@@ -107,7 +107,8 @@ def update_thread(thread_id: Any, status: str = "", next_step: str = "", notes: 
     status = _clean(status, 20).lower()
     if status and status not in STATUSES:
         return f"[TASK_UPDATE] Невалиден статус {status!r}. Позволени: {', '.join(STATUSES)}."
-    sets, params = [], []
+    sets: list[str] = []
+    params: list[Any] = []  # съдържа и tid (int) накрая
     if status:
         sets.append("status = ?"); params.append(status)
     if next_step:

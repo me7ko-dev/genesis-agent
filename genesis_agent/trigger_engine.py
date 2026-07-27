@@ -82,7 +82,7 @@ class TriggerEngine:
         if not skill_meta:
             return None
 
-        name = skill_meta.get("name")
+        name = str(skill_meta.get("name") or "")
         category = skill_meta.get("category", "?")
         description = skill_meta.get("description", "")
         file_path = skill_meta.get("file_path", "")

@@ -110,7 +110,8 @@ def _run_autonomous(goal: str) -> str:
     from genesis_agent.autonomous_loop import run_autonomous_loop
     out = run_autonomous_loop(goal, operator_id="DELEGATE")
     if out.success:
-        return f"✅ Готово за {out.rounds} рунда → {Path(out.skill_path).name}"
+        name = Path(out.skill_path).name if out.skill_path else "(без файл)"
+        return f"✅ Готово за {out.rounds} рунда → {name}"
     raise RuntimeError(f"Autonomous loop неуспешен след {out.rounds} опита.")
 
 

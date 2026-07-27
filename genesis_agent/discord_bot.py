@@ -64,7 +64,7 @@ import time
 from collections import defaultdict, deque
 from datetime import date
 from pathlib import Path
-from typing import Deque, Dict, List
+from typing import Any, Deque, Dict, List
 
 try:
     import discord
@@ -109,7 +109,7 @@ try:
     from genesis_agent.tool_schemas import FULL_TOOLS as _DISCORD_TOOL_SCHEMAS
 except Exception:  # pragma: no cover
     genesis_skills = None  # type: ignore
-    _DISCORD_TOOL_SCHEMAS = None
+    _DISCORD_TOOL_SCHEMAS = None  # type: ignore[assignment]
 
 _TOOL_ROUND_CAP = 6
 
@@ -215,7 +215,7 @@ class GenesisClient(discord.Client):
         )
         # 24/7 цикъл — състояние на background thread-а.
         self._loop_thread: threading.Thread | None = None
-        self._loop_stats: Dict[str, object] = {
+        self._loop_stats: Dict[str, Any] = {
             "missions": 0, "successes": 0, "started_at": None,
         }
 

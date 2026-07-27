@@ -191,12 +191,12 @@ def search(
         if result_url.startswith("//"):
             result_url = "https:" + result_url
         if "uddg=" in result_url:
-            try:
-                result_url = urllib.parse.unquote(
-                    re.search(r"uddg=([^&]+)", result_url).group(1)
-                )
-            except Exception:
-                pass
+            m_uddg = re.search(r"uddg=([^&]+)", result_url)
+            if m_uddg:
+                try:
+                    result_url = urllib.parse.unquote(m_uddg.group(1))
+                except Exception:
+                    pass
         results.append({"title": title, "url": result_url, "snippet": snippet[:300]})
 
     # Fallback: показваме извлечен текст ако не е парснат нищо

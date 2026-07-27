@@ -24,7 +24,7 @@ import os
 import time
 from collections import deque
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List
 
 import requests
 import yaml
@@ -426,7 +426,8 @@ class Brain:
         headers = {"Content-Type": "application/json"}
         if key:
             headers["Authorization"] = f"Bearer {key}"
-        payload = {"model": model, "messages": messages, "temperature": 0.7, "max_tokens": 4096}
+        payload: Dict[str, Any] = {"model": model, "messages": messages,
+                                   "temperature": 0.7, "max_tokens": 4096}
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
@@ -489,9 +490,12 @@ class Brain:
         получава tools (проверено наживо — не връща структуриран tool_calls,
         а суров JSON текст в content), винаги text-tag режим."""
         last_error = None
+        loc = self.local
+        if not loc:
+            return None
         for _try in range(attempts):
             try:
-                raw_text, _tc = self._call(self.local["provider"], self.local["model"], messages)
+                raw_text, _tc = self._call(loc["provider"], loc["model"], messages)
                 self._fail_count = 0
                 self.current = self.local
                 code = ""

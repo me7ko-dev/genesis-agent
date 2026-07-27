@@ -118,14 +118,14 @@ class Core:
                         "\n\n## СЪСТОЯНИЕ НА РАБОТАТА (от предишни сесии)\n" + self.briefing
                     )
             except Exception:
-                self.wm = None
+                self.wm = None  # type: ignore[assignment]
 
             try:
                 from genesis_agent import conversation_memory as cm
 
                 self.conv_mem = cm
             except Exception:
-                self.conv_mem = None
+                self.conv_mem = None  # type: ignore[assignment]
 
             self.ok = True
         except Exception:

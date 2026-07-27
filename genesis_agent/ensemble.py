@@ -110,9 +110,9 @@ def _generate_one(goal: str, provider: str, rag_context: str, system_content: st
                         args = _json.loads(fn.get("arguments") or "{}")
                     except (_json.JSONDecodeError, TypeError):
                         args = {}
-                    result = genesis_skills.dispatch_tool_call(name, args)
+                    tool_out = genesis_skills.dispatch_tool_call(name, args)
                     messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
-                                      "name": name, "content": result[:4000]})
+                                      "name": name, "content": tool_out[:4000]})
             except Exception as _e:
                 messages.append({"role": "tool", "tool_call_id": "error",
                                   "name": "error", "content": f"[tool грешка: {_e}]"})

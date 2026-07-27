@@ -68,7 +68,12 @@ def skill_view(name: str, *, file_path: Optional[Path] = None) -> Dict[str, Any]
         else:
             raise FileNotFoundError(f"Умение '{name}' не е намерено в skills.json.")
 
-    md_path = Path(file_path) if file_path else PROJECT_ROOT / skill_meta["file_path"]
+    if file_path:
+        md_path = Path(file_path)
+    elif skill_meta:
+        md_path = PROJECT_ROOT / skill_meta["file_path"]
+    else:
+        raise FileNotFoundError(f"Умение '{name}' няма нито файл, нито запис в индекса.")
     if not md_path.exists():
         raise FileNotFoundError(f"Файлът на умението не съществува: {md_path}")
 

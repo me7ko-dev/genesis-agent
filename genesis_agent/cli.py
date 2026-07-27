@@ -68,7 +68,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if cmd == "discord":
         from genesis_agent import discord_bot
-        return discord_bot.main() or 0
+        discord_bot.main()
+        return 0
 
     if cmd == "skills":
         from genesis_agent.skill_loader import load_skills_index

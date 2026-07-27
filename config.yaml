@@ -110,21 +110,6 @@ models:
       model: "llama-3.3-70b-versatile"
       size_b: 70
       supports_tools: true    # потвърдено наживо (с валиден ключ, не #1)
-
-    # ─── Cohere — НАРОЧНО ПОСЛЕДЕН (design note, 2026-07-25): trial акаунтът има
-    # само 1000 обаждания/месец общо И по-рано беше по средата на веригата —
-    # при верижен fallback (напр. HF временен rate-limit на 4 модела наведнъж
-    # от една сметка) кацаше тук и "залепваше" (ask_genesis пази последния
-    # успешен модел като нов current). Сега е последна резерва, не средна. ──
-    - provider: "cohere"
-      model: "command-a-03-2025"                    # 111B, ~0.5с
-      size_b: 111
-      supports_tools: true    # потвърдено наживо
-    - provider: "cohere"
-      model: "command-r-plus-08-2024"
-      size_b: 104
-      supports_tools: true    # потвърдено наживо
-
 discord:
   webhook: ""
   bot_token: ""

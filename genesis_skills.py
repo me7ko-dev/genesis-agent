@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import re
 import sys
+from typing import Callable
 from pathlib import Path
 
 # Уверяваме се, че genesis_agent/ пакетът е импортируем (мостът стои в root-а).
@@ -213,9 +214,10 @@ def _tool_list_dir(arg: str) -> str:
     except OSError as e:
         return f"[LIST_DIR] Грешка: {e}"
     lines = [f"[LIST_DIR: {path}]"]
-    for e in entries[:200]:
-        marker = "📁" if e.is_dir() else "📄"
-        lines.append(f"  {marker} {e.name}")
+    # Не `e` — точно това име държи изключението по-горе.
+    for entry in entries[:200]:
+        marker = "📁" if entry.is_dir() else "📄"
+        lines.append(f"  {marker} {entry.name}")
     if len(entries) > 200:
         # Съкратеният списък е азбучен, значи цели буквени "опашки" изчезват —
         # в папка с 2157 .md файла `skills.json` (буква "s") просто не се
@@ -384,7 +386,7 @@ _BROWSER_READ_RE = re.compile(r"\[BROWSER_READ\]")
 # TASK_LIST без аргумент — най-честата форма ([TASK_LIST] = отворените нишки).
 _TASK_LIST_RE = re.compile(r"\[TASK_LIST\]")
 
-_SIMPLE_DISPATCH = {
+_SIMPLE_DISPATCH: dict[str, "Callable[..., str]"] = {
     "READ_FILE": _tool_read_file,
     "RUN_CMD": _tool_run_cmd,
     "ASK_USER": _tool_ask_user,
@@ -443,7 +445,8 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
     if not response_text:
         return []
 
-    results: list[str] = []
+    # (позиция_в_текста, изход) — сортира се по позиция, после се връщат само изходите.
+    results: list[tuple[int, str]] = []
     consumed_spans: list[tuple[int, int]] = []
 
     # 1. WRITE_FILE блокове (с тяло).

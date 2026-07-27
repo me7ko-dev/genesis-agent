@@ -19,6 +19,7 @@ import json
 from collections import defaultdict
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from genesis_agent.config import PROJECT_ROOT
 
@@ -69,8 +70,10 @@ def daily_totals(day: date | None = None) -> dict:
     доставчик. Безопасно — при повреден/липсващ лог връща нули."""
     day = day or datetime.now(timezone.utc).date()
     day_str = day.isoformat()
-    totals = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
-              "by_provider": defaultdict(lambda: {"calls": 0, "total_tokens": 0})}
+    # Смесени стойности (броячи + вложена разбивка), затова Any.
+    totals: dict[str, Any] = {
+        "calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+        "by_provider": defaultdict(lambda: {"calls": 0, "total_tokens": 0})}
     for e in _read_entries():
         ts = e.get("ts", "")
         if not ts.startswith(day_str):
@@ -93,8 +96,9 @@ def today_totals() -> dict:
 def range_totals(days: int = 7) -> dict:
     """Обобщение за последните N дни (по подразбиране седмица, UTC)."""
     from datetime import timedelta
-    totals = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
-              "by_provider": defaultdict(lambda: {"calls": 0, "total_tokens": 0})}
+    totals: dict[str, Any] = {
+        "calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+        "by_provider": defaultdict(lambda: {"calls": 0, "total_tokens": 0})}
     cutoff = datetime.now(timezone.utc).date() - timedelta(days=days - 1)
     for e in _read_entries():
         ts = e.get("ts", "")

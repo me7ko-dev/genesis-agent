@@ -388,11 +388,11 @@ def assess_code(code: str) -> RiskVerdict:
     if verdict.level == RiskLevel.BLOCKED:
         return verdict
     reasons = list(verdict.reasons)
-    level = verdict.level
+    level: RiskLevel = verdict.level
     for rx, why in _PY_CONFIRM_PATTERNS:
         if rx.search(code):
             reasons.append(why)
-            level = RiskLevel(max(level, RiskLevel.CONFIRM))
+            level = RiskLevel(max(level.value, RiskLevel.CONFIRM.value))
     return RiskVerdict(level, reasons)
 
 

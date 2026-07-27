@@ -18,6 +18,7 @@ import json
 import sys
 import time
 from datetime import datetime, timezone
+from typing import Any
 from pathlib import Path
 
 from genesis_agent.brain import Brain
@@ -117,7 +118,7 @@ def run_benchmark(quick: bool = False, orchestrated: bool = False) -> dict:
     print(f"\n  РЕЗУЛТАТ: {passed}/{len(tasks)} = {pct}%  ({elapsed}s)")
 
     # Записваме в историята за проследяване във времето.
-    hist = {"runs": []}
+    hist: dict[str, list[Any]] = {"runs": []}
     if HISTORY.exists():
         try:
             hist = json.loads(HISTORY.read_text(encoding="utf-8"))
