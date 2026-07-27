@@ -18,7 +18,12 @@ from pathlib import Path
 from typing import Any
 
 from genesis_agent import dna
-from genesis_agent.config import PROJECT_ROOT, SKILLS_DIR
+from genesis_agent.config import SKILLS_DIR
+
+# `file_path` in skills.json is relative to this, not PROJECT_ROOT — see the
+# comment on skill_loader.SKILLS_ROOT for why the two are not the same thing
+# once Genesis is pip-installed rather than run from a checkout.
+SKILLS_ROOT = SKILLS_DIR.parent
 
 SKILLS_INDEX_NAME = "skills.json"
 
@@ -144,7 +149,7 @@ def save_skill(
             encoding="utf-8",
         )
 
-        rel = str(md_path.relative_to(PROJECT_ROOT)).replace("\\", "/")
+        rel = str(md_path.relative_to(SKILLS_ROOT)).replace("\\", "/")
         entry: dict[str, Any] = {
             "name": final_slug,
             "category": "autonomous",

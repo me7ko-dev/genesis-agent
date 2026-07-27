@@ -21,9 +21,9 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from genesis_agent.config import PROJECT_ROOT
+from genesis_agent.config import DATA_DIR
 
-LOG_PATH = PROJECT_ROOT / "budget_log.jsonl"
+LOG_PATH = DATA_DIR / "budget_log.jsonl"
 
 
 def record_usage(*, provider: str, model: str, prompt_tokens: int,

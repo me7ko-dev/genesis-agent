@@ -22,7 +22,7 @@ import re
 from collections import Counter
 from pathlib import Path
 
-from genesis_agent.config import PROJECT_ROOT, SKILLS_DIR
+from genesis_agent.config import DATA_DIR, PROJECT_ROOT, SKILLS_DIR
 from genesis_agent.skills_manager import slugify
 
 SKILLS_JSON = SKILLS_DIR / "skills.json"
@@ -171,7 +171,7 @@ def _load_skill_names() -> list[str]:
 def _load_past_goals() -> set[str]:
     """Слугове на минали цели (от next_goals.json), за да не ги повтаряме."""
     seen: set[str] = set()
-    ng = PROJECT_ROOT / "next_goals.json"
+    ng = DATA_DIR / "next_goals.json"
     if ng.exists():
         try:
             for g in json.loads(ng.read_text(encoding="utf-8")):

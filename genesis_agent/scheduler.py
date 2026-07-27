@@ -23,10 +23,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
-from genesis_agent.config import PROJECT_ROOT
+from genesis_agent.config import DATA_DIR
 
 log = logging.getLogger("genesis.scheduler")
-JOBS_FILE = PROJECT_ROOT / "cron_jobs.json"
+JOBS_FILE = DATA_DIR / "cron_jobs.json"
 
 # ─── Вградена минимална cron интерпретация ───────────────────────────────────
 

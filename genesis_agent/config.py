@@ -9,12 +9,48 @@ from pathlib import Path
 stop_event = threading.Event()
 
 
-# Repository root: .../genesis-0/
+# The directory containing the genesis_agent package. For a git checkout
+# this is the repo root — writable, fine to use directly. For a `pip install`
+# it is site-packages, which a mission has no business writing into (often
+# not even permitted, and wiped on the next reinstall/upgrade).
 PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
+_INSTALLED = PROJECT_ROOT.name in ("site-packages", "dist-packages")
 
-SKILLS_DIR: Path = Path(os.environ.get("GENESIS_SKILLS_DIR", PROJECT_ROOT / "skills"))
-SANDBOX_DIR: Path = Path(os.environ.get("GENESIS_SANDBOX_DIR", PROJECT_ROOT / ".sandbox_run"))
-LOGS_DIR: Path = PROJECT_ROOT / "logs"
+
+def _default_skills_dir() -> Path:
+    shipped = PROJECT_ROOT / "skills"
+    if not _INSTALLED:
+        return shipped
+    # Installed copy: skills a mission writes go to ~/.genesis/skills instead.
+    # Seeded once from the shipped starter set, so `genesis skills` still
+    # shows them immediately on a fresh install — this only copies, it never
+    # writes back into site-packages.
+    from genesis_agent.paths import GENESIS_HOME
+    user_dir = GENESIS_HOME / "skills"
+    if not user_dir.exists():
+        if shipped.exists():
+            import shutil
+            shutil.copytree(shipped, user_dir)
+        else:
+            user_dir.mkdir(parents=True, exist_ok=True)
+    return user_dir
+
+
+SKILLS_DIR: Path = Path(os.environ.get("GENESIS_SKILLS_DIR") or _default_skills_dir())
+SANDBOX_DIR: Path = Path(os.environ.get("GENESIS_SANDBOX_DIR",
+    str((Path.home() / ".genesis" / "sandbox_run") if _INSTALLED else PROJECT_ROOT / ".sandbox_run")))
+LOGS_DIR: Path = (Path.home() / ".genesis" / "logs") if _INSTALLED else PROJECT_ROOT / "logs"
+
+# Where the SQLite state lives: workspace memory, episodic memory, conversation
+# history, the embeddings cache. These modules historically wrote next to
+# their own __file__ — fine in a checkout (that's a writable repo directory),
+# but for an installed copy __file__ is under site-packages, and a database
+# nobody can write survives exactly until the next `pip install --upgrade`
+# deletes it anyway. Same path as always in checkout mode: zero behavior
+# change for anyone running from a git clone.
+DATA_DIR: Path = (Path.home() / ".genesis" / "data") if _INSTALLED else (PROJECT_ROOT / "genesis_agent")
+if _INSTALLED:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # ENGINE / 100% STANDALONE MODE
 # MODEL_PATH беше хардкоднат Windows път; сега е env-конфигурируем и по

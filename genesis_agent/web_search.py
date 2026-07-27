@@ -31,13 +31,13 @@ from html.parser import HTMLParser
 from typing import Optional
 from pathlib import Path
 
-from genesis_agent.config import PROJECT_ROOT
+from genesis_agent.config import DATA_DIR, PROJECT_ROOT
 
 log = logging.getLogger("genesis.web_search")
 
 # ─── Кеш ─────────────────────────────────────────────────────────────────────
 
-CACHE_DIR = PROJECT_ROOT / ".search_cache"
+CACHE_DIR = DATA_DIR / ".search_cache"
 CACHE_TTL_SECONDS = 3600  # 1 час
 
 

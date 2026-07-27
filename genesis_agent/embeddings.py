@@ -29,9 +29,9 @@ from pathlib import Path
 
 import requests
 
-from genesis_agent.config import PROJECT_ROOT
+from genesis_agent.config import DATA_DIR
 
-DB_PATH = PROJECT_ROOT / "genesis_agent" / "embeddings.db"
+DB_PATH = DATA_DIR / "embeddings.db"
 MODEL = "nomic-embed-text"
 _OLLAMA_URL = "http://localhost:11434/api/embeddings"
 

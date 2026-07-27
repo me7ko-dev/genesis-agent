@@ -20,9 +20,15 @@ import yaml
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 
-from genesis_agent.config import PROJECT_ROOT
+from genesis_agent.config import SKILLS_DIR
 
-SKILLS_DIR = PROJECT_ROOT / "skills"
+# `file_path` entries in skills.json are stored relative to this, not to
+# PROJECT_ROOT — the two coincide for a git checkout, but diverge for an
+# installed copy, where SKILLS_DIR is redirected to ~/.genesis/skills (see
+# config._default_skills_dir). Resolving against PROJECT_ROOT there would
+# look inside site-packages for a file that actually lives under the user's
+# home directory.
+SKILLS_ROOT = SKILLS_DIR.parent
 _SKILLS_INDEX_CACHE: Optional[Dict[str, Dict[str, Any]]] = None
 
 
@@ -71,7 +77,7 @@ def skill_view(name: str, *, file_path: Optional[Path] = None) -> Dict[str, Any]
     if file_path:
         md_path = Path(file_path)
     elif skill_meta:
-        md_path = PROJECT_ROOT / skill_meta["file_path"]
+        md_path = SKILLS_ROOT / skill_meta["file_path"]
     else:
         raise FileNotFoundError(f"Умение '{name}' няма нито файл, нито запис в индекса.")
     if not md_path.exists():
@@ -97,7 +103,7 @@ def skill_view(name: str, *, file_path: Optional[Path] = None) -> Dict[str, Any]
     return {
         "metadata": metadata,
         "code": code_match.group(1).strip(),
-        "file_path": str(md_path.relative_to(PROJECT_ROOT)),
+        "file_path": str(md_path.relative_to(SKILLS_ROOT)),
     }
 
 

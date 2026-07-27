@@ -32,7 +32,9 @@ from pathlib import Path
 from typing import List, Optional, Dict
 
 # ---------- SQLite setup ----------
-DB_PATH = Path(__file__).with_name("episodes.db")
+from genesis_agent.config import DATA_DIR
+
+DB_PATH = DATA_DIR / "episodes.db"
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS episodes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

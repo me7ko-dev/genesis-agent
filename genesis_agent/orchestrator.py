@@ -25,6 +25,7 @@ from genesis_agent.brain import Brain
 from genesis_agent.executor import run_python_subprocess
 from genesis_agent.verifier import verify_skill
 from genesis_agent.skills_manager import save_skill, slugify
+from genesis_agent.skill_loader import SKILLS_ROOT
 from genesis_agent.config import PROJECT_ROOT, MAX_LLM_RETRIES
 from genesis_agent import dna
 from genesis_agent.tool_schemas import MISSION_TOOLS
@@ -186,7 +187,7 @@ def run_orchestrated(goal: str, *, max_rounds: int | None = None,
                 messages.append({"role": "assistant", "content": reply.raw_text})
                 messages.append({"role": "user", "content": f"DNA отказа: {e}. Пренапиши."})
                 continue
-            rel = str(path.relative_to(PROJECT_ROOT)).replace("\\", "/")
+            rel = str(path.relative_to(SKILLS_ROOT)).replace("\\", "/")
             return OrchestratedOutcome(True, round_i + 1, skill_path=rel, plan=plan)
 
         # 4. REVIEWER — конкретни инструкции за поправка.

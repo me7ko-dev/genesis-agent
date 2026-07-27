@@ -25,11 +25,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from genesis_agent.brain import Brain
-from genesis_agent.config import PROJECT_ROOT, MAX_LLM_RETRIES
+from genesis_agent.config import DATA_DIR, MAX_LLM_RETRIES
 from genesis_agent import sandbox, dna
 from genesis_agent.skills_manager import slugify
 
-PROJECTS_DIR = PROJECT_ROOT / "projects_out"
+# DATA_DIR (not PROJECT_ROOT): same reasoning as SKILLS_DIR/DATA_DIR in
+# config.py — for an installed copy PROJECT_ROOT is site-packages, and
+# generated multi-file projects need a location the user actually owns.
+PROJECTS_DIR = DATA_DIR / "projects_out"
 PROJECTS_INDEX = PROJECTS_DIR / "projects.json"
 
 
@@ -123,7 +126,7 @@ def build_project(goal: str, *, max_rounds: int | None = None,
                      "created": datetime.now(timezone.utc).isoformat(), "verified": True}
             idx["projects"] = [p for p in idx["projects"] if p["slug"] != slug] + [entry]
             PROJECTS_INDEX.write_text(json.dumps(idx, indent=2, ensure_ascii=False), encoding="utf-8")
-            return ProjectOutcome(True, round_i + 1, path=str(proj_dir.relative_to(PROJECT_ROOT)),
+            return ProjectOutcome(True, round_i + 1, path=str(proj_dir.relative_to(DATA_DIR)),
                                   files=sorted(files) + ["README.md"])
 
         last_error = (res.stderr or res.stdout)[:300]

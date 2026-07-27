@@ -3,10 +3,9 @@ import os
 import time
 from pathlib import Path
 
-# Пътят до live status файла — относителен спрямо проекта, с env override.
-# (Беше хардкоднат Windows път C:\Users\roika\..., мъртъв код на Linux.)
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-STATUS_FILE = os.environ.get("GENESIS_STATUS_FILE", str(_PROJECT_ROOT / "live_status.json"))
+from genesis_agent.config import DATA_DIR
+
+STATUS_FILE = os.environ.get("GENESIS_STATUS_FILE", str(DATA_DIR / "live_status.json"))
 
 def report_thought(thought: str):
     """Writes a thought to the live status file for the Operator to see."""

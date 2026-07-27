@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import json
 import time
-from pathlib import Path
 from threading import Lock
 
-_STATS_PATH = Path(__file__).resolve().parent.parent / "provider_stats.json"
+from genesis_agent.config import DATA_DIR
+
+_STATS_PATH = DATA_DIR / "provider_stats.json"
 _MAX_SAMPLES = 30          # rolling прозорец на извикване по доставчик
 _MIN_SAMPLES_TO_JUDGE = 5  # под това не съдим — недостатъчно данни
 _BAD_SUCCESS_RATE = 0.5    # под 50% успех (при ≥5 извадки) → деприоритизирай

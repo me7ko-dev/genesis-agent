@@ -7,6 +7,7 @@ from typing import Any
 
 from genesis_agent import dna
 from genesis_agent.brain import Brain
+from genesis_agent.skill_loader import SKILLS_ROOT
 from genesis_agent.config import MAX_LLM_RETRIES, PROJECT_ROOT
 from genesis_agent.executor import format_failure_for_brain, run_python_subprocess
 from genesis_agent.skills_manager import save_skill, slugify
@@ -306,7 +307,7 @@ def _run_autonomous_loop_impl(
                     }
                 )
                 continue
-            rel = str(path.relative_to(PROJECT_ROOT)).replace("\\", "/")
+            rel = str(path.relative_to(SKILLS_ROOT)).replace("\\", "/")
             try:
                 from genesis_agent.reflection import detect_reuse
                 reused = detect_reuse(rag_context, reply.code)
@@ -368,7 +369,7 @@ def _run_autonomous_loop_impl(
                            "repair_rounds": repair.rounds,
                            "operator": operator_id or "operator"}
                 )
-                rel = str(path.relative_to(PROJECT_ROOT)).replace("\\", "/")
+                rel = str(path.relative_to(SKILLS_ROOT)).replace("\\", "/")
                 return LoopOutcome(
                     success=True,
                     rounds=max_rounds + repair.rounds,

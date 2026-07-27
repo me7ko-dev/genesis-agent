@@ -26,8 +26,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DB_PATH = PROJECT_ROOT / "genesis_agent" / "workspace_memory.db"
+from genesis_agent.config import DATA_DIR
+
+DB_PATH = DATA_DIR / "workspace_memory.db"
 
 STATUSES = ("open", "blocked", "done")
 _MAX_TEXT = 2000  # рязък таван — LLM понякога праща цял абзац за "заглавие"

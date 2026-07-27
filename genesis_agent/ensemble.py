@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 
 from genesis_agent import dna
 from genesis_agent.brain import Brain
+from genesis_agent.skill_loader import SKILLS_ROOT
 from genesis_agent.config import PROJECT_ROOT
 from genesis_agent.executor import run_python_subprocess
 from genesis_agent.skills_manager import save_skill, slugify
@@ -213,7 +214,7 @@ def run_ensemble(
     except Exception:
         reused = False
 
-    rel = str(path.relative_to(PROJECT_ROOT)).replace("\\", "/")
+    rel = str(path.relative_to(SKILLS_ROOT)).replace("\\", "/")
     return EnsembleResult(
         goal=goal, success=True, winner_provider=winner.provider,
         skill_path=rel, reused_existing=reused, candidates=candidates,

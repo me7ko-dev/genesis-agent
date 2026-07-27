@@ -23,9 +23,9 @@ from pathlib import Path
 
 from genesis_agent.brain import Brain
 from genesis_agent.executor import run_python_subprocess
-from genesis_agent.config import PROJECT_ROOT
+from genesis_agent.config import DATA_DIR
 
-HISTORY = PROJECT_ROOT / "benchmark_history.json"
+HISTORY = DATA_DIR / "benchmark_history.json"
 
 # Всяка задача: (goal, check_code). check_code се долепя след генерирания код и
 # трябва да мине (assert-и) → доказва, че решението наистина работи.

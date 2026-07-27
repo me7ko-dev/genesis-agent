@@ -19,8 +19,9 @@ import os
 import datetime
 from typing import List, Dict
 
-# Път към SQLite файла – в същата директория като скрипта.
-DB_PATH = os.path.join(os.path.dirname(__file__), "conversation_memory.db")
+from genesis_agent.config import DATA_DIR
+
+DB_PATH = str(DATA_DIR / "conversation_memory.db")
 
 # --------------------------------------------------------------
 # Инициализация на базата

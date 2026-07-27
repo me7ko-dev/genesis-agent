@@ -36,14 +36,14 @@ import logging
 from pathlib import Path
 from typing import Any, Optional, List, Dict
 
-from genesis_agent.config import PROJECT_ROOT
+from genesis_agent.config import DATA_DIR
 import genesis_agent.episodic_memory as episodic
 
 log = logging.getLogger("genesis.memory")
 
 # ─── SQLite Setup (Key/Value store) ──────────────────────────────────────────
 
-DB_PATH = PROJECT_ROOT / "genesis_agent" / "persistent_memory.db"
+DB_PATH = DATA_DIR / "persistent_memory.db"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS kv_store (
