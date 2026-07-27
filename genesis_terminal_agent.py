@@ -18,6 +18,7 @@ import yaml
 from collections import deque
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
@@ -35,7 +36,7 @@ except ImportError:
 try:
     from genesis_agent.tool_schemas import FULL_TOOLS as TERMINAL_TOOL_SCHEMAS
 except ImportError:
-    TERMINAL_TOOL_SCHEMAS = None
+    TERMINAL_TOOL_SCHEMAS: Any = None  # type: ignore[no-redef]
 
 # ── Споделено ядро (genesis_agent): памет + sandbox политика ────────────────────────
 # Всичко тук е меко-опционално: ако липсва зависимост, чатът пак работи.
@@ -43,8 +44,8 @@ try:
     from genesis_agent import conversation_memory as _conv_mem
     from genesis_agent.memory import memory_context as _memory_context
 except Exception:
-    _conv_mem = None
-    _memory_context = None
+    _conv_mem: Any = None  # type: ignore[no-redef]
+    _memory_context: Any = None  # type: ignore[no-redef]
 
 
 def _remember(role: str, content: str) -> None:
@@ -223,7 +224,7 @@ FALLBACKS = {
     "llmstudio":    ["local-model"],
 }
 
-MODELS_CACHE = {}
+MODELS_CACHE: dict[str, list[str]] = {}
 current_provider = config.get("models", {}).get("default_provider", "groq")
 current_model_id = config.get("models", {}).get("default_model_id", "llama-3.3-70b-versatile")
 
@@ -575,7 +576,7 @@ def discord_send(text: str) -> bool:
 # ── Epic GENESIS Banner ───────────────────────────────────────────────────────
 def get_system_info() -> dict:
     """Collect system status info for the banner."""
-    info = {}
+    info: dict[str, Any] = {}
     # CPU
     try:
         with open("/proc/loadavg") as f:

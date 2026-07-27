@@ -44,6 +44,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
+from typing import Any
 
 import gi
 
@@ -170,7 +171,7 @@ class Window(Adw.ApplicationWindow):
         self.busy = False
         self.muted = False
         self.recorder = Recorder()
-        self._whisper = None  # зарежда се лениво/на фон, виж _load_whisper
+        self._whisper: Any = None  # зарежда се лениво/на фон, виж _load_whisper
         self.set_default_size(760, 860)
 
         self.messages: list[dict] = [{"role": "system", "content": core.system_prompt}]
@@ -523,7 +524,11 @@ def _gui_confirm(operation: str, verdict) -> bool:
             dlg.set_response_appearance("yes", Adw.ResponseAppearance.DESTRUCTIVE)
             dlg.set_default_response("no")
             dlg.set_close_response("no")
-            dlg.connect("response", lambda _d, r: (answer.update(ok=r == "yes"), done.set()))
+
+            def on_response_alert(_d, r):
+                answer.update(ok=r == "yes")
+                done.set()
+            dlg.connect("response", on_response_alert)
             dlg.present(_WINDOW)
         else:
             dlg = Adw.MessageDialog(transient_for=_WINDOW, heading="Genesis иска потвърждение", body=body)
@@ -532,7 +537,11 @@ def _gui_confirm(operation: str, verdict) -> bool:
             dlg.set_response_appearance("yes", Adw.ResponseAppearance.DESTRUCTIVE)
             dlg.set_default_response("no")
             dlg.set_close_response("no")
-            dlg.connect("response", lambda _d, r: (answer.update(ok=r == "yes"), done.set()))
+
+            def on_response_message(_d, r):
+                answer.update(ok=r == "yes")
+                done.set()
+            dlg.connect("response", on_response_message)
             dlg.present()
         return False
 

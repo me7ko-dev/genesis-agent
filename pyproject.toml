@@ -70,3 +70,12 @@ genesis_agent = [
     "../skills/skills.json",
     "../gui/*.py",
 ]
+
+[tool.pytest.ini_options]
+addopts = "--ignore=scripts"
+
+[tool.mypy]
+# Third-party libs used only by optional frontends (gi/GTK, croniter,
+# faster_whisper, edge_tts, discord) ship no type stubs. Without this, mypy
+# on those files is 100% import-resolution noise, not real findings.
+ignore_missing_imports = true

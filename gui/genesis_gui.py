@@ -26,6 +26,7 @@ import time
 import traceback
 from collections import deque
 from pathlib import Path
+from typing import Any
 
 import gi
 
@@ -117,7 +118,9 @@ class MessageWidget(Gtk.Box):
     def _split_code(text: str) -> list:
         """Разделя на (is_code, chunk) по ``` огради. Нечетен брой огради =
         незатворен блок — остатъкът пак се показва като код, не се губи."""
-        parts, buf, in_code = [], [], False
+        parts: list = []
+        buf: list[str] = []
+        in_code = False
         for line in text.split("\n"):
             if line.lstrip().startswith("```"):
                 parts.append((in_code, "\n".join(buf)))
@@ -159,7 +162,7 @@ class Window(Adw.ApplicationWindow):
         self.busy = False
         self.set_default_size(980, 720)
 
-        self.messages = deque(
+        self.messages: Any = deque(
             [{"role": "system", "content": core.system_prompt}], maxlen=30
         )
 
