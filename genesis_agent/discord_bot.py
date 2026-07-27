@@ -74,7 +74,7 @@ except ImportError:  # pragma: no cover
     )
 
 # ─── Конфигурация ─────────────────────────────────────────────────────────────
-from genesis_agent.paths import ENV_FILES as _ENV_FILES
+from genesis_agent.paths import ENV_FILES as _ENV_FILES, _strip_inline_comment
 _CONFIG_YAML = Path(__file__).resolve().parent.parent / "config.yaml"
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
@@ -133,7 +133,8 @@ def _read_env_file_value(key: str) -> str:
             for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
                 line = line.strip().removeprefix("export ").strip()
                 if line.startswith(key) and "=" in line and not line.startswith("#"):
-                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+                    raw = line.split("=", 1)[1].strip()
+                    return _strip_inline_comment(raw).strip('"').strip("'")
         except OSError:
             pass
     return ""

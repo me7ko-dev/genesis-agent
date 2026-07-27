@@ -29,7 +29,9 @@ from typing import Dict, List
 import requests
 import yaml
 
-from genesis_agent.paths import PROJECT_ROOT, CONFIG_PATH, ENV_FILES
+from genesis_agent.paths import (
+    PROJECT_ROOT, CONFIG_PATH, ENV_FILES, _strip_inline_comment,
+)
 CLOUD_TIMEOUT = 90
 LOCAL_TIMEOUT = 240  # локалният 3B модел на слаб GPU е бавен — даваме му време
 RETRY_ROUNDS = 2  # колко пъти да обходим цялата верига при пълен провал
@@ -99,7 +101,7 @@ def _load_keys() -> dict[str, str]:
             line = line.strip().removeprefix("export ").strip()
             if "=" in line and not line.startswith("#"):
                 k, v = line.split("=", 1)
-                keys.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+                keys.setdefault(k.strip(), _strip_inline_comment(v.strip()).strip('"').strip("'"))
     for k, v in os.environ.items():
         keys.setdefault(k, v)
     return keys

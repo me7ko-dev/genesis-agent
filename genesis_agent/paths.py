@@ -56,6 +56,21 @@ def history_dir() -> Path:
     return Path(os.environ.get("GENESIS_HISTORY_DIR", default))
 
 
+def _strip_inline_comment(value: str) -> str:
+    """
+    `KEY=value   # note` → `value`.
+
+    Standard .env convention: a `#` only starts a comment when it follows
+    whitespace, so a `#` inside an actual secret survives. Without this, a
+    trailing note silently becomes part of the key and every request fails
+    with a confusing 401.
+    """
+    for i, ch in enumerate(value):
+        if ch == "#" and i > 0 and value[i - 1] in " \t":
+            return value[:i].rstrip()
+    return value
+
+
 def read_env_files(key: str) -> str | None:
     """
     Look up `key` in the .env files. Returns None if absent.
@@ -77,7 +92,7 @@ def read_env_files(key: str) -> str | None:
                 if k.startswith("export "):
                     k = k[len("export "):].strip()
                 if k == key:
-                    return v.strip().strip('"').strip("'")
+                    return _strip_inline_comment(v.strip()).strip('"').strip("'")
         except OSError:
             continue
     return None

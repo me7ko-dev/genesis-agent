@@ -83,7 +83,7 @@ except Exception:
 # All paths come from genesis_agent.paths, which derives them from the
 # installed package and the user's own home — nothing machine-specific here.
 from genesis_agent.paths import (
-    CONFIG_PATH, ENV_FILES, workspace_dir, history_dir,
+    CONFIG_PATH, ENV_FILES, workspace_dir, history_dir, _strip_inline_comment,
 )
 
 try:
@@ -181,7 +181,7 @@ def load_env(path):
         line = line.removeprefix("export ").strip()
         if "=" in line:
             k, v = line.split("=", 1)
-            k, v = k.strip(), v.strip().strip('"').strip("'")
+            k, v = k.strip(), _strip_inline_comment(v.strip()).strip('"').strip("'")
             if k in KEYS and v: KEYS[k] = v
 
 for _p in ENV_FILES:
