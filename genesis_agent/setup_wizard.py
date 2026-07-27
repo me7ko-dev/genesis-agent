@@ -14,6 +14,7 @@ knowing about now, not on your first mission.
 """
 from __future__ import annotations
 
+import datetime
 import os
 import sys
 
@@ -97,18 +98,37 @@ def run() -> int:
 
     for var, name, url, base_url, model in PROVIDERS:
         current = _existing(var)
-        if current:
-            print(f"  ✓ {name}: вече е зададен — пропускам "
-                  f"(изтрий го от {ENV_FILE}, за да го смениш)")
-            collected[var] = current
-            working += 1
-            continue
 
-        print(f"  {name}  —  вземи ключ от: {url}")
-        key = _prompt(f"    {var} = ")
-        if not key:
-            print("    (пропуснат)\n")
-            continue
+        if current:
+            # An existing key is TESTED, not assumed good. A wizard that prints
+            # a checkmark next to a dead key is worse than one that says
+            # nothing — it is the reason you stop checking.
+            print(f"  {name}  —  ключ вече има, проверявам…", end=" ", flush=True)
+            ok, why = _test_key(base_url, current, model)
+            print("✅" if ok else "❌", why)
+            if ok:
+                # Working key: keep it unless the user deliberately replaces it.
+                key = _prompt("    [Enter] запази · или въведи нов ключ: ")
+                if not key:
+                    collected[var] = current
+                    working += 1
+                    print("    запазен\n")
+                    continue
+            else:
+                # Broken key: replacing is the obvious move, so make that the
+                # default and require a deliberate choice to keep it.
+                print(f"    Вземи нов от: {url}")
+                key = _prompt("    Нов ключ (Enter = остави счупения): ")
+                if not key:
+                    collected[var] = current
+                    print("    оставен непроменен — този доставчик няма да работи\n")
+                    continue
+        else:
+            print(f"  {name}  —  вземи ключ от: {url}")
+            key = _prompt(f"    {var} = ")
+            if not key:
+                print("    (пропуснат)\n")
+                continue
 
         print("    проверявам…", end=" ", flush=True)
         ok, why = _test_key(base_url, key, model)
@@ -129,26 +149,72 @@ def run() -> int:
         return 1
 
     # ── Discord (optional) ────────────────────────────────────────────────
-    print("  Discord бот (по избор — чат с агента от телефона).")
-    print("  Enter, за да пропуснеш.")
-    token = _prompt("    GENESIS_DISCORD_BOT_TOKEN = ")
-    if token:
-        collected["GENESIS_DISCORD_BOT_TOKEN"] = token
-        print("    Твоят Discord user ID е ЗАДЪЛЖИТЕЛЕН — без него ботът не")
-        print("    отговаря на никого (Settings → Advanced → Developer Mode →")
-        print("    десен клик на профила ти → Copy User ID).")
-        owner = _prompt("    GENESIS_DISCORD_OWNER_ID = ")
-        if owner:
-            collected["GENESIS_DISCORD_OWNER_ID"] = owner
-        else:
-            print("    ⚠️  Без ID ботът ще мълчи. Добави го по-късно в", ENV_FILE)
+    # Carried over silently when already configured — there is nothing to
+    # verify here without connecting to the gateway, so re-asking is noise.
+    for var in ("GENESIS_DISCORD_BOT_TOKEN", "GENESIS_DISCORD_OWNER_ID",
+                "GENESIS_DISCORD_WEBHOOK"):
+        val = _existing(var)
+        if val:
+            collected[var] = val
+
+    if collected.get("GENESIS_DISCORD_BOT_TOKEN"):
+        has_owner = bool(collected.get("GENESIS_DISCORD_OWNER_ID"))
+        print(f"  Discord бот: настроен {'✅' if has_owner else '⚠️'}")
+        if not has_owner:
+            print("    Липсва GENESIS_DISCORD_OWNER_ID — без него ботът НЕ отговаря")
+            print("    на никого (Settings → Advanced → Developer Mode → десен")
+            print("    клик на профила ти → Copy User ID).")
+            owner = _prompt("    GENESIS_DISCORD_OWNER_ID = ")
+            if owner:
+                collected["GENESIS_DISCORD_OWNER_ID"] = owner
+    else:
+        print("  Discord бот (по избор — чат с агента от телефона).")
+        token = _prompt("    GENESIS_DISCORD_BOT_TOKEN (Enter = пропусни) = ")
+        if token:
+            collected["GENESIS_DISCORD_BOT_TOKEN"] = token
+            print("    Твоят Discord user ID е ЗАДЪЛЖИТЕЛЕН — без него ботът не")
+            print("    отговаря на никого.")
+            owner = _prompt("    GENESIS_DISCORD_OWNER_ID = ")
+            if owner:
+                collected["GENESIS_DISCORD_OWNER_ID"] = owner
+            else:
+                print("    ⚠️  Без ID ботът ще мълчи. Добави го по-късно в", ENV_FILE)
     print()
 
     # ── Write ─────────────────────────────────────────────────────────────
     ensure_genesis_home()
+
+    # Anything already in the file that this wizard does not manage is carried
+    # over verbatim. Overwriting with only what we collected silently deleted
+    # unrelated settings — running setup to add one key must never cost you
+    # another.
+    preserved: dict[str, str] = {}
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text(encoding="utf-8", errors="ignore").splitlines():
+            s = line.strip()
+            if not s or s.startswith("#") or "=" not in s:
+                continue
+            k, _, v = s.partition("=")
+            k = k.strip().removeprefix("export ").strip()
+            if k and k not in collected and v.strip():
+                preserved[k] = v.strip()
+
+        # A dated copy before every write, so a mistake here is recoverable.
+        backup = ENV_FILE.with_name(f".env.backup-{datetime.datetime.now():%Y%m%d-%H%M%S}")
+        backup.write_text(ENV_FILE.read_text(encoding="utf-8"), encoding="utf-8")
+        backup.chmod(0o600)
+        print(f"  предишният файл е запазен като {backup.name}")
+
     lines = ["# Genesis Agent — written by `genesis setup`.",
-             "# Keep this file private. It is never committed.", ""]
+             "# Keep this file private. It is never committed.",
+             "#",
+             "# Format is strict:  NAME=value   (no spaces around =).",
+             "# Comments go on their own line, starting with #.",
+             ""]
     lines += [f"{k}={v}" for k, v in collected.items()]
+    if preserved:
+        lines += ["", "# Kept from the previous file (not managed by setup):"]
+        lines += [f"{k}={v}" for k, v in preserved.items()]
     ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
     ENV_FILE.chmod(0o600)
 
