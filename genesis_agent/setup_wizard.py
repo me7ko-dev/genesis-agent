@@ -23,13 +23,18 @@ import requests
 from genesis_agent.paths import ENV_FILE, ensure_genesis_home, read_env_files
 
 # (env var, display name, where to get it, base_url, a model to smoke-test with)
+#
+# The probe model is only ever used to make ONE request during setup — it is
+# not the model the agent runs on (that chain lives in config.yaml). Providers
+# retire models regularly, so `_test_key` treats a 404/410 here as "the probe
+# is stale", never as "your key is bad".
 PROVIDERS: list[tuple[str, str, str, str, str]] = [
     ("HF_TOKEN", "HuggingFace",
      "https://huggingface.co/settings/tokens",
      "https://router.huggingface.co/v1", "Qwen/Qwen2.5-Coder-32B-Instruct"),
     ("OPENROUTER_API_KEY", "OpenRouter",
      "https://openrouter.ai/keys",
-     "https://openrouter.ai/api/v1", "meta-llama/llama-3.3-70b-instruct:free"),
+     "https://openrouter.ai/api/v1", "inclusionai/ling-3.0-flash:free"),
     ("OLLAMA_API_KEY", "Ollama Cloud",
      "https://ollama.com/settings/keys",
      "https://ollama.com/v1", "gpt-oss:120b-cloud"),
@@ -38,7 +43,7 @@ PROVIDERS: list[tuple[str, str, str, str, str]] = [
      "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
     ("NVIDIA_API_KEY", "NVIDIA NIM",
      "https://build.nvidia.com/",
-     "https://integrate.api.nvidia.com/v1", "mistralai/mixtral-8x7b-instruct-v0.1"),
+     "https://integrate.api.nvidia.com/v1", "meta/llama-3.3-70b-instruct"),
     ("COHERE_API_KEY", "Cohere",
      "https://dashboard.cohere.com/api-keys",
      "https://api.cohere.ai/compatibility/v1", "command-a-03-2025"),
@@ -46,32 +51,59 @@ PROVIDERS: list[tuple[str, str, str, str, str]] = [
 
 
 def _test_key(base_url: str, key: str, model: str) -> tuple[bool, str]:
-    """One real, tiny request. Returns (ok, human-readable reason)."""
-    try:
-        r = requests.post(
-            f"{base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {key}",
-                     "Content-Type": "application/json"},
-            json={"model": model,
-                  "messages": [{"role": "user", "content": "say ok"}],
-                  "max_tokens": 5},
-            timeout=30,
-        )
-    except requests.RequestException as e:
-        return False, f"network error: {type(e).__name__}"
+    """
+    Is this key usable? Returns (ok, human-readable reason).
+
+    A real completion is the authority, because that is the request the agent
+    actually makes. `GET /models` is tempting as an auth check and is a trap:
+    measured across these six providers, four of them answer it with 200 even
+    when the key is deliberate garbage. Trusting it hands out green checkmarks
+    for expired keys.
+
+    /models is still useful for one narrow job — telling "your key is bad"
+    apart from "the model I probed with no longer exists" — so it is consulted
+    only on a 404/410, and only for providers that actually authenticate it.
+    """
+    def _probe() -> requests.Response | None:
+        try:
+            return requests.post(
+                f"{base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {key}",
+                         "Content-Type": "application/json"},
+                json={"model": model,
+                      "messages": [{"role": "user", "content": "say ok"}],
+                      "max_tokens": 5},
+                timeout=30,
+            )
+        except requests.RequestException:
+            return None
+
+    r = _probe()
+    if r is None:
+        return False, "мрежова грешка — не можах да достигна доставчика"
 
     if r.status_code == 200:
-        return True, "works"
-    if r.status_code in (401, 403):
-        return False, "key rejected (401/403) — wrong or expired"
+        return True, "работи"
+    if r.status_code == 401:
+        return False, "ключът е отхвърлен (401) — грешен или изтекъл"
+    if r.status_code == 403:
+        return False, ("403 — блокиран достъп. Ключът може да е наред, но "
+                       "доставчикът не обслужва твоя регион (пробвай с VPN)")
     if r.status_code == 402:
-        return False, "payment required — the account needs billing enabled"
+        return False, "402 — валиден ключ, но акаунтът няма кредит/плащане"
     if r.status_code == 429:
-        # The key is valid; the quota is just busy right now.
-        return True, "valid, but rate-limited at the moment"
-    if r.status_code == 404:
-        return True, f"key accepted, but the test model is unavailable ({model})"
-    return False, f"HTTP {r.status_code}: {r.text[:100]}"
+        return True, "ключът е валиден · квотата е изчерпана в момента"
+    if r.status_code in (404, 410):
+        # Ambiguous on its own: a dead key and a retired model look the same.
+        try:
+            m = requests.get(f"{base_url}/models",
+                             headers={"Authorization": f"Bearer {key}"}, timeout=15)
+            if m.status_code in (401, 403):
+                return False, "ключът е отхвърлен"
+        except requests.RequestException:
+            pass
+        return True, f"ключът минава · тестовият модел {model} вече не съществува"
+    return False, f"HTTP {r.status_code}: {r.text[:90]}"
 
 
 def _prompt(text: str) -> str:
