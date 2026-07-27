@@ -57,4 +57,7 @@ packages = ["genesis_agent"]
 py-modules = ["genesis_skills"]
 
 [tool.setuptools.package-data]
-genesis_agent = ["../config.yaml"]
+# config.yaml and the starter skills live beside the package, not inside it,
+# so they need naming explicitly. Without the skills entry a pip install ends
+# up with an empty library — which quietly contradicts the README.
+genesis_agent = ["../config.yaml", "../skills/*.md", "../skills/skills.json"]

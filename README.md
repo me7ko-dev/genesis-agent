@@ -10,7 +10,7 @@ what comes next, so the following one does not start by asking you to explain
 everything again.
 
 ```bash
-pip install genesis-agent
+pip install git+https://github.com/me7ko-dev/genesis-agent
 genesis setup        # asks for API keys, tests each one live
 genesis              # start working
 ```
@@ -42,9 +42,12 @@ on session end and on context compaction, whether or not the model cooperated.
 Requires Python 3.10+ and at least one API key (all providers have free tiers).
 
 ```bash
-pip install genesis-agent
+pip install git+https://github.com/me7ko-dev/genesis-agent
 genesis setup
 ```
+
+> Not on PyPI yet, so install from git for now. `pip install genesis-agent`
+> will work once the first release is published there.
 
 `genesis setup` asks for each key, makes one real request to verify it, and
 writes `~/.genesis/.env` with mode 600. Skip any provider you do not have —

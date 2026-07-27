@@ -67,7 +67,8 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "skills":
         from genesis_agent.skill_loader import load_skills_index
         index = load_skills_index()
-        verified = sum(1 for s in index.values() if "verified" in str(s.get("status", "")))
+        # The index records `verified: true`, not a `status` string.
+        verified = sum(1 for s in index.values() if s.get("verified"))
         print(f"{len(index)} умения, {verified} verified")
         return 0
 
