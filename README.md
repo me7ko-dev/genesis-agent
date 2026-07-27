@@ -104,7 +104,6 @@ whatever you have not configured.
 | Ollama Cloud | yes | `OLLAMA_API_KEY` |
 | Groq | yes | `GROQ_API_KEY` |
 | NVIDIA NIM | yes | `NVIDIA_API_KEY` |
-| Cohere | trial | `COHERE_API_KEY` |
 | Ollama (local) | free | `GENESIS_LOCAL_MODEL` |
 
 **One key per provider.** Genesis does not rotate multiple accounts of the same

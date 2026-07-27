@@ -44,9 +44,6 @@ PROVIDERS: list[tuple[str, str, str, str, str]] = [
     ("NVIDIA_API_KEY", "NVIDIA NIM",
      "https://build.nvidia.com/",
      "https://integrate.api.nvidia.com/v1", "meta/llama-3.3-70b-instruct"),
-    ("COHERE_API_KEY", "Cohere",
-     "https://dashboard.cohere.com/api-keys",
-     "https://api.cohere.ai/compatibility/v1", "command-a-03-2025"),
 ]
 
 
