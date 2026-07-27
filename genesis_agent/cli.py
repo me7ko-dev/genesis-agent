@@ -23,12 +23,18 @@ USAGE = __doc__.split("    genesis", 1)[0].strip() + "\n\n" + "\n".join(
 )
 
 
-def _chat() -> int:
+def _project_root():
+    """The directory holding config.yaml, skills/ and gui/ — checkout or install."""
     from pathlib import Path
-    root = Path(__file__).resolve().parent.parent
-    sys.path.insert(0, str(root))
+    return Path(__file__).resolve().parent.parent
+
+
+def _chat() -> int:
+    # Run as a module, not from a file path: an installed copy has the module
+    # importable but no .py sitting next to the package in every layout.
+    sys.path.insert(0, str(_project_root()))
     import runpy
-    runpy.run_path(str(root / "genesis_terminal_agent.py"), run_name="__main__")
+    runpy.run_module("genesis_terminal_agent", run_name="__main__", alter_sys=True)
     return 0
 
 
@@ -73,12 +79,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if cmd in ("gui", "voice"):
-        from pathlib import Path
         import runpy
-        root = Path(__file__).resolve().parent.parent
+        root = _project_root()
         sys.path.insert(0, str(root))
-        script = "genesis_gui.py" if cmd == "gui" else "genesis_jarvis.py"
-        runpy.run_path(str(root / "gui" / script), run_name="__main__")
+        script = root / "gui" / ("genesis_gui.py" if cmd == "gui" else "genesis_jarvis.py")
+        if not script.exists():
+            print(f"Липсва {script}.\n"
+                  f"Този фронтенд се пуска от копие на repo-то:\n"
+                  f"  git clone https://github.com/me7ko-dev/genesis-agent")
+            return 1
+        runpy.run_path(str(script), run_name="__main__")
         return 0
 
     if cmd == "chat":

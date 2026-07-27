@@ -54,10 +54,19 @@ genesis = "genesis_agent.cli:main"
 
 [tool.setuptools]
 packages = ["genesis_agent"]
-py-modules = ["genesis_skills"]
+# Both are top-level modules the CLI loads at runtime. Omitting
+# genesis_terminal_agent left `genesis` — the headline command — crashing with
+# FileNotFoundError on every installed copy.
+py-modules = ["genesis_skills", "genesis_terminal_agent"]
 
 [tool.setuptools.package-data]
-# config.yaml and the starter skills live beside the package, not inside it,
-# so they need naming explicitly. Without the skills entry a pip install ends
-# up with an empty library — which quietly contradicts the README.
-genesis_agent = ["../config.yaml", "../skills/*.md", "../skills/skills.json"]
+# config.yaml, the starter skills and the GUI scripts live beside the package
+# rather than inside it, so each needs naming explicitly. Anything missing here
+# is missing from an installed copy while still working from a git checkout —
+# which is exactly the kind of gap that only shows up for other people.
+genesis_agent = [
+    "../config.yaml",
+    "../skills/*.md",
+    "../skills/skills.json",
+    "../gui/*.py",
+]

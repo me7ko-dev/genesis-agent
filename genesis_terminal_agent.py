@@ -1159,7 +1159,10 @@ def main():
             with open(session_file, "w", encoding="utf-8") as f:
                 json.dump(list(messages), f, ensure_ascii=False, indent=None, separators=(',', ':'))
 
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, EOFError):
+            # EOF (Ctrl-D, or stdin closed when piped) used to fall through to
+            # the generic handler below, which printed the error and looped —
+            # forever, since the next read hit EOF again immediately.
             break
         except Exception as e:
             console.print(f"[red]⚠ {e}[/]")
@@ -1189,7 +1192,7 @@ def main():
     except Exception:
         pass
 
-    console.print("\n[dim]Довиждане, потребителят![/]")
+    console.print("\n[dim]Довиждане![/]")
 
 if __name__ == "__main__":
     main()
