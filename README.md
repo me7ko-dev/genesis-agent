@@ -10,7 +10,7 @@ what comes next, so the following one does not start by asking you to explain
 everything again.
 
 ```bash
-pip install git+https://github.com/me7ko-dev/genesis-agent
+pipx install git+https://github.com/me7ko-dev/genesis-agent
 genesis setup        # asks for API keys, tests each one live
 genesis              # start working
 ```
@@ -40,14 +40,37 @@ on session end and on context compaction, whether or not the model cooperated.
 ## Install
 
 Requires Python 3.10+ and at least one API key (all providers have free tiers).
+Not on PyPI yet, so install from git.
+
+**Recommended — [pipx](https://pipx.pypa.io):** installs the `genesis` command
+into its own environment and puts it on your PATH.
 
 ```bash
-pip install git+https://github.com/me7ko-dev/genesis-agent
-genesis setup
+pipx install git+https://github.com/me7ko-dev/genesis-agent
 ```
 
-> Not on PyPI yet, so install from git for now. `pip install genesis-agent`
-> will work once the first release is published there.
+On Debian/Ubuntu, get pipx first with `sudo apt install pipx && pipx ensurepath`.
+
+<details>
+<summary>Without pipx</summary>
+
+A plain `pip install` fails on Debian, Ubuntu, Fedora and most current distros
+with `error: externally-managed-environment` — the system Python is protected
+([PEP 668](https://peps.python.org/pep-0668/)). Either of these works:
+
+```bash
+# a virtualenv — always works, nothing to install first
+python3 -m venv ~/.venvs/genesis
+~/.venvs/genesis/bin/pip install git+https://github.com/me7ko-dev/genesis-agent
+~/.venvs/genesis/bin/genesis
+
+# or install for your user only, opting out of the protection
+pip install --user --break-system-packages git+https://github.com/me7ko-dev/genesis-agent
+```
+
+With `--user` the command lands in `~/.local/bin/genesis`; make sure that
+directory is on your PATH.
+</details>
 
 `genesis setup` asks for each key, makes one real request to verify it, and
 writes `~/.genesis/.env` with mode 600. Skip any provider you do not have —
