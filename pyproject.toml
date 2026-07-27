@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "genesis-agent"
+version = "0.1.0"
+description = "Self-hosted autonomous coding agent with a library of verified, executable skills and memory that survives sessions."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Me7ko__" }]
+keywords = ["ai", "agent", "autonomous", "llm", "coding-assistant", "self-hosted"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Code Generators",
+]
+
+# Deliberately small. Everything heavier is an extra, so `pip install
+# genesis-agent` stays fast and the browser/voice stacks are opt-in.
+dependencies = [
+    "requests>=2.31",
+    "PyYAML>=6.0",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+browser = ["playwright>=1.40"]           # then: playwright install chromium
+discord = ["discord.py>=2.3"]
+voice = ["faster-whisper>=1.0", "edge-tts>=6.1"]
+vision = ["mss>=9.0"]                    # then: ollama pull moondream
+all = [
+    "playwright>=1.40",
+    "discord.py>=2.3",
+    "faster-whisper>=1.0",
+    "edge-tts>=6.1",
+    "mss>=9.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/me7ko-dev/genesis-agent"
+Issues = "https://github.com/me7ko-dev/genesis-agent/issues"
+Security = "https://github.com/me7ko-dev/genesis-agent/blob/main/SECURITY.md"
+
+[project.scripts]
+genesis = "genesis_agent.cli:main"
+
+[tool.setuptools]
+packages = ["genesis_agent"]
+py-modules = ["genesis_skills"]
+
+[tool.setuptools.package-data]
+genesis_agent = ["../config.yaml"]

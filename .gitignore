@@ -1,0 +1,40 @@
+# ---- Тайни. Никога в repo-то. ----
+.env
+.env.local
+*.key
+*.pem
+secrets/
+
+# ---- Локално състояние (различно за всеки потребител) ----
+*.db
+*.db-shm
+*.db-wal
+*.jsonl
+provider_stats.json
+next_goals.json
+ranked_goals.json
+benchmark_history.json
+live_status.json
+
+# ---- Runtime директории ----
+.sandbox_run/
+.search_cache/
+.verify_libs/
+.verify_venv/
+projects_out/
+logs/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+venv/
+.venv/
+
+# ---- Редактор / OS ----
+*.swp
+.DS_Store
+.idea/
+.vscode/

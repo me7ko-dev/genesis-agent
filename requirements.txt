@@ -1,0 +1,12 @@
+# pip install -r requirements.txt --break-system-packages --user
+openai>=1.30.0
+mss>=10.0.0
+playwright>=1.61.0
+# след pip install: playwright install chromium   (тегли headless Chromium binary, ~300MB)
+
+# gui/genesis_jarvis.py (гласов агент) — само за тази функционалност:
+faster-whisper>=1.2.1   # STT, локален (~150MB модел, кешира се при първо ползване)
+edge-tts>=7.2.8         # TTS, естествен глас, безплатно, без ключ (нужна мрежа)
+# нужни системни инструменти (без sudo достъпни на тази машина): arecord/aplay
+# (пакет alsa-utils), ffplay (пакет ffmpeg), spd-say (speech-dispatcher) — офлайн
+# резерва на гласа. Провери с: which arecord ffplay spd-say

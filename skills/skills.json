@@ -1,0 +1,175 @@
+{
+  "version": "1.0",
+  "skills": [
+    {
+      "name": "build_a_self_contained_standard_library_only_sch",
+      "category": "autonomous",
+      "file_path": "skills/build_a_self_contained_standard_library_only_sch.md",
+      "description": "Build a self-contained (standard-library-only) schema migration diff generator for dict records module with a docstring, type hints and an assert-based self-test that prints OK.",
+      "triggers": [
+        "build a self contained standard library only sch"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-07-27T13:53:30.074296+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
+    },
+    {
+      "name": "build_a_stdlib_only_an_in_process_event_bus_pub",
+      "category": "autonomous",
+      "file_path": "skills/build_a_stdlib_only_an_in_process_event_bus_pub.md",
+      "description": "Build a stdlib-only an in-process event bus / pub-sub dispatcher with type hints, docstring and an assert self-test printing OK.",
+      "triggers": [
+        "build a stdlib only an in process event bus pub"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-07-27T13:53:30.095292+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
+    },
+    {
+      "name": "build_a_stdlib_only_async_semaphore_bounded_fan",
+      "category": "autonomous",
+      "file_path": "skills/build_a_stdlib_only_async_semaphore_bounded_fan.md",
+      "description": "Build a stdlib-only async semaphore-bounded fan-out/fan-in with type hints, docstring and an assert self-test printing OK.",
+      "triggers": [
+        "build a stdlib only async semaphore bounded fan"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-07-27T13:52:53.042568+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
+    },
+    {
+      "name": "build_a_stdlib_only_async_timeout_cancellation_w",
+      "category": "autonomous",
+      "file_path": "skills/build_a_stdlib_only_async_timeout_cancellation_w.md",
+      "description": "Build a stdlib-only async timeout-cancellation wrapper with type hints, docstring and an assert self-test printing OK.",
+      "triggers": [
+        "build a stdlib only async timeout cancellation w"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-07-27T13:55:05.095443+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
+    },
+    {
+      "name": "create_a_stdlib_only_n_gram_frequency_analyzer_w",
+      "category": "autonomous",
+      "file_path": "skills/create_a_stdlib_only_n_gram_frequency_analyzer_w.md",
+      "description": "Create a stdlib-only n-gram frequency analyzer with type hints, docstring, and an assert self-test printing OK.",
+      "triggers": [
+        "create a stdlib only n gram frequency analyzer w"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-07-27T13:53:54.138140+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
+    },
+    {
+      "name": "create_a_stdlib_only_word_level_diff_highlighter",
+      "category": "autonomous",
+      "file_path": "skills/create_a_stdlib_only_word_level_diff_highlighter.md",
+      "description": "Create a stdlib-only word-level diff highlighter between two strings with type hints, docstring, and an assert self-test printing OK.",
+      "triggers": [
+        "create a stdlib only word level diff highlighter"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-07-27T13:53:39.563907+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
+    },
+    {
+      "name": "create_a_stdlib_only_word_wrap_text_justify_form",
+      "category": "autonomous",
+      "file_path": "skills/create_a_stdlib_only_word_wrap_text_justify_form.md",
+      "description": "Create a stdlib-only word-wrap/text-justify formatter with type hints, docstring, and an assert self-test printing OK.",
+      "triggers": [
+        "create a stdlib only word wrap text justify form"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-07-27T13:53:47.264116+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
+    },
+    {
+      "name": "implement_a_consistent_hashing_ring_from_scratch",
+      "category": "autonomous",
+      "file_path": "skills/implement_a_consistent_hashing_ring_from_scratch.md",
+      "description": "Implement a consistent-hashing ring from scratch (stdlib only) with type hints, docstring and an assert-based self-test that prints OK.",
+      "triggers": [
+        "implement a consistent hashing ring from scratch"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-07-27T13:55:55.648775+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
+    },
+    {
+      "name": "implement_a_stdlib_only_jwt_like_token_encoder_d",
+      "category": "autonomous",
+      "file_path": "skills/implement_a_stdlib_only_jwt_like_token_encoder_d.md",
+      "description": "Implement a stdlib-only JWT-like token encoder/decoder using hmac (HS256) with type hints, docstring, and an assert-based self-test that prints OK.",
+      "triggers": [
+        "implement a stdlib only jwt like token encoder d"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-07-27T13:53:13.677343+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
+    },
+    {
+      "name": "implement_sliding_window_maximum_from_scratch_st",
+      "category": "autonomous",
+      "file_path": "skills/implement_sliding_window_maximum_from_scratch_st.md",
+      "description": "Implement sliding-window maximum from scratch (stdlib only) with type hints, docstring and an assert-based self-test that prints OK.",
+      "triggers": [
+        "implement sliding window maximum from scratch st"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-07-27T13:54:05.528659+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
+    }
+  ]
+}
