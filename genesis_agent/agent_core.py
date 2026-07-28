@@ -1,7 +1,7 @@
 """
 genesis_agent.agent_core — споделеното ядро зад ВСЕКИ пълноценен фронтенд (design note, 2026-07-27): терминал, Discord, GTK чат, и новия Jarvis гласов агент.
 
-Извадено от gui/genesis_gui.py (по-рано дефинирано САМО там) при строежа на
+Извадено от genesis_agent/gui/genesis_gui.py (по-рано дефинирано САМО там) при строежа на
 Jarvis фронтенда — иначе гласовото приложение трябваше да копира ~150 реда
 tool-loop логика буквално, точно дублирането, което проектът изрично избягва
 ("не дублирай логика, фронтендите делят едно ядро" — виж genesis_gui.py
@@ -81,7 +81,7 @@ class Core:
         try:
             import yaml
 
-            cfg_path = PROJECT_ROOT / "config.yaml"
+            from genesis_agent.paths import CONFIG_PATH as cfg_path
             cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
             self.cfg = cfg
 

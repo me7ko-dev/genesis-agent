@@ -5,7 +5,7 @@ import json
 from collections import Counter
 from pathlib import Path
 
-SKILLS_JSON = Path(__file__).resolve().parent.parent / "skills" / "skills.json"
+SKILLS_JSON = Path(__file__).resolve().parent.parent / "genesis_agent" / "skills" / "skills.json"
 
 
 def main() -> None:

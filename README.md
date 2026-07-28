@@ -152,7 +152,7 @@ container.
 
 ## The skill library
 
-Ten verified, dependency-free skills ship in `skills/` — enough to see the
+Ten verified, dependency-free skills ship in `genesis_agent/skills/` — enough to see the
 format and the reuse working. They are not the product; the mechanism is.
 Point the agent at real work, or run the forge, and the library becomes yours:
 

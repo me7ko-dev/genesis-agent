@@ -2,7 +2,7 @@
 genesis_agent/episodic_memory.py
 ---------------------------
 
-Persistently stores “episodes” – значими събития, които Genesis0 преживява.
+Persistently stores “episodes” – значими събития, които Genesis Agent преживява.
 Всеки епизод съдържа:
 
     * timestamp      – време на събитието (ISO‑8601)

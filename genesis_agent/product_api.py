@@ -158,7 +158,7 @@ def chat_completions(req: ChatCompletionRequest, request: Request):
     return JSONResponse({
         "id": "genesis-chatcmpl",
         "object": "chat.completion",
-        "model": (brain.current or {}).get("model", "genesis-0"),
+        "model": (brain.current or {}).get("model", "genesis-agent"),
         "choices": [{
             "index": 0,
             "message": {"role": "assistant", "content": content},

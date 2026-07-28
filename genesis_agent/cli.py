@@ -24,7 +24,7 @@ USAGE = __doc__.split("    genesis", 1)[0].strip() + "\n\n" + "\n".join(
 
 
 def _project_root():
-    """The directory holding config.yaml, skills/ and gui/ — checkout or install."""
+    """The directory the top-level modules import from — checkout or install."""
     from pathlib import Path
     return Path(__file__).resolve().parent.parent
 
@@ -81,9 +81,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if cmd in ("gui", "voice"):
         import runpy
-        root = _project_root()
-        sys.path.insert(0, str(root))
-        script = root / "gui" / ("genesis_gui.py" if cmd == "gui" else "genesis_jarvis.py")
+        from genesis_agent.paths import PACKAGE_DIR
+        sys.path.insert(0, str(_project_root()))
+        script = PACKAGE_DIR / "gui" / ("genesis_gui.py" if cmd == "gui" else "genesis_jarvis.py")
         if not script.exists():
             print(f"Липсва {script}.\n"
                   f"Този фронтенд се пуска от копие на repo-то:\n"

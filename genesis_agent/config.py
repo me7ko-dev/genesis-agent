@@ -13,12 +13,13 @@ stop_event = threading.Event()
 # this is the repo root — writable, fine to use directly. For a `pip install`
 # it is site-packages, which a mission has no business writing into (often
 # not even permitted, and wiped on the next reinstall/upgrade).
-PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
+PACKAGE_DIR: Path = Path(__file__).resolve().parent
+PROJECT_ROOT: Path = PACKAGE_DIR.parent
 _INSTALLED = PROJECT_ROOT.name in ("site-packages", "dist-packages")
 
 
 def _default_skills_dir() -> Path:
-    shipped = PROJECT_ROOT / "skills"
+    shipped = PACKAGE_DIR / "skills"
     if not _INSTALLED:
         return shipped
     # Installed copy: skills a mission writes go to ~/.genesis/skills instead.
@@ -52,28 +53,17 @@ DATA_DIR: Path = (Path.home() / ".genesis" / "data") if _INSTALLED else (PROJECT
 if _INSTALLED:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-# ENGINE / 100% STANDALONE MODE
-# MODEL_PATH беше хардкоднат Windows път; сега е env-конфигурируем и по
-# подразбиране търси в ~/.lmstudio/models (Linux/LM Studio разположение).
-ENGINE_EXE: Path = Path(os.environ.get("GENESIS_ENGINE_EXE", PROJECT_ROOT / "engine" / "llama-server"))
-MODEL_PATH: Path = Path(os.environ.get(
-    "GENESIS_MODEL_PATH",
-    Path.home() / ".lmstudio" / "models" / "nvidia-agentic-coder-4b.gguf",
-))
-ENGINE_PORT = 12345
-
-# OpenAI-compatible local LLM (LM Studio / Ollama)
-LLM_BASE_URL: str = os.environ.get("GENESIS_LLM_BASE_URL", f"http://127.0.0.1:{ENGINE_PORT}/v1")
-LLM_API_KEY: str = os.environ.get("GENESIS_LLM_API_KEY", "genesis")
-LLM_MODEL: str = os.environ.get("GENESIS_LLM_MODEL", "nvidia-agentic")
+# Removed here: ENGINE_EXE / MODEL_PATH / ENGINE_PORT / LLM_BASE_URL /
+# LLM_API_KEY / LLM_MODEL / GENESIS_MODE. They described a llama-server and
+# LM Studio setup that no longer exists — nothing in the codebase read any of
+# them, and they pointed at a specific .gguf on a specific machine. The local
+# model is configured with GENESIS_LOCAL_MODEL and talked to over Ollama's
+# OpenAI-compatible endpoint; see genesis_agent/brain.py.
 
 # За локални малки модели (DeepSeek 8B, Qwen 7B и т.н.) намали ретрите!
 # Малък модел = бърз провал, не 300 рунда по 130 секунди
 MAX_LLM_RETRIES: int = int(os.environ.get("GENESIS_MAX_RETRIES", "8"))
 EXEC_TIMEOUT_SEC: int = int(os.environ.get("GENESIS_EXEC_TIMEOUT", "120"))
-
-# Детекция на режим: 'local' (малък модел) или 'cloud' (GPT/Groq/NVIDIA)
-GENESIS_MODE: str = os.environ.get("GENESIS_MODE", "local")  # 'local' | 'cloud'
 
 # Optional: set GENESIS_OPERATOR=<your-name> for an audit trail (CLI --operator).
 # GENESIS_STRICT_AUTHORITY=1 requires sovereign operator to start the autonomous loop.

@@ -24,7 +24,7 @@ jobs:
 
       - name: Everything imports and compiles
         run: |
-          python -m compileall -q genesis_agent/ gui/ scripts/ *.py
+          python -m compileall -q genesis_agent/ scripts/ *.py
           python -c "import genesis_agent.brain, genesis_agent.sandbox, genesis_agent.paths"
 
       # The sandbox is the safety boundary — if it regresses, nothing else

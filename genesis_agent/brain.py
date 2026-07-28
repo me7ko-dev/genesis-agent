@@ -91,8 +91,18 @@ def _mark_exhausted(key: str) -> None:
 
 
 def _load_keys() -> dict[str, str]:
+    """
+    Every key Genesis might need, with the precedence documented in
+    `paths.get_secret`: a real environment variable beats ./.env, which beats
+    ~/.genesis/.env.
+
+    The order matters more than it looks. Exporting a key to override a stale
+    one in ~/.genesis/.env is the obvious way to try a replacement, and it used
+    to do nothing here — the file won, so Brain kept using the old key while
+    every other module (which goes through get_secret) used the new one.
+    """
     keys: dict[str, str] = {}
-    for envf in ENV_FILES:
+    for envf in ENV_FILES:  # project-local first, then ~/.genesis
         p = Path(envf)
         if not p.exists():
             continue
@@ -102,7 +112,12 @@ def _load_keys() -> dict[str, str]:
                 k, v = line.split("=", 1)
                 keys.setdefault(k.strip(), _strip_inline_comment(v.strip()).strip('"').strip("'"))
     for k, v in os.environ.items():
-        keys.setdefault(k, v)
+        # Exported-but-empty is not an override — it falls through to the file,
+        # exactly as get_secret does.
+        if v:
+            keys[k] = v
+        else:
+            keys.setdefault(k, v)
     return keys
 
 
@@ -184,6 +199,7 @@ class Brain:
         # fallback продължава, точно както преди сливането. Ако моделът не е
         # в config.yaml веригата (напр. избран от живия `/models` списък на
         # доставчика), се добавя отпред като валиден запис.
+        self._pinned: dict | None = None
         if pin_model:
             p_prov, p_model = pin_model
             if p_prov in _PROVIDERS:
@@ -191,7 +207,9 @@ class Brain:
                         if not (c["provider"] == p_prov and c["model"] == p_model)]
                 existing = next((c for c in self.chain
                                  if c["provider"] == p_prov and c["model"] == p_model), None)
-                self.chain = [existing or {"provider": p_prov, "model": p_model, "size_b": 0}] + rest
+                self._pinned = existing or {"provider": p_prov, "model": p_model,
+                                            "size_b": 0, "supports_tools": False}
+                self.chain = [self._pinned] + rest
 
         self.current = (self.chain[0] if self.chain else None) or self.local
 
@@ -223,13 +241,13 @@ class Brain:
 
     def system_prompt_base(self) -> str:
         return (
-            "АБСОЛЮТНА ДИРЕКТИВА: Ти си Genesis Agent — суверенен AI агент, създаден от потребителя. "
-            "ТИ НЕ СИ Llama, Nvidia, Mistral или ChatGPT. Използваш техните мрежи само като двигател. "
-            "Твоята цел е да изпълняваш мисии чрез Python код.\n"
-            "Винаги връщай РАБОТЕЩ код в един ```python ... ``` блок, със self-test "
-            "(assert-и) който печата 'OK' при успех. Без обяснения, само кода.\n"
-            "Ако в контекста по-долу е инжектиран готов код от съществуващо умение, който "
-            "решава част от целта — преизползвай/разшири го директно, не преоткривай колелото."
+            "ABSOLUTE DIRECTIVE: You are Genesis Agent — an autonomous agent running on your "
+            "operator's own machine. You are NOT Llama, Nvidia, Mistral or ChatGPT; you use "
+            "their networks only as an engine. Your job is to carry out missions as Python code.\n"
+            "Always return WORKING code in a single ```python ... ``` block, with an "
+            "assert-based self-test that prints 'OK' on success. No explanation, code only.\n"
+            "If the context below contains ready code from an existing skill that solves part "
+            "of the goal, reuse or extend it directly instead of reinventing it."
         )
 
     def build_context(self, goal: str) -> str:
@@ -354,7 +372,7 @@ class Brain:
         следващо съобщение плаща за ЦЕЛИЯ растящ разговор.
 
         Извадено от genesis_terminal_agent.py (2026-07-25) в Brain, за да го
-        ползва и gui/genesis_gui.py (2026-07-27): GUI-то дефинираше същите
+        ползва и genesis_agent/gui/genesis_gui.py (2026-07-27): GUI-то дефинираше същите
         COMPACT_THRESHOLD/COMPACT_KEEP_RECENT константи, но никога не викаше
         компресия — трупаше сурово до твърдия deque(maxlen=30) cutoff, което е
         едновременно по-скъпо (плаща пълната растяща история по-дълго) И губи
@@ -609,9 +627,15 @@ class Brain:
         # веригата ТОЗИ рунд — не се маркира изчерпан, не се трие, просто не
         # хабим първия опит на здравите доставчици върху нещо болно. Никога
         # не хвърля — статистиката е "nice to have", не критичен път.
+        # Reordered into a LOCAL list, never back into self.chain: this is a
+        # judgement about right now, and writing it back made it permanent —
+        # the reorder was stable and each call re-sorted the already-sorted
+        # chain, so a provider demoted during one bad minute never climbed back
+        # to its configured position even after it started answering again.
+        chain = self.chain
         try:
             from genesis_agent.provider_stats import deprioritize_flaky
-            self.chain = deprioritize_flaky(self.chain)
+            chain = deprioritize_flaky(chain)
         except Exception:
             pass
 
@@ -620,16 +644,26 @@ class Brain:
         # text-tag режим (историята се "почиства" от native формат за тях,
         # виж _sanitize_for_textmode). Без tools — редът е непроменен.
         if tools:
-            capable = [c for c in self.chain if c.get("supports_tools")]
-            rest = [c for c in self.chain if not c.get("supports_tools")]
+            capable = [c for c in chain if c.get("supports_tools")]
+            rest = [c for c in chain if not c.get("supports_tools")]
             ordered_chain = capable + rest
+            # An explicit pin outranks this reordering. The operator picked that
+            # model in the `/model` menu; quietly answering from a different one
+            # because theirs lacks native tool-calling is not our call to make —
+            # and it was the silent default, since the shipped default model
+            # (Qwen2.5-Coder-32B) is exactly one of the two without it. Pinned
+            # still means first, not only: it falls back normally if it fails,
+            # and it gets the text-tag protocol instead of JSON schemas.
+            if self._pinned is not None:
+                ordered_chain = ([self._pinned]
+                                 + [c for c in ordered_chain if c is not self._pinned])
             # Текстовият вариант получава И документацията на таговете — native
             # моделите я НЕ получават (имат JSON схемите), което е спестяването.
             messages_notools = self._with_tool_tag_docs(
                 self._sanitize_for_textmode(messages)
             )
         else:
-            ordered_chain = self.chain
+            ordered_chain = chain
             messages_notools = messages
 
         n = len(ordered_chain)

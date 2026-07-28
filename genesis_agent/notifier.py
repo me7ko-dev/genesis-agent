@@ -27,7 +27,7 @@ from typing import Optional
 # сам намира webhook-а от същите източници, които ползва терминалният агент.
 
 from genesis_agent.paths import ENV_FILES as _ENV_FILES
-_CONFIG_YAML = Path(__file__).resolve().parent.parent / "config.yaml"
+from genesis_agent.paths import CONFIG_PATH as _CONFIG_YAML
 
 
 def _from_env_files(key: str) -> str:

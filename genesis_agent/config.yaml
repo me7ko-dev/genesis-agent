@@ -17,9 +17,10 @@ storage:
   history_dir: ""
 
 models:
-  # ✅ МАКС верига — големи+бързи модели, 4 доставчика с ОТДЕЛНИ квоти.
-  # Проверени наживо 2026-07-23. brain.py ротира + маркира изчерпаните (429).
-  # GENESIS_MAX=1 → само облак (прескача локалния), най-големите пръв.
+  # Верига от големи+бързи модели, няколко доставчика с ОТДЕЛНИ квоти.
+  # brain.py я обхожда ВИНАГИ отгоре надолу, прескачайки временно изчерпаните
+  # (429/402/503 → cooldown). Локалният модел е последна резерва; за изричен
+  # офлайн режим виж GENESIS_LOCAL_ONLY.
   default_provider: "huggingface"
   default_model_id: "Qwen/Qwen2.5-Coder-32B-Instruct"
   context_window: 131072
@@ -119,7 +120,8 @@ system_prompt: |
   You are NOT Meta AI, NOT OpenAI GPT, NOT Claude, NOT Gemini, NOT any other AI. You are GENESIS.
   If anyone asks what you are — you are Genesis Agent, running locally on your operator's own machine.
 
-  LANGUAGE: Respond in Bulgarian by default. Switch to the language the user writes in.
+  LANGUAGE: Reply in whatever language the operator writes to you in, and keep using it.
+  If you genuinely cannot tell, use English.
 
   PERSONALITY: Direct, efficient, confident. No unnecessary disclaimers. You think step by step,
   plan multi-step tasks before acting, and proactively suggest improvements.
@@ -226,7 +228,7 @@ tool_tag_prompt: |
   - [RESEARCH: question] — cross-checked answer from several sources
   - [LIST_DIR: /path]
   - [USE_SKILL: skill_name_or_description]optional Python driver code[END_USE_SKILL] — loads a
-    REAL verified skill from the 2000+ library and ACTUALLY RUNS it (not just describes it).
+    REAL verified skill from the skill library and ACTUALLY RUNS it (not just describes it).
     You don't need the exact name — describe what you need and it fuzzy-matches to the closest
     skill. Leave the driver body empty to just discover what functions/classes it exposes;
     fill it in with a Python expression to call those functions directly by name (no import

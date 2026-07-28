@@ -15,7 +15,7 @@ workspace_memory/conversation_memory. Затова умение, записан�
 пускат тихо (виж _gui_confirm).
 
 Пускане:  genesis-agent        (след инсталация)
-          python3 gui/genesis_gui.py   (от repo-то)
+          python3 genesis_agent/gui/genesis_gui.py   (от repo-то)
 """
 from __future__ import annotations
 
@@ -35,20 +35,22 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, Gdk, Gio, Gtk  # noqa: E402
 
 # ── Намиране на инсталацията на Genesis ──────────────────────────────────────
-# GUI-то е фронтенд към СЪЩЕСТВУВАЩ genesis-0 проект (със скиловете и паметта
-# на потребителя) — не носи свое копие, за да няма две разминаващи се
-# библиотеки. Пътят е конфигурируем, за да работи и извън машината на автора.
+# GUI-то е фронтенд към СЪЩЕСТВУВАЩА инсталация (със скиловете и паметта на
+# потребителя) — не носи свое копие, за да няма две разминаващи се библиотеки.
+#
+# ВАЖНО: override-ът е GENESIS_PROJECT_ROOT, НЕ GENESIS_HOME. Тук се четеше
+# GENESIS_HOME, но paths.py и .env.example го дефинират като директорията с
+# конфигурацията (~/.genesis, където е .env) — един и същ env var с две
+# значения. Тръгналият по документацията получаваше `~/.genesis/genesis_agent`,
+# което не съществува.
 def _find_project_root() -> Path:
-    env = os.environ.get("GENESIS_HOME")
+    env = os.environ.get("GENESIS_PROJECT_ROOT")
     if env and (Path(env) / "genesis_agent").is_dir():
         return Path(env)
-    here = Path(__file__).resolve().parent.parent
-    if (here / "genesis_agent").is_dir():
-        return here
-    for cand in (Path.home() / "projects/genesis-0", Path("/opt/genesis-0")):
-        if (cand / "genesis_agent").is_dir():
-            return cand
-    return here
+    # .../<root>/genesis_agent/gui/this_file.py → <root>, which is the repo in
+    # a checkout and site-packages in an install. Either way `import
+    # genesis_agent` resolves from there.
+    return Path(__file__).resolve().parents[2]
 
 
 PROJECT_ROOT = _find_project_root()

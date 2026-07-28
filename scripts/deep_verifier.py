@@ -41,7 +41,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from genesis_agent import sandbox  # noqa: E402
 
-SKILLS_DIR = ROOT / "skills"
+SKILLS_DIR = ROOT / "genesis_agent" / "skills"
 SKILLS_JSON = SKILLS_DIR / "skills.json"
 # Изолирана директория за пакети (pip install --target). Не пипа системния/
 # потребителския Python — умения се пускат с PYTHONPATH сочещ само тук.

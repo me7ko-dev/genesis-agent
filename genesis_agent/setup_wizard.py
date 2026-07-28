@@ -20,7 +20,24 @@ import sys
 
 import requests
 
+from pathlib import Path
+
 from genesis_agent.paths import ENV_FILE, ensure_genesis_home, read_env_files
+
+
+def _write_private(path: Path, text: str) -> None:
+    """
+    Write a file that only its owner can read — private from the first byte.
+
+    Writing and then calling chmod(600) leaves a window in which the file
+    exists with the default umask (usually 644) while already holding the API
+    keys. The window is short, but on a shared machine "short" is not the same
+    as "closed", and getting it right costs one extra argument.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    path.chmod(0o600)  # an existing file keeps its old mode through O_CREAT
 
 # (env var, display name, where to get it, base_url, a model to smoke-test with)
 #
@@ -230,8 +247,7 @@ def run() -> int:
 
         # A dated copy before every write, so a mistake here is recoverable.
         backup = ENV_FILE.with_name(f".env.backup-{datetime.datetime.now():%Y%m%d-%H%M%S}")
-        backup.write_text(ENV_FILE.read_text(encoding="utf-8"), encoding="utf-8")
-        backup.chmod(0o600)
+        _write_private(backup, ENV_FILE.read_text(encoding="utf-8"))
         print(f"  предишният файл е запазен като {backup.name}")
 
     lines = ["# Genesis Agent — written by `genesis setup`.",
@@ -244,8 +260,7 @@ def run() -> int:
     if preserved:
         lines += ["", "# Kept from the previous file (not managed by setup):"]
         lines += [f"{k}={v}" for k, v in preserved.items()]
-    ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    ENV_FILE.chmod(0o600)
+    _write_private(ENV_FILE, "\n".join(lines) + "\n")
 
     print(f"  ✅ Записано в {ENV_FILE} (права 600 — само ти можеш да го четеш)")
     print(f"  {working} работещи доставчика.\n")

@@ -185,10 +185,13 @@ def load_env(path):
             k, v = k.strip(), _strip_inline_comment(v.strip()).strip('"').strip("'")
             if k in KEYS and v: KEYS[k] = v
 
+# Real environment variables win over the .env files, matching
+# paths.get_secret. The loop below used to run the other way round, so an
+# exported key meant to override a stale one in ~/.genesis/.env did nothing.
 for _p in ENV_FILES:
     load_env(Path(_p))
 for k in KEYS:
-    if not KEYS[k] and os.environ.get(k):
+    if os.environ.get(k):
         KEYS[k] = os.environ[k]
 
 # ── Providers & Models ────────────────────────────────────────────────────────
@@ -476,14 +479,17 @@ def ask_genesis(messages, tools=None):
     Rich известията и escape hatch-а за доставчици, които Brain не познава.
 
     Какво идва наготово от Brain (терминалът НЕ ги имаше досега):
-      • multi-key pool — ротация през PROVIDER_KEY, _2, _3... (терминалът
-        ползваше само ЕДИН ключ на доставчик);
       • exhaustion tracking с cooldown при 429/402/503;
       • data-driven деприоритизация на "болни" доставчици (provider_stats);
-      • ротация на началото на веригата (разпределя товара);
       • RETRY_ROUNDS — втори пълен обход след кратка пауза;
       • локалният мозък като последна резерва;
       • РАБОТЕЩИЯ HuggingFace endpoint (виж по-долу).
+
+    Този списък описваше и multi-key ротация (PROVIDER_KEY, _2, _3...) и
+    ротиращ офсет на началото на веригата. И двете са премахнати: ротирането
+    на няколко акаунта на един доставчик нарушава ToS-а на повечето от тях
+    (виж SECURITY.md — един ключ на доставчик), а офсетът връщаше отговори от
+    различен модел на всяко съобщение и не се качваше обратно нагоре.
     """
     global total_input_tokens, total_output_tokens, current_provider, current_model_id
 
@@ -541,7 +547,7 @@ def _compact_messages(messages: "deque") -> "deque":
     пази последното (fallback), никога не чупи разговора.
 
     Делегира на genesis_agent.brain.Brain.compact_chat_history (изнесено оттук
-    2026-07-27, за да го ползва и gui/genesis_gui.py — виж коментара там за
+    2026-07-27, за да го ползва и genesis_agent/gui/genesis_gui.py — виж коментара там за
     защо GUI-то се нуждаеше от точно същото)."""
     from genesis_agent.brain import Brain
     return Brain.compact_chat_history(
@@ -645,7 +651,7 @@ GENESIS_ART = """[bold cyan]
 ╚██████╔╝███████╗██║ ╚████║███████╗███████║██║███████║
  ╚═════╝ ╚══════╝╚═╝  ╚═══╝╚══════╝╚══════╝╚═╝╚══════╝[/]"""
 
-VERSION_LINE = "[bold magenta]    ⚡ TERMINAL AGENT v5.0  •  by потребителят  •  Autonomous AI System ⚡[/]"
+VERSION_LINE = "[bold magenta]    ⚡ TERMINAL AGENT  •  Autonomous AI System ⚡[/]"
 DIVIDER      = "[dim cyan]    ══════════════════════════════════════════════════════[/]"
 
 
@@ -677,7 +683,8 @@ def print_minimal_banner():
 
     stable.add_row("🤖  Модел",         f"{model_short}")
     stable.add_row("🌐  Доставчик",     prov_name)
-    stable.add_row("🔑  API Ключове",   f"[green]{api_keys_ok}[/] / {api_keys_tot} активни")
+    stable.add_row("🔑  API Ключове",
+                   f"[{'green' if api_keys_ok else 'red'}]{api_keys_ok}[/] / {api_keys_tot} активни")
     stable.add_row("🏠  Ollama",        sysinfo.get("ollama", "N/A"))
     stable.add_row("🖥️   GPU",           sysinfo.get("gpu", "N/A"))
     stable.add_row(f"💾  RAM ({ram_pct}%)", f"[{ram_color}]{sysinfo.get('ram', 'N/A')}[/]")
@@ -693,6 +700,16 @@ def print_minimal_banner():
     console.print()
     console.print("[dim]  Команди: [cyan]/model[/] [cyan]/models[/] [cyan]/clear[/] [cyan]/status[/] [cyan]/discord[/] [cyan]/backup[/] [cyan]/tasks[/] [cyan]/help[/]  │  Изход: [cyan]exit[/][/]")
     console.print(f"[dim]  Fallback: [green]{len(FALLBACK_CHAIN)} модела[/] верига | Активен: [cyan]{current_model_id.split('/')[-1][:30]}[/][/]")
+    # Без нито един ключ нищо облачно няма да проработи, а "0 / 5 активни" в
+    # таблицата отгоре е твърде тихо за фатално условие — първото съобщение
+    # просто се проваляше с грешка от края на веригата.
+    if not api_keys_ok:
+        local_ok = "✅" in str(sysinfo.get("ollama", ""))
+        console.print("[bold yellow]  ⚠ Няма конфигуриран нито един API ключ.[/] "
+                      "Пусни [cyan]genesis setup[/] (или попълни ~/.genesis/.env).")
+        if local_ok:
+            console.print("[dim]    Локалният Ollama е наличен и ще поеме всичко — "
+                          "той е резерва, не заместител на облака.[/]")
     console.print()
 
 # ── Status Bar Display ────────────────────────────────────────────────────────
@@ -870,19 +887,26 @@ def main():
                 continue
 
             if user_input.lower() == "/autoupgrade":
-                # Реалният еволюционен маратон (genesis_think_loop.py не съществуваше).
-                marathon = f"{WORKSPACE}/real_evolution_marathon.py"
-                console.print("[cyan]🚀 Стартирам еволюционен маратон...[/]")
-                if shutil.which("ptyxis"):
-                    subprocess.Popen(["ptyxis", "--new-window", "--", "bash", "-c",
-                                      f"cd {WORKSPACE} && python3 {marathon}; exec bash"])
-                    console.print("[green]✓ В нов терминал.[/]")
-                else:
-                    # Fallback: фонов процес с лог, ако няма терминал-емулатор.
-                    logf = f"{WORKSPACE}/logs/marathon.log"
-                    subprocess.Popen(["bash", "-c", f"cd {WORKSPACE} && python3 {marathon} > {logf} 2>&1 &"])
-                    console.print(f"[green]✓ На заден план. Лог: {logf}[/]")
-                discord_send("🚀 **Genesis стартира еволюционен маратон!**")
+                # Пуска ковачницата на заден план: сама тегли цели от
+                # goal_engine и произвежда verified умения.
+                #
+                # Дотук сочеше `real_evolution_marathon.py` — файл, който
+                # живее само в личния предшественик на проекта и никога не е
+                # бил доставян тук. Командата беше тих no-op за всеки: с
+                # ptyxis (терминал, който повечето хора нямат) прозорецът
+                # мигваше и изчезваше, а без него логът отиваше в `logs/`,
+                # която дори не се създава.
+                from genesis_agent.config import LOGS_DIR
+                LOGS_DIR.mkdir(parents=True, exist_ok=True)
+                logf = LOGS_DIR / "forge.log"
+                console.print("[cyan]🔨 Стартирам ковачницата на заден план…[/]")
+                with open(logf, "ab") as lf:
+                    subprocess.Popen(
+                        [sys.executable, "-m", "genesis_agent.parallel_forge"],
+                        stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
+                        start_new_session=True)
+                console.print(f"[green]✓ Работи. Лог: {logf}[/]")
+                discord_send("🔨 **Genesis стартира ковачницата.**")
                 continue
 
             if user_input.lower() == "/backup":
@@ -929,13 +953,13 @@ def main():
                 help_table.add_column("Команда", style="bold cyan", width=20)
                 help_table.add_column("Описание", style="white")
                 help_table.add_row("/model или /agent", "Смяна на AI модел/доставчик")
-                help_table.add_row("/models", "Покажи целия fallback chain (50 модела)")
+                help_table.add_row("/models", f"Покажи целия fallback chain ({len(FALLBACK_CHAIN)} модела)")
                 help_table.add_row("/clear", "Нов разговор (изчиства историята)")
                 help_table.add_row("/status", "Системна информация и статистика")
                 help_table.add_row("/history", "Преглед и зареждане на стари сесии")
                 help_table.add_row("/discord <текст>", "Изпрати съобщение в Discord")
-                help_table.add_row("/autoupgrade", "Стартира авто-надграждане")
-                help_table.add_row("/backup", "Архивиране на Genesis към HDD")
+                help_table.add_row("/autoupgrade", "Пуска ковачницата (нови умения) на заден план")
+                help_table.add_row("/backup", "Архивиране към GENESIS_BACKUP_DIR")
                 help_table.add_row("/tasks", "Състояние на работата — отворени нишки, решения")
                 help_table.add_row("/done <id>", "Затвори нишка като готова (/drop <id> = изхвърли)")
                 help_table.add_row("exit / quit", "Изход")

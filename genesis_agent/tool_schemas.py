@@ -132,7 +132,7 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "USE_SKILL",
-            "description": "Load a REAL verified skill from the 2000+ skill library and "
+            "description": "Load a REAL verified skill from the skill library and "
                            "actually run it (not just describe it). You don't need the exact "
                            "name — describe what you need and it fuzzy-matches. Leave "
                            "driver_code empty to just discover what functions/classes it "

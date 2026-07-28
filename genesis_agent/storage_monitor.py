@@ -1,4 +1,4 @@
-"""Storage monitor — warn when the genesis-0 tree exceeds configured threshold.
+"""Storage monitor — warn when the project tree exceeds configured threshold.
 
 Operates under Project Genesis Agent DNA: growth must not bypass GENE-ETHICS / GENE-AUTHORITY /
 GENE-SECURITY policies enforced elsewhere (Brain, Executor, Skills).

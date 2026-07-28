@@ -60,15 +60,18 @@ packages = ["genesis_agent"]
 py-modules = ["genesis_skills", "genesis_terminal_agent"]
 
 [tool.setuptools.package-data]
-# config.yaml, the starter skills and the GUI scripts live beside the package
-# rather than inside it, so each needs naming explicitly. Anything missing here
-# is missing from an installed copy while still working from a git checkout —
-# which is exactly the kind of gap that only shows up for other people.
+# These live inside the package. When they sat beside it (named here as
+# "../config.yaml" and friends) an installed copy unpacked `config.yaml`,
+# `skills/` and `gui/` into site-packages itself — top-level names generic
+# enough that an unrelated project's `import gui` could have found ours.
+# Anything missing from this list is missing from an installed copy while
+# still working from a git checkout: exactly the gap that only shows up for
+# other people.
 genesis_agent = [
-    "../config.yaml",
-    "../skills/*.md",
-    "../skills/skills.json",
-    "../gui/*.py",
+    "config.yaml",
+    "skills/*.md",
+    "skills/skills.json",
+    "gui/*.py",
 ]
 
 [tool.pytest.ini_options]

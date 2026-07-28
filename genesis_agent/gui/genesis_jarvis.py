@@ -15,9 +15,9 @@ genesis_agent.agent_core.Core + run_tool_loop — говориш, Genesis реа
        не е насила български, за да върви и с английски/смесени изречения,
        както навсякъде другаде в Genesis.
   TTS: edge-tts (Microsoft Edge "Read Aloud" — безплатно, без API ключ,
-       реален невронен глас bg-BG-BorislavNeural). потребителят чу първо espeak-ng
-       (spd-say) варианта и поиска нещо много по-добро — edge-tts звучи
-       несравнимо по-естествено. Компромисът е ~5с мрежова латентност на
+       реален невронен глас, конфигурируем през GENESIS_TTS_VOICE). Избран
+       след espeak-ng (spd-say), който звучи осезаемо роботизирано —
+       разликата се чува веднага. Компромисът е ~5с мрежова латентност на
        реплика (TLS connect overhead към Microsoft, не расте много с дължина
        на текста) — приемливо във фонова нишка, не блокира разговора.
        spd-say (espeak-ng) остава като ОФЛАЙН резерва, ако мрежата липсва
@@ -27,7 +27,7 @@ genesis_agent.agent_core.Core + run_tool_loop — говориш, Genesis реа
        системната библиотека libportaudio2, която не може да се инсталира
        без sudo парола в тази среда; arecord/aplay вече бяха налични.
 
-Безопасност: sandbox CONFIRM操ации минават през ВИЗУАЛЕН диалог, не гласово
+Безопасност: sandbox CONFIRM операции минават през ВИЗУАЛЕН диалог, не гласово
 да/не разпознаване — грешно разпознато "не" като "да" на опасна операция би
 било реален риск, затова потвърждението остава детерминистично (клик), както
 при GTK чата.
@@ -35,6 +35,7 @@ genesis_agent.agent_core.Core + run_tool_loop — говориш, Genesis реа
 from __future__ import annotations
 
 import atexit
+import os
 import re
 import signal
 import subprocess
@@ -54,18 +55,12 @@ from gi.repository import Adw, Gdk, GLib, Gio, Gtk  # noqa: E402
 
 
 def _find_project_root() -> Path:
-    import os
-
-    env = os.environ.get("GENESIS_HOME")
+    """Виж genesis_gui._find_project_root — override-ът е GENESIS_PROJECT_ROOT,
+    не GENESIS_HOME (последното е директорията с конфигурацията)."""
+    env = os.environ.get("GENESIS_PROJECT_ROOT")
     if env and (Path(env) / "genesis_agent").is_dir():
         return Path(env)
-    here = Path(__file__).resolve().parent.parent
-    if (here / "genesis_agent").is_dir():
-        return here
-    for cand in (Path.home() / "projects/genesis-0", Path("/opt/genesis-0")):
-        if (cand / "genesis_agent").is_dir():
-            return cand
-    return here
+    return Path(__file__).resolve().parents[2]
 
 
 PROJECT_ROOT = _find_project_root()
@@ -79,6 +74,11 @@ from genesis_agent.agent_core import Core, run_tool_loop  # noqa: E402
 from genesis_gui import CSS, MessageWidget, ToolWidget  # noqa: E402 — преизползваме widget-ите
 
 APP_ID = "org.genesis.Jarvis"
+# Гласът е конфигурируем: закован български глас караше Jarvis да говори
+# български на всеки, независимо от езика на отговора. `edge-tts
+# --list-voices` изброява наличните.
+TTS_VOICE = os.environ.get("GENESIS_TTS_VOICE", "bg-BG-BorislavNeural")
+TTS_FALLBACK_LANG = os.environ.get("GENESIS_TTS_LANG", "bg")
 WHISPER_MODEL_SIZE = "small"
 MIN_RECORDING_SEC = 0.5     # по-кратко от това почти сигурно е случаен клик, не реч
 MAX_RECORDING_SEC = 120     # предпазен таван — да не тече запис вечно ако забравиш
@@ -104,10 +104,10 @@ _WS_RE = re.compile(r"[ \t]{2,}")
 
 
 def _speakable_text(text: str) -> str:
-    """Превръща отговора в естествен изговорим текст (потребителят, 2026-07-27:
-    "не искам да чете всеки знак" — TTS четеше markdown синтаксиса буквално:
-    "звезда звезда Готово звезда звезда", хаштагове, обратни кавички, emoji
-    описания). Маха ```код``` блокове изцяло (безсмислено да се изговаря
+    """Превръща отговора в естествен изговорим текст. Без това TTS-ът четеше
+    markdown синтаксиса буквално: "звезда звезда Готово звезда звезда",
+    хаштагове, обратни кавички, описания на emoji.
+    Маха ```код``` блокове изцяло (безсмислено да се изговаря
     суров Python), после чисти markdown маркерите от останалата проза, без
     да маха самия текст вътре в тях."""
     parts = MessageWidget._split_code(text)
@@ -441,8 +441,11 @@ class Window(Adw.ApplicationWindow):
         import os as _os
         _os.close(fd)
         try:
+            # sys.executable, НЕ "python3": в pipx/venv инсталация `python3` е
+            # системният интерпретатор, който няма edge_tts — TTS-ът се
+            # проваляше винаги и тихо падаше на роботизирания spd-say.
             r = subprocess.run(
-                ["python3", "-m", "edge_tts", "--voice", "bg-BG-BorislavNeural",
+                [sys.executable, "-m", "edge_tts", "--voice", TTS_VOICE,
                  "--text", text, "--write-media", path],
                 capture_output=True, timeout=20, text=True,
             )
@@ -467,7 +470,8 @@ class Window(Adw.ApplicationWindow):
 
     def _speak_fallback(self, text: str) -> None:
         try:
-            subprocess.run(["spd-say", "-l", "bg", "-w", text], capture_output=True, timeout=60)
+            subprocess.run(["spd-say", "-l", TTS_FALLBACK_LANG, "-w", text],
+                           capture_output=True, timeout=60)
         except Exception as e:
             print(f"[jarvis] и офлайн резервата гръмна: {e}", file=sys.stderr)
 

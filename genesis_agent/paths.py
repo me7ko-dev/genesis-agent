@@ -21,15 +21,24 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-# The installed package: .../genesis-agent/genesis_agent/ → .../genesis-agent/
-PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
+# The package itself: .../genesis_agent/
+PACKAGE_DIR: Path = Path(__file__).resolve().parent
+
+# The directory containing the package. For a git checkout this is the repo
+# root; for an installed copy it is site-packages.
+PROJECT_ROOT: Path = PACKAGE_DIR.parent
 
 # User configuration lives here. Override with GENESIS_HOME if you keep
 # config elsewhere (e.g. an encrypted volume).
 GENESIS_HOME: Path = Path(os.environ.get("GENESIS_HOME", Path.home() / ".genesis"))
 
 ENV_FILE: Path = GENESIS_HOME / ".env"
-CONFIG_PATH: Path = PROJECT_ROOT / "config.yaml"
+
+# config.yaml, the starter skills and the GUI scripts live INSIDE the package.
+# They used to sit beside it, which meant an installed copy dropped `config.yaml`,
+# `skills/` and `gui/` straight into site-packages — `import gui` in an unrelated
+# project would then have found ours.
+CONFIG_PATH: Path = PACKAGE_DIR / "config.yaml"
 
 # Searched in order. The project-local .env wins over the home one, so a
 # checkout can be pinned to different keys without touching global config.

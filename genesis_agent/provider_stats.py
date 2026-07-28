@@ -1,11 +1,9 @@
 """
 genesis_agent.provider_stats — data-driven ред на веригата (design note, 2026-07-25).
 
-Пази rolling latency+success статистика ПО ДОСТАВЧИК (не по-модел — доставчик
-е достатъчна детайлност за "този цял акаунт/región в момента лош ли е").
-НЕ заменя съществуващата ротация (_ROTATION offset в brain.py) — тя вече
-разпределя товара честно между ключовете с течение на времето. Тук само
-деприоритизираме, В РАМКИТЕ на текущия рунд, доставчик с ПОТВЪРДЕН (≥5
+Пази rolling latency+success статистика ПО ДОСТАВЧИК (не по модел — доставчик
+е достатъчна детайлност за "този цял акаунт в момента лош ли е"). Само
+деприоритизираме, В РАМКИТЕ на текущото извикване, доставчик с ПОТВЪРДЕН (≥5
 извадки) лош success rate (<50%) — минава последен вместо пръв, вместо
 слепешката да му хабим първия опит всеки път, докато е "болен".
 """
@@ -68,17 +66,27 @@ def deprioritize_flaky(chain: list[dict]) -> list[dict]:
     """
     Стабилно пренарежда веригата: записи от доставчик с ПОТВЪРДЕНО лош rolling
     success rate минават в края на СПИСЪКА (не се трият, не се маркират
-    изчерпани — просто не пречат на здравите доставчици да се пробват първи
-    тоя рунд). Относителният ред вътре във всяка група (здрави/болни) се
-    пази — съществуващата _ROTATION offset ротация в brain.py продължава да
-    работи непроменена върху резултата.
-    """
-    def is_flaky(c: dict) -> bool:
-        rate = success_rate(c["provider"])
-        return rate is not None and rate < _BAD_SUCCESS_RATE
+    изчерпани — просто не пречат на здравите доставчици да се пробват първи).
+    Относителният ред вътре във всяка група (здрави/болни) се пази.
 
-    healthy = [c for c in chain if not is_flaky(c)]
-    flaky = [c for c in chain if is_flaky(c)]
+    Викащият (brain.py) НЕ бива да записва резултата обратно в self.chain —
+    това е преценка за момента, не нова конфигурация.
+
+    Чете статистиката ВЕДНЪЖ: през success_rate() всяка проверка беше отделно
+    четене+парсване на JSON файла, т.е. 2×N дискови четения преди всяко
+    обръщение към модел.
+    """
+    data = _load()
+
+    def _is_flaky(provider: str) -> bool:
+        samples = data.get(provider, {}).get("samples", [])
+        if len(samples) < _MIN_SAMPLES_TO_JUDGE:
+            return False  # недостатъчно данни — не съдим
+        return sum(1 for s in samples if s["ok"]) / len(samples) < _BAD_SUCCESS_RATE
+
+    sick = {c["provider"] for c in chain if _is_flaky(c["provider"])}
+    healthy = [c for c in chain if c["provider"] not in sick]
+    flaky = [c for c in chain if c["provider"] in sick]
     return healthy + flaky
 
 

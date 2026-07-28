@@ -216,7 +216,7 @@ if __name__ == "__main__":
     memory_store("user_name", "потребителят")
     memory_store("preferred_language", "bulgarian")
     memory_store("coding_style", {"indentation": 4, "quotes": "double"})
-    memory_store("last_project", "genesis-0")
+    memory_store("last_project", "genesis-agent")
 
     print(f"  user_name: {memory_recall('user_name')}")
     print(f"  preferred_language: {memory_recall('preferred_language')}")

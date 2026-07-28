@@ -95,11 +95,11 @@ check("ново умение е видимо от trigger_engine", test_slug in 
 # ── Почистване на тестовите артефакти ─────────────────────────────
 import json
 conversation_memory.clear_session() if n0 == 0 else None
-skills_json = ROOT / "skills" / "skills.json"
+skills_json = ROOT / "genesis_agent" / "skills" / "skills.json"
 idx = json.loads(skills_json.read_text(encoding="utf-8"))
 idx["skills"] = [s for s in idx["skills"] if s["name"] != test_slug]
 skills_json.write_text(json.dumps(idx, indent=2, ensure_ascii=False), encoding="utf-8")
-(ROOT / "skills" / f"{test_slug}.md").unlink(missing_ok=True)
+(ROOT / "genesis_agent" / "skills" / f"{test_slug}.md").unlink(missing_ok=True)
 
 print("\n" + ("═" * 50))
 print("ВСИЧКО МИНАВА ✅" if _ok else "ИМА ПРОВАЛ ❌")
