@@ -25,6 +25,7 @@ import threading
 import time
 import traceback
 from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, GLib, Gdk, Gio, Gtk  # noqa: E402
+from gi.repository import Adw, GLib, Gdk, Gio, GObject, Gtk  # noqa: E402
 
 # ── Намиране на инсталацията на Genesis ──────────────────────────────────────
 # GUI-то е фронтенд към СЪЩЕСТВУВАЩА инсталация (със скиловете и паметта на
@@ -58,6 +59,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from genesis_agent.agent_core import Core, run_tool_loop  # noqa: E402
+import gui_sessions  # noqa: E402 — вижте модула: собствена persist-схема за Recents
 
 APP_ID = "org.genesis.Agent"
 TOOL_ROUND_CAP = 8
@@ -85,6 +87,9 @@ CSS = """
 .speaker       { font-size: 11px; font-weight: bold; opacity: .65; }
 .status-dim    { font-size: 11px; opacity: .6; }
 .file-row      { font-family: monospace; font-size: 12px; }
+.sidebar           { background: alpha(@card_bg_color, .5); }
+.sidebar-row-title { font-size: 13px; font-weight: 600; }
+.sidebar-row-time  { font-size: 11px; opacity: .55; }
 """
 
 
@@ -383,6 +388,106 @@ class WorkspacePanel(Gtk.Box):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Странична лента — Recents (Claude Code Desktop reference, design note 2026-07-29)
+# ─────────────────────────────────────────────────────────────────────────────
+def _relative_time(iso: str) -> str:
+    try:
+        ts = datetime.fromisoformat(iso)
+    except ValueError:
+        return ""
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    secs = (datetime.now(timezone.utc) - ts).total_seconds()
+    if secs < 60:
+        return "току-що"
+    if secs < 3600:
+        return f"преди {int(secs // 60)} мин"
+    if secs < 86400:
+        return f"преди {int(secs // 3600)} ч"
+    days = int(secs // 86400)
+    if days == 1:
+        return "вчера"
+    if days < 7:
+        return f"преди {days} дни"
+    return ts.strftime("%d.%m.%Y")
+
+
+class Sidebar(Gtk.Box):
+    """Списък от предишни разговори (gui_sessions.py) — нов бутон, търсене по
+    заглавие, клик отваря стария разговор. Преди тази промяна приложението
+    беше единичен прозорец без начин да се преотвори стар разговор; тук няма
+    собствено състояние на текущата сесия — само callback-и, ЕДИНСТВЕНИЯТ
+    "истина" източник за текущия разговор си остава Window.messages."""
+
+    def __init__(self, on_new, on_select) -> None:
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.on_select = on_select
+        self.add_css_class("sidebar")
+        self.set_size_request(240, -1)
+
+        new_btn = Gtk.Button(label="＋ Нов разговор")
+        new_btn.add_css_class("suggested-action")
+        new_btn.set_margin_top(8)
+        new_btn.set_margin_start(8)
+        new_btn.set_margin_end(8)
+        new_btn.connect("clicked", lambda *_: on_new())
+        self.append(new_btn)
+
+        self.listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        self.listbox.add_css_class("navigation-sidebar")
+        self.listbox.set_filter_func(self._filter_row)
+        self.listbox.connect("row-activated", self._on_row_activated)
+
+        self.search = Gtk.SearchEntry(placeholder_text="Търсене…")
+        self.search.set_margin_start(8)
+        self.search.set_margin_end(8)
+        self.search.connect("search-changed", lambda *_: self.listbox.invalidate_filter())
+        self.append(self.search)
+
+        sw = Gtk.ScrolledWindow(vexpand=True)
+        sw.set_child(self.listbox)
+        self.append(sw)
+
+        self.refresh()
+
+    def refresh(self) -> None:
+        child = self.listbox.get_first_child()
+        while child:
+            nxt = child.get_next_sibling()
+            self.listbox.remove(child)
+            child = nxt
+        try:
+            sessions = gui_sessions.list_recent()
+        except Exception:
+            sessions = []
+        for s in sessions:
+            row = Gtk.ListBoxRow()
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+            box.set_margin_top(6)
+            box.set_margin_bottom(6)
+            box.set_margin_start(10)
+            box.set_margin_end(10)
+            box.append(_label(s["title"], selectable=False, css="sidebar-row-title"))
+            box.append(_label(_relative_time(s["updated_at"]), selectable=False,
+                               css="sidebar-row-time"))
+            row.set_child(box)
+            setattr(row, "genesis_session_id", s["id"])
+            setattr(row, "genesis_title", s["title"].lower())
+            self.listbox.append(row)
+
+    def _filter_row(self, row: Gtk.ListBoxRow) -> bool:
+        query = self.search.get_text().strip().lower()
+        if not query:
+            return True
+        return query in getattr(row, "genesis_title", "")
+
+    def _on_row_activated(self, _lb: Gtk.ListBox, row: Gtk.ListBoxRow) -> None:
+        sid = getattr(row, "genesis_session_id", None)
+        if sid:
+            self.on_select(sid)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Прозорецът
 # ─────────────────────────────────────────────────────────────────────────────
 class Window(Adw.ApplicationWindow):
@@ -395,6 +500,7 @@ class Window(Adw.ApplicationWindow):
         self.messages: Any = deque(
             [{"role": "system", "content": core.system_prompt}], maxlen=30
         )
+        self.session_id = gui_sessions.new_id()
 
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
@@ -403,8 +509,13 @@ class Window(Adw.ApplicationWindow):
         self.title_widget = title
         header.set_title_widget(title)
 
+        sidebar_btn = Gtk.ToggleButton(icon_name="sidebar-show-symbolic", active=True)
+        sidebar_btn.set_tooltip_text("Разговори")
+        header.pack_start(sidebar_btn)
+
+        # Studio-ерата model picker вече живее в долната лента (виж bottom по-долу),
+        # не в header-а — Claude Code Desktop reference го показва до входа.
         self.model_picker = ModelPicker(core, self.on_model_picked)
-        header.pack_end(self.model_picker)
 
         workspace_btn = Gtk.ToggleButton(icon_name="folder-symbolic")
         workspace_btn.set_tooltip_text("Работна директория")
@@ -460,6 +571,7 @@ class Window(Adw.ApplicationWindow):
         bottom.set_margin_bottom(10)
         bottom.append(entry_sw)
         entry_sw.set_hexpand(True)
+        bottom.append(self.model_picker)
         bottom.append(self.spinner)
         bottom.append(self.send_btn)
 
@@ -479,7 +591,16 @@ class Window(Adw.ApplicationWindow):
             # showing/hiding end_child е по-надежден в GTK4 от position-хакове.
             self.workspace_panel.set_visible(False)
         toolbar.set_content(self.paned)
-        self.set_content(toolbar)
+
+        self.sidebar = Sidebar(self.on_clear, self.load_session)
+        self.split_view = Adw.OverlaySplitView()
+        self.split_view.set_sidebar(self.sidebar)
+        self.split_view.set_content(toolbar)
+        sidebar_btn.bind_property(
+            "active", self.split_view, "show-sidebar",
+            GObject.BindingFlags.BIDIRECTIONAL | GObject.BindingFlags.SYNC_CREATE,
+        )
+        self.set_content(self.split_view)
 
         # Enter праща, Shift+Enter нов ред.
         keys = Gtk.EventControllerKey()
@@ -561,15 +682,65 @@ class Window(Adw.ApplicationWindow):
 
     # ── Действия от менюто ───────────────────────────────────────────────────
     def on_clear(self, *_a) -> None:
+        # Споделено между менюто "Нов разговор" и sidebar-ния "＋" бутон —
+        # старият разговор се пази (save-then-reset), не се губи мълчаливо.
+        self._save_current_session()
+        self.session_id = gui_sessions.new_id()
         self.messages = deque(
             [{"role": "system", "content": self.core.system_prompt}], maxlen=30
         )
+        self._rebuild_chat_widgets([])
+        self._refresh_sidebar()
+
+    def load_session(self, session_id: str) -> None:
+        if self.busy:
+            return
+        self._save_current_session()
+        msgs = gui_sessions.load(session_id)
+        if msgs is None:
+            return
+        self.session_id = session_id
+        self.messages = deque(
+            [{"role": "system", "content": self.core.system_prompt}] + msgs, maxlen=30
+        )
+        self._rebuild_chat_widgets(msgs)
+
+    def _rebuild_chat_widgets(self, msgs: list[dict]) -> None:
+        """Пресъздава видимите балончета от съхранена история. Ролите tool/
+        system умишлено не се пресъздават визуално (ToolWidget-ите изискват
+        оригиналния diff, който не пазим отделно) — пълният контекст пак е в
+        self.messages за модела, само видимата стара тул-стъпка липсва."""
         child = self.chat.get_first_child()
         while child:
             nxt = child.get_next_sibling()
             self.chat.remove(child)
             child = nxt
-        self.add_widget(MessageWidget("Genesis", "Нов разговор.", kind="assistant"))
+        shown = False
+        for m in msgs:
+            role = m.get("role")
+            content = m.get("content")
+            if not isinstance(content, str) or not content:
+                continue
+            if role == "user":
+                self.add_widget(MessageWidget("Ти", content, kind="user"))
+                shown = True
+            elif role == "assistant":
+                self.add_widget(MessageWidget("Genesis", content, kind="assistant"))
+                shown = True
+        if not shown:
+            self.add_widget(MessageWidget("Genesis", "Нов разговор.", kind="assistant"))
+
+    def _save_current_session(self) -> None:
+        try:
+            gui_sessions.save(self.session_id, list(self.messages))
+        except Exception:
+            pass
+
+    def _refresh_sidebar(self) -> None:
+        try:
+            self.sidebar.refresh()
+        except Exception:
+            pass
 
     def on_tasks(self, *_a) -> None:
         try:
@@ -606,6 +777,7 @@ class Window(Adw.ApplicationWindow):
                     self.core.wm.auto_capture(convo)
         except Exception:
             pass
+        self._save_current_session()
         return False
 
     # ── Изпращане ────────────────────────────────────────────────────────────
@@ -710,6 +882,8 @@ class Window(Adw.ApplicationWindow):
         self.spinner.stop()
         self.send_btn.set_sensitive(True)
         self.set_status(self._idle_subtitle())
+        self._save_current_session()
+        self._refresh_sidebar()
         return False
 
 
