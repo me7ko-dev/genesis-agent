@@ -215,6 +215,25 @@ def _run_autonomous_loop_impl(
         if reply.code:
             last_generated_code = reply.code  # Запазва последния генериран код
 
+            # Ruff pre-check ПРЕДИ sandbox-а (design note, 2026-07-29): явен
+            # синтактичен/lint проблем не се нуждае от истинско subprocess
+            # изпълнение, за да се хване — same fail-open convention навсякъде
+            # другаде (ако ruff липсва, validate_code_with_ruff връща (True,"")
+            # и нищо не се променя). Auto-fix-натата версия минава напред към
+            # sandbox-а вместо оригинала; unfixable проблем спестява целия
+            # sandbox рунд — обратно към модела веднага, без subprocess такса.
+            from genesis_agent.code_validate import validate_code_with_ruff
+            lint_ok, lint_detail = validate_code_with_ruff(reply.code)
+            if lint_ok and lint_detail:
+                reply.code = lint_detail
+                last_generated_code = reply.code
+            elif not lint_ok:
+                messages.append({"role": "assistant", "content": reply.raw_text})
+                messages.append({"role": "user", "content":
+                    f"{lint_detail}\n\nПоправи и върни ЦЕЛИЯ коригиран скрипт "
+                    "в един ```python``` fence, преди да го пробваме."})
+                continue
+
         if not reply.code:
             raw = str(reply.raw_text)
             if raw.startswith("Error:"):

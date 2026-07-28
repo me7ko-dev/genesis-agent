@@ -82,6 +82,7 @@ Optional extras:
 pip install "genesis-agent[browser]" && playwright install chromium   # web automation
 pip install "genesis-agent[discord]"                                  # phone access
 pip install "genesis-agent[voice]"                                    # speak to it
+pip install "genesis-agent[quality]"                                  # lint generated code with ruff
 ```
 
 For a local fallback that costs nothing, install [Ollama](https://ollama.com)

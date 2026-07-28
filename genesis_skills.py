@@ -117,6 +117,19 @@ def _tool_write_file(arg: str, content: str) -> str:
         allowed, reason = sandbox._decide(f"WRITE_FILE {path}", verdict, sandbox.get_policy())
         if not allowed:
             return f"[WRITE_FILE] {reason}"
+    # Ruff pre-check преди диска, само за .py (design note, 2026-07-29): не
+    # блокираме записа при unfixable проблеми (моделът изрично поиска точно
+    # това съдържание) — но ако ruff го оправи автоматично, пишем ФИКСНАТАТА
+    # версия, и ВИНАГИ показваме находките в резултата, за да се самокоригира
+    # моделът в следващия рунд вместо да чака sandbox изпълнение да ги хване.
+    lint_note = ""
+    if path.suffix == ".py":
+        from genesis_agent.code_validate import validate_code_with_ruff
+        ok, detail = validate_code_with_ruff(content)
+        if ok and detail:
+            content = detail
+        elif not ok:
+            lint_note = f"\n{detail}"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
@@ -124,7 +137,7 @@ def _tool_write_file(arg: str, content: str) -> str:
         return f"[WRITE_FILE] Грешка: {e}"
     _log_episode(f"WRITE_FILE {path}", f"записани {len(content)} символа",
                  ["tool", "write_file"])
-    return f"[WRITE_FILE: {path}] ✓ записани {len(content)} символа"
+    return f"[WRITE_FILE: {path}] ✓ записани {len(content)} символа{lint_note}"
 
 
 def _tool_run_cmd(arg: str) -> str:
