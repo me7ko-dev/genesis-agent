@@ -90,6 +90,12 @@ CSS = """
 .sidebar           { background: alpha(@card_bg_color, .5); }
 .sidebar-row-title { font-size: 13px; font-weight: 600; }
 .sidebar-row-time  { font-size: 11px; opacity: .55; }
+.input-frame       { background: alpha(@card_fg_color, .05);
+                      border: 1px solid alpha(@borders, .9);
+                      border-radius: 12px; padding: 2px 8px; }
+.input-frame:focus-within { border-color: @accent_bg_color; }
+.mode-toggle       { font-size: 12px; }
+.mode-toggle-auto   { color: @warning_color; }
 """
 
 
@@ -101,9 +107,11 @@ CSS = """
 # ─────────────────────────────────────────────────────────────────────────────
 # Съобщения в чата
 # ─────────────────────────────────────────────────────────────────────────────
-def _label(text: str, *, selectable: bool = True, css: str | None = None) -> Gtk.Label:
-    lb = Gtk.Label(label=text, xalign=0.0, wrap=True, selectable=selectable)
-    lb.set_wrap_mode(2)  # WORD_CHAR — дългите пътища/URL не разпъват прозореца
+def _label(text: str, *, selectable: bool = True, css: str | None = None,
+           wrap: bool = True) -> Gtk.Label:
+    lb = Gtk.Label(label=text, xalign=0.0, wrap=wrap, selectable=selectable)
+    if wrap:
+        lb.set_wrap_mode(2)  # WORD_CHAR — дългите пътища/URL не разпъват прозореца
     if css:
         lb.add_css_class(css)
     return lb
@@ -251,18 +259,23 @@ class ModelPicker(Gtk.MenuButton):
         self.refresh()
 
     def refresh(self) -> None:
+        # width_request фиксира popover-а на удобна ширина независимо от
+        # най-краткия ред — wrap=False пази всеки ред на един ред (design
+        # note 2026-07-29: METKO докладва прекалено тясно/нечетимо меню —
+        # wrapping label-ите смаляваха natural width заявката до минимума).
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        box.set_size_request(360, -1)
         box.set_margin_top(8)
         box.set_margin_bottom(8)
         box.set_margin_start(8)
         box.set_margin_end(8)
-        box.append(_label("Модел", selectable=False, css="speaker"))
+        box.append(_label("Модел", selectable=False, css="speaker", wrap=False))
 
         listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         listbox.add_css_class("boxed-list")
 
         auto_row = Gtk.ListBoxRow()
-        auto_row.set_child(_label("🔀 Автоматично (най-добър наличен)"))
+        auto_row.set_child(_label("🔀 Автоматично (най-добър наличен)", wrap=False))
         setattr(auto_row, "genesis_model", None)
         listbox.append(auto_row)
 
@@ -274,7 +287,7 @@ class ModelPicker(Gtk.MenuButton):
             row = Gtk.ListBoxRow()
             size = m.get("size_b") or 0
             suffix = f" · {int(size)}B" if size else ""
-            row.set_child(_label(f"{m['model']}  ·  {m['provider']}{suffix}"))
+            row.set_child(_label(f"{m['model']}  ·  {m['provider']}{suffix}", wrap=False))
             setattr(row, "genesis_model", (m["provider"], m["model"]))
             listbox.append(row)
 
@@ -285,10 +298,51 @@ class ModelPicker(Gtk.MenuButton):
             self.popover.popdown()
 
         listbox.connect("row-activated", on_row_activated)
-        sw = Gtk.ScrolledWindow(max_content_height=360, propagate_natural_height=True)
+        sw = Gtk.ScrolledWindow(max_content_height=360, propagate_natural_height=True,
+                                 propagate_natural_width=True)
         sw.set_child(listbox)
         box.append(sw)
         self.popover.set_child(box)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Auto-approve / Ръчно — реален sandbox режим
+# ─────────────────────────────────────────────────────────────────────────────
+class ModeToggle(Gtk.ToggleButton):
+    """Превключва genesis_agent.sandbox.SandboxPolicy.mode на живо (design
+    note, 2026-07-29 — METKO поиска auto-approve/manual контрол до входа,
+    като референтния Claude Code Desktop "Auto"). Реален механизъм, не
+    декоративен бутон: "Ръчно" = mode="interactive" (истински модален
+    диалог на всяка CONFIRM операция, СЪЩОТО поведение като по подразбиране
+    досега); "Автоматично" = mode="allow" (CONFIRM операции минават без
+    питане — истински риск, затова изключено по подразбиране и оцветено
+    предупредително, когато е активно). BLOCKED операциите не зависят от
+    режима изобщо (винаги отказани), тук не се пипа."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.add_css_class("mode-toggle")
+        self.set_tooltip_text(
+            "Ръчно: всяка рискова операция чака твое потвърждение.\n"
+            "Автоматично: рисковите операции минават БЕЗ питане — внимавай."
+        )
+        self.connect("toggled", lambda *_: self._sync())
+        self._sync()
+
+    def _sync(self) -> None:
+        auto = self.get_active()
+        self.set_label("🔓 Автоматично" if auto else "🔒 Ръчно")
+        if auto:
+            self.add_css_class("mode-toggle-auto")
+        else:
+            self.remove_css_class("mode-toggle-auto")
+        try:
+            from genesis_agent import sandbox
+            sandbox.set_policy(sandbox.SandboxPolicy(
+                mode="allow" if auto else "interactive", confirm_fn=_gui_confirm
+            ))
+        except Exception:
+            pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -554,7 +608,7 @@ class Window(Adw.ApplicationWindow):
         self.entry.set_size_request(-1, 46)
         entry_sw = Gtk.ScrolledWindow(max_content_height=160, propagate_natural_height=True)
         entry_sw.set_child(self.entry)
-        entry_sw.add_css_class("card")
+        entry_sw.add_css_class("input-frame")
 
         self.send_btn = Gtk.Button(icon_name="document-send-symbolic")
         self.send_btn.add_css_class("suggested-action")
@@ -564,11 +618,15 @@ class Window(Adw.ApplicationWindow):
         self.spinner = Gtk.Spinner()
         self.spinner.set_valign(Gtk.Align.END)
 
+        self.mode_toggle = ModeToggle()
+        self.mode_toggle.set_valign(Gtk.Align.END)
+
         bottom = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         bottom.set_margin_start(10)
         bottom.set_margin_end(10)
         bottom.set_margin_top(4)
         bottom.set_margin_bottom(10)
+        bottom.append(self.mode_toggle)
         bottom.append(entry_sw)
         entry_sw.set_hexpand(True)
         bottom.append(self.model_picker)
@@ -958,17 +1016,11 @@ class App(Adw.Application):
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
+        # Sandbox политиката вече се задава от ModeToggle (в Window.__init__,
+        # с mode="interactive" по подразбиране — идентично на предишното тук)
+        # — един източник на истина вместо да се дублира на две места.
         win = self.props.active_window or Window(self, self.core)
         _WINDOW = win
-        if self.core.ok:
-            try:
-                from genesis_agent import sandbox
-
-                sandbox.set_policy(
-                    sandbox.SandboxPolicy(mode="interactive", confirm_fn=_gui_confirm)
-                )
-            except Exception:
-                pass
         win.present()
 
 
