@@ -22,6 +22,7 @@ Playwright, headless Chromium, ИЗОЛИРАН ефемерен профил (�
 """
 from __future__ import annotations
 
+import os
 import re
 from typing import Optional
 
@@ -46,7 +47,10 @@ _SCAN_JS = """
         const text = (el.innerText || el.value || el.getAttribute('aria-label') ||
                       el.getAttribute('placeholder') || '').trim().slice(0, 80);
         const name = el.getAttribute('name') || el.id || '';
-        out.push({i, tag, type, text, name});
+        const r = el.getBoundingClientRect();
+        out.push({i, tag, type, text, name,
+                   x: Math.round(r.x), y: Math.round(r.y),
+                   w: Math.round(r.width), h: Math.round(r.height)});
         i += 1;
         if (i >= %d) break;
     }
@@ -68,7 +72,11 @@ def _ensure_page():
     from playwright.sync_api import sync_playwright
     _pw = sync_playwright().start()
     # Ефемерен, изолиран профил — без cookies/пароли от реалния Chrome на потребителя.
-    _browser = _pw.chromium.launch(headless=True)
+    # Headless по подразбиране (безопасно, работи и без дисплей на сървър) —
+    # GENESIS_BROWSER_VISIBLE=1 показва реален прозорец, за да гледаш агента
+    # докато навигира (design note, 2026-07-29, изрична заявка на METKO).
+    visible = os.environ.get("GENESIS_BROWSER_VISIBLE") == "1"
+    _browser = _pw.chromium.launch(headless=not visible)
     _page = _browser.new_page()
     _page.set_default_timeout(15000)
     return _page
