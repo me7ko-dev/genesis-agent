@@ -274,8 +274,15 @@ class ModelPicker(Gtk.MenuButton):
         listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         listbox.add_css_class("boxed-list")
 
+        # selectable=False е критично тук, не козметика: selectable label в
+        # GTK4 прихваща клика за текст-селекция и НЕ го пуска да стигне до
+        # ListBoxRow-а → row-activated никога не гърми, изборът изглежда
+        # мъртъв (METKO докладва точно това, 2026-07-29). Предшестващ бъг —
+        # _label()'s default (selectable=True) никога не е бил override-нат
+        # тук, само в по-новия Sidebar.
         auto_row = Gtk.ListBoxRow()
-        auto_row.set_child(_label("🔀 Автоматично (най-добър наличен)", wrap=False))
+        auto_row.set_child(_label("🔀 Автоматично (най-добър наличен)",
+                                   selectable=False, wrap=False))
         setattr(auto_row, "genesis_model", None)
         listbox.append(auto_row)
 
@@ -287,7 +294,8 @@ class ModelPicker(Gtk.MenuButton):
             row = Gtk.ListBoxRow()
             size = m.get("size_b") or 0
             suffix = f" · {int(size)}B" if size else ""
-            row.set_child(_label(f"{m['model']}  ·  {m['provider']}{suffix}", wrap=False))
+            row.set_child(_label(f"{m['model']}  ·  {m['provider']}{suffix}",
+                                  selectable=False, wrap=False))
             setattr(row, "genesis_model", (m["provider"], m["model"]))
             listbox.append(row)
 
