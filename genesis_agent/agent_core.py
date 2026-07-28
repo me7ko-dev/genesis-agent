@@ -78,6 +78,7 @@ class Core:
         self.tools = None
         self.provider = ""
         self.model = ""
+        self.pin_model: tuple[str, str] | None = None
         try:
             import yaml
 
@@ -161,7 +162,7 @@ class Core:
         """Едно обръщение към мозъка. Връща (text, tool_calls, provider, model)."""
         from genesis_agent.brain import Brain
 
-        brain = Brain(min_size_b=MIN_SIZE_B)
+        brain = Brain(min_size_b=MIN_SIZE_B, pin_model=self.pin_model)
         reply = brain.complete(list(messages), tools=self.tools)
         cur = brain.current or {}
         return (
@@ -170,6 +171,47 @@ class Core:
             cur.get("provider", ""),
             cur.get("model", ""),
         )
+
+    def available_models(self) -> list[dict]:
+        """Моделите в текущата верига (за model-picker UI). Не мери latency/
+        не вика мрежата — само чете config.yaml през Brain-овия chain builder,
+        филтрирано през същия MIN_SIZE_B праг като реалните обаждания, за да
+        не предлага в picker-а модел, който complete() никога не би избрал."""
+        from genesis_agent.brain import Brain
+
+        brain = Brain(min_size_b=MIN_SIZE_B)
+        return [{"provider": c["provider"], "model": c["model"],
+                 "size_b": c.get("size_b", 0)} for c in brain.chain]
+
+
+def _diff_for_write(skills, args: dict) -> Optional[str]:
+    """Unified diff за предстоящ WRITE_FILE (design note, 2026-07-28) — четем
+    СТАРОТО съдържание ПРЕДИ dispatch_tool_call презапише файла, за да могат
+    фронтендите да покажат какво реално се променя, вместо голия
+    "✓ записани N символа" статус, който `_tool_write_file` връща на модела.
+    Използва `skills._resolve()` (същата path-логика като реалния запис,
+    вкл. workspace-relative разрешаване) — да няма разминаване между това
+    какво показваме и какво реално се пише. Best-effort: никога не хвърля,
+    UI преглед не бива да чупи истинския tool loop."""
+    path = args.get("path")
+    new_content = args.get("content")
+    if not path or new_content is None:
+        return None
+    try:
+        import difflib
+
+        target = skills._resolve(path)
+        old_content = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else ""
+        if old_content == new_content:
+            return None
+        diff = difflib.unified_diff(
+            old_content.splitlines(keepends=True),
+            new_content.splitlines(keepends=True),
+            fromfile=f"a/{path}", tofile=f"b/{path}",
+        )
+        return "".join(diff) or None
+    except Exception:
+        return None
 
 
 def _is_question(result: str) -> bool:
@@ -196,7 +238,7 @@ def run_tool_loop(
     messages: list,
     *,
     on_assistant: Callable[[str, str, str], None],
-    on_tool_result: Callable[[str, str], None],
+    on_tool_result: Callable[[str, str, Optional[str]], None],
     on_status: Optional[Callable[[str], None]] = None,
     round_cap: int = TOOL_ROUND_CAP,
 ) -> list:
@@ -206,8 +248,12 @@ def run_tool_loop(
     предкомпресираната история — същата логика, която терминалът и GTK чатът
     вече ползват поотделно (сега само тук, веднъж).
 
-    on_assistant(text, provider, model) — извиква се на всеки текстов отговор.
-    on_tool_result(name, result)        — извиква се на всеки изпълнен tool.
+    on_assistant(text, provider, model)  — извиква се на всеки текстов отговор.
+    on_tool_result(name, result, extra)  — извиква се на всеки изпълнен tool.
+        `extra` е `None` освен за WRITE_FILE през native tool-calling, където
+        носи unified diff текст (design note, 2026-07-28) — фронтенди, които
+        не го ползват (Jarvis — говори резултата, не показва diff), просто
+        игнорират третия аргумент.
     on_status(text)                     — по избор, кратки статус съобщения.
 
     Хвърля само ако Core.complete() хвърли; извикващият решава как да покаже
@@ -238,8 +284,9 @@ def run_tool_loop(
                     args = json.loads(fn.get("arguments") or "{}")
                 except (json.JSONDecodeError, TypeError):
                     args = {}
+                diff = _diff_for_write(core.skills, args) if name == "WRITE_FILE" else None
                 result = core.skills.dispatch_tool_call(name, args)
-                on_tool_result(name, result)
+                on_tool_result(name, result, diff)
                 messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                                  "name": name, "content": result})
                 if _is_question(result):
@@ -266,7 +313,7 @@ def run_tool_loop(
         if not results:
             break
         for r in results:
-            on_tool_result("инструмент", r)
+            on_tool_result("инструмент", r, None)
         asked = next((r for r in results if _is_question(r)), "")
         if asked:
             on_assistant(_clean_question(asked), prov, model)

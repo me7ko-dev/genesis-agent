@@ -389,7 +389,9 @@ class Window(Adw.ApplicationWindow):
             if text.strip():
                 spoken.append(text)
 
-        def on_tool_result(name: str, result: str) -> None:
+        def on_tool_result(name: str, result: str, _diff: str | None = None) -> None:
+            # Jarvis говори резултата, не показва diff-ове — третият аргумент
+            # (WRITE_FILE diff, виж agent_core.run_tool_loop) не важи тук.
             GLib.idle_add(self.add_widget, ToolWidget(name, result))
 
         def on_status(text: str) -> None:
