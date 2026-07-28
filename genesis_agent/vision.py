@@ -45,7 +45,10 @@ def capture_screen() -> bytes:
 
     with mss.mss() as sct:
         shot = sct.grab(sct.monitors[0])
-        return mss.tools.to_png(shot.rgb, shot.size)
+        png = mss.tools.to_png(shot.rgb, shot.size)
+        if png is None:
+            raise RuntimeError("screen capture failed (mss returned no PNG data)")
+        return png
 
 
 def describe_screen(question: str = "") -> str:

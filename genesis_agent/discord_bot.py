@@ -465,6 +465,7 @@ class GenesisClient(discord.Client):
 
     # ── Събития ─────────────────────────────────────────────────────────────────
     async def on_ready(self) -> None:
+        assert self.user is not None  # discord.py гарантира не-None тук, mypy не го знае
         print(f"[discord_bot] ✅ Свързан като {self.user} (id={self.user.id})")
         print("[discord_bot] Пиши в DM или спомени бота в канал. !help за помощ.")
 
@@ -493,6 +494,7 @@ class GenesisClient(discord.Client):
         # Изчисти споменаването/префикса от текста.
         text = content
         if mentioned:
+            assert self.user is not None  # съобщения идват само след on_ready
             text = text.replace(f"<@{self.user.id}>", "").replace(f"<@!{self.user.id}>", "").strip()
         for p in _PREFIXES:
             if lowered.startswith(p):

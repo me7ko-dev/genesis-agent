@@ -27,6 +27,7 @@ genesis_agent.sandbox — единна защитна бариера за изп
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 import sys
@@ -382,6 +383,51 @@ def assess_command(command: str, cwd: Path | None = None) -> RiskVerdict:
         return verdict
 
 
+# ── Пътища-литерали vs реален достъп (2026-07-28) ─────────────────────────────
+# `/etc/(passwd|shadow|sudoers)` и `.ssh/|.aws/|id_rsa|.env|credentials` в
+# _CONFIRM_PATTERNS regex-ват СУРОВИЯ текст на кода — не различават "кодът
+# ЧЕТЕ /etc/passwd" от "кодът съдържа низа '/etc/passwd', за да го ОТХВЪРЛИ"
+# (напр. traversal-защита: `if p.startswith('/etc/passwd'): raise ...`).
+# Живо хванато: hard-benchmark задача за safe_join(), чиято ЦЯЛА цел е да
+# откаже опасни пътища, беше отказана от sandbox-а заради собствения си
+# защитен код. Regex остава непроменен за истински shell команди (RUN_CMD) —
+# там "cat /etc/passwd" винаги значи достъп. За Python код (assess_code)
+# питаме AST дали низът реално стои като аргумент на четящо повикване.
+_PATH_LITERAL_FALSE_POSITIVE_REASONS = {
+    "достъп до системни идентификационни файлове",
+    "достъп до чувствителни файлове (ключове/тайни)",
+}
+_FILE_READ_CALL_NAMES = {"open", "read_text", "read_bytes", "read"}
+_SENSITIVE_PATH_RE = re.compile(
+    r"(/etc/(passwd|shadow|sudoers)|\.ssh/|\.aws/|id_rsa|\.env\b|credentials\b)"
+)
+
+
+def _python_reads_sensitive_path(code: str) -> bool:
+    """True ако код реално ЧЕТЕ чувствителен път (не само го споменава/сравнява).
+    При SyntaxError или друга несигурност връща True (консервативно — не
+    сваляме предупреждение за код, който не можем уверено да разберем)."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return True
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else (
+            func.id if isinstance(func, ast.Name) else None)
+        if name not in _FILE_READ_CALL_NAMES and not (
+                isinstance(func, ast.Attribute) and func.attr == "open" and
+                isinstance(func.value, ast.Name) and func.value.id == "os"):
+            continue
+        for arg in list(node.args) + [kw.value for kw in node.keywords]:
+            if (isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                    and _SENSITIVE_PATH_RE.search(arg.value)):
+                return True
+    return False
+
+
 def assess_code(code: str) -> RiskVerdict:
     """Оценява риска на Python код (проверява и shell, и Python образците)."""
     verdict = assess_command(code)  # кодът може да съдържа shell чрез os.system и т.н.
@@ -389,6 +435,10 @@ def assess_code(code: str) -> RiskVerdict:
         return verdict
     reasons = list(verdict.reasons)
     level: RiskLevel = verdict.level
+    if any(r in _PATH_LITERAL_FALSE_POSITIVE_REASONS for r in reasons):
+        if not _python_reads_sensitive_path(code):
+            reasons = [r for r in reasons if r not in _PATH_LITERAL_FALSE_POSITIVE_REASONS]
+            level = RiskLevel.CONFIRM if reasons else RiskLevel.SAFE
     for rx, why in _PY_CONFIRM_PATTERNS:
         if rx.search(code):
             reasons.append(why)

@@ -48,7 +48,10 @@ def sign_code(code_text: str) -> str:
             f.read(),
             password=None
         )
-    
+    if not isinstance(private_key, rsa.RSAPrivateKey):
+        raise TypeError(f"{PRIVATE_KEY_PATH} does not hold an RSA key (this "
+                         f"module only generates/expects RSA keys)")
+
     signature = private_key.sign(
         code_text.encode('utf-8'),
         padding.PSS(
@@ -66,7 +69,9 @@ def verify_signature(code_text: str, signature_hex: str) -> bool:
         
     with open(PUBLIC_KEY_PATH, "rb") as f:
         public_key = serialization.load_pem_public_key(f.read())
-    
+    if not isinstance(public_key, rsa.RSAPublicKey):
+        return False
+
     try:
         public_key.verify(
             bytes.fromhex(signature_hex),

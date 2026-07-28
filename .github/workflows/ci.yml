@@ -21,11 +21,19 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e .
+          pip install mypy
 
       - name: Everything imports and compiles
         run: |
           python -m compileall -q genesis_agent/ scripts/ *.py
           python -c "import genesis_agent.brain, genesis_agent.sandbox, genesis_agent.paths"
+
+      # Commit messages have claimed "0 mypy errors" before and drifted (a
+      # dependency version bump silently broke cryptography_utils.py's type
+      # checks without anyone noticing). Gate it in CI so that claim can't go
+      # stale again.
+      - name: Type check (mypy)
+        run: python -m mypy genesis_agent/ genesis_skills.py genesis_terminal_agent.py
 
       # The sandbox is the safety boundary — if it regresses, nothing else
       # matters. These checks need no API key and no network.
