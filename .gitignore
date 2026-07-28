@@ -15,6 +15,7 @@ next_goals.json
 ranked_goals.json
 benchmark_history.json
 live_status.json
+knowledge_graph.json
 
 # ---- Runtime директории ----
 .sandbox_run/

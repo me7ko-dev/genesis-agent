@@ -121,6 +121,22 @@ class Core:
             except Exception:
                 self.wm = None  # type: ignore[assignment]
 
+            # Знаниев граф (GraphRAG-style, design note 2026-07-29) — допълва
+            # briefing-а, не го заменя: threads/decisions отговарят "какво
+            # предстои", графът отговаря "какво с какво е свързано и в какво
+            # състояние е". Same fail-open convention, отделен try — провал
+            # тук не бива да маха работещия briefing по-горе.
+            try:
+                from genesis_agent import knowledge_graph as kgraph
+
+                graph_text = kgraph.graph_briefing()
+                if graph_text:
+                    self.system_prompt += (
+                        "\n\n## ЗНАНИЕВ ГРАФ (entities/relations/states)\n" + graph_text
+                    )
+            except Exception:
+                pass
+
             try:
                 from genesis_agent import conversation_memory as cm
 
@@ -343,6 +359,16 @@ def run_tool_loop(
     if len(messages) < before_len and core.wm:
         try:
             core.wm.auto_capture(pre_compact)
+        except Exception:
+            pass
+        try:
+            from genesis_agent import knowledge_graph as kgraph
+
+            transcript = "\n".join(
+                f"{m.get('role')}: {m.get('content')}" for m in pre_compact
+                if isinstance(m.get("content"), str)
+            )
+            kgraph.compact_and_graph_memory(transcript)
         except Exception:
             pass
         _status(f"история компресирана ({before_len} → {len(messages)})")
