@@ -647,16 +647,6 @@ class Brain:
             capable = [c for c in chain if c.get("supports_tools")]
             rest = [c for c in chain if not c.get("supports_tools")]
             ordered_chain = capable + rest
-            # An explicit pin outranks this reordering. The operator picked that
-            # model in the `/model` menu; quietly answering from a different one
-            # because theirs lacks native tool-calling is not our call to make —
-            # and it was the silent default, since the shipped default model
-            # (Qwen2.5-Coder-32B) is exactly one of the two without it. Pinned
-            # still means first, not only: it falls back normally if it fails,
-            # and it gets the text-tag protocol instead of JSON schemas.
-            if self._pinned is not None:
-                ordered_chain = ([self._pinned]
-                                 + [c for c in ordered_chain if c is not self._pinned])
             # Текстовият вариант получава И документацията на таговете — native
             # моделите я НЕ получават (имат JSON схемите), което е спестяването.
             messages_notools = self._with_tool_tag_docs(
@@ -665,6 +655,20 @@ class Brain:
         else:
             ordered_chain = chain
             messages_notools = messages
+
+        # An explicit pin outranks any reordering above (tools-capability sort
+        # or deprioritize_flaky), in EITHER branch. The operator picked that
+        # model in the `/model` menu; quietly answering from a different one —
+        # because theirs lacks native tool-calling, or because provider_stats
+        # decided it looked flaky — is not our call to make. This used to live
+        # only inside the `if tools:` branch, so a pinned provider that
+        # deprioritize_flaky pushed to the back stayed there for plain
+        # (tools=None) calls, with no error and no log line distinguishing it
+        # from a normal fallback. Pinned still means first, not only: it falls
+        # back normally if it fails.
+        if self._pinned is not None:
+            ordered_chain = ([self._pinned]
+                             + [c for c in ordered_chain if c is not self._pinned])
 
         n = len(ordered_chain)
         if n > 0:
