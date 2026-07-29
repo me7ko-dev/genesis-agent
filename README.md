@@ -181,8 +181,16 @@ anything that matters.
 
 ## Contributing
 
-Issues and PRs welcome. If you are changing behaviour the agent depends on, run
-the integration test first:
+Issues and PRs welcome. Before opening a PR, run the unit test suite:
+
+```bash
+pip install -e .[dev]
+pytest
+```
+
+It's isolated — no API keys or network needed, and it never touches your real
+`~/.genesis` data. If you are changing behaviour the agent depends on
+end-to-end, also run the integration test:
 
 ```bash
 python scripts/e2e_integration_test.py

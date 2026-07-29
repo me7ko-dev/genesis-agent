@@ -20,7 +20,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e .
+          pip install -e .[dev]
           pip install mypy
 
       - name: Everything imports and compiles
@@ -34,6 +34,14 @@ jobs:
       # stale again.
       - name: Type check (mypy)
         run: python -m mypy genesis_agent/ genesis_skills.py genesis_terminal_agent.py
+
+      # Real unit tests, isolated from the user's actual ~/.genesis data
+      # (every test that touches persisted state monkeypatches the module's
+      # path constant to a tmp file — see tests/conftest.py). No API keys or
+      # network needed: LLM calls are faked, ruff/sandbox subprocess calls
+      # either use a real local binary or mock subprocess directly.
+      - name: Unit tests (pytest)
+        run: python -m pytest -q
 
       # The sandbox is the safety boundary — if it regresses, nothing else
       # matters. These checks need no API key and no network.

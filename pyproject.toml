@@ -32,6 +32,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+dev = ["pytest>=8.0"]                    # test suite, see tests/
 browser = ["playwright>=1.40"]           # then: playwright install chromium
 discord = ["discord.py>=2.3"]
 voice = ["faster-whisper>=1.0", "edge-tts>=6.1"]
