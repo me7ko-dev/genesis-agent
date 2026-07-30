@@ -107,6 +107,14 @@ whatever you have not configured.
 | NVIDIA NIM | yes | `NVIDIA_API_KEY` |
 | Ollama (local) | free | `GENESIS_LOCAL_MODEL` |
 
+Optional paid tier, off unless you ask for it — see [MAX mode](#max-mode):
+
+| Provider | Env var |
+|---|---|
+| Anthropic (Claude) | `ANTHROPIC_API_KEY` |
+| OpenAI | `OPENAI_API_KEY` |
+| DeepSeek | `DEEPSEEK_API_KEY` |
+
 **One key per provider.** Genesis does not rotate multiple accounts of the same
 provider to multiply a quota — that violates most providers' terms of service.
 Resilience comes from breadth instead. See [SECURITY.md](SECURITY.md).
@@ -122,13 +130,60 @@ genesis gui                   # GTK window
 genesis voice                 # speak, it speaks back
 genesis discord               # chat from your phone
 genesis mission "write a retry decorator with exponential backoff"
+genesis fix ~/code/theirs "median() is wrong for even-length input"
 ```
+
+## Fixing an existing project
+
+`genesis mission` writes new code, which it owns. `genesis fix` changes code
+that is already someone's, already running, and where a wrong edit does not
+fail loudly — it fails later, somewhere else, looking like a different bug.
+Three things carry that difference, and all three are code rather than
+instructions to the model:
+
+- **A checkpoint before the first edit.** A snapshot of the project, taken
+  before anything is touched. `genesis fix --revert PATH` puts it all back. Git
+  is used too when present, but never relied on — the projects most likely to
+  need this are the ones not under version control.
+- **The project's own test suite is the verdict.** Tests run before any change
+  (so an already-red suite is not later blamed on the agent) and after every
+  round of edits. "Fixed" means red → green; nothing else is reported as fixed.
+- **A real diff at the end** — the bytes that changed, not the model's account
+  of what it believes it did.
+
+Edits are anchored (`EDIT_FILE`), not whole-file rewrites: the snippet must
+already exist, must be unique, and if the result stops parsing, the file is
+left untouched and the model gets the parse error back to try again.
+
+```bash
+genesis fix ~/code/theirs "median() is wrong for even-length input"
+genesis fix ~/code/theirs "..." --test "npm test -- --run"   # if autodetection is wrong
+genesis fix --revert ~/code/theirs                           # undo everything
+```
+
+### MAX mode
+
+The free chain handles most work. For the hardest cases — repairing unfamiliar
+code is the clearest one — a paid frontier model is measurably better, so
+`--max` puts one in front of the free chain (which stays as the fallback, so an
+expired card means a weaker answer, not a stopped agent):
+
+```bash
+pip install "genesis-agent[premium]"     # Anthropic's SDK; the rest need nothing
+genesis fix ~/code/theirs "..." --max    # or: export GENESIS_QUALITY=max
+```
+
+⚠️ These keys **cost money per request**. Nothing is enabled by the key alone:
+without `--max` / `GENESIS_QUALITY=max` the chain, the order and the spend are
+exactly as before.
 
 ## What it can do
 
 - **Run commands** through a three-level safety gate (see below)
-- **Read and write files**, and finish multi-step work across turns instead of
-  stopping after the first tool call
+- **Read, write and surgically edit files**, and finish multi-step work across
+  turns instead of stopping after the first tool call
+- **Work on a codebase it did not write** — map a project, grep it, patch it,
+  run its tests, undo everything (see [Fixing an existing project](#fixing-an-existing-project))
 - **Drive a browser** — navigate, read, click, type — in an isolated profile
   with no access to your real cookies or passwords
 - **Search and cross-check the web**: `RESEARCH` pulls several sources,

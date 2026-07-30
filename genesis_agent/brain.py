@@ -20,6 +20,7 @@ object with `.raw_text` and `.code`.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -42,6 +43,13 @@ CLOUD_TIMEOUT = 90
 LOCAL_TIMEOUT = 240  # локалният 3B модел на слаб GPU е бавен — даваме му време
 RETRY_ROUNDS = 2  # колко пъти да обходим цялата верига при пълен провал
 
+# Anthropic native (само при quality="max"). max_tokens покрива И размисъла, И
+# отговора — 16k стига за код без да изисква streaming (над ~16k SDK-то иска
+# stream, за да не удари HTTP timeout). `xhigh` е препоръчаното ниво за кодинг
+# и агентна работа; отделен запис в config.yaml може да го смени за конкретен модел.
+ANTHROPIC_MAX_TOKENS = 16000
+ANTHROPIC_EFFORT = "xhigh"
+
 # OpenAI-съвместими доставчици (base_url + env ключ; None ключ = без auth, локален).
 _PROVIDERS = {
     "ollama_local": ("http://localhost:11434/v1", None),   # СОБСТВЕН локален мозък
@@ -54,7 +62,25 @@ _PROVIDERS = {
     # СЪЩИЯТ OpenAI-съвместим формат, но много по-големи модели (:cloud суфикс)
     # отколкото GTX 1650 4GB може да върти локално. Добавено 2026-07-25.
     "ollama_cloud": ("https://ollama.com/v1", "OLLAMA_API_KEY"),
+    # ── Платени доставчици (design note, 2026-07-30) ──────────────────────────────
+    # Никога не се пробват сами: влизат във веригата САМО при quality="max"
+    # (`GENESIS_QUALITY=max`) И само ако ключът реално е конфигуриран. Без ключ
+    # всичко работи точно както преди — безплатната верига, същият ред.
+    #
+    # Причината да съществуват изобщо: за поправка на чужд код таванът на
+    # безплатния слой е реален. Тези модели струват пари на заявка, затова
+    # изборът кога да се плати остава на оператора, не на кода.
+    "openai": ("https://api.openai.com/v1", "OPENAI_API_KEY"),
+    "deepseek": ("https://api.deepseek.com/v1", "DEEPSEEK_API_KEY"),
+    # Anthropic НЕ минава през OpenAI-съвместимия път по-долу — има собствен
+    # native клон (_call_anthropic), защото Messages API-то е различен формат
+    # (system отделно от messages, tool_use/tool_result блокове, adaptive
+    # thinking). base_url-ът тук е само маркер за _PROVIDERS проверките.
+    "anthropic": ("native://anthropic", "ANTHROPIC_API_KEY"),
 }
+
+# Кои доставчици се викат през native SDK вместо през OpenAI-съвместим HTTP.
+_NATIVE_PROVIDERS = {"anthropic"}
 
 # Локалният модел (собственият мозък на Genesis). Празно → изключен.
 LOCAL_MODEL = os.environ.get("GENESIS_LOCAL_MODEL", "qwen2.5-coder:3b")
@@ -162,12 +188,44 @@ def _load_chain() -> list[dict]:
     return [c for c in chain if c["provider"] in _PROVIDERS]
 
 
+def _load_premium_chain() -> list[dict]:
+    """
+    Платените модели от config.yaml (`models.premium_models`).
+
+    Отделен списък, а не флаг в основната верига, за да е невъзможно нещо да
+    се озове там случайно: тези записи се четат САМО когато операторът изрично
+    поиска quality="max", и се филтрират по наличен ключ. Липсва ли ключът,
+    списъкът излиза празен и Brain се държи точно както преди — това е
+    единственият начин "по-добро качество" да не се превърне в неочаквана
+    сметка за някой, който е клонирал проекта.
+
+    `premium: True` ги освобождава от min_size_b филтъра. Той рангира
+    БЕЗПЛАТНИ модели по брой параметри (безплатният 8B наистина е по-слаб от
+    безплатния 70B); за назован платен frontier модел параметрите нито са
+    публични, нито са смисленият критерий.
+    """
+    try:
+        cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return []
+    out: list[dict] = []
+    for entry in (cfg.get("models", {}) or {}).get("premium_models", []) or []:
+        provider, model = entry.get("provider"), entry.get("model")
+        if not provider or not model or provider not in _PROVIDERS:
+            continue
+        out.append({"provider": provider, "model": model, "size_b": 0,
+                    "supports_tools": bool(entry.get("supports_tools", True)),
+                    "premium": True, "effort": entry.get("effort", "")})
+    return out
+
+
 class Brain:
     # Кеш за config.yaml tool_tag_prompt (виж _tool_tag_prompt).
     _TAG_PROMPT_CACHE: str | None = None
 
     def __init__(self, prefer_provider: str | None = None, use_local: bool = True,
-                 min_size_b: float = 0, pin_model: tuple[str, str] | None = None):
+                 min_size_b: float = 0, pin_model: tuple[str, str] | None = None,
+                 quality: str | None = None):
         self.keys = _load_keys()
         self.chain = _load_chain()
         self.timeout = CLOUD_TIMEOUT
@@ -181,7 +239,32 @@ class Brain:
         # последна резерва независимо от размера, по-добре слаб отговор,
         # отколкото никакъв при пълен облачен провал.
         if min_size_b:
-            self.chain = [c for c in self.chain if c.get("size_b", 0) >= min_size_b]
+            self.chain = [c for c in self.chain
+                          if c.get("premium") or c.get("size_b", 0) >= min_size_b]
+        # MAX качество (design note, 2026-07-30): платените модели минават ПРЕД
+        # цялата безплатна верига, която остава като резерва — изтекла карта или
+        # свършена квота значи по-слаб отговор, не спрял агент. Прилага се
+        # СЛЕД min_size_b нарочно: филтърът рангира безплатни модели по размер и
+        # няма власт над изричен избор на оператора.
+        self.quality = (quality or os.environ.get("GENESIS_QUALITY") or "").strip().lower()
+        self.premium: list[dict] = []
+        self._premium_meta: dict[tuple[str, str], dict] = {}
+        if self.quality == "max":
+            # Всеки платен доставчик има env ключ по дефиниция (само локалният
+            # е с None) — но проверката е изрична, за да не мине мълчаливо
+            # доставчик без auth, ако някой добави нов запис небрежно.
+            self.premium = [c for c in _load_premium_chain()
+                            if (_PROVIDERS[c["provider"]][1]
+                                and self._provider_key(str(_PROVIDERS[c["provider"]][1])))]
+            self._premium_meta = {(c["provider"], c["model"]): c for c in self.premium}
+            if self.premium:
+                self.chain = self.premium + self.chain
+                names = ", ".join(f"{c['provider']}/{c['model']}" for c in self.premium)
+                print(f"  [Brain] 💎 MAX режим: {names}")
+            else:
+                print("  [Brain] ⚠️  MAX режим е поискан, но няма конфигуриран платен ключ "
+                      "(ANTHROPIC_API_KEY / OPENAI_API_KEY / DEEPSEEK_API_KEY) — "
+                      "работя с безплатната верига.")
         # prefer_provider (за паралелна работа) — заковава worker-а към един
         # доставчик (отделна квота), реди неговите модели пръв и без локален.
         if prefer_provider:
@@ -482,6 +565,139 @@ class Brain:
         self._last_usage = data.get("usage")
         return (content or "").strip(), tool_calls
 
+    # ── Anthropic native (Messages API) ──────────────────────────────────────────
+    # Не минава през _http: Messages API-то не е OpenAI-съвместимо (system извън
+    # messages, tool_use/tool_result блокове, adaptive thinking, refusal като
+    # успешен 200). Преводът е тук, за да остане ВСИЧКО останало в проекта
+    # непроменено — извикващият код продължава да получава (text, tool_calls) в
+    # точно същия OpenAI формат, който вече обработва.
+
+    @staticmethod
+    def _to_anthropic_messages(messages: list[dict]) -> tuple[str, list[dict]]:
+        """(system, messages) в Anthropic формат."""
+        system_parts: list[str] = []
+        out: list[dict] = []
+        for m in messages:
+            role = m.get("role")
+            content = m.get("content") or ""
+            if role == "system":
+                if content:
+                    system_parts.append(content)
+            elif role == "tool":
+                out.append({"role": "user", "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": m.get("tool_call_id") or "",
+                    "content": content or "(празен резултат)",
+                }]})
+            elif role == "assistant":
+                blocks: list[dict] = []
+                if content.strip():
+                    blocks.append({"type": "text", "text": content})
+                for tc in m.get("tool_calls") or []:
+                    fn = tc.get("function", {}) or {}
+                    try:
+                        args = json.loads(fn.get("arguments") or "{}")
+                    except (ValueError, TypeError):
+                        args = {}
+                    blocks.append({"type": "tool_use", "id": tc.get("id") or "",
+                                   "name": fn.get("name", ""), "input": args})
+                # Празен assistant ход се изпуска: Anthropic отхвърля съобщение
+                # без съдържание, а такова носи и нулева информация.
+                if blocks:
+                    out.append({"role": "assistant", "content": blocks})
+            else:
+                out.append({"role": "user", "content": content or "(празно)"})
+        # Разговорът трябва да започва с user ход.
+        while out and out[0]["role"] != "user":
+            out.pop(0)
+        return "\n\n".join(system_parts), out
+
+    @staticmethod
+    def _to_anthropic_tools(tools: list[dict]) -> list[dict]:
+        out = []
+        for t in tools:
+            fn = t.get("function", {}) or {}
+            out.append({
+                "name": fn.get("name", ""),
+                "description": fn.get("description", ""),
+                "input_schema": fn.get("parameters") or {"type": "object", "properties": {}},
+            })
+        return out
+
+    def _call_anthropic(self, key: str, model: str, messages: list[dict],
+                        tools: list[dict] | None, effort: str) -> tuple[str, list | None]:
+        try:
+            import anthropic
+        except ImportError:
+            raise RuntimeError("skip: липсва пакетът `anthropic` (pip install anthropic)")
+
+        system, msgs = self._to_anthropic_messages(messages)
+        if not msgs:
+            raise RuntimeError("няма съобщения за изпращане")
+        params: dict[str, Any] = {
+            "model": model,
+            "max_tokens": ANTHROPIC_MAX_TOKENS,
+            "messages": msgs,
+            # Adaptive thinking: моделът сам решава колко да мисли по задачата.
+            # Точно това искаме тук — MAX режимът съществува заради трудните
+            # случаи, а лесните не бива да плащат за размисъл, който не им трябва.
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": effort or ANTHROPIC_EFFORT},
+        }
+        if system:
+            params["system"] = system
+        if tools:
+            params["tools"] = self._to_anthropic_tools(tools)
+
+        client = anthropic.Anthropic(api_key=key, timeout=float(self.timeout))
+        try:
+            # Класификаторите за безопасност могат да откажат заявка (връща се
+            # 200 с stop_reason="refusal"). `fallbacks="default"` оставя сървъра
+            # да я довърши на друг модел вместо да ни върне празен отговор.
+            resp = client.beta.messages.create(
+                betas=["server-side-fallback-2026-07-01"], fallbacks="default", **params)
+        except anthropic.BadRequestError as e:
+            # Акаунт без достъп до тази beta (или SDK, който не я познава) —
+            # същата заявка без нея. Нашата собствена верига поема отказа.
+            if "fallback" not in str(e).lower() and "beta" not in str(e).lower():
+                raise RuntimeError(f"HTTP_400: {e}") from e
+            resp = client.messages.create(**params)
+        except anthropic.AuthenticationError as e:
+            raise RuntimeError(f"HTTP_401: {e}") from e
+        except anthropic.PermissionDeniedError as e:
+            raise RuntimeError(f"HTTP_403: {e}") from e
+        except anthropic.RateLimitError as e:
+            raise RuntimeError(f"HTTP_429: {e}") from e
+        except anthropic.APIStatusError as e:
+            raise RuntimeError(f"HTTP_{e.status_code}: {e}") from e
+        except anthropic.APIConnectionError as e:
+            raise RuntimeError(f"мрежа: {e}") from e
+
+        if getattr(resp, "stop_reason", "") == "refusal":
+            # Не е техническа грешка — моделът е отказал темата. Като RuntimeError,
+            # за да продължи веригата към следващия модел вместо да върне празно.
+            raise RuntimeError(f"HTTP_REFUSAL: моделът отказа заявката "
+                               f"({getattr(resp, 'stop_details', None)})")
+
+        text_parts, tool_calls = [], []
+        for block in resp.content:
+            if block.type == "text":
+                text_parts.append(block.text)
+            elif block.type == "tool_use":
+                tool_calls.append({"id": block.id, "type": "function",
+                                   "function": {"name": block.name,
+                                                "arguments": json.dumps(block.input)}})
+        usage = getattr(resp, "usage", None)
+        self._last_usage = {
+            "prompt_tokens": getattr(usage, "input_tokens", 0) or 0,
+            "completion_tokens": getattr(usage, "output_tokens", 0) or 0,
+        } if usage else None
+
+        text = "".join(text_parts).strip()
+        if not text and not tool_calls:
+            raise RuntimeError("празен отговор")
+        return text, (tool_calls or None)
+
     def _call(self, provider: str, model: str, messages: list[dict],
              tools: list[dict] | None = None) -> tuple[str, list | None]:
         base_url, key_env = _PROVIDERS[provider]
@@ -497,6 +713,10 @@ class Brain:
             raise RuntimeError(f"HTTP_429: {key_env} is rate-limited, cooling down")
 
         try:
+            if provider in _NATIVE_PROVIDERS:
+                meta = self._premium_meta.get((provider, model), {})
+                return self._call_anthropic(key, model, messages, tools,
+                                            str(meta.get("effort", "")))
             return self._http(base_url, key, model, messages, self.timeout, tools=tools)
         except RuntimeError as e:
             last = str(e)

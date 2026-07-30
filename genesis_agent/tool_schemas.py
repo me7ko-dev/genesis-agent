@@ -43,6 +43,68 @@ FULL_TOOLS: list[dict] = [
             },
         },
     },
+    # ── Работа по ЧУЖД код (design note, 2026-07-30) ──────────────────────────────
+    # WRITE_FILE презаписва целия файл. Върху файл, който агентът сам е написал,
+    # това е нормално; върху чужд модул от 2000 реда значи "препиши го по памет"
+    # и всичко незапомнено изчезва тихо. EDIT_FILE е закотвена замяна: anchor-ът
+    # трябва вече да съществува, да е уникален, и резултатът трябва още да се
+    # парсва — иначе файлът НЕ се пипа. Виж genesis_agent/code_edit.py.
+    {
+        "type": "function",
+        "function": {
+            "name": "EDIT_FILE",
+            "description": "Replace an exact snippet inside an EXISTING file. Prefer this over "
+                           "WRITE_FILE for any file you did not just author — it changes only "
+                           "what you name and returns a diff of what actually changed. "
+                           "'old' must appear in the file exactly once (whitespace counts); add "
+                           "surrounding lines to make it unique. If the edit would break Python "
+                           "syntax the file is left untouched and you get the parse error back.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File to edit"},
+                    "old": {"type": "string", "description": "Exact existing text to replace"},
+                    "new": {"type": "string", "description": "Replacement text"},
+                    "replace_all": {"type": "boolean",
+                                    "description": "Replace every occurrence (default false)"},
+                },
+                "required": ["path", "old", "new"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "SEARCH_CODE",
+            "description": "Regex search across a project's file contents (like grep -rn). "
+                           "Use this to LOCATE code before reading files — guessing filenames "
+                           "and reading them whole wastes the context window.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Regular expression"},
+                    "path": {"type": "string", "description": "Directory to search (default: workspace)"},
+                    "glob": {"type": "string", "description": "Optional filename filter, e.g. *.py"},
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "REPO_MAP",
+            "description": "Summarise a project: language, file counts, layout, entry points, "
+                           "how its tests are run, whether it is under git. Call this FIRST when "
+                           "you are handed an unfamiliar codebase.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Project root (default: workspace)"},
+                },
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -306,4 +368,21 @@ READONLY_TOOLS: list[dict] = [
 # време на самото съставяне.
 MISSION_TOOLS: list[dict] = READONLY_TOOLS + [
     t for t in FULL_TOOLS if t["function"]["name"] == "USE_SKILL"
+]
+
+# Поправка на ЧУЖД проект (design note, 2026-07-30, genesis_agent/repo_agent.py).
+# Умишлено по-тесен набор от FULL_TOOLS:
+#   • БЕЗ browser/WEB_SEARCH/RESEARCH — цикълът работи по код на диска, не в мрежата;
+#     един URL в traceback-а не бива да отвежда агента да сърфира.
+#   • БЕЗ DELEGATE/USE_SKILL — подагент без checkpoint-а и без нишката на този
+#     конкретен ремонт произвежда промени, за които никой не отговаря.
+#   • БЕЗ ASK_USER — repo_agent се пуска и без надзор (`genesis fix`), а питане
+#     там просто увисва; неяснотата се решава чрез спиране с доклад.
+#   • С EDIT_FILE, SEARCH_CODE, REPO_MAP и RUN_CMD — намери, промени, пусни тестовете.
+REPAIR_TOOLS: list[dict] = [
+    t for t in FULL_TOOLS
+    if t["function"]["name"] in {
+        "READ_FILE", "LIST_DIR", "SEARCH_CODE", "REPO_MAP",
+        "EDIT_FILE", "WRITE_FILE", "RUN_CMD",
+    }
 ]

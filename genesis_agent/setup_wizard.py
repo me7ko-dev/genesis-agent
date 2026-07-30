@@ -62,6 +62,52 @@ PROVIDERS: list[tuple[str, str, str, str, str]] = [
 ]
 
 
+# Платени доставчици (design note, 2026-07-30). Отделен списък, отделен въпрос,
+# отделно предупреждение: за разлика от всичко по-горе, тези харчат пари на
+# заявка. Ключ тук НЕ променя нищо от само себе си — моделите влизат във
+# веригата само при `GENESIS_QUALITY=max` (или `genesis fix --max`).
+PAID_PROVIDERS: list[tuple[str, str, str, str, str]] = [
+    ("ANTHROPIC_API_KEY", "Anthropic (Claude)",
+     "https://console.anthropic.com/settings/keys",
+     "native://anthropic", "claude-opus-5"),
+    ("OPENAI_API_KEY", "OpenAI",
+     "https://platform.openai.com/api-keys",
+     "https://api.openai.com/v1", "gpt-5.5"),
+    ("DEEPSEEK_API_KEY", "DeepSeek",
+     "https://platform.deepseek.com/api_keys",
+     "https://api.deepseek.com/v1", "deepseek-chat"),
+]
+
+
+def _test_anthropic_key(key: str, model: str) -> tuple[bool, str]:
+    """Anthropic не е OpenAI-съвместим — собствена проба през Messages API."""
+    try:
+        import anthropic
+    except ImportError:
+        return False, ("липсва пакетът `anthropic` — инсталирай го с "
+                       "`pip install anthropic`, за да се ползва този ключ")
+    try:
+        anthropic.Anthropic(api_key=key, timeout=30.0).messages.create(
+            model=model, max_tokens=16,
+            messages=[{"role": "user", "content": "say ok"}],
+        )
+    except anthropic.AuthenticationError:
+        return False, "ключът е отхвърлен (401) — грешен или изтекъл"
+    except anthropic.NotFoundError:
+        return True, f"ключът работи (модел {model} не съществува — обнови config.yaml)"
+    except anthropic.PermissionDeniedError as e:
+        return False, f"403 — няма достъп: {e}"
+    except anthropic.RateLimitError:
+        return True, "ключът работи (в момента е rate-limited)"
+    except anthropic.APIStatusError as e:
+        if e.status_code == 400 and "credit" in str(e).lower():
+            return False, "няма кредит по сметката"
+        return False, f"HTTP {e.status_code}: {str(e)[:120]}"
+    except anthropic.APIConnectionError:
+        return False, "мрежова грешка — не можах да достигна доставчика"
+    return True, "работи"
+
+
 def _test_key(base_url: str, key: str, model: str) -> tuple[bool, str]:
     """
     Is this key usable? Returns (ok, human-readable reason).
@@ -184,6 +230,52 @@ def run() -> int:
             keep = _prompt("    Да го запиша ли въпреки това? [y/N] ").lower()
             if keep.startswith("y"):
                 collected[var] = key
+        print()
+
+    # ── Платени доставчици (по избор) ─────────────────────────────────────
+    print("  ── Платени модели (по избор) ──")
+    print("  Безплатната верига стига за повечето неща. За най-трудното —")
+    print("  например поправка на бъг в чужд проект — платен модел е")
+    print("  забележимо по-добър. ⚠️  Тези ключове ХАРЧАТ ПАРИ на заявка.")
+    print("  Включват се САМО с `GENESIS_QUALITY=max` или `genesis fix --max`;")
+    print("  без този флаг нищо не се променя и нищо не се харчи.")
+    existing_paid = [v for v, *_ in PAID_PROVIDERS if _existing(v)]
+    default_yes = bool(existing_paid)
+    prompt = "  Да настроя ли платен ключ? [Y/n] " if default_yes else "  Да настроя ли платен ключ? [y/N] "
+    answer = _prompt(prompt).lower()
+    want_paid = (not answer.startswith("n")) if default_yes else answer.startswith("y")
+    if want_paid:
+        print()
+        for var, name, url, base_url, model in PAID_PROVIDERS:
+            current = _existing(var)
+            if current:
+                print(f"  {name}  —  ключ вече има, проверявам…", end=" ", flush=True)
+                ok, why = (_test_anthropic_key(current, model)
+                           if base_url.startswith("native://")
+                           else _test_key(base_url, current, model))
+                print("✅" if ok else "❌", why)
+                key = _prompt("    [Enter] запази · или въведи нов ключ: ")
+                if not key:
+                    collected[var] = current
+                    print()
+                    continue
+            else:
+                print(f"  {name}  —  вземи ключ от: {url}")
+                key = _prompt(f"    {var} = ")
+                if not key:
+                    print("    (пропуснат)\n")
+                    continue
+            print("    проверявам…", end=" ", flush=True)
+            ok, why = (_test_anthropic_key(key, model) if base_url.startswith("native://")
+                       else _test_key(base_url, key, model))
+            print("✅" if ok else "❌", why)
+            if ok or _prompt("    Да го запиша ли въпреки това? [y/N] ").lower().startswith("y"):
+                collected[var] = key
+            print()
+    else:
+        # Съществуващ платен ключ се пренася, а не се трие мълчаливо.
+        for var in existing_paid:
+            collected[var] = _existing(var)
         print()
 
     if not collected:

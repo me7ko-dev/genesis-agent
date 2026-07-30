@@ -75,6 +75,18 @@ def _resolve(path_str: str) -> Path:
     return p if p.is_absolute() else (_WORKSPACE / p)
 
 
+def _strip_one_newline(part: str) -> str:
+    """Маха ЕДИН водещ и ЕДИН завършващ нов ред от част на EDIT_FILE блок.
+
+    Само по един: тагът и разделителят са на собствени редове, така че точно
+    един \\n от всяка страна принадлежи на синтаксиса, а не на кода. По-агресивен
+    strip() би изял отстъпа на първия ред и anchor-ът никога не би съвпаднал.
+    """
+    part = part.removeprefix("\n")
+    part = part.removesuffix("\n")
+    return part
+
+
 def _log_episode(goal: str, outcome: str, tags: list[str]) -> None:
     if memory_record_episode is None:
         return
@@ -137,6 +149,67 @@ def _tool_write_file(arg: str, content: str) -> str:
     _log_episode(f"WRITE_FILE {path}", f"записани {len(content)} символа",
                  ["tool", "write_file"])
     return f"[WRITE_FILE: {path}] ✓ записани {len(content)} символа{lint_note}"
+
+
+def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False) -> str:
+    """Закотвена замяна в СЪЩЕСТВУВАЩ файл (виж genesis_agent/code_edit.py).
+
+    Минава през същата CONFIRM бариера като WRITE_FILE при запис извън
+    workspace-а — редакцията е по-малка по обхват, но не е по-малко реална.
+    """
+    path = _resolve(path_arg)
+    try:
+        inside = path.resolve().is_relative_to(_WORKSPACE.resolve())
+    except (ValueError, OSError):
+        inside = False
+    if not inside:
+        verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM,
+                                      [f"редакция извън workspace: {path}"])
+        allowed, reason = sandbox._decide(f"EDIT_FILE {path}", verdict, sandbox.get_policy())
+        if not allowed:
+            return f"[EDIT_FILE] {reason}"
+
+    from genesis_agent.code_edit import edit_file
+    res = edit_file(path, old, new, replace_all=replace_all)
+    if not res.ok:
+        _log_episode(f"EDIT_FILE {path}", f"отказана: {res.detail[:200]}",
+                     ["tool", "edit_file", "rejected"])
+        return f"[EDIT_FILE: {path}] ❌ {res.detail}"
+    _log_episode(f"EDIT_FILE {path}", res.detail, ["tool", "edit_file"])
+    # Диффът се връща на модела нарочно: така следващият рунд вижда какво РЕАЛНО
+    # се е променило, вместо да разчита на спомена си какво е искал да промени.
+    diff = res.diff if len(res.diff) <= 4000 else res.diff[:4000] + "\n… [диффът е отрязан]"
+    return f"[EDIT_FILE: {path}] {res.detail}\n{diff}"
+
+
+def _tool_search_code(arg: str, path: str = "", glob: str = "") -> str:
+    pattern = arg.strip()
+    if not pattern:
+        return "[SEARCH_CODE] Празен шаблон."
+    from genesis_agent.repo_map import search_code
+    root = _resolve(path) if path else _WORKSPACE
+    try:
+        hits = search_code(pattern, root, glob or None)
+    except (ValueError, FileNotFoundError) as e:
+        return f"[SEARCH_CODE: {pattern}] {e}"
+    if not hits:
+        return (f"[SEARCH_CODE: {pattern}] Няма съвпадения в {root}. "
+                "Това означава, че низът наистина го няма — не предполагай, че е скрит.")
+    lines = [f"[SEARCH_CODE: {pattern}] {len(hits)} съвпадения в {root}"]
+    lines += [f"  {h.path}:{h.line}: {h.text.strip()}" for h in hits]
+    _log_episode(f"SEARCH_CODE {pattern}", f"{len(hits)} съвпадения", ["tool", "search_code"])
+    return "\n".join(lines)
+
+
+def _tool_repo_map(arg: str = "") -> str:
+    from genesis_agent.repo_map import repo_map
+    root = _resolve(arg) if arg.strip() else _WORKSPACE
+    try:
+        out = repo_map(root)
+    except OSError as e:
+        return f"[REPO_MAP] Грешка: {e}"
+    _log_episode(f"REPO_MAP {root}", "картиран", ["tool", "repo_map"])
+    return out
 
 
 def _tool_run_cmd(arg: str) -> str:
@@ -388,11 +461,21 @@ _WRITE_RE = re.compile(r"\[WRITE_FILE:\s*(?P<path>[^\]]+)\](?P<body>.*?)\[END_WR
 # USE_SKILL е също двучастен — умение + опционален driver код до [END_USE_SKILL].
 _USE_SKILL_RE = re.compile(r"\[USE_SKILL:\s*(?P<name>[^\]]+)\](?P<body>.*?)\[END_USE_SKILL\]",
                            re.DOTALL)
+# EDIT_FILE е тричастен — файл + anchor + замяна. Разделителят е дълъг и
+# нетипичен нарочно: и двете половини са СУРОВ код, така че всичко по-късо
+# (--- или ===) рано или късно се среща вътре в самия код и реже редакцията
+# на грешното място.
+_EDIT_SEPARATOR = "---GENESIS-REPLACE-WITH---"
+_EDIT_RE = re.compile(r"\[EDIT_FILE:\s*(?P<path>[^\]]+)\](?P<body>.*?)\[END_EDIT\]",
+                      re.DOTALL)
 _SIMPLE_RE = re.compile(
     r"\[(?P<tool>READ_FILE|RUN_CMD|WEB_SEARCH|LIST_DIR|DELEGATE|RESEARCH|BROWSE|ASK_USER|"
+    r"SEARCH_CODE|REPO_MAP|"
     r"BROWSER_CLICK|BROWSER_TYPE|REMEMBER|TASK_ADD|TASK_UPDATE|TASK_LIST):"
     r"\s*(?P<arg>[^\]]+)\]"
 )
+# REPO_MAP без аргумент = текущият workspace (както BROWSER_READ/TASK_LIST).
+_REPO_MAP_RE = re.compile(r"\[REPO_MAP\]")
 # BROWSER_READ е без аргумент (като LOOK_AT_SCREEN) — отделен pattern.
 _BROWSER_READ_RE = re.compile(r"\[BROWSER_READ\]")
 # TASK_LIST без аргумент — най-честата форма ([TASK_LIST] = отворените нишки).
@@ -406,6 +489,8 @@ _SIMPLE_DISPATCH: dict[str, Callable[..., str]] = {
     "LIST_DIR": _tool_list_dir,
     "DELEGATE": _tool_delegate,
     "RESEARCH": _tool_research,
+    "SEARCH_CODE": _tool_search_code,
+    "REPO_MAP": _tool_repo_map,
     "BROWSE": _tool_browse,
     "BROWSER_CLICK": _tool_browser_click,
     "BROWSER_TYPE": _tool_browser_type,
@@ -466,6 +551,20 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
         results.append((m.start(), _tool_write_file(m.group("path"), m.group("body"))))
         consumed_spans.append((m.start(), m.end()))
 
+    # 1a. EDIT_FILE блокове (anchor + замяна, разделени с _EDIT_SEPARATOR).
+    for m in _EDIT_RE.finditer(response_text):
+        body = m.group("body")
+        if _EDIT_SEPARATOR not in body:
+            results.append((m.start(),
+                            (f"[EDIT_FILE: {m.group('path').strip()}] ❌ Липсва разделителят "
+                             f"{_EDIT_SEPARATOR} между стария и новия текст.")))
+        else:
+            old_part, new_part = body.split(_EDIT_SEPARATOR, 1)
+            results.append((m.start(), _tool_edit_file(m.group("path"),
+                                                       _strip_one_newline(old_part),
+                                                       _strip_one_newline(new_part))))
+        consumed_spans.append((m.start(), m.end()))
+
     # 1b. USE_SKILL блокове (умение + опционален driver код).
     for m in _USE_SKILL_RE.finditer(response_text):
         results.append((m.start(), _tool_use_skill(m.group("name"), m.group("body"))))
@@ -486,6 +585,12 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
         if _inside_write(m.start()):
             continue
         results.append((m.start(), _tool_browser_read()))
+
+    # 3b. REPO_MAP без аргумент — картира текущия workspace.
+    for m in _REPO_MAP_RE.finditer(response_text):
+        if _inside_write(m.start()):
+            continue
+        results.append((m.start(), _tool_repo_map("")))
 
     # 4. TASK_LIST без аргумент — [TASK_LIST] показва отворените нишки.
     for m in _TASK_LIST_RE.finditer(response_text):
@@ -527,6 +632,17 @@ def dispatch_tool_call(name: str, arguments) -> str:
             return _tool_read_file(arguments.get("path", ""))
         if name == "WRITE_FILE":
             return _tool_write_file(arguments.get("path", ""), arguments.get("content", ""))
+        if name == "EDIT_FILE":
+            return _tool_edit_file(arguments.get("path", ""),
+                                   arguments.get("old", ""),
+                                   arguments.get("new", ""),
+                                   bool(arguments.get("replace_all", False)))
+        if name == "SEARCH_CODE":
+            return _tool_search_code(arguments.get("pattern", ""),
+                                     arguments.get("path", "") or "",
+                                     arguments.get("glob", "") or "")
+        if name == "REPO_MAP":
+            return _tool_repo_map(arguments.get("path", "") or "")
         if name == "RUN_CMD":
             return _tool_run_cmd(arguments.get("command", ""))
         if name == "ASK_USER":

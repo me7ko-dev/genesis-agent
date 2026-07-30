@@ -111,6 +111,36 @@ models:
       model: "llama-3.3-70b-versatile"
       size_b: 70
       supports_tools: true    # потвърдено наживо (с валиден ключ, не #1)
+
+  # ─── ПЛАТЕНИ модели — MAX режим (design note, 2026-07-30) ──────────────────
+  # Тези НЕ са част от нормалната верига. Влизат само когато операторът изрично
+  # поиска `GENESIS_QUALITY=max` (или `genesis fix --max`) И само ако ключът за
+  # доставчика реално съществува. Без ключ поведението е непроменено —
+  # безплатната верига, същият ред, нула разлика.
+  #
+  # Защо изобщо съществуват: за поправка на чужд код таванът на безплатния слой
+  # е реален и измерим. 21-задачният hard benchmark (genesis_agent/benchmark.py)
+  # показва къде свършват безплатните модели; за трудния случай платеният модел
+  # е разликата между поправка и правдоподобно изглеждаща грешка. Кога да се
+  # плати остава решение на оператора, не на кода.
+  #
+  # Редът е "най-способният пръв". Всеки, за когото няма ключ, се пропуска.
+  premium_models:
+    - provider: "anthropic"
+      model: "claude-opus-5"          # native Messages API (не OpenAI-съвместим)
+      supports_tools: true
+      effort: "xhigh"                 # препоръчаното ниво за кодинг/агентна работа
+    - provider: "openai"
+      model: "gpt-5.5"                # проверено наживо срещу GET /v1/models, 2026-07-30
+      supports_tools: true
+    - provider: "deepseek"
+      model: "deepseek-chat"          # най-евтиният смислен платен вариант
+      supports_tools: true
+  # Имената на моделите се менят по-често от този файл. Ако някой запис върне
+  # 404, веригата просто пада на следващия — но си струва да се провери:
+  #   curl -s https://api.openai.com/v1/models -H "Authorization: Bearer $OPENAI_API_KEY"
+  # (GET /v1/models проверява авторизацията, без да харчи квота — за разлика от
+  # POST /chat/completions, където „моделът го няма" изглежда като „ключът е лош".)
 discord:
   webhook: ""
   bot_token: ""
@@ -222,7 +252,18 @@ tool_tag_prompt: |
   TOOLS — emit these EXACT tags (never inside ```code``` fences). They are executed for real
   through the sandbox, and each call is logged to memory:
   - [READ_FILE: /absolute/path]
-  - [WRITE_FILE: /absolute/path]file content here[END_WRITE]
+  - [WRITE_FILE: /absolute/path]file content here[END_WRITE] — writes the WHOLE file. Only for
+    files you are creating or that you authored yourself in this session.
+  - [EDIT_FILE: /absolute/path]exact existing text---GENESIS-REPLACE-WITH---replacement text[END_EDIT]
+    Changes only the snippet you name, in a file that already exists — ALWAYS prefer this over
+    WRITE_FILE for code you did not write. The old text must appear exactly once (whitespace and
+    indentation count); include surrounding lines to make it unique. You get back a diff of what
+    really changed. If the edit would break Python syntax, the file is left untouched and you get
+    the parse error — fix your edit and try again, do not fall back to rewriting the whole file.
+  - [SEARCH_CODE: regex pattern] — grep across the project's file contents. Use this to FIND the
+    code before reading files; do not guess filenames.
+  - [REPO_MAP] or [REPO_MAP: /path/to/project] — language, layout, entry points, test command,
+    git status. Call this first on an unfamiliar codebase.
   - [RUN_CMD: command here]
   - [WEB_SEARCH: search query]
   - [RESEARCH: question] — cross-checked answer from several sources
