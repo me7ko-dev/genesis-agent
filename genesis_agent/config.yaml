@@ -21,8 +21,17 @@ models:
   # brain.py я обхожда ВИНАГИ отгоре надолу, прескачайки временно изчерпаните
   # (429/402/503 → cooldown). Локалният модел е последна резерва; за изричен
   # офлайн режим виж GENESIS_LOCAL_ONLY.
-  default_provider: "huggingface"
-  default_model_id: "Qwen/Qwen2.5-Coder-32B-Instruct"
+  # HuggingFace беше пръв тук до 2026-07-30, когато `HF_TOKEN` изчерпа месечните
+  # си кредити (HTTP 402, проверено директно). Дотогава ВСЯКО обаждане чукаше
+  # първо на мъртъв доставчик. `_mark_exhausted` го прескача след първия провал
+  # за 5 минути, така че не е фатално — но по подразбиране да води доставчик,
+  # който не отговаря, е грешно.
+  # Ollama Cloud поема водачеството: отделна квота (~5M токена/седмица), реално
+  # обслужваше всички repair пускове в деня на смяната, 120B, native tools.
+  # Щом HF кредитът се поднови, върни го напред — 685B DeepSeek-V3 на отделна
+  # квота е ценен точно когато другите се изчерпят.
+  default_provider: "ollama_cloud"
+  default_model_id: "gpt-oss:120b-cloud"
   context_window: 131072
 
   # МИНИМУМ ~20-30B параметъра за ВСЕКИ модел във веригата (design note, 2026-07-25:
@@ -47,25 +56,6 @@ models:
   # `brain.py` пробва tools-способните пръв в native режим, после пада към
   # останалите в стар text-tag режим (`[RUN_CMD: ...]` в промпта).
   fallback_models:
-
-    # ─── HuggingFace (голями, БЪРЗИ ~1с, отделна квота) ──────────────
-    - provider: "huggingface"
-      model: "Qwen/Qwen2.5-Coder-32B-Instruct"   # най-добър КОДИНГ (32B)
-      size_b: 32
-      supports_tools: false   # 400 UNSUPPORTED_OPENAI_PARAMS, проверено наживо
-    - provider: "huggingface"
-      model: "deepseek-ai/DeepSeek-V3-0324"        # МАКС голям (685B)
-      size_b: 685
-      supports_tools: true    # потвърдено наживо, реален tool_call
-    - provider: "huggingface"
-      model: "meta-llama/Llama-3.3-70B-Instruct"   # 70B бърз
-      size_b: 70
-      supports_tools: true    # потвърдено наживо
-    - provider: "huggingface"
-      model: "Qwen/Qwen2.5-72B-Instruct"           # 72B
-      size_b: 72
-      supports_tools: true    # тестът върна 402 (изчерпан кредит), не 400
-                               # unsupported-param — параметърът мина валидация
 
     # ─── Ollama Cloud (отделна квота, 4 ключа — добавени 2026-07-25, ~5M
     # токена/седмица безплатно ОБЩО, много по-големи модели от локалните
@@ -97,6 +87,30 @@ models:
       model: "google/gemma-4-31b-it:free"
       size_b: 31
       supports_tools: true    # потвърдено наживо
+
+    # ─── HuggingFace (големи и бързи ~1с, отделна квота) ─────────────
+    # Преместен от ПЪРВО на това място 2026-07-30: `HF_TOKEN` изчерпа месечните
+    # си кредити (HTTP 402). Оставен във веригата, а не изтрит — 685B DeepSeek-V3
+    # на отделна квота е сред най-силните тук и се връща от само себе си, щом
+    # кредитът се поднови (402 → cooldown, после нормален опит). Ако станеш PRO
+    # или купиш кредит, върни целия блок най-отгоре.
+    - provider: "huggingface"
+      model: "deepseek-ai/DeepSeek-V3-0324"        # МАКС голям (685B)
+      size_b: 685
+      supports_tools: true    # потвърдено наживо, реален tool_call
+    - provider: "huggingface"
+      model: "meta-llama/Llama-3.3-70B-Instruct"   # 70B бърз
+      size_b: 70
+      supports_tools: true    # потвърдено наживо
+    - provider: "huggingface"
+      model: "Qwen/Qwen2.5-72B-Instruct"           # 72B
+      size_b: 72
+      supports_tools: true    # тестът върна 402 (изчерпан кредит), не 400
+                               # unsupported-param — параметърът мина валидация
+    - provider: "huggingface"
+      model: "Qwen/Qwen2.5-Coder-32B-Instruct"   # най-добър КОДИНГ (32B)
+      size_b: 32
+      supports_tools: false   # 400 UNSUPPORTED_OPENAI_PARAMS, проверено наживо
 
     # ─── NVIDIA native (отделна квота, 2 ключа; MoE 8x7B ≈ 46.7B общо) ──
     - provider: "nvidia"

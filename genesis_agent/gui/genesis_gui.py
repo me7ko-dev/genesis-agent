@@ -260,7 +260,7 @@ class ModelPicker(Gtk.MenuButton):
     def refresh(self) -> None:
         # width_request фиксира popover-а на удобна ширина независимо от
         # най-краткия ред — wrap=False пази всеки ред на един ред (design
-        # note 2026-07-29: METKO докладва прекалено тясно/нечетимо меню —
+        # note 2026-07-29: докладвано прекалено тясно/нечетимо меню —
         # wrapping label-ите смаляваха natural width заявката до минимума).
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         box.set_size_request(360, -1)
@@ -276,7 +276,7 @@ class ModelPicker(Gtk.MenuButton):
         # selectable=False е критично тук, не козметика: selectable label в
         # GTK4 прихваща клика за текст-селекция и НЕ го пуска да стигне до
         # ListBoxRow-а → row-activated никога не гърми, изборът изглежда
-        # мъртъв (METKO докладва точно това, 2026-07-29). Предшестващ бъг —
+        # мъртъв (докладвано точно това, 2026-07-29). Предшестващ бъг —
         # _label()'s default (selectable=True) никога не е бил override-нат
         # тук, само в по-новия Sidebar.
         auto_row = Gtk.ListBoxRow()
@@ -317,7 +317,7 @@ class ModelPicker(Gtk.MenuButton):
 # ─────────────────────────────────────────────────────────────────────────────
 class ModeToggle(Gtk.ToggleButton):
     """Превключва genesis_agent.sandbox.SandboxPolicy.mode на живо (design
-    note, 2026-07-29 — METKO поиска auto-approve/manual контрол до входа,
+    note, 2026-07-29 — поискан auto-approve/manual контрол до входа,
     като референтния Claude Code Desktop "Auto"). Реален механизъм, не
     декоративен бутон: "Ръчно" = mode="interactive" (истински модален
     диалог на всяка CONFIRM операция, СЪЩОТО поведение като по подразбиране

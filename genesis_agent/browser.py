@@ -72,7 +72,7 @@ def _ensure_page():
     # Ефемерен, изолиран профил — без cookies/пароли от реалния Chrome на потребителя.
     # Headless по подразбиране (безопасно, работи и без дисплей на сървър) —
     # GENESIS_BROWSER_VISIBLE=1 показва реален прозорец, за да гледаш агента
-    # докато навигира (design note, 2026-07-29, изрична заявка на METKO).
+    # докато навигира (design note, 2026-07-29, изрична заявка на оператора).
     visible = os.environ.get("GENESIS_BROWSER_VISIBLE") == "1"
     _browser = _pw.chromium.launch(headless=not visible)
     _page = _browser.new_page()
