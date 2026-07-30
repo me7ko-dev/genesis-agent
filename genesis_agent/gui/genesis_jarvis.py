@@ -69,13 +69,12 @@ GUI_DIR = Path(__file__).resolve().parent
 if str(GUI_DIR) not in sys.path:
     sys.path.insert(0, str(GUI_DIR))
 
-from genesis_gui import (
+from genesis_agent.agent_core import Core, run_tool_loop
+from genesis_agent.gui.genesis_gui import (
     CSS,
     MessageWidget,
     ToolWidget,
 )
-
-from genesis_agent.agent_core import Core, run_tool_loop
 
 APP_ID = "org.genesis.Jarvis"
 # Гласът е конфигурируем: закован български глас караше Jarvis да говори

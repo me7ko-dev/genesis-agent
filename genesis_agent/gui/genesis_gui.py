@@ -57,9 +57,8 @@ PROJECT_ROOT = _find_project_root()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import gui_sessions
-
 from genesis_agent.agent_core import Core, run_tool_loop
+from genesis_agent.gui import gui_sessions
 
 APP_ID = "org.genesis.Agent"
 TOOL_ROUND_CAP = 8
