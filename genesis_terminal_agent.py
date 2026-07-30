@@ -246,6 +246,12 @@ current_model_id = config.get("models", {}).get("default_model_id", "llama-3.3-7
 # по-малките модели мислят забележимо по-слабо. config.yaml's size_b анотира
 # всеки запис; default_model_id (Qwen2.5-Coder-32B, 32B) вече го покрива.
 _TERMINAL_MIN_SIZE_B = 32
+
+# `/maxcoding` — за сесията, не за постоянно. Обичайната верига е компромис
+# между качество, скорост и квота, което е правилният компромис за разговор;
+# работата по код иска другия. Изборът е изричен и се вижда в /status.
+_CODING_MODE = False
+
 FALLBACK_CHAIN = [
     {"provider": fb.get("provider", "groq"), "model": fb.get("model", "")}
     for fb in config.get("models", {}).get("fallback_models", [])
@@ -508,8 +514,11 @@ def ask_genesis(messages, tools=None):
         return _ask_via_legacy(messages, tools, current_provider, current_model_id)
 
     from genesis_agent.brain import Brain
+    # Кодинг режимът (/maxcoding) нарочно бие ръчния пин: ако избраният в
+    # `/model` модел остане пръв, режимът не прави нищо, а изглежда включен.
     brain = Brain(min_size_b=_TERMINAL_MIN_SIZE_B,
-                  pin_model=(current_provider, current_model_id))
+                  quality="coding" if _CODING_MODE else None,
+                  pin_model=None if _CODING_MODE else (current_provider, current_model_id))
     before = (current_provider, current_model_id)
 
     reply = brain.complete(list(messages), tools=tools)
@@ -949,9 +958,33 @@ def main():
                 show_agent_menu()
                 continue
 
+            # ── /maxcoding — най-силните БЕЗПЛАТНИ модели за работа по код ──
+            # Нужен е като отделен режим, защото обикновеният ред на веригата е
+            # компромис между качество, скорост и квота: за чат това е правилно,
+            # за редакция на чужд код — не. Тук изборът е изричен и се плаща в
+            # скорост и квота, не в пари.
+            if user_input.lower() in ("/maxcoding", "/макскод"):
+                globals()["_CODING_MODE"] = not _CODING_MODE
+                if _CODING_MODE:
+                    from genesis_agent.brain import _load_coding_chain
+                    chain = _load_coding_chain()
+                    console.print("[bold green]🛠️  Кодинг режим ВКЛЮЧЕН[/] — "
+                                  "най-силните безплатни модели за код:")
+                    for i, c in enumerate(chain, 1):
+                        console.print(f"   [cyan]{i}.[/] {c['provider']}/{c['model']}")
+                    console.print("[dim]   По-бавно и харчи повече квота — затова не е по подразбиране.[/]")
+                    if current_provider or current_model_id:
+                        # Ръчният пин би държал избрания модел пръв и би обезсмислил
+                        # режима — казваме го, вместо да го оставим да мълчи.
+                        console.print("[dim]   Ръчно избраният модел (/model) се игнорира, докато режимът е включен.[/]")
+                else:
+                    console.print("[yellow]🛠️  Кодинг режим ИЗКЛЮЧЕН[/] — обичайната верига.")
+                continue
+
             if user_input.lower() == "/status":
                 _ctx_used, ctx_remain, ctx_pct = get_context_stats()
-                console.print(f"[cyan]Модел:[/] {current_model_id}")
+                console.print(f"[cyan]Модел:[/] {current_model_id}"
+                              + ("  [green](кодинг режим — веригата е друга)[/]" if _CODING_MODE else ""))
                 console.print(f"[cyan]Доставчик:[/] {PROVIDERS[current_provider]['name']}")
                 console.print(f"[cyan]Време:[/] {get_elapsed_time()}")
                 console.print(f"[cyan]Токени:[/] ~{total_input_tokens + total_output_tokens} ({ctx_pct}%)")
@@ -964,6 +997,7 @@ def main():
                 help_table.add_column("Описание", style="white")
                 help_table.add_row("/model или /agent", "Смяна на AI модел/доставчик")
                 help_table.add_row("/models", f"Покажи целия fallback chain ({len(FALLBACK_CHAIN)} модела)")
+                help_table.add_row("/maxcoding", "Вкл./изкл. най-силните БЕЗПЛАТНИ модели за код")
                 help_table.add_row("/clear", "Нов разговор (изчиства историята)")
                 help_table.add_row("/status", "Системна информация и статистика")
                 help_table.add_row("/history", "Преглед и зареждане на стари сесии")

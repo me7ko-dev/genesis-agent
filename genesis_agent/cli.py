@@ -43,8 +43,10 @@ _FIX_USAGE = """Употреба:
   genesis fix --revert <път-до-проекта>
 
 Опции:
-  --max              ползвай платените модели (иска ANTHROPIC_API_KEY / OPENAI_API_KEY /
-                     DEEPSEEK_API_KEY; без ключ работи безплатната верига)
+  --maxcoding        най-силните БЕЗПЛАТНИ модели за код (по-бавно, повече квота,
+                     нула разход) — същото като /maxcoding в чата
+  --max              платените модели отпред (иска ANTHROPIC_API_KEY / OPENAI_API_KEY /
+                     DEEPSEEK_API_KEY); без такъв ключ пада на --maxcoding
   --test "команда"   как се пускат тестовете (по подразбиране се разпознава сам)
   --rounds N         таван на рундовете (по подразбиране 8)
   --no-diff          не печатай диффа накрая
@@ -77,6 +79,8 @@ def _fix(args: list[str]) -> int:
         a = rest[i]
         if a == "--max":
             quality = "max"
+        elif a in ("--maxcoding", "--coding"):
+            quality = "coding"
         elif a == "--no-diff":
             show_diff = False
         elif a == "--test" and i + 1 < len(rest):

@@ -188,6 +188,36 @@ def _load_chain() -> list[dict]:
     return [c for c in chain if c["provider"] in _PROVIDERS]
 
 
+def _load_coding_chain() -> list[dict]:
+    """
+    Най-силната БЕЗПЛАТНА верига за код (`models.coding_models`) — това, което
+    `/maxcoding` включва.
+
+    Нарочно отделна от нормалната верига, а не просто пренареждане по `size_b`:
+    „голям" и „добър в код" не са едно и също. Част от записите тук са
+    специализирани кодинг-агентни модели, по-малки от 550B общ модел и
+    по-подходящи точно за тази работа. За критериите и мерките зад подредбата
+    виж коментара в config.yaml.
+
+    Нула платени ключове, нула разход: същите безплатни доставчици, само друг
+    ред и по-строг подбор.
+    """
+    try:
+        cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return []
+    out: list[dict] = []
+    for entry in (cfg.get("models", {}) or {}).get("coding_models", []) or []:
+        provider, model = entry.get("provider"), entry.get("model")
+        if not provider or not model or provider not in _PROVIDERS:
+            continue
+        out.append({"provider": provider, "model": model,
+                    "size_b": entry.get("size_b", 0),
+                    "supports_tools": bool(entry.get("supports_tools", True)),
+                    "coding": True})
+    return out
+
+
 def _load_premium_chain() -> list[dict]:
     """
     Платените модели от config.yaml (`models.premium_models`).
@@ -238,9 +268,13 @@ class Brain:
         # size_b анотациите). Локалният мозък НЕ се филтрира — той си остава
         # последна резерва независимо от размера, по-добре слаб отговор,
         # отколкото никакъв при пълен облачен провал.
+        # Курираните слоеве (premium/coding) се добавят ПОД тази точка и затова
+        # не минават през филтъра — умишлено. size_b е сигнал за НЕкурирани
+        # безплатни модели, където размерът е всичко, с което разполагаме; при
+        # изрично избран модел той е грешният критерий (north-mini-code е 30B и
+        # е кодинг-агентен — за редакция на код бие доста по-голям общ модел).
         if min_size_b:
-            self.chain = [c for c in self.chain
-                          if c.get("premium") or c.get("size_b", 0) >= min_size_b]
+            self.chain = [c for c in self.chain if c.get("size_b", 0) >= min_size_b]
         # MAX качество (design note, 2026-07-30): платените модели минават ПРЕД
         # цялата безплатна верига, която остава като резерва — изтекла карта или
         # свършена квота значи по-слаб отговор, не спрял агент. Прилага се
@@ -249,6 +283,21 @@ class Brain:
         self.quality = (quality or os.environ.get("GENESIS_QUALITY") or "").strip().lower()
         self.premium: list[dict] = []
         self._premium_meta: dict[tuple[str, str], dict] = {}
+
+        # Безплатният кодинг слой (`/maxcoding`). Влиза и при quality="max" —
+        # така „максимално качество" остава смислена заявка и без платен ключ:
+        # платените отпред (ако има), после най-силните безплатни за код, после
+        # обикновената верига. Никой режим не оставя агента без резерва.
+        if self.quality in ("coding", "max"):
+            coding = _load_coding_chain()
+            if coding:
+                already = {(c["provider"], c["model"]) for c in coding}
+                self.chain = coding + [c for c in self.chain
+                                       if (c["provider"], c["model"]) not in already]
+                if self.quality == "coding":
+                    print(f"  [Brain] 🛠️  Кодинг режим: {coding[0]['model']} "
+                          f"+ още {len(coding) - 1} безплатни")
+
         if self.quality == "max":
             # Всеки платен доставчик има env ключ по дефиниция (само локалният
             # е с None) — но проверката е изрична, за да не мине мълчаливо
@@ -262,9 +311,9 @@ class Brain:
                 names = ", ".join(f"{c['provider']}/{c['model']}" for c in self.premium)
                 print(f"  [Brain] 💎 MAX режим: {names}")
             else:
-                print("  [Brain] ⚠️  MAX режим е поискан, но няма конфигуриран платен ключ "
-                      "(ANTHROPIC_API_KEY / OPENAI_API_KEY / DEEPSEEK_API_KEY) — "
-                      "работя с безплатната верига.")
+                print("  [Brain] 🛠️  MAX без платен ключ → най-силната БЕЗПЛАТНА "
+                      "кодинг верига (ANTHROPIC_API_KEY / OPENAI_API_KEY / "
+                      "DEEPSEEK_API_KEY биха я подсилили, но не са нужни).")
         # prefer_provider (за паралелна работа) — заковава worker-а към един
         # доставчик (отделна квота), реди неговите модели пръв и без локален.
         if prefer_provider:

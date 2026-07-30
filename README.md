@@ -161,12 +161,29 @@ genesis fix ~/code/theirs "..." --test "npm test -- --run"   # if autodetection 
 genesis fix --revert ~/code/theirs                           # undo everything
 ```
 
-### MAX mode
+### Coding mode — free
 
-The free chain handles most work. For the hardest cases — repairing unfamiliar
-code is the clearest one — a paid frontier model is measurably better, so
-`--max` puts one in front of the free chain (which stays as the fallback, so an
-expired card means a weaker answer, not a stopped agent):
+The default chain is a compromise between quality, speed and quota. That is the
+right compromise for conversation and the wrong one for editing code you did
+not write, so the stronger chain is a mode you turn on rather than the default:
+
+```bash
+genesis fix ~/code/theirs "..." --maxcoding    # or GENESIS_QUALITY=coding
+/maxcoding                                     # toggle inside the terminal chat
+```
+
+It costs nothing — same free providers, a different selection and order. The
+picks are by fitness for code, not by parameter count: two of them are
+purpose-built coding-agent models that are *smaller* than the general giants
+they sit next to, and every one is verified to support native tool-calling,
+which the repair loop leans on. You pay in speed and quota instead of money —
+these are the most contended free models — which is exactly why it is opt-in.
+
+### MAX mode — optional, paid
+
+`--max` puts a paid frontier model in front of everything else. **Without a paid
+key it degrades to the free coding chain above**, so "give me your best" stays a
+meaningful request whether or not you have a card on file:
 
 ```bash
 pip install "genesis-agent[premium]"     # Anthropic's SDK; the rest need nothing
