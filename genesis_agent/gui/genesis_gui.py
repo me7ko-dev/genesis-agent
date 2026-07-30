@@ -1033,7 +1033,13 @@ class App(Adw.Application):
 
 def main() -> int:
     core = Core()
-    return App(core).run(sys.argv)
+    # Only the program name, not sys.argv[1:] — via `genesis gui` that's
+    # literally the string "gui", which GApplication.run() otherwise treats
+    # as a file to open (the app doesn't implement do_open): a
+    # GLib-GIO-CRITICAL "This application can not open files" warning, then
+    # it exits without ever presenting a window. No CLI args are parsed by
+    # this app, so there's nothing real to lose here.
+    return App(core).run(sys.argv[:1])
 
 
 if __name__ == "__main__":

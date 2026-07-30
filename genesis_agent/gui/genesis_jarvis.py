@@ -602,7 +602,10 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
     app = App(core)
-    app.run(sys.argv)
+    # Only the program name — see the identical comment in genesis_gui.py's
+    # main(): via `genesis voice`, sys.argv[1:] is literally ["voice"],
+    # which GApplication.run() otherwise misreads as a file to open.
+    app.run(sys.argv[:1])
 
 
 if __name__ == "__main__":
