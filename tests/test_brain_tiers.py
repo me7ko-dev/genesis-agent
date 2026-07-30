@@ -32,7 +32,7 @@ def _no_local_probe(monkeypatch):
 
 @pytest.fixture
 def no_paid_keys(monkeypatch):
-    monkeypatch.setattr("genesis_agent.brain._load_keys", lambda: {})
+    monkeypatch.setattr("genesis_agent.brain._load_keys", dict)
 
 
 @pytest.fixture
