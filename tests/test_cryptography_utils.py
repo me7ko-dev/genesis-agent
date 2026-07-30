@@ -5,6 +5,8 @@ writes real key files to ~/.genesis by default and must never touch it."""
 from __future__ import annotations
 
 import pytest
+
+cryptography = pytest.importorskip("cryptography")
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 

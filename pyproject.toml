@@ -38,6 +38,7 @@ discord = ["discord.py>=2.3"]
 voice = ["faster-whisper>=1.0", "edge-tts>=6.1"]
 vision = ["mss>=9.0"]                    # then: ollama pull moondream
 quality = ["ruff>=0.6"]                  # code_validate.py pre-checks generated code
+signing = ["cryptography>=42"]           # cryptography_utils.py — RSA skill signing
 all = [
     "playwright>=1.40",
     "discord.py>=2.3",
@@ -45,6 +46,7 @@ all = [
     "edge-tts>=6.1",
     "mss>=9.0",
     "ruff>=0.6",
+    "cryptography>=42",
 ]
 
 [project.urls]
