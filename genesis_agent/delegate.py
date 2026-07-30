@@ -20,13 +20,13 @@ Sub-agent delegation:
 
 from __future__ import annotations
 
-import uuid
+import logging
+import sys
 import threading
 import time
-import sys
-import logging
+import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Optional, Callable, Dict, List
 from enum import Enum
 from pathlib import Path
 
@@ -48,14 +48,14 @@ class DelegatedTask:
     goal: str
     agent: str
     status: TaskStatus = TaskStatus.PENDING
-    result: Optional[str] = None
-    error: Optional[str] = None
-    started_at: Optional[float] = None
-    finished_at: Optional[float] = None
-    thread: Optional[threading.Thread] = field(default=None, repr=False)
+    result: str | None = None
+    error: str | None = None
+    started_at: float | None = None
+    finished_at: float | None = None
+    thread: threading.Thread | None = field(default=None, repr=False)
 
     @property
-    def elapsed(self) -> Optional[float]:
+    def elapsed(self) -> float | None:
         if self.started_at is None:
             return None
         end = self.finished_at or time.time()
@@ -68,15 +68,15 @@ class DelegatedTask:
 
 # ─── Глобален регистър ────────────────────────────────────────────────────────
 
-_TASKS: Dict[str, DelegatedTask] = {}
+_TASKS: dict[str, DelegatedTask] = {}
 _LOCK = threading.Lock()
 
 
-def get_status(task_id: str) -> Optional[DelegatedTask]:
+def get_status(task_id: str) -> DelegatedTask | None:
     return _TASKS.get(task_id)
 
 
-def list_tasks() -> List[DelegatedTask]:
+def list_tasks() -> list[DelegatedTask]:
     with _LOCK:
         return list(_TASKS.values())
 
@@ -97,7 +97,6 @@ def _run_shell(goal: str) -> str:
 def _run_skill(skill_name: str) -> str:
     """Изпълнява умение от skills/ директорията."""
     import sys
-    from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from genesis_agent.skill_loader import run_skill
     return run_skill(skill_name)
@@ -105,7 +104,6 @@ def _run_skill(skill_name: str) -> str:
 
 def _run_autonomous(goal: str) -> str:
     """Изпълнява задача чрез Genesis autonomous_loop."""
-    from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from genesis_agent.autonomous_loop import run_autonomous_loop
     out = run_autonomous_loop(goal, operator_id="DELEGATE")
@@ -115,7 +113,7 @@ def _run_autonomous(goal: str) -> str:
     raise RuntimeError(f"Autonomous loop неуспешен след {out.rounds} опита.")
 
 
-def _worker(task: DelegatedTask, timeout: int, on_done: Optional[Callable]):
+def _worker(task: DelegatedTask, timeout: int, on_done: Callable | None):
     """Вътрешен worker — изпълнява задачата в отделна нишка."""
     task.status = TaskStatus.RUNNING
     task.started_at = time.time()
@@ -155,7 +153,7 @@ def delegate_task(
     *,
     agent: str = "autonomous",
     timeout: int = 300,
-    on_done: Optional[Callable[[DelegatedTask], None]] = None,
+    on_done: Callable[[DelegatedTask], None] | None = None,
 ) -> DelegatedTask:
     """
     Делегира задача към под-агент и я изпълнява в отделна нишка.
@@ -186,7 +184,7 @@ def delegate_task(
     return task
 
 
-def wait_all(tasks: List[DelegatedTask], timeout: int = 300) -> List[DelegatedTask]:
+def wait_all(tasks: list[DelegatedTask], timeout: int = 300) -> list[DelegatedTask]:
     """
     Изчаква всички задачи да приключат (или да изтече timeout).
 
@@ -204,7 +202,7 @@ def wait_all(tasks: List[DelegatedTask], timeout: int = 300) -> List[DelegatedTa
     return tasks
 
 
-def run_parallel(goals: List[str], agent: str = "shell", timeout: int = 120) -> List[DelegatedTask]:
+def run_parallel(goals: list[str], agent: str = "shell", timeout: int = 120) -> list[DelegatedTask]:
     """
     Удобен helper — делегира всички задачи паралелно и изчаква.
 

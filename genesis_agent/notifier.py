@@ -14,20 +14,18 @@ genesis_agent/notifier.py — Multi-channel delivery за Genesis Agent.
 
 from __future__ import annotations
 
-import os
 import json
-import urllib.request
+import os
 import urllib.error
+import urllib.request
 from pathlib import Path
-from typing import Optional
 
+from genesis_agent.paths import CONFIG_PATH as _CONFIG_YAML
 
 # ─── Разрешаване на конфигурация (env → .env файлове → config.yaml) ────────────
 # Ядрото (autonomous loop и т.н.) не зарежда .env в os.environ, затова notifier-ът
 # сам намира webhook-а от същите източници, които ползва терминалният агент.
-
 from genesis_agent.paths import ENV_FILES as _ENV_FILES
-from genesis_agent.paths import CONFIG_PATH as _CONFIG_YAML
 
 
 def _from_env_files(key: str) -> str:
@@ -120,7 +118,7 @@ def _send_discord(text: str, webhook_url: str) -> bool:
 def send_message(
     text: str,
     *,
-    channels: Optional[list[str]] = None,
+    channels: list[str] | None = None,
 ) -> dict[str, bool]:
     """
     Изпраща съобщение към всички конфигурирани канали.

@@ -21,7 +21,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e .[dev]
-          pip install mypy
+          pip install mypy ruff
 
       - name: Everything imports and compiles
         run: |
@@ -34,6 +34,15 @@ jobs:
       # stale again.
       - name: Type check (mypy)
         run: python -m mypy genesis_agent/ genesis_skills.py genesis_terminal_agent.py
+
+      # Was never wired up before: `ruff` only ran INSIDE code_validate.py to
+      # vet LLM-generated code, never over the codebase's own source. 620
+      # pre-existing findings got fixed/annotated to reach a clean baseline
+      # (see pyproject.toml's [tool.ruff.lint] ignore comment for the two
+      # rules — BLE001/S110 — still carrying deliberate, documented debt).
+      # Gate it here so nothing new drifts back in.
+      - name: Lint (ruff)
+        run: python -m ruff check .
 
       # Real unit tests, isolated from the user's actual ~/.genesis data
       # (every test that touches persisted state monkeypatches the module's

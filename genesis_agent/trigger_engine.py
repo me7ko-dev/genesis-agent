@@ -18,11 +18,10 @@ genesis_agent/trigger_engine.py — Skill Trigger система за Genesis Ag
 
 from __future__ import annotations
 
-import re
 import logging
-from typing import Optional
+import re
 
-from genesis_agent.skill_loader import load_skills_index, skill_view, search_skills
+from genesis_agent.skill_loader import load_skills_index, search_skills, skill_view
 
 log = logging.getLogger("genesis.trigger")
 
@@ -39,7 +38,7 @@ class TriggerEngine:
     def __init__(self, threshold: int = TRIGGER_THRESHOLD):
         self.threshold = threshold
 
-    def match(self, query: str) -> Optional[dict]:
+    def match(self, query: str) -> dict | None:
         """
         Търси най-релевантното умение за дадена заявка.
 
@@ -56,9 +55,9 @@ class TriggerEngine:
         triggers = best.get("triggers", [])
         if isinstance(triggers, str):
             triggers = [triggers]
-        trigger_words = set(
+        trigger_words = {
             w for t in triggers for w in re.findall(r"[a-z0-9_]+", t.lower())
-        )
+        }
         name_words = set(re.findall(r"[a-z0-9_]+", best.get("name", "").lower()))
         score = len(query_words & (trigger_words | name_words))
 
@@ -68,7 +67,7 @@ class TriggerEngine:
             return best
         return None
 
-    def match_and_run(self, query: str) -> Optional[str]:
+    def match_and_run(self, query: str) -> str | None:
         """
         Търси умение и ако намери съвпадение — зарежда и описва го.
 

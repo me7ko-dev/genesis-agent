@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 genesis_agent.project_builder — генериране на МНОГОФАЙЛОВИ проекти (L2-3).
 
@@ -22,11 +21,10 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 
+from genesis_agent import dna, sandbox
 from genesis_agent.brain import Brain
 from genesis_agent.config import DATA_DIR, MAX_LLM_RETRIES
-from genesis_agent import sandbox, dna
 from genesis_agent.skills_manager import slugify
 
 # DATA_DIR (not PROJECT_ROOT): same reasoning as SKILLS_DIR/DATA_DIR in

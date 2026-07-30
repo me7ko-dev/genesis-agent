@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 Genesis Agent — нативно GTK4/libadwaita приложение за Linux.
 
@@ -22,7 +21,6 @@ from __future__ import annotations
 import os
 import sys
 import threading
-import time
 import traceback
 from collections import deque
 from datetime import datetime, timezone
@@ -33,7 +31,8 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, GLib, Gdk, Gio, GObject, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk
+
 
 # ── Намиране на инсталацията на Genesis ──────────────────────────────────────
 # GUI-то е фронтенд към СЪЩЕСТВУВАЩА инсталация (със скиловете и паметта на
@@ -58,8 +57,9 @@ PROJECT_ROOT = _find_project_root()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from genesis_agent.agent_core import Core, run_tool_loop  # noqa: E402
-import gui_sessions  # noqa: E402 — вижте модула: собствена persist-схема за Recents
+import gui_sessions
+
+from genesis_agent.agent_core import Core, run_tool_loop
 
 APP_ID = "org.genesis.Agent"
 TOOL_ROUND_CAP = 8
@@ -249,7 +249,7 @@ class ModelPicker(Gtk.MenuButton):
     заковава Core.pin_model за следващите обаждания. "Автоматично" връща
     pin_model на None (Brain-ът пак решава сам, top-down верига)."""
 
-    def __init__(self, core: "Core", on_pick) -> None:
+    def __init__(self, core: Core, on_pick) -> None:
         super().__init__(icon_name="applications-engineering-symbolic")
         self.set_tooltip_text("Смяна на модел")
         self.core = core
@@ -283,7 +283,7 @@ class ModelPicker(Gtk.MenuButton):
         auto_row = Gtk.ListBoxRow()
         auto_row.set_child(_label("🔀 Автоматично (най-добър наличен)",
                                    selectable=False, wrap=False))
-        setattr(auto_row, "genesis_model", None)
+        auto_row.genesis_model = None
         listbox.append(auto_row)
 
         try:
@@ -296,7 +296,7 @@ class ModelPicker(Gtk.MenuButton):
             suffix = f" · {int(size)}B" if size else ""
             row.set_child(_label(f"{m['model']}  ·  {m['provider']}{suffix}",
                                   selectable=False, wrap=False))
-            setattr(row, "genesis_model", (m["provider"], m["model"]))
+            row.genesis_model = m["provider"], m["model"]
             listbox.append(row)
 
         def on_row_activated(_lb: Gtk.ListBox, row: Gtk.ListBoxRow) -> None:
@@ -429,7 +429,7 @@ class WorkspacePanel(Gtk.Box):
             row = Gtk.ListBoxRow()
             rel = f.relative_to(self.workspace)
             row.set_child(_label(str(rel), css="file-row"))
-            setattr(row, "genesis_path", f)
+            row.genesis_path = f
             self.listbox.append(row)
         if not files:
             row = Gtk.ListBoxRow(selectable=False, activatable=False)
@@ -533,8 +533,8 @@ class Sidebar(Gtk.Box):
             box.append(_label(_relative_time(s["updated_at"]), selectable=False,
                                css="sidebar-row-time"))
             row.set_child(box)
-            setattr(row, "genesis_session_id", s["id"])
-            setattr(row, "genesis_title", s["title"].lower())
+            row.genesis_session_id = s["id"]
+            row.genesis_title = s["title"].lower()
             self.listbox.append(row)
 
     def _filter_row(self, row: Gtk.ListBoxRow) -> bool:

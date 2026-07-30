@@ -8,7 +8,6 @@ from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 
-
 from genesis_agent import dna, sandbox
 from genesis_agent.config import EXEC_TIMEOUT_SEC, SANDBOX_DIR
 
@@ -64,7 +63,7 @@ def run_python_inprocess(code: str) -> ExecResult:
     try:
         with redirect_stdout(buf_out), redirect_stderr(buf_err):
             ns: dict[str, object] = {"__name__": "__genesis_exec__"}
-            exec(compile(code, "<genesis_exec>", "exec"), ns, ns)
+            exec(compile(code, "<genesis_exec>", "exec"), ns, ns)  # noqa: S102 — trusted-snippet escape hatch, see docstring
     except Exception:
         rc = 1
         print(traceback.format_exc(), file=buf_err)

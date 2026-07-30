@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 genesis_agent.setup_wizard — first-run configuration.
 
@@ -17,10 +16,9 @@ from __future__ import annotations
 import datetime
 import os
 import sys
+from pathlib import Path
 
 import requests
-
-from pathlib import Path
 
 from genesis_agent.paths import ENV_FILE, ensure_genesis_home, read_env_files
 

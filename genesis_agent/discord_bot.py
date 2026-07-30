@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 genesis_agent/discord_bot.py — ДВУПОСОЧЕН Discord чат с Genesis Agent.
 
@@ -64,7 +63,7 @@ import time
 from collections import defaultdict, deque
 from datetime import date
 from pathlib import Path
-from typing import Any, Deque, Dict, List
+from typing import Any
 
 try:
     import discord
@@ -74,7 +73,9 @@ except ImportError:  # pragma: no cover
     )
 
 # ─── Конфигурация ─────────────────────────────────────────────────────────────
-from genesis_agent.paths import ENV_FILES as _ENV_FILES, _strip_inline_comment
+from genesis_agent.paths import ENV_FILES as _ENV_FILES
+from genesis_agent.paths import _strip_inline_comment
+
 _CONFIG_YAML = Path(__file__).resolve().parent.parent / "config.yaml"
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
@@ -178,12 +179,12 @@ def _load_persona() -> str:
     )
 
 
-def _chunk(text: str, size: int = _DISCORD_LIMIT) -> List[str]:
+def _chunk(text: str, size: int = _DISCORD_LIMIT) -> list[str]:
     """Реже дълъг отговор на части по границата на Discord лимита (по редове)."""
     text = text.strip() or "…"
     if len(text) <= size:
         return [text]
-    chunks: List[str] = []
+    chunks: list[str] = []
     cur = ""
     for line in text.splitlines(keepends=True):
         if len(cur) + len(line) > size:
@@ -210,12 +211,12 @@ class GenesisClient(discord.Client):
         super().__init__(intents=intents)
         self.persona = _load_persona()
         # Кратка памет за контекст, отделно за всеки канал.
-        self._history: Dict[int, Deque[Dict[str, str]]] = defaultdict(
+        self._history: dict[int, deque[dict[str, str]]] = defaultdict(
             lambda: deque(maxlen=_HISTORY_TURNS)
         )
         # 24/7 цикъл — състояние на background thread-а.
         self._loop_thread: threading.Thread | None = None
-        self._loop_stats: Dict[str, Any] = {
+        self._loop_stats: dict[str, Any] = {
             "missions": 0, "successes": 0, "started_at": None,
         }
 
@@ -265,7 +266,7 @@ class GenesisClient(discord.Client):
                 persona += "\n\n" + env_facts()
             except Exception:
                 pass
-        messages: List[Dict] = [{"role": "system", "content": persona}]
+        messages: list[dict] = [{"role": "system", "content": persona}]
         messages.extend(hist)
         messages.append({"role": "user", "content": user_text})
 
@@ -279,7 +280,7 @@ class GenesisClient(discord.Client):
                 total_tokens += (reply.usage or {}).get("total_tokens", 0)
             text = (reply.raw_text or "").strip()
             tool_calls = getattr(reply, "tool_calls", None)
-            assistant_msg: Dict = {"role": "assistant", "content": text}
+            assistant_msg: dict = {"role": "assistant", "content": text}
             if tool_calls:
                 assistant_msg["tool_calls"] = tool_calls
             messages.append(assistant_msg)
@@ -355,9 +356,9 @@ class GenesisClient(discord.Client):
         реален kill-switch (stop_event — за пръв път в проекта нещо действително
         го задейства/чете в цикъл). Sandbox policy "deny" — unattended default.
         """
-        from genesis_agent import sandbox, storage_monitor, goal_engine, budget
-        from genesis_agent.config import stop_event
+        from genesis_agent import budget, goal_engine, sandbox, storage_monitor
         from genesis_agent.autonomous_loop import run_autonomous_loop
+        from genesis_agent.config import stop_event
         from genesis_agent.notifier import notify
 
         interval_sec = max(60, int(os.environ.get("GENESIS_247_INTERVAL_MIN", "30")) * 60)
@@ -409,7 +410,8 @@ class GenesisClient(discord.Client):
             # нишката и в Discord. Промени по машината/проектите НЕ се правят
             # без надзор — решението за изпълнение остава на потребителя.
             try:
-                from genesis_agent import thread_worker, workspace_memory as wm
+                from genesis_agent import thread_worker
+                from genesis_agent import workspace_memory as wm
                 open_threads = wm.list_threads("open", 2)
             except Exception:
                 open_threads = []
@@ -459,7 +461,7 @@ class GenesisClient(discord.Client):
 
         notify("🔴 **Genesis 24/7 цикъл спрян.**")
 
-    async def _send(self, channel: "discord.abc.Messageable", text: str) -> None:
+    async def _send(self, channel: discord.abc.Messageable, text: str) -> None:
         for part in _chunk(text):
             await channel.send(part)
 
@@ -469,7 +471,7 @@ class GenesisClient(discord.Client):
         print(f"[discord_bot] ✅ Свързан като {self.user} (id={self.user.id})")
         print("[discord_bot] Пиши в DM или спомени бота в канал. !help за помощ.")
 
-    async def on_message(self, message: "discord.Message") -> None:
+    async def on_message(self, message: discord.Message) -> None:
         if message.author == self.user or message.author.bot:
             return
         # Owner-lock, fail-CLOSED: без зададен GENESIS_DISCORD_OWNER_ID ботът

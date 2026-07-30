@@ -1,7 +1,6 @@
 import json
 import os
 import time
-from pathlib import Path
 
 from genesis_agent.config import DATA_DIR
 

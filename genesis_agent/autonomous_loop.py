@@ -7,12 +7,12 @@ from typing import Any
 
 from genesis_agent import dna
 from genesis_agent.brain import Brain
-from genesis_agent.skill_loader import SKILLS_ROOT
 from genesis_agent.config import MAX_LLM_RETRIES, PROJECT_ROOT
 from genesis_agent.executor import format_failure_for_brain, run_python_subprocess
+from genesis_agent.local_repair_agent import emergency_repair
+from genesis_agent.skill_loader import SKILLS_ROOT
 from genesis_agent.skills_manager import save_skill, slugify
 from genesis_agent.storage_monitor import check_storage, human_gb
-from genesis_agent.local_repair_agent import emergency_repair
 from genesis_agent.tool_schemas import MISSION_TOOLS
 
 
@@ -175,8 +175,9 @@ def _run_autonomous_loop_impl(
             try:
                 import sys as _sys
                 _sys.path.insert(0, str(PROJECT_ROOT))
-                import genesis_skills
                 import json as _json
+
+                import genesis_skills
                 for tc in reply.tool_calls:
                     fn = tc.get("function", {}) or {}
                     name = fn.get("name", "")
@@ -237,7 +238,6 @@ def _run_autonomous_loop_impl(
         if not reply.code:
             raw = str(reply.raw_text)
             if raw.startswith("Error:"):
-                import time
                 print(f"\n[КРИТИЧНА ГРЕШКА] Сървърът върна: {raw}")
                 # Спира веднага - няма смисъл да въртим 8 рунда при грешка на връзка
                 print("[!] Прекратявам опитите. Провери модела и повтори (/модел)")
@@ -348,7 +348,7 @@ def _run_autonomous_loop_impl(
             brain.escalate()
 
         # BROADCAST THOUGHT: FAILURE / SELF-CORRECT
-        report_thought(f"❌ Грешка при изпълнението. Анализирам проблема и започвам самокорекция...")
+        report_thought("❌ Грешка при изпълнението. Анализирам проблема и започвам самокорекция...")
         
         messages.append({"role": "assistant", "content": reply.raw_text})
         messages.append(
@@ -401,7 +401,7 @@ def _run_autonomous_loop_impl(
             except Exception as save_err:
                 print(f"  [\u0420\u0415\u041c\u041e\u041d\u0422] \u0413\u0440\u0435\u0448\u043a\u0430 \u043f\u0440\u0438 \u0437\u0430\u043f\u0430\u0437\u0432\u0430\u043d\u0435: {save_err}")
         else:
-            print(f"  [\u0420\u0415\u041c\u041e\u041d\u0422 \u041d\u0415\u0423\u0421\u041f\u0415\u0428\u0415\u041d] \u041d\u0438\u0442\u043e pattern fixes, \u043d\u0438\u0442\u043e LLM \u043d\u0435 \u043f\u043e\u043c\u043e\u0433\u043d\u0430\u0445а.")
+            print("  [\u0420\u0415\u041c\u041e\u041d\u0422 \u041d\u0415\u0423\u0421\u041f\u0415\u0428\u0415\u041d] \u041d\u0438\u0442\u043e pattern fixes, \u043d\u0438\u0442\u043e LLM \u043d\u0435 \u043f\u043e\u043c\u043e\u0433\u043d\u0430\u0445а.")
 
     return LoopOutcome(
         success=False,

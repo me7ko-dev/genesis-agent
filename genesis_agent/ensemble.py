@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 genesis_agent.ensemble — Ensemble качество (Scale-4): ЕДНА цел, НЯКОЛКО модела
 паралелно, пази се само НАЙ-ДОБРИЯТ verified резултат.
@@ -29,12 +28,12 @@ from dataclasses import dataclass, field
 
 from genesis_agent import dna
 from genesis_agent.brain import Brain
-from genesis_agent.skill_loader import SKILLS_ROOT
 from genesis_agent.config import PROJECT_ROOT
 from genesis_agent.executor import run_python_subprocess
+from genesis_agent.skill_loader import SKILLS_ROOT
 from genesis_agent.skills_manager import save_skill, slugify
-from genesis_agent.verifier import verify_skill
 from genesis_agent.tool_schemas import MISSION_TOOLS
+from genesis_agent.verifier import verify_skill
 
 # Ensemble е single-shot по дизайн (ширината на ансамбъла Е retry
 # механизмът — виж модулния docstring) — но native USE_SKILL резолюция
@@ -102,8 +101,9 @@ def _generate_one(goal: str, provider: str, rag_context: str, system_content: st
             try:
                 import sys as _sys
                 _sys.path.insert(0, str(PROJECT_ROOT))
-                import genesis_skills
                 import json as _json
+
+                import genesis_skills
                 for tc in reply.tool_calls:
                     fn = tc.get("function", {}) or {}
                     name = fn.get("name", "")

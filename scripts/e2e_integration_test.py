@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 End-to-end integration тест за свързаната Genesis система.
 
@@ -22,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import genesis_skills
-from genesis_agent import sandbox, conversation_memory, skills_manager
+from genesis_agent import conversation_memory, sandbox, skills_manager
 from genesis_agent import episodic_memory as em
 from genesis_agent.skill_loader import reload_skills_index, search_skills
 
@@ -94,6 +93,7 @@ check("ново умение е видимо от trigger_engine", test_slug in 
 
 # ── Почистване на тестовите артефакти ─────────────────────────────
 import json
+
 conversation_memory.clear_session() if n0 == 0 else None
 skills_json = ROOT / "genesis_agent" / "skills" / "skills.json"
 idx = json.loads(skills_json.read_text(encoding="utf-8"))

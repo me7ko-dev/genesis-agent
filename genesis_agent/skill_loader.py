@@ -14,11 +14,12 @@ Skill loader — reads the Markdown skill format used by this project.
 from __future__ import annotations
 
 import ast
-import re
 import json
-import yaml
+import re
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Any
+
+import yaml
 
 from genesis_agent.config import SKILLS_DIR
 
@@ -29,10 +30,10 @@ from genesis_agent.config import SKILLS_DIR
 # look inside site-packages for a file that actually lives under the user's
 # home directory.
 SKILLS_ROOT = SKILLS_DIR.parent
-_SKILLS_INDEX_CACHE: Optional[Dict[str, Dict[str, Any]]] = None
+_SKILLS_INDEX_CACHE: dict[str, dict[str, Any]] | None = None
 
 
-def reload_skills_index() -> Dict[str, Dict[str, Any]]:
+def reload_skills_index() -> dict[str, dict[str, Any]]:
     """Принудително презарежда skills.json индекса от диска."""
     global _SKILLS_INDEX_CACHE
     index_path = SKILLS_DIR / "skills.json"
@@ -48,14 +49,14 @@ def reload_skills_index() -> Dict[str, Dict[str, Any]]:
     return _SKILLS_INDEX_CACHE
 
 
-def load_skills_index() -> Dict[str, Dict[str, Any]]:
+def load_skills_index() -> dict[str, dict[str, Any]]:
     """Зарежда (с кеш) skills.json индекса."""
     if _SKILLS_INDEX_CACHE is None:
         reload_skills_index()
     return _SKILLS_INDEX_CACHE  # type: ignore[return-value]
 
 
-def skill_view(name: str, *, file_path: Optional[Path] = None) -> Dict[str, Any]:
+def skill_view(name: str, *, file_path: Path | None = None) -> dict[str, Any]:
     """
     Зарежда .md файл на умение и връща YAML метаданни + код.
 
@@ -87,7 +88,7 @@ def skill_view(name: str, *, file_path: Optional[Path] = None) -> Dict[str, Any]
 
     # Извличане на YAML frontmatter
     fm_match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
-    metadata: Dict[str, Any] = {}
+    metadata: dict[str, Any] = {}
     if fm_match:
         try:
             metadata = yaml.safe_load(fm_match.group(1)) or {}
@@ -134,7 +135,7 @@ def _keywords(text: str) -> set[str]:
     }
 
 
-def search_skills(query: str, top_n: int = 5, *, use_semantic: bool = True) -> List[Dict[str, Any]]:
+def search_skills(query: str, top_n: int = 5, *, use_semantic: bool = True) -> list[dict[str, Any]]:
     """
     Търси умения по keyword overlap (бързо, точно за буквални съвпадения), после
     допълва с семантично търсене (genesis_agent.embeddings) за перифразирани заявки,
@@ -143,13 +144,13 @@ def search_skills(query: str, top_n: int = 5, *, use_semantic: bool = True) -> L
     """
     index = load_skills_index()
     query_words = _keywords(query)
-    scored: List[tuple[int, Dict[str, Any]]] = []
+    scored: list[tuple[int, dict[str, Any]]] = []
 
     for skill in index.values():
         triggers = skill.get("triggers", [])
         if isinstance(triggers, str):
             triggers = [triggers]
-        trigger_words = set(w for t in triggers for w in _keywords(t))
+        trigger_words = {w for t in triggers for w in _keywords(t)}
         # Добавяме думи от name и description
         name_words = _keywords(skill.get("name", ""))
         desc_words = _keywords(skill.get("description", ""))
@@ -181,14 +182,14 @@ def search_skills(query: str, top_n: int = 5, *, use_semantic: bool = True) -> L
     return results[:top_n]
 
 
-def _extract_signatures(code: str) -> List[str]:
+def _extract_signatures(code: str) -> list[str]:
     """Топ-ниво def/class сигнатури от кода на умение — какво реално може да
     се извика, показано на модела ПРЕДИ да пише driver код по памет/предположение."""
     try:
         tree = ast.parse(code)
     except SyntaxError:
         return []
-    sigs: List[str] = []
+    sigs: list[str] = []
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             args = [a.arg for a in node.args.args]
@@ -202,7 +203,7 @@ def _extract_signatures(code: str) -> List[str]:
     return sigs
 
 
-def resolve_skill(name_or_query: str) -> Tuple[Optional[str], List[Dict[str, Any]]]:
+def resolve_skill(name_or_query: str) -> tuple[str | None, list[dict[str, Any]]]:
     """
     Резолвира умение по ТОЧНО име (skills.json ключ), а ако липсва — по
     свободен текст (fuzzy/семантично търсене през search_skills).
@@ -279,6 +280,7 @@ def run_skill(name: str, **exec_kwargs) -> str:
     Връща stdout на процеса.
     """
     import json as _json
+
     from genesis_agent import sandbox
 
     data = skill_view(name)
@@ -297,7 +299,6 @@ def run_skill(name: str, **exec_kwargs) -> str:
 
 
 if __name__ == "__main__":
-    from pprint import pprint
     idx = load_skills_index()
     print(f"✅ Заредени умения: {len(idx)}")
 

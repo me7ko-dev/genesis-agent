@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 genesis_agent.orchestrator — мулти-агентна оркестрация (L2-1).
 
@@ -21,14 +20,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from genesis_agent.brain import Brain
-from genesis_agent.executor import run_python_subprocess
-from genesis_agent.verifier import verify_skill
-from genesis_agent.skills_manager import save_skill, slugify
-from genesis_agent.skill_loader import SKILLS_ROOT
-from genesis_agent.config import PROJECT_ROOT, MAX_LLM_RETRIES
 from genesis_agent import dna
+from genesis_agent.brain import Brain
+from genesis_agent.config import MAX_LLM_RETRIES, PROJECT_ROOT
+from genesis_agent.executor import run_python_subprocess
+from genesis_agent.skill_loader import SKILLS_ROOT
+from genesis_agent.skills_manager import save_skill, slugify
 from genesis_agent.tool_schemas import MISSION_TOOLS
+from genesis_agent.verifier import verify_skill
 
 
 @dataclass
@@ -146,8 +145,9 @@ def run_orchestrated(goal: str, *, max_rounds: int | None = None,
             try:
                 import sys as _sys
                 _sys.path.insert(0, str(PROJECT_ROOT))
-                import genesis_skills
                 import json as _json
+
+                import genesis_skills
                 for tc in reply.tool_calls:
                     fn = tc.get("function", {}) or {}
                     name = fn.get("name", "")

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 Genesis Jarvis — гласов фронтенд към СЪЩОТО ядро (design note, 2026-07-27).
 
@@ -51,7 +50,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gdk, GLib, Gio, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
 
 def _find_project_root() -> Path:
@@ -70,8 +69,13 @@ GUI_DIR = Path(__file__).resolve().parent
 if str(GUI_DIR) not in sys.path:
     sys.path.insert(0, str(GUI_DIR))
 
-from genesis_agent.agent_core import Core, run_tool_loop  # noqa: E402
-from genesis_gui import CSS, MessageWidget, ToolWidget  # noqa: E402 — преизползваме widget-ите
+from genesis_gui import (
+    CSS,
+    MessageWidget,
+    ToolWidget,
+)
+
+from genesis_agent.agent_core import Core, run_tool_loop
 
 APP_ID = "org.genesis.Jarvis"
 # Гласът е конфигурируем: закован български глас караше Jarvis да говори
@@ -339,7 +343,7 @@ class Window(Adw.ApplicationWindow):
 
     def _transcribe_worker(self, wav_path: Path) -> None:
         try:
-            segments, info = self._whisper.transcribe(str(wav_path))
+            segments, _info = self._whisper.transcribe(str(wav_path))
             text = " ".join(s.text for s in segments).strip()
         except Exception as e:
             text = ""
@@ -449,14 +453,14 @@ class Window(Adw.ApplicationWindow):
             r = subprocess.run(
                 [sys.executable, "-m", "edge_tts", "--voice", TTS_VOICE,
                  "--text", text, "--write-media", path],
-                capture_output=True, timeout=20, text=True,
+                capture_output=True, timeout=20, text=True, check=False,
             )
             if r.returncode != 0:
                 return False, (r.stderr or r.stdout or f"rc={r.returncode}").strip()[:200]
             if Path(path).stat().st_size == 0:
                 return False, "празен mp3 файл"
             play = subprocess.run(["ffplay", "-nodisp", "-autoexit", "-loglevel", "error", path],
-                                  capture_output=True, timeout=60, text=True)
+                                  capture_output=True, timeout=60, text=True, check=False)
             if play.returncode != 0:
                 # mp3-ят е реален (сигурен признак, че edge-tts е успял), но
                 # възпроизвеждането е гръмнало — това НЕ е причина да минаваме
@@ -473,7 +477,7 @@ class Window(Adw.ApplicationWindow):
     def _speak_fallback(self, text: str) -> None:
         try:
             subprocess.run(["spd-say", "-l", TTS_FALLBACK_LANG, "-w", text],
-                           capture_output=True, timeout=60)
+                           capture_output=True, timeout=60, check=False)
         except Exception as e:
             print(f"[jarvis] и офлайн резервата гръмна: {e}", file=sys.stderr)
 

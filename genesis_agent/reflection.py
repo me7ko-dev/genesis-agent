@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 genesis_agent.reflection — мета-обучение: агентът се учи от миналите си грешки.
 
@@ -19,21 +18,21 @@ from genesis_agent import episodic_memory as _em
 
 # Образец на грешка → кратък урок. Проверяват се в реда на списъка.
 _ERROR_LESSONS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"ModuleNotFoundError|No module named", re.I),
+    (re.compile(r"ModuleNotFoundError|No module named", re.IGNORECASE),
      "Липсващ пакет е чест проблем — пиши със СТАНДАРТНАТА библиотека, без външни зависимости."),
-    (re.compile(r"no passing self-test|has NO passing self-test|self.test", re.I),
+    (re.compile(r"no passing self-test|has NO passing self-test|self.test", re.IGNORECASE),
      "Винаги слагай assert-based self-test най-отдолу, който проверява целта и печата 'OK'."),
-    (re.compile(r"AssertionError", re.I),
+    (re.compile(r"AssertionError", re.IGNORECASE),
      "Логиката често не минава собствения тест — провери граничните случаи преди да върнеш кода."),
-    (re.compile(r"SyntaxError|IndentationError", re.I),
+    (re.compile(r"SyntaxError|IndentationError", re.IGNORECASE),
      "Синтактични грешки са чести — върни един валиден ```python``` блок, внимавай с отстъпите."),
-    (re.compile(r"Timeout|timed out", re.I),
+    (re.compile(r"Timeout|timed out", re.IGNORECASE),
      "Избягвай безкрайни цикли/тежки изчисления — кодът трябва да приключва бързо."),
-    (re.compile(r"SANDBOX (BLOCKED|DENIED)|blocked", re.I),
+    (re.compile(r"SANDBOX (BLOCKED|DENIED)|blocked", re.IGNORECASE),
      "Избягвай опасни операции (изтриване на системни пътища, os.system) — те се блокират."),
-    (re.compile(r"NameError|not defined", re.I),
+    (re.compile(r"NameError|not defined", re.IGNORECASE),
      "Дефинирай всичко, което ползваш — без недекларирани имена."),
-    (re.compile(r"FileNotFoundError", re.I),
+    (re.compile(r"FileNotFoundError", re.IGNORECASE),
      "Не разчитай на външни файлове — създавай нужните данни в самия скрипт."),
 ]
 

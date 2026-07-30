@@ -123,5 +123,5 @@ def test_real_ruff_flags_syntax_error() -> None:
 
 @pytest.mark.skipif(_ruff_missing, reason="ruff not installed")
 def test_real_ruff_passes_clean_code() -> None:
-    ok, detail = code_validate.validate_code_with_ruff("def f():\n    return 1\n")
+    ok, _detail = code_validate.validate_code_with_ruff("def f():\n    return 1\n")
     assert ok is True

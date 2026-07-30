@@ -19,19 +19,18 @@ genesis_agent/web_search.py — Browser/Web Interaction за Genesis Agent.
 
 from __future__ import annotations
 
-import re
-import json
-import time
 import hashlib
-import urllib.request
-import urllib.parse
-import urllib.error
+import json
 import logging
+import re
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from html.parser import HTMLParser
-from typing import Optional
-from pathlib import Path
+from typing import ClassVar
 
-from genesis_agent.config import DATA_DIR, PROJECT_ROOT
+from genesis_agent.config import DATA_DIR
 
 log = logging.getLogger("genesis.web_search")
 
@@ -45,7 +44,7 @@ def _cache_key(text: str) -> str:
     return hashlib.md5(text.encode()).hexdigest()
 
 
-def _cache_get(key: str) -> Optional[str]:
+def _cache_get(key: str) -> str | None:
     CACHE_DIR.mkdir(exist_ok=True)
     path = CACHE_DIR / f"{key}.json"
     if not path.exists():
@@ -72,7 +71,7 @@ def _cache_set(key: str, content: str):
 
 class _TextExtractor(HTMLParser):
     """Извлича чист текст от HTML."""
-    SKIP_TAGS = {"script", "style", "head", "nav", "footer", "aside"}
+    SKIP_TAGS: ClassVar[set[str]] = {"script", "style", "head", "nav", "footer", "aside"}
 
     def __init__(self):
         super().__init__()

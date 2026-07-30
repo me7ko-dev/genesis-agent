@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 genesis_agent.goal_engine — двигател на цели за автономното самонадграждане.
 
@@ -19,10 +18,8 @@ from __future__ import annotations
 
 import json
 import re
-from collections import Counter
-from pathlib import Path
 
-from genesis_agent.config import DATA_DIR, PROJECT_ROOT, SKILLS_DIR
+from genesis_agent.config import DATA_DIR, SKILLS_DIR
 from genesis_agent.skills_manager import slugify
 
 SKILLS_JSON = SKILLS_DIR / "skills.json"
@@ -34,8 +31,8 @@ _DOMAINS: dict[str, dict] = {
         "keywords": ["retry", "circuit_breaker", "timeout", "backoff", "rate_limit",
                      "health_check", "self_heal", "watchdog", "graceful"],
         "templates": [
-            "Implement a production-grade {topic} utility in pure Python with type hints, "
-            "docstring, and an inline assert-based self-test that prints OK.",
+            ("Implement a production-grade {topic} utility in pure Python with type hints, "
+             "docstring, and an inline assert-based self-test that prints OK."),
         ],
         "topics": ["exponential backoff retry", "circuit breaker", "token-bucket rate limiter",
                    "deadline/timeout wrapper", "bulkhead isolation", "health-check aggregator",
@@ -52,8 +49,8 @@ _DOMAINS: dict[str, dict] = {
         "keywords": ["csv", "json", "parse", "clean", "dedupe", "transform", "validate",
                      "schema", "flatten", "diff"],
         "templates": [
-            "Build a self-contained (standard-library-only) {topic} module with a docstring, "
-            "type hints and an assert-based self-test that prints OK.",
+            ("Build a self-contained (standard-library-only) {topic} module with a docstring, "
+             "type hints and an assert-based self-test that prints OK."),
         ],
         "topics": ["CSV schema validator", "JSON diff tool", "streaming line deduplicator",
                    "nested-dict flattener/unflattener", "fixed-width record parser",
@@ -74,8 +71,8 @@ _DOMAINS: dict[str, dict] = {
         "keywords": ["regex", "token", "nlp", "extract", "entity", "slug", "template",
                      "markdown", "levenshtein", "fuzzy"],
         "templates": [
-            "Create a stdlib-only {topic} with type hints, docstring, and an assert self-test "
-            "printing OK.",
+            ("Create a stdlib-only {topic} with type hints, docstring, and an assert self-test "
+             "printing OK."),
         ],
         "topics": ["regex entity extractor (dates/amounts/emails)", "Levenshtein distance function",
                    "simple template engine", "markdown table generator", "text tokenizer",
@@ -94,8 +91,8 @@ _DOMAINS: dict[str, dict] = {
         "keywords": ["sort", "search", "graph", "tree", "cache", "lru", "heap", "trie",
                      "dijkstra", "dynamic_programming"],
         "templates": [
-            "Implement {topic} from scratch (stdlib only) with type hints, docstring and an "
-            "assert-based self-test that prints OK.",
+            ("Implement {topic} from scratch (stdlib only) with type hints, docstring and an "
+             "assert-based self-test that prints OK."),
         ],
         "topics": ["an LRU cache", "a trie with prefix search", "Dijkstra shortest path",
                    "a min-heap priority queue", "binary search variants", "topological sort",
@@ -110,8 +107,8 @@ _DOMAINS: dict[str, dict] = {
         "keywords": ["async", "queue", "worker", "pool", "thread", "lock", "semaphore",
                      "pipeline", "producer", "consumer"],
         "templates": [
-            "Build a stdlib-only {topic} with type hints, docstring and an assert self-test "
-            "printing OK.",
+            ("Build a stdlib-only {topic} with type hints, docstring and an assert self-test "
+             "printing OK."),
         ],
         "topics": ["asyncio producer-consumer queue", "thread pool with bounded workers",
                    "a simple actor mailbox", "a debounce/throttle decorator",
@@ -128,8 +125,8 @@ _DOMAINS: dict[str, dict] = {
         "keywords": ["hash", "encrypt", "sanitize", "csrf", "sign", "token", "escape",
                      "password", "sql_injection"],
         "templates": [
-            "Implement a stdlib-only {topic} with type hints, docstring, and an assert-based "
-            "self-test that prints OK.",
+            ("Implement a stdlib-only {topic} with type hints, docstring, and an assert-based "
+             "self-test that prints OK."),
         ],
         "topics": ["constant-time string comparison utility",
                    "HMAC-based token signer/verifier",
@@ -144,8 +141,8 @@ _DOMAINS: dict[str, dict] = {
         "weight": 2,
         "keywords": ["argparse", "cli", "subcommand", "dotenv", "progress_bar", "logging_setup"],
         "templates": [
-            "Build a stdlib-only {topic} with type hints, docstring, and an assert-based "
-            "self-test that prints OK.",
+            ("Build a stdlib-only {topic} with type hints, docstring, and an assert-based "
+             "self-test that prints OK."),
         ],
         "topics": ["argparse-based CLI with subcommands",
                    "layered config loader (env over file over defaults)",

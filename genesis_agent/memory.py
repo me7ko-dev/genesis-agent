@@ -29,15 +29,14 @@ Cross-session memory interface, свързан директно с episodic_memo
 
 from __future__ import annotations
 
-import sqlite3
-import json
 import datetime
+import json
 import logging
-from pathlib import Path
-from typing import Any, Optional, List, Dict
+import sqlite3
+from typing import Any
 
-from genesis_agent.config import DATA_DIR
 import genesis_agent.episodic_memory as episodic
+from genesis_agent.config import DATA_DIR
 
 log = logging.getLogger("genesis.memory")
 
@@ -116,7 +115,7 @@ def memory_delete(key: str) -> bool:
         return cursor.rowcount > 0
 
 
-def memory_list_keys(prefix: str = "") -> List[str]:
+def memory_list_keys(prefix: str = "") -> list[str]:
     """Връща всички ключове (с опционален prefix филтър)."""
     with _get_conn() as conn:
         if prefix:
@@ -129,7 +128,7 @@ def memory_list_keys(prefix: str = "") -> List[str]:
     return [r[0] for r in rows]
 
 
-def memory_dump() -> Dict[str, Any]:
+def memory_dump() -> dict[str, Any]:
     """Връща всички key/value двойки като речник."""
     with _get_conn() as conn:
         rows = conn.execute("SELECT key, value FROM kv_store ORDER BY key;").fetchall()
@@ -148,8 +147,8 @@ def memory_record_episode(
     goal: str,
     outcome: str,
     skill_path: str = "unknown",
-    lessons: Optional[List[str]] = None,
-    tags: Optional[List[str]] = None,
+    lessons: list[str] | None = None,
+    tags: list[str] | None = None,
 ) -> None:
     """Записва епизод в episodic_memory (wrapper за удобство)."""
     episodic.record_episode(
@@ -162,7 +161,7 @@ def memory_record_episode(
     log.debug(f"[memory] Епизод записан: {goal[:60]}")
 
 
-def memory_search(query: str, top_k: int = 5) -> List[Dict]:
+def memory_search(query: str, top_k: int = 5) -> list[dict]:
     """
     Семантично търсене в episodic memory.
 

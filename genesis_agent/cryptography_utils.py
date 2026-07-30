@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 import os
 from pathlib import Path
+
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 # Key storage — the current user's ~/.genesis, overridable via GENESIS_KEY_DIR.
 KEY_DIR = Path(os.environ.get("GENESIS_KEY_DIR", Path.home() / ".genesis"))

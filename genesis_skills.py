@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 genesis_skills.py — Мостът между genesis_terminal_agent.py и genesis_agent/ ядрото.
 
@@ -29,7 +28,7 @@ from __future__ import annotations
 
 import re
 import sys
-from typing import Callable
+from collections.abc import Callable
 from pathlib import Path
 
 # Уверяваме се, че genesis_agent/ пакетът е импортируем (мостът стои в root-а).
@@ -37,7 +36,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from genesis_agent import sandbox  # noqa: E402
+from genesis_agent import sandbox
 
 # Паметта/уеб търсенето са meko-опционални — ако липсва зависимост (напр.
 # scikit-learn), мостът пак работи, само без логване/търсене.
@@ -399,7 +398,7 @@ _BROWSER_READ_RE = re.compile(r"\[BROWSER_READ\]")
 # TASK_LIST без аргумент — най-честата форма ([TASK_LIST] = отворените нишки).
 _TASK_LIST_RE = re.compile(r"\[TASK_LIST\]")
 
-_SIMPLE_DISPATCH: dict[str, "Callable[..., str]"] = {
+_SIMPLE_DISPATCH: dict[str, Callable[..., str]] = {
     "READ_FILE": _tool_read_file,
     "RUN_CMD": _tool_run_cmd,
     "ASK_USER": _tool_ask_user,

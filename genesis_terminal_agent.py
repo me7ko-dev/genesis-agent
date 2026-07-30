@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 Genesis Agent — the terminal frontend.
 
@@ -13,20 +12,27 @@ only what is genuinely terminal-specific: the /model picker, the status bar,
 rich rendering, and the interactive sandbox confirmation prompt.
 """
 
-import os, sys, json, re, subprocess, threading, time, urllib.request, glob, shutil
-import yaml
+import glob
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import urllib.request
 from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from rich.console import Console
-from rich.live import Live
-from rich.panel import Panel
-from rich.text import Text
-from rich.table import Table
-from rich.markdown import Markdown
-from rich import box
+
 import requests
+import yaml
+from rich import box
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
 
 try:
     import genesis_skills
@@ -84,7 +90,11 @@ except Exception:
 # All paths come from genesis_agent.paths, which derives them from the
 # installed package and the user's own home — nothing machine-specific here.
 from genesis_agent.paths import (
-    CONFIG_PATH, ENV_FILES, workspace_dir, history_dir, _strip_inline_comment,
+    CONFIG_PATH,
+    ENV_FILES,
+    _strip_inline_comment,
+    history_dir,
+    workspace_dir,
 )
 
 try:
@@ -277,7 +287,7 @@ def fetch_models(provider_key):
                 if models:
                     MODELS_CACHE[provider_key] = models
                     return models
-        except: pass
+        except Exception: pass
     elif p["type"] == "gemini":
         try:
             r = requests.get(f"{p['base_url']}?key={key}", timeout=10)
@@ -286,7 +296,7 @@ def fetch_models(provider_key):
                           if "generateContent" in m.get("supportedGenerationMethods",[])]
                 MODELS_CACHE[provider_key] = models
                 return models
-        except: pass
+        except Exception: pass
     elif p["type"] == "ollama":
         # Local Ollama — use /api/tags
         try:
@@ -299,7 +309,7 @@ def fetch_models(provider_key):
                 else:
                     MODELS_CACHE[provider_key] = ["__no_models__"]
                     return MODELS_CACHE[provider_key]
-        except:
+        except Exception:
             pass
     MODELS_CACHE[provider_key] = FALLBACKS.get(provider_key, [])
     return MODELS_CACHE[provider_key]
@@ -339,7 +349,7 @@ def call_openai_compatible(messages, provider_key, model_id, tools=None):
         try:
             err_body = r.json()
             err_msg = err_body.get("error", {}).get("message", r.text[:120])
-        except:
+        except Exception:
             err_msg = r.text[:120]
         raise RuntimeError(f"HTTP_{r.status_code}: {err_msg}")
     except RuntimeError:
@@ -368,7 +378,7 @@ def call_gemini(messages, model_id):
                 "completion_tokens": usage.get("candidatesTokenCount", 0),
             }
         try: return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-        except: return "[Грешка: Празен отговор]"
+        except Exception: return "[Грешка: Празен отговор]"
     return f"[Грешка {r.status_code}]"
 
 def call_ollama(messages, model_id):
@@ -588,7 +598,7 @@ def get_system_info() -> dict:
         with open("/proc/loadavg") as f:
             load = f.read().split()[:3]
         info["cpu_load"] = f"{load[0]} {load[1]} {load[2]}"
-    except:
+    except Exception:
         info["cpu_load"] = "N/A"
     # RAM
     try:
@@ -600,7 +610,7 @@ def get_system_info() -> dict:
         used_mb  = total_mb - free_mb
         info["ram"] = f"{used_mb}MB / {total_mb}MB"
         info["ram_pct"] = int(used_mb / total_mb * 100) if total_mb else 0
-    except:
+    except Exception:
         info["ram"] = "N/A"
         info["ram_pct"] = 0
     # Ollama
@@ -614,7 +624,7 @@ def get_system_info() -> dict:
         else:
             info["ollama"] = "❌ Не работи"
             info["ollama_ok"] = False
-    except:
+    except Exception:
         info["ollama"] = "❌ Не работи"
         info["ollama_ok"] = False
     # GPU
@@ -628,7 +638,7 @@ def get_system_info() -> dict:
                 info["gpu"] = f"{parts[0]}  {parts[1]}MB/{parts[2]}MB  {parts[3]}°C"
             else:
                 info["gpu"] = out
-        except:
+        except Exception:
             info["gpu"] = "N/A"
     else:
         info["gpu"] = "Няма NVIDIA GPU"
@@ -638,7 +648,7 @@ def get_system_info() -> dict:
         total_gb = (st.f_blocks * st.f_frsize) // (1024**3)
         free_gb  = (st.f_bfree  * st.f_frsize) // (1024**3)
         info["disk"] = f"{free_gb}GB свободни / {total_gb}GB"
-    except:
+    except Exception:
         info["disk"] = "N/A"
     return info
 
@@ -726,7 +736,7 @@ def show_status_bar():
 
 def update_status_in_place():
     """Quick status update (for after responses)."""
-    pass  # Status shown at start, updates on next prompt
+    # Status shown at start, updates on next prompt
 
 # ── Agent Selection Menu ──────────────────────────────────────────────────────
 def show_agent_menu():
@@ -760,7 +770,7 @@ def show_agent_menu():
         console.print(f"[red]⚠ Няма ключ за {p['name']}![/]")
         return
 
-    with console.status(f"[dim]Извличам модели...[/]", spinner="dots"):
+    with console.status("[dim]Извличам модели...[/]", spinner="dots"):
         models = fetch_models(pk)
 
     # Special case: Ollama works but no models downloaded
@@ -802,7 +812,7 @@ def show_agent_menu():
     console.print(mtable)
 
     try:
-        msel = int(console.input(f"[green]> [/]").strip())
+        msel = int(console.input("[green]> [/]").strip())
     except ValueError:
         return
     if msel == 0: return
@@ -926,7 +936,7 @@ def main():
                      "--exclude", "venv", "--exclude", "__pycache__",
                      "--exclude", ".git", "--exclude", ".env",
                      f"{WORKSPACE}/", f"{dest}/"],
-                    capture_output=True, text=True)
+                    capture_output=True, text=True, check=False)
                 if r.returncode == 0:
                     console.print("[green]✅ Архивирането завърши.[/]")
                     discord_send(f"💾 **Архив готов** → `{dest}`")
@@ -940,7 +950,7 @@ def main():
                 continue
 
             if user_input.lower() == "/status":
-                ctx_used, ctx_remain, ctx_pct = get_context_stats()
+                _ctx_used, ctx_remain, ctx_pct = get_context_stats()
                 console.print(f"[cyan]Модел:[/] {current_model_id}")
                 console.print(f"[cyan]Доставчик:[/] {PROVIDERS[current_provider]['name']}")
                 console.print(f"[cyan]Време:[/] {get_elapsed_time()}")
@@ -1074,7 +1084,7 @@ def main():
             # докато Genesis сам спре да вика тулове или се удари в тавана.
             _TOOL_ROUND_CAP = 8
             round_i = 0
-            with console.status(f"[dim]Genesis мисли...[/]", spinner="dots2"):
+            with console.status("[dim]Genesis мисли...[/]", spinner="dots2"):
                 response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
 
             while True:

@@ -15,9 +15,6 @@
 """
 
 import sqlite3
-import os
-import datetime
-from typing import List, Dict
 
 from genesis_agent.config import DATA_DIR
 
@@ -44,7 +41,7 @@ def _init_db() -> sqlite3.Connection:
 # --------------------------------------------------------------
 # Вътрешна помощна функция за сумиране (placeholder)
 # --------------------------------------------------------------
-def _simple_summarize(messages: List[Dict[str, str]]) -> str:
+def _simple_summarize(messages: list[dict[str, str]]) -> str:
     """
     Проста (плейхолдър) функция за обобщаване.
     Тя взема списъка от съобщения и създава кратко резюме,
@@ -82,7 +79,7 @@ def add_message(role: str, content: str) -> None:
     summarize_old_context()
 
 
-def get_history(last_n: int = 20) -> List[Dict[str, str]]:
+def get_history(last_n: int = 20) -> list[dict[str, str]]:
     """
     Връща последните `last_n` съобщения в хронологичен ред
     (от най-старото към най-новото).

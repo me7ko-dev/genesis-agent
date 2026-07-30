@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from genesis_agent.config import DATA_DIR
@@ -340,8 +339,9 @@ def auto_capture(messages: list[dict], max_chars: int = 6000) -> dict:
         pass
 
     try:
-        from genesis_agent.brain import Brain
         import json as _json
+
+        from genesis_agent.brain import Brain
 
         reply = Brain(min_size_b=32).complete([
             {"role": "system", "content": _CAPTURE_PROMPT + known},

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 deep_verifier.py — дълбока верификация на умения, които искат външни пакети.
 
@@ -39,7 +38,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from genesis_agent import sandbox  # noqa: E402
+from genesis_agent import sandbox
 
 SKILLS_DIR = ROOT / "genesis_agent" / "skills"
 SKILLS_JSON = SKILLS_DIR / "skills.json"
@@ -186,7 +185,7 @@ def run_skill_isolated(code: str, timeout: int = 30) -> tuple[bool, str]:
            "PYTHONIOENCODING": "utf-8", "PYTHONPATH": str(LIBS)}
     try:
         proc = subprocess.run([sys.executable, str(script)], cwd=str(root),
-                              capture_output=True, text=True, timeout=timeout, env=env)
+                              capture_output=True, text=True, timeout=timeout, env=env, check=False)
         ok = proc.returncode == 0
         return ok, (proc.stdout if ok else proc.stderr)[:300]
     except subprocess.TimeoutExpired:

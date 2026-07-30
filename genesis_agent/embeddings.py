@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 genesis_agent.embeddings — семантична памет: локални embeddings вместо keyword search.
 
@@ -25,7 +24,6 @@ from __future__ import annotations
 import json
 import sqlite3
 import struct
-from pathlib import Path
 
 import requests
 

@@ -16,8 +16,8 @@ import json
 import os
 import re
 import traceback
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -155,8 +155,7 @@ class Core:
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-                if line.startswith("export "):
-                    line = line[7:]
+                line = line.removeprefix("export ")
                 if "=" not in line:
                     continue
                 k, v = line.split("=", 1)
@@ -200,7 +199,7 @@ class Core:
                  "size_b": c.get("size_b", 0)} for c in brain.chain]
 
 
-def _diff_for_write(skills, args: dict) -> Optional[str]:
+def _diff_for_write(skills, args: dict) -> str | None:
     """Unified diff за предстоящ WRITE_FILE (design note, 2026-07-28) — четем
     СТАРОТО съдържание ПРЕДИ dispatch_tool_call презапише файла, за да могат
     фронтендите да покажат какво реално се променя, вместо голия
@@ -254,8 +253,8 @@ def run_tool_loop(
     messages: list,
     *,
     on_assistant: Callable[[str, str, str], None],
-    on_tool_result: Callable[[str, str, Optional[str]], None],
-    on_status: Optional[Callable[[str], None]] = None,
+    on_tool_result: Callable[[str, str, str | None], None],
+    on_status: Callable[[str], None] | None = None,
     round_cap: int = TOOL_ROUND_CAP,
 ) -> list:
     """Пълният агентен цикъл: complete → (native tool_calls | текстови тагове)

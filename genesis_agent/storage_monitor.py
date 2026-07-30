@@ -36,9 +36,7 @@ def _candidate_filter(p: Path, root: Path) -> bool:
         return False
     if ".sandbox_run" in rel_parts:
         return False
-    if ".git" in rel_parts:
-        return False
-    return True
+    return ".git" not in rel_parts
 
 
 def _file_sizes(root: Path, *, candidates_only: bool) -> list[tuple[Path, int]]:

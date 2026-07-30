@@ -20,18 +20,24 @@ object with `.raw_text` and `.code`.
 """
 from __future__ import annotations
 
+import logging
 import os
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 import requests
 import yaml
 
 from genesis_agent.paths import (
-    PROJECT_ROOT, CONFIG_PATH, ENV_FILES, _strip_inline_comment,
+    CONFIG_PATH,
+    ENV_FILES,
+    _strip_inline_comment,
 )
+
+log = logging.getLogger("genesis.brain")
+
 CLOUD_TIMEOUT = 90
 LOCAL_TIMEOUT = 240  # локалният 3B модел на слаб GPU е бавен — даваме му време
 RETRY_ROUNDS = 2  # колко пъти да обходим цялата верига при пълен провал
@@ -221,8 +227,8 @@ class Brain:
             if m:
                 self.local = {"provider": "ollama_local", "model": m}
                 self.current = self.local
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("route_for_goal: model_router недостъпен, местният модел остава по подразбиране: %s", e)
 
     def escalate(self) -> bool:
         """Качва локалния мозък на следващия по-голям НАЛИЧЕН модел. True ако е сменен."""
@@ -235,8 +241,8 @@ class Brain:
                 self.current = self.local
                 print(f"  [Brain] ⬆️ Ескалация към по-голям модел: {nxt}")
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("escalate: model_router недостъпен, оставам на текущия модел: %s", e)
         return False
 
     def system_prompt_base(self) -> str:
@@ -306,27 +312,27 @@ class Brain:
                 if rest:
                     lines = [f"- {h['name']}: {h.get('description', '')[:80]}" for h in rest]
                     parts.append("Други подобни умения (само за идея):\n" + "\n".join(lines))
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("build_context: skill_loader недостъпен, без инжектирани умения: %s", e)
         try:
             from genesis_agent.memory import memory_search
             eps = memory_search(goal, top_k=3)
             lessons = []
-            for e in eps:
-                for les in e.get("lessons_learned", [])[:1]:
+            for ep in eps:
+                for les in ep.get("lessons_learned", [])[:1]:
                     lessons.append(f"- {les[:120]}")
             if lessons:
                 parts.append("Уроци от минали мисии:\n" + "\n".join(lessons))
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("build_context: memory_search недостъпен, без инжектирани уроци: %s", e)
         return "\n\n".join(parts)
 
-    def _trim_messages(self, messages: List[Dict], max_chars: int = 2000) -> List[Dict]:
+    def _trim_messages(self, messages: list[dict], max_chars: int = 2000) -> list[dict]:
         # Облачните модели имат голям контекст — не режем.
         return messages
 
     @staticmethod
-    def trim_round_history(messages: List[Dict]) -> List[Dict]:
+    def trim_round_history(messages: list[dict]) -> list[dict]:
         """
         Реже растящата история на многорундова мисия (autonomous_loop/orchestrator):
         пази system + оригиналната цел (messages[0:2]) + САМО последния разменен чифт
@@ -398,7 +404,7 @@ class Brain:
         )
         maxlen = getattr(messages, "maxlen", None)
 
-        def _rebuild(parts: list) -> "deque | list":
+        def _rebuild(parts: list) -> deque | list:
             return deque(parts, maxlen=maxlen) if maxlen else parts
 
         try:
@@ -439,12 +445,12 @@ class Brain:
         val = str(val).strip()
         return val or None
 
-    def _http(self, base_url: str, key: str | None, model: str, messages: List[Dict], timeout: int,
-             tools: List[Dict] | None = None) -> tuple[str, list | None]:
+    def _http(self, base_url: str, key: str | None, model: str, messages: list[dict], timeout: int,
+             tools: list[dict] | None = None) -> tuple[str, list | None]:
         headers = {"Content-Type": "application/json"}
         if key:
             headers["Authorization"] = f"Bearer {key}"
-        payload: Dict[str, Any] = {"model": model, "messages": messages,
+        payload: dict[str, Any] = {"model": model, "messages": messages,
                                    "temperature": 0.7, "max_tokens": 4096}
         if tools:
             payload["tools"] = tools
@@ -476,8 +482,8 @@ class Brain:
         self._last_usage = data.get("usage")
         return (content or "").strip(), tool_calls
 
-    def _call(self, provider: str, model: str, messages: List[Dict],
-             tools: List[Dict] | None = None) -> tuple[str, list | None]:
+    def _call(self, provider: str, model: str, messages: list[dict],
+             tools: list[dict] | None = None) -> tuple[str, list | None]:
         base_url, key_env = _PROVIDERS[provider]
         if not key_env:  # локален — без ключ
             return self._http(base_url, None, model, messages, LOCAL_TIMEOUT, tools=tools)
@@ -502,7 +508,7 @@ class Brain:
                 print(f"  [Brain] 🔑 {key_env} unavailable ({last[:60]}) → next provider")
             raise
 
-    def _call_local(self, messages: List[Dict], attempts: int = 1) -> tuple[str, str] | None:
+    def _call_local(self, messages: list[dict], attempts: int = 1) -> tuple[str, str] | None:
         """Пробва локалния мозък (текущия tier — 3b/7b/14b, каквото е в self.local).
         Връща (raw_text, code) при успех, None при провал. Локалният никога не
         получава tools (проверено наживо — не връща структуриран tool_calls,
@@ -547,7 +553,7 @@ class Brain:
         return Brain._TAG_PROMPT_CACHE
 
     @classmethod
-    def _with_tool_tag_docs(cls, messages: List[Dict]) -> List[Dict]:
+    def _with_tool_tag_docs(cls, messages: list[dict]) -> list[dict]:
         """Добавя тул-таговете към system съобщението — САМО за модели без
         native tool-calling, които иначе не биха знали как да викат инструмент."""
         tags = cls._tool_tag_prompt()
@@ -562,14 +568,14 @@ class Brain:
         return [{"role": "system", "content": tags}] + out
 
     @staticmethod
-    def _sanitize_for_textmode(messages: List[Dict]) -> List[Dict]:
+    def _sanitize_for_textmode(messages: list[dict]) -> list[dict]:
         """Превръща native tool_calls/tool-role съобщения в обикновен текст.
 
         Нужно е, когато веригата пада от tools-способен модел към такъв БЕЗ
         tools параметър в СЪЩИЯ разговор — много доставчици връщат 400 при
         role='tool' съобщение, ако заявката не декларира и 'tools'. No-op ако
         историята вече е чист текст (обичайният случай)."""
-        out: List[Dict] = []
+        out: list[dict] = []
         for m in messages:
             role = m.get("role")
             if role == "tool":
@@ -586,7 +592,7 @@ class Brain:
                 out.append(m)
         return out
 
-    def complete(self, messages: List[Dict], tools: List[Dict] | None = None):
+    def complete(self, messages: list[dict], tools: list[dict] | None = None):
         """
         tools (design note, 2026-07-25): опционален списък OpenAI tool schemas
         (genesis_agent.tool_schemas). Ако е зададен — веригата пробва ПЪРВО
@@ -636,8 +642,8 @@ class Brain:
         try:
             from genesis_agent.provider_stats import deprioritize_flaky
             chain = deprioritize_flaky(chain)
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("provider_stats недостъпен, реда на веригата остава непроменен: %s", e)
 
         # tools заявен → tools-способните (config.yaml supports_tools) вървят
         # ПРЪВ (native, реален tool_calls), останалите — след тях, в стария
@@ -752,8 +758,8 @@ class Brain:
         try:
             from genesis_agent.provider_stats import record_call
             record_call(provider, latency_s, success)
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("provider_stats недостъпен, повикването не е записано: %s", e)
 
     def _log_usage(self) -> None:
         """Безопасно логва token usage за последното успешно извикване (ако има).
@@ -768,5 +774,5 @@ class Brain:
                 prompt_tokens=int(self._last_usage.get("prompt_tokens", 0) or 0),
                 completion_tokens=int(self._last_usage.get("completion_tokens", 0) or 0),
             )
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("budget недостъпен, usage не е записан: %s", e)

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 genesis_agent.vision — Genesis получава зрение (read-only screen intelligence).
 

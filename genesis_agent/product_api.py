@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 genesis_agent.product_api — продуктов слой (L2-5).
 
@@ -27,12 +26,12 @@ from __future__ import annotations
 import time
 from collections import defaultdict
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
-from genesis_agent.orchestrator import run_orchestrated
 from genesis_agent.brain import Brain
+from genesis_agent.orchestrator import run_orchestrated
 
 app = FastAPI(title="Genesis — Verified Code Service")
 
@@ -75,8 +74,9 @@ def solve(req: SolveRequest, request: Request):
     code = ""
     if out.success and out.skill_path:
         try:
-            from genesis_agent.skill_loader import skill_view
             from pathlib import Path
+
+            from genesis_agent.skill_loader import skill_view
             code = skill_view(Path(out.skill_path).stem)["code"]
         except Exception:
             code = ""

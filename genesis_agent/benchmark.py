@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 genesis_agent.benchmark — самооценка на агента (L2-4).
 
@@ -19,11 +18,10 @@ import sys
 import time
 from datetime import datetime, timezone
 from typing import Any
-from pathlib import Path
 
 from genesis_agent.brain import Brain
-from genesis_agent.executor import run_python_subprocess
 from genesis_agent.config import DATA_DIR
+from genesis_agent.executor import run_python_subprocess
 
 HISTORY = DATA_DIR / "benchmark_history.json"
 
@@ -44,8 +42,8 @@ TASKS: list[tuple[str, str]] = [
     ("Implement is_palindrome(s) returning True if s reads the same backwards.",
      "assert is_palindrome('racecar') and not is_palindrome('abc')\nprint('CHECK_OK')"),
     # ── СРЕДНИ ──
-    ("Implement fizzbuzz(n) returning a list of strings for 1..n: 'Fizz' if divisible by 3, "
-     "'Buzz' if by 5, 'FizzBuzz' if by both, else the number as a string.",
+    (("Implement fizzbuzz(n) returning a list of strings for 1..n: 'Fizz' if divisible by 3, "
+      "'Buzz' if by 5, 'FizzBuzz' if by both, else the number as a string."),
      "assert fizzbuzz(5)==['1','2','Fizz','4','Buzz'] and fizzbuzz(15)[-1]=='FizzBuzz'\nprint('CHECK_OK')"),
     ("Implement gcd(a,b) computing the greatest common divisor.",
      "assert gcd(12,8)==4 and gcd(17,5)==1 and gcd(100,10)==10\nprint('CHECK_OK')"),

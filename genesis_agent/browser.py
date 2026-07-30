@@ -23,8 +23,6 @@ Playwright, headless Chromium, ИЗОЛИРАН ефемерен профил (�
 from __future__ import annotations
 
 import os
-import re
-from typing import Optional
 
 from genesis_agent import sandbox
 
@@ -56,7 +54,7 @@ _SCAN_JS = """
     }
     return out;
 }
-""" % _MAX_ELEMENTS
+""" % _MAX_ELEMENTS  # noqa: UP031 — JS literal is full of {}; %-format avoids escaping every brace
 
 # ── Персистентна (в рамките на процеса) headless сесия ──────────────────────
 _pw = None
@@ -136,7 +134,7 @@ def _page_state_summary() -> str:
     )
 
 
-def _resolve_element(target: str, *, kind: str = "any") -> Optional[dict]:
+def _resolve_element(target: str, *, kind: str = "any") -> dict | None:
     """target = индекс от последното сканиране ИЛИ текст за fuzzy match."""
     target = target.strip()
     if target.isdigit():

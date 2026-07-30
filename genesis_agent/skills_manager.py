@@ -104,6 +104,7 @@ def save_skill(
     умението не мине проверката → НЕ се записва и се вдига GenesisDNAError.
     """
     import os
+
     from genesis_agent.verifier import verify_skill
 
     dna.validate_skill_payload(goal=goal, code=code)

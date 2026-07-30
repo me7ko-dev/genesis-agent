@@ -80,6 +80,29 @@ genesis_agent = [
 [tool.pytest.ini_options]
 addopts = "--ignore=scripts"
 
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+ignore = [
+    # datetime.now()/date.today() without tzinfo: every flagged call site
+    # compares against another naive call from the same process (self-consistent,
+    # no aware/naive mixing bug) or formats a filename/display string for the
+    # user's local clock, where UTC would be the wrong, more confusing choice.
+    "DTZ005", "DTZ006", "DTZ011",
+    # Accepted debt, not a false positive: ~220 call sites across the codebase
+    # (mostly best-effort optional-integration fallbacks) blindly catch or
+    # swallow exceptions. The security/reliability-critical modules (sandbox,
+    # brain, executor, scheduler, budget, skills_api) have been triaged —
+    # broad catches there are either narrowed, logged, or annotated with a
+    # specific `# noqa` explaining why. The remaining call sites (peripheral
+    # modules, GUI, terminal frontend) still need per-site review; enabling
+    # these two rules repo-wide now would make the CI gate fail on pre-existing
+    # code instead of catching new regressions. Tighten file-by-file as those
+    # modules get touched, then drop the corresponding ignore.
+    "BLE001", "S110",
+]
+
 [tool.mypy]
 # Third-party libs used only by optional frontends (gi/GTK, croniter,
 # faster_whisper, edge_tts, discord) ship no type stubs. Without this, mypy

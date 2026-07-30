@@ -23,13 +23,11 @@ GENESIS 0 — LOCAL REPAIR AGENT (Авариен режим)
 from __future__ import annotations
 
 import re
-import sys
-import json
-import time
-import requests
 import subprocess
+import sys
 from dataclasses import dataclass
-from typing import Optional
+
+import requests
 
 # ─── КОНФИГУРАЦИЯ ────────────────────────────────────────────────────────────
 # LM Studio директно — порт 1234 е неговият дефолт
@@ -53,7 +51,7 @@ class PatternFixer:
     """Поправя ~80% от Python грешките с regex — мигновено."""
 
     @staticmethod
-    def fix_indentation(code: str, error: str) -> Optional[str]:
+    def fix_indentation(code: str, error: str) -> str | None:
         """IndentationError → нормализира отстъпите."""
         if "IndentationError" not in error and "TabError" not in error:
             return None
@@ -66,7 +64,7 @@ class PatternFixer:
         return result if result != code else None
 
     @staticmethod
-    def fix_missing_import(code: str, error: str) -> Optional[str]:
+    def fix_missing_import(code: str, error: str) -> str | None:
         """ModuleNotFoundError → добавя pip install в началото."""
         match = re.search(r"No module named '([^']+)'", error)
         if not match:
@@ -83,7 +81,7 @@ class PatternFixer:
         return None
 
     @staticmethod
-    def fix_none_type(code: str, error: str) -> Optional[str]:
+    def fix_none_type(code: str, error: str) -> str | None:
         """TypeError: 'NoneType' object → добавя None check преди problematic line."""
         if "'NoneType'" not in error and "NoneType" not in error:
             return None
@@ -108,7 +106,7 @@ class PatternFixer:
         return "\n".join(lines)
 
     @staticmethod
-    def fix_key_error(code: str, error: str) -> Optional[str]:
+    def fix_key_error(code: str, error: str) -> str | None:
         """KeyError → замества dict[key] с dict.get(key)."""
         if "KeyError" not in error:
             return None
@@ -122,7 +120,7 @@ class PatternFixer:
         return fixed if fixed != code else None
 
     @staticmethod
-    def fix_file_not_found(code: str, error: str) -> Optional[str]:
+    def fix_file_not_found(code: str, error: str) -> str | None:
         """FileNotFoundError → добавя makedirs преди файловата операция."""
         if "FileNotFoundError" not in error and "No such file" not in error:
             return None
@@ -140,7 +138,7 @@ class PatternFixer:
         return prefix + code if prefix else None
 
     @staticmethod
-    def fix_encoding(code: str, error: str) -> Optional[str]:
+    def fix_encoding(code: str, error: str) -> str | None:
         """UnicodeDecodeError → добавя encoding='utf-8' към open()."""
         if "UnicodeDecodeError" not in error and "codec" not in error:
             return None
@@ -154,7 +152,7 @@ class PatternFixer:
         return fixed if fixed != code else None
 
     @staticmethod
-    def fix_undefined_name(code: str, error: str) -> Optional[str]:
+    def fix_undefined_name(code: str, error: str) -> str | None:
         """NameError → добавя None дефиниция на undefined var."""
         match = re.search(r"name '(\w+)' is not defined", error)
         if not match:
@@ -170,13 +168,13 @@ class PatternFixer:
         lines = code.split("\n")
         insert_pos = 0
         for i, line in enumerate(lines):
-            if line.startswith("import ") or line.startswith("from "):
+            if line.startswith(("import ", "from ")):
                 insert_pos = i + 1
         lines.insert(insert_pos, f"{var} = None  # auto-fix: NameError")
         return "\n".join(lines)
 
     @classmethod
-    def try_all(cls, code: str, error: str) -> tuple[Optional[str], str]:
+    def try_all(cls, code: str, error: str) -> tuple[str | None, str]:
         """Опитва всички pattern fixes. Връща (fixed_code, description)."""
         fixes = [
             (cls.fix_indentation,     "Поправен отстъп (tabs→spaces)"),
@@ -235,7 +233,7 @@ class TinyLLM:
             self.available = self._detect()
         return self.available
 
-    def fix(self, code: str, error: str) -> Optional[str]:
+    def fix(self, code: str, error: str) -> str | None:
         """Праща кратък промпт към малкия модел за поправяне на грешката."""
         if not self.is_available():
             return None
@@ -256,7 +254,7 @@ class TinyLLM:
             print(f"  [RepairLLM] Грешка: {e}")
             return None
 
-    def _call_lmstudio(self, prompt: str) -> Optional[str]:
+    def _call_lmstudio(self, prompt: str) -> str | None:
         payload = {
             "model": self.model,
             "messages": [
@@ -272,7 +270,7 @@ class TinyLLM:
         content = r.json()["choices"][0]["message"]["content"]
         return self._extract_code(content)
 
-    def _call_ollama(self, prompt: str) -> Optional[str]:
+    def _call_ollama(self, prompt: str) -> str | None:
         payload = {
             "model": self.ollama_model,
             "prompt": prompt,
@@ -286,7 +284,7 @@ class TinyLLM:
         return self._extract_code(content)
 
     @staticmethod
-    def _extract_code(text: str) -> Optional[str]:
+    def _extract_code(text: str) -> str | None:
         if "```python" in text:
             return text.split("```python")[1].split("```")[0].strip()
         if "```" in text:
@@ -327,7 +325,7 @@ class LocalRepairAgent:
                 print(f"  [PATTERN FIX] {desc}")
                 test = self._test_code(fixed)
                 if test["ok"]:
-                    print(f"  [✅ REPAIR OK] Поправен с pattern matching!")
+                    print("  [✅ REPAIR OK] Поправен с pattern matching!")
                     return RepairResult(
                         fixed=True, code=fixed, rounds=round_i,
                         method="pattern", fix_desc=desc
@@ -343,16 +341,16 @@ class LocalRepairAgent:
                 if llm_fixed:
                     test = self._test_code(llm_fixed)
                     if test["ok"]:
-                        print(f"  [✅ REPAIR OK] Малкият модел поправи грешката!")
+                        print("  [✅ REPAIR OK] Малкият модел поправи грешката!")
                         return RepairResult(
                             fixed=True, code=llm_fixed, rounds=round_i,
                             method="llm", fix_desc=f"LLM fix (round {round_i})"
                         )
                     current_code = llm_fixed
                     full_error = test["error"]
-                    print(f"  [RETRY] Все още има грешка, опитвам отново...")
+                    print("  [RETRY] Все още има грешка, опитвам отново...")
             else:
-                print(f"  [INFO] LM Studio/Ollama офлайн — само pattern fixes")
+                print("  [INFO] LM Studio/Ollama офлайн — само pattern fixes")
                 break  # Без LLM, pattern-ите вече не помагат
 
         return RepairResult(
@@ -373,7 +371,7 @@ class LocalRepairAgent:
         try:
             proc = subprocess.run(
                 [sys.executable, "-c", code],
-                capture_output=True, text=True, timeout=15
+                capture_output=True, text=True, timeout=15, check=False,
             )
             if proc.returncode == 0:
                 return {"ok": True, "error": ""}
@@ -394,7 +392,7 @@ class LocalRepairAgent:
 
 
 # ─── SINGLETON ───────────────────────────────────────────────────────────────
-_agent: Optional[LocalRepairAgent] = None
+_agent: LocalRepairAgent | None = None
 
 def get_repair_agent() -> LocalRepairAgent:
     global _agent

@@ -30,16 +30,15 @@ from __future__ import annotations
 import ast
 import os
 import re
-import sys
 import shlex
 import signal
 import subprocess
-import tempfile
+import sys
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
-from typing import Callable, Optional
 
 try:  # POSIX-only; resource limits са best-effort на не-Linux платформи.
     import resource  # type: ignore
@@ -66,7 +65,7 @@ class RiskVerdict:
     def is_safe(self) -> bool:
         return self.level == RiskLevel.SAFE
 
-    def merge(self, other: "RiskVerdict") -> "RiskVerdict":
+    def merge(self, other: RiskVerdict) -> RiskVerdict:
         return RiskVerdict(
             level=RiskLevel(max(self.level, other.level)),
             reasons=self.reasons + other.reasons,
@@ -80,7 +79,7 @@ class SandboxResult:
     stderr: str
     returncode: int | None
     blocked: bool = False          # спряно от политиката, не се е стартирало
-    verdict: Optional[RiskVerdict] = None
+    verdict: RiskVerdict | None = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -378,7 +377,7 @@ def assess_command(command: str, cwd: Path | None = None) -> RiskVerdict:
     verdict = RiskVerdict(level, reasons)
     try:
         return verdict.merge(_assess_file_ops(command, cwd))
-    except Exception as e:  # преглед никога не бива да чупи оценката
+    except Exception as e:
         verdict.reasons.append(f"(преглед на файловите операции неуспешен: {e})")
         return verdict
 
@@ -435,10 +434,10 @@ def assess_code(code: str) -> RiskVerdict:
         return verdict
     reasons = list(verdict.reasons)
     level: RiskLevel = verdict.level
-    if any(r in _PATH_LITERAL_FALSE_POSITIVE_REASONS for r in reasons):
-        if not _python_reads_sensitive_path(code):
-            reasons = [r for r in reasons if r not in _PATH_LITERAL_FALSE_POSITIVE_REASONS]
-            level = RiskLevel.CONFIRM if reasons else RiskLevel.SAFE
+    if (any(r in _PATH_LITERAL_FALSE_POSITIVE_REASONS for r in reasons)
+            and not _python_reads_sensitive_path(code)):
+        reasons = [r for r in reasons if r not in _PATH_LITERAL_FALSE_POSITIVE_REASONS]
+        level = RiskLevel.CONFIRM if reasons else RiskLevel.SAFE
     for rx, why in _PY_CONFIRM_PATTERNS:
         if rx.search(code):
             reasons.append(why)
@@ -530,7 +529,7 @@ def _decide(operation: str, verdict: RiskVerdict, policy: SandboxPolicy) -> tupl
 # Изпълнение с реални граници
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_env(policy: SandboxPolicy, extra: Optional[dict[str, str]] = None) -> dict[str, str]:
+def _build_env(policy: SandboxPolicy, extra: dict[str, str] | None = None) -> dict[str, str]:
     env = {k: os.environ[k] for k in policy.env_passthrough if k in os.environ}
     env.setdefault("PYTHONIOENCODING", "utf-8")
     if extra:
@@ -569,7 +568,7 @@ def _preexec(policy: SandboxPolicy, nproc_cap: int):  # изпълнява се 
 
 
 def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
-         env_extra: Optional[dict[str, str]] = None) -> SandboxResult:
+         env_extra: dict[str, str] | None = None) -> SandboxResult:
     env = _build_env(policy, env_extra)
     # Ако NPROC е включен, капът е headroom над текущото натоварване.
     nproc_cap = (_count_user_processes() + policy.max_processes) if policy.max_processes > 0 else 0
@@ -581,7 +580,7 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
             stderr=subprocess.PIPE,
             text=True,
             env=env,
-            preexec_fn=(lambda: _preexec(policy, nproc_cap)) if os.name == "posix" else None,
+            preexec_fn=(lambda: _preexec(policy, nproc_cap)) if os.name == "posix" else None,  # noqa: PLW1509 — fork()+exec() is immediate; setrlimit-only preexec, no locks touched
         )
     except Exception as e:
         return SandboxResult(ok=False, stdout="", stderr=f"[sandbox] стартът се провали: {e}",
@@ -603,8 +602,8 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
 
 
 def run_shell(command: str, *, cwd: Path | None = None,
-              policy: Optional[SandboxPolicy] = None,
-              timeout: Optional[int] = None) -> SandboxResult:
+              policy: SandboxPolicy | None = None,
+              timeout: int | None = None) -> SandboxResult:
     """Изпълнява shell команда през защитната бариера."""
     policy = policy or _POLICY
     work = cwd if (cwd and cwd.is_dir()) else _sandbox_dir()
@@ -622,9 +621,9 @@ def run_shell(command: str, *, cwd: Path | None = None,
 
 
 def run_python(code: str, *, cwd: Path | None = None,
-               policy: Optional[SandboxPolicy] = None,
-               timeout: Optional[int] = None,
-               env_extra: Optional[dict[str, str]] = None) -> SandboxResult:
+               policy: SandboxPolicy | None = None,
+               timeout: int | None = None,
+               env_extra: dict[str, str] | None = None) -> SandboxResult:
     """Изпълнява Python код в отделен интерпретатор през защитната бариера."""
     policy = policy or _POLICY
     verdict = assess_code(code)

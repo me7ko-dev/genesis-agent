@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 genesis_agent.verifier — реална верификация на умение преди да се приеме за годно.
 
@@ -28,7 +27,7 @@ from genesis_agent import sandbox
 _PLACEHOLDER_RE = re.compile(
     r"your_api_key|YOUR_API_KEY|your-api-key|api_key\s*=\s*['\"]your|"
     r"<your_|replace_with_your|xxxxxxxx",
-    re.I,
+    re.IGNORECASE,
 )
 
 

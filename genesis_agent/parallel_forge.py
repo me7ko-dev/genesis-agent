@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 genesis_agent.parallel_forge — мащабно паралелно производство на умения (Scale-2).
 
@@ -26,8 +25,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 from genesis_agent.orchestrator import run_orchestrated
-from genesis_agent.skills_manager import slugify
 from genesis_agent.skill_loader import load_skills_index
+from genesis_agent.skills_manager import slugify
 
 # Providers with SEPARATE quotas — workers are spread across them so parallel
 # missions do not all queue behind one account's rate limit.
@@ -46,7 +45,7 @@ def _available_providers_cycle() -> list[str]:
     parallelism comes from using several providers at once, each within its
     own limits, not from stacking accounts on one.
     """
-    from genesis_agent.brain import Brain, _PROVIDERS
+    from genesis_agent.brain import _PROVIDERS, Brain
     try:
         b = Brain(use_local=False)
         available = []

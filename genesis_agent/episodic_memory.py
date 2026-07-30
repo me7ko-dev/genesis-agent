@@ -25,11 +25,9 @@ Persistently stores “episodes” – значими събития, които
 комбинацията от полетата *goal*, *outcome*, *lessons_learned* и *tags*.
 """
 
-import sqlite3
-import json
 import datetime
-from pathlib import Path
-from typing import List, Optional, Dict
+import json
+import sqlite3
 
 # ---------- SQLite setup ----------
 from genesis_agent.config import DATA_DIR
@@ -69,10 +67,10 @@ def _now_iso() -> str:
         .replace("+00:00", "Z")
     )
 
-def _json_encode(lst: Optional[List[str]]) -> Optional[str]:
+def _json_encode(lst: list[str] | None) -> str | None:
     return json.dumps(lst, ensure_ascii=False) if lst else None
 
-def _json_decode(s: Optional[str]) -> List[str]:
+def _json_decode(s: str | None) -> list[str]:
     return json.loads(s) if s else []
 
 # ---------- Core API ----------
@@ -80,8 +78,8 @@ def record_episode(
     goal: str,
     outcome: str,
     skill_path: str,
-    lessons_learned: Optional[List[str]] = None,
-    tags: Optional[List[str]] = None,
+    lessons_learned: list[str] | None = None,
+    tags: list[str] | None = None,
 ) -> None:
     """Записва нов епизод в базата."""
     timestamp = _now_iso()
@@ -100,7 +98,7 @@ def record_episode(
         conn.commit()
 
 
-def _fetch_all_episodes() -> List[Dict]:
+def _fetch_all_episodes() -> list[dict]:
     """Връща всички епизоди като списък от речници (за TF‑IDF)."""
     with _get_connection() as conn:
         rows = conn.execute(
@@ -127,15 +125,15 @@ def _fetch_all_episodes() -> List[Dict]:
     return episodes
 
 
-def search_episodes(query: str, top_k: int = 5) -> List[Dict]:
+def search_episodes(query: str, top_k: int = 5) -> list[dict]:
     """
     Търси епизоди, подобни на *query* чрез косинусова сходство на TF‑IDF.
     Връща най‑по‑подобните ``top_k`` епизода.
     """
     # Local import – scikit‑learn е опционална зависимост.
+    import numpy as np
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.metrics.pairwise import cosine_similarity
-    import numpy as np
 
     episodes = _fetch_all_episodes()
     if not episodes:
@@ -170,7 +168,7 @@ def search_episodes(query: str, top_k: int = 5) -> List[Dict]:
     return results
 
 
-def get_lessons(topic: str) -> List[str]:
+def get_lessons(topic: str) -> list[str]:
     """Връща уникални уроци, съдържащи *topic* в текста."""
     episodes = _fetch_all_episodes()
     matched = set()

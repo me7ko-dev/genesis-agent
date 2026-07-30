@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 genesis_agent.skills_api — преизползване на съществуващи умения като градивни блокове.
 
@@ -21,9 +20,10 @@ genesis_agent.skills_api — преизползване на съществув�
 from __future__ import annotations
 
 import types
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
-from genesis_agent.skill_loader import skill_view, load_skills_index
+from genesis_agent.skill_loader import load_skills_index, skill_view
 
 
 def list_available(verified_only: bool = True) -> list[str]:
@@ -54,7 +54,7 @@ def load(name: str, *, verified_only: bool = True) -> types.ModuleType:
     mod.__dict__["__name__"] = f"genesis_skill_{name}"
     # Изпълняваме БЕЗ __main__ секцията (за да не пуска self-test-а при import).
     # Умението се дефинира; self-test под if __name__=="__main__" не се задейства.
-    exec(compile(code, f"<skill:{name}>", "exec"), mod.__dict__)
+    exec(compile(code, f"<skill:{name}>", "exec"), mod.__dict__)  # noqa: S102 — loading a stored skill's own code by design
     return mod
 
 
@@ -63,7 +63,7 @@ def get_function(skill_name: str, func_name: str, *, verified_only: bool = True)
     mod = load(skill_name, verified_only=verified_only)
     fn = getattr(mod, func_name, None)
     if not callable(fn):
-        raise AttributeError(f"Умението '{skill_name}' няма функция '{func_name}'.")
+        raise TypeError(f"Умението '{skill_name}' няма функция '{func_name}'.")
     return fn
 
 

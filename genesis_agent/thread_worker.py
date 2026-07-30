@@ -109,9 +109,9 @@ def prepare_thread(thread: dict, max_rounds: int = _MAX_TOOL_ROUNDS) -> ThreadWo
     notes = str(thread.get("notes", ""))
 
     try:
-        from genesis_agent.brain import Brain
         import genesis_skills
         from genesis_agent import workspace_memory as wm
+        from genesis_agent.brain import Brain
     except Exception as e:
         return ThreadWorkResult(tid, title, "", False, error=f"import: {e}")
 

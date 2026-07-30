@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 genesis_agent.budget — token/call observability слой.
 
@@ -16,10 +15,12 @@ self-modify, Discord чат, 24/7 цикъл): всички минават пр�
 from __future__ import annotations
 
 import json
+import logging
 from collections import defaultdict
 from datetime import date, datetime, timezone
-from pathlib import Path
 from typing import Any
+
+log = logging.getLogger("genesis.budget")
 
 from genesis_agent.config import DATA_DIR
 
@@ -57,9 +58,11 @@ def _read_entries():
                     continue
                 try:
                     yield json.loads(line)
-                except Exception:
+                except Exception as e:
+                    log.debug("budget: пропускам развален JSONL ред: %s", e)
                     continue
-    except Exception:
+    except OSError as e:
+        log.debug("budget: не мога да прочета %s: %s", LOG_PATH, e)
         return
 
 
@@ -104,7 +107,8 @@ def range_totals(days: int = 7) -> dict:
         ts = e.get("ts", "")
         try:
             d = date.fromisoformat(ts[:10])
-        except Exception:
+        except ValueError:
+            log.debug("budget: невалиден timestamp в лог реда: %r", ts)
             continue
         if d < cutoff:
             continue

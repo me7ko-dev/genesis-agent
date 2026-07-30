@@ -19,9 +19,8 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Callable, Dict, Optional
 
 from genesis_agent.config import DATA_DIR
 
@@ -30,7 +29,7 @@ JOBS_FILE = DATA_DIR / "cron_jobs.json"
 
 # ─── Вградена минимална cron интерпретация ───────────────────────────────────
 
-def _parse_interval(schedule: str) -> Optional[int]:
+def _parse_interval(schedule: str) -> int | None:
     """
     Опростен parser. Поддържа:
       "@hourly"  → 3600
@@ -78,8 +77,8 @@ class Job:
         self.schedule = schedule
         self.func = func
         self.enabled = enabled
-        self.last_run: Optional[datetime] = None
-        self.next_run: Optional[datetime] = None
+        self.last_run: datetime | None = None
+        self.next_run: datetime | None = None
         self._set_next_run()
 
     def _set_next_run(self):
@@ -105,9 +104,9 @@ class Job:
         self._set_next_run()
 
 
-_JOBS: Dict[str, Job] = {}
+_JOBS: dict[str, Job] = {}
 _SCHEDULER_RUNNING = False
-_SCHEDULER_THREAD: Optional[threading.Thread] = None
+_SCHEDULER_THREAD: threading.Thread | None = None
 
 
 def add_job(name: str, schedule: str, func: Callable, enabled: bool = True) -> Job:
@@ -139,7 +138,6 @@ def list_jobs() -> list[dict]:
 
 def _scheduler_loop(tick_seconds: int = 30):
     """Вътрешен loop — проверява и изпълнява дължимите jobs."""
-    global _SCHEDULER_RUNNING
     while _SCHEDULER_RUNNING:
         for job in list(_JOBS.values()):
             if job.is_due():
@@ -193,18 +191,18 @@ def _load_jobs_from_file():
 
         # Wrap командата през genesis_agent.sandbox (защитната бариера).
         from genesis_agent import sandbox
-        def _make_func(cmd: str):
+        def _make_func(cmd: str, job_name: str):
             def _run():
                 result = sandbox.run_shell(cmd, timeout=300)
                 if result.blocked:
-                    log.error(f"[scheduler] '{name}' отказан от sandbox: {result.stderr[:500]}")
+                    log.error(f"[scheduler] '{job_name}' отказан от sandbox: {result.stderr[:500]}")
                 elif result.returncode != 0:
-                    log.error(f"[scheduler] '{name}' грешка: {result.stderr[:500]}")
+                    log.error(f"[scheduler] '{job_name}' грешка: {result.stderr[:500]}")
                 else:
-                    log.info(f"[scheduler] '{name}' OK: {result.stdout[:200]}")
+                    log.info(f"[scheduler] '{job_name}' OK: {result.stdout[:200]}")
             return _run
 
-        add_job(name, schedule, _make_func(command), enabled=enabled)
+        add_job(name, schedule, _make_func(command, name), enabled=enabled)
 
 
 def save_jobs_to_file():

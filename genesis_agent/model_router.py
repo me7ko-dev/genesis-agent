@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 genesis_agent.model_router — адаптивен избор на локален модел според сложността.
 
@@ -31,10 +30,10 @@ _HARD = re.compile(
     r"thread|graph|tree|trie|dijkstra|dynamic\s+programming|state\s+machine|"
     r"recursi|cache|lru|regex|crypto|encrypt|distributed|neural|matrix|optimi|"
     r"simulat|balanced|priority\s+queue|topological|heap|backtrack|multi-?file|"
-    r"framework|engine|protocol|scheduler)\b", re.I)
+    r"framework|engine|protocol|scheduler)\b", re.IGNORECASE)
 _MED = re.compile(
     r"\b(sort|search|merge|validat|encod|decod|convert|stack|queue|hash|"
-    r"anagram|flatten|fibonacci|roman|matrix|palindrom|counter|group|parse)\b", re.I)
+    r"anagram|flatten|fibonacci|roman|matrix|palindrom|counter|group|parse)\b", re.IGNORECASE)
 
 
 def estimate_tier(goal: str) -> int:

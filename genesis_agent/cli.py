@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 genesis_agent.cli — the `genesis` command.
 
@@ -81,6 +80,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if cmd in ("gui", "voice"):
         import runpy
+
         from genesis_agent.paths import PACKAGE_DIR
         sys.path.insert(0, str(_project_root()))
         script = PACKAGE_DIR / "gui" / ("genesis_gui.py" if cmd == "gui" else "genesis_jarvis.py")
