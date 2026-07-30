@@ -20,7 +20,9 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e .[dev]
+          # discord extra pulled in so tests/test_discord_bot.py actually runs
+          # instead of silently skipping via pytest.importorskip.
+          pip install -e .[dev,discord]
           pip install mypy ruff
 
       - name: Everything imports and compiles
