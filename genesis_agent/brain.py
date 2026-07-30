@@ -578,7 +578,8 @@ class Brain:
         return val or None
 
     def _http(self, base_url: str, key: str | None, model: str, messages: list[dict], timeout: int,
-             tools: list[dict] | None = None) -> tuple[str, list | None]:
+             tools: list[dict] | None = None, extra: dict[str, Any] | None = None
+             ) -> tuple[str, list | None]:
         headers = {"Content-Type": "application/json"}
         if key:
             headers["Authorization"] = f"Bearer {key}"
@@ -587,6 +588,8 @@ class Brain:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
+        if extra:
+            payload.update(extra)
         r = requests.post(
             f"{base_url}/chat/completions",
             headers=headers,
@@ -751,7 +754,15 @@ class Brain:
              tools: list[dict] | None = None) -> tuple[str, list | None]:
         base_url, key_env = _PROVIDERS[provider]
         if not key_env:  # локален — без ключ
-            return self._http(base_url, None, model, messages, LOCAL_TIMEOUT, tools=tools)
+            # reasoning_effort="none" (design note, 2026-07-31, живо измерено):
+            # Qwen3 мисли по подразбиране дори за тривиални задачи — >3 минути
+            # за палиндром функция, срещу ~16-30с изключено. `think:false`
+            # НЕ работи през OpenAI-съвместимия /v1/chat/completions endpoint
+            # (само native /api/chat го чете) — правилното поле е
+            # reasoning_effort. Езикът (BG срещу EN prompt) добавя само ~30%,
+            # не десетократния ефект на мисленето — превод не е нужен.
+            return self._http(base_url, None, model, messages, LOCAL_TIMEOUT, tools=tools,
+                              extra={"reasoning_effort": "none"})
 
         key = self._provider_key(key_env)
         if not key:
