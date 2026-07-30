@@ -31,6 +31,7 @@ itself would run.
 from __future__ import annotations
 
 import runpy
+import sys
 from pathlib import Path
 
 import pytest
@@ -53,6 +54,37 @@ class TestLaunchPath:
 
     def test_genesis_jarvis_loads_without_a_bare_import_error(self) -> None:
         runpy.run_path(str(GUI_DIR / "genesis_jarvis.py"), run_name="genesis_jarvis_under_test")
+
+
+class TestMainDoesNotLeakTheSubcommandIntoArgv:
+    """Regression test for a second bug found while manually launching
+    `genesis gui`: passing the full sys.argv (`['genesis', 'gui']` via the
+    installed command) to Gtk.Application.run() makes GLib treat the
+    leftover positional arg "gui" as a file to open — logs a
+    GLib-GIO-CRITICAL and the app exits without ever showing a window.
+    Neither app parses its own CLI args, so main() must trim to just the
+    program name before calling .run()."""
+
+    def test_genesis_gui_main_passes_only_the_program_name(self, monkeypatch, gui_module) -> None:
+        monkeypatch.setattr(sys, "argv", ["/usr/bin/genesis", "gui"])
+        captured = {}
+        monkeypatch.setattr(
+            gui_module["App"], "run",
+            lambda self, argv: captured.setdefault("argv", argv) or 0,
+        )
+        gui_module["main"]()
+        assert captured["argv"] == ["/usr/bin/genesis"]
+
+    def test_genesis_jarvis_main_passes_only_the_program_name(self, monkeypatch, jarvis_module) -> None:
+        monkeypatch.setattr(sys, "argv", ["/usr/bin/genesis", "voice"])
+        captured = {}
+        monkeypatch.setattr(
+            jarvis_module["App"], "run",
+            lambda self, argv: captured.setdefault("argv", argv) or 0,
+        )
+        monkeypatch.setattr(jarvis_module["signal"], "signal", lambda *a: None)
+        jarvis_module["main"]()
+        assert captured["argv"] == ["/usr/bin/genesis"]
 
 
 @pytest.fixture(scope="module")
