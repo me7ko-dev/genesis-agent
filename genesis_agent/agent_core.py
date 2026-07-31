@@ -79,6 +79,10 @@ class Core:
         self.provider = ""
         self.model = ""
         self.pin_model: tuple[str, str] | None = None
+        # Изричен офлайн режим (LocalModePicker в GUI-то) — None = обичайният
+        # облак-пръв ред; иначе Ollama tag, форсиран през genesis_agent.brain.set_local_only
+        # (споделено с терминала, виж /local_model_max и /local_model_normal там).
+        self.local_only_model: str | None = None
         try:
             import yaml
 
@@ -175,8 +179,9 @@ class Core:
 
     def complete(self, messages: list) -> tuple:
         """Едно обръщение към мозъка. Връща (text, tool_calls, provider, model)."""
-        from genesis_agent.brain import Brain
+        from genesis_agent.brain import Brain, set_local_only
 
+        set_local_only(self.local_only_model)
         brain = Brain(min_size_b=MIN_SIZE_B, pin_model=self.pin_model)
         reply = brain.complete(list(messages), tools=self.tools)
         cur = brain.current or {}

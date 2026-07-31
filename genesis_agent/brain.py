@@ -85,6 +85,33 @@ _NATIVE_PROVIDERS = {"anthropic"}
 # Локалният модел (собственият мозък на Genesis). Празно → изключен.
 LOCAL_MODEL = os.environ.get("GENESIS_LOCAL_MODEL", "qwen2.5-coder:3b")
 
+# Двете фиксирани нива за изричен офлайн режим (design note, 2026-07-31):
+# "MAX" — най-мощният локален модел, инсталиран на машината, бавен; "NORMAL" —
+# по-лек и по-бърз. Общи константи за всеки фронтенд (терминал, GUI), за да не
+# се разминат имената на моделите на две места.
+LOCAL_TIER_MAX = "qwen3:14b"
+LOCAL_TIER_NORMAL = "qwen2.5-coder:7b"
+
+
+def set_local_only(model_id: str | None) -> None:
+    """Форсира ("model_id" зададен) или освобождава (None) изричен офлайн режим
+    за следващите Brain() извиквания в текущия процес.
+
+    LOCAL_MODEL е модулна константа, четена от Brain.__init__ през global lookup
+    ПРИ ВСЯКО извикване (не се заключва на import) — затова смяната ѝ тук е
+    достатъчна, без да се минава през env var (GENESIS_LOCAL_MODEL се чете само
+    веднъж, на import). GENESIS_LOCAL_ONLY кара Brain.complete() да пропусне
+    ЦЯЛАТА облачна верига и да ползва само local. Споделено между терминала
+    (/local_model_max, /local_model_normal) и GUI-то (LocalModePicker), за да не
+    се разминават двата фронтенда в поведение."""
+    global LOCAL_MODEL
+    if model_id:
+        os.environ["GENESIS_LOCAL_ONLY"] = "1"
+        LOCAL_MODEL = model_id
+    else:
+        os.environ.pop("GENESIS_LOCAL_ONLY", None)
+        LOCAL_MODEL = os.environ.get("GENESIS_LOCAL_MODEL", "qwen2.5-coder:3b")
+
 
 def _local_available(model: str) -> bool:
     """Проверява дали Ollama върви локално и има модела."""

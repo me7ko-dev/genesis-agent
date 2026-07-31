@@ -65,6 +65,7 @@ TOOL_ROUND_CAP = 8
 
 _HELP_TEXT = (
     "/model — отвори избора на модел\n"
+    "🏠 бутонът до него — изричен офлайн режим (само локален модел, MAX/NORMAL)\n"
     "/clear — нов разговор\n"
     "/tasks — отворени нишки и решения от паметта\n"
     "/budget — разход на токени днес\n"
@@ -306,6 +307,68 @@ class ModelPicker(Gtk.MenuButton):
 
         listbox.connect("row-activated", on_row_activated)
         sw = Gtk.ScrolledWindow(max_content_height=360, propagate_natural_height=True,
+                                 propagate_natural_width=True)
+        sw.set_child(listbox)
+        box.append(sw)
+        self.popover.set_child(box)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Изричен офлайн режим — само локален модел
+# ─────────────────────────────────────────────────────────────────────────────
+class LocalModePicker(Gtk.MenuButton):
+    """Форсира Brain да ползва САМО локален Ollama модел, без изобщо да пипа
+    облака (design note, 2026-07-31 — поискано и в GUI-то, не само в терминала,
+    виж /local_model_max и /local_model_normal там). Две фиксирани нива:
+    LOCAL_TIER_MAX (14B, най-мощен, бавен) и LOCAL_TIER_NORMAL (7B, по-лек,
+    бърз) — общи константи с терминала, за да не се разминат имената на
+    моделите на две места. Прилагането минава през
+    genesis_agent.brain.set_local_only (споделена логика с терминала:
+    LOCAL_MODEL е модулна константа, четена динамично при всяко Brain(), не
+    заключена на import — safe да се пипа от произволен фронтенд в процеса)."""
+
+    def __init__(self, core: Core, on_pick) -> None:
+        super().__init__(icon_name="computer-symbolic")
+        self.set_tooltip_text("Изричен офлайн режим — само локален модел")
+        self.core = core
+        self.on_pick = on_pick
+        self.popover = Gtk.Popover()
+        self.set_popover(self.popover)
+        self.refresh()
+
+    def refresh(self) -> None:
+        from genesis_agent.brain import LOCAL_TIER_MAX, LOCAL_TIER_NORMAL
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        box.set_size_request(320, -1)
+        box.set_margin_top(8)
+        box.set_margin_bottom(8)
+        box.set_margin_start(8)
+        box.set_margin_end(8)
+        box.append(_label("Локален режим", selectable=False, css="speaker", wrap=False))
+
+        listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        listbox.add_css_class("boxed-list")
+
+        options = [
+            (None, "☁️ Облак (по подразбиране)"),
+            (LOCAL_TIER_MAX, f"🏠 MAX — {LOCAL_TIER_MAX} (14B, най-мощен, бавен)"),
+            (LOCAL_TIER_NORMAL, f"🏠 NORMAL — {LOCAL_TIER_NORMAL} (7B, по-лек и бърз)"),
+        ]
+        for model_id, text in options:
+            row = Gtk.ListBoxRow()
+            row.set_child(_label(text, selectable=False, wrap=False))
+            row.genesis_local_model = model_id
+            listbox.append(row)
+
+        def on_row_activated(_lb: Gtk.ListBox, row: Gtk.ListBoxRow) -> None:
+            picked = getattr(row, "genesis_local_model", None)
+            self.core.local_only_model = picked
+            self.on_pick(picked)
+            self.popover.popdown()
+
+        listbox.connect("row-activated", on_row_activated)
+        sw = Gtk.ScrolledWindow(max_content_height=200, propagate_natural_height=True,
                                  propagate_natural_width=True)
         sw.set_child(listbox)
         box.append(sw)
@@ -577,6 +640,7 @@ class Window(Adw.ApplicationWindow):
         # Studio-ерата model picker вече живее в долната лента (виж bottom по-долу),
         # не в header-а — Claude Code Desktop reference го показва до входа.
         self.model_picker = ModelPicker(core, self.on_model_picked)
+        self.local_mode_picker = LocalModePicker(core, self.on_local_mode_picked)
 
         workspace_btn = Gtk.ToggleButton(icon_name="folder-symbolic")
         workspace_btn.set_tooltip_text("Работна директория")
@@ -637,6 +701,7 @@ class Window(Adw.ApplicationWindow):
         bottom.append(entry_sw)
         entry_sw.set_hexpand(True)
         bottom.append(self.model_picker)
+        bottom.append(self.local_mode_picker)
         bottom.append(self.spinner)
         bottom.append(self.send_btn)
 
@@ -717,7 +782,12 @@ class Window(Adw.ApplicationWindow):
     def _idle_subtitle(self) -> str:
         """Заглавието винаги показва активния модел (не само "готов"/"мисли…")
         — точно липсата на тази видимост беше разликата с терминала, който
-        винаги знае/показва какво отговаря (design note, 2026-07-28)."""
+        винаги знае/показва какво отговаря (design note, 2026-07-28).
+        Локалният офлайн режим (ако е включен) измества облачния пин в
+        показването — той измества и реално облака в Brain.complete()."""
+        local = getattr(self.core, "local_only_model", None)
+        if local:
+            return f"🏠 локален режим: {local}"
         pin = getattr(self.core, "pin_model", None)
         return f"модел: {pin[1]}" if pin else "готов · авто модел"
 
@@ -734,6 +804,16 @@ class Window(Adw.ApplicationWindow):
         self.set_status(self._idle_subtitle())
         label = picked[1] if picked else "автоматично"
         self.add_widget(MessageWidget("⚙️ Модел", f"Превключено на: {label}", kind="assistant"))
+
+    def on_local_mode_picked(self, picked: str | None) -> None:
+        self.set_status(self._idle_subtitle())
+        if picked:
+            self.add_widget(MessageWidget(
+                "🏠 Локален режим", f"Включен — {picked}. Облакът не се пипа, докато е така.",
+                kind="assistant"))
+        else:
+            self.add_widget(MessageWidget(
+                "☁️ Локален режим", "Изключен — обратно към облачната верига.", kind="assistant"))
 
     def on_toggle_workspace(self, btn: Gtk.ToggleButton) -> None:
         if self.workspace_panel is None:

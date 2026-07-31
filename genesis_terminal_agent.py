@@ -255,25 +255,9 @@ _CODING_MODE = False
 # `/local_model_max` (14B, най-мощният локален) и `/local_model_normal` (7B,
 # по-лек и по-бърз) — изричен офлайн режим за сесията, вкл./изкл. като
 # /maxcoding. None = обичайният облак-пръв ред; иначе държи tag-а на
-# инсталирания Ollama модел, който в момента е форсиран.
+# инсталирания Ollama модел, който в момента е форсиран. Прилагането
+# (env + brain.LOCAL_MODEL) е споделено с GUI-то — виж genesis_agent.brain.set_local_only.
 _LOCAL_ONLY_MODEL: str | None = None
-_LOCAL_TIER_MAX = "qwen3:14b"
-_LOCAL_TIER_NORMAL = "qwen2.5-coder:7b"
-
-
-def _apply_local_only_mode() -> None:
-    """Синхронизира os.environ + brain.LOCAL_MODEL с текущия избор на
-    _LOCAL_ONLY_MODEL. brain.LOCAL_MODEL се чете САМО веднъж при import
-    (`os.environ.get(...)` на модулно ниво), затова местният override не
-    минава през env — пипаме директно модулния атрибут, който Brain.__init__
-    гледа при всяко извикване (dynamic global lookup, не заключен на import)."""
-    from genesis_agent import brain as _brain_module
-    if _LOCAL_ONLY_MODEL:
-        os.environ["GENESIS_LOCAL_ONLY"] = "1"
-        _brain_module.LOCAL_MODEL = _LOCAL_ONLY_MODEL
-    else:
-        os.environ.pop("GENESIS_LOCAL_ONLY", None)
-        _brain_module.LOCAL_MODEL = os.environ.get("GENESIS_LOCAL_MODEL", "qwen2.5-coder:3b")
 
 FALLBACK_CHAIN = [
     {"provider": fb.get("provider", "groq"), "model": fb.get("model", "")}
@@ -1023,12 +1007,13 @@ def main():
             # облак-пръв ред; извикване на другата команда, докато режимът вече
             # е включен, само сменя нивото.
             if user_input.lower() in ("/local_model_max", "/локален_макс"):
+                from genesis_agent.brain import LOCAL_TIER_MAX, set_local_only
                 globals()["_LOCAL_ONLY_MODEL"] = (
-                    None if _LOCAL_ONLY_MODEL == _LOCAL_TIER_MAX else _LOCAL_TIER_MAX
+                    None if _LOCAL_ONLY_MODEL == LOCAL_TIER_MAX else LOCAL_TIER_MAX
                 )
-                _apply_local_only_mode()
+                set_local_only(_LOCAL_ONLY_MODEL)
                 if _LOCAL_ONLY_MODEL:
-                    console.print(f"[bold green]🏠 Локален режим ВКЛЮЧЕН (MAX)[/] — {_LOCAL_TIER_MAX} "
+                    console.print(f"[bold green]🏠 Локален режим ВКЛЮЧЕН (MAX)[/] — {LOCAL_TIER_MAX} "
                                   "(14B, най-мощният локален модел, бавен)")
                     console.print("[dim]   Само локално — облакът не се пипа, докато режимът е включен.[/]")
                 else:
@@ -1036,12 +1021,13 @@ def main():
                 continue
 
             if user_input.lower() in ("/local_model_normal", "/локален_нормал"):
+                from genesis_agent.brain import LOCAL_TIER_NORMAL, set_local_only
                 globals()["_LOCAL_ONLY_MODEL"] = (
-                    None if _LOCAL_ONLY_MODEL == _LOCAL_TIER_NORMAL else _LOCAL_TIER_NORMAL
+                    None if _LOCAL_ONLY_MODEL == LOCAL_TIER_NORMAL else LOCAL_TIER_NORMAL
                 )
-                _apply_local_only_mode()
+                set_local_only(_LOCAL_ONLY_MODEL)
                 if _LOCAL_ONLY_MODEL:
-                    console.print(f"[bold green]🏠 Локален режим ВКЛЮЧЕН (NORMAL)[/] — {_LOCAL_TIER_NORMAL} "
+                    console.print(f"[bold green]🏠 Локален режим ВКЛЮЧЕН (NORMAL)[/] — {LOCAL_TIER_NORMAL} "
                                   "(7B, по-лек и по-бърз)")
                     console.print("[dim]   Само локално — облакът не се пипа, докато режимът е включен.[/]")
                 else:
