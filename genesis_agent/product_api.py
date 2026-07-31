@@ -30,8 +30,17 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
-from genesis_agent.brain import Brain
+from genesis_agent.brain import LOCAL_TIER_MAX, LOCAL_TIER_NORMAL, Brain, set_local_only
 from genesis_agent.orchestrator import run_orchestrated
+
+# Изричен офлайн режим през /v1/chat/completions (design note, 2026-07-31):
+# клиентите тук (genesis-web-agent) нямат достъп до Python import-и, само до
+# JSON — затова моделният избор минава през самото OpenAI "model" поле вместо
+# нов custom параметър. "local-max"/"local-normal" са sentinel стойности,
+# разпознати само тук; всяка друга (или липсваща) стойност си остава обичайният
+# облак-пръв ред. Реалните имена на моделите са в genesis_agent.brain, за да не
+# се разминат с терминала/GUI-то.
+_LOCAL_MODE_ALIASES = {"local-max": LOCAL_TIER_MAX, "local-normal": LOCAL_TIER_NORMAL}
 
 app = FastAPI(title="Genesis — Verified Code Service")
 
@@ -146,8 +155,12 @@ def chat_completions(req: ChatCompletionRequest, request: Request):
         raise HTTPException(status_code=400, detail="Нужно е поне едно 'user' съобщение.")
     goal = user_messages[-1].content
 
+    local_model = _LOCAL_MODE_ALIASES.get((req.model or "").strip().lower())
+    set_local_only(local_model)
+
     brain = Brain()
-    brain.route_for_goal(goal)
+    if not local_model:
+        brain.route_for_goal(goal)
 
     messages = [{"role": "system", "content": _IDE_CHAT_SYSTEM_PROMPT}]
     messages += [{"role": m.role, "content": m.content} for m in req.messages]
