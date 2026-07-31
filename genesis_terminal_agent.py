@@ -252,6 +252,29 @@ _TERMINAL_MIN_SIZE_B = 32
 # работата по код иска другия. Изборът е изричен и се вижда в /status.
 _CODING_MODE = False
 
+# `/local_model_max` (14B, най-мощният локален) и `/local_model_normal` (7B,
+# по-лек и по-бърз) — изричен офлайн режим за сесията, вкл./изкл. като
+# /maxcoding. None = обичайният облак-пръв ред; иначе държи tag-а на
+# инсталирания Ollama модел, който в момента е форсиран.
+_LOCAL_ONLY_MODEL: str | None = None
+_LOCAL_TIER_MAX = "qwen3:14b"
+_LOCAL_TIER_NORMAL = "qwen2.5-coder:7b"
+
+
+def _apply_local_only_mode() -> None:
+    """Синхронизира os.environ + brain.LOCAL_MODEL с текущия избор на
+    _LOCAL_ONLY_MODEL. brain.LOCAL_MODEL се чете САМО веднъж при import
+    (`os.environ.get(...)` на модулно ниво), затова местният override не
+    минава през env — пипаме директно модулния атрибут, който Brain.__init__
+    гледа при всяко извикване (dynamic global lookup, не заключен на import)."""
+    from genesis_agent import brain as _brain_module
+    if _LOCAL_ONLY_MODEL:
+        os.environ["GENESIS_LOCAL_ONLY"] = "1"
+        _brain_module.LOCAL_MODEL = _LOCAL_ONLY_MODEL
+    else:
+        os.environ.pop("GENESIS_LOCAL_ONLY", None)
+        _brain_module.LOCAL_MODEL = os.environ.get("GENESIS_LOCAL_MODEL", "qwen2.5-coder:3b")
+
 FALLBACK_CHAIN = [
     {"provider": fb.get("provider", "groq"), "model": fb.get("model", "")}
     for fb in config.get("models", {}).get("fallback_models", [])
@@ -507,7 +530,7 @@ def ask_genesis(messages, tools=None):
     (виж SECURITY.md — един ключ на доставчик), а офсетът връщаше отговори от
     различен модел на всяко съобщение и не се качваше обратно нагоре.
     """
-    global total_input_tokens, total_output_tokens, current_provider, current_model_id
+    global total_input_tokens, total_output_tokens
 
     # Ръчно избран доставчик, който Brain не познава → стария директен път.
     if current_provider in _BRAIN_UNKNOWN_PROVIDERS:
@@ -519,7 +542,7 @@ def ask_genesis(messages, tools=None):
     brain = Brain(min_size_b=_TERMINAL_MIN_SIZE_B,
                   quality="coding" if _CODING_MODE else None,
                   pin_model=None if _CODING_MODE else (current_provider, current_model_id))
-    before = (current_provider, current_model_id)
+    pinned = (current_provider, current_model_id)
 
     reply = brain.complete(list(messages), tools=tools)
     text = reply.raw_text or ""
@@ -536,13 +559,24 @@ def ask_genesis(messages, tools=None):
                 total_input_tokens += estimate_tokens(m.get("content", "") or "")
         total_output_tokens += estimate_tokens(text)
 
-    # Ако Brain е сменил модела (fallback/ротация), отразяваме го в status bar-а.
+    # Ако Brain е паднал на друг доставчик ЗА ТОЗИ отговор (cooldown/грешка,
+    # включително сгромолясване до локалния модел като последна резерва),
+    # само показваме бадж — НЕ пипаме current_provider/current_model_id.
+    # (Бъг до 2026-07-31: тук се презаписваше глобалният пин с каквото Brain
+    # реално отговори. Една временна облачна грешка ставаше ПОСТОЯННА смяна —
+    # сесията оставаше заключена на резервния/локалния модел до края,
+    # вместо да се самолекува на следващото съобщение. Ако fallback-ът беше
+    # към "ollama_local" (Brain-ов вътрешен provider ключ, липсващ от
+    # терминалния PROVIDERS речник), следващото /status дори гърмеше с
+    # KeyError.) Пинът се пипа само от изричен избор на оператора — /model,
+    # /maxcoding, /local_model_max, /local_model_normal.
     if brain.current:
-        current_provider = brain.current.get("provider", current_provider)
-        current_model_id = brain.current.get("model", current_model_id)
-        if (current_provider, current_model_id) != before:
-            badge = model_badge(current_provider, current_model_id)
-            console.print(f"\n[yellow]↪ Модел → {current_provider} / {current_model_id} {badge}[/]")
+        used_provider = brain.current.get("provider", current_provider)
+        used_model_id = brain.current.get("model", current_model_id)
+        if (used_provider, used_model_id) != pinned:
+            badge = model_badge(used_provider, used_model_id)
+            console.print(f"\n[yellow]↪ Отговорено от → {used_provider} / {used_model_id} {badge} "
+                          f"[dim](временно — пинът си остава {pinned[0]}/{pinned[1]})[/][/]")
 
     if text.startswith("Error:"):
         return f"[Грешка: {text[6:].strip()}]", None
@@ -981,11 +1015,47 @@ def main():
                     console.print("[yellow]🛠️  Кодинг режим ИЗКЛЮЧЕН[/] — обичайната верига.")
                 continue
 
+            # ── /local_model_max, /local_model_normal — изричен офлайн режим ──
+            # Форсира Brain да ползва САМО локален Ollama модел (GENESIS_LOCAL_ONLY),
+            # без изобщо да пипа облака. Две фиксирани нива, каквото е реално
+            # инсталирано на машината: 14B (най-мощен, бавен) и 7B (по-лек, бърз).
+            # Повторно извикване на същата команда изключва режима обратно към
+            # облак-пръв ред; извикване на другата команда, докато режимът вече
+            # е включен, само сменя нивото.
+            if user_input.lower() in ("/local_model_max", "/локален_макс"):
+                globals()["_LOCAL_ONLY_MODEL"] = (
+                    None if _LOCAL_ONLY_MODEL == _LOCAL_TIER_MAX else _LOCAL_TIER_MAX
+                )
+                _apply_local_only_mode()
+                if _LOCAL_ONLY_MODEL:
+                    console.print(f"[bold green]🏠 Локален режим ВКЛЮЧЕН (MAX)[/] — {_LOCAL_TIER_MAX} "
+                                  "(14B, най-мощният локален модел, бавен)")
+                    console.print("[dim]   Само локално — облакът не се пипа, докато режимът е включен.[/]")
+                else:
+                    console.print("[yellow]🏠 Локален режим ИЗКЛЮЧЕН[/] — обратно към облачната верига.")
+                continue
+
+            if user_input.lower() in ("/local_model_normal", "/локален_нормал"):
+                globals()["_LOCAL_ONLY_MODEL"] = (
+                    None if _LOCAL_ONLY_MODEL == _LOCAL_TIER_NORMAL else _LOCAL_TIER_NORMAL
+                )
+                _apply_local_only_mode()
+                if _LOCAL_ONLY_MODEL:
+                    console.print(f"[bold green]🏠 Локален режим ВКЛЮЧЕН (NORMAL)[/] — {_LOCAL_TIER_NORMAL} "
+                                  "(7B, по-лек и по-бърз)")
+                    console.print("[dim]   Само локално — облакът не се пипа, докато режимът е включен.[/]")
+                else:
+                    console.print("[yellow]🏠 Локален режим ИЗКЛЮЧЕН[/] — обратно към облачната верига.")
+                continue
+
             if user_input.lower() == "/status":
                 _ctx_used, ctx_remain, ctx_pct = get_context_stats()
                 console.print(f"[cyan]Модел:[/] {current_model_id}"
                               + ("  [green](кодинг режим — веригата е друга)[/]" if _CODING_MODE else ""))
-                console.print(f"[cyan]Доставчик:[/] {PROVIDERS[current_provider]['name']}")
+                if _LOCAL_ONLY_MODEL:
+                    console.print(f"[cyan]Доставчик:[/] 🏠 Локален режим — {_LOCAL_ONLY_MODEL} (облакът е спрян)")
+                else:
+                    console.print(f"[cyan]Доставчик:[/] {PROVIDERS[current_provider]['name']}")
                 console.print(f"[cyan]Време:[/] {get_elapsed_time()}")
                 console.print(f"[cyan]Токени:[/] ~{total_input_tokens + total_output_tokens} ({ctx_pct}%)")
                 console.print(f"[cyan]Остава:[/] ~{ctx_remain}")
@@ -998,6 +1068,8 @@ def main():
                 help_table.add_row("/model или /agent", "Смяна на AI модел/доставчик")
                 help_table.add_row("/models", f"Покажи целия fallback chain ({len(FALLBACK_CHAIN)} модела)")
                 help_table.add_row("/maxcoding", "Вкл./изкл. най-силните БЕЗПЛАТНИ модели за код")
+                help_table.add_row("/local_model_max", "Вкл./изкл. офлайн режим — само qwen3:14b (мощен, бавен)")
+                help_table.add_row("/local_model_normal", "Вкл./изкл. офлайн режим — само qwen2.5-coder:7b (лек, бърз)")
                 help_table.add_row("/clear", "Нов разговор (изчиства историята)")
                 help_table.add_row("/status", "Системна информация и статистика")
                 help_table.add_row("/history", "Преглед и зареждане на стари сесии")
