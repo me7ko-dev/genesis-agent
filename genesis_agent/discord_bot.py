@@ -300,32 +300,60 @@ class GenesisClient(discord.Client):
             if tool_calls:
                 assistant_msg["tool_calls"] = tool_calls
             messages.append(assistant_msg)
-            if not tool_calls:
+
+            if tool_calls:
+                if _round >= _TOOL_ROUND_CAP:
+                    text = text or "(достигнат таван инструмент-рундове за това съобщение)"
+                    break
+                asked = ""
+                for tc in tool_calls:
+                    fn = tc.get("function", {}) or {}
+                    name = fn.get("name", "")
+                    try:
+                        args = json.loads(fn.get("arguments") or "{}")
+                    except (json.JSONDecodeError, TypeError):
+                        args = {}
+                    result = genesis_skills.dispatch_tool_call(name, args)
+                    messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
+                                      "name": name, "content": result})
+                    if genesis_skills.ASK_USER_MARKER in result:
+                        asked = result
+                if asked:
+                    # ASK_USER (design note, 2026-07-27) — в Discord "спирането" е
+                    # естествено: въпросът се праща като отговор, а следващото
+                    # съобщение на потребителя е отговорът му. Текстът на модела (ако
+                    # има) се запазва над въпроса, за да не се губи контекстът.
+                    q = asked.replace(genesis_skills.ASK_USER_MARKER, "").strip()
+                    text = f"{text}\n\n{q}".strip() if text else q
+                    break
+                continue
+
+            # Няма native tool_calls. Или моделът просто говори (обичайният
+            # случай), или — реален бъг, хванат наживо 2026-07-31 с !local_max —
+            # локалният модел НИКОГА не връща native tool_calls (genesis_agent.
+            # brain._call_local), само text-tag синтаксис в raw_text. Дотук този
+            # клон просто спираше тук, така че локалният модел можеше само да
+            # РАЗКАЖЕ намерение ("Използвам браузър, за да търся...") без да се
+            # изпълни каквото и да е — точно "не върши реално нещата". Огледало
+            # на терминала (parse_and_execute_tools + system "[Резултат]" рунд).
+            if not use_tools:
+                break
+            tool_results = genesis_skills.parse_and_execute_tools(text)
+            if not tool_results:
+                break
+            asked = next((r for r in tool_results if genesis_skills.ASK_USER_MARKER in r), "")
+            if asked:
+                q = asked.replace(genesis_skills.ASK_USER_MARKER, "").strip()
+                text = f"{text}\n\n{q}".strip() if text else q
                 break
             if _round >= _TOOL_ROUND_CAP:
                 text = text or "(достигнат таван инструмент-рундове за това съобщение)"
                 break
-            asked = ""
-            for tc in tool_calls:
-                fn = tc.get("function", {}) or {}
-                name = fn.get("name", "")
-                try:
-                    args = json.loads(fn.get("arguments") or "{}")
-                except (json.JSONDecodeError, TypeError):
-                    args = {}
-                result = genesis_skills.dispatch_tool_call(name, args)
-                messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
-                                  "name": name, "content": result})
-                if genesis_skills.ASK_USER_MARKER in result:
-                    asked = result
-            if asked:
-                # ASK_USER (design note, 2026-07-27) — в Discord "спирането" е
-                # естествено: въпросът се праща като отговор, а следващото
-                # съобщение на потребителя е отговорът му. Текстът на модела (ако
-                # има) се запазва над въпроса, за да не се губи контекстът.
-                q = asked.replace(genesis_skills.ASK_USER_MARKER, "").strip()
-                text = f"{text}\n\n{q}".strip() if text else q
-                break
+            messages.append({"role": "system",
+                              "content": "[Резултат]:\n" + "\n\n".join(tool_results) +
+                              "\n\nАко тези резултати вече изпълняват заявката на потребителя "
+                              "напълно — дай КРАТКО финално обобщение БЕЗ никакви нови tool тагове. "
+                              "Викай нов tool САМО ако наистина има следваща реална стъпка."})
         text = text or "(празен отговор)"
 
         # Обнови контекста и споделената памет (безопасно). Пазим само

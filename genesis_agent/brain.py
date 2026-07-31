@@ -922,7 +922,19 @@ class Brain:
         if local_only:
             if not self.local:
                 return self._error_result("Error: локален режим — няма наличен локален модел")
-            hit = self._call_local(messages, attempts=2)
+            # Бъг, хванат наживо 2026-07-31 (Discord !local_max + реални tools):
+            # този клон връщаше рано БЕЗ да мине през _with_tool_tag_docs/
+            # _sanitize_for_textmode по-долу — локалният модел никога не
+            # научаваше какъв е синтаксисът на тул-таговете, затова само
+            # разказваше намерение ("Използвам браузър...") без да върне нищо
+            # парсваемо. Локалният модел НИКОГА не връща native tool_calls
+            # (виж _call_local) — единственият му път е text-tag режимът, а той
+            # изисква точно тази документация в system съобщението.
+            local_messages = (
+                self._with_tool_tag_docs(self._sanitize_for_textmode(messages))
+                if tools else messages
+            )
+            hit = self._call_local(local_messages, attempts=2)
             if hit:
                 raw_text, code = hit
                 return type("Obj", (object,), {"raw_text": raw_text, "code": code,
