@@ -115,13 +115,26 @@ except Exception:  # pragma: no cover
 _TOOL_ROUND_CAP = 6
 
 
-def _chat_brain():
-    """Brain, филтриран до ≥17B общи (не coder-специализирани) модели за чат."""
-    from genesis_agent.brain import Brain
+def _chat_brain(local_only_model: str | None = None):
+    """Brain, филтриран до ≥17B общи (не coder-специализирани) модели за чат.
 
-    b = Brain(use_local=False, min_size_b=_CHAT_MIN_SIZE_B)
-    b.chain = [c for c in b.chain if "coder" not in c["model"].lower()]
-    b.current = b.chain[0] if b.chain else None
+    local_only_model (design note, 2026-07-31, !local_max/!local_normal —
+    поискано и тук, не само в терминала/GUI-то/уеб приложението): изричен избор
+    на оператора бие подразбиращото се изключване на "-Coder-" моделите по-долу
+    (то е за автоматичния облачен избор, не за нещо, което операторът поиска
+    директно). use_local=False по подразбиране е нарочно — местните 3b/7b/14b
+    пишат забележимо по-слаб български, затова обичайният Discord чат никога не
+    ги пробва сам. Когато local_only_model е зададен, минаваме през
+    genesis_agent.brain.set_local_only (споделено с терминала/GUI-то/уеб
+    приложението) и пускаме use_local=True, за да има Brain.local изобщо
+    какво да ползва в GENESIS_LOCAL_ONLY клона."""
+    from genesis_agent.brain import Brain, set_local_only
+
+    set_local_only(local_only_model)
+    b = Brain(use_local=bool(local_only_model), min_size_b=_CHAT_MIN_SIZE_B)
+    if not local_only_model:
+        b.chain = [c for c in b.chain if "coder" not in c["model"].lower()]
+        b.current = b.chain[0] if b.chain else None
     return b
 
 
@@ -219,6 +232,9 @@ class GenesisClient(discord.Client):
         self._loop_stats: dict[str, Any] = {
             "missions": 0, "successes": 0, "started_at": None,
         }
+        # !local_max / !local_normal — изричен офлайн режим, споделен с
+        # терминала/GUI-то/уеб приложението (genesis_agent.brain.set_local_only).
+        self._local_only_model: str | None = None
 
     # ── Помощни ───────────────────────────────────────────────────────────────
     def _brain_reply(self, channel_id: int, user_text: str, enable_tools: bool = False) -> tuple[str, int]:
@@ -270,7 +286,7 @@ class GenesisClient(discord.Client):
         messages.extend(hist)
         messages.append({"role": "user", "content": user_text})
 
-        brain = _chat_brain()
+        brain = _chat_brain(self._local_only_model)
         tools = _DISCORD_TOOL_SCHEMAS if use_tools else None
         total_tokens = 0
         text = ""
@@ -517,6 +533,8 @@ class GenesisClient(discord.Client):
                 "• `!stop` — kill-switch (спира 24/7 И текуща !mission).\n"
                 "• `!status247` — статус на 24/7 цикъла.\n"
                 "• `!budget` — token/API разход днес и последните 7 дни.\n"
+                "• `!local_max` / `!local_normal` — изричен офлайн режим (само локален "
+                "модел, 14B мощен/бавен или 7B лек/бърз); пак същата команда изключва.\n"
                 "• `!tasks` — какво е отворено, следващи стъпки, решения.\n"
                 "• `!done <id>` / `!drop <id>` — затвори нишка / изхвърли я.\n"
                 "• `!clear` — забравям контекста на този канал.\n"
@@ -569,6 +587,34 @@ class GenesisClient(discord.Client):
                 f"Активен: {'✅ да' if running else '❌ не'}\n"
                 f"Мисии тази сесия: {missions} ({successes} успешни)\n"
                 f"Uptime: {uptime}")
+            return
+
+        # Изричен офлайн режим — !local_max/!local_normal, огледало на
+        # /local_model_max и /local_model_normal в терминала (design note,
+        # 2026-07-31). Второ извикване на СЪЩАТА команда изключва обратно към
+        # облака; извикване на другата, докато вече е включен, само сменя нивото.
+        if text.lower() == "!local_max":
+            from genesis_agent.brain import LOCAL_TIER_MAX
+            self._local_only_model = None if self._local_only_model == LOCAL_TIER_MAX else LOCAL_TIER_MAX
+            if self._local_only_model:
+                await self._send(message.channel,
+                    f"🏠 **Локален режим ВКЛЮЧЕН (MAX)** — {LOCAL_TIER_MAX} (14B, най-мощен, бавен).\n"
+                    f"Само локално, докато не изключиш с `!local_max` пак или не смениш с `!local_normal`.")
+            else:
+                await self._send(message.channel, "☁️ Локален режим ИЗКЛЮЧЕН — обратно към облачната верига.")
+            return
+
+        if text.lower() == "!local_normal":
+            from genesis_agent.brain import LOCAL_TIER_NORMAL
+            self._local_only_model = None if self._local_only_model == LOCAL_TIER_NORMAL else LOCAL_TIER_NORMAL
+            if self._local_only_model:
+                await self._send(message.channel,
+                    f"🏠 **Локален режим ВКЛЮЧЕН (NORMAL)** — {LOCAL_TIER_NORMAL} (7B, по-лек и бърз).\n"
+                    f"⚠️ Coder-специализиран модел — по-слаб български от облачния чат "
+                    f"(същата причина, поради която обичайната верига винаги го изключва).\n"
+                    f"Само локално, докато не изключиш с `!local_normal` пак или не смениш с `!local_max`.")
+            else:
+                await self._send(message.channel, "☁️ Локален режим ИЗКЛЮЧЕН — обратно към облачната верига.")
             return
 
         if text.lower() == "!budget":
