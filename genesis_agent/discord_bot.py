@@ -246,13 +246,33 @@ class GenesisClient(discord.Client):
         tool schemas като терминалния чат) — реално изпълнява RUN_CMD/
         WRITE_FILE/USE_SKILL/... вместо само да "знае" за тях. Ограничен до
         _TOOL_ROUND_CAP рунда в рамките на ЕДНО съобщение (не блокира gateway
-        безкрайно). Sandbox-ът вече е безопасен по подразбиране тук — ботът
-        върви като systemd service (без tty), policy.resolve_mode() пада на
-        "deny" автоматично → CONFIRM операции се отказват, не увисват на
-        въпрос, който никой не може да отговори."""
+        безкрайно).
+
+        Sandbox policy (design note, 2026-07-31 — METKO избра изрично, виж
+        по-долу): временно "allow" за CONFIRM-ниво операции, САМО докато тече
+        тази синхронна заявка, после върнато на предишната политика. BLOCKED
+        (rm -rf /, форматиране на диск, парола/плащане в браузъра и т.н.)
+        остава отказано ВИНАГИ, независимо от mode — това не се пипа тук.
+        Причина: този метод се вика САМО от съобщение на owner-а (виж
+        on_message — botът fail-closed мълчи на всеки друг), т.е. реален човек
+        чете отговора в реално време, точно както терминален оператор би
+        написал "y" на CONFIRM въпрос. Преди тази промяна режимът беше "deny"
+        по подразбиране тук (без tty), защото systemd service без надзор не
+        бива да инсталира пакети сам — но за ЖИВ разговор с verified owner
+        това е грешна предпазливост: моделът или лъжеше, че е инсталирал
+        нещо след реален отказ (нарушава "никога не лъжи за резултат"), или
+        изхабяваше всичките рундове в повторни опити върху отказ, който не
+        може да се промени. 24/7 автономният цикъл (_run_247_loop) НЕ минава
+        оттук — той изрично задава mode="deny" отделно и си остава
+        неприсъстван (никой не чете в реално време да каже "да").
+        ВНИМАНИЕ: sandbox._POLICY е един процесов global, не thread-local —
+        ако фонова 24/7 нишка случайно удари CONFIRM операция в същия
+        прозорец, докато тази заявка тече, тя временно би видяла "allow"
+        също. Приет риск за личен, еднооператорен бот; преразгледай, ако
+        някога това реално се пресече на живо."""
         hist = self._history[channel_id]
         persona = self.persona
-        use_tools = enable_tools and _DISCORD_TOOL_SCHEMAS and genesis_skills
+        use_tools = bool(enable_tools and _DISCORD_TOOL_SCHEMAS and genesis_skills)
         if use_tools:
             persona += (" Имаш реални инструменти (файлове, команди, умения от библиотеката, "
                         "браузър) — викай ги директно вместо само да описваш какво трябва "
@@ -261,7 +281,13 @@ class GenesisClient(discord.Client):
                         "отговор от паметта си, винаги викай подходящ tool и цитирай РЕАЛНИЯ "
                         "резултат от него. Имаш и памет за работата (TASK_ADD/TASK_UPDATE/"
                         "REMEMBER) — записвай в нея веднага щом нещо се реши или остане "
-                        "недовършено, същата е като в терминалния чат.")
+                        "недовършено, същата е като в терминалния чат. "
+                        "НЕ питай за разрешение преди да викнеш tool ('да го инсталирам ли?', "
+                        "'да продължа ли?', 'потвърди с да') — това НЕ е твое решение, а на "
+                        "sandbox-а: инсталиране на пакет, четене/писане на файл и други обичайни "
+                        "операции минават автоматично тук — само истински катастрофалните "
+                        "остават блокирани. Въпросът само добавя излишен рунд. Викай tool-а "
+                        "СЕГА, в този отговор, после докладвай какво реално стана.")
 
         # Състоянието на работата — същата workspace памет като терминала, за да
         # може потребителят да продължи от телефона без да преразказва (design note, 2026-07-25).
@@ -288,6 +314,38 @@ class GenesisClient(discord.Client):
 
         brain = _chat_brain(self._local_only_model)
         tools = _DISCORD_TOOL_SCHEMAS if use_tools else None
+        total_tokens = 0
+        text = ""
+
+        from genesis_agent import sandbox
+        prev_sandbox_policy = sandbox.get_policy()
+        if use_tools:
+            sandbox.set_policy(sandbox.SandboxPolicy(mode="allow"))
+        try:
+            text, total_tokens = self._run_tool_rounds(messages, brain, tools, use_tools)
+        finally:
+            if use_tools:
+                sandbox.set_policy(prev_sandbox_policy)
+
+        # Обнови контекста и споделената памет (безопасно). Пазим само
+        # user/assistant текст в историята (не native tool_calls формата —
+        # виж genesis_agent.brain._sanitize_for_textmode за защо).
+        hist.append({"role": "user", "content": user_text})
+        hist.append({"role": "assistant", "content": text})
+        try:
+            from genesis_agent import conversation_memory as cm
+            cm.add_message("user", user_text)
+            cm.add_message("assistant", text)
+        except Exception:
+            pass
+        return text, total_tokens
+
+    @staticmethod
+    def _run_tool_rounds(messages: list[dict], brain, tools, use_tools: bool) -> tuple[str, int]:
+        """Извлечено от _brain_reply (design note, 2026-07-31): изолира точно
+        рундовете, за които важи временната sandbox "allow" политика, от
+        всичко около тях (persona/history/memory), за да е ясно какво точно
+        се пуска под разхлабения режим."""
         total_tokens = 0
         text = ""
         for _round in range(_TOOL_ROUND_CAP + 1):
@@ -355,18 +413,6 @@ class GenesisClient(discord.Client):
                               "напълно — дай КРАТКО финално обобщение БЕЗ никакви нови tool тагове. "
                               "Викай нов tool САМО ако наистина има следваща реална стъпка."})
         text = text or "(празен отговор)"
-
-        # Обнови контекста и споделената памет (безопасно). Пазим само
-        # user/assistant текст в историята (не native tool_calls формата —
-        # виж genesis_agent.brain._sanitize_for_textmode за защо).
-        hist.append({"role": "user", "content": user_text})
-        hist.append({"role": "assistant", "content": text})
-        try:
-            from genesis_agent import conversation_memory as cm
-            cm.add_message("user", user_text)
-            cm.add_message("assistant", text)
-        except Exception:
-            pass
         return text, total_tokens
 
     def _run_mission(self, goal: str) -> str:
