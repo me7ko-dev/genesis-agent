@@ -204,6 +204,32 @@ for k in KEYS:
     if os.environ.get(k):
         KEYS[k] = os.environ[k]
 
+# Opt-in ollama_cloud multi-key rotation lives in genesis_agent.brain (the
+# actual chat completions go through Brain — see the two `from
+# genesis_agent.brain import Brain` calls below), so it already works even
+# though KEYS/load_env above only ever recognize the bare OLLAMA_API_KEY.
+# This flag exists ONLY so the status panel's "0/9 активни" line and the
+# "no key configured" warning do not lie to the operator when the real key
+# lives at OLLAMA_API_KEY_2.._10 instead of the bare name — it changes no
+# request-routing behavior, only what gets printed.
+_OLLAMA_CLOUD_EXTRA_KEYS = [f"OLLAMA_API_KEY_{i}" for i in range(2, 11)]
+_ollama_cloud_multi: dict[str, bool] = {}
+for _p in ENV_FILES:
+    if not Path(_p).exists():
+        continue
+    for _line in Path(_p).read_text(encoding="utf-8", errors="replace").splitlines():
+        _line = _line.strip().removeprefix("export ").strip()
+        if "=" not in _line or _line.startswith("#"):
+            continue
+        _k, _v = _line.split("=", 1)
+        _k = _k.strip()
+        if _k in _OLLAMA_CLOUD_EXTRA_KEYS and _strip_inline_comment(_v.strip()).strip('"').strip("'"):
+            _ollama_cloud_multi[_k] = True
+for _k in _OLLAMA_CLOUD_EXTRA_KEYS:
+    if os.environ.get(_k):
+        _ollama_cloud_multi[_k] = True
+HAS_OLLAMA_CLOUD_KEY = bool(KEYS.get("OLLAMA_API_KEY") or _ollama_cloud_multi)
+
 # ── Providers & Models ────────────────────────────────────────────────────────
 PROVIDERS = {
     "groq":         {"name": "⚡ Groq",              "key_env": "GROQ_API_KEY",       "base_url": "https://api.groq.com/openai/v1",                        "type": "openai"},
@@ -712,7 +738,9 @@ def print_minimal_banner():
 
     model_short = current_model_id.split("/")[-1] if "/" in current_model_id else current_model_id
     prov_name   = PROVIDERS[current_provider]["name"]
-    api_keys_ok = sum(1 for pk, pd in PROVIDERS.items() if pd["key_env"] and KEYS.get(pd["key_env"]))
+    api_keys_ok = sum(1 for pk, pd in PROVIDERS.items()
+                      if pd["key_env"] and (KEYS.get(pd["key_env"])
+                                            or (pk == "ollama_cloud" and _ollama_cloud_multi)))
     api_keys_tot = sum(1 for pd in PROVIDERS.values() if pd["key_env"])
 
     ram_pct = sysinfo.get("ram_pct", 0)
