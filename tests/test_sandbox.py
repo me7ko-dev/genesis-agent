@@ -151,3 +151,95 @@ def test_browser_buy_now_click_blocked() -> None:
 def test_browser_ordinary_click_is_confirm() -> None:
     verdict = sandbox.assess_browser_click("Next page")
     assert verdict.level == CONFIRM
+
+
+# ── _build_env: the module docstring's core promise ─────────────────────────
+# "LLM-генерираният код НЕ вижда API ключовете/токените на процеса-родител."
+
+def test_build_env_excludes_vars_outside_the_allowlist(monkeypatch) -> None:
+    monkeypatch.setenv("SOME_SECRET_API_KEY", "sk-should-not-leak")
+    env = sandbox._build_env(SandboxPolicy())
+    assert "SOME_SECRET_API_KEY" not in env
+
+
+def test_build_env_keeps_allowlisted_vars(monkeypatch) -> None:
+    monkeypatch.setenv("HOME", "/home/roika")
+    env = sandbox._build_env(SandboxPolicy())
+    assert env.get("HOME") == "/home/roika"
+
+
+def test_build_env_extra_overrides(monkeypatch) -> None:
+    monkeypatch.setenv("PATH", "/usr/bin")
+    env = sandbox._build_env(SandboxPolicy(), extra={"PATH": "/custom/bin"})
+    assert env["PATH"] == "/custom/bin"
+
+
+# ── run_shell / run_python: the actual execution boundary ──────────────────
+
+def test_run_shell_executes_a_safe_command(tmp_path) -> None:
+    res = sandbox.run_shell("echo hello-from-sandbox", cwd=tmp_path)
+    assert res.ok is True
+    assert not res.blocked
+    assert "hello-from-sandbox" in res.stdout
+    assert res.returncode == 0
+
+
+def test_run_shell_blocked_command_never_reaches_a_subprocess(tmp_path, monkeypatch) -> None:
+    """The BLOCKED verdict must short-circuit before any process is spawned —
+    not just be reported as failed after running."""
+    called = False
+
+    def _fail_if_called(*a, **kw):
+        nonlocal called
+        called = True
+        raise AssertionError("Popen must not be called for a BLOCKED command")
+
+    monkeypatch.setattr(sandbox.subprocess, "Popen", _fail_if_called)
+    res = sandbox.run_shell("rm -rf /", cwd=tmp_path)
+    assert called is False
+    assert res.blocked is True
+    assert res.ok is False
+    assert "BLOCKED" in res.stderr
+
+
+def test_run_shell_confirm_command_denied_non_interactively(tmp_path) -> None:
+    """No tty under pytest → policy resolves to 'deny' for CONFIRM commands."""
+    res = sandbox.run_shell("sudo apt-get install nginx", cwd=tmp_path)
+    assert res.blocked is True
+    assert res.ok is False
+    assert "DENIED" in res.stderr
+
+
+def test_run_shell_timeout_kills_the_process(tmp_path) -> None:
+    res = sandbox.run_shell("sleep 5", cwd=tmp_path, timeout=1)
+    assert res.ok is False
+    assert "Timeout" in res.stderr
+
+
+def test_run_python_executes_and_returns_stdout(tmp_path) -> None:
+    res = sandbox.run_python("print(2 + 2)", cwd=tmp_path)
+    assert res.ok is True
+    assert "4" in res.stdout
+
+
+def test_run_python_blocked_code_never_writes_a_script(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(sandbox, "_sandbox_dir", lambda: tmp_path)
+    res = sandbox.run_python("import os; os.system('rm -rf /')", cwd=tmp_path)
+    assert res.blocked is True
+    assert list(tmp_path.glob("run_*.py")) == []
+
+
+def test_run_python_cleans_up_its_temp_script(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(sandbox, "_sandbox_dir", lambda: tmp_path)
+    res = sandbox.run_python("print('done')", cwd=tmp_path)
+    assert res.ok is True
+    assert list(tmp_path.glob("run_*.py")) == []
+
+
+# ── SandboxPolicy.resolve_mode / _decide, mode="allow" for CONFIRM ─────────
+
+def test_run_shell_confirm_command_allowed_in_allow_mode(tmp_path) -> None:
+    policy = SandboxPolicy(mode="allow")
+    res = sandbox.run_shell("echo would-normally-confirm", cwd=tmp_path, policy=policy)
+    assert res.blocked is False
+    assert res.ok is True

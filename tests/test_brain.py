@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 
+import genesis_agent.brain as brain_mod
 from genesis_agent.brain import Brain
 
 
@@ -141,3 +142,166 @@ class TestHttp:
         content, tool_calls = b._http("https://x", "key", "m", [], 30, tools=[{}])
         assert content == ""
         assert tool_calls == [{"id": "1"}]
+
+
+@pytest.fixture(autouse=True)
+def _clean_exhausted_state():
+    """_EXHAUSTED is module-level global state, keyed by provider/key id —
+    a previous test marking something exhausted must not leak into the next
+    one's cooldown assertions."""
+    brain_mod._EXHAUSTED.clear()
+    yield
+    brain_mod._EXHAUSTED.clear()
+
+
+class TestExhaustionCooldown:
+    def test_unmarked_key_is_not_exhausted(self) -> None:
+        assert brain_mod._is_exhausted("nobody-marked-this") is False
+
+    def test_marked_key_is_exhausted_immediately(self) -> None:
+        brain_mod._mark_exhausted("groq")
+        assert brain_mod._is_exhausted("groq") is True
+
+    def test_expired_cooldown_is_no_longer_exhausted_and_self_clears(self, monkeypatch) -> None:
+        t = [1_000_000.0]
+        monkeypatch.setattr(brain_mod.time, "time", lambda: t[0])
+        brain_mod._mark_exhausted("groq")
+        assert brain_mod._is_exhausted("groq") is True
+        t[0] += brain_mod._EXHAUST_COOLDOWN + 1
+        assert brain_mod._is_exhausted("groq") is False
+        # Self-clearing: the entry should be gone, not just reported as expired.
+        assert "groq" not in brain_mod._EXHAUSTED
+
+
+class TestLastModelPersistence:
+    def _isolate(self, monkeypatch, tmp_path):
+        p = tmp_path / "last_model.json"
+        monkeypatch.setattr(brain_mod, "last_model_path", lambda: p)
+        return p
+
+    def test_missing_file_returns_none(self, monkeypatch, tmp_path) -> None:
+        self._isolate(monkeypatch, tmp_path)
+        assert brain_mod._load_last_model() is None
+
+    def test_corrupt_file_returns_none_not_an_exception(self, monkeypatch, tmp_path) -> None:
+        p = self._isolate(monkeypatch, tmp_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("not json at all", encoding="utf-8")
+        assert brain_mod._load_last_model() is None
+
+    def test_save_then_load_round_trips(self, monkeypatch, tmp_path) -> None:
+        self._isolate(monkeypatch, tmp_path)
+        brain_mod._save_last_model("groq", "llama-3.3-70b-versatile")
+        assert brain_mod._load_last_model() == ("groq", "llama-3.3-70b-versatile")
+
+    def test_save_never_raises_even_if_the_path_is_unwritable(self, monkeypatch, tmp_path) -> None:
+        # Point at a path whose parent cannot be created (a file, not a dir).
+        blocker = tmp_path / "blocker"
+        blocker.write_text("x", encoding="utf-8")
+        monkeypatch.setattr(brain_mod, "last_model_path", lambda: blocker / "last_model.json")
+        brain_mod._save_last_model("groq", "some-model")  # must not raise
+
+
+class TestOllamaCloudKeys:
+    def _brain_with_keys(self, keys: dict) -> Brain:
+        b = Brain.__new__(Brain)
+        b.keys = keys
+        return b
+
+    def test_empty_when_no_keys_set(self) -> None:
+        b = self._brain_with_keys({})
+        assert b._ollama_cloud_keys() == []
+
+    def test_single_bare_key_returns_one_item_list(self) -> None:
+        b = self._brain_with_keys({"OLLAMA_API_KEY": "k1"})
+        assert b._ollama_cloud_keys() == ["k1"]
+
+    def test_numbered_keys_collected_in_order(self) -> None:
+        b = self._brain_with_keys({
+            "OLLAMA_API_KEY": "k1",
+            "OLLAMA_API_KEY_3": "k3",
+            "OLLAMA_API_KEY_2": "k2",
+        })
+        # Order follows _OLLAMA_CLOUD_KEY_ENVS (bare, then _2, _3, ...), not
+        # insertion order into the dict.
+        assert b._ollama_cloud_keys() == ["k1", "k2", "k3"]
+
+    def test_blank_numbered_key_is_skipped(self) -> None:
+        b = self._brain_with_keys({"OLLAMA_API_KEY": "k1", "OLLAMA_API_KEY_2": "   "})
+        assert b._ollama_cloud_keys() == ["k1"]
+
+
+class TestOllamaCloudRotation:
+    """_call_ollama_cloud_rotating — the opt-in multi-key path. Only reached
+    with >1 key (see brain.py's `_call`), so these call it directly."""
+
+    def _brain(self) -> Brain:
+        b = Brain.__new__(Brain)
+        b.timeout = 30
+        return b
+
+    def test_first_key_succeeds_no_rotation_needed(self, monkeypatch) -> None:
+        b = self._brain()
+        calls = []
+
+        def fake_http(base_url, key, model, messages, timeout, tools=None):
+            calls.append(key)
+            return "ok", None
+
+        monkeypatch.setattr(b, "_http", fake_http)
+        out = b._call_ollama_cloud_rotating("https://x", "m", [], None, ["k1", "k2"])
+        assert out == ("ok", None)
+        assert calls == ["k1"]
+
+    def test_exhausted_first_key_rotates_to_second(self, monkeypatch) -> None:
+        b = self._brain()
+        calls = []
+
+        def fake_http(base_url, key, model, messages, timeout, tools=None):
+            calls.append(key)
+            if key == "k1":
+                raise RuntimeError("HTTP_429: rate limited")
+            return "from k2", None
+
+        monkeypatch.setattr(b, "_http", fake_http)
+        out = b._call_ollama_cloud_rotating("https://x", "m", [], None, ["k1", "k2"])
+        assert out == ("from k2", None)
+        assert calls == ["k1", "k2"]
+        assert brain_mod._is_exhausted("key::OLLAMA_API_KEY#1") is True
+        assert brain_mod._is_exhausted("key::OLLAMA_API_KEY#2") is False
+
+    def test_already_cooling_key_is_skipped_without_being_tried(self, monkeypatch) -> None:
+        b = self._brain()
+        brain_mod._mark_exhausted("key::OLLAMA_API_KEY#1")
+        calls = []
+
+        def fake_http(base_url, key, model, messages, timeout, tools=None):
+            calls.append(key)
+            return "from k2", None
+
+        monkeypatch.setattr(b, "_http", fake_http)
+        out = b._call_ollama_cloud_rotating("https://x", "m", [], None, ["k1", "k2"])
+        assert out == ("from k2", None)
+        assert calls == ["k2"]
+
+    def test_all_keys_exhausted_raises_a_clear_error(self) -> None:
+        b = self._brain()
+        brain_mod._mark_exhausted("key::OLLAMA_API_KEY#1")
+        brain_mod._mark_exhausted("key::OLLAMA_API_KEY#2")
+        with pytest.raises(RuntimeError, match="cooling down"):
+            b._call_ollama_cloud_rotating("https://x", "m", [], None, ["k1", "k2"])
+
+    def test_non_fallback_error_propagates_immediately_without_trying_next_key(self, monkeypatch) -> None:
+        """A bug (e.g. TypeError) must not be swallowed and silently retried
+        as if it were an exhausted-quota response."""
+        b = self._brain()
+        calls = []
+
+        def fake_http(base_url, key, model, messages, timeout, tools=None):
+            calls.append(key)
+            raise RuntimeError("HTTP_400: bad request")
+
+        monkeypatch.setattr(b, "_http", fake_http)
+        with pytest.raises(RuntimeError, match="HTTP_400"):
+            b._call_ollama_cloud_rotating("https://x", "m", [], None, ["k1", "k2"])
+        assert calls == ["k1"]  # never tried k2 — this wasn't a quota/auth failure
