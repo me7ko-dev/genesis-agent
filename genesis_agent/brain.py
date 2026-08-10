@@ -7,9 +7,15 @@ finally to a local Ollama model if one is installed. Providers you have no key
 for are skipped silently, so the agent works with one key or with six.
 
 Design notes worth knowing before you change anything here:
-  • ONE key per provider. Rotating several free accounts to multiply a quota
-    violates most providers' terms; breadth across providers is the supported
-    way to get headroom.
+  • ONE key per provider BY DEFAULT. Rotating several free accounts to
+    multiply a quota violates most providers' terms; breadth across providers
+    is the supported way to get headroom. The one documented exception is
+    `ollama_cloud`: if the OPERATOR (not this codebase) chooses to add
+    `OLLAMA_API_KEY_2`..`OLLAMA_API_KEY_5` to their own gitignored
+    `~/.genesis/.env`, Brain rotates across whichever of those they set —
+    opt-in, per-machine, never suggested or enabled by default. Whether that
+    is within Ollama's own terms is the operator's call to make, not this
+    code's; nothing here contacts Ollama to check.
   • Models that support native OpenAI tool-calling are preferred when `tools=`
     is passed; the rest fall back to the text-tag protocol in `config.yaml`.
   • A provider that returns 429/402/503/401/403 is put on a cooldown rather
@@ -35,7 +41,14 @@ from genesis_agent.paths import (
     CONFIG_PATH,
     ENV_FILES,
     _strip_inline_comment,
+    last_model_path,
 )
+
+# Extra ollama_cloud keys an operator may add THEMSELVES to their own
+# gitignored ~/.genesis/.env — OLLAMA_API_KEY_2 through _10. Not suggested,
+# not enabled by default, not touched unless these exact names are present.
+# See the module docstring above.
+_OLLAMA_CLOUD_KEY_ENVS = ["OLLAMA_API_KEY"] + [f"OLLAMA_API_KEY_{i}" for i in range(2, 11)]
 
 log = logging.getLogger("genesis.brain")
 
@@ -147,6 +160,31 @@ def _is_exhausted(key: str) -> bool:
 
 def _mark_exhausted(key: str) -> None:
     _EXHAUSTED[key] = time.time() + _EXHAUST_COOLDOWN
+
+
+def _load_last_model() -> tuple[str, str] | None:
+    """(provider, model) Brain last completed successfully with, or None on
+    first run / corrupt file. Never raises — a missing or bad file just means
+    'start from the top of the chain', the same as before this existed."""
+    try:
+        data = json.loads(last_model_path().read_text(encoding="utf-8"))
+        provider, model = data.get("provider"), data.get("model")
+        if provider and model:
+            return str(provider), str(model)
+    except Exception:
+        pass
+    return None
+
+
+def _save_last_model(provider: str, model: str) -> None:
+    """Best-effort — a failed write should never break a completion that
+    already succeeded, so this swallows its own errors."""
+    try:
+        p = last_model_path()
+        p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        p.write_text(json.dumps({"provider": provider, "model": model}), encoding="utf-8")
+    except Exception as e:
+        log.debug("could not persist last_model: %s", e)
 
 
 def _load_keys() -> dict[str, str]:
@@ -357,6 +395,18 @@ class Brain:
             self.local = None
             if use_local and _local_available(LOCAL_MODEL):
                 self.local = {"provider": "ollama_local", "model": LOCAL_MODEL}
+
+        # Резюме на последния успешен модел (design note, added at operator's
+        # request): ако никой не е избрал изрично pin_model за тази сесия (и
+        # не сме в prefer_provider паралелен worker, който има собствена
+        # логика), опитваме последното (provider, model), с което Brain е
+        # завършил успешно предния път — записано от `_save_last_model` в
+        # complete()/_call_local(). Съвсем същият механизъм като pin_model
+        # по-долу: първо в опашката, но с нормален fallback ако вече не е наличен.
+        if not pin_model and not prefer_provider:
+            last = _load_last_model()
+            if last:
+                pin_model = last
 
         # pin_model (design note, 2026-07-25): ТОЧЕН (provider, model) отпред — за
         # ръчния избор от терминалния `/model` меню. Не РЕЖЕ веригата (за
@@ -643,14 +693,30 @@ class Brain:
 
         Deliberately one key per provider. Rotating several free-tier accounts
         to multiply a quota is against most providers' terms of service, so it
-        is not something this project ships. Resilience comes from breadth
-        instead — many providers in the chain, each used within its own limits.
+        is not something this project ships by default. Resilience comes from
+        breadth instead — many providers in the chain, each used within its
+        own limits. `_ollama_cloud_keys` below is the one opt-in exception,
+        gated on the operator's own env vars — see the module docstring.
         """
         val = self.keys.get(key_env)
         if val is None:
             return None
         val = str(val).strip()
         return val or None
+
+    def _ollama_cloud_keys(self) -> list[str]:
+        """
+        Every OLLAMA_API_KEY[_2.._5] the operator has actually set, in order.
+
+        Empty unless they added the extra numbered vars themselves — a bare
+        OLLAMA_API_KEY still returns exactly the one-item list it always did,
+        so nothing changes for anyone who never touches this."""
+        out = []
+        for env_name in _OLLAMA_CLOUD_KEY_ENVS:
+            v = self.keys.get(env_name)
+            if v and str(v).strip():
+                out.append(str(v).strip())
+        return out
 
     def _http(self, base_url: str, key: str | None, model: str, messages: list[dict], timeout: int,
              tools: list[dict] | None = None, extra: dict[str, Any] | None = None
@@ -839,6 +905,15 @@ class Brain:
             return self._http(base_url, None, model, messages, LOCAL_TIMEOUT, tools=tools,
                               extra={"reasoning_effort": "none"})
 
+        # Opt-in multi-key ollama_cloud (see module docstring + _ollama_cloud_keys):
+        # only takes this branch if the OPERATOR set more than one of
+        # OLLAMA_API_KEY[_2.._5] themselves. A single key falls straight
+        # through to the normal one-key path below, unchanged.
+        if provider == "ollama_cloud":
+            cloud_keys = self._ollama_cloud_keys()
+            if len(cloud_keys) > 1:
+                return self._call_ollama_cloud_rotating(base_url, model, messages, tools, cloud_keys)
+
         key = self._provider_key(key_env)
         if not key:
             raise RuntimeError(f"skip: no {key_env} configured")
@@ -863,6 +938,38 @@ class Brain:
                 print(f"  [Brain] 🔑 {key_env} unavailable ({last[:60]}) → next provider")
             raise
 
+    def _call_ollama_cloud_rotating(self, base_url: str, model: str, messages: list[dict],
+                                     tools: list[dict] | None, keys: list[str]) -> tuple[str, list | None]:
+        """
+        Opt-in ollama_cloud path — only reached when `keys` has more than one
+        entry, i.e. the operator added OLLAMA_API_KEY_2.. themselves. Tries
+        each key in the order they set them, skipping ones already on
+        cooldown, and marks only the SPECIFIC key that fails (not the whole
+        provider) so a healthy key #3 still gets used after #1 and #2 hit
+        their weekly cap. Whether running several free accounts this way fits
+        Ollama's own terms is the operator's call — see the module docstring.
+        """
+        last_err: Exception | None = None
+        tried_any = False
+        for idx, key in enumerate(keys, start=1):
+            kid = f"key::OLLAMA_API_KEY#{idx}"
+            if _is_exhausted(kid):
+                continue
+            tried_any = True
+            try:
+                return self._http(base_url, key, model, messages, self.timeout, tools=tools)
+            except RuntimeError as e:
+                last = str(e)
+                last_err = e
+                if any(f"HTTP_{c}" in last for c in _EXHAUST_CODES | {401, 403}):
+                    _mark_exhausted(kid)
+                    print(f"  [Brain] 🔑 OLLAMA_API_KEY#{idx} unavailable ({last[:60]}) → next key")
+                    continue
+                raise
+        if not tried_any:
+            raise RuntimeError("HTTP_429: all configured OLLAMA_API_KEY* are cooling down")
+        raise last_err or RuntimeError("HTTP_502: ollama_cloud key rotation exhausted")
+
     def _call_local(self, messages: list[dict], attempts: int = 1) -> tuple[str, str] | None:
         """Пробва локалния мозък (текущия tier — 3b/7b/14b, каквото е в self.local).
         Връща (raw_text, code) при успех, None при провал. Локалният никога не
@@ -878,6 +985,7 @@ class Brain:
                 raw_text, _tc = self._call(loc["provider"], loc["model"], trimmed)
                 self._fail_count = 0
                 self.current = self.local
+                _save_last_model(loc["provider"], loc["model"])
                 code = ""
                 if "```python" in raw_text:
                     code = raw_text.split("```python")[1].split("```")[0].strip()
@@ -1089,6 +1197,7 @@ class Brain:
                         self._record_stat(prov, time.time() - t0, True)
                         self._fail_count = 0
                         self.current = attempt
+                        _save_last_model(prov, model)
                         if step > 0 or round_i > 0:
                             print(f"  [Brain] ↪ модел: {prov}/{model}")
                         code = ""

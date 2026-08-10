@@ -124,11 +124,10 @@ def prepare_thread(thread: dict, max_rounds: int = _MAX_TOOL_ROUNDS) -> ThreadWo
     messages = [{"role": "system", "content": _SYSTEM},
                 {"role": "user", "content": user_msg}]
 
-    brain = Brain(min_size_b=120)
-    tools = _readonly_tools()
     rounds = 0
-
     try:
+        brain = Brain(min_size_b=120)
+        tools = _readonly_tools()
         for _ in range(max_rounds):
             reply = brain.complete(messages, tools=tools)
             text = (reply.raw_text or "").strip()

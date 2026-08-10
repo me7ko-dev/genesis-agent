@@ -33,6 +33,9 @@ build/
 dist/
 venv/
 .venv/
+.coverage
+.coverage.*
+htmlcov/
 
 # ---- Редактор / OS ----
 *.swp

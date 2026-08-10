@@ -30,6 +30,18 @@ def _no_local_probe(monkeypatch):
     monkeypatch.setattr("genesis_agent.brain._local_available", lambda _m: False)
 
 
+@pytest.fixture(autouse=True)
+def _no_last_model(monkeypatch):
+    """Isolate from ~/.genesis/last_model.json on the machine running the suite.
+
+    Brain() pins the previous run's (provider, model) ahead of the chain when
+    one is on disk (see `_load_last_model` in brain.py) — real, desired
+    behaviour for an actual session, but it makes chain-ordering assertions
+    here depend on whichever machine and account happen to run the tests.
+    """
+    monkeypatch.setattr("genesis_agent.brain._load_last_model", lambda: None)
+
+
 @pytest.fixture
 def no_paid_keys(monkeypatch):
     monkeypatch.setattr("genesis_agent.brain._load_keys", dict)

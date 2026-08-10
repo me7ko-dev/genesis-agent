@@ -122,3 +122,11 @@ def ensure_genesis_home() -> Path:
     """Create ~/.genesis with owner-only permissions (it holds API keys)."""
     GENESIS_HOME.mkdir(mode=0o700, parents=True, exist_ok=True)
     return GENESIS_HOME
+
+
+def last_model_path() -> Path:
+    """Where Brain remembers the last (provider, model) it completed with,
+    so the next process start resumes on it instead of always re-picking
+    the top of the chain. Same directory as the API keys, same privacy
+    expectations — gitignored, per-machine, never committed."""
+    return GENESIS_HOME / "last_model.json"
