@@ -34,6 +34,14 @@ class FakeBrain:
     trim_round_history = staticmethod(RealBrain.trim_round_history)
     replies: ClassVar[list[_Reply]] = []
     escalated = 0
+    # Cloud-only test double (design note, 2026-08-11): local=None + a non-empty
+    # chain means the mandatory local-tier research injection in
+    # autonomous_loop.py never fires here, matching every existing test's
+    # assumption of a pure cloud path.
+    local = None
+    chain: ClassVar[list[dict]] = [{"provider": "fake", "model": "fake"}]
+    current: ClassVar[dict | None] = None
+    calls: ClassVar[list[list[dict]]] = []  # messages passed to each .complete() call, in order
 
     def __init__(self, *a, **kw) -> None:
         pass
@@ -53,6 +61,7 @@ class FakeBrain:
 
     def complete(self, messages, tools=None, avoid=None):
         assert FakeBrain.replies, "FakeBrain.complete called more times than the test queued"
+        FakeBrain.calls.append(list(messages))
         return FakeBrain.replies.pop(0)
 
 
@@ -62,6 +71,9 @@ def _fake_dependencies(monkeypatch, tmp_path):
     dependency (disk, telemetry status file) for every test in this module."""
     FakeBrain.replies = []
     FakeBrain.escalated = 0
+    FakeBrain.calls = []
+    FakeBrain.local = None
+    FakeBrain.current = None
     monkeypatch.setattr(al, "Brain", FakeBrain)
     monkeypatch.setattr(
         al,
@@ -265,3 +277,101 @@ class TestPublicWrapperNeverCrashesOnNotification:
         outcome = al.run_autonomous_loop("print OK")
 
         assert outcome.success is True
+
+
+class TestWeakModelResearch:
+    """The 2026-08-11 mandatory-research-for-the-local-tier feature: a weak
+    3B/7B/14B model gets grounded web research injected BEFORE it writes code,
+    instead of relying on it to think to ask for that itself."""
+
+    def test_local_only_injects_research_before_the_first_round(self, monkeypatch) -> None:
+        code = "print('OK')"
+        _queue(
+            _Reply(raw_text="```python\n" + code + "\n```", code=code),
+            _Reply(raw_text="YES"),  # critic
+        )
+        FakeBrain.local = {"provider": "ollama_local", "model": "qwen2.5-coder:3b"}
+        monkeypatch.setenv("GENESIS_LOCAL_ONLY", "1")
+        monkeypatch.setattr(al, "_research_for_weak_model", lambda goal: "RESEARCH_MARKER_XYZ")
+        monkeypatch.setattr(al, "run_python_subprocess",
+                             lambda c: ExecResult(ok=True, stdout="OK\n", stderr="", returncode=0))
+        monkeypatch.setattr("genesis_agent.code_validate.validate_code_with_ruff", lambda c: (True, ""))
+        monkeypatch.setattr("genesis_agent.verifier.verify_skill",
+                             lambda c: VerifyResult(verified=True, method="self_test_passed"))
+        monkeypatch.setattr(al, "save_skill", lambda **kw: SKILLS_ROOT / "x.md")
+
+        outcome = al.run_autonomous_loop("something a weak model needs help with")
+
+        assert outcome.success is True
+        # The FIRST call to Brain.complete() already carried the research note —
+        # proves it was injected before round 0, not after a wasted blind attempt.
+        first_call_messages = FakeBrain.calls[0]
+        assert any("RESEARCH_MARKER_XYZ" in str(m.get("content", ""))
+                    for m in first_call_messages)
+
+    def test_cloud_first_mission_never_researches(self, monkeypatch) -> None:
+        """FakeBrain.local stays None (the default, cloud-only double) — the
+        pure-cloud path used by every other test in this module must stay
+        exactly as before: no research call, no extra round."""
+        code = "print('OK')"
+        _queue(
+            _Reply(raw_text="```python\n" + code + "\n```", code=code),
+            _Reply(raw_text="YES"),
+        )
+        researched = []
+        monkeypatch.setattr(al, "_research_for_weak_model",
+                             lambda goal: researched.append(goal) or "should never be used")
+        monkeypatch.setattr(al, "run_python_subprocess",
+                             lambda c: ExecResult(ok=True, stdout="OK\n", stderr="", returncode=0))
+        monkeypatch.setattr("genesis_agent.code_validate.validate_code_with_ruff", lambda c: (True, ""))
+        monkeypatch.setattr("genesis_agent.verifier.verify_skill",
+                             lambda c: VerifyResult(verified=True, method="self_test_passed"))
+        monkeypatch.setattr(al, "save_skill", lambda **kw: SKILLS_ROOT / "x.md")
+
+        outcome = al.run_autonomous_loop("print OK")
+
+        assert outcome.success is True
+        assert outcome.rounds == 1
+        assert researched == []
+
+    def test_mid_mission_fallback_to_local_discards_the_blind_reply_and_researches(
+        self, monkeypatch
+    ) -> None:
+        """Simulates the reactive path: brain.current already equals brain.local
+        by the time the first reply comes back (cloud exhausted, fell to local).
+        The blind first attempt must be discarded and replaced by a research-
+        informed retry, not executed/verified as-is."""
+        local = {"provider": "ollama_local", "model": "qwen2.5-coder:3b"}
+        blind_code = "print('blind attempt, no research context')"
+        informed_code = "print('OK')"
+        _queue(
+            _Reply(raw_text="```python\n" + blind_code + "\n```", code=blind_code),
+            _Reply(raw_text="```python\n" + informed_code + "\n```", code=informed_code),
+            _Reply(raw_text="YES"),  # critic
+        )
+        FakeBrain.local = local
+        FakeBrain.current = local  # already "fell back" before the first reply
+        FakeBrain.chain = [{"provider": "cloud", "model": "big"}]  # non-empty -> no pre-round-0 path
+        monkeypatch.delenv("GENESIS_LOCAL_ONLY", raising=False)
+        monkeypatch.setattr(al, "_research_for_weak_model", lambda goal: "RESEARCH_MARKER_XYZ")
+
+        executed_codes = []
+
+        def _fake_run(c):
+            executed_codes.append(c)
+            return ExecResult(ok=True, stdout="OK\n", stderr="", returncode=0)
+
+        monkeypatch.setattr(al, "run_python_subprocess", _fake_run)
+        monkeypatch.setattr("genesis_agent.code_validate.validate_code_with_ruff", lambda c: (True, ""))
+        monkeypatch.setattr("genesis_agent.verifier.verify_skill",
+                             lambda c: VerifyResult(verified=True, method="self_test_passed"))
+        monkeypatch.setattr(al, "save_skill", lambda **kw: SKILLS_ROOT / "x.md")
+
+        outcome = al.run_autonomous_loop("something needing a weak local fallback model")
+
+        assert outcome.success is True
+        assert outcome.rounds == 2  # round 1 discarded, round 2 is the informed retry
+        assert executed_codes == [informed_code]  # blind_code was NEVER executed
+        second_call_messages = FakeBrain.calls[1]
+        assert any("RESEARCH_MARKER_XYZ" in str(m.get("content", ""))
+                    for m in second_call_messages)

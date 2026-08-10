@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -39,6 +40,26 @@ def _note_quality_failure(brain: Brain, count: int, threshold: int) -> int:
         except AttributeError:
             pass
     return count
+
+
+def _research_for_weak_model(goal: str) -> str:
+    """Grounded уеб проучване по целта — инжектирано в контекста ПРЕДИ слабият
+    (локален 3B/7B/14B) модел да напише и ред код, вместо да разчита само на
+    собствената си, по-плитка памет (design note, 2026-08-11: "прочети въпроса,
+    намери решение в интернет, после пиши код" специално за слабия tier —
+    облачните модели са достатъчно силни и без това). Ползва
+    genesis_agent.research.grounded_research (cross-verified през няколко
+    източника, не суров първи snippet). Безопасно (никога не хвърля) — липса
+    на резултат просто значи "продължи без проучване", не спира мисията."""
+    try:
+        from genesis_agent.research import grounded_research
+        note = (grounded_research(goal) or "").strip()
+    except Exception:
+        return ""
+    if not note or "Няма намерени резултати" in note or "Грешка при търсене" in note:
+        return ""
+    return ("## ПРОУЧВАНЕ ОТ ИНТЕРНЕТ (автоматично, преди да пишеш код — слаб "
+            "локален модел, затова първо реален контекст, после код)\n" + note)
 
 
 @dataclass
@@ -176,6 +197,22 @@ def _run_autonomous_loop_impl(
         },
     ]
 
+    # Задължително проучване за СЛАБИЯ (локален) tier (design note, 2026-08-11):
+    # ако мисията ще тръгне директно от локалния 3B/7B/14B модел — офлайн
+    # режим (GENESIS_LOCAL_ONLY=1) или изобщо няма конфигурирана облачна верига
+    # — инжектираме grounded web research по целта ПРЕДИ първия рунд, вместо да
+    # чакаме слабия модел сам да се сети да го поиска (обичайно не се сеща).
+    # За нормални мисии (облакът пробва пръв) същото се случва РЕАКТИВНО долу,
+    # в момента на реален fallback към локалния модел — тук не можем да знаем
+    # предварително дали облакът ще откаже.
+    _local_research_injected = False
+    if brain.local and (os.environ.get("GENESIS_LOCAL_ONLY") == "1" or not brain.chain):
+        research_note = _research_for_weak_model(goal)
+        if research_note:
+            report_thought("🔎 Локален tier от старта — правя проучване в интернет първо...")
+            messages.append({"role": "system", "content": research_note})
+        _local_research_injected = True
+
     # ─── АВАРИЕН РЕМОНТ: задейства ако имаме код от последен рунд но е бракувал ───
     last_generated_code = ""
     last_stdout = ""
@@ -192,6 +229,26 @@ def _run_autonomous_loop_impl(
 
         messages = Brain.trim_round_history(messages)
         reply = brain.complete(messages, tools=MISSION_TOOLS)
+
+        # ─── ПАДНАХМЕ НА ЛОКАЛНИЯ TIER — проучи преди да продължиш (design note,
+        # 2026-08-11): облакът се пробва пръв за всяка нормална мисия, така че
+        # горе (преди рунд 0) не можехме да знаем предварително дали ще стигнем
+        # дотук. Веднага щом brain.current реално сочи локалния модел за първи
+        # път тази мисия — това round-и отговор е писан "на сляпо" от слаб
+        # модел без реален контекст; изхвърляме го и force-ваме нов опит,
+        # информиран от grounded research, вместо да продължим с код от нищото.
+        if (not _local_research_injected and brain.local
+                and brain.current == brain.local
+                and not str(reply.raw_text or "").startswith("Error:")):
+            _local_research_injected = True
+            research_note = _research_for_weak_model(goal)
+            if research_note:
+                report_thought("🔎 Паднахме на локален модел — правя проучване в интернет...")
+                messages.append({"role": "assistant", "content": reply.raw_text or ""})
+                messages.append({"role": "user", "content": research_note +
+                                 "\n\nИзползвай горното (ако е relevantно за целта) и напиши "
+                                 "финалния Python скрипт със self-test, който печата OK."})
+                continue
 
         # ─── NATIVE TOOL USE (design note, 2026-07-25, "мисии с реални умения") ───
         # Ако моделът поддържа function-calling (config.yaml supports_tools),
