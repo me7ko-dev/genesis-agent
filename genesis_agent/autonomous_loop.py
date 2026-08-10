@@ -17,6 +17,38 @@ from genesis_agent.storage_monitor import check_storage, human_gb
 from genesis_agent import provider_stats
 from genesis_agent.tool_schemas import MISSION_TOOLS
 
+# Колко ДОПЪЛНИТЕЛНИ кандидата (отвъд първия опит) да генерираме от локалния
+# tier, когато той не излезе перфектен от първия път (design note, 2026-08-11).
+# Локалният inference е безплатен — цената е само латентност, затова малко,
+# но ненулево число: достатъчно за реален "best of N" ефект без да удвоим-
+# утроим латентността на всеки рунд без нужда.
+LOCAL_EXTRA_CANDIDATES = 2
+
+
+def _score_local_candidate(code: str) -> tuple[int, str]:
+    """Резултат за РЕЙТИНГ на кандидат от локалния candidate pool: 2 =
+    self_test_passed, 1 = runs_clean, 0 = lint/execution провал (по-високо е
+    по-добре). Умишлено дублира изпълнението, което основният pipeline прави
+    веднага след избора на победител — приемлив компромис: локалният sandbox
+    run е евтин/безплатен, простотата/коректността тежат повече от микро-
+    оптимизацията да се избегне повторно изпълнение. Никога не хвърля."""
+    try:
+        from genesis_agent.code_validate import validate_code_with_ruff
+        lint_ok, lint_detail = validate_code_with_ruff(code)
+        if not lint_ok:
+            return (0, code)
+        if lint_detail:
+            code = lint_detail
+        result = run_python_subprocess(code)
+        if not result.ok:
+            return (0, code)
+        from genesis_agent.verifier import verify_skill
+        vres = verify_skill(code)
+        score = 2 if vres.method == "self_test_passed" else (1 if vres.verified else 0)
+        return (score, code)
+    except Exception:
+        return (0, code)
+
 
 def _note_quality_failure(brain: Brain, count: int, threshold: int) -> int:
     """Verifier/критик отхвърлиха резултата — различно от HTTP/execution грешка,
@@ -60,6 +92,74 @@ def _research_for_weak_model(goal: str) -> str:
         return ""
     return ("## ПРОУЧВАНЕ ОТ ИНТЕРНЕТ (автоматично, преди да пишеш код — слаб "
             "локален модел, затова първо реален контекст, после код)\n" + note)
+
+
+def _few_shot_example_for_weak_model(goal: str) -> str:
+    """Един РЕАЛЕН, верифициран пример (задача + код) от skill библиотеката —
+    демонстрира ОЧАКВАНИЯ ФОРМАТ на верен отговор (design note, 2026-08-11:
+    reliability review-то установи нула few-shot примери в промпта досега).
+    Различно от Brain.build_context, който инжектира код за ПРЕИЗПОЛЗВАНЕ —
+    тук целта е "ето как изглежда правилен отговор", не непременно решение на
+    ТАЗИ конкретна задача. Безопасно — празен низ при провал."""
+    try:
+        from genesis_agent.skill_loader import search_skills, skill_view
+        hits = search_skills(goal, top_n=1)
+    except Exception:
+        return ""
+    if not hits or not hits[0].get("verification", {}).get("verified"):
+        return ""
+    hit = hits[0]
+    try:
+        code = skill_view(hit["name"])["code"]
+    except Exception:
+        return ""
+    if not code.strip():
+        return ""
+    lines = code.splitlines()[:40]
+    example_task = hit.get("description") or hit.get("name", "")
+    return ("## ПРИМЕР ОТ МИНАЛА ВЕРИФИЦИРАНА ЗАДАЧА (за ФОРМАТ на отговора, "
+            "не непременно решение на ТАЗИ цел)\nЗадача: " + str(example_task) +
+            "\nПравилен отговор:\n```python\n" + "\n".join(lines) + "\n```")
+
+
+def _plan_for_weak_model(brain: Brain, goal: str) -> str:
+    """Кратък план (2-5 стъпки) за целта — task decomposition, специално за
+    слабия tier (design note, 2026-08-11): слаб модел се справя много по-добре
+    с "направи стъпка X" отколкото с цялата задача накуп. Извиква ДИРЕКТНО
+    _call_local (не brain.complete) — не искаме да пробваме отново вече
+    изчерпания облачен chain само за да планираме, когато вече знаем, че сме
+    на локалния tier. Безопасно — празен низ при провал/липса на локален модел."""
+    if not brain.local:
+        return ""
+    plan_messages = [
+        {"role": "system", "content": "You break a coding goal into 2-5 short, concrete, "
+                                       "ordered steps. One line per step, no code, no explanation."},
+        {"role": "user", "content": f"Goal: {goal}"},
+    ]
+    try:
+        hit = brain._call_local(plan_messages, attempts=1)
+    except Exception:
+        return ""
+    if not hit:
+        return ""
+    plan = (hit[0] or "").strip()
+    if not plan:
+        return ""
+    return "## ПЛАН (следвай стъпка по стъпка)\n" + plan
+
+
+def _context_boost_for_weak_model(brain: Brain, goal: str) -> str:
+    """Целият "прочети → провери в интернет → виж пример → планирай → пиши
+    код" пакет за слабия (локален) tier — вместо да разчита само на
+    собствената си, по-плитка памет и инстинкт да пише код веднага. Всяка
+    съставка е независимо безопасна; комбинацията просто пропуска частите,
+    които не сработят, никога не спира мисията заради това."""
+    parts = [p for p in (
+        _research_for_weak_model(goal),
+        _few_shot_example_for_weak_model(goal),
+        _plan_for_weak_model(brain, goal),
+    ) if p]
+    return "\n\n".join(parts)
 
 
 @dataclass
@@ -207,10 +307,10 @@ def _run_autonomous_loop_impl(
     # предварително дали облакът ще откаже.
     _local_research_injected = False
     if brain.local and (os.environ.get("GENESIS_LOCAL_ONLY") == "1" or not brain.chain):
-        research_note = _research_for_weak_model(goal)
-        if research_note:
-            report_thought("🔎 Локален tier от старта — правя проучване в интернет първо...")
-            messages.append({"role": "system", "content": research_note})
+        boost = _context_boost_for_weak_model(brain, goal)
+        if boost:
+            report_thought("🔎 Локален tier от старта — проучвам, търся пример, планирам...")
+            messages.append({"role": "system", "content": boost})
         _local_research_injected = True
 
     # ─── АВАРИЕН РЕМОНТ: задейства ако имаме код от последен рунд но е бракувал ───
@@ -241,11 +341,11 @@ def _run_autonomous_loop_impl(
                 and brain.current == brain.local
                 and not str(reply.raw_text or "").startswith("Error:")):
             _local_research_injected = True
-            research_note = _research_for_weak_model(goal)
-            if research_note:
-                report_thought("🔎 Паднахме на локален модел — правя проучване в интернет...")
+            boost = _context_boost_for_weak_model(brain, goal)
+            if boost:
+                report_thought("🔎 Паднахме на локален модел — проучвам, търся пример, планирам...")
                 messages.append({"role": "assistant", "content": reply.raw_text or ""})
-                messages.append({"role": "user", "content": research_note +
+                messages.append({"role": "user", "content": boost +
                                  "\n\nИзползвай горното (ако е relevantно за целта) и напиши "
                                  "финалния Python скрипт със self-test, който печата OK."})
                 continue
@@ -305,6 +405,30 @@ def _run_autonomous_loop_impl(
 
         if reply.code:
             last_generated_code = reply.code  # Запазва последния генериран код
+
+            # ─── LOCAL BEST-OF-N + ансамбъл от модели (design note, 2026-08-11) ───
+            # Локалният inference е безплатен (собствен GPU) — вместо да приемем
+            # сляпо първия отговор на слаб 3B/7B/14B модел, ако той не излезе
+            # перфектен, вземаме LOCAL_EXTRA_CANDIDATES още опита (различен
+            # инсталиран tier и/или temperature, виж Brain.generate_local_
+            # candidates) и избираме най-добре верифицирания. Само когато вече
+            # знаем, че сме на локалния tier тази мисия — облачните рундове са
+            # достатъчно силни без това.
+            if brain.local and brain.current == brain.local and _local_research_injected:
+                best_score, best_code = _score_local_candidate(reply.code)
+                best_raw = reply.raw_text
+                if best_score < 2:
+                    report_thought("🎲 Първият локален опит не е перфектен — пробвам още кандидати...")
+                    for raw, code, _model in brain.generate_local_candidates(
+                        messages, n=LOCAL_EXTRA_CANDIDATES
+                    ):
+                        if not code or best_score == 2:
+                            continue
+                        score, scored_code = _score_local_candidate(code)
+                        if score > best_score:
+                            best_score, best_code, best_raw = score, scored_code, raw
+                reply.code, reply.raw_text = best_code, best_raw
+                last_generated_code = reply.code
 
             # Ruff pre-check ПРЕДИ sandbox-а (design note, 2026-07-29): явен
             # синтактичен/lint проблем не се нуждае от истинско subprocess

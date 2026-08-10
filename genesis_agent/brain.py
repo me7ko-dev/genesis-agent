@@ -892,7 +892,8 @@ class Brain:
         return text, (tool_calls or None)
 
     def _call(self, provider: str, model: str, messages: list[dict],
-             tools: list[dict] | None = None) -> tuple[str, list | None]:
+             tools: list[dict] | None = None,
+             extra: dict[str, Any] | None = None) -> tuple[str, list | None]:
         base_url, key_env = _PROVIDERS[provider]
         if not key_env:  # локален — без ключ
             # reasoning_effort="none" (design note, 2026-07-31, живо измерено):
@@ -902,8 +903,14 @@ class Brain:
             # (само native /api/chat го чете) — правилното поле е
             # reasoning_effort. Езикът (BG срещу EN prompt) добавя само ~30%,
             # не десетократния ефект на мисленето — превод не е нужен.
+            # extra (design note, 2026-08-11): опционален override/добавка —
+            # Brain.generate_local_candidates ползва го за temperature, за да
+            # вземе разнообразни кандидати от локалния tier вместо еднакви.
+            local_extra = {"reasoning_effort": "none"}
+            if extra:
+                local_extra.update(extra)
             return self._http(base_url, None, model, messages, LOCAL_TIMEOUT, tools=tools,
-                              extra={"reasoning_effort": "none"})
+                              extra=local_extra)
 
         # Opt-in multi-key ollama_cloud (see module docstring + _ollama_cloud_keys):
         # only takes this branch if the OPERATOR set more than one of
@@ -998,6 +1005,55 @@ class Brain:
                 last_error = f"локален: {e}"
         self._last_local_error = last_error
         return None
+
+    def generate_local_candidates(self, messages: list[dict], *, n: int = 2
+                                  ) -> list[tuple[str, str, str]]:
+        """"Best-of-N" + ансамбъл от МОДЕЛИ, специално за локалния tier (design
+        note, 2026-08-11): локалният inference е безплатен (собствен GPU), само
+        латентност — затова вместо да приемем сляпо първия отговор на слаб
+        3B/7B/14B модел, вземаме до `n` ДОПЪЛНИТЕЛНИ кандидата и оставяме
+        извикващия (autonomous_loop) да ги верифицира и избере най-добрия.
+
+        Разнообразието идва от ДВЕ оси, в ред на приоритет:
+          1. РАЗЛИЧЕН инсталиран tier (3b/7b/14b, ако е наличен друг освен
+             текущия) — истинско разнообразие на модел, не само temperature.
+          2. Различна temperature на СЪЩИЯ модел за оставащите слотове, ако
+             няма друг инсталиран tier (не форсираме model-swap — на слаб GPU
+             това е реален latency разход).
+
+        Връща [(raw_text, code, model_used), ...] — само успешните опити,
+        никога не хвърля (провалени опити просто липсват от резултата)."""
+        if not self.local:
+            return []
+        try:
+            from genesis_agent.model_router import LOCAL_TIERS, available_tiers
+            avail = available_tiers()
+            installed = [t for t, ok in zip(LOCAL_TIERS, avail) if ok]
+        except Exception:
+            installed = []
+        base_model = self.local["model"]
+        others = [m for m in installed if m != base_model]
+        model_plan = (others + [base_model] * n)[:n]
+
+        trimmed = self._trim_messages(messages)
+        temps = [0.2, 0.9, 0.5, 1.1]
+        out: list[tuple[str, str, str]] = []
+        for i, model in enumerate(model_plan):
+            temp = temps[i % len(temps)]
+            try:
+                raw_text, _tc = self._call(self.local["provider"], model, trimmed,
+                                           extra={"temperature": temp})
+            except Exception:
+                continue
+            if not raw_text or not raw_text.strip():
+                continue
+            code = ""
+            if "```python" in raw_text:
+                code = raw_text.split("```python")[1].split("```")[0].strip()
+            elif raw_text.lstrip().startswith(("def ", "import ", "from ", "class ")):
+                code = raw_text
+            out.append((raw_text, code, model))
+        return out
 
     @staticmethod
     def _tool_tag_prompt() -> str:

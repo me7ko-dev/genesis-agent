@@ -59,6 +59,9 @@ class FakeBrain:
         FakeBrain.escalated += 1
         return True
 
+    def generate_local_candidates(self, messages, n=2):
+        return []
+
     def complete(self, messages, tools=None, avoid=None):
         assert FakeBrain.replies, "FakeBrain.complete called more times than the test queued"
         FakeBrain.calls.append(list(messages))
@@ -371,7 +374,50 @@ class TestWeakModelResearch:
 
         assert outcome.success is True
         assert outcome.rounds == 2  # round 1 discarded, round 2 is the informed retry
-        assert executed_codes == [informed_code]  # blind_code was NEVER executed
+        # blind_code was NEVER executed. informed_code runs twice: once while
+        # the local best-of-N pool scores it (it's already a score-2 winner,
+        # so no extra candidates get generated), once by the normal pipeline
+        # right after — the accepted double-execution tradeoff, see
+        # _score_local_candidate's docstring.
+        assert executed_codes == [informed_code, informed_code]
         second_call_messages = FakeBrain.calls[1]
         assert any("RESEARCH_MARKER_XYZ" in str(m.get("content", ""))
                     for m in second_call_messages)
+
+    def test_local_best_of_n_picks_a_better_candidate_without_a_whole_extra_round(
+        self, monkeypatch
+    ) -> None:
+        """First local attempt runs clean but has no real self-test (score 1).
+        The candidate pool's one extra candidate DOES have a real self-test
+        (score 2) and must win -- saved on round 1, no extra round burned."""
+        local = {"provider": "ollama_local", "model": "qwen2.5-coder:3b"}
+        weak_code = "print('OK')"
+        strong_code = "assert 1 + 1 == 2\nprint('OK')"
+        _queue(
+            _Reply(raw_text="```python\n" + weak_code + "\n```", code=weak_code),
+            _Reply(raw_text="YES"),  # critic, evaluates the WINNING candidate
+        )
+        FakeBrain.local = local
+        FakeBrain.current = local
+        monkeypatch.setattr(al, "_context_boost_for_weak_model", lambda brain, goal: "")
+        monkeypatch.setattr(FakeBrain, "generate_local_candidates",
+                             lambda self, messages, n=2:
+                                 [("raw-strong", strong_code, "qwen2.5-coder:7b")])
+
+        def _fake_verify(code):
+            method = "self_test_passed" if "assert" in code else "runs_clean"
+            return VerifyResult(verified=True, method=method)
+
+        monkeypatch.setattr(al, "run_python_subprocess",
+                             lambda c: ExecResult(ok=True, stdout="OK\n", stderr="", returncode=0))
+        monkeypatch.setattr("genesis_agent.code_validate.validate_code_with_ruff", lambda c: (True, ""))
+        monkeypatch.setattr("genesis_agent.verifier.verify_skill", _fake_verify)
+        saved = {}
+        monkeypatch.setattr(al, "save_skill",
+                             lambda **kw: saved.update(kw) or SKILLS_ROOT / "x.md")
+
+        outcome = al.run_autonomous_loop("something weak models struggle with", max_rounds=3)
+
+        assert outcome.success is True
+        assert outcome.rounds == 1
+        assert saved["code"] == strong_code
