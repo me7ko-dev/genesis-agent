@@ -253,6 +253,68 @@ def _clean_question(result: str) -> str:
     return result.replace(ASK_USER_MARKER, "").strip()
 
 
+# Универсален BG превод на текста, който потребителят РЕАЛНО чете (design
+# note, 2026-08-11): без значение дали английският идва от самия модел
+# (coding модели са по-силни на английски, виж config.yaml supports_tools
+# филтъра) или е ехо от нещо, което вече е било на английски по-рано в
+# разговора — крайният текст пред потребителя винаги минава през тази
+# проверка. Историята, изпращана обратно към модела (messages/core.remember),
+# НЕ се пипа — само това, което вижда човекът.
+_CYRILLIC_RE = re.compile(r"[а-яА-ЯёЁ]")
+_CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+
+
+def _looks_like_english(text: str) -> bool:
+    """Евтина евристика (regex, без LLM повикване) — превод се задейства
+    само когато реално има смисъл. Ако вече има кирилица някъде извън код
+    блоковете, приемаме текста за (поне частично) български и не пипаме —
+    по-добре пропуснат превод, отколкото развален двуезичен текст."""
+    if not text:
+        return False
+    stripped = _CODE_FENCE_RE.sub(" ", text)  # код е винаги латиница, не броим
+    if _CYRILLIC_RE.search(stripped):
+        return False
+    return len(re.findall(r"[a-zA-Z]", stripped)) >= 20
+
+
+def _to_user_text(text: str) -> str:
+    """Превежда `text` на български за показване, ако е предимно английски.
+    Никога не хвърля — при провал (преводачът недостъпен, модел не е
+    инсталиран и т.н.) връща оригинала непроменен, fail-open като навсякъде
+    другаде в проекта."""
+    if not _looks_like_english(text):
+        return text
+    try:
+        from genesis_agent.translator import translate_en_to_bg
+        return translate_en_to_bg(text)
+    except Exception:
+        return text
+
+
+def _translate_last_user_message_to_en(messages: list) -> None:
+    """Обратната посока: превежда ПОСЛЕДНОТО user съобщение на английски
+    ПРЕДИ да стигне до модела (design note, 2026-08-11) — coding моделите са
+    по-силни на английски (виж translator.py). Мутира messages[-1] на място;
+    не добавя ново съобщение. Потребителят пак е писал на български в
+    терминала/чата — echo-то е на фронтенда, отделно от това, което се праща
+    към модела. Никога не пипа user съобщение, което вече не съдържа
+    кирилица (вече английски, или код/числа) — по-добре пропуснат превод,
+    отколкото развален изпратен towards модела текст. Fail-open."""
+    if not messages:
+        return
+    last = messages[-1]
+    if last.get("role") != "user":
+        return
+    content = last.get("content")
+    if not isinstance(content, str) or not _CYRILLIC_RE.search(content):
+        return
+    try:
+        from genesis_agent.translator import translate_bg_to_en
+        last["content"] = translate_bg_to_en(content)
+    except Exception:
+        pass
+
+
 def run_tool_loop(
     core: Core,
     messages: list,
@@ -284,12 +346,13 @@ def run_tool_loop(
     malformed_tag_retries = 0
     completion_claim_retries = 0
 
+    _translate_last_user_message_to_en(messages)
     text, tool_calls, prov, model = core.complete(messages)
     while True:
         if prov:
             _status(f"{prov} · {model}")
         if text.strip():
-            on_assistant(text, prov, model)
+            on_assistant(_to_user_text(text), prov, model)
         msg: dict = {"role": "assistant", "content": text}
         if tool_calls:
             msg["tool_calls"] = tool_calls
@@ -318,7 +381,7 @@ def run_tool_loop(
                 # човека. Без това ASK_USER би бил безсмислен: моделът пита и
                 # веднага сам продължава да гадае, точно поведението, което
                 # инструментът съществува да спре.
-                on_assistant(_clean_question(asked), prov, model)
+                on_assistant(_to_user_text(_clean_question(asked)), prov, model)
                 _status("чака отговор")
                 break
             rounds += 1
@@ -382,7 +445,7 @@ def run_tool_loop(
             on_tool_result("инструмент", r, None)
         asked = next((r for r in results if _is_question(r)), "")
         if asked:
-            on_assistant(_clean_question(asked), prov, model)
+            on_assistant(_to_user_text(_clean_question(asked)), prov, model)
             _status("чака отговор")
             break
         rounds += 1

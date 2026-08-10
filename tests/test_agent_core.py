@@ -303,3 +303,128 @@ class TestRunToolLoopCompaction:
             on_assistant=lambda t, p, m: None,
             on_tool_result=lambda *a: None,
         )
+
+
+class TestLooksLikeEnglish:
+    """Pure-function heuristic (design note, 2026-08-11): no LLM call, just
+    decides whether translation is even worth attempting."""
+
+    def test_cyrillic_text_is_not_english(self) -> None:
+        assert ac._looks_like_english("Напиши функция за проверка дали число е просто") is False
+
+    def test_short_latin_snippet_is_not_worth_translating(self) -> None:
+        assert ac._looks_like_english("OK") is False
+        assert ac._looks_like_english("done") is False
+
+    def test_long_latin_prose_is_english(self) -> None:
+        assert ac._looks_like_english(
+            "This is a longer English sentence explaining what the code does."
+        ) is True
+
+    def test_code_fence_does_not_count_toward_the_latin_threshold(self) -> None:
+        # All the Latin letters are inside the fence; outside it there's
+        # Cyrillic -- must NOT be flagged as English.
+        text = "Ето кода:\n```python\ndef merge_intervals(intervals): pass\n```"
+        assert ac._looks_like_english(text) is False
+
+    def test_empty_text_is_not_english(self) -> None:
+        assert ac._looks_like_english("") is False
+
+
+class TestToUserText:
+    def test_bulgarian_text_passes_through_untranslated(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "genesis_agent.translator.translate_en_to_bg",
+            lambda t: pytest.fail("should not be called for Bulgarian text"),
+        )
+        assert ac._to_user_text("Готово е.") == "Готово е."
+
+    def test_long_english_text_gets_translated(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "genesis_agent.translator.translate_en_to_bg",
+            lambda t: "ПРЕВЕДЕНО: " + t,
+        )
+        out = ac._to_user_text("This is a longer English sentence to translate.")
+        assert out.startswith("ПРЕВЕДЕНО: ")
+
+    def test_translator_failure_falls_back_to_the_original_text(self, monkeypatch) -> None:
+        def _boom(t):
+            raise RuntimeError("ollama unreachable")
+
+        monkeypatch.setattr("genesis_agent.translator.translate_en_to_bg", _boom)
+        original = "This is a longer English sentence that fails to translate."
+        assert ac._to_user_text(original) == original
+
+
+class TestTranslateLastUserMessageToEn:
+    def test_bulgarian_user_message_is_translated_in_place(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "genesis_agent.translator.translate_bg_to_en",
+            lambda t: "translated: " + t,
+        )
+        messages = [{"role": "system", "content": "sys"},
+                    {"role": "user", "content": "Напиши функция"}]
+        ac._translate_last_user_message_to_en(messages)
+        assert messages[-1]["content"] == "translated: Напиши функция"
+        assert messages[0]["content"] == "sys"  # untouched
+
+    def test_already_english_user_message_is_left_alone(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "genesis_agent.translator.translate_bg_to_en",
+            lambda t: pytest.fail("should not be called for English text"),
+        )
+        messages = [{"role": "user", "content": "Write a function"}]
+        ac._translate_last_user_message_to_en(messages)
+        assert messages[-1]["content"] == "Write a function"
+
+    def test_non_user_last_message_is_left_alone(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "genesis_agent.translator.translate_bg_to_en",
+            lambda t: pytest.fail("should not be called when the last message isn't from the user"),
+        )
+        messages = [{"role": "user", "content": "Напиши функция"},
+                    {"role": "assistant", "content": "Готово"}]
+        ac._translate_last_user_message_to_en(messages)
+        assert messages[-1]["content"] == "Готово"
+
+    def test_translator_failure_leaves_the_original_bulgarian_text(self, monkeypatch) -> None:
+        def _boom(t):
+            raise RuntimeError("ollama unreachable")
+
+        monkeypatch.setattr("genesis_agent.translator.translate_bg_to_en", _boom)
+        messages = [{"role": "user", "content": "Напиши функция"}]
+        ac._translate_last_user_message_to_en(messages)
+        assert messages[-1]["content"] == "Напиши функция"
+
+
+class TestRunToolLoopBilingualRoundTrip:
+    """End-to-end: a Bulgarian user message reaches the model in English, and
+    a long English model reply reaches on_assistant in Bulgarian -- the two
+    halves of the BG<->EN sandwich (design note, 2026-08-11), wired into the
+    shared loop every frontend calls."""
+
+    def test_user_bg_in_model_en_out_bg_to_the_user(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "genesis_agent.translator.translate_bg_to_en",
+            lambda t: "EN: " + t,
+        )
+        monkeypatch.setattr(
+            "genesis_agent.translator.translate_en_to_bg",
+            lambda t: "BG: " + t,
+        )
+        long_english_reply = "This is a sufficiently long English explanation of the fix."
+        core = _FakeCore([(long_english_reply, None, "groq", "llama")])
+        core.skills = _FakeToolSkills([])
+        seen = []
+        messages = [{"role": "user", "content": "Обясни ми поправката"}]
+
+        ac.run_tool_loop(
+            core, messages,
+            on_assistant=lambda t, p, m: seen.append(t),
+            on_tool_result=lambda *a: pytest.fail("no tool should run"),
+        )
+
+        # The model saw the ENGLISH translation, not the raw Bulgarian.
+        assert messages[0]["content"] == "EN: Обясни ми поправката"
+        # The user saw the BULGARIAN translation of the model's English reply.
+        assert seen == ["BG: " + long_english_reply]
