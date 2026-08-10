@@ -281,6 +281,8 @@ def run_tool_loop(
     """
     _status = on_status or (lambda _s: None)
     rounds = 0
+    malformed_tag_retries = 0
+    completion_claim_retries = 0
 
     text, tool_calls, prov, model = core.complete(messages)
     while True:
@@ -331,6 +333,50 @@ def run_tool_loop(
         # Текстови тагове — за модели без native tool-calling в тази ротация.
         results = core.skills.parse_and_execute_tools(text)
         if not results:
+            # Празен резултат означава две различни неща и трябва да ги
+            # различим: моделът реално приключи, ИЛИ моделът се опита да
+            # викне tool но обърка синтаксиса ([INSTALL:...] вместо познат
+            # таг, липсващ [END_WRITE] и т.н.) — второто иначе тихо се
+            # третира като финален отговор (git история: "Fix local model
+            # narrating tool use without ever executing" — същият бъг клас,
+            # закърпен на друго място, не в корена).
+            import genesis_skills as _gs
+            if malformed_tag_retries < 2 and _gs.looks_like_attempted_tool_tag(text):
+                malformed_tag_retries += 1
+                messages.append({
+                    "role": "system",
+                    "content": "[Система]: В последния отговор не намерих валиден tool таг, "
+                               "но той изглежда като опит за такъв. Ако си искал да викнеш "
+                               "инструмент — използвай точния синтаксис `[TAG: аргумент]` "
+                               "(или `[WRITE_FILE: път]...[END_WRITE]` за файлове). Ако вече "
+                               "си приключил със задачата — дай кратък финален отговор БЕЗ "
+                               "скоби във формàт на таг.",
+                })
+                _status("проверява формат на tool tag…")
+                text, tool_calls, prov, model = core.complete(messages)
+                continue
+            # config.yaml system_prompt казва изрично "NEVER report an action
+            # as done unless a tool result above actually shows it happening",
+            # но досега това беше само промпт текст — нищо в кода не
+            # проверяваше дали слаб модел го спазва. rounds == 0 тук значи, че
+            # НИКАКЪВ tool не се е изпълнил в тази реплика до момента — ако
+            # текстът твърди завършено действие въпреки това, е неподкрепено
+            # твърдение (git история: "Fix Genesis handing work back instead
+            # of doing it" — същият клас бъг).
+            if (rounds == 0 and completion_claim_retries < 1
+                    and _gs.looks_like_unverified_completion_claim(text)):
+                completion_claim_retries += 1
+                messages.append({
+                    "role": "system",
+                    "content": "[Система]: Твърдиш, че действие е завършено, но никой tool "
+                               "resultat по-горе не го доказва. Ако наистина трябва да "
+                               "изпълниш нещо — извикай съответния инструмент СЕГА, не го "
+                               "описвай. Ако вече е било изпълнено в по-ранен рунд — игнорирай "
+                               "тази бележка и продължи с финалния отговор.",
+                })
+                _status("проверява дали действието наистина е изпълнено…")
+                text, tool_calls, prov, model = core.complete(messages)
+                continue
             break
         for r in results:
             on_tool_result("инструмент", r, None)

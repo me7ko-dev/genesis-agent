@@ -145,7 +145,12 @@ def _generate_one(goal: str, provider: str, rag_context: str, system_content: st
                 "Did the code FULLY accomplish the goal? Reply exactly 'YES' or 'NO: <reason>'."
             )},
         ]
-        critic_eval = brain.complete(critic_msg).raw_text.strip()
+        # avoid=writer_pair (design note, 2026-08-11, mirrors autonomous_loop.py):
+        # без него критикът пада на СЪЩИЯ provider/model, който написа кода.
+        writer = getattr(brain, "current", None)
+        writer_pair = ((writer.get("provider"), writer.get("model"))
+                       if isinstance(writer, dict) and writer.get("provider") else None)
+        critic_eval = brain.complete(critic_msg, avoid=writer_pair).raw_text.strip()
         cand.critic_ok = critic_eval.upper().startswith("YES")
     except Exception as e:
         cand.error = str(e)

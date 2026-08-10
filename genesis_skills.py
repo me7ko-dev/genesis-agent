@@ -603,6 +603,52 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
     return [r for _, r in results]
 
 
+# Всяко скоби-подобно "[ГЛАВНИ_БУКВИ:" или "[ГЛАВНИ_БУКВИ]" в текста — независимо
+# дали е познат таг. Ползва се САМО след като parse_and_execute_tools вече е
+# върнал [], за да различим "моделът приключи" от "моделът се опита да викне
+# tool, но обърка синтаксиса/името" (грешно име, липсващо двоеточие, липсващ
+# [END_WRITE] и т.н.) — вторият случай иначе тихо се третираше като финален
+# отговор (виж git история: "Fix local model narrating tool use without ever
+# executing" / "Fix Genesis handing work back instead of doing it").
+_ATTEMPTED_TAG_RE = re.compile(r"\[[A-Z][A-Z_]{2,30}(?::|\])")
+
+
+def looks_like_attempted_tool_tag(response_text: str) -> bool:
+    """True ако текстът съдържа нещо, което прилича на tool tag, но нито един
+    истински таг не е разпознат от parse_and_execute_tools за него."""
+    if not response_text:
+        return False
+    return bool(_ATTEMPTED_TAG_RE.search(response_text))
+
+
+# Правилото "NEVER report an action as done unless a tool result above actually
+# shows it happening" (config.yaml system_prompt) досега съществуваше САМО като
+# промпт текст — нищо в кода не проверяваше дали слаб модел реално го спазва.
+# Списъкът е нарочно тесен (глаголи за завършено действие, минало време/
+# perfect), за да не гърми на легитимни финални резюмета след РЕАЛНО изпълнени
+# tool-ове ("инсталирах пакета" е ОК, ако предният рунд реално е викнал
+# RUN_CMD — проверката по-долу се извиква само в рундове БЕЗ никакъв изпълнен
+# tool в текущия разговор).
+_COMPLETION_CLAIM_RE = re.compile(
+    r"\b(инсталирах|преместих|изтрих|създадох|запазих|качих|конфигурирах|"
+    r"поправих|инсталирано е|готово е|направено е|свършено е|"
+    r"i(?:'ve| have) (?:installed|moved|created|deleted|saved|written|"
+    r"uploaded|configured|fixed|updated)|"
+    r"successfully (?:installed|moved|created|deleted|saved|updated|fixed))\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_unverified_completion_claim(response_text: str) -> bool:
+    """True ако текстът твърди, че действие е ИЗПЪЛНЕНО (инсталирах/преместих/
+    done/installed...). Извиквай само в рундове без никакъв реален tool
+    резултат зад отговора — иначе легитимни резюмета след истински изпълнени
+    tool-ове ще фалшиво-положат."""
+    if not response_text:
+        return False
+    return bool(_COMPLETION_CLAIM_RE.search(response_text))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Native tool-calling dispatch
 # ─────────────────────────────────────────────────────────────────────────────

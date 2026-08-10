@@ -348,6 +348,7 @@ class GenesisClient(discord.Client):
         се пуска под разхлабения режим."""
         total_tokens = 0
         text = ""
+        _malformed_tag_retries = 0
         for _round in range(_TOOL_ROUND_CAP + 1):
             reply = brain.complete(messages, tools=tools)
             if getattr(reply, "usage", None):
@@ -398,6 +399,21 @@ class GenesisClient(discord.Client):
                 break
             tool_results = genesis_skills.parse_and_execute_tools(text)
             if not tool_results:
+                # Обърнат tool tag ≠ модел приключил — вж. agent_core.run_tool_loop
+                # за пълния design note (2026-08-11).
+                if (_malformed_tag_retries < 2
+                        and genesis_skills.looks_like_attempted_tool_tag(text)):
+                    _malformed_tag_retries += 1
+                    messages.append({
+                        "role": "system",
+                        "content": "[Система]: В последния отговор не намерих валиден tool "
+                                   "таг, но той изглежда като опит за такъв. Ако си искал да "
+                                   "викнеш инструмент — използвай точния синтаксис "
+                                   "`[TAG: аргумент]` (или `[WRITE_FILE: път]...[END_WRITE]` "
+                                   "за файлове). Ако вече си приключил — дай кратък финален "
+                                   "отговор БЕЗ скоби във формàт на таг.",
+                    })
+                    continue
                 break
             asked = next((r for r in tool_results if genesis_skills.ASK_USER_MARKER in r), "")
             if asked:

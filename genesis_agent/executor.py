@@ -70,13 +70,29 @@ def run_python_inprocess(code: str) -> ExecResult:
     return ExecResult(ok=rc == 0, stdout=buf_out.getvalue(), stderr=buf_err.getvalue(), returncode=rc)
 
 
+_MAX_FEEDBACK_CHARS = 1500  # виж бележката по-долу
+
+
 def format_failure_for_brain(result: ExecResult) -> str:
-    """Bundle stderr + stdout for self-correction prompts."""
+    """Bundle stderr + stdout for self-correction prompts.
+
+    Ограничено до последните _MAX_FEEDBACK_CHARS на всеки блок (design note,
+    2026-08-11): необрязан traceback (напр. дълбока рекурсия или библиотечен
+    stack trace) можеше да запуши по-голямата част от контекста на слаб
+    локален 3B/7B модел за един рунд, точно когато escalate() е на път да се
+    задейства. Опашката се пази, не главата — истинското изключение е накрая
+    на traceback-а. Същият праг като local_repair_agent.emergency_repair."""
     parts = []
     if result.stderr.strip():
-        parts.append("### stderr\n" + result.stderr.strip())
+        parts.append("### stderr\n" + _tail(result.stderr.strip()))
     if result.stdout.strip():
-        parts.append("### stdout\n" + result.stdout.strip())
+        parts.append("### stdout\n" + _tail(result.stdout.strip()))
     if result.returncode is not None:
         parts.append(f"### return code\n{result.returncode}")
     return "\n\n".join(parts) if parts else "(no output captured)"
+
+
+def _tail(text: str, limit: int = _MAX_FEEDBACK_CHARS) -> str:
+    if len(text) <= limit:
+        return text
+    return "...(truncated)...\n" + text[-limit:]

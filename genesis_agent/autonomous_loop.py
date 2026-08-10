@@ -13,7 +13,32 @@ from genesis_agent.local_repair_agent import emergency_repair
 from genesis_agent.skill_loader import SKILLS_ROOT
 from genesis_agent.skills_manager import save_skill, slugify
 from genesis_agent.storage_monitor import check_storage, human_gb
+from genesis_agent import provider_stats
 from genesis_agent.tool_schemas import MISSION_TOOLS
+
+
+def _note_quality_failure(brain: Brain, count: int, threshold: int) -> int:
+    """Verifier/критик отхвърлиха резултата — различно от HTTP/execution грешка,
+    но досега невидимо за provider_stats (само `success=False` на мрежово ниво
+    се записваше, `brain.py` reда 1026/1042/1047). HTTP 200 с боклук код се
+    броеше за "успех" завинаги. Записваме провала на КАЧЕСТВОТО срещу текущия
+    доставчик (deprioritize_flaky вижда го при следваща мисия) и, при
+    достигнат праг, качваме към по-силната безплатна кодинг верига веднага —
+    не чакаме операторът да сложи GENESIS_QUALITY=coding ръчно."""
+    count += 1
+    current = getattr(brain, "current", None)
+    prov = current.get("provider") if isinstance(current, dict) else None
+    if prov:
+        try:
+            provider_stats.record_call(prov, 0.0, False)
+        except Exception:
+            pass
+    if count >= threshold:
+        try:
+            brain.escalate_to_coding_chain()
+        except AttributeError:
+            pass
+    return count
 
 
 @dataclass
@@ -113,6 +138,14 @@ def _run_autonomous_loop_impl(
     brain.route_for_goal(goal)  # адаптивен избор на модел според сложността
     max_rounds = max_rounds or MAX_LLM_RETRIES
     _escalate_after = max(2, max_rounds // 3)  # след 1/3 неуспешни рундове → по-голям модел
+    # Провал на КАЧЕСТВОТО (verifier/критик отхвърлят) е различен сигнал от HTTP/
+    # execution грешка — свободен модел може да връща HTTP 200 с боклук код
+    # безкрайно, без това някога да го деприоритизира или да качи веригата
+    # (design note, 2026-08-11). Броим го отделно и ескалираме към по-силната
+    # безплатна кодинг верига, вместо да чакаме операторът ръчно да сложи
+    # GENESIS_QUALITY=coding.
+    _quality_escalate_after = max(2, max_rounds // 3)
+    _quality_failures = 0
 
     red_note = ""
     if dna.red_zone_elevation_granted():
@@ -262,6 +295,7 @@ def _run_autonomous_loop_impl(
             from genesis_agent.verifier import verify_skill
             vres = verify_skill(reply.code)
             if vres.method != "self_test_passed":
+                _quality_failures = _note_quality_failure(brain, _quality_failures, _quality_escalate_after)
                 report_thought(f"🧪 Тест-гейт отхвърли: няма преминаващ self-test ({vres.method})")
                 messages.append({"role": "assistant", "content": reply.raw_text})
                 messages.append({
@@ -287,9 +321,18 @@ def _run_autonomous_loop_impl(
                 {"role": "system", "content": "You are a strict code reviewer. You ONLY reply with YES or NO: <reason>."},
                 {"role": "user", "content": critic_prompt}
             ]
-            critic_eval = brain.complete(critic_msg).raw_text.strip()
+            # avoid=writer_pair (design note, 2026-08-11): без това критикът много
+            # често пада на СЪЩИЯ provider/model, който написа кода (chain-ът винаги
+            # обхожда отгоре-надолу) — "второто мнение" тогава просто повтаря
+            # слепите петна на първото. brain.current още сочи towards писателя тук
+            # (нищо не го е сменило между генерирането на кода и този ред).
+            writer = getattr(brain, "current", None)
+            writer_pair = ((writer.get("provider"), writer.get("model"))
+                           if isinstance(writer, dict) and writer.get("provider") else None)
+            critic_eval = brain.complete(critic_msg, avoid=writer_pair).raw_text.strip()
 
             if critic_eval.upper().startswith("NO"):
+                _quality_failures = _note_quality_failure(brain, _quality_failures, _quality_escalate_after)
                 report_thought(f"🔍 Критикът отхвърли резултата: {critic_eval}")
                 messages.append({"role": "assistant", "content": reply.raw_text})
                 messages.append({
@@ -373,9 +416,28 @@ def _run_autonomous_loop_impl(
 
         repair = emergency_repair(last_generated_code, last_stderr, last_stdout)
 
+        # Верифицирай ремонта преди да го запишеш трайно (design note, 2026-08-11):
+        # emergency_repair.fixed досега значеше само "_test_code излезе с код 0" -
+        # pattern фиксовете (fix_key_error: d["k"] -> d.get("k"); fix_undefined_name
+        # -> None) могат тихо да МАСКИРАТ грешката вместо да я поправят ("не гърми"
+        # != "прави правилното нещо"). Такъв код се записваше с verification_stdout=""
+        # - т.е. НУЛЕВА верификация - и после се преизползва от бъдещи мисии през
+        # RAG (Brain.build_context), пренасяйки бъга нататък. Минава през СЪЩИЯ
+        # sandbox verify_skill гейт като нормалния успешен path по-горе.
+        repair_verified = False
+        vres = None
         if repair.fixed:
+            from genesis_agent.verifier import verify_skill
+            vres = verify_skill(repair.code)
+            repair_verified = vres.verified
+            if not repair_verified:
+                print(f"  [РЕМОНТ ОТХВЪРЛЕН] Поправеният код не мина verify_skill "
+                      f"({vres.method}) - вероятно маскира грешката вместо да я "
+                      "поправя; НЕ се записва в библиотеката непроверен.")
+
+        if repair_verified:
             print(f"\n  [\u2705 \u0410\u0412\u0410\u0420\u0418\u0415\u041d \u0420\u0415\u041c\u041e\u041d\u0422 \u0423\u0421\u041f\u0415\u0428\u0415\u041d] {repair.fix_desc}")
-            print(f"  Метод: {repair.method} | Рундове: {repair.rounds}")
+            print(f"  Метод: {repair.method} | Рундове: {repair.rounds} | verify: {vres.method}")
 
             slug = (skill_slug or slugify(goal)) + "_repaired"
             try:
@@ -383,9 +445,10 @@ def _run_autonomous_loop_impl(
                     slug=slug,
                     code=repair.code,
                     goal=goal + " [repaired by LocalRepairAgent]",
-                    verification_stdout="",
+                    verification_stdout=vres.detail,
                     extra={"repair_method": repair.method,
                            "repair_rounds": repair.rounds,
+                           "verify_method": vres.method,
                            "operator": operator_id or "operator"}
                 )
                 rel = str(path.relative_to(SKILLS_ROOT)).replace("\\", "/")

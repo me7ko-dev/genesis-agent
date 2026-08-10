@@ -41,6 +41,21 @@ class VerifyResult:
         return {"verified": self.verified, "method": self.method, "detail": self.detail[:500]}
 
 
+def _is_tautological_assert(node: ast.Assert) -> bool:
+    """assert True / assert 1==1 стил — двата операнда на сравнение (или
+    единственият за bare-константа) са литерали, значи тестът НЕ проверява
+    нищо реално. Слаб модел, инструктиран да "винаги сложи self-test", но без
+    уменията да напише истински такъв, свършва точно тук — verify_skill досега
+    приемаше това като пълноценен self_test_passed (design note, 2026-08-11)."""
+    test = node.test
+    if isinstance(test, ast.Constant):
+        return True
+    if isinstance(test, ast.Compare):
+        operands = [test.left, *test.comparators]
+        return all(isinstance(o, ast.Constant) for o in operands)
+    return False
+
+
 def verify_skill(code: str, *, timeout: int = 30) -> VerifyResult:
     """Изпълнява умението в sandbox и връща обективна присъда."""
     # 1. Статични проверки (бързи, без изпълнение).
@@ -52,7 +67,8 @@ def verify_skill(code: str, *, timeout: int = 30) -> VerifyResult:
         return VerifyResult(False, "placeholder", "съдържа заместващ ключ/стойност")
 
     has_self_test = "__main__" in code or any(
-        isinstance(n, ast.Assert) for n in ast.walk(tree)
+        isinstance(n, ast.Assert) and not _is_tautological_assert(n)
+        for n in ast.walk(tree)
     )
 
     # 2. Реално изпълнение в sandbox (deny режим → опасното не се пуска).
@@ -62,7 +78,13 @@ def verify_skill(code: str, *, timeout: int = 30) -> VerifyResult:
     if not res.ok:
         return VerifyResult(False, "runtime_err", (res.stderr or res.stdout)[:300])
 
-    if has_self_test:
+    # "OK" в stdout се изисква изрично навсякъде в промптите (autonomous_loop,
+    # orchestrator, ensemble, brain.system_prompt_base — "print 'OK' on
+    # success"), но досега verify_skill не проверяваше дали моделът реално го
+    # е спазил — само дали ИМА assert. Двете заедно (нетавтологичен assert +
+    # действително отпечатано OK) са единствената комбинация, приемана за
+    # self_test_passed.
+    if has_self_test and "OK" in res.stdout:
         return VerifyResult(True, "self_test_passed", res.stdout.strip()[:300])
     return VerifyResult(True, "runs_clean", res.stdout.strip()[:300])
 

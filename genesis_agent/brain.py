@@ -404,6 +404,28 @@ class Brain:
             log.debug("escalate: model_router недостъпен, оставам на текущия модел: %s", e)
         return False
 
+    def escalate_to_coding_chain(self) -> bool:
+        """Качва към най-силната БЕЗПЛАТНА кодинг верига (`/maxcoding` еквивалент),
+        автоматично — след повторни ПРОВАЛИ НА КАЧЕСТВОТО (verifier/критик отхвърлят
+        резултата), не само HTTP/execution грешки. Досега това ставаше само ръчно
+        през GENESIS_QUALITY=coding (design note, 2026-08-11: свободен модел, който
+        връща HTTP 200 с грешен/боклук код, никога не биваше деприоритизиран или
+        заменян — `escalate()` качва само ЛОКАЛНИЯ tier, не облачната верига).
+        True ако веригата е реално сменена (idempotent — no-op ако вече сме на
+        coding/max)."""
+        if self.quality in ("coding", "max"):
+            return False
+        coding = _load_coding_chain()
+        if not coding:
+            return False
+        already = {(c["provider"], c["model"]) for c in coding}
+        self.chain = coding + [c for c in self.chain if (c["provider"], c["model"]) not in already]
+        self.quality = "coding"
+        self.current = self.chain[0] if self.chain else self.current
+        print(f"  [Brain] ⬆️ Ескалация към кодинг веригата след повторни провали "
+              f"на КАЧЕСТВОТО (не грешка): {coding[0]['model']}")
+        return True
+
     def system_prompt_base(self) -> str:
         return (
             "ABSOLUTE DIRECTIVE: You are Genesis Agent — an autonomous agent running on your "
@@ -411,6 +433,9 @@ class Brain:
             "their networks only as an engine. Your job is to carry out missions as Python code.\n"
             "Always return WORKING code in a single ```python ... ``` block, with an "
             "assert-based self-test that prints 'OK' on success. No explanation, code only.\n"
+            "NEVER write a trivial/tautological assert (assert True, assert 1==1) just to "
+            "satisfy the self-test requirement — it must actually verify the goal was achieved, "
+            "or the verifier will reject it.\n"
             "If the context below contains ready code from an existing skill that solves part "
             "of the goal, reuse or extend it directly instead of reinventing it."
         )
@@ -486,9 +511,32 @@ class Brain:
             log.debug("build_context: memory_search недостъпен, без инжектирани уроци: %s", e)
         return "\n\n".join(parts)
 
-    def _trim_messages(self, messages: list[dict], max_chars: int = 2000) -> list[dict]:
-        # Облачните модели имат голям контекст — не режем.
-        return messages
+    def _trim_messages(self, messages: list[dict], max_chars: int = 6000) -> list[dict]:
+        """Ограничава общия размер на историята — само за ЛОКАЛНИЯ модел
+        (виж _call_local). Досега методът беше документиран no-op ("облачните
+        модели имат голям контекст — не режем"), вярно за облака, но пропуска
+        точно случая, за който е кръстен: локалният 3B/7B/14B fallback има
+        МНОГО по-малък прозорец от облачната верига, а нищо на локалния път
+        не проверяваше сериализирания размер преди изпращане (design note,
+        2026-08-11). System съобщението и последното (най-скорошно)
+        съобщение се пазят непокътнати; по-старите се режат до опашката им."""
+        total = sum(len(str(m.get("content") or "")) for m in messages)
+        if total <= max_chars or not messages:
+            return messages
+
+        out = list(messages)
+        system_idx = next((i for i, m in enumerate(out) if m.get("role") == "system"), None)
+        protected = {i for i in (system_idx, len(out) - 1) if i is not None}
+
+        for i in range(len(out)):
+            if i in protected:
+                continue
+            content = str(out[i].get("content") or "")
+            if len(content) > 400:
+                out[i] = {**out[i], "content": "...(съкратено)...\n" + content[-400:]}
+            if sum(len(str(m.get("content") or "")) for m in out) <= max_chars:
+                break
+        return out
 
     @staticmethod
     def trim_round_history(messages: list[dict]) -> list[dict]:
@@ -824,9 +872,10 @@ class Brain:
         loc = self.local
         if not loc:
             return None
+        trimmed = self._trim_messages(messages)
         for _try in range(attempts):
             try:
-                raw_text, _tc = self._call(loc["provider"], loc["model"], messages)
+                raw_text, _tc = self._call(loc["provider"], loc["model"], trimmed)
                 self._fail_count = 0
                 self.current = self.local
                 code = ""
@@ -899,7 +948,8 @@ class Brain:
                 out.append(m)
         return out
 
-    def complete(self, messages: list[dict], tools: list[dict] | None = None):
+    def complete(self, messages: list[dict], tools: list[dict] | None = None,
+                 avoid: tuple[str, str] | None = None):
         """
         tools (design note, 2026-07-25): опционален списък OpenAI tool schemas
         (genesis_agent.tool_schemas). Ако е зададен — веригата пробва ПЪРВО
@@ -911,6 +961,15 @@ class Brain:
         regex парсене на [TAG: ...] от reply.raw_text. Без tools параметър
         поведението е 100% същото като преди (нулев риск за съществуващите
         извиквания от autonomous_loop/orchestrator/self_modify).
+
+        avoid (design note, 2026-08-11): опционален (provider, model) чифт за
+        изключване от тази конкретна заявка — за "критик" second-opinion
+        разговори, извиквани на СЪЩИЯ Brain instance, който току-що е писал
+        кода. Без това критикът много често пада на същия provider/model
+        (chain-ът винаги обхожда отгоре надолу от началото), т.е. "второто
+        мнение" структурно се съгласява със слепите петна на първото. Не
+        засяга GENESIS_LOCAL_ONLY клона нарочно — там няма къде другаде да
+        отиде заявката.
         """
         if not self.chain and not self.local:
             return self._error_result("Error: няма конфигурирани модели (config.yaml)")
@@ -995,6 +1054,10 @@ class Brain:
             ordered_chain = ([self._pinned]
                              + [c for c in ordered_chain if c is not self._pinned])
 
+        if avoid:
+            ordered_chain = [c for c in ordered_chain
+                             if (c["provider"], c["model"]) != avoid]
+
         n = len(ordered_chain)
         if n > 0:
             # ВИНАГИ отгоре надолу, прескачайки временно изчерпаните.
@@ -1057,7 +1120,9 @@ class Brain:
 
         # ПОСЛЕДНА РЕЗЕРВА: локалният собствен мозък — само ако облакът напълно
         # отказа (или изобщо няма конфигурирани облачни модели).
-        if self.local:
+        local_avoided = bool(avoid and self.local
+                             and (self.local["provider"], self.local["model"]) == avoid)
+        if self.local and not local_avoided:
             print("  [Brain] ☁️ Облакът е изчерпан/недостъпен → 🏠 локален мозък като резерва...")
             hit = self._call_local(messages_notools, attempts=1)
             if hit:

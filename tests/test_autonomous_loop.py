@@ -51,7 +51,7 @@ class FakeBrain:
         FakeBrain.escalated += 1
         return True
 
-    def complete(self, messages, tools=None):
+    def complete(self, messages, tools=None, avoid=None):
         assert FakeBrain.replies, "FakeBrain.complete called more times than the test queued"
         return FakeBrain.replies.pop(0)
 

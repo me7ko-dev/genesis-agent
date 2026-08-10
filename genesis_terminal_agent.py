@@ -1176,6 +1176,7 @@ def main():
             # докато Genesis сам спре да вика тулове или се удари в тавана.
             _TOOL_ROUND_CAP = 8
             round_i = 0
+            _malformed_tag_retries = 0
             with console.status("[dim]Genesis мисли...[/]", spinner="dots2"):
                 response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
 
@@ -1235,6 +1236,25 @@ def main():
                 # (или просто избра да не вика нищо тази реплика).
                 tool_results = parse_and_execute_tools(response)
                 if not tool_results:
+                    # Празно ≠ непременно "приключи" — може да е объркан tool tag
+                    # (виж agent_core.run_tool_loop, същият фикс, design note
+                    # 2026-08-11: "Fix local model narrating tool use without
+                    # ever executing" беше закърпен само тук частично, не в корена).
+                    if (_malformed_tag_retries < 2
+                            and genesis_skills.looks_like_attempted_tool_tag(response)):
+                        _malformed_tag_retries += 1
+                        messages.append({
+                            "role": "system",
+                            "content": "[Система]: В последния отговор не намерих валиден tool "
+                                       "таг, но той изглежда като опит за такъв. Ако си искал да "
+                                       "викнеш инструмент — използвай точния синтаксис "
+                                       "`[TAG: аргумент]` (или `[WRITE_FILE: път]...[END_WRITE]` "
+                                       "за файлове). Ако вече си приключил — дай кратък финален "
+                                       "отговор БЕЗ скоби във формàт на таг.",
+                        })
+                        with console.status("[dim]Анализирам...[/]", spinner="aesthetic"):
+                            response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
+                        continue
                     break
                 asked = next((r for r in tool_results
                               if genesis_skills.ASK_USER_MARKER in r), "")
