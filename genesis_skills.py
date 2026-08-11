@@ -621,6 +621,27 @@ _READONLY_DISPATCH = {
 _VISION_RE = re.compile(r"\[LOOK_AT_SCREEN(?::\s*(?P<arg>[^\]]*))?\]")
 
 
+def _safe_tool(name: str, fn: Callable[..., str], *args) -> str:
+    """Изпълнява един тул и превръща изключението в текст вместо да го пуска нагоре.
+
+    Огледало на гаранцията, която `dispatch_tool_call` (native пътят) вече дава
+    изрично. tool_schemas.py описва двата пътя като различаващи се САМО по
+    формата на извикването — но при грешка се разминаваха дълбоко (bug fix,
+    2026-08-12): native връщаше "[TOOL] Грешка при изпълнение: ...", а
+    текстовият пускаше изключението през parse_and_execute_tools и то отнасяше
+    и вече УСПЕЛИТЕ резултати от същата реплика (един провалил се RESEARCH
+    изяждаше READ_FILE и LIST_DIR резултатите до него).
+
+    Има значение кой път пострадва: текстовите тагове са пътят на моделите БЕЗ
+    native function-calling, тоест на слабия/локалния резервен слой — точно там,
+    където устойчивостта трябва да е по-голяма, а не по-малка.
+    """
+    try:
+        return fn(*args)
+    except Exception as e:  # noqa: BLE001 — точно това е гаранцията
+        return f"[{name}] Грешка при изпълнение: {e}"
+
+
 def parse_and_execute_readonly_tools(response_text: str) -> list[str]:
     """
     Изпълнява САМО безопасните read-only инструменти (READ_FILE/WEB_SEARCH/
@@ -633,9 +654,9 @@ def parse_and_execute_readonly_tools(response_text: str) -> list[str]:
     results: list[tuple[int, str]] = []
     for m in _READONLY_RE.finditer(response_text):
         fn = _READONLY_DISPATCH[m.group("tool")]
-        results.append((m.start(), fn(m.group("arg"))))
+        results.append((m.start(), _safe_tool(m.group("tool"), fn, m.group("arg"))))
     for m in _VISION_RE.finditer(response_text):
-        results.append((m.start(), _tool_look_at_screen(m.group("arg") or "")))
+        results.append((m.start(), _safe_tool("LOOK_AT_SCREEN", _tool_look_at_screen, m.group("arg") or "")))
     results.sort(key=lambda t: t[0])
     return [r for _, r in results]
 
@@ -654,7 +675,8 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
 
     # 1. WRITE_FILE блокове (с тяло).
     for m in _WRITE_RE.finditer(response_text):
-        results.append((m.start(), _tool_write_file(m.group("path"), m.group("body"))))
+        results.append((m.start(), _safe_tool("WRITE_FILE", _tool_write_file,
+                                              m.group("path"), m.group("body"))))
         consumed_spans.append((m.start(), m.end()))
 
     # 1a. EDIT_FILE блокове (anchor + замяна, разделени с _EDIT_SEPARATOR).
@@ -666,14 +688,16 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
                              f"{_EDIT_SEPARATOR} между стария и новия текст.")))
         else:
             old_part, new_part = body.split(_EDIT_SEPARATOR, 1)
-            results.append((m.start(), _tool_edit_file(m.group("path"),
-                                                       _strip_one_newline(old_part),
-                                                       _strip_one_newline(new_part))))
+            results.append((m.start(), _safe_tool("EDIT_FILE", _tool_edit_file,
+                                                  m.group("path"),
+                                                  _strip_one_newline(old_part),
+                                                  _strip_one_newline(new_part))))
         consumed_spans.append((m.start(), m.end()))
 
     # 1b. USE_SKILL блокове (умение + опционален driver код).
     for m in _USE_SKILL_RE.finditer(response_text):
-        results.append((m.start(), _tool_use_skill(m.group("name"), m.group("body"))))
+        results.append((m.start(), _safe_tool("USE_SKILL", _tool_use_skill,
+                                              m.group("name"), m.group("body"))))
         consumed_spans.append((m.start(), m.end()))
 
     # 2. Едноредови тулове — прескачаме тези вътре във WRITE_FILE блок.
@@ -684,25 +708,25 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
         if _inside_write(m.start()):
             continue
         fn = _SIMPLE_DISPATCH[m.group("tool")]
-        results.append((m.start(), fn(m.group("arg"))))
+        results.append((m.start(), _safe_tool(m.group("tool"), fn, m.group("arg"))))
 
     # 3. BROWSER_READ — без аргумент (като LOOK_AT_SCREEN).
     for m in _BROWSER_READ_RE.finditer(response_text):
         if _inside_write(m.start()):
             continue
-        results.append((m.start(), _tool_browser_read()))
+        results.append((m.start(), _safe_tool("BROWSER_READ", _tool_browser_read)))
 
     # 3b. REPO_MAP без аргумент — картира текущия workspace.
     for m in _REPO_MAP_RE.finditer(response_text):
         if _inside_write(m.start()):
             continue
-        results.append((m.start(), _tool_repo_map("")))
+        results.append((m.start(), _safe_tool("REPO_MAP", _tool_repo_map, "")))
 
     # 4. TASK_LIST без аргумент — [TASK_LIST] показва отворените нишки.
     for m in _TASK_LIST_RE.finditer(response_text):
         if _inside_write(m.start()):
             continue
-        results.append((m.start(), _tool_task_list("open")))
+        results.append((m.start(), _safe_tool("TASK_LIST", _tool_task_list, "open")))
 
     # Подреждаме по позиция в текста, връщаме само низовете.
     results.sort(key=lambda t: t[0])

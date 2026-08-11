@@ -314,3 +314,68 @@ def test_readonly_parser_ignores_write_file(_workspace) -> None:
     results = gs.parse_and_execute_readonly_tools(text)
     assert results == []
     assert not (_workspace / "sneaky.txt").exists()
+
+
+class TestBothDispatchPathsFailAlike:
+    """tool_schemas.py documents the two dispatch paths as differing only in
+    how arguments arrive — "И двата пътя изпълняват СЪЩИЯ код... само форматът
+    на извикването/резултата е различен". Their failure behaviour diverged
+    badly (fixed 2026-08-12): dispatch_tool_call caught everything and
+    returned an error string, while the text-tag path let the exception
+    escape, destroying the results of tools that had ALREADY succeeded in the
+    same reply. It matters which side broke: text tags are the path taken by
+    models WITHOUT native function-calling, i.e. the weak/local fallback tier.
+    """
+
+    def test_a_failing_tool_does_not_lose_its_siblings(self, _workspace, monkeypatch) -> None:
+        (_workspace / "note.txt").write_text("hello", encoding="utf-8")
+
+        def _boom(_arg):
+            raise RuntimeError("provider unreachable")
+        monkeypatch.setitem(gs._SIMPLE_DISPATCH, "RESEARCH", _boom)
+
+        results = gs.parse_and_execute_tools(
+            "[READ_FILE: note.txt]\n[RESEARCH: anything]\n[LIST_DIR: .]"
+        )
+        assert len(results) == 3
+        assert "hello" in results[0]
+        assert "Грешка при изпълнение" in results[1]
+        assert "LIST_DIR" in results[2]
+
+    def test_the_failure_is_reported_like_the_native_path(self, _workspace, monkeypatch) -> None:
+        def _boom(_arg):
+            raise RuntimeError("provider unreachable")
+        monkeypatch.setitem(gs._SIMPLE_DISPATCH, "RESEARCH", _boom)
+
+        tag_result = gs.parse_and_execute_tools("[RESEARCH: anything]")[0]
+        monkeypatch.setattr(gs, "_tool_research", _boom)
+        native_result = gs.dispatch_tool_call("RESEARCH", {"question": "anything"})
+
+        for out in (tag_result, native_result):
+            assert out.startswith("[RESEARCH]")
+            assert "provider unreachable" in out
+
+    def test_readonly_path_is_guarded_too(self, _workspace, monkeypatch) -> None:
+        (_workspace / "note.txt").write_text("hello", encoding="utf-8")
+
+        def _boom(_arg):
+            raise RuntimeError("provider unreachable")
+        monkeypatch.setitem(gs._READONLY_DISPATCH, "RESEARCH", _boom)
+
+        results = gs.parse_and_execute_readonly_tools(
+            "[READ_FILE: note.txt]\n[RESEARCH: anything]"
+        )
+        assert len(results) == 2
+        assert "hello" in results[0]
+        assert "Грешка при изпълнение" in results[1]
+
+    def test_a_write_that_explodes_is_reported_not_raised(self, _workspace, monkeypatch) -> None:
+        def _boom(*_a):
+            raise OSError("disk full")
+        monkeypatch.setattr(gs, "_tool_write_file", _boom)
+        results = gs.parse_and_execute_tools("[WRITE_FILE: x.txt]body[END_WRITE]")
+        assert len(results) == 1
+        assert "disk full" in results[0]
+
+    def test_safe_tool_passes_a_healthy_result_through_untouched(self) -> None:
+        assert gs._safe_tool("X", lambda a: f"ok:{a}", "arg") == "ok:arg"
