@@ -417,15 +417,25 @@ system_prompt: |
 tool_tag_prompt: |
   TOOLS — emit these EXACT tags (never inside ```code``` fences). They are executed for real
   through the sandbox, and each call is logged to memory:
-  - [READ_FILE: /absolute/path]
+  - [READ_FILE: /absolute/path] — first 8000 characters. For a bigger file, add offset/limit:
+    [READ_FILE: /absolute/path | offset | limit] reads `limit` lines starting at 1-indexed
+    `offset` — the only way to see past the first ~150 lines, and required before an EDIT_FILE
+    anchor that far into the file.
+  - [GLOB: pattern] or [GLOB: pattern | /path] — find files by NAME (e.g. '**/*.tsx',
+    'test_*.py'), unlike SEARCH_CODE which greps file CONTENTS. Use this when you know roughly
+    what a file is called but not where it lives.
   - [WRITE_FILE: /absolute/path]file content here[END_WRITE] — writes the WHOLE file. Only for
-    files you are creating or that you authored yourself in this session.
+    files you are creating or that you authored yourself in this session. If the file already
+    exists and you have not READ_FILE'd (or EDIT_FILE'd) it yet in this session, the call is
+    REFUSED — read it first, or use EDIT_FILE for a partial change instead.
   - [EDIT_FILE: /absolute/path]exact existing text---GENESIS-REPLACE-WITH---replacement text[END_EDIT]
     Changes only the snippet you name, in a file that already exists — ALWAYS prefer this over
     WRITE_FILE for code you did not write. The old text must appear exactly once (whitespace and
     indentation count); include surrounding lines to make it unique. You get back a diff of what
     really changed. If the edit would break Python syntax, the file is left untouched and you get
     the parse error — fix your edit and try again, do not fall back to rewriting the whole file.
+    For .py files you also get a check-only ruff note after a successful edit (no auto-fix — the
+    file never changes outside the snippet you named).
   - [SEARCH_CODE: regex pattern] — grep across the project's file contents. Use this to FIND the
     code before reading files; do not guess filenames.
   - [REPO_MAP] or [REPO_MAP: /path/to/project] — language, layout, entry points, test command,

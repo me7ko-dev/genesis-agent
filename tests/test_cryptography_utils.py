@@ -4,6 +4,9 @@ test redirects PRIVATE_KEY_PATH/PUBLIC_KEY_PATH to tmp_path — this module
 writes real key files to ~/.genesis by default and must never touch it."""
 from __future__ import annotations
 
+import os
+import stat
+
 import pytest
 
 cryptography = pytest.importorskip("cryptography")
@@ -51,6 +54,35 @@ class TestGenerateKeys:
         agent) — loading with password=None must succeed."""
         cu.generate_keys()
         serialization.load_pem_private_key(cu.PRIVATE_KEY_PATH.read_bytes(), password=None)
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits only")
+    def test_private_key_file_is_owner_only(self) -> None:
+        """An unencrypted RSA private key (see test above) is only as safe as
+        the filesystem permissions around it — `open(path, 'wb')` alone would
+        leave it at the process umask (typically 0o644: group/other readable).
+        Design note 2026-08-12: this directory holds the same class of secret
+        as ~/.genesis/.env, which paths.ensure_genesis_home already locks to
+        0o700; the key file itself needs the matching treatment."""
+        cu.generate_keys()
+        mode = stat.S_IMODE(cu.PRIVATE_KEY_PATH.stat().st_mode)
+        assert mode & (stat.S_IRWXG | stat.S_IRWXO) == 0, oct(mode)
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits only")
+    def test_key_dir_is_owner_only(self) -> None:
+        cu.generate_keys()
+        mode = stat.S_IMODE(cu.KEY_DIR.stat().st_mode)
+        assert mode & (stat.S_IRWXG | stat.S_IRWXO) == 0, oct(mode)
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits only")
+    def test_key_dir_permissions_tightened_even_if_it_pre_existed_looser(self) -> None:
+        """mkdir(mode=...) only applies when it actually creates the
+        directory — a pre-existing looser KEY_DIR (e.g. GENESIS_KEY_DIR
+        pointed at a directory made by something else) must still end up
+        locked down, not silently left open."""
+        cu.KEY_DIR.chmod(0o755)
+        cu.generate_keys()
+        mode = stat.S_IMODE(cu.KEY_DIR.stat().st_mode)
+        assert mode & (stat.S_IRWXG | stat.S_IRWXO) == 0, oct(mode)
 
 
 class TestSignAndVerifyRoundTrip:

@@ -125,3 +125,77 @@ def test_real_ruff_flags_syntax_error() -> None:
 def test_real_ruff_passes_clean_code() -> None:
     ok, _detail = code_validate.validate_code_with_ruff("def f():\n    return 1\n")
     assert ok is True
+
+
+# ── lint_note (check-only, for EDIT_FILE) ───────────────────────────────────
+# Same fail-open/mocking conventions as validate_code_with_ruff above, but this
+# is a single-call, no-fix path: EDIT_FILE must never have ruff silently
+# rewrite parts of the file the model did not name in its anchor.
+
+def test_lint_note_empty_when_ruff_missing(monkeypatch) -> None:
+    monkeypatch.setattr(code_validate.shutil, "which", lambda _: None)
+    assert code_validate.lint_note("x") == ""
+
+
+def test_lint_note_empty_on_timeout(monkeypatch) -> None:
+    monkeypatch.setattr(code_validate.shutil, "which", lambda _: "/usr/bin/ruff")
+
+    def raise_timeout(*a, **kw):
+        raise subprocess.TimeoutExpired(cmd="ruff", timeout=10)
+
+    monkeypatch.setattr(code_validate.subprocess, "run", raise_timeout)
+    assert code_validate.lint_note("whatever") == ""
+
+
+def test_lint_note_empty_when_clean(monkeypatch) -> None:
+    monkeypatch.setattr(code_validate.shutil, "which", lambda _: "/usr/bin/ruff")
+    monkeypatch.setattr(code_validate.subprocess, "run",
+                        lambda *a, **kw: _FakeCompleted(stdout="[]", returncode=0))
+    assert code_validate.lint_note("def f():\n    return 1\n") == ""
+
+
+def test_lint_note_only_ever_makes_one_subprocess_call(monkeypatch) -> None:
+    """No --fix pass: unlike validate_code_with_ruff, this never writes back,
+    so there is nothing for a second (fix) subprocess call to do."""
+    monkeypatch.setattr(code_validate.shutil, "which", lambda _: "/usr/bin/ruff")
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        assert "--fix" not in cmd
+        return _FakeCompleted(stdout="[]", returncode=0)
+
+    monkeypatch.setattr(code_validate.subprocess, "run", fake_run)
+    code_validate.lint_note("x")
+    assert len(calls) == 1
+
+
+def test_lint_note_reports_issues_without_claiming_a_fix(monkeypatch) -> None:
+    monkeypatch.setattr(code_validate.shutil, "which", lambda _: "/usr/bin/ruff")
+    errors = [{"location": {"row": 3}, "code": "F821", "message": "undefined name 'x'"}]
+    monkeypatch.setattr(code_validate.subprocess, "run",
+                        lambda *a, **kw: _FakeCompleted(stdout=json.dumps(errors), returncode=1))
+    note = code_validate.lint_note("...")
+    assert "F821" in note
+    assert "L3" in note
+
+
+def test_lint_note_empty_on_malformed_ruff_output(monkeypatch) -> None:
+    """Unlike validate_code_with_ruff, an advisory note fails silent on
+    malformed output rather than surfacing raw ruff crash text — this path is
+    informational only, never blocks the edit that already succeeded."""
+    monkeypatch.setattr(code_validate.shutil, "which", lambda _: "/usr/bin/ruff")
+    monkeypatch.setattr(code_validate.subprocess, "run",
+                        lambda *a, **kw: _FakeCompleted(stdout="not json", returncode=2))
+    assert code_validate.lint_note("x") == ""
+
+
+@pytest.mark.skipif(_ruff_missing, reason="ruff not installed")
+def test_real_ruff_lint_note_flags_undefined_name() -> None:
+    note = code_validate.lint_note("def f():\n    return undefined_name\n")
+    assert "F821" in note
+
+
+@pytest.mark.skipif(_ruff_missing, reason="ruff not installed")
+def test_real_ruff_lint_note_empty_for_clean_code() -> None:
+    assert code_validate.lint_note("def f():\n    return 1\n") == ""

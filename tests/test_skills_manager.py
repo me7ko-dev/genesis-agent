@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from genesis_agent import skills_manager as sm
 
 
@@ -16,6 +18,20 @@ def _isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(sm, "SKILLS_DIR", skills_dir)
     monkeypatch.setattr(sm, "SKILLS_ROOT", tmp_path)
     return skills_dir
+
+
+@pytest.fixture
+def _isolated_keys(tmp_path_factory, monkeypatch):
+    """save_skill() now signs with cryptography_utils — redirect its key
+    storage to a throwaway directory so tests never touch the real
+    ~/.genesis/private_key.pem, same isolation as test_cryptography_utils.py."""
+    cryptography = pytest.importorskip("cryptography")
+    from genesis_agent import cryptography_utils as cu
+    key_dir = tmp_path_factory.mktemp("keys")
+    monkeypatch.setattr(cu, "KEY_DIR", key_dir)
+    monkeypatch.setattr(cu, "PRIVATE_KEY_PATH", key_dir / "private_key.pem")
+    monkeypatch.setattr(cu, "PUBLIC_KEY_PATH", key_dir / "public_key.pem")
+    return cu
 
 
 def _index(skills_dir) -> dict:
@@ -83,3 +99,49 @@ def test_unrelated_slugs_never_collide(tmp_path, monkeypatch) -> None:
     sm.save_skill(slug="flatten list", code="print(2)", goal="flatten list helper")
     idx = _index(skills_dir)
     assert len(idx["skills"]) == 2
+
+
+# ── Signing new skills (2026-08-12) ─────────────────────────────────────────
+# save_skill() now signs the code with cryptography_utils.sign_code and
+# stores the signature in the index entry — skill_loader.skill_view() is
+# where it actually gets checked before anything executes (test_skill_loader.py).
+
+class TestSigning:
+    def test_saved_skill_has_a_non_empty_signature(self, tmp_path, monkeypatch, _isolated_keys) -> None:
+        skills_dir = _isolate(tmp_path, monkeypatch)
+        sm.save_skill(slug="fibonacci", code="print(1)", goal="fibonacci helper")
+        idx = _index(skills_dir)
+        assert idx["skills"][0]["signature"]
+
+    def test_signature_actually_verifies_against_the_saved_code(
+        self, tmp_path, monkeypatch, _isolated_keys
+    ) -> None:
+        skills_dir = _isolate(tmp_path, monkeypatch)
+        sm.save_skill(slug="fibonacci", code="print(1)", goal="fibonacci helper")
+        entry = _index(skills_dir)["skills"][0]
+        assert _isolated_keys.verify_signature("print(1)", entry["signature"]) is True
+
+    def test_two_different_skills_get_different_signatures(
+        self, tmp_path, monkeypatch, _isolated_keys
+    ) -> None:
+        skills_dir = _isolate(tmp_path, monkeypatch)
+        sm.save_skill(slug="a", code="print('a')", goal="goal A")
+        sm.save_skill(slug="b", code="print('b')", goal="goal B")
+        sigs = [s["signature"] for s in _index(skills_dir)["skills"]]
+        assert sigs[0] != sigs[1]
+
+    def test_signing_failure_does_not_block_saving_the_skill(self, tmp_path, monkeypatch) -> None:
+        """Fail-open: an optional integrity upgrade must not turn into 'my
+        skill library stopped saving' the moment the crypto package or key
+        generation hiccups — same convention as every other optional feature
+        in this codebase (embeddings, ruff, web_search caching, ...)."""
+        skills_dir = _isolate(tmp_path, monkeypatch)
+
+        def _boom(_code):
+            raise RuntimeError("no cryptography backend available")
+        monkeypatch.setattr("genesis_agent.cryptography_utils.sign_code", _boom)
+
+        path = sm.save_skill(slug="fibonacci", code="print(1)", goal="fibonacci helper")
+        assert path.exists()
+        entry = _index(skills_dir)["skills"][0]
+        assert entry["signature"] == ""

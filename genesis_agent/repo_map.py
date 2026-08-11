@@ -130,6 +130,30 @@ def _search_ripgrep(root: Path, pattern: str, glob: str | None,
     return out
 
 
+def find_files(pattern: str, path: str | Path = ".",
+               max_results: int = 200) -> list[str]:
+    """Find files by NAME pattern (e.g. '**/*.tsx', 'test_*.py') — the filename
+    counterpart to search_code's content grep. Skips the same noise dirs
+    (.git, node_modules, venvs...) as everything else in this module."""
+    root = Path(path).expanduser()
+    if not root.exists():
+        raise FileNotFoundError(f"няма такъв път: {root}")
+    out: list[str] = []
+    for p in root.rglob(pattern):
+        if p.is_dir():
+            continue
+        if any(part in _SKIP_DIRS for part in p.parts):
+            continue
+        try:
+            out.append(str(p.relative_to(root)))
+        except ValueError:
+            out.append(str(p))
+        if len(out) >= max_results:
+            break
+    out.sort()
+    return out
+
+
 def search_code(pattern: str, path: str | Path = ".", glob: str | None = None,
                 max_results: int = _DEFAULT_MAX_RESULTS) -> list[Match]:
     """Regex search across a tree. Prefers ripgrep, falls back to Python."""

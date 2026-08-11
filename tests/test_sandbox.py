@@ -222,6 +222,31 @@ def test_run_python_executes_and_returns_stdout(tmp_path) -> None:
     assert "4" in res.stdout
 
 
+# ── _shell_argv (portability, design note 2026-08-11) ──────────────────────
+# `/bin/sh` does not exist on native Windows — live-observed as
+# "[WinError 2] The system cannot find the file specified" on every single
+# RUN_CMD when running under Windows-native Python (needed for real Ollama
+# inference). These force the non-posix branch via monkeypatch since the CI/
+# dev sandbox for this suite is POSIX either way.
+
+def test_shell_argv_uses_posix_sh_on_posix(monkeypatch) -> None:
+    monkeypatch.setattr(sandbox.os, "name", "posix")
+    assert sandbox._shell_argv("echo hi") == ["/bin/sh", "-c", "echo hi"]
+
+
+def test_shell_argv_prefers_bash_on_windows_when_available(monkeypatch) -> None:
+    monkeypatch.setattr(sandbox.os, "name", "nt")
+    monkeypatch.setattr("shutil.which", lambda _: r"C:\Program Files\Git\bin\bash.exe")
+    argv = sandbox._shell_argv("echo hi")
+    assert argv == [r"C:\Program Files\Git\bin\bash.exe", "-c", "echo hi"]
+
+
+def test_shell_argv_falls_back_to_cmd_on_windows_without_bash(monkeypatch) -> None:
+    monkeypatch.setattr(sandbox.os, "name", "nt")
+    monkeypatch.setattr("shutil.which", lambda _: None)
+    assert sandbox._shell_argv("echo hi") == ["cmd.exe", "/c", "echo hi"]
+
+
 def test_run_python_blocked_code_never_writes_a_script(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(sandbox, "_sandbox_dir", lambda: tmp_path)
     res = sandbox.run_python("import os; os.system('rm -rf /')", cwd=tmp_path)

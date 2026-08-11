@@ -100,10 +100,38 @@ def skill_view(name: str, *, file_path: Path | None = None) -> dict[str, Any]:
     code_match = re.search(r"```python\n(.*?)\n```", content, re.DOTALL)
     if not code_match:
         raise ValueError(f"Няма Python код блок в: {md_path}")
+    code = code_match.group(1).strip()
+
+    # Signature check (design note, 2026-08-12): skills_manager.save_skill
+    # signs NEW skills going forward — see its comment for why. Deliberately
+    # asymmetric: a MISSING signature (every skill saved before this, or one
+    # saved while `cryptography` was unavailable) loads exactly as it always
+    # has, no backfill, no forced re-sign. A signature that IS present but no
+    # longer matches the code just read from disk means the .md file (or the
+    # index entry) was edited after signing — that skill is refused, not
+    # silently executed, because everything that calls skill_view() (USE_SKILL,
+    # run_skill, load_skill_code) feeds its "code" straight into sandbox
+    # execution. Fails OPEN only on the crypto tooling itself being
+    # unavailable (ImportError etc.) — an optional integrity check must not
+    # turn into an outage for every already-working skill the moment the
+    # `cryptography` package goes missing; a genuine signature MISMATCH still
+    # refuses regardless.
+    signature = (skill_meta or {}).get("signature") or ""
+    if signature:
+        try:
+            from genesis_agent.cryptography_utils import verify_signature
+            sig_ok = verify_signature(code, signature)
+        except Exception:
+            sig_ok = True
+        if not sig_ok:
+            raise ValueError(
+                f"Умение '{name}' носи подпис, но той не съвпада с текущото съдържание на "
+                f"{md_path.name} — кодът е бил променен след подписването. Отказвам да го заредя."
+            )
 
     return {
         "metadata": metadata,
-        "code": code_match.group(1).strip(),
+        "code": code,
         "file_path": str(md_path.relative_to(SKILLS_ROOT)),
     }
 

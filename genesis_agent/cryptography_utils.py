@@ -13,21 +13,37 @@ PUBLIC_KEY_PATH = KEY_DIR / "public_key.pem"
 def generate_keys():
     """Generate this installation's RSA key pair for signing skills."""
     print(f"[DNA] Generating secure keys in {KEY_DIR}...")
-    KEY_DIR.mkdir(parents=True, exist_ok=True)
-    
+    KEY_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # mkdir's `mode` only applies when this call actually creates the
+    # directory — if KEY_DIR (typically ~/.genesis, shared with API keys)
+    # already existed with looser permissions, force it here too.
+    try:
+        os.chmod(KEY_DIR, 0o700)
+    except OSError:
+        pass
+
     private_key = rsa.generate_private_key(
         public_exponent=65537,
         key_size=2048
     )
-    
-    # Save Private Key
+
+    # Save Private Key. `open(..., "wb")` alone leaves it at the process
+    # umask (0o644 on a typical Linux default: group/other CAN read an
+    # unencrypted RSA private key) — this directory holds the same class of
+    # secret as ~/.genesis/.env (paths.ensure_genesis_home already locks that
+    # one to 0o700); the key file itself needs the same treatment, design
+    # note 2026-08-12.
     with open(PRIVATE_KEY_PATH, "wb") as f:
         f.write(private_key.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption()
         ))
-    
+    try:
+        os.chmod(PRIVATE_KEY_PATH, 0o600)
+    except OSError:
+        pass
+
     # Save Public Key
     public_key = private_key.public_key()
     with open(PUBLIC_KEY_PATH, "wb") as f:
@@ -35,7 +51,7 @@ def generate_keys():
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         ))
-    
+
     print("[DNA] Keys generated successfully. Keep the private key safe!")
     return private_key
 

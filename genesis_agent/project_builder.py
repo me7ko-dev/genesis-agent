@@ -109,7 +109,11 @@ def build_project(goal: str, *, max_rounds: int | None = None,
 
         test_file = test_files[0]
         runner = f"import unittest,sys\nl=unittest.TestLoader().discover('.', pattern='{test_file}')\nr=unittest.TextTestRunner(verbosity=1).run(l)\nprint('OK' if r.wasSuccessful() else 'FAIL')\nsys.exit(0 if r.wasSuccessful() else 1)"
-        res = sandbox.run_shell(f"cd {proj_dir} && python3 -c \"{runner}\"",
+        # cwd=proj_dir, НЕ `cd {proj_dir} &&` в самия команден низ (design note,
+        # 2026-08-11): последното чупи се на всеки път с интервал в него (напр.
+        # Windows "C:\Users\John Doe\...") — run_shell вече приема cwd нативно
+        # през subprocess, същия mechanism като _tool_run_cmd/run_tests другаде.
+        res = sandbox.run_shell(f'python3 -c "{runner}"', cwd=proj_dir,
                                 policy=sandbox.SandboxPolicy(mode="deny"), timeout=60)
 
         if res.ok and "OK" in res.stdout:

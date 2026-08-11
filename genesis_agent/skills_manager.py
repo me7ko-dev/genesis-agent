@@ -150,6 +150,24 @@ def save_skill(
             encoding="utf-8",
         )
 
+        # RSA-sign the code (design note, 2026-08-12): cryptography_utils.py
+        # had a complete sign/verify implementation that nothing in the real
+        # pipeline ever called — "verified" only ever meant "passed a sandbox
+        # self-test at creation time", no protection against the .md file (or
+        # this index entry) being edited afterwards. Signing NEW skills going
+        # forward, checked in skill_loader.skill_view() before anything
+        # executes their code — see that function for why old, unsigned
+        # skills are deliberately left untouched rather than backfilled.
+        # Fail-open on signing itself (missing `cryptography` package, key
+        # generation hiccup, ...): an optional integrity upgrade must not
+        # block saving a skill that would have saved fine yesterday.
+        signature = ""
+        try:
+            from genesis_agent.cryptography_utils import sign_code
+            signature = sign_code(code)
+        except Exception:
+            pass
+
         rel = str(md_path.relative_to(SKILLS_ROOT)).replace("\\", "/")
         entry: dict[str, Any] = {
             "name": final_slug,
@@ -161,6 +179,7 @@ def save_skill(
             "last_updated": now,
             "verified": vres.verified,
             "verification": vres.as_dict(),
+            "signature": signature,
         }
         if extra:
             entry["extra"] = extra

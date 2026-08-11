@@ -72,11 +72,17 @@ def _parse_interval(schedule: str) -> int | None:
 # ─── Job registry ─────────────────────────────────────────────────────────────
 
 class Job:
-    def __init__(self, name: str, schedule: str, func: Callable, enabled: bool = True):
+    def __init__(self, name: str, schedule: str, func: Callable, enabled: bool = True,
+                 command: str | None = None):
         self.name = name
         self.schedule = schedule
         self.func = func
         self.enabled = enabled
+        # The shell command this job wraps, if any (design note, 2026-08-12):
+        # a plain Python `func` can't be serialized back to JSON, but a
+        # shell-command job CAN — save_jobs_to_file needs this to actually
+        # round-trip, see the bug it fixes below.
+        self.command = command
         self.last_run: datetime | None = None
         self.next_run: datetime | None = None
         self._set_next_run()
@@ -109,9 +115,12 @@ _SCHEDULER_RUNNING = False
 _SCHEDULER_THREAD: threading.Thread | None = None
 
 
-def add_job(name: str, schedule: str, func: Callable, enabled: bool = True) -> Job:
-    """Добавя нов scheduled job."""
-    job = Job(name, schedule, func, enabled)
+def add_job(name: str, schedule: str, func: Callable, enabled: bool = True,
+            command: str | None = None) -> Job:
+    """Добавя нов scheduled job. `command` е по избор — задай го, когато func
+    просто обвива sandbox.run_shell(command), за да може save_jobs_to_file
+    после реално да го запази (виж Job.command)."""
+    job = Job(name, schedule, func, enabled, command=command)
     _JOBS[name] = job
     log.info(f"[scheduler] Регистриран job: {name} ({schedule}), следващо изпълнение: {job.next_run}")
     return job
@@ -129,6 +138,7 @@ def list_jobs() -> list[dict]:
             "name": j.name,
             "schedule": j.schedule,
             "enabled": j.enabled,
+            "command": j.command,
             "last_run": j.last_run.isoformat() if j.last_run else None,
             "next_run": j.next_run.isoformat() if j.next_run else None,
         }
@@ -202,13 +212,22 @@ def _load_jobs_from_file():
                     log.info(f"[scheduler] '{job_name}' OK: {result.stdout[:200]}")
             return _run
 
-        add_job(name, schedule, _make_func(command, name), enabled=enabled)
+        add_job(name, schedule, _make_func(command, name), enabled=enabled, command=command)
 
 
 def save_jobs_to_file():
-    """Записва текущите jobs в cron_jobs.json (само тези с команди)."""
-    # Не можем да сериализираме Python функции, запазваме само метаданни
-    jobs_info = list_jobs()
+    """Записва текущите jobs в cron_jobs.json (само тези с команди).
+
+    Bug fix (2026-08-12): list_jobs() досега не връщаше "command" изобщо —
+    коментарът тук вече твърдеше "запазваме само тези с команди", но нищо
+    не филтрираше по това, ЗАЩОТО никой job запис нямаше "command" поле за
+    филтриране. Резултат: save_jobs_to_file() пишеше валиден JSON, но
+    _load_jobs_from_file() при следващото стартиране винаги прескачаше
+    всичко (command винаги None) — round-trip-ът беше тихо счупен за
+    буквално всеки job. Не можем да сериализираме Python функции — само
+    shell-based jobs (тези с command) реално преживяват рестарт.
+    """
+    jobs_info = [j for j in list_jobs() if j.get("command")]
     JOBS_FILE.write_text(json.dumps(jobs_info, indent=2, ensure_ascii=False), encoding="utf-8")
     log.info(f"[scheduler] Запазени {len(jobs_info)} jobs в {JOBS_FILE}")
 

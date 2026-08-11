@@ -114,3 +114,26 @@ def test_repo_map_reports_missing_tests_and_missing_git(tmp_path) -> None:
     out = repo_map.repo_map(tmp_path)
     assert "не са открити" in out
     assert "НЕ (няма version control)" in out
+
+
+# ── find_files (GLOB) ────────────────────────────────────────────────────
+
+def test_find_files_matches_by_name_pattern(tree) -> None:
+    hits = repo_map.find_files("**/*.py", tree)
+    assert any(h.endswith("core.py") for h in hits)
+    assert not any(h.endswith(".js") for h in hits)
+
+
+def test_find_files_skips_dependency_directories(tree) -> None:
+    hits = repo_map.find_files("**/*.js", tree)
+    assert not any("node_modules" in h for h in hits)
+    assert any(h.endswith("util.js") for h in hits)
+
+
+def test_find_files_no_matches_returns_empty_list(tree) -> None:
+    assert repo_map.find_files("**/*.nonexistent", tree) == []
+
+
+def test_find_files_missing_root_raises(tmp_path) -> None:
+    with pytest.raises(FileNotFoundError):
+        repo_map.find_files("*.py", tmp_path / "nope")

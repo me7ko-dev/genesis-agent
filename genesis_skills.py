@@ -7,7 +7,8 @@ genesis_skills.py — Мостът между genesis_terminal_agent.py и genes
 CONFIRM/BLOCKED бариерата) и се записва в genesis_agent.memory / episodic_memory.
 
 Поддържани тагове (както са описани в config.yaml system_prompt):
-    [READ_FILE: /път/до/файл]
+    [READ_FILE: /път/до/файл]  или  [READ_FILE: /път | offset | limit]  (диапазон от редове)
+    [GLOB: шаблон]  или  [GLOB: шаблон | /път]  — намира файлове по ИМЕ (rglob), не по съдържание
     [WRITE_FILE: /път/до/файл]съдържание[END_WRITE]
     [RUN_CMD: команда]                 (или: RUN_CMD: bash -c '...')
     [WEB_SEARCH: заявка]
@@ -62,11 +63,24 @@ except Exception:  # pragma: no cover
 
 _WORKSPACE = _PROJECT_ROOT
 
+# Пътища, за които моделът вече е видял РЕАЛНОТО съдържание в тази сесия —
+# чрез READ_FILE, или защото самият той току-що го записа/редактира (design
+# note, 2026-08-11). Пази WRITE_FILE от тихо унищожаване на файл, чието
+# съдържание моделът никога не е видял: досега единствената защита беше ред в
+# промпта ("EDIT_FILE, NOT WRITE_FILE... only for a file you are genuinely
+# creating") — точно класът бъг, който проектът навсякъде другаде (malformed
+# tag, unverified completion claim, tautological assert, stall nudge) вече
+# третира като механизъм, а не молба към модела. Нарочно НЯМА bypass флаг:
+# цената на "прочети първо" е един евтин tool call, а изключение би обезсмислило
+# гаранцията точно за случая, в който тя има значение.
+_SEEN_PATHS: set[Path] = set()
+
 
 def set_workspace(path) -> None:
     """Задава работната директория (вика се от genesis_terminal_agent.py)."""
     global _WORKSPACE
     _WORKSPACE = Path(path)
+    _SEEN_PATHS.clear()
 
 
 def _resolve(path_str: str) -> Path:
@@ -101,22 +115,79 @@ def _log_episode(goal: str, outcome: str, tags: list[str]) -> None:
 # Реализация на отделните тулове
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _tool_read_file(arg: str) -> str:
-    path = _resolve(arg)
+def _tool_read_file(arg: str, offset=None, limit=None) -> str:
+    """Чете файл. Без offset/limit: първите 8000 символа (старото поведение,
+    непроменено за малки файлове). С тях: конкретен диапазон от РЕДОВЕ.
+
+    Защо изобщо: твърдото отрязване на 8000 символа означаваше, че всичко
+    след тази граница беше буквално невидимо за модела — а EDIT_FILE изисква
+    точен anchor от СЪЩЕСТВУВАЩИЯ текст. За файл над ~150 реда моделът не
+    можеше НИКОГА да построи валидна редакция отвъд началото, независимо
+    колко пъти опиташе. Текстовият таг приема двата параметъра pipe-разделени
+    (както BROWSER_TYPE/TASK_UPDATE): `[READ_FILE: път | offset | limit]`.
+    """
+    parts = [p.strip() for p in arg.split("|")] if "|" in arg else [arg]
+    path_str = parts[0]
+    if offset is None and len(parts) > 1 and parts[1]:
+        offset = parts[1]
+    if limit is None and len(parts) > 2 and parts[2]:
+        limit = parts[2]
+    try:
+        offset_i = int(offset) if offset not in (None, "") else None
+    except (TypeError, ValueError):
+        offset_i = None
+    try:
+        limit_i = int(limit) if limit not in (None, "") else None
+    except (TypeError, ValueError):
+        limit_i = None
+
+    path = _resolve(path_str)
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return f"[READ_FILE] Файлът не съществува: {path}"
     except OSError as e:
         return f"[READ_FILE] Грешка: {e}"
+    _SEEN_PATHS.add(path.resolve())
+
+    if offset_i is not None or limit_i is not None:
+        lines = text.splitlines()
+        start = max(0, (offset_i or 1) - 1)
+        end = start + limit_i if limit_i else len(lines)
+        # Номерирани редове (както `cat -n`) — тук, за разлика от режима по
+        # подразбиране, точната позиция е ЦЯЛАТА цел на извикването: моделът
+        # е поискал точно този диапазон, защото гради EDIT_FILE anchor или
+        # обяснява нещо на потребителя по конкретен ред.
+        numbered = [f"{i:>5}\t{ln}" for i, ln in enumerate(lines[start:end], start + 1)]
+        chunk = "\n".join(numbered)
+        if len(chunk) > 8000:
+            chunk = chunk[:8000] + f"\n… [отрязано, диапазонът е по-голям от 8000 символа]"
+        _log_episode(f"READ_FILE {path}", "прочетен (диапазон)", ["tool", "read_file"])
+        return (f"[READ_FILE: {path}]  (редове {start + 1}-{min(end, len(lines))} от {len(lines)})\n"
+                + chunk)
+
     if len(text) > 8000:
-        text = text[:8000] + f"\n… [отрязано, общо {len(text)} символа]"
+        total_lines = text.count("\n") + 1
+        text = (text[:8000]
+                + f"\n… [отрязано, общо {len(text)} символа, {total_lines} реда — "
+                  f"за конкретен диапазон: READ_FILE: {path_str} | offset | limit]")
     _log_episode(f"READ_FILE {path}", "прочетен", ["tool", "read_file"])
     return f"[READ_FILE: {path}]\n{text}"
 
 
 def _tool_write_file(arg: str, content: str) -> str:
     path = _resolve(arg)
+    resolved = path.resolve() if path.exists() else None
+    # WRITE_FILE презаписва ЦЕЛИЯ файл. Върху нещо, което моделът никога не е
+    # видяло в тази сесия, това е сляпо унищожаване на неизвестно съдържание —
+    # досега единствената спирачка беше промпт текст ("EDIT_FILE, NOT
+    # WRITE_FILE"), а не нещо, което кодът реално проверява (design note,
+    # 2026-08-11, виж _SEEN_PATHS по-горе). Нарочно БЕЗ bypass: цената на
+    # "прочети първо" е един евтин READ_FILE tool call.
+    if path.is_file() and resolved not in _SEEN_PATHS:
+        return (f"[WRITE_FILE: {path}] ❌ Файлът вече съществува и не си го чел в тази сесия — "
+                "WRITE_FILE презаписва ЦЯЛОТО му съдържание. Прочети го първо с READ_FILE (за да "
+                "видиш какво ще загубиш), или по-добре ползвай EDIT_FILE за частична промяна.")
     # Пишем ли извън workspace-а? Това е операция за потвърждение.
     try:
         inside = path.resolve().is_relative_to(_WORKSPACE.resolve())
@@ -146,6 +217,7 @@ def _tool_write_file(arg: str, content: str) -> str:
         path.write_text(content, encoding="utf-8")
     except OSError as e:
         return f"[WRITE_FILE] Грешка: {e}"
+    _SEEN_PATHS.add(path.resolve())
     _log_episode(f"WRITE_FILE {path}", f"записани {len(content)} символа",
                  ["tool", "write_file"])
     return f"[WRITE_FILE: {path}] ✓ записани {len(content)} символа{lint_note}"
@@ -175,11 +247,23 @@ def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False
         _log_episode(f"EDIT_FILE {path}", f"отказана: {res.detail[:200]}",
                      ["tool", "edit_file", "rejected"])
         return f"[EDIT_FILE: {path}] ❌ {res.detail}"
+    _SEEN_PATHS.add(path.resolve())
     _log_episode(f"EDIT_FILE {path}", res.detail, ["tool", "edit_file"])
     # Диффът се връща на модела нарочно: така следващият рунд вижда какво РЕАЛНО
     # се е променило, вместо да разчита на спомена си какво е искал да промени.
     diff = res.diff if len(res.diff) <= 4000 else res.diff[:4000] + "\n… [диффът е отрязан]"
-    return f"[EDIT_FILE: {path}] {res.detail}\n{diff}"
+    # Check-only ruff (design note, 2026-08-11): WRITE_FILE вече получаваше lint
+    # обратна връзка, EDIT_FILE — не, макар да е ПРЕДПОЧИТАНИЯТ инструмент.
+    # Нарочно без --fix тук (виж code_validate.lint_note) — auto-fix би пипнал
+    # части от файла отвъд самата редакция, което чупи обещанието на EDIT_FILE.
+    ruff_note = ""
+    if path.suffix == ".py":
+        try:
+            from genesis_agent.code_validate import lint_note
+            ruff_note = lint_note(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            pass
+    return f"[EDIT_FILE: {path}] {res.detail}\n{diff}{ruff_note}"
 
 
 def _tool_search_code(arg: str, path: str = "", glob: str = "") -> str:
@@ -198,6 +282,27 @@ def _tool_search_code(arg: str, path: str = "", glob: str = "") -> str:
     lines = [f"[SEARCH_CODE: {pattern}] {len(hits)} съвпадения в {root}"]
     lines += [f"  {h.path}:{h.line}: {h.text.strip()}" for h in hits]
     _log_episode(f"SEARCH_CODE {pattern}", f"{len(hits)} съвпадения", ["tool", "search_code"])
+    return "\n".join(lines)
+
+
+def _tool_glob(arg: str) -> str:
+    """[GLOB: шаблон] или [GLOB: шаблон | път] — намира файлове по ИМЕ
+    (напр. '**/*.tsx', 'test_*.py'), за разлика от SEARCH_CODE, което търси
+    в СЪДЪРЖАНИЕТО. Ползва Path.rglob под капака (repo_map.find_files)."""
+    parts = [p.strip() for p in arg.split("|")] if "|" in arg else [arg.strip(), ""]
+    pattern, path = parts[0], (parts[1] if len(parts) > 1 else "")
+    if not pattern:
+        return "[GLOB] Празен шаблон."
+    from genesis_agent.repo_map import find_files
+    root = _resolve(path) if path else _WORKSPACE
+    try:
+        hits = find_files(pattern, root)
+    except (ValueError, FileNotFoundError) as e:
+        return f"[GLOB: {pattern}] {e}"
+    if not hits:
+        return f"[GLOB: {pattern}] Няма файлове по този шаблон в {root}."
+    _log_episode(f"GLOB {pattern}", f"{len(hits)} файла", ["tool", "glob"])
+    lines = [f"[GLOB: {pattern}] {len(hits)} файла в {root}"] + [f"  {h}" for h in hits]
     return "\n".join(lines)
 
 
@@ -470,7 +575,7 @@ _EDIT_RE = re.compile(r"\[EDIT_FILE:\s*(?P<path>[^\]]+)\](?P<body>.*?)\[END_EDIT
                       re.DOTALL)
 _SIMPLE_RE = re.compile(
     r"\[(?P<tool>READ_FILE|RUN_CMD|WEB_SEARCH|LIST_DIR|DELEGATE|RESEARCH|BROWSE|ASK_USER|"
-    r"SEARCH_CODE|REPO_MAP|"
+    r"SEARCH_CODE|REPO_MAP|GLOB|"
     r"BROWSER_CLICK|BROWSER_TYPE|REMEMBER|TASK_ADD|TASK_UPDATE|TASK_LIST):"
     r"\s*(?P<arg>[^\]]+)\]"
 )
@@ -491,6 +596,7 @@ _SIMPLE_DISPATCH: dict[str, Callable[..., str]] = {
     "RESEARCH": _tool_research,
     "SEARCH_CODE": _tool_search_code,
     "REPO_MAP": _tool_repo_map,
+    "GLOB": _tool_glob,
     "BROWSE": _tool_browse,
     "BROWSER_CLICK": _tool_browser_click,
     "BROWSER_TYPE": _tool_browser_type,
@@ -675,7 +781,8 @@ def dispatch_tool_call(name: str, arguments) -> str:
         arguments = {}
     try:
         if name == "READ_FILE":
-            return _tool_read_file(arguments.get("path", ""))
+            return _tool_read_file(arguments.get("path", ""),
+                                   arguments.get("offset"), arguments.get("limit"))
         if name == "WRITE_FILE":
             return _tool_write_file(arguments.get("path", ""), arguments.get("content", ""))
         if name == "EDIT_FILE":
@@ -689,6 +796,10 @@ def dispatch_tool_call(name: str, arguments) -> str:
                                      arguments.get("glob", "") or "")
         if name == "REPO_MAP":
             return _tool_repo_map(arguments.get("path", "") or "")
+        if name == "GLOB":
+            pattern = arguments.get("pattern", "")
+            path = arguments.get("path", "") or ""
+            return _tool_glob(f"{pattern} | {path}" if path else pattern)
         if name == "RUN_CMD":
             return _tool_run_cmd(arguments.get("command", ""))
         if name == "ASK_USER":

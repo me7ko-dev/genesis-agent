@@ -20,10 +20,19 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "READ_FILE",
-            "description": "Read a file's contents (absolute or workspace-relative path).",
+            "description": "Read a file's contents (absolute or workspace-relative path). "
+                           "Without offset/limit, returns up to the first 8000 characters. For "
+                           "a bigger file, pass offset (1-indexed start line) and limit (max "
+                           "lines) to read a specific range — the only way to see anything past "
+                           "the first ~150 lines, and required before an EDIT_FILE anchor that "
+                           "far into the file. A ranged read is numbered per line (like `cat -n`).",
             "parameters": {
                 "type": "object",
-                "properties": {"path": {"type": "string", "description": "Path to read"}},
+                "properties": {
+                    "path": {"type": "string", "description": "Path to read"},
+                    "offset": {"type": "integer", "description": "1-indexed line to start from"},
+                    "limit": {"type": "integer", "description": "Max lines to return"},
+                },
                 "required": ["path"],
             },
         },
@@ -31,8 +40,30 @@ FULL_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "GLOB",
+            "description": "Find files by NAME pattern across a directory tree (e.g. "
+                           "'**/*.tsx', 'test_*.py') — the filename counterpart to SEARCH_CODE, "
+                           "which greps file CONTENTS. Use this when you know roughly what a "
+                           "file is called but not where it lives.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Glob pattern, e.g. '**/*.py'"},
+                    "path": {"type": "string", "description": "Directory to search (default: workspace)"},
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "WRITE_FILE",
-            "description": "Write (or overwrite) a file with the given content.",
+            "description": "Write (or overwrite) a file with the given content. If the file "
+                           "already exists, you must have READ_FILE'd (or just EDIT_FILE'd) it "
+                           "in this session first — otherwise the call is refused, so you never "
+                           "blind-overwrite content you haven't actually seen. Prefer EDIT_FILE "
+                           "for a partial change to a file you did not just author.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -58,7 +89,10 @@ FULL_TOOLS: list[dict] = [
                            "what you name and returns a diff of what actually changed. "
                            "'old' must appear in the file exactly once (whitespace counts); add "
                            "surrounding lines to make it unique. If the edit would break Python "
-                           "syntax the file is left untouched and you get the parse error back.",
+                           "syntax the file is left untouched and you get the parse error back. "
+                           "For .py files, a check-only ruff pass runs after a successful edit "
+                           "and any findings are appended as an advisory note — nothing is "
+                           "auto-fixed, so the file never changes outside what you named.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -356,7 +390,7 @@ FULL_TOOLS: list[dict] = [
 # писане/команди минават през отделния code-generation път, не през tool tags.
 READONLY_TOOLS: list[dict] = [
     t for t in FULL_TOOLS
-    if t["function"]["name"] in {"READ_FILE", "WEB_SEARCH", "RESEARCH", "LIST_DIR"}
+    if t["function"]["name"] in {"READ_FILE", "WEB_SEARCH", "RESEARCH", "LIST_DIR", "GLOB"}
 ]
 
 # Мисии (design note, 2026-07-25, "мисиите с реални умения"): READONLY_TOOLS +
@@ -382,7 +416,7 @@ MISSION_TOOLS: list[dict] = READONLY_TOOLS + [
 REPAIR_TOOLS: list[dict] = [
     t for t in FULL_TOOLS
     if t["function"]["name"] in {
-        "READ_FILE", "LIST_DIR", "SEARCH_CODE", "REPO_MAP",
+        "READ_FILE", "LIST_DIR", "SEARCH_CODE", "REPO_MAP", "GLOB",
         "EDIT_FILE", "WRITE_FILE", "RUN_CMD",
     }
 ]

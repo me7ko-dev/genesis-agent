@@ -590,15 +590,43 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
         return SandboxResult(ok=proc.returncode == 0, stdout=out or "", stderr=err or "",
                              returncode=proc.returncode)
     except subprocess.TimeoutExpired:
-        # Убиваме цялата process group.
+        # Убиваме цялата process group — само на POSIX (os.killpg/getpgid не
+        # съществуват на Windows и AttributeError не се хваща по-долу, значи
+        # преди тази проверка timeout на native Windows гърмеше необработено
+        # вместо да падне грациозно на proc.kill(), design note 2026-08-11).
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            proc.kill()
+            if os.name == "posix":
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            else:
+                proc.kill()
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                proc.kill()
+            except OSError:
+                pass
         out, err = proc.communicate()
         return SandboxResult(ok=False, stdout=out or "",
                              stderr=(err or "") + f"\n[sandbox] Timeout след {timeout}s",
                              returncode=None)
+
+
+def _shell_argv(command: str) -> list[str]:
+    """Argv за подадената команда, портативно.
+
+    `/bin/sh` буквално не съществува извън POSIX — на native Windows Python
+    (нужен за реален Ollama inference, виж genesis_agent/model_router.py)
+    всяка RUN_CMD команда гърмеше с "[WinError 2] The system cannot find the
+    file specified" (наблюдавано на живо, 2026-08-11). Всички RUN_CMD примери
+    в config.yaml/промпта са POSIX синтаксис (&&, rm -rf, apt-get) — затова
+    предпочитаме Git Bash/WSL `bash.exe`, ако е на PATH (обичайно е на
+    Windows dev машина), и падаме на `cmd.exe /c` само ако липсва."""
+    if os.name == "posix":
+        return ["/bin/sh", "-c", command]
+    import shutil
+    bash = shutil.which("bash")
+    if bash:
+        return [bash, "-c", command]
+    return ["cmd.exe", "/c", command]
 
 
 def run_shell(command: str, *, cwd: Path | None = None,
@@ -614,7 +642,7 @@ def run_shell(command: str, *, cwd: Path | None = None,
     if not allowed:
         return SandboxResult(ok=False, stdout="", stderr=reason, returncode=None,
                              blocked=True, verdict=verdict)
-    res = _run(["/bin/sh", "-c", command], cwd=work, policy=policy,
+    res = _run(_shell_argv(command), cwd=work, policy=policy,
                timeout=timeout or policy.cpu_seconds)
     res.verdict = verdict
     return res

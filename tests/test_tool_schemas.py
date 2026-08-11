@@ -31,7 +31,7 @@ def test_every_tool_has_valid_openai_function_shape() -> None:
 
 
 def test_readonly_tools_is_exactly_the_readonly_set() -> None:
-    assert _names(tool_schemas.READONLY_TOOLS) == {"READ_FILE", "WEB_SEARCH", "RESEARCH", "LIST_DIR"}
+    assert _names(tool_schemas.READONLY_TOOLS) == {"READ_FILE", "WEB_SEARCH", "RESEARCH", "LIST_DIR", "GLOB"}
 
 
 def test_mission_tools_is_readonly_plus_use_skill() -> None:

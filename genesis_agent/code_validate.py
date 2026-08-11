@@ -71,3 +71,44 @@ def validate_code_with_ruff(code: str) -> tuple[bool, str]:
     if len(errors) > _MAX_ERRORS_SHOWN:
         lines.append(f"  … и още {len(errors) - _MAX_ERRORS_SHOWN}")
     return False, "Ruff намери проблеми:\n" + "\n".join(lines)
+
+
+def lint_note(code: str) -> str:
+    """CHECK-ONLY ruff pass — no --fix, никога не връща променено съдържание.
+
+    За EDIT_FILE (genesis_skills._tool_edit_file), не за WRITE_FILE. Причината
+    да не преизползваме validate_code_with_ruff директно: тя auto-fix-ва и
+    връща ЦЕЛИЯ пренаписан файл — правилно за WRITE_FILE (моделът и без това
+    подава цялото съдържание), но за EDIT_FILE би означавало ruff тихо да
+    пренапише части от файла, които моделът НЕ е поискал да пипа — точно
+    обратното на обещанието на code_edit.py ("changes only what you name").
+    Затова тук само отчитаме находки, без да пипаме нищо на диска.
+
+    Празен низ = ruff не е наличен, или файлът е чист.
+    """
+    if not _ruff_available():
+        return ""
+    try:
+        checked = subprocess.run(
+            ["ruff", "check", "--output-format", "json",
+             "--stdin-filename", "generated.py", "-"],
+            input=code, capture_output=True, text=True,
+            timeout=_RUFF_TIMEOUT, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+    if checked.returncode == 0:
+        return ""
+    try:
+        errors = json.loads(checked.stdout or "[]")
+    except json.JSONDecodeError:
+        return ""
+    if not errors:
+        return ""
+    lines = [
+        f"  L{e['location']['row']}: {e['code']} {e['message']}"
+        for e in errors[:_MAX_ERRORS_SHOWN]
+    ]
+    if len(errors) > _MAX_ERRORS_SHOWN:
+        lines.append(f"  … и още {len(errors) - _MAX_ERRORS_SHOWN}")
+    return "\nRuff (само отчет, файлът не е пипнат отвъд редакцията):\n" + "\n".join(lines)
