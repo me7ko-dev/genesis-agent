@@ -106,6 +106,13 @@ def compact_and_graph_memory(session_logs: str) -> dict[str, Any]:
         )
         reply = Brain(min_size_b=120).complete([{"role": "user", "content": prompt}])
         extracted = _parse_llm_json(reply.raw_text)
+        # Валиден JSON със СГРЕШЕНА форма минаваше през except-а по-долу,
+        # защото парсването е успяло — и after that `extracted.get(...)` гърми
+        # с AttributeError ИЗВЪН try блока (bug fix, 2026-08-12). Моделът,
+        # помолен за обект, редовно връща списък на най-горно ниво; docstring-ът
+        # на модула обещава, че точно "malformed LLM response" никога не хвърля.
+        if not isinstance(extracted, dict):
+            raise TypeError(f"очакван обект, получен {type(extracted).__name__}")
     except Exception:
         return graph  # fail-open — this round just doesn't grow the graph
 
@@ -142,7 +149,13 @@ def compact_and_graph_memory(session_logs: str) -> dict[str, Any]:
                 "name": entity, "status": status, "updated_at": now
             }
 
-    _save(graph)
+    # Записът също е под guard: `_save` прави write_text, който гърми при
+    # пълен диск или права — а извлеченият граф вече е в паметта и връщането
+    # му е по-полезно от изключение от функция, обещала че не хвърля.
+    try:
+        _save(graph)
+    except OSError:
+        pass
     return graph
 
 

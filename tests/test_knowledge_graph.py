@@ -161,3 +161,62 @@ def test_load_recovers_from_corrupt_json_file(tmp_path, monkeypatch) -> None:
     path.write_text("{not valid json")
     monkeypatch.setattr(kg, "GRAPH_PATH", path)
     assert kg._load() == kg._empty_graph()
+
+
+class TestNeverRaisesOnBadModelOutput:
+    """The module docstring promises "a malformed LLM response or a missing
+    file never raises — worst case, the graph just doesn't grow this round".
+    Valid JSON of the WRONG SHAPE slipped past that (fixed 2026-08-12): the
+    parse succeeded so the except never fired, and `extracted.get(...)` then
+    raised AttributeError from outside the try. A model asked for an object
+    answering with a top-level list is a routine occurrence, not an exotic one.
+    """
+
+    def _fake_reply(self, monkeypatch, raw: str) -> None:
+        import genesis_agent.brain as bm
+
+        class _Fake:
+            def __init__(self, *a, **kw) -> None:
+                pass
+
+            def complete(self, messages, **kw):
+                return type("O", (object,), {"raw_text": raw, "code": "",
+                                              "usage": None, "tool_calls": None})
+        monkeypatch.setattr(bm, "Brain", _Fake)
+
+    def test_a_top_level_list_does_not_raise(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(kg, "GRAPH_PATH", tmp_path / "g.json")
+        self._fake_reply(monkeypatch, '[{"name": "AuthToken", "type": "x"}]')
+        graph = kg.compact_and_graph_memory("user: hello")
+        assert graph == {"entities": {}, "relations": [], "states": {}}
+
+    def test_a_bare_string_does_not_raise(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(kg, "GRAPH_PATH", tmp_path / "g.json")
+        self._fake_reply(monkeypatch, '"just a string"')
+        assert kg.compact_and_graph_memory("user: hello")["entities"] == {}
+
+    def test_an_error_reply_does_not_raise(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(kg, "GRAPH_PATH", tmp_path / "g.json")
+        self._fake_reply(monkeypatch, "Error: цялата верига е изчерпана")
+        assert kg.compact_and_graph_memory("user: hello")["entities"] == {}
+
+    def test_a_correct_object_still_grows_the_graph(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(kg, "GRAPH_PATH", tmp_path / "g.json")
+        self._fake_reply(monkeypatch, '{"entities":[{"name":"AuthToken","type":"symbol"}],'
+                                      '"relations":[],"states":[]}')
+        graph = kg.compact_and_graph_memory("user: hello")
+        assert "authtoken" in graph["entities"]
+
+    def test_an_unwritable_graph_path_does_not_raise(self, tmp_path, monkeypatch) -> None:
+        """_save() does a plain write_text; a full disk or a bad path must not
+        turn into an exception out of a function documented as fail-open."""
+        monkeypatch.setattr(kg, "GRAPH_PATH", tmp_path / "g.json")
+        self._fake_reply(monkeypatch, '{"entities":[{"name":"X","type":"y"}],'
+                                      '"relations":[],"states":[]}')
+
+        def _boom(_graph):
+            raise OSError("no space left on device")
+        monkeypatch.setattr(kg, "_save", _boom)
+
+        graph = kg.compact_and_graph_memory("user: hello")
+        assert "x" in graph["entities"]  # extraction survived, only the write failed
