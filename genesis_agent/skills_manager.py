@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import threading
 from datetime import datetime, timezone
@@ -58,7 +59,32 @@ def _load_index() -> dict[str, Any]:
 
 
 def _save_index(data: dict[str, Any]) -> None:
-    _index_path().write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    """Атомарен запис на индекса: пълен файл във временен, после os.replace.
+
+    Директното `write_text` (както беше досега) отваря файла с O_TRUNC и после
+    пише — ако процесът умре по средата (Ctrl-C, kill, спрян ток, пълен диск),
+    `skills.json` остава отрязан. Последствието е несъразмерно на прозореца
+    (design note, 2026-08-12): `_load_index` не лови JSONDecodeError, така че
+    всяко следващо `save_skill` гърми, а `skill_loader.reload_skills_index` го
+    лови и връща ПРАЗЕН индекс — цялата библиотека става невидима наведнъж.
+    Самите .md файлове оцеляват, но индексът е картата към тях.
+
+    `os.replace` е атомарен и на POSIX, и на Windows: или се вижда старият
+    файл, или новият, никога полу-записан. Временният файл е в СЪЩАТА
+    директория нарочно — преименуване между файлови системи не е атомарно.
+    """
+    idx = _index_path()
+    payload = json.dumps(data, indent=2, ensure_ascii=False)
+    tmp = idx.with_name(f".{idx.name}.tmp{os.getpid()}")
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())  # без това replace може да изпревари данните
+        os.replace(tmp, idx)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def list_skills() -> list[dict[str, Any]]:
@@ -103,8 +129,6 @@ def save_skill(
     в индекса. Ако require_verified е True (или env GENESIS_REQUIRE_VERIFIED=1) и
     умението не мине проверката → НЕ се записва и се вдига GenesisDNAError.
     """
-    import os
-
     from genesis_agent.verifier import verify_skill
 
     dna.validate_skill_payload(goal=goal, code=code)

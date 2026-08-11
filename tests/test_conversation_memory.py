@@ -85,6 +85,52 @@ class TestSummarizeOldContext:
         assert count_after_second_batch > count_after_first_batch
 
 
+class TestSummarizeKeepLargerThanHistory:
+    """`keep` is a public parameter (the module docstring advertises it), and
+    `keep >= total` used to break two different ways (fixed 2026-08-12), both
+    reached by passing a perfectly reasonable-looking value.
+    """
+
+    def test_keep_equal_to_total_is_a_no_op_not_a_crash(self) -> None:
+        """total - keep == 0 produced `DELETE ... WHERE id IN ()`, which is
+        not valid SQL — an OperationalError out of a memory write."""
+        for i in range(12):
+            cm.add_message("user", f"msg {i}")
+        cm.summarize_old_context(threshold=10, keep=12)
+        history = cm.get_history(last_n=1000)
+        assert len(history) == 12
+        assert all("[Context summary]" not in h["content"] for h in history)
+
+    def test_keep_larger_than_total_does_not_wipe_the_conversation(self) -> None:
+        """total - keep < 0 became a negative LIMIT, which SQLite reads as NO
+        limit — so it selected and deleted the ENTIRE history, the exact
+        opposite of 'keep the last N'."""
+        for i in range(12):
+            cm.add_message("user", f"msg {i}")
+        cm.summarize_old_context(threshold=10, keep=500)
+        history = cm.get_history(last_n=1000)
+        assert len(history) == 12
+        assert [h["content"] for h in history] == [f"msg {i}" for i in range(12)]
+
+    def test_keep_zero_still_compresses_everything(self) -> None:
+        """The other end of the range must keep working: keep=0 legitimately
+        means 'summarize all of it'."""
+        for i in range(12):
+            cm.add_message("user", f"msg {i}")
+        cm.summarize_old_context(threshold=10, keep=0)
+        history = cm.get_history(last_n=1000)
+        assert len(history) == 1
+        assert history[0]["role"] == "system"
+
+    def test_negative_keep_is_treated_as_zero_not_as_unlimited(self) -> None:
+        for i in range(12):
+            cm.add_message("user", f"msg {i}")
+        cm.summarize_old_context(threshold=10, keep=-5)
+        history = cm.get_history(last_n=1000)
+        assert len(history) == 1
+        assert history[0]["role"] == "system"
+
+
 class TestClearSession:
     def test_clears_all_messages(self) -> None:
         cm.add_message("user", "hi")

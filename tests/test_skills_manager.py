@@ -130,6 +130,37 @@ class TestSigning:
         sigs = [s["signature"] for s in _index(skills_dir)["skills"]]
         assert sigs[0] != sigs[1]
 
+    def test_atomic_index_write_leaves_no_temp_files_behind(self, tmp_path, monkeypatch, _isolated_keys) -> None:
+        skills_dir = _isolate(tmp_path, monkeypatch)
+        sm.save_skill(slug="fibonacci", code="print(1)", goal="fibonacci helper")
+        leftovers = [p.name for p in skills_dir.iterdir() if ".tmp" in p.name]
+        assert leftovers == []
+
+    def test_a_crash_mid_write_cannot_truncate_the_index(self, tmp_path, monkeypatch) -> None:
+        """The durability point of writing through a temp file + os.replace:
+        the index either stays at its previous complete state or becomes the
+        new complete state, never a half-written one. A truncated skills.json
+        is unusually costly here — _load_index does not catch JSONDecodeError,
+        so every later save_skill raises, and skill_loader catches it and
+        returns an EMPTY index, making the whole library invisible at once
+        even though every .md file is still on disk."""
+        skills_dir = _isolate(tmp_path, monkeypatch)
+        sm.save_skill(slug="first", code="print(1)", goal="the first skill")
+        good = (skills_dir / sm.SKILLS_INDEX_NAME).read_text(encoding="utf-8")
+
+        # Simulate the process dying after the temp file is written but before
+        # the rename makes it visible.
+        def _die(*_a, **_kw):
+            raise KeyboardInterrupt("killed mid-write")
+        monkeypatch.setattr(sm.os, "replace", _die)
+
+        with pytest.raises(KeyboardInterrupt):
+            sm.save_skill(slug="second", code="print(2)", goal="the second skill")
+
+        # The index on disk is still the previous, entirely valid one.
+        assert (skills_dir / sm.SKILLS_INDEX_NAME).read_text(encoding="utf-8") == good
+        assert json.loads(good)["skills"][0]["name"] == "first"
+
     def test_signing_failure_does_not_block_saving_the_skill(self, tmp_path, monkeypatch) -> None:
         """Fail-open: an optional integrity upgrade must not turn into 'my
         skill library stopped saving' the moment the crypto package or key

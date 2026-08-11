@@ -125,6 +125,19 @@ def summarize_old_context(threshold: int = 50, keep: int | None = None) -> None:
         conn.close()
         return  # Няма нужда от обобщаване.
 
+    # Колко от най-старите ще обобщим. Проверката е задължителна, защото
+    # `keep` е публичен параметър (виж docstring-а на модула) и при
+    # `keep >= total_messages` изразът излиза нула или отрицателен — два
+    # отделни начина да се счупи (bug fix, 2026-08-12):
+    #   • LIMIT 0  → празен резултат → `DELETE ... WHERE id IN ()`, което не е
+    #     валиден SQL и гърми с OperationalError;
+    #   • LIMIT <0 → SQLite го чете като БЕЗ ограничение, тоест избира и трие
+    #     ЦЕЛИЯ разговор — точната противоположност на "запази последните N".
+    to_summarize = total_messages - max(0, keep)
+    if to_summarize <= 0:
+        conn.close()
+        return
+
     # Избираме най-старите съобщения, които ще бъдат обобщени.
     # Тези, които остават след обобщението, са последните `keep`.
     cur = conn.execute(
@@ -133,7 +146,7 @@ def summarize_old_context(threshold: int = 50, keep: int | None = None) -> None:
         ORDER BY id ASC
         LIMIT ?;
         """,
-        (total_messages - keep,),
+        (to_summarize,),
     )
     old_messages = [{"id": row[0], "role": row[1], "content": row[2]} for row in cur.fetchall()]
 
