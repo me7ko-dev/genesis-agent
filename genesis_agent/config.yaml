@@ -126,6 +126,24 @@ models:
       size_b: 70
       supports_tools: true    # потвърдено наживо (с валиден ключ, не #1)
 
+    # ─── Cerebras (добавен 2026-08-11, неверифициран наживо — операторът
+    # още няма CEREBRAS_API_KEY). Най-щедрата безплатна квота от всички тук:
+    # 1M токена/ден + 14 400 заявки/ден НА МОДЕЛ, без карта. Само 8K контекст
+    # на безплатния tier обаче — забележимо по-малко от останалите тук.
+    # supports_tools нарочно false, докато не се провери с curl (виж
+    # инструкцията в коментара на premium_models по-долу) — не гадаем.
+    - provider: "cerebras"
+      model: "llama-4-scout-17b-16e-instruct"
+      size_b: 109   # Llama 4 Scout: 109B общо (MoE), 17B активни
+      supports_tools: false   # НЕпроверено наживо — провери преди да разчиташ
+
+    # ─── SambaNova Cloud (добавен 2026-08-11, неверифициран наживо —
+    # операторът още няма SAMBANOVA_API_KEY). Безплатен tier, без карта.
+    - provider: "sambanova"
+      model: "DeepSeek-V3-0324"
+      size_b: 685
+      supports_tools: false   # НЕпроверено наживо — провери преди да разчиташ
+
   # ─── КОДИНГ верига — `/maxcoding` (design note, 2026-07-30) ────────────────
   # Изцяло БЕЗПЛАТНА. Влиза само при `/maxcoding` в чата, `genesis fix
   # --maxcoding`, или `GENESIS_QUALITY=coding` — и автоматично при MAX режим

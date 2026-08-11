@@ -71,6 +71,19 @@ _PROVIDERS = {
     "cohere":     ("https://api.cohere.ai/compatibility/v1", "COHERE_API_KEY"),
     "groq":       ("https://api.groq.com/openai/v1", "GROQ_API_KEY"),
     "nvidia":     ("https://integrate.api.nvidia.com/v1", "NVIDIA_API_KEY"),
+    # Cerebras (added 2026-08-11): genuinely free, no card — 1M tokens/day +
+    # 14,400 req/day PER MODEL, no signup friction. 8K context on the free
+    # tier though (much smaller than the other free providers here).
+    "cerebras": ("https://api.cerebras.ai/v1", "CEREBRAS_API_KEY"),
+    # SambaNova Cloud (added 2026-08-11): free tier, no card required either.
+    "sambanova": ("https://api.sambanova.ai/v1", "SAMBANOVA_API_KEY"),
+    # Together AI (added 2026-08-11, design note): NOT truly free like the
+    # entries above — a payment method is required to even create a working
+    # key (a signup credit offsets early usage, but it is card-gated). Kept
+    # out of config.yaml's default `fallback_models` free chain on purpose;
+    # only useful if the operator has explicitly added a card-backed key and
+    # wants to opt in via a manual fallback_models entry.
+    "together": ("https://api.together.xyz/v1", "TOGETHER_API_KEY"),
     # Ollama Cloud (различно от ollama_local!) — ~5M токена/седмица безплатно,
     # СЪЩИЯТ OpenAI-съвместим формат, но много по-големи модели (:cloud суфикс)
     # отколкото GTX 1650 4GB може да върти локално. Добавено 2026-07-25.

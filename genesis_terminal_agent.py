@@ -248,6 +248,13 @@ PROVIDERS = {
     "ollama":       {"name": "🏠 Ollama (Local)",     "key_env": None,                "base_url": "http://localhost:11434",                                "type": "ollama"},
     # Ollama CLOUD — ollama.com/v1, OpenAI-compatible, изисква OLLAMA_API_KEY
     "ollama_cloud": {"name": "☁️  Ollama (Cloud)",    "key_env": "OLLAMA_API_KEY",    "base_url": "https://ollama.com/v1",                                 "type": "openai"},
+    # Добавени 2026-08-11 — безплатни tier-ове без карта. Cerebras е с най-
+    # щедрата квота от всички тук (1M токена/ден), но само 8K контекст.
+    "cerebras":     {"name": "🧠 Cerebras",           "key_env": "CEREBRAS_API_KEY",  "base_url": "https://api.cerebras.ai/v1",                            "type": "openai"},
+    "sambanova":    {"name": "🟣 SambaNova",          "key_env": "SAMBANOVA_API_KEY", "base_url": "https://api.sambanova.ai/v1",                           "type": "openai"},
+    # Together AI изисква карта дори за стартовия кредит — НЕ е безплатен като
+    # горните два, затова е маркиран PAID в /model менюто (виж FREE_PROVIDERS).
+    "together":     {"name": "🔗 Together AI",        "key_env": "TOGETHER_API_KEY",  "base_url": "https://api.together.xyz/v1",                           "type": "openai"},
     "llmstudio":    {"name": "🖥️  LLM Studio",        "key_env": None,                "base_url": "http://127.0.0.1:1234/v1",                             "type": "openai"},
 }
 FALLBACKS = {
@@ -260,6 +267,12 @@ FALLBACKS = {
     "cohere":       ["command-a-plus-05-2026", "command-a-03-2025", "command-r-plus-08-2024", "command-r-08-2024", "command-r7b-12-2024"],
     "ollama":       [KEYS["OLLAMA_MODEL"]],
     "ollama_cloud": ["llama3.2", "llama3.1:8b", "mistral", "phi3"],
+    # Резерва САМО ако живият GET /v1/models не отговори — реалният списък
+    # винаги идва от доставчика (fetch_models). Имената на моделите се менят
+    # често, затова тук са само няколко потвърдени за август 2026.
+    "cerebras":     ["llama-4-scout-17b-16e-instruct", "qwen-3-32b"],
+    "sambanova":    ["DeepSeek-V3-0324", "Meta-Llama-3.3-70B-Instruct", "gpt-oss-120b"],
+    "together":     ["meta-llama/Llama-3.3-70B-Instruct-Turbo"],
     "llmstudio":    ["local-model"],
 }
 
@@ -299,7 +312,10 @@ _SUPPORTS_TOOLS = {
 }
 
 # FREE model detection
-FREE_PROVIDERS = {"groq", "ollama"}  # local Ollama is free; Ollama Cloud has usage limits/subscription gates
+# cerebras/sambanova добавени 2026-08-11: и двата имат истински безплатен tier
+# БЕЗ карта (Cerebras 1M токена/ден, SambaNova безплатен tier). Together AI
+# нарочно НЕ е тук — иска карта дори за стартовия кредит, значи PAID.
+FREE_PROVIDERS = {"groq", "ollama", "cerebras", "sambanova"}  # local Ollama is free; Ollama Cloud has usage limits/subscription gates
 FREE_MODEL_PATTERNS = [":free", "command-r", "command-a"]  # cohere free tier
 
 def is_free_model(provider_key: str, model_id: str) -> bool:
