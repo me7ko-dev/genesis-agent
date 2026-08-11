@@ -415,7 +415,19 @@ def call_openai_compatible(messages, provider_key, model_id, tools=None):
                     "prompt_tokens": usage.get("prompt_tokens", 0),
                     "completion_tokens": usage.get("completion_tokens", 0),
                 }
-            return message.get("content", "").strip(), (message.get("tool_calls") or None)
+            content = message.get("content", "").strip()
+            # Same guard as genesis_agent.brain._http (design note, 2026-08-12):
+            # finish_reason was never checked here either — a response cut off
+            # mid code-fence at the max_tokens ceiling came back looking like a
+            # normal answer, and got extracted as if it were complete code.
+            if choice.get("finish_reason") == "length":
+                from genesis_agent.brain import _is_truncated
+                if _is_truncated(content):
+                    raise RuntimeError(
+                        f"HTTP_TRUNCATED: отговорът е отрязан на тавана от 2048 "
+                        "токена, посред код-ограда (finish_reason=length)."
+                    )
+            return content, (message.get("tool_calls") or None)
         # Parse error message
         try:
             err_body = r.json()

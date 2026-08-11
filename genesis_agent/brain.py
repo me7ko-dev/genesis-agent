@@ -59,6 +59,14 @@ CLOUD_TIMEOUT = 90
 LOCAL_TIMEOUT = 240  # локалният 3B модел на слаб GPU е бавен — даваме му време
 RETRY_ROUNDS = 2  # колко пъти да обходим цялата верига при пълен провал
 
+# Таван на изходните токени за OpenAI-съвместимите доставчици. 4096 е стойността,
+# с която проектът работи от началото — оставена е като подразбиране нарочно
+# (всеки безплатен доставчик във веригата я приема; по-висока стойност някои
+# отхвърлят с 400). Env override-ът съществува, защото 4096 е РЕАЛНО ограничение
+# за по-дълъг скрипт: виж _is_truncated и коментара в _http за какво се случваше
+# преди, когато таванът се удари.
+MAX_OUTPUT_TOKENS = int(os.environ.get("GENESIS_MAX_TOKENS", "4096"))
+
 # Anthropic native (само при quality="max"). max_tokens покрива И размисъла, И
 # отговора — 16k стига за код без да изисква streaming (над ~16k SDK-то иска
 # stream, за да не удари HTTP timeout). `xhigh` е препоръчаното ниво за кодинг
@@ -176,6 +184,21 @@ def _is_exhausted(key: str) -> bool:
 
 def _mark_exhausted(key: str) -> None:
     _EXHAUSTED[key] = time.time() + _EXHAUST_COOLDOWN
+
+
+def _is_truncated(text: str) -> bool:
+    """True ако `text` свършва посред код-ограда (нечетен брой ``` маркери).
+
+    Точно този случай е опасен (design note, 2026-08-12): извличането на код
+    навсякъде в проекта е `raw_text.split("```python")[1].split("```")[0]`.
+    При НЕЗАТВОРЕНА ограда вторият split няма на какво да се раздели и връща
+    целия остатък — тоест полуписан, синтактично счупен код се извлича така,
+    сякаш е завършен. После пада във verifier-а като SyntaxError, изгаря цял
+    рунд, и нищо никъде не показва, че истинската причина е ударен таван на
+    токените, а не сгрешен код. `finish_reason` не се проверяваше НИКЪДЕ по
+    целия LLM път до тази поправка.
+    """
+    return text.count("```") % 2 == 1
 
 
 def _load_last_model() -> tuple[str, str] | None:
@@ -767,7 +790,7 @@ class Brain:
         if key:
             headers["Authorization"] = f"Bearer {key}"
         payload: dict[str, Any] = {"model": model, "messages": messages,
-                                   "temperature": 0.7, "max_tokens": 4096}
+                                   "temperature": 0.7, "max_tokens": MAX_OUTPUT_TOKENS}
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
@@ -789,13 +812,31 @@ class Brain:
         # за да мине през нормалната fallback логика.
         try:
             data = r.json()
-            message = data["choices"][0]["message"]
+            choice = data["choices"][0]
+            message = choice["message"]
             content = message.get("content")
             tool_calls = message.get("tool_calls") or None
+            finish_reason = choice.get("finish_reason") or ""
         except (ValueError, KeyError, IndexError, TypeError) as e:
             raise RuntimeError(f"HTTP_200_MALFORMED: {type(e).__name__}: {r.text[:150]}")
         if not content and not tool_calls:
             raise RuntimeError("празен отговор")
+        # Ударен таван на изходните токени (design note, 2026-08-12): досега
+        # `finish_reason` не се четеше НИКЪДЕ и отрязан отговор се връщаше като
+        # нормален. Ако при това код-оградата е останала незатворена, счупен
+        # полукод се извличаше като готов резултат — виж _is_truncated. Вдигаме
+        # RuntimeError, за да мине през СЪЩАТА fallback логика като всяка друга
+        # грешка (следващ модел във веригата), вместо да върнем нещо, което
+        # изглежда като валиден отговор. Разпознаваемо име, за да е ясно в лога
+        # каква е реалната причина, вместо мистериозен SyntaxError два слоя
+        # по-надолу. НЕ съвпада с _EXHAUST_CODES (429/402/503) нарочно — таванът
+        # не е изчерпана квота и не бива да вкарва модела в cooldown.
+        if finish_reason == "length" and _is_truncated(content or ""):
+            raise RuntimeError(
+                f"HTTP_TRUNCATED: отговорът е отрязан на тавана от {MAX_OUTPUT_TOKENS} "
+                f"токена, посред код-ограда (finish_reason=length). Вдигни го с "
+                f"GENESIS_MAX_TOKENS, ако доставчикът го позволява."
+            )
         # usage липсва при локален Ollama /v1 понякога — None е ОК, budget.py го обработва.
         self._last_usage = data.get("usage")
         return (content or "").strip(), tool_calls
@@ -931,6 +972,16 @@ class Brain:
         text = "".join(text_parts).strip()
         if not text and not tool_calls:
             raise RuntimeError("празен отговор")
+        # Същото като при OpenAI-съвместимия път (виж _http): досега тук се
+        # проверяваше само "refusal", а изчерпан max_tokens минаваше за
+        # нормален отговор — с незатворена код-ограда това значи счупен
+        # полукод, приет за завършен.
+        if getattr(resp, "stop_reason", "") == "max_tokens" and _is_truncated(text):
+            raise RuntimeError(
+                f"HTTP_TRUNCATED: отговорът е отрязан на тавана от "
+                f"{ANTHROPIC_MAX_TOKENS} токена, посред код-ограда "
+                f"(stop_reason=max_tokens)."
+            )
         return text, (tool_calls or None)
 
     def _call(self, provider: str, model: str, messages: list[dict],

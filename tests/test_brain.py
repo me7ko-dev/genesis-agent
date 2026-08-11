@@ -144,6 +144,80 @@ class TestHttp:
         assert tool_calls == [{"id": "1"}]
 
 
+class TestTruncationDetection:
+    """finish_reason was never read anywhere in the LLM path before 2026-08-12.
+
+    A response cut off at the max_tokens ceiling came back looking like a
+    normal answer. Every code-extraction site in the project does
+    `raw_text.split("```python")[1].split("```")[0]` — with the closing fence
+    missing, that second split has nothing to split on and returns the whole
+    remainder, so half-written, syntactically broken code was extracted as if
+    it were finished, then failed the verifier as a mystery SyntaxError.
+    """
+
+    def _brain(self) -> Brain:
+        return Brain.__new__(Brain)
+
+    def test_unterminated_fence_is_detected(self) -> None:
+        assert brain_mod._is_truncated("here you go\n```python\ndef f():\n    ret") is True
+
+    def test_closed_fence_is_not_truncated(self) -> None:
+        assert brain_mod._is_truncated("```python\ndef f():\n    pass\n```") is False
+
+    def test_plain_prose_is_not_truncated(self) -> None:
+        assert brain_mod._is_truncated("no code fences at all here") is False
+
+    def test_truncated_code_response_raises_instead_of_returning_broken_code(
+        self, monkeypatch
+    ) -> None:
+        b = self._brain()
+        resp = _FakeResponse(200, {
+            "choices": [{
+                "message": {"content": "sure:\n```python\ndef solve():\n    x = ["},
+                "finish_reason": "length",
+            }],
+        })
+        monkeypatch.setattr("genesis_agent.brain.requests.post", lambda *a, **kw: resp)
+        with pytest.raises(RuntimeError, match="HTTP_TRUNCATED"):
+            b._http("https://x", "key", "m", [], 30)
+
+    def test_length_finish_with_intact_fence_is_allowed_through(self, monkeypatch) -> None:
+        """Hitting the ceiling right after the closing fence is harmless — the
+        code block is complete, so there is nothing broken to guard against."""
+        b = self._brain()
+        resp = _FakeResponse(200, {
+            "choices": [{
+                "message": {"content": "```python\ndef f():\n    pass\n```"},
+                "finish_reason": "length",
+            }],
+        })
+        monkeypatch.setattr("genesis_agent.brain.requests.post", lambda *a, **kw: resp)
+        content, _ = b._http("https://x", "key", "m", [], 30)
+        assert "def f()" in content
+
+    def test_normal_stop_with_odd_fence_count_is_not_flagged(self, monkeypatch) -> None:
+        """Only finish_reason=length means truncation. A stray ``` in prose on
+        a normally-completed answer must not be mistaken for a cut-off."""
+        b = self._brain()
+        resp = _FakeResponse(200, {
+            "choices": [{
+                "message": {"content": "use the ``` fence syntax like this"},
+                "finish_reason": "stop",
+            }],
+        })
+        monkeypatch.setattr("genesis_agent.brain.requests.post", lambda *a, **kw: resp)
+        content, _ = b._http("https://x", "key", "m", [], 30)
+        assert "fence syntax" in content
+
+    def test_truncation_error_does_not_trigger_provider_cooldown(self) -> None:
+        """HTTP_TRUNCATED must not collide with the _EXHAUST_CODES matching in
+        complete() — hitting a token ceiling is not a spent quota, and putting
+        an otherwise-healthy model into a 5-minute cooldown for it would be
+        the wrong reaction entirely."""
+        err = "HTTP_TRUNCATED: отговорът е отрязан"
+        assert not any(f"HTTP_{c}" in err for c in brain_mod._EXHAUST_CODES)
+
+
 @pytest.fixture(autouse=True)
 def _clean_exhausted_state():
     """_EXHAUSTED is module-level global state, keyed by provider/key id —

@@ -210,6 +210,59 @@ class TestEscalation:
         assert outcome.success is False
         assert FakeBrain.escalated == 1
 
+    def test_escalation_still_fires_when_the_threshold_round_takes_a_continue_path(
+        self, monkeypatch
+    ) -> None:
+        """The actual bug (fixed 2026-08-12): the escalation check sits at the
+        BOTTOM of the round loop, below six different `continue` branches
+        (native tool calls, read-only tool tags, lint failure, missing code
+        block, verifier rejection, critic rejection). The old check compared
+        `round_i + 1 == _escalate_after` — exact equality, no memory. If the
+        round landing exactly on that threshold took any of those `continue`
+        paths, the comparison's one true moment was skipped and escalate()
+        was never called for the rest of the mission, no matter how many more
+        rounds failed afterwards. Here round 2 (the threshold, since
+        max_rounds=6 -> _escalate_after=2) returns no code at all — a
+        `continue` round — and round 3+ fail normally; escalation must still
+        happen once, on round 3."""
+        max_rounds = 6
+        code = "raise RuntimeError('boom')"
+        _queue(
+            _Reply(raw_text="still thinking, no code yet", code=None),  # round 1: continue
+            _Reply(raw_text="still thinking, no code yet", code=None),  # round 2: the threshold round, ALSO continue
+            *[_Reply(raw_text="```python\n" + code + "\n```", code=code) for _ in range(max_rounds - 2)],
+        )
+        monkeypatch.setattr(al, "run_python_subprocess",
+                             lambda c: ExecResult(ok=False, stdout="", stderr="boom", returncode=1))
+        monkeypatch.setattr("genesis_agent.code_validate.validate_code_with_ruff", lambda c: (True, ""))
+        monkeypatch.setattr(al, "emergency_repair",
+                             lambda code, stderr, stdout: RepairResult(
+                                 fixed=False, code=code, rounds=0, method="none", fix_desc=""))
+
+        outcome = al.run_autonomous_loop("a goal that always fails", max_rounds=max_rounds)
+
+        assert outcome.success is False
+        assert FakeBrain.escalated == 1
+
+    def test_escalation_happens_at_most_once_per_mission(self, monkeypatch) -> None:
+        """escalate() reflects the installed Ollama tiers, which don't change
+        mid-mission — calling it again every subsequent round past the
+        threshold would just be a wasted poll, not a real re-escalation."""
+        max_rounds = 8
+        code = "raise RuntimeError('boom')"
+        _queue(*[_Reply(raw_text="```python\n" + code + "\n```", code=code) for _ in range(max_rounds)])
+        monkeypatch.setattr(al, "run_python_subprocess",
+                             lambda c: ExecResult(ok=False, stdout="", stderr="boom", returncode=1))
+        monkeypatch.setattr("genesis_agent.code_validate.validate_code_with_ruff", lambda c: (True, ""))
+        monkeypatch.setattr(al, "emergency_repair",
+                             lambda code, stderr, stdout: RepairResult(
+                                 fixed=False, code=code, rounds=0, method="none", fix_desc=""))
+
+        outcome = al.run_autonomous_loop("a goal that always fails", max_rounds=max_rounds)
+
+        assert outcome.success is False
+        assert FakeBrain.escalated == 1
+
 
 class TestExhaustion:
     def test_all_rounds_fail_and_repair_also_fails_returns_failure(self, monkeypatch) -> None:

@@ -203,8 +203,24 @@ def test_run_shell_blocked_command_never_reaches_a_subprocess(tmp_path, monkeypa
 
 
 def test_run_shell_confirm_command_denied_non_interactively(tmp_path) -> None:
-    """No tty under pytest → policy resolves to 'deny' for CONFIRM commands."""
-    res = sandbox.run_shell("sudo apt-get install nginx", cwd=tmp_path)
+    """CONFIRM commands are denied in deny mode.
+
+    `mode="deny"` passed explicitly rather than relying on auto-detection
+    picking it up from ambient stdin state (bug found 2026-08-12): this test
+    used to call run_shell() with no explicit policy, counting on
+    SandboxPolicy(mode="auto").resolve_mode() reading pytest's captured
+    (non-tty) stdin as "deny" — an environment ASSUMPTION, not something the
+    test controlled. Importing an unrelated module elsewhere in the same run
+    that constructs a `rich.Console()` (genesis_terminal_agent, collected
+    earlier alphabetically) was enough to make resolve_mode() pick
+    'interactive' instead, and this test then hit a REAL input() prompt under
+    pytest's capture (crashes with "reading from stdin while output is
+    captured"). Auto-detection itself already has its own dedicated test —
+    test_resolve_mode_auto_is_deny_when_stdin_not_a_tty above — so this one
+    only needs to verify what deny mode actually does with a CONFIRM command,
+    which does not require going anywhere near real stdin at all."""
+    res = sandbox.run_shell("sudo apt-get install nginx", cwd=tmp_path,
+                            policy=SandboxPolicy(mode="deny"))
     assert res.blocked is True
     assert res.ok is False
     assert "DENIED" in res.stderr
