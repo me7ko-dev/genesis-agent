@@ -170,30 +170,6 @@
         "method": "self_test_passed",
         "detail": "OK"
       }
-    },
-    {
-      "name": "write_a_python_function_is_leap_year_year_implem",
-      "category": "autonomous",
-      "file_path": "skills/write_a_python_function_is_leap_year_year_implem.md",
-      "description": "Write a Python function is_leap_year(year) implementing the correct Gregorian calendar rule (divisible by 4, EXCEPT century years unless also divisible by 400). Include an assert-based self-test that checks year 2000 (leap), year 1900 (NOT leap), and year 2024 (leap), printing OK on success.",
-      "triggers": [
-        "write a python function is leap year year implem"
-      ],
-      "version": "1.0",
-      "last_updated": "2026-08-10T22:31:44.195030+00:00",
-      "verified": true,
-      "verification": {
-        "verified": true,
-        "method": "self_test_passed",
-        "detail": "OK"
-      },
-      "extra": {
-        "rounds": 1,
-        "test_gated": true,
-        "operator": null,
-        "is_sovereign": false,
-        "red_zone_active": false
-      }
     }
   ]
 }
