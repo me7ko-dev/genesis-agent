@@ -232,8 +232,10 @@ class TestOllamaCloudKeys:
 
 
 class TestOllamaCloudRotation:
-    """_call_ollama_cloud_rotating — the opt-in multi-key path. Only reached
-    with >1 key (see brain.py's `_call`), so these call it directly."""
+    """_call_rotating — the opt-in multi-key path (was
+    _call_ollama_cloud_rotating; generalised to any provider 2026-08-11, so
+    it now takes key_env). Only reached with >1 key (see brain.py's
+    `_call`), so these call it directly."""
 
     def _brain(self) -> Brain:
         b = Brain.__new__(Brain)
@@ -249,7 +251,7 @@ class TestOllamaCloudRotation:
             return "ok", None
 
         monkeypatch.setattr(b, "_http", fake_http)
-        out = b._call_ollama_cloud_rotating("https://x", "m", [], None, ["k1", "k2"])
+        out = b._call_rotating("https://x", "OLLAMA_API_KEY", "m", [], None, ["k1", "k2"])
         assert out == ("ok", None)
         assert calls == ["k1"]
 
@@ -264,7 +266,7 @@ class TestOllamaCloudRotation:
             return "from k2", None
 
         monkeypatch.setattr(b, "_http", fake_http)
-        out = b._call_ollama_cloud_rotating("https://x", "m", [], None, ["k1", "k2"])
+        out = b._call_rotating("https://x", "OLLAMA_API_KEY", "m", [], None, ["k1", "k2"])
         assert out == ("from k2", None)
         assert calls == ["k1", "k2"]
         assert brain_mod._is_exhausted("key::OLLAMA_API_KEY#1") is True
@@ -280,7 +282,7 @@ class TestOllamaCloudRotation:
             return "from k2", None
 
         monkeypatch.setattr(b, "_http", fake_http)
-        out = b._call_ollama_cloud_rotating("https://x", "m", [], None, ["k1", "k2"])
+        out = b._call_rotating("https://x", "OLLAMA_API_KEY", "m", [], None, ["k1", "k2"])
         assert out == ("from k2", None)
         assert calls == ["k2"]
 
@@ -289,7 +291,7 @@ class TestOllamaCloudRotation:
         brain_mod._mark_exhausted("key::OLLAMA_API_KEY#1")
         brain_mod._mark_exhausted("key::OLLAMA_API_KEY#2")
         with pytest.raises(RuntimeError, match="cooling down"):
-            b._call_ollama_cloud_rotating("https://x", "m", [], None, ["k1", "k2"])
+            b._call_rotating("https://x", "OLLAMA_API_KEY", "m", [], None, ["k1", "k2"])
 
     def test_non_fallback_error_propagates_immediately_without_trying_next_key(self, monkeypatch) -> None:
         """A bug (e.g. TypeError) must not be swallowed and silently retried
@@ -303,5 +305,58 @@ class TestOllamaCloudRotation:
 
         monkeypatch.setattr(b, "_http", fake_http)
         with pytest.raises(RuntimeError, match="HTTP_400"):
-            b._call_ollama_cloud_rotating("https://x", "m", [], None, ["k1", "k2"])
+            b._call_rotating("https://x", "OLLAMA_API_KEY", "m", [], None, ["k1", "k2"])
         assert calls == ["k1"]  # never tried k2 — this wasn't a quota/auth failure
+
+    def test_cooldown_ids_are_namespaced_per_provider(self, monkeypatch) -> None:
+        """Generalisation guard (2026-08-11): rotation now covers every
+        provider, so a key exhausted on one must NOT put another provider's
+        key #1 on cooldown. Regression risk is real -- the cooldown id used
+        to be the hardcoded string "key::OLLAMA_API_KEY#N"."""
+        b = self._brain()
+
+        def fake_http(base_url, key, model, messages, timeout, tools=None):
+            raise RuntimeError("HTTP_429: rate limited")
+
+        monkeypatch.setattr(b, "_http", fake_http)
+        with pytest.raises(RuntimeError):
+            b._call_rotating("https://x", "GROQ_API_KEY", "m", [], None, ["g1"])
+
+        assert brain_mod._is_exhausted("key::GROQ_API_KEY#1") is True
+        # A different provider's first key must be untouched.
+        assert brain_mod._is_exhausted("key::OPENROUTER_API_KEY#1") is False
+        assert brain_mod._is_exhausted("key::OLLAMA_API_KEY#1") is False
+
+
+class TestNumberedKeys:
+    """_numbered_keys — reads <BASE> and <BASE>_2.._10 from the operator's own
+    .env. Opt-in by construction: absent extras give a one-item list."""
+
+    def _brain(self, keys: dict) -> Brain:
+        b = Brain.__new__(Brain)
+        b.keys = keys
+        return b
+
+    def test_single_unnumbered_key_returns_one_item(self) -> None:
+        b = self._brain({"GROQ_API_KEY": "g1"})
+        assert b._numbered_keys("GROQ_API_KEY") == ["g1"]
+
+    def test_numbered_keys_are_collected_in_order(self) -> None:
+        b = self._brain({"GROQ_API_KEY": "g1", "GROQ_API_KEY_2": "g2",
+                          "GROQ_API_KEY_3": "g3"})
+        assert b._numbered_keys("GROQ_API_KEY") == ["g1", "g2", "g3"]
+
+    def test_blank_and_missing_entries_are_skipped(self) -> None:
+        b = self._brain({"GROQ_API_KEY": "g1", "GROQ_API_KEY_2": "   ",
+                          "GROQ_API_KEY_4": "g4"})   # _3 absent entirely
+        assert b._numbered_keys("GROQ_API_KEY") == ["g1", "g4"]
+
+    def test_no_key_at_all_returns_empty(self) -> None:
+        b = self._brain({"OTHER": "x"})
+        assert b._numbered_keys("GROQ_API_KEY") == []
+
+    def test_does_not_bleed_across_providers(self) -> None:
+        b = self._brain({"GROQ_API_KEY": "g1", "OPENROUTER_API_KEY": "o1",
+                          "OPENROUTER_API_KEY_2": "o2"})
+        assert b._numbered_keys("GROQ_API_KEY") == ["g1"]
+        assert b._numbered_keys("OPENROUTER_API_KEY") == ["o1", "o2"]

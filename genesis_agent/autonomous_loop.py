@@ -267,6 +267,14 @@ def _run_autonomous_loop_impl(
     # GENESIS_QUALITY=coding.
     _quality_escalate_after = max(2, max_rounds // 3)
     _quality_failures = 0
+    # Живо хванат бъг (2026-08-11, реален 10/10-рунда провал на мини-DB
+    # мисия): native tool_calls клонът по-долу прави `continue` БЕЗУСЛОВНО —
+    # нищо не пречи на модела да вика USE_SKILL/RESEARCH рунд след рунд, без
+    # НИКОГА да стигне до писане на код, изгаряйки целия max_rounds бюджет
+    # на чисто търсене. Полезно (RAG-preамбюл), но само до определен праг —
+    # след него моделът трябва изрично да спре и да пише.
+    _tool_only_rounds = 0
+    _force_code_after = max(3, (max_rounds * 2) // 3)
 
     red_note = ""
     if dna.red_zone_elevation_granted():
@@ -381,6 +389,21 @@ def _run_autonomous_loop_impl(
             except Exception as _e:
                 messages.append({"role": "tool", "tool_call_id": "error",
                                   "name": "error", "content": f"[tool грешка: {_e}]"})
+
+            _tool_only_rounds += 1
+            if _tool_only_rounds >= _force_code_after:
+                report_thought(f"⏱️ {_tool_only_rounds} рунда само tool calls, без код — "
+                               "принуждавам писане сега.")
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "STOP calling tools. You have used most of the round budget "
+                        "searching/looking things up without writing any code. Whatever "
+                        "you have found so far is enough — write the final Python script "
+                        "NOW, in a single ```python``` fence, with the required self-test. "
+                        "Do not call USE_SKILL or any other tool in your next reply."
+                    ),
+                })
             continue
 
         # ─── TOOL USE ПО ВРЕМЕ НА МИСИЯ (стар text-tag режим, само read-only) ───

@@ -421,3 +421,39 @@ class TestWeakModelResearch:
         assert outcome.success is True
         assert outcome.rounds == 1
         assert saved["code"] == strong_code
+
+
+class TestNativeToolCallsDoNotStarveCodeWriting:
+    """Live-caught bug (2026-08-11): a real mission burned all 10/10 rounds on
+    native tool_calls (repeated USE_SKILL/RESEARCH) and NEVER wrote a single
+    line of code -- the native tool_calls branch used to `continue`
+    unconditionally with no pressure to eventually write code."""
+
+    def test_repeated_tool_calls_get_forced_into_writing_code(self, monkeypatch) -> None:
+        tc = [{"id": "1", "function": {"name": "RESEARCH", "arguments": '{"question": "x"}'}}]
+        code = "assert 1 + 1 == 2\nprint('OK')"
+        # max_rounds=6 -> _force_code_after = max(3, (6*2)//3) = 4.
+        _queue(
+            _Reply(raw_text="", tool_calls=tc),  # round 1: tool only
+            _Reply(raw_text="", tool_calls=tc),  # round 2: tool only
+            _Reply(raw_text="", tool_calls=tc),  # round 3: tool only
+            _Reply(raw_text="", tool_calls=tc),  # round 4: tool only -> nudge appended after this
+            _Reply(raw_text="```python\n" + code + "\n```", code=code),  # round 5: finally writes
+            _Reply(raw_text="YES"),  # critic
+        )
+        monkeypatch.setattr("genesis_skills.dispatch_tool_call", lambda name, args: "[RESEARCH] found nothing useful")
+        monkeypatch.setattr(al, "run_python_subprocess",
+                             lambda c: ExecResult(ok=True, stdout="OK\n", stderr="", returncode=0))
+        monkeypatch.setattr("genesis_agent.code_validate.validate_code_with_ruff", lambda c: (True, ""))
+        monkeypatch.setattr("genesis_agent.verifier.verify_skill",
+                             lambda c: VerifyResult(verified=True, method="self_test_passed"))
+        monkeypatch.setattr(al, "save_skill", lambda **kw: SKILLS_ROOT / "x.md")
+
+        outcome = al.run_autonomous_loop("a goal with no matching skill in the library", max_rounds=6)
+
+        assert outcome.success is True
+        # The 4th tool-only round must have appended a "stop calling tools,
+        # write code now" directive -- otherwise this reproduces the live bug.
+        nudges = [m for m in FakeBrain.calls[4]
+                  if m.get("role") == "user" and "STOP calling tools" in str(m.get("content", ""))]
+        assert nudges, "expected a forced-code directive after _force_code_after tool-only rounds"

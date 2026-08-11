@@ -9,13 +9,16 @@ for are skipped silently, so the agent works with one key or with six.
 Design notes worth knowing before you change anything here:
   • ONE key per provider BY DEFAULT. Rotating several free accounts to
     multiply a quota violates most providers' terms; breadth across providers
-    is the supported way to get headroom. The one documented exception is
-    `ollama_cloud`: if the OPERATOR (not this codebase) chooses to add
-    `OLLAMA_API_KEY_2`..`OLLAMA_API_KEY_5` to their own gitignored
-    `~/.genesis/.env`, Brain rotates across whichever of those they set —
-    opt-in, per-machine, never suggested or enabled by default. Whether that
-    is within Ollama's own terms is the operator's call to make, not this
-    code's; nothing here contacts Ollama to check.
+    is the supported way to get headroom. The documented exception is opt-in
+    numbered keys: if the OPERATOR (not this codebase) chooses to add
+    `<PROVIDER_KEY>_2`..`_10` to their own gitignored `~/.genesis/.env`, Brain
+    rotates across whichever of those they set — opt-in, per-machine, never
+    suggested or created by this project. Whether that is within a given
+    provider's terms is the operator's call to make, not this code's; nothing
+    here contacts a provider to check. Originally `ollama_cloud`-only,
+    generalised to every provider on 2026-08-11 at the operator's request.
+    Note that keys from the SAME account gain nothing — providers rate-limit
+    per account/organisation, not per key.
   • Models that support native OpenAI tool-calling are preferred when `tools=`
     is passed; the rest fall back to the text-tag protocol in `config.yaml`.
   • A provider that returns 429/402/503/401/403 is put on a cooldown rather
@@ -724,8 +727,34 @@ class Brain:
         Empty unless they added the extra numbered vars themselves — a bare
         OLLAMA_API_KEY still returns exactly the one-item list it always did,
         so nothing changes for anyone who never touches this."""
+        return self._numbered_keys("OLLAMA_API_KEY")
+
+    def _numbered_keys(self, base_env: str) -> list[str]:
+        """
+        Every `<BASE>` / `<BASE>_2` .. `<BASE>_10` the operator has actually
+        set in their OWN gitignored ~/.genesis/.env, in order.
+
+        Generalised from `_ollama_cloud_keys` (2026-08-11) at the operator's
+        request, so the same opt-in mechanism covers any provider they hold
+        several keys for — the numbered vars are read, never written, by this
+        code. The caveat in the module docstring applies unchanged and is
+        worth restating here, because this generalisation makes it easy to
+        reach for: rotating keys belonging to SEPARATE free-tier accounts to
+        multiply a quota is against most providers' terms of service. Whether
+        that line is being crossed depends on where the keys came from, which
+        only the operator knows; nothing here contacts a provider to check,
+        and no numbered key is ever suggested or created by this project.
+
+        Worth knowing before bothering: if several keys belong to the SAME
+        account, rotation buys nothing at all — providers rate-limit per
+        account/organisation, not per key (Groq documents this explicitly).
+        In that case this is pure overhead.
+
+        A single unnumbered key returns a one-item list, i.e. the normal
+        single-key path, unchanged for anyone who never sets the extras."""
+        names = [base_env] + [f"{base_env}_{i}" for i in range(2, 11)]
         out = []
-        for env_name in _OLLAMA_CLOUD_KEY_ENVS:
+        for env_name in names:
             v = self.keys.get(env_name)
             if v and str(v).strip():
                 out.append(str(v).strip())
@@ -925,14 +954,16 @@ class Brain:
             return self._http(base_url, None, model, messages, LOCAL_TIMEOUT, tools=tools,
                               extra=local_extra)
 
-        # Opt-in multi-key ollama_cloud (see module docstring + _ollama_cloud_keys):
-        # only takes this branch if the OPERATOR set more than one of
-        # OLLAMA_API_KEY[_2.._5] themselves. A single key falls straight
-        # through to the normal one-key path below, unchanged.
-        if provider == "ollama_cloud":
-            cloud_keys = self._ollama_cloud_keys()
-            if len(cloud_keys) > 1:
-                return self._call_ollama_cloud_rotating(base_url, model, messages, tools, cloud_keys)
+        # Opt-in multi-key rotation (see module docstring + _numbered_keys):
+        # only takes this branch if the OPERATOR set `<KEY>_2`.. themselves in
+        # their own gitignored .env. A single key falls straight through to
+        # the normal one-key path below, unchanged. Generalised beyond
+        # ollama_cloud on 2026-08-11 at the operator's request — same
+        # mechanism, same caveats, now any provider.
+        if provider not in _NATIVE_PROVIDERS:
+            rotating = self._numbered_keys(key_env)
+            if len(rotating) > 1:
+                return self._call_rotating(base_url, key_env, model, messages, tools, rotating)
 
         key = self._provider_key(key_env)
         if not key:
@@ -958,21 +989,26 @@ class Brain:
                 print(f"  [Brain] 🔑 {key_env} unavailable ({last[:60]}) → next provider")
             raise
 
-    def _call_ollama_cloud_rotating(self, base_url: str, model: str, messages: list[dict],
-                                     tools: list[dict] | None, keys: list[str]) -> tuple[str, list | None]:
+    def _call_rotating(self, base_url: str, key_env: str, model: str, messages: list[dict],
+                        tools: list[dict] | None, keys: list[str]) -> tuple[str, list | None]:
         """
-        Opt-in ollama_cloud path — only reached when `keys` has more than one
-        entry, i.e. the operator added OLLAMA_API_KEY_2.. themselves. Tries
-        each key in the order they set them, skipping ones already on
-        cooldown, and marks only the SPECIFIC key that fails (not the whole
-        provider) so a healthy key #3 still gets used after #1 and #2 hit
-        their weekly cap. Whether running several free accounts this way fits
-        Ollama's own terms is the operator's call — see the module docstring.
+        Opt-in multi-key path — only reached when `keys` has more than one
+        entry, i.e. the operator set `<KEY>_2`.. themselves in their own
+        gitignored .env. Tries each key in the order they set them, skipping
+        ones already on cooldown, and marks only the SPECIFIC key that fails
+        (not the whole provider) so a healthy key #3 still gets used after #1
+        and #2 hit their cap.
+
+        Was `_call_ollama_cloud_rotating`; generalised to any provider on
+        2026-08-11 at the operator's request. The terms-of-service caveat in
+        the module docstring and `_numbered_keys` applies to every provider
+        this now covers, not just Ollama — it is the operator's call, and
+        this code neither checks nor encourages it.
         """
         last_err: Exception | None = None
         tried_any = False
         for idx, key in enumerate(keys, start=1):
-            kid = f"key::OLLAMA_API_KEY#{idx}"
+            kid = f"key::{key_env}#{idx}"
             if _is_exhausted(kid):
                 continue
             tried_any = True
@@ -983,12 +1019,12 @@ class Brain:
                 last_err = e
                 if any(f"HTTP_{c}" in last for c in _EXHAUST_CODES | {401, 403}):
                     _mark_exhausted(kid)
-                    print(f"  [Brain] 🔑 OLLAMA_API_KEY#{idx} unavailable ({last[:60]}) → next key")
+                    print(f"  [Brain] 🔑 {key_env}#{idx} unavailable ({last[:60]}) → next key")
                     continue
                 raise
         if not tried_any:
-            raise RuntimeError("HTTP_429: all configured OLLAMA_API_KEY* are cooling down")
-        raise last_err or RuntimeError("HTTP_502: ollama_cloud key rotation exhausted")
+            raise RuntimeError(f"HTTP_429: all configured {key_env}* are cooling down")
+        raise last_err or RuntimeError(f"HTTP_502: {key_env} key rotation exhausted")
 
     def _call_local(self, messages: list[dict], attempts: int = 1) -> tuple[str, str] | None:
         """Пробва локалния мозък (текущия tier — 3b/7b/14b, каквото е в self.local).

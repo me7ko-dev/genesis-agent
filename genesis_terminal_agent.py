@@ -311,11 +311,27 @@ _SUPPORTS_TOOLS = {
     for fb in config.get("models", {}).get("fallback_models", [])
 }
 
-# FREE model detection
-# cerebras/sambanova добавени 2026-08-11: и двата имат истински безплатен tier
-# БЕЗ карта (Cerebras 1M токена/ден, SambaNova безплатен tier). Together AI
-# нарочно НЕ е тук — иска карта дори за стартовия кредит, значи PAID.
-FREE_PROVIDERS = {"groq", "ollama", "cerebras", "sambanova"}  # local Ollama is free; Ollama Cloud has usage limits/subscription gates
+# FREE model detection (ревизирано 2026-08-11 — на живо в терминала се видя,
+# че /model показваше и NVIDIA, и по-широко доставчици с реален безплатен
+# достъп като PAID). Критерият тук е: достъпен БЕЗ карта, дори да е с лимити
+# по заявки/токени (rate-limited ≠ PAID) — не дали има ГОРНА граница.
+#   groq        — безплатен tier, без карта
+#   ollama      — локален, нулева цена по дефиниция
+#   ollama_cloud — ~5M токена/седмица безплатно, без карта (работещо цяла
+#                  вечер с 5 отделни ключа) — БЕШЕ подвеждащо PAID досега
+#   cerebras    — безплатен tier обявен без карта (на ТОЗИ акаунт всеки
+#                 модел реално връща HTTP 402 — виж config.yaml коментара;
+#                 маркиран free по устройство на доставчика, не по акаунт)
+#   sambanova   — безплатен tier, без карта
+#   nvidia      — NVIDIA NIM безплатен за Developer Program, без карта
+#   github      — GitHub Models, безплатен с лимити за всеки GitHub акаунт
+#   gemini      — Google AI Studio има истински безплатен tier, без карта
+#   llmstudio   — локален софтуер, нулева цена по дефиниция (като ollama)
+# НЕ в списъка (истински платени/card-gated): openai, together, huggingface
+# (месечен $ кредит, не чисто rate-limited — вижда се като изчерпан в
+# config.yaml коментарите), cohere (частично платен — вижда се по pattern).
+FREE_PROVIDERS = {"groq", "ollama", "ollama_cloud", "cerebras", "sambanova",
+                   "nvidia", "github", "gemini", "llmstudio"}
 FREE_MODEL_PATTERNS = [":free", "command-r", "command-a"]  # cohere free tier
 
 def is_free_model(provider_key: str, model_id: str) -> bool:
