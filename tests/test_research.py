@@ -113,3 +113,59 @@ def test_per_source_extraction_prompt_includes_question_title_and_url(monkeypatc
     assert "PEP 8" in prompt
     assert "https://peps.python.org/pep-0008" in prompt
     assert "use 4 spaces" in prompt
+
+
+class TestUnreachableModelIsNotDressedUpAsVerified:
+    """Brain.complete() does not raise when the provider chain is exhausted —
+    it returns an object whose raw_text starts with "Error:". Unchecked, that
+    string flowed straight into the report and came out labelled "(проверено
+    през N източника)": a cross-check claim with nothing behind it, and the
+    weak-model path in autonomous_loop injects exactly this text into the
+    prompt as researched context (fixed 2026-08-12). The whole module exists
+    for the difference between verified and merely verified-looking.
+    """
+
+    _SOURCES = [
+        {"title": "A", "url": "https://a.example", "snippet": "text a"},
+        {"title": "B", "url": "https://b.example", "snippet": "text b"},
+    ]
+
+    def test_all_extractions_failing_is_reported_as_no_content(self, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.web_search.search", lambda *a, **kw: self._SOURCES)
+        _install_fake_brain(monkeypatch, ["Error: цялата верига е изчерпана"] * 2)
+        out = rs.grounded_research("what is the GIL")
+        assert "проверено през" not in out
+        assert "Error:" not in out
+
+    def test_failed_compare_pass_does_not_claim_cross_check(self, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.web_search.search", lambda *a, **kw: self._SOURCES)
+        _install_fake_brain(monkeypatch, [
+            "GIL is a mutex",           # source A extraction — fine
+            "GIL serializes bytecode",  # source B extraction — fine
+            "Error: цялата верига е изчерпана",  # the compare pass fails
+        ])
+        out = rs.grounded_research("what is the GIL")
+
+        assert "проверено през" not in out
+        assert "НЕ бе извършено" in out
+        # The per-source answers that DID succeed are still handed over.
+        assert "GIL is a mutex" in out
+        assert "GIL serializes bytecode" in out
+
+    def test_a_single_failed_source_is_dropped_not_counted(self, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.web_search.search", lambda *a, **kw: self._SOURCES)
+        _install_fake_brain(monkeypatch, [
+            "Error: цялата верига е изчерпана",  # source A fails
+            "GIL serializes bytecode",           # source B succeeds
+        ])
+        out = rs.grounded_research("what is the GIL")
+        # One usable source left -> the no-cross-check branch, not a claim of two.
+        assert "само 1 източник" in out
+        assert "Error:" not in out
+
+    def test_healthy_run_still_claims_verification(self, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.web_search.search", lambda *a, **kw: self._SOURCES)
+        _install_fake_brain(monkeypatch, ["answer a", "answer b", "consensus: it is a mutex"])
+        out = rs.grounded_research("what is the GIL")
+        assert "проверено през 2 източника" in out
+        assert "consensus: it is a mutex" in out

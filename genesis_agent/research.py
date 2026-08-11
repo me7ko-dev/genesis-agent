@@ -63,6 +63,13 @@ def grounded_research(question: str, *, top_n: int = 3) -> str:
             )},
         ])
         answer = (reply.raw_text or "").strip()
+        # Brain.complete() не хвърля при изчерпана верига — връща обект с
+        # raw_text = "Error: ..." (виж brain._error_result). Без тази проверка
+        # текстът на грешката влизаше като „отговор от източника" и после
+        # излизаше долу с етикет „(проверено през N източника)" — твърдение за
+        # cross-check, зад което няма нищо (bug fix, 2026-08-12).
+        if not answer or answer.startswith("Error:"):
+            continue
         per_source.append(f"[{url}] {answer}")
 
     if not per_source:
@@ -78,6 +85,16 @@ def grounded_research(question: str, *, top_n: int = 3) -> str:
         )},
     ])
     verdict = (compare_reply.raw_text or "").strip()
+    if not verdict or verdict.startswith("Error:"):
+        # Извличането по източници е минало, но сверяването — не. Връщаме
+        # суровите отговори с ясно казано какво липсва, вместо да лепим
+        # „(проверено през N източника)" върху текста на грешката. Целият
+        # модул съществува заради разликата между „проверено" и „изглежда
+        # проверено" (виж модулния docstring).
+        return (f"[RESEARCH] {question}\n\n"
+                "⚠️ Сверяването между източниците НЕ бе извършено (моделът е "
+                "недостъпен) — по-долу са суровите отговори по източник, "
+                "БЕЗ cross-check:\n" + "\n".join(per_source))
     return f"[RESEARCH] {question}\n\n{verdict}\n\n(проверено през {len(per_source)} източника)"
 
 

@@ -434,3 +434,79 @@ class TestNumberedKeys:
                           "OPENROUTER_API_KEY_2": "o2"})
         assert b._numbered_keys("GROQ_API_KEY") == ["g1"]
         assert b._numbered_keys("OPENROUTER_API_KEY") == ["o1", "o2"]
+
+
+class TestCompactChatHistory:
+    """Brain.complete() never raises — on an exhausted chain it RETURNS an
+    object whose raw_text starts with "Error:". compact_chat_history checked
+    only for an empty summary, and an error string is not empty, so the
+    fallback right below it was unreachable and the error text was injected as
+    the summary: the entire earlier conversation replaced by
+    "## Резюме на по-ранния разговор:\nError: цялата верига е изчерпана..."
+    (fixed 2026-08-12). It bit exactly when providers were already failing.
+    """
+
+    @staticmethod
+    def _history(n: int = 20) -> list[dict]:
+        msgs = [{"role": "system", "content": "SYSTEM"}]
+        msgs += [{"role": "user" if i % 2 == 0 else "assistant", "content": f"turn {i}"}
+                 for i in range(n)]
+        return msgs
+
+    @staticmethod
+    def _fake_brain(monkeypatch, raw_text: str) -> None:
+        class _Fake:
+            def __init__(self, *a, **kw) -> None:
+                pass
+
+            def complete(self, messages, **kw):
+                return type("Obj", (object,), {"raw_text": raw_text, "code": "",
+                                                "usage": None, "tool_calls": None})
+        monkeypatch.setattr(brain_mod, "Brain", _Fake)
+
+    def test_exhausted_chain_keeps_recent_turns_instead_of_an_error_summary(
+        self, monkeypatch
+    ) -> None:
+        self._fake_brain(monkeypatch, "Error: цялата верига е изчерпана | последна: HTTP_429")
+        out = list(Brain.compact_chat_history(self._history(), threshold=16, keep_recent=5))
+
+        assert not any("Error:" in str(m.get("content", "")) for m in out)
+        assert out[0]["content"] == "SYSTEM"
+        # Falls back to "keep the recent turns raw", which is the honest loss.
+        assert [m["content"] for m in out[1:]] == [f"turn {i}" for i in range(15, 20)]
+
+    def test_local_mode_error_is_also_refused(self, monkeypatch) -> None:
+        self._fake_brain(monkeypatch, "Error: локален режим — няма наличен локален модел")
+        out = list(Brain.compact_chat_history(self._history(), threshold=16, keep_recent=5))
+        assert not any("Error:" in str(m.get("content", "")) for m in out)
+
+    def test_empty_summary_still_falls_back(self, monkeypatch) -> None:
+        self._fake_brain(monkeypatch, "   ")
+        out = list(Brain.compact_chat_history(self._history(), threshold=16, keep_recent=5))
+        assert len(out) == 6  # system + 5 recent, no summary message
+        assert out[0]["content"] == "SYSTEM"
+
+    def test_a_real_summary_is_used(self, monkeypatch) -> None:
+        self._fake_brain(monkeypatch, "Потребителят иска X, решено е Y.")
+        out = list(Brain.compact_chat_history(self._history(), threshold=16, keep_recent=5))
+        assert out[0]["content"] == "SYSTEM"
+        assert out[1]["role"] == "system"
+        assert "Потребителят иска X" in out[1]["content"]
+        assert [m["content"] for m in out[2:]] == [f"turn {i}" for i in range(15, 20)]
+
+    def test_below_threshold_is_untouched(self, monkeypatch) -> None:
+        self._fake_brain(monkeypatch, "should not be called")
+        msgs = self._history(4)
+        assert Brain.compact_chat_history(msgs, threshold=16, keep_recent=5) is msgs
+
+    def test_history_without_a_system_message_is_untouched(self, monkeypatch) -> None:
+        self._fake_brain(monkeypatch, "irrelevant")
+        msgs = [{"role": "user", "content": f"turn {i}"} for i in range(20)]
+        assert Brain.compact_chat_history(msgs, threshold=16, keep_recent=5) is msgs
+
+    def test_a_deque_input_keeps_its_maxlen(self, monkeypatch) -> None:
+        from collections import deque
+        self._fake_brain(monkeypatch, "Error: chain exhausted")
+        msgs = deque(self._history(), maxlen=30)
+        out = Brain.compact_chat_history(msgs, threshold=16, keep_recent=5)
+        assert out.maxlen == 30
