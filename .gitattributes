@@ -1,0 +1,45 @@
+# Line endings.
+#
+# Genesis is developed across Windows, WSL and Linux at once (the terminal
+# frontend runs on all three; the GTK/Jarvis frontends are Linux-only), so the
+# same checkout regularly gets touched by tools with different conventions.
+# Without this file that is left to each machine's `core.autocrlf`, which is a
+# per-clone setting nobody shares — one contributor's commit then rewrites
+# every line of a file that nobody actually edited.
+#
+# `text=auto` puts the decision in the repository instead: content is stored
+# with LF, and checked out with whatever the platform expects. Existing files
+# are already LF-normalized, so this changes what git DOES, not what the files
+# look like on disk.
+* text=auto
+
+# Explicit, so a new extension does not depend on git's heuristic.
+*.py     text diff=python
+*.md     text
+*.txt    text
+*.json   text
+*.toml   text
+*.yaml   text
+*.yml    text
+
+# Always LF regardless of platform: these are executed by an interpreter that
+# reads the shebang, and a CRLF line ending there produces the notoriously
+# unhelpful "bad interpreter: No such file or directory".
+*.sh     text eol=lf
+
+# Never transform — byte-for-byte or not at all. SQLite databases and archives
+# are gitignored today, but listing them keeps an accidental `git add -f` from
+# silently corrupting one.
+*.db     binary
+*.sqlite binary
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.pdf    binary
+*.gz     binary
+*.zip    binary
+*.tar    binary
+*.pem    binary
+*.key    binary
