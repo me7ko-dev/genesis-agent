@@ -64,3 +64,61 @@ def test_normal_stop_is_returned_unchanged(monkeypatch) -> None:
     monkeypatch.setattr(gta.requests, "post", lambda *a, **kw: resp)
     content, _ = gta.call_openai_compatible([{"role": "user", "content": "hi"}], "openai", "gpt-4")
     assert content == "just a plain answer"
+
+
+class TestRestoreSession:
+    """`/history` used to do a bare `messages = json.load(f)` (fixed 2026-08-12).
+
+    Two distinct breakages: the live `messages` structure is a
+    deque(maxlen=_HISTORY_MAXLEN) everywhere else, so loading a session
+    silently replaced it with an unbounded plain list; and since a bounded
+    deque evicts from the FRONT, a long restored session would drop exactly
+    the system message — taking env_facts and the workspace briefing with it,
+    and also quietly disabling compact_chat_history, which bails out unless
+    messages[0] is the system role.
+    """
+
+    def test_returns_a_bounded_deque_not_a_list(self) -> None:
+        restored = gta._restore_session(
+            [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}],
+            "fallback",
+        )
+        assert restored.maxlen == gta._HISTORY_MAXLEN
+        assert not isinstance(restored, list)
+
+    def test_system_message_survives_an_oversized_session(self) -> None:
+        loaded = [{"role": "system", "content": "THE SYSTEM PROMPT"}]
+        loaded += [{"role": "user", "content": f"msg{i}"} for i in range(100)]
+        restored = gta._restore_session(loaded, "fallback")
+
+        assert len(restored) == gta._HISTORY_MAXLEN
+        assert restored[0]["role"] == "system"
+        assert restored[0]["content"] == "THE SYSTEM PROMPT"
+        # and it kept the most RECENT turns, not the oldest
+        assert restored[-1]["content"] == "msg99"
+
+    def test_session_without_a_system_message_gets_the_current_prompt(self) -> None:
+        restored = gta._restore_session([{"role": "user", "content": "hi"}], "CURRENT PROMPT")
+        assert restored[0]["role"] == "system"
+        assert restored[0]["content"] == "CURRENT PROMPT"
+
+    def test_short_session_is_restored_intact(self) -> None:
+        loaded = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ]
+        assert list(gta._restore_session(loaded, "fallback")) == loaded
+
+    def test_duplicate_system_messages_collapse_to_the_first(self) -> None:
+        """compact_chat_history injects a second system message (the summary),
+        so a restored file can legitimately contain more than one — only the
+        original belongs at the head."""
+        loaded = [
+            {"role": "system", "content": "original"},
+            {"role": "system", "content": "## Резюме на по-ранния разговор:\n..."},
+            {"role": "user", "content": "hi"},
+        ]
+        restored = gta._restore_session(loaded, "fallback")
+        assert restored[0]["content"] == "original"
+        assert sum(1 for m in restored if m.get("role") == "system") == 1

@@ -164,13 +164,30 @@ def run_ensemble(
     *,
     providers: list[str] | None = None,
     skill_slug: str | None = None,
+    operator_id: str | None = None,
 ) -> EnsembleResult:
     """
     Генерира решения за ЕДНА цел паралелно през няколко доставчика, пази само
     най-добрия verified резултат. Победител: critic-одобрените първо, после
     най-кратък код (proxy за чистота) сред тях.
+
+    GENE-ETHICS/GENE-AUTHORITY: целта минава през DNA гейта ПРЕДИ първото LLM
+    извикване, както в autonomous_loop/orchestrator/project_builder.
     """
     providers = providers or PROVIDERS_CYCLE
+    # DNA гейт ПРЕДИ каквото и да е (security fix, 2026-08-12). Досега ensemble
+    # беше единственият entry point без него: целта се пращаше на 3 доставчика
+    # паралелно И полученият код се ИЗПЪЛНЯВАШЕ, а етичната проверка се
+    # задействаше чак в save_skill (през validate_skill_payload) — тоест след
+    # всичко, което гейтът съществува да предотврати. По-същественото:
+    # validate_skill_payload проверява само етика и Red Zone, НЕ операторска
+    # власт, така че GENESIS_STRICT_AUTHORITY=1 изобщо не покриваше този път —
+    # единственият вход, който строгият режим оставяше отворен.
+    try:
+        dna.validate_goal_ethics(goal)
+        dna.assert_operator_if_strict(operator_id)
+    except dna.GenesisDNAError:
+        return EnsembleResult(goal=goal, success=False, candidates=[])
     brain0 = Brain()
     rag_context = brain0.build_context(goal)
     system_content = brain0.system_prompt_base()

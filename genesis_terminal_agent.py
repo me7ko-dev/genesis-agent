@@ -646,6 +646,30 @@ def ask_genesis(messages, tools=None):
 # (резюмето носи информация от целия разговор, не само последните N реда).
 _COMPACT_THRESHOLD = 16  # съобщения (без system) преди компресия
 _COMPACT_KEEP_RECENT = 10  # колко последни съобщения остават сурови
+# Твърдият таван на живата история. Компресията по-горе е ПРЕВАНТИВНА и обикновено
+# се задейства далеч преди този таван — той е последната преграда.
+_HISTORY_MAXLEN = 30
+
+
+def _restore_session(loaded: list, system_prompt: str) -> "deque":
+    """Превръща заредена от диска сесия обратно в живата `messages` структура.
+
+    Изнесено от тялото на `/history`, за да е тестваемо (главният цикъл е един
+    голям интерактивен `while True` с `console.input`). Две неща, които
+    наивното `messages = json.load(f)` чупеше (bug fix, 2026-08-12):
+
+      • резултатът беше обикновен СПИСЪК, докато `messages` навсякъде другаде
+        е `deque(maxlen=_HISTORY_MAXLEN)` — таванът изчезваше за остатъка от
+        сесията и историята растеше без ограничение;
+      • системното съобщение е ПЪРВО, а deque с maxlen реже точно отпред —
+        сесия с 30+ реда изхвърляше него (а с него env_facts и брифинга), т.е.
+        агентът тихо оставаше без инструкции; `compact_chat_history` пък
+        изисква `messages[0]["role"] == "system"` и иначе спира да компресира.
+    """
+    system_msgs = [m for m in loaded if m.get("role") == "system"]
+    rest = [m for m in loaded if m.get("role") != "system"]
+    head = system_msgs[0] if system_msgs else {"role": "system", "content": system_prompt}
+    return deque([head] + rest[-(_HISTORY_MAXLEN - 1):], maxlen=_HISTORY_MAXLEN)
 
 
 def _compact_messages(messages: "deque") -> "deque":
@@ -764,7 +788,7 @@ DIVIDER      = "[dim cyan]    ════════════════�
 
 def print_minimal_banner():
     """Epic GENESIS startup banner with system status."""
-    os.system("clear")
+    os.system("cls" if os.name == "nt" else "clear")
     console.print()
     console.print(GENESIS_ART)
     console.print(VERSION_LINE, justify="center")
@@ -892,7 +916,13 @@ def show_agent_menu():
         if pull_choice and pull_choice not in ["не", "no", "n", ""]:
             model_to_pull = "llama3.2" if pull_choice in ["да", "yes", "y"] else pull_choice
             console.print(f"[cyan]⬇  Изтеглям {model_to_pull}...[/]")
-            subprocess.Popen(["bash", "-c", f"ollama pull {model_to_pull}"])
+            # argv list, НЕ `bash -c f"...{model_to_pull}"` (bug fix, 2026-08-12):
+            # старият код подаваше суров потребителски вход директно в shell низ
+            # (инжекция — `pull_choice` идва необработен от console.input()) И
+            # твърдо закачаше "bash", което не съществува на native Windows. И
+            # двете отпадат наведнъж — argv списък изобщо не минава през shell,
+            # а `ollama` е на PATH на двете платформи (както навсякъде другаде).
+            subprocess.Popen(["ollama", "pull", model_to_pull])
             console.print(f"[green]✓ Изтеглянето на {model_to_pull} стартира в фонов режим. Изчакай малко и пробвай отново.[/]")
         return
 
@@ -970,7 +1000,7 @@ def main():
                             title="[bold cyan]📋 Оттук продължаваме[/]",
                             border_style="cyan", padding=(1, 2)))
 
-    messages = deque([{"role": "system", "content": SYSTEM_PROMPT}], maxlen=30)
+    messages = deque([{"role": "system", "content": SYSTEM_PROMPT}], maxlen=_HISTORY_MAXLEN)
 
     while True:
         try:
@@ -989,7 +1019,7 @@ def main():
                 continue
 
             if user_input.lower() == "/clear":
-                messages = deque([{"role": "system", "content": SYSTEM_PROMPT}], maxlen=30)
+                messages = deque([{"role": "system", "content": SYSTEM_PROMPT}], maxlen=_HISTORY_MAXLEN)
                 total_input_tokens = 0
                 total_output_tokens = 0
                 print_minimal_banner()
@@ -1213,24 +1243,32 @@ def main():
                 if not history_files:
                     console.print("[yellow]Няма намерена история.[/]")
                     continue
-                
+
+                # Само показаните са избираеми (bug fix, 2026-08-12): таблицата
+                # реже на 10, а валидацията долу приемаше номер до дължината на
+                # ЦЕЛИЯ списък — с 25 запазени сесии "15" зареждаше файл, който
+                # операторът никога не е виждал на екрана.
+                shown = history_files[:10]
                 table = Table(title="[bold cyan]История на сесиите[/]", box=box.ROUNDED, border_style="cyan")
                 table.add_column("#", style="bold white")
                 table.add_column("Файл")
                 table.add_column("Дата")
-                for i, hf in enumerate(history_files[:10], 1):
+                for i, hf in enumerate(shown, 1):
                     dt = datetime.fromtimestamp(os.path.getmtime(hf)).strftime("%Y-%m-%d %H:%M:%S")
                     table.add_row(str(i), Path(hf).name, dt)
                 table.add_row("0", "Назад", "")
                 console.print(table)
-                
+
                 try:
                     hsel = int(console.input("\n[bold cyan]Избери сесия за зареждане > [/]").strip())
-                    if hsel > 0 and hsel <= len(history_files):
-                        with open(history_files[hsel-1], "r", encoding="utf-8") as f:
-                            messages = json.load(f)
+                    if 0 < hsel <= len(shown):
+                        with open(shown[hsel - 1], "r", encoding="utf-8") as f:
+                            loaded = json.load(f)
+                        messages = _restore_session(loaded, SYSTEM_PROMPT)
                         console.print(f"[green]✓ Сесията е заредена! ({len(messages)} съобщения)[/]")
-                except (ValueError, FileNotFoundError):
+                    elif hsel != 0:
+                        console.print("[red]Невалиден избор.[/]")
+                except (ValueError, OSError, json.JSONDecodeError):
                     console.print("[red]Невалиден избор.[/]")
                 continue
 

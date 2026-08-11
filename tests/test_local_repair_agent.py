@@ -1,10 +1,13 @@
 """genesis_agent.local_repair_agent — the emergency fallback that patches
 code when the main Brain is unreachable, previously untested. PatternFixer
 is pure regex logic (thorough coverage below); TinyLLM's network calls are
-mocked; LocalRepairAgent.repair()'s _test_code actually runs the candidate
-code in a real subprocess (no sandbox, by design — see the module docstring),
-which is fine for the small test-authored snippets used here."""
+mocked; LocalRepairAgent._test_code executes the candidate code through
+genesis_agent.sandbox in deny mode (it used to shell out to a bare
+`subprocess.run([sys.executable, "-c", code])` — a real sandbox bypass on a
+production path, fixed 2026-08-12, see TestTestCodeGoesThroughSandbox)."""
 from __future__ import annotations
+
+import pytest
 
 from genesis_agent.local_repair_agent import LocalRepairAgent, PatternFixer, TinyLLM
 
@@ -261,6 +264,58 @@ class TestTestCode:
         result = LocalRepairAgent._test_code("raise RuntimeError('boom')")
         assert result["ok"] is False
         assert "boom" in result["error"]
+
+
+class TestTestCodeGoesThroughSandbox:
+    """SECURITY regression (fixed 2026-08-12).
+
+    _test_code used to run LLM-generated repair code via a bare
+    `subprocess.run([sys.executable, "-c", code])`. sandbox.py documents
+    itself as the single choke point for exactly this, and going around it
+    skipped all four of its guarantees at once: the minimal-env whitelist
+    (so the code under repair could read the parent process's entire
+    os.environ, API keys included), CPU/memory/file resource limits, the
+    process-group kill on timeout, and the SAFE/CONFIRM/BLOCKED risk gate.
+    It is reachable in production — autonomous_loop calls emergency_repair
+    whenever a mission exhausts its rounds — and PatternFixer.fix_missing_import
+    deliberately injects a `pip install <name parsed from traceback text>`
+    line into the very code that then got executed unsandboxed.
+    """
+
+    def test_dangerous_code_is_refused_not_executed(self) -> None:
+        result = LocalRepairAgent._test_code("import os\nos.system('rm -rf /')")
+        assert result["ok"] is False
+
+    def test_it_actually_calls_the_sandbox(self, monkeypatch) -> None:
+        """Pin down the routing itself: a future refactor must not quietly
+        go back to raw subprocess just because the assertions above would
+        still pass by coincidence."""
+        called = {}
+
+        def fake_run_python(code, **kw):
+            called["code"] = code
+            called["policy_mode"] = getattr(kw.get("policy"), "mode", None)
+            return type("R", (), {"blocked": False, "ok": True, "stdout": "", "stderr": ""})()
+
+        from genesis_agent import sandbox
+        monkeypatch.setattr(sandbox, "run_python", fake_run_python)
+
+        result = LocalRepairAgent._test_code("print('hi')")
+        assert result["ok"] is True
+        assert called["code"] == "print('hi')"
+        assert called["policy_mode"] == "deny"
+
+    def test_sandbox_block_is_reported_as_a_failure_not_a_pass(self, monkeypatch) -> None:
+        def fake_run_python(code, **kw):
+            return type("R", (), {"blocked": True, "ok": False,
+                                   "stdout": "", "stderr": "[SANDBOX BLOCKED] nope"})()
+
+        from genesis_agent import sandbox
+        monkeypatch.setattr(sandbox, "run_python", fake_run_python)
+
+        result = LocalRepairAgent._test_code("whatever")
+        assert result["ok"] is False
+        assert "sandbox" in result["error"].lower()
 
 
 class TestEmergencyRepair:

@@ -23,8 +23,6 @@ GENESIS 0 — LOCAL REPAIR AGENT (Авариен режим)
 from __future__ import annotations
 
 import re
-import subprocess
-import sys
 from dataclasses import dataclass
 
 import requests
@@ -360,7 +358,27 @@ class LocalRepairAgent:
 
     @staticmethod
     def _test_code(code: str) -> dict:
-        """Тества кода в subprocess — без sandbox, само синтаксис и runtime."""
+        """Тества кода през genesis_agent.sandbox.
+
+        Досега тук стоеше гол `subprocess.run([sys.executable, "-c", code])`
+        с коментар "без sandbox" (SECURITY fix, 2026-08-12). Това е ЛLM-
+        генериран код, изпълняван в production път (autonomous_loop вика
+        emergency_repair, когато мисия се провали), а sandbox.py твърди за
+        себе си, че е "единственият choke point" за точно това. Заобикаляха се
+        едновременно:
+          • минималната env среда — поправеният код виждаше ЦЕЛИЯ os.environ
+            на процеса-родител, тоест всички API ключове;
+          • CPU/памет/файлови resource limits;
+          • убиването на цялата process group при timeout;
+          • SAFE/CONFIRM/BLOCKED гейтът — а `fix_missing_import` по-горе
+            НАРОЧНО инжектира `pip install <име от traceback текста>` в кода,
+            който после се изпълняваше несандбоксирано.
+        mode="deny" е същата политика, която verifier.verify_skill вече
+        ползва за LLM код — а autonomous_loop и без това пуска резултата от
+        ремонта през verify_skill, така че всичко, което минаваше тук, но
+        падаше там, вече беше отхвърляно; промяната само мести отказа по-рано
+        и затваря дупката в изпълнението.
+        """
         try:
             # Бърза синтаксис проверка
             import ast
@@ -369,17 +387,17 @@ class LocalRepairAgent:
             return {"ok": False, "error": f"SyntaxError: {e}"}
 
         try:
-            proc = subprocess.run(
-                [sys.executable, "-c", code],
-                capture_output=True, text=True, timeout=15, check=False,
+            from genesis_agent import sandbox
+            res = sandbox.run_python(
+                code, policy=sandbox.SandboxPolicy(mode="deny"), timeout=15
             )
-            if proc.returncode == 0:
-                return {"ok": True, "error": ""}
-            return {"ok": False, "error": proc.stderr[:500]}
-        except subprocess.TimeoutExpired:
-            return {"ok": False, "error": "Timeout при тест"}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+        if res.blocked:
+            return {"ok": False, "error": f"sandbox отказа кода: {res.stderr[:400]}"}
+        if res.ok:
+            return {"ok": True, "error": ""}
+        return {"ok": False, "error": (res.stderr or res.stdout)[:500]}
 
     def status(self) -> str:
         """Показва статуса на repair агента."""
