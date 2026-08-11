@@ -37,6 +37,34 @@ def _write_private(path: Path, text: str) -> None:
         fh.write(text)
     path.chmod(0o600)  # an existing file keeps its old mode through O_CREAT
 
+
+# How many dated .env backups to keep. Every run of `genesis setup` writes one,
+# and each is a full copy of every API key in the file. They were never pruned,
+# so a user who ran setup a dozen times had a dozen complete copies of their
+# secrets sitting in ~/.genesis forever. The backups are worth having — the
+# point of writing one is that a mistake stays recoverable — but "recoverable"
+# needs the last few, not all of them.
+_KEEP_BACKUPS = 5
+
+
+def _prune_backups(directory: Path, keep: int = _KEEP_BACKUPS) -> None:
+    """Изтрива най-старите `.env.backup-*`, оставя последните `keep`.
+
+    Имената носят дата (`.env.backup-YYYYMMDD-HHMMSS`), затова азбучното
+    подреждане Е хронологично — не разчитаме на mtime, който копирането между
+    машини не запазва. Никога не хвърля: неуспешно почистване не бива да
+    проваля настройка, която иначе е минала.
+    """
+    try:
+        backups = sorted(directory.glob(".env.backup-*"))
+    except OSError:
+        return
+    for old in backups[:-keep] if keep > 0 else backups:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
 # (env var, display name, where to get it, base_url, a model to smoke-test with)
 #
 # The probe model is only ever used to make ONE request during setup — it is
@@ -338,6 +366,7 @@ def run() -> int:
         # A dated copy before every write, so a mistake here is recoverable.
         backup = ENV_FILE.with_name(f".env.backup-{datetime.datetime.now():%Y%m%d-%H%M%S}")
         _write_private(backup, ENV_FILE.read_text(encoding="utf-8"))
+        _prune_backups(ENV_FILE.parent)
         print(f"  предишният файл е запазен като {backup.name}")
 
     lines = ["# Genesis Agent — written by `genesis setup`.",

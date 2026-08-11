@@ -164,6 +164,57 @@ class TestWritePrivate:
         assert p.read_text(encoding="utf-8") == "NEW=short\n"
 
 
+class TestPruneBackups:
+    """Every `genesis setup` run writes a dated backup, and every backup is a
+    full copy of every API key in the file. Nothing pruned them, so a dozen
+    setup runs left a dozen complete copies of the user's secrets sitting in
+    ~/.genesis indefinitely (2026-08-12). Keeping the recent few preserves the
+    reason backups exist — a mistake stays recoverable — without the sprawl.
+    """
+
+    def _make(self, tmp_path, *stamps) -> None:
+        for s in stamps:
+            (tmp_path / f".env.backup-{s}").write_text("KEY=secret\n", encoding="utf-8")
+
+    def test_keeps_only_the_newest_n(self, tmp_path) -> None:
+        self._make(tmp_path, *[f"2026081{i}-120000" for i in range(9)])
+        sw._prune_backups(tmp_path, keep=3)
+        left = sorted(p.name for p in tmp_path.glob(".env.backup-*"))
+        assert left == [".env.backup-20260816-120000",
+                        ".env.backup-20260817-120000",
+                        ".env.backup-20260818-120000"]
+
+    def test_under_the_limit_nothing_is_removed(self, tmp_path) -> None:
+        self._make(tmp_path, "20260810-120000", "20260811-120000")
+        sw._prune_backups(tmp_path, keep=5)
+        assert len(list(tmp_path.glob(".env.backup-*"))) == 2
+
+    def test_the_live_env_file_is_never_touched(self, tmp_path) -> None:
+        (tmp_path / ".env").write_text("LIVE=keys\n", encoding="utf-8")
+        self._make(tmp_path, *[f"2026081{i}-120000" for i in range(9)])
+        sw._prune_backups(tmp_path, keep=1)
+        assert (tmp_path / ".env").read_text(encoding="utf-8") == "LIVE=keys\n"
+
+    def test_no_backups_at_all_is_a_no_op(self, tmp_path) -> None:
+        sw._prune_backups(tmp_path, keep=3)  # must not raise
+
+    def test_missing_directory_is_a_no_op(self, tmp_path) -> None:
+        sw._prune_backups(tmp_path / "does-not-exist", keep=3)  # must not raise
+
+    def test_ordering_is_by_name_not_mtime(self, tmp_path) -> None:
+        """Names are timestamped, so lexical order IS chronological — copying
+        the directory between machines does not preserve mtime, and sorting by
+        it would then delete the wrong ones."""
+        import os
+        import time
+        self._make(tmp_path, "20260801-090000", "20260820-090000")
+        # Make the OLDER-named file look newest by mtime.
+        os.utime(tmp_path / ".env.backup-20260801-090000", (time.time(), time.time()))
+        sw._prune_backups(tmp_path, keep=1)
+        left = [p.name for p in tmp_path.glob(".env.backup-*")]
+        assert left == [".env.backup-20260820-090000"]
+
+
 class TestExisting:
     def test_real_env_var_wins(self, monkeypatch) -> None:
         monkeypatch.setenv("SOME_KEY", "from-environ")

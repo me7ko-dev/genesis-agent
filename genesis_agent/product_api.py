@@ -23,6 +23,7 @@ genesis_agent.product_api — продуктов слой (L2-5).
 """
 from __future__ import annotations
 
+import threading
 import time
 from collections import defaultdict
 
@@ -47,6 +48,11 @@ app = FastAPI(title="Genesis — Verified Code Service")
 _RATE: dict[str, list[float]] = defaultdict(list)
 _RATE_LIMIT = 10          # заявки
 _RATE_WINDOW = 60         # за 60 секунди
+_RATE_LOCK = threading.Lock()
+
+# Сериализира глобалната мутация на режима в /v1/chat/completions — виж
+# бележката в самия endpoint защо изобщо е нужен.
+_LOCAL_MODE_LOCK = threading.Lock()
 
 
 class SolveRequest(BaseModel):
@@ -66,10 +72,23 @@ class ChatCompletionRequest(BaseModel):
 
 def _check_rate(ip: str) -> None:
     now = time.time()
-    _RATE[ip] = [t for t in _RATE[ip] if now - t < _RATE_WINDOW]
-    if len(_RATE[ip]) >= _RATE_LIMIT:
-        raise HTTPException(status_code=429, detail="Твърде много заявки. Опитай пак след минута.")
-    _RATE[ip].append(now)
+    # Под lock: FastAPI обслужва sync endpoint-ите в threadpool, значи _RATE се
+    # чете и пише от няколко нишки едновременно.
+    with _RATE_LOCK:
+        # Изхвърляме и записите на ДРУГИ, замлъкнали IP-та, не само подрязваме
+        # текущия (bug fix, 2026-08-12): преди се пипаше само списъкът на
+        # подателя, а ключът на всеки виждан някога IP оставаше в речника
+        # завинаги. При услуга, вързана на 0.0.0.0, това е неограничен растеж,
+        # ключуван по стойност, която изпращачът контролира.
+        for k in [k for k, hits in _RATE.items()
+                  if k != ip and (not hits or now - hits[-1] >= _RATE_WINDOW)]:
+            del _RATE[k]
+
+        _RATE[ip] = [t for t in _RATE[ip] if now - t < _RATE_WINDOW]
+        if len(_RATE[ip]) >= _RATE_LIMIT:
+            raise HTTPException(status_code=429,
+                                detail="Твърде много заявки. Опитай пак след минута.")
+        _RATE[ip].append(now)
 
 
 @app.post("/solve")
@@ -156,16 +175,36 @@ def chat_completions(req: ChatCompletionRequest, request: Request):
     goal = user_messages[-1].content
 
     local_model = _LOCAL_MODE_ALIASES.get((req.model or "").strip().lower())
-    set_local_only(local_model)
-
-    brain = Brain()
-    if not local_model:
-        brain.route_for_goal(goal)
 
     messages = [{"role": "system", "content": _IDE_CHAT_SYSTEM_PROMPT}]
     messages += [{"role": m.role, "content": m.content} for m in req.messages]
 
-    reply = brain.complete(messages)
+    # Под lock, обхващащ set_local_only → Brain() → complete() (bug fix,
+    # 2026-08-12). `set_local_only` мутира състояние за ЦЕЛИЯ процес —
+    # os.environ["GENESIS_LOCAL_ONLY"] плюс модулната brain.LOCAL_MODEL — а
+    # Brain.complete() чете env променливата в момента на извикването си, не
+    # при конструиране. FastAPI обслужва sync endpoint-и (`def`, не `async
+    # def`) в threadpool, така че две едновременни заявки се тъпчеха взаимно:
+    # клиент, поискал "local-max", тихо получаваше облачен отговор, защото
+    # друг клиент е извикал set_local_only(None) между двата реда; или обратно
+    # — заявка без модел биваше прехвърлена в локален режим от чужд избор.
+    # Сериализирането прави chat completions последователни, което за тази
+    # услуга (личен мобилен/IDE клиент, документирана като без auth) е
+    # правилната размяна: и без това всяка заявка чака LLM няколко секунди, а
+    # алтернативата е да изпълняваме избора на ГРЕШНИЯ клиент. Истинската
+    # поправка е per-request local-only параметър в Brain вместо глобално
+    # състояние — по-голяма промяна в brain.py, отделна задача.
+    with _LOCAL_MODE_LOCK:
+        set_local_only(local_model)
+        try:
+            brain = Brain()
+            if not local_model:
+                brain.route_for_goal(goal)
+            reply = brain.complete(messages)
+        finally:
+            # Режимът е за ТАЗИ заявка — не бива да остане включен за
+            # следващата, която не го е искала.
+            set_local_only(None)
     content = reply.raw_text or "(празен отговор от Genesis)"
 
     return JSONResponse({
