@@ -18,29 +18,32 @@ import json
 import os
 import urllib.error
 import urllib.request
-from pathlib import Path
 
 from genesis_agent.paths import CONFIG_PATH as _CONFIG_YAML
 
 # ─── Разрешаване на конфигурация (env → .env файлове → config.yaml) ────────────
 # Ядрото (autonomous loop и т.н.) не зарежда .env в os.environ, затова notifier-ът
 # сам намира webhook-а от същите източници, които ползва терминалният агент.
-from genesis_agent.paths import ENV_FILES as _ENV_FILES
 
 
 def _from_env_files(key: str) -> str:
-    for envf in _ENV_FILES:
-        p = Path(envf)
-        if not p.exists():
-            continue
-        try:
-            for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-                line = line.strip().removeprefix("export ").strip()
-                if line.startswith(key) and "=" in line:
-                    return line.split("=", 1)[1].strip().strip('"').strip("'")
-        except OSError:
-            pass
-    return ""
+    """Стойността на ключ от .env файловете, или "" ако липсва.
+
+    Делегира на paths.read_env_files вместо да преповтаря четенето (bug fix,
+    2026-08-12). Локалното копие тук имаше два дефекта, които общата функция
+    отдавна няма:
+
+      • съпоставяше имената с `line.startswith(key)` — ПРЕФИКС, не точно
+        съвпадение, така че `GENESIS_DISCORD_WEBHOOK` хващаше и
+        `GENESIS_DISCORD_WEBHOOK_2=...`, ако то стои по-нагоре във файла.
+        Тук цената е известията да заминат към ЧУЖД webhook/бот — не просто
+        грешна конфигурация, а изпращане на съдържание не където трябва.
+      • не махаше inline коментар, тоест
+        `GENESIS_DISCORD_WEBHOOK=https://... # моят hook` връщаше URL с
+        залепен коментар и заявката просто се проваляше.
+    """
+    from genesis_agent.paths import read_env_files
+    return read_env_files(key) or ""
 
 
 def _from_config_yaml(section: str, field: str) -> str:
