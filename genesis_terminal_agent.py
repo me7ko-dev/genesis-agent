@@ -654,22 +654,14 @@ _HISTORY_MAXLEN = 30
 def _restore_session(loaded: list, system_prompt: str) -> "deque":
     """Превръща заредена от диска сесия обратно в живата `messages` структура.
 
-    Изнесено от тялото на `/history`, за да е тестваемо (главният цикъл е един
-    голям интерактивен `while True` с `console.input`). Две неща, които
-    наивното `messages = json.load(f)` чупеше (bug fix, 2026-08-12):
-
-      • резултатът беше обикновен СПИСЪК, докато `messages` навсякъде другаде
-        е `deque(maxlen=_HISTORY_MAXLEN)` — таванът изчезваше за остатъка от
-        сесията и историята растеше без ограничение;
-      • системното съобщение е ПЪРВО, а deque с maxlen реже точно отпред —
-        сесия с 30+ реда изхвърляше него (а с него env_facts и брифинга), т.е.
-        агентът тихо оставаше без инструкции; `compact_chat_history` пък
-        изисква `messages[0]["role"] == "system"` и иначе спира да компресира.
+    Тънка обвивка над `agent_core.restored_history` — общата логика живее там,
+    защото GUI-то имаше ТОЧНО същия бъг на своя `load_session` (bug fix,
+    2026-08-12), а agent_core е документираното споделено ядро зад всеки
+    фронтенд. Обвивката остава, защото `/history` е нейният единствен
+    извикващ и името ѝ казва какво прави в контекста на терминала.
     """
-    system_msgs = [m for m in loaded if m.get("role") == "system"]
-    rest = [m for m in loaded if m.get("role") != "system"]
-    head = system_msgs[0] if system_msgs else {"role": "system", "content": system_prompt}
-    return deque([head] + rest[-(_HISTORY_MAXLEN - 1):], maxlen=_HISTORY_MAXLEN)
+    from genesis_agent.agent_core import restored_history
+    return restored_history(loaded, system_prompt, maxlen=_HISTORY_MAXLEN)
 
 
 def _compact_messages(messages: "deque") -> "deque":

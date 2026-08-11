@@ -428,3 +428,56 @@ class TestRunToolLoopBilingualRoundTrip:
         assert messages[0]["content"] == "EN: Обясни ми поправката"
         # The user saw the BULGARIAN translation of the model's English reply.
         assert seen == ["BG: " + long_english_reply]
+
+
+class TestRestoredHistory:
+    """A bounded deque evicts from the FRONT, which is where the system
+    message lives (bug fix, 2026-08-12).
+
+    `deque([system_msg] + saved, maxlen=30)` reads as obviously correct and
+    behaves correctly for short sessions — then silently drops the system
+    message on any restored session with 30+ turns, taking env_facts and the
+    workspace briefing with it, so the model spends the rest of the session
+    with no instructions. It also disables compaction entirely, since
+    Brain.compact_chat_history bails out unless messages[0] is the system
+    role, so the history then grows uncompacted up to the hard cap.
+    """
+
+    def test_returns_a_bounded_deque(self) -> None:
+        out = ac.restored_history([{"role": "user", "content": "hi"}], "sys")
+        assert out.maxlen == ac.HISTORY_MAXLEN
+
+    def test_system_message_survives_an_oversized_session(self) -> None:
+        saved = [{"role": "user", "content": f"m{i}"} for i in range(100)]
+        out = ac.restored_history(saved, "THE SYSTEM PROMPT")
+        assert len(out) == ac.HISTORY_MAXLEN
+        assert out[0] == {"role": "system", "content": "THE SYSTEM PROMPT"}
+        assert out[-1]["content"] == "m99"  # kept the most recent, not the oldest
+
+    def test_current_prompt_replaces_the_saved_one(self) -> None:
+        """The system prompt is passed in rather than read from the file on
+        purpose: it carries fresh env_facts and briefing for THIS session,
+        not whatever was true a week ago."""
+        saved = [
+            {"role": "system", "content": "STALE PROMPT FROM LAST WEEK"},
+            {"role": "user", "content": "hi"},
+        ]
+        out = ac.restored_history(saved, "FRESH PROMPT")
+        assert out[0]["content"] == "FRESH PROMPT"
+        assert sum(1 for m in out if m.get("role") == "system") == 1
+
+    def test_short_session_keeps_every_turn(self) -> None:
+        saved = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+        out = ac.restored_history(saved, "sys")
+        assert list(out)[1:] == saved
+
+    def test_empty_session_is_just_the_system_message(self) -> None:
+        out = ac.restored_history([], "sys")
+        assert list(out) == [{"role": "system", "content": "sys"}]
+
+    def test_custom_maxlen_is_respected(self) -> None:
+        saved = [{"role": "user", "content": f"m{i}"} for i in range(20)]
+        out = ac.restored_history(saved, "sys", maxlen=5)
+        assert len(out) == 5
+        assert out[0]["role"] == "system"
+        assert out[-1]["content"] == "m19"

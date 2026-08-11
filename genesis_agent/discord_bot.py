@@ -73,8 +73,6 @@ except ImportError:  # pragma: no cover
     )
 
 # ─── Конфигурация ─────────────────────────────────────────────────────────────
-from genesis_agent.paths import ENV_FILES as _ENV_FILES
-from genesis_agent.paths import _strip_inline_comment
 
 _CONFIG_YAML = Path(__file__).resolve().parent.parent / "config.yaml"
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -138,24 +136,22 @@ def _chat_brain(local_only_model: str | None = None):
     return b
 
 
-def _read_env_file_value(key: str) -> str:
-    for envf in _ENV_FILES:
-        p = Path(envf)
-        if not p.exists():
-            continue
-        try:
-            for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-                line = line.strip().removeprefix("export ").strip()
-                if line.startswith(key) and "=" in line and not line.startswith("#"):
-                    raw = line.split("=", 1)[1].strip()
-                    return _strip_inline_comment(raw).strip('"').strip("'")
-        except OSError:
-            pass
-    return ""
-
-
 def _resolve(key: str) -> str:
-    return os.environ.get(key, "") or _read_env_file_value(key)
+    """Стойността на един ключ: реален env var, после .env файловете.
+
+    Делегира на paths.get_secret вместо да преповтаря четенето на .env (bug
+    fix, 2026-08-12). Локалното копие тук съпоставяше имената с
+    `line.startswith(key)` — ПРЕФИКС, не точно съвпадение — така че всеки
+    ключ, чието име започва с търсеното, съвпадаше пръв, ако стои по-нагоре
+    във файла. Не е хипотетично: самият проект документира конвенция за
+    номерирани ключове `<KEY>_2`..`_10` (виж brain.py), значи оператор с
+    `GENESIS_DISCORD_OWNER_ID_2` в своя .env получаваше owner-lock, доверен
+    на ГРЕШЕН Discord user ID, или бот, който се аутентикира с грешен токен.
+    paths.get_secret сравнява имената точно (`k == key`) и вече е покрит с
+    тестове.
+    """
+    from genesis_agent.paths import get_secret
+    return get_secret(key) or ""
 
 
 # Owner-lock (design note, 2026-07-25): "само аз ползвам бота" — след като е зададен,

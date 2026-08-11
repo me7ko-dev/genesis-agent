@@ -16,6 +16,7 @@ import json
 import os
 import re
 import traceback
+from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 
@@ -25,6 +26,33 @@ TOOL_ROUND_CAP = 8
 MIN_SIZE_B = 32          # само модели ≥32B за интерактивен чат (като терминала)
 COMPACT_THRESHOLD = 16
 COMPACT_KEEP_RECENT = 10
+# Твърдият таван на живата история. Компресията (compact_chat_history) е
+# ПРЕВАНТИВНА и обикновено се задейства далеч преди него — това е последната
+# преграда, не основният механизъм.
+HISTORY_MAXLEN = 30
+
+
+def restored_history(saved: list[dict], system_prompt: str,
+                     maxlen: int = HISTORY_MAXLEN) -> deque:
+    """Заредена от диска сесия → живата `messages` структура на фронтенда.
+
+    Съществува, защото `deque(maxlen=N)` изхвърля от ПРЕДНИЯ край (bug fix,
+    2026-08-12). Наивното `deque([system_msg] + saved, maxlen=30)` изглежда
+    правилно и работи за къси сесии, но при 30+ запазени реплики изхвърля
+    точно системното съобщение, което току-що е сложено отпред — а с него
+    env_facts и брифинга за работата, тоест моделът тихо остава без
+    инструкции за целия остатък от сесията. Освен това
+    Brain.compact_chat_history проверява `messages[0]["role"] == "system"` и
+    иначе спира да компресира изобщо, така че историята после расте
+    несъкратена до твърдия таван.
+
+    Системният промпт се подава отделно (а не се чете от файла) нарочно:
+    той носи СВЕЖИ env_facts/брифинг за текущата сесия, не онези отпреди
+    седмица.
+    """
+    body = [m for m in saved if m.get("role") != "system"]
+    return deque([{"role": "system", "content": system_prompt}] + body[-(maxlen - 1):],
+                 maxlen=maxlen)
 
 
 def env_facts(workspace: str = "") -> str:

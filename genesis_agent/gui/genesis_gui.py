@@ -57,7 +57,12 @@ PROJECT_ROOT = _find_project_root()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from genesis_agent.agent_core import Core, run_tool_loop
+from genesis_agent.agent_core import (
+    HISTORY_MAXLEN,
+    Core,
+    restored_history,
+    run_tool_loop,
+)
 from genesis_agent.gui import gui_sessions
 
 APP_ID = "org.genesis.Agent"
@@ -622,7 +627,7 @@ class Window(Adw.ApplicationWindow):
         self.set_default_size(980, 720)
 
         self.messages: Any = deque(
-            [{"role": "system", "content": core.system_prompt}], maxlen=30
+            [{"role": "system", "content": core.system_prompt}], maxlen=HISTORY_MAXLEN
         )
         self.session_id = gui_sessions.new_id()
 
@@ -832,7 +837,7 @@ class Window(Adw.ApplicationWindow):
         self._save_current_session()
         self.session_id = gui_sessions.new_id()
         self.messages = deque(
-            [{"role": "system", "content": self.core.system_prompt}], maxlen=30
+            [{"role": "system", "content": self.core.system_prompt}], maxlen=HISTORY_MAXLEN
         )
         self._rebuild_chat_widgets([])
         self._refresh_sidebar()
@@ -845,9 +850,11 @@ class Window(Adw.ApplicationWindow):
         if msgs is None:
             return
         self.session_id = session_id
-        self.messages = deque(
-            [{"role": "system", "content": self.core.system_prompt}] + msgs, maxlen=30
-        )
+        # restored_history, НЕ deque([system] + msgs, maxlen=30) (bug fix,
+        # 2026-08-12): deque изхвърля от ПРЕДНИЯ край, така че сесия с 30+
+        # реплики махаше точно системното съобщение, което току-що сме сложили
+        # отпред — виж agent_core.restored_history за пълната бележка.
+        self.messages = restored_history(msgs, self.core.system_prompt)
         self._rebuild_chat_widgets(msgs)
 
     def _rebuild_chat_widgets(self, msgs: list[dict]) -> None:
