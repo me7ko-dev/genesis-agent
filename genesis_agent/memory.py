@@ -116,12 +116,23 @@ def memory_delete(key: str) -> bool:
 
 
 def memory_list_keys(prefix: str = "") -> list[str]:
-    """Връща всички ключове (с опционален prefix филтър)."""
+    """Връща всички ключове (с опционален prefix филтър).
+
+    Префиксът се екранира преди LIKE (bug fix, 2026-08-12): в SQL LIKE `_` е
+    wildcard за ЕДИН произволен знак, а `%` — за произволен низ. Подаден суров,
+    префикс `last_` съвпадаше и с `lastZproject`, не само с `last_project` —
+    а точно този стил имена (`user_name`, `preferred_language`, `coding_style`)
+    е обичайният тук, така че почти всеки реален префикс съдържа `_` и
+    филтърът тихо връщаше повече, отколкото е поискано.
+    """
     with _get_conn() as conn:
         if prefix:
+            # Обратната наклонена черта първа — иначе екранираме собствените си
+            # добавени escape знаци на следващите два реда.
+            escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             rows = conn.execute(
-                "SELECT key FROM kv_store WHERE key LIKE ? ORDER BY key;",
-                (f"{prefix}%",)
+                "SELECT key FROM kv_store WHERE key LIKE ? ESCAPE '\\' ORDER BY key;",
+                (f"{escaped}%",)
             ).fetchall()
         else:
             rows = conn.execute("SELECT key FROM kv_store ORDER BY key;").fetchall()
