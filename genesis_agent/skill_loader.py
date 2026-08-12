@@ -119,14 +119,33 @@ def skill_view(name: str, *, file_path: Path | None = None) -> dict[str, Any]:
     signature = (skill_meta or {}).get("signature") or ""
     if signature:
         try:
-            from genesis_agent.cryptography_utils import verify_signature
-            sig_ok = verify_signature(code, signature)
+            from genesis_agent.cryptography_utils import (
+                PUBLIC_KEY_PATH,
+                verify_signature,
+            )
+            # Липсващ публичен ключ НЕ е провалена проверка (bug found
+            # end-to-end, 2026-08-12): verify_signature() връща False и в двата
+            # случая, а третирането им еднакво значи, че всяко клониране без
+            # ключовете — или само сгрешен GENESIS_HOME — прави ЦЯЛАТА
+            # библиотека незаредима, при това с обвинение в подправяне.
+            # Липсата на ключ значи "не мога да преценя", не "открих намеса";
+            # тогава се държим точно както при неподписаните умения.
+            # Несъвпадение ПРИ наличен ключ си остава твърд отказ.
+            if not PUBLIC_KEY_PATH.exists():
+                sig_ok = True
+            else:
+                sig_ok = verify_signature(code, signature)
         except Exception:
             sig_ok = True
         if not sig_ok:
+            from genesis_agent.cryptography_utils import KEY_DIR as _KEY_DIR
             raise ValueError(
-                f"Умение '{name}' носи подпис, но той не съвпада с текущото съдържание на "
-                f"{md_path.name} — кодът е бил променен след подписването. Отказвам да го заредя."
+                f"Умение '{name}' носи подпис, който НЕ съвпада с текущото съдържание на "
+                f"{md_path.name}. Две възможни причини: (1) файлът е променян след "
+                f"подписването, или (2) зареждаш го с ДРУГ ключ от този, с който е "
+                f"подписано (ключовете са в {_KEY_DIR} — провери дали GENESIS_HOME сочи "
+                f"натам и от двете среди, ако ползваш Genesis и от WSL, и от Windows). "
+                f"Отказвам да го заредя, докато не е ясно кое от двете е."
             )
 
     return {

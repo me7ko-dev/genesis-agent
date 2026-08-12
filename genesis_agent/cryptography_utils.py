@@ -5,8 +5,23 @@ from pathlib import Path
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-# Key storage — the current user's ~/.genesis, overridable via GENESIS_KEY_DIR.
-KEY_DIR = Path(os.environ.get("GENESIS_KEY_DIR", Path.home() / ".genesis"))
+# Key storage. Follows GENESIS_HOME — the ONE variable that relocates Genesis's
+# configuration — with GENESIS_KEY_DIR kept as an explicit per-purpose override.
+#
+# This used to default to `Path.home() / ".genesis"` directly, ignoring
+# GENESIS_HOME (bug found end-to-end, 2026-08-12). Nothing depended on the
+# signing keys until skills started being signed, and then it broke exactly the
+# setup GENESIS_HOME exists for: run Genesis from WSL and from Windows against
+# the same checkout, and each side silently generated its OWN keypair in its own
+# home. A skill written on one side then failed verification on the other and
+# was refused with "кодът е бил променен след подписването" — a tampering
+# accusation for two environments that were both behaving correctly.
+#
+# When GENESIS_HOME is unset this resolves to `~/.genesis`, exactly as before,
+# so a single-environment install sees no change and needs no migration.
+from genesis_agent.paths import GENESIS_HOME as _GENESIS_HOME
+
+KEY_DIR = Path(os.environ.get("GENESIS_KEY_DIR", _GENESIS_HOME))
 PRIVATE_KEY_PATH = KEY_DIR / "private_key.pem"
 PUBLIC_KEY_PATH = KEY_DIR / "public_key.pem"
 

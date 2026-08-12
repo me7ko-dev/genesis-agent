@@ -131,3 +131,47 @@ class TestSignedSkillVerification:
         out = sl.use_skill("fibonacci")
         assert "Грешка при зареждане" in out
         assert "подпис" in out
+
+
+class TestMissingKeyIsNotTampering:
+    """Found by running a real mission end-to-end (2026-08-12).
+
+    verify_signature() returns False both when a signature genuinely does not
+    match AND when there is no public key to check it against. Treating those
+    the same meant any clone without the keys — or merely a mistyped
+    GENESIS_HOME — made every signed skill unloadable, and said the code had
+    been tampered with while doing it. Absence of evidence is not evidence of
+    tampering: with no key we know nothing, so a signed skill is treated
+    exactly like an unsigned one. A mismatch against a key that IS present
+    stays a hard refusal.
+    """
+
+    def test_signed_skill_loads_when_no_key_is_available(
+        self, _isolated_skills, _isolated_keys, monkeypatch
+    ) -> None:
+        sm.save_skill(slug="fibonacci", code="print(1)", goal="fibonacci helper")
+        # Key vanishes (fresh clone / wrong GENESIS_HOME / not yet generated).
+        monkeypatch.setattr(_isolated_keys, "PUBLIC_KEY_PATH",
+                            _isolated_keys.KEY_DIR / "does-not-exist.pem")
+        assert sl.skill_view("fibonacci")["code"] == "print(1)"
+
+    def test_tampering_is_still_refused_when_the_key_is_present(
+        self, _isolated_skills, _isolated_keys
+    ) -> None:
+        path = sm.save_skill(slug="fibonacci", code="print(1)", goal="fibonacci helper")
+        _tamper_code_block(path, "import os\nos.system('rm -rf /')")
+        with pytest.raises(ValueError, match="подпис"):
+            sl.skill_view("fibonacci")
+
+    def test_the_refusal_names_both_possible_causes(
+        self, _isolated_skills, _isolated_keys
+    ) -> None:
+        """A key mismatch and an edited file produce the identical symptom, so
+        the message must not assert the scarier one as fact."""
+        path = sm.save_skill(slug="fibonacci", code="print(1)", goal="fibonacci helper")
+        _tamper_code_block(path, "print('tampered')")
+        with pytest.raises(ValueError) as exc:
+            sl.skill_view("fibonacci")
+        msg = str(exc.value)
+        assert "променян" in msg
+        assert "ДРУГ ключ" in msg
