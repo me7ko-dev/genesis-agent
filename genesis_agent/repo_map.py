@@ -238,6 +238,40 @@ def _makefile_has_test(root: Path) -> bool:
         return False
 
 
+def _has_pytest_style_tests(root: Path) -> bool:
+    """Има ли изобщо файлове, които pytest би събрал?
+
+    Обратната страна на "маркерният файл не е обещание" (виж коментара в
+    detect_project): липсата на маркерен файл също не е обещание, че тестове
+    НЯМА. Хванато на живо (2026-08-12) с `genesis fix` върху малък проект от
+    два файла — `calc.py` и `test_calc.py`, без pyproject.toml, без setup.py,
+    без git. detect_project върна test_command="" ("тестове: няма открити"),
+    затова целият тест-гейт на repo_agent просто не се пусна: цикълът изгори
+    всичките 8 рунда, моделът си измисляше ad-hoc `python -c ...` проверки, а
+    накрая поправка, която БЕШЕ вярна, се докладва като "промените НЕ са
+    проверени — прегледай диффа преди да му вярваш". Точно проектите, върху
+    които някой пуска `genesis fix` (скрипт, домашно, малък инструмент), най-
+    рядко имат packaging маркер.
+
+    Нарочно тесен критерий — pytest-овата собствена конвенция за имена
+    (`test_*.py` / `*_test.py`), в корена или в отделна тестова директория, не
+    "някъде в дървото": файл на име `test_helpers.py` вътре в пакета е
+    помощен модул поне толкова често, колкото и тестов.
+    """
+    patterns = ("test_*.py", "*_test.py")
+    for pat in patterns:
+        if any(root.glob(pat)):
+            return True
+    for d in ("tests", "test"):
+        sub = root / d
+        if not sub.is_dir():
+            continue
+        for pat in patterns:
+            if any(sub.rglob(pat)):
+                return True
+    return False
+
+
 def detect_project(path: str | Path) -> ProjectInfo:
     root = Path(path).expanduser().resolve()
     counts: Counter = Counter()
@@ -265,6 +299,10 @@ def detect_project(path: str | Path) -> ProjectInfo:
             continue
         language, test_cmd = lang, cmd
         break
+    # Няма маркерен файл, но има тестове по pytest конвенцията — виж
+    # _has_pytest_style_tests за защо липсата на маркер не е доказателство.
+    if not test_cmd and _has_pytest_style_tests(root):
+        language, test_cmd = "python", f"{_python_cmd()} -m pytest -q"
     if language == "unknown" and counts:
         by_lang = {".py": "python", ".js": "javascript", ".ts": "typescript",
                    ".go": "go", ".rs": "rust", ".rb": "ruby", ".java": "java"}

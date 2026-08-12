@@ -116,6 +116,61 @@ def test_repo_map_reports_missing_tests_and_missing_git(tmp_path) -> None:
     assert "НЕ (няма version control)" in out
 
 
+class TestTestsWithoutAPackagingMarker:
+    """Found live (2026-08-12) running `genesis fix` on a two-file project.
+
+    Detection asked only "is there a marker file?", so `calc.py` +
+    `test_calc.py` with no pyproject.toml reported no test command at all. The
+    repair loop's test gate — repo_agent's whole notion of a verdict — never
+    ran: it burned all 8 rounds, and a repair that was actually correct came
+    back labelled "промените НЕ са проверени". A missing marker is no more a
+    promise than a present one (see test_package_json_without_test_script).
+    """
+
+    def test_root_level_test_file_is_enough(self, tmp_path) -> None:
+        (tmp_path / "calc.py").write_text("def mean(v): return sum(v)/len(v)\n",
+                                          encoding="utf-8")
+        (tmp_path / "test_calc.py").write_text("from calc import mean\n", encoding="utf-8")
+        info = repo_map.detect_project(tmp_path)
+        assert "pytest" in info.test_command
+        assert info.language == "python"
+
+    def test_suffix_style_names_count_too(self, tmp_path) -> None:
+        (tmp_path / "calc_test.py").write_text("def test_x(): pass\n", encoding="utf-8")
+        assert "pytest" in repo_map.detect_project(tmp_path).test_command
+
+    def test_a_tests_directory_counts(self, tmp_path) -> None:
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "calc.py").write_text("x = 1\n", encoding="utf-8")
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_calc.py").write_text("def test_x(): pass\n",
+                                                          encoding="utf-8")
+        assert "pytest" in repo_map.detect_project(tmp_path).test_command
+
+    def test_a_marker_file_still_wins(self, tmp_path) -> None:
+        """Ordering must not change for projects that already declared how they
+        are tested — this is a fallback, not a new first rule."""
+        (tmp_path / "package.json").write_text('{"scripts":{"test":"jest"}}',
+                                               encoding="utf-8")
+        (tmp_path / "test_thing.py").write_text("def test_x(): pass\n", encoding="utf-8")
+        assert repo_map.detect_project(tmp_path).test_command == "npm test"
+
+    def test_a_plain_module_named_test_something_deep_inside_does_not_count(
+        self, tmp_path
+    ) -> None:
+        """Deliberately narrow: `pkg/test_helpers.py` is a helper module at
+        least as often as it is a test suite, and claiming a test command that
+        collects nothing is the failure this fix exists to prevent."""
+        pkg = tmp_path / "pkg"
+        pkg.mkdir()
+        (pkg / "test_helpers.py").write_text("HELPER = 1\n", encoding="utf-8")
+        assert repo_map.detect_project(tmp_path).test_command == ""
+
+    def test_no_python_tests_at_all_still_reports_nothing(self, tmp_path) -> None:
+        (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+        assert repo_map.detect_project(tmp_path).test_command == ""
+
+
 # ── find_files (GLOB) ────────────────────────────────────────────────────
 
 def test_find_files_matches_by_name_pattern(tree) -> None:
