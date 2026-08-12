@@ -250,20 +250,52 @@ def _extract_signatures(code: str) -> list[str]:
     return sigs
 
 
+# Колко РЕАЛНИ (пост-stopword) съвпадащи думи трябват, за да сметнем свободен
+# текст за наистина сочещ към конкретно умение. Същият праг като в
+# Brain.build_context — виж resolve_skill за защо тук е дори по-важен.
+_MIN_FUZZY_KW_SCORE = 2
+
+
 def resolve_skill(name_or_query: str) -> tuple[str | None, list[dict[str, Any]]]:
     """
     Резолвира умение по ТОЧНО име (skills.json ключ), а ако липсва — по
     свободен текст (fuzzy/семантично търсене през search_skills).
-    Връща (resolved_name или None, списък кандидати от search — празен ако е било точно име).
+    Връща (resolved_name или None, списък кандидати от search — при отказ това
+    са БЛИЗКИТЕ, но недостатъчно убедителни попадения, за да може викащият да
+    ги покаже, вместо да мълчи).
+
+    Прагът (design note, 2026-08-12, хванат на живо): `search_skills` връща
+    ВСЯКО умение с overlap ≥ 1 дума, а дотук се вземаше просто candidates[0],
+    колкото и слабо да е съвпадението. Реален случай от проследена мисия:
+    заявка "in-process job queue retry exponential backoff" резолвваше до
+    `build_a_stdlib_only_an_in_process_event_bus_pub` — цялото съвпадение е
+    думата "process" — и USE_SKILL връщаше self-test-а на EventBus с "OK",
+    все едно наистина е намерил job queue. Моделът повярва, че такова умение
+    съществува, и изгори 5 от 8 рунда да го разпитва, преди anti-starvation
+    предпазителят да го принуди да пише код (мисия за 1 рунд стана 8).
+
+    Брат ѝ `Brain.build_context` ползва точно този праг (`_kw_score >= 2`) от
+    2026-07-27 по същата причина. Тук е дори по-остро: build_context само
+    ИНЖЕКТИРА код в промпта, докато USE_SKILL реално ИЗПЪЛНЯВА умението и
+    представя изхода му като отговор на заявката.
+
+    Чисто семантично попадение (`_semantic_hit`, без keyword overlap) също не
+    стига за авто-изпълнение — build_context съзнателно не му се доверява за
+    скъпия път, защото 0.55 cosine прагът е замърсен от шаблонната опашка в
+    описанията ("...with type hints, docstring and an assert-based self-test").
+    То обаче остава в списъка кандидати: точното име винаги резолвва, така че
+    ако наистина е това умението, моделът е на едно извикване разстояние.
     """
     idx = load_skills_index()
     q = name_or_query.strip()
     if q in idx:
         return q, []
     candidates = search_skills(q, top_n=3)
-    if candidates:
-        return candidates[0].get("name"), candidates
-    return None, []
+    confident = [c for c in candidates
+                 if c.get("_kw_score", 0) >= _MIN_FUZZY_KW_SCORE and c.get("name")]
+    if confident:
+        return confident[0]["name"], candidates
+    return None, candidates
 
 
 def use_skill(name_or_query: str, driver_code: str = "") -> str:
@@ -282,7 +314,18 @@ def use_skill(name_or_query: str, driver_code: str = "") -> str:
 
     resolved, candidates = resolve_skill(name_or_query)
     if not resolved:
-        return f"[USE_SKILL: {name_or_query.strip()}] Няма намерено умение по това име/заявка."
+        msg = f"[USE_SKILL: {name_or_query.strip()}] Няма достатъчно близко умение по това име/заявка."
+        # Слабите попадения се ПОКАЗВАТ, но не се изпълняват (виж resolve_skill):
+        # мълчаливото "няма нищо" би скрило умение, което моделът после може да
+        # поиска по точно име, а мълчаливото изпълнение на слабо съвпадение е
+        # точно бъгът, заради който прагът съществува.
+        near = [c["name"] for c in candidates if c.get("name")]
+        if near:
+            msg += ("\nБлизки по име, но СЛАБО съвпадение — не приемай, че вършат работа: "
+                    + ", ".join(near)
+                    + ". Ако някое наистина е това, извикай го по ТОЧНОТО име.")
+        msg += "\nИначе напиши кода сам — не търси повече."
+        return msg
 
     try:
         data = skill_view(resolved)

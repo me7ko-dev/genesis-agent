@@ -175,3 +175,57 @@ class TestMissingKeyIsNotTampering:
         msg = str(exc.value)
         assert "променян" in msg
         assert "ДРУГ ключ" in msg
+
+
+class TestFuzzyResolveNeedsRealEvidence:
+    """Found by tracing a real mission (2026-08-12).
+
+    `search_skills` returns anything with a single overlapping word, and
+    `resolve_skill` used to take candidates[0] no matter how weak. Live case:
+    the query "in-process job queue retry exponential backoff" resolved to an
+    EventBus skill on the strength of the word "process" alone, and USE_SKILL
+    ran its self-test and answered "OK" — so the model believed a job-queue
+    skill existed and spent 5 of its 8 rounds interrogating it.
+    """
+
+    def _bus(self):
+        sm.save_skill(
+            slug="build_a_stdlib_only_an_in_process_event_bus_pub",
+            code="class EventBus:\n    def subscribe(self):\n        pass\n\nprint('OK')",
+            goal="Build a stdlib-only, in-process event bus (pub/sub dispatcher)",
+        )
+        sl.reload_skills_index()
+
+    def test_one_shared_word_does_not_resolve(self, _isolated_skills) -> None:
+        self._bus()
+        resolved, candidates = sl.resolve_skill(
+            "in-process job queue retry exponential backoff")
+        assert resolved is None
+        # The near-miss is still reported, just not executed.
+        assert [c["name"] for c in candidates] == [
+            "build_a_stdlib_only_an_in_process_event_bus_pub"]
+
+    def test_use_skill_says_no_match_instead_of_running_the_wrong_skill(
+        self, _isolated_skills
+    ) -> None:
+        self._bus()
+        out = sl.use_skill("in-process job queue retry exponential backoff")
+        assert "Няма достатъчно близко умение" in out
+        assert "напиши кода сам" in out.lower()
+        # The wrong skill's own output must NOT appear as if it were an answer.
+        assert "Достъпни:" not in out
+
+    def test_two_shared_words_still_resolve(self, _isolated_skills) -> None:
+        """The threshold must not break genuine fuzzy matching."""
+        self._bus()
+        resolved, _ = sl.resolve_skill("in-process event dispatcher")
+        assert resolved == "build_a_stdlib_only_an_in_process_event_bus_pub"
+
+    def test_exact_name_always_resolves_however_odd(self, _isolated_skills) -> None:
+        """Escape hatch the refusal message points the model at: a skill named
+        in full is never second-guessed by the relevance threshold."""
+        self._bus()
+        resolved, candidates = sl.resolve_skill(
+            "build_a_stdlib_only_an_in_process_event_bus_pub")
+        assert resolved == "build_a_stdlib_only_an_in_process_event_bus_pub"
+        assert candidates == []
