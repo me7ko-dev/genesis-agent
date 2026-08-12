@@ -24,9 +24,18 @@ manually); only actually *showing* a window needs one, which nothing here does.
 PyGObject (`gi`) is a system package (apt python3-gi + GTK4/libadwaita
 typelibs), not a pip-installable extra like discord.py — CI does not have it
 and getting it there is a separate, riskier change (system library
-dependencies, not just a pip install). This file skips gracefully via
-importorskip when `gi` is absent; it runs locally wherever the desktop app
-itself would run.
+dependencies, not just a pip install). This file skips gracefully when the
+GTK4 stack is absent; it runs locally wherever the desktop app itself would
+run.
+
+Note that `import gi` succeeding is NOT enough to run these tests: the
+python3-gi binding and the GTK4/libadwaita *typelibs* are separate packages,
+and this WSL box has the first without the second. `importorskip("gi")` alone
+therefore let the whole file run there, where every test blew up in setup with
+`ValueError: Namespace Gtk not available` — 2 failures + 18 errors on a suite
+that is otherwise green, i.e. a red run that says nothing about the code. The
+guard below asks for what the tests actually need (the Gtk 4.0 namespace) and
+skips on anything less.
 """
 from __future__ import annotations
 
@@ -36,7 +45,12 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("gi")
+gi = pytest.importorskip("gi")
+try:
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+except ValueError as exc:  # typelib missing / wrong major version installed
+    pytest.skip(f"GTK4 typelibs not installed: {exc}", allow_module_level=True)
 
 GUI_DIR = Path(__file__).resolve().parent.parent / "genesis_agent" / "gui"
 
