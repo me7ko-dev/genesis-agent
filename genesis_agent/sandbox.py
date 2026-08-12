@@ -152,6 +152,100 @@ _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
      "достъп до системни идентификационни файлове"),
 ]
 
+# ── Windows (design note, 2026-08-12) ────────────────────────────────────────
+# Всички образци дотук са POSIX. Windows е реална работна платформа за този
+# проект — native Python е задължителен за истински локален Ollama inference
+# (виж model_router.py), а `genesis fix` и терминалният чат вече изпълняват
+# RUN_CMD през Git Bash, тоест реални Windows команди на реалната машина.
+# Измерено преди тази промяна, всяко едно от следните минаваше като SAFE,
+# тоест изпълняваше се АВТОМАТИЧНО, без да пита никого:
+#
+#   Remove-Item -Recurse -Force C:\Users\<user>     format C: /y
+#   del /f /s /q C:\Windows\*                       rd /s /q C:\Users
+#   reg delete HKLM\SOFTWARE /f                     vssadmin delete shadows /all
+#   powershell -enc <base64>                        curl http://... | powershell -
+#
+# Барierата обещава на README/SECURITY.md ниво, че катастрофалното се отказва
+# ВИНАГИ; това обещание важеше само за половината операционни системи. Тук са
+# Windows съответствията на вече покритите POSIX образци — по същата логика,
+# не нов риск-модел. Не са условни спрямо os.name нарочно: проверката е върху
+# ТЕКСТА на командата, а низове като "Remove-Item" или "vssadmin" не се
+# срещат случайно в POSIX команда, така че цената на безусловното включване е
+# нула, а ползата е, че една и съща команда се оценява еднакво навсякъде.
+
+# Корени, чието рекурсивно триене е катастрофа (не просто опасно).
+_WIN_ROOT = (r"(?:[A-Za-z]:\\*(?:\s|$|[\"';*])"          # C:\ / C: / C:\\ (ескейпнато)
+             r"|[A-Za-z]:\\(?:Windows|Users|Program\s)"   # C:\Windows, C:\Users
+             r"|\$env:USERPROFILE|%USERPROFILE%|\$HOME"
+             r"|[A-Za-z]:\\\*)")
+
+_WIN_BLOCK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # `\b-Recurse` НЕ работи: между интервал и тире няма граница на дума
+    # (и двата символа са не-word), затова тук е `(?:^|\s)-`.
+    (_c(r"\bRemove-Item\b[^\n]*(?:^|\s)-(?:Recurse|Force)\b[^\n]*" + _WIN_ROOT),
+     "Remove-Item -Recurse/-Force върху диск/системна/домашна директория"),
+    (_c(r"\b(del|erase)\b[^\n]*\s/s\b[^\n]*" + _WIN_ROOT),
+     "del /s върху диск/системна/домашна директория"),
+    (_c(r"\brd\b[^\n]*\s/s\b[^\n]*" + _WIN_ROOT),
+     "rd /s върху диск/системна/домашна директория"),
+    (_c(r"\bformat\s+[A-Za-z]:"),
+     "форматиране на дял (format)"),
+    (_c(r"\b(Format-Volume|Clear-Disk|Initialize-Disk)\b"),
+     "форматиране/изчистване на диск (PowerShell)"),
+    (_c(r"\\\\\.\\PhysicalDrive"),
+     "запис върху физически диск (\\\\.\\PhysicalDrive)"),
+    (_c(r"\bvssadmin\b[^\n]*\bdelete\b[^\n]*\bshadows\b"),
+     "изтриване на Volume Shadow Copies (унищожава възстановяването)"),
+    (_c(r"\b(Stop-Computer|Restart-Computer)\b"),
+     "изключване/рестарт на машината"),
+    (_c(r"\bcipher\b[^\n]*\s/w"),
+     "cipher /w (необратимо затриване на свободното място)"),
+]
+
+_WIN_CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (_c(r"\bRemove-Item\b[^\n]*(?:^|\s)-(?:Recurse|Force)\b"),
+     "рекурсивно/принудително триене (Remove-Item)"),
+    (_c(r"\b(del|erase)\b[^\n]*\s/(s|q|f)\b"),
+     "принудително/рекурсивно триене (del)"),
+    (_c(r"\brd\b[^\n]*\s/s\b|\brmdir\b[^\n]*\s/s\b"),
+     "триене на директория (rd /s)"),
+    (_c(r"\breg\s+(delete|add|import)\b|\bSet-ItemProperty\b[^\n]*\bHK(LM|CU|CR|U|CC):"),
+     "промяна на регистъра"),
+    (_c(r"\bpowershell(\.exe)?\b[^\n]*\s-(enc|e|encodedcommand)\b"),
+     "PowerShell с кодирана команда (-EncodedCommand)"),
+    (_c(r"\b(Invoke-Expression|iex)\b|\|\s*(powershell|pwsh)\b"),
+     "динамично изпълнение / изтеглено съдържание директно в PowerShell"),
+    (_c(r"\bSet-ExecutionPolicy\b"),
+     "промяна на PowerShell execution policy"),
+    (_c(r"\bStart-Process\b[^\n]*-Verb\s+RunAs|\brunas\b"),
+     "изпълнение с повишени права (RunAs)"),
+    (_c(r"\bnet\s+(user|localgroup)\b|\bNew-LocalUser\b|\bAdd-LocalGroupMember\b"),
+     "промяна на потребители/групи"),
+    (_c(r"\b(takeown|icacls|cacls)\b|\bSet-Acl\b"),
+     "промяна на собственик/права (takeown/icacls)"),
+    (_c(r"\b(taskkill|Stop-Process)\b"),
+     "убиване на процеси"),
+    (_c(r"\b(sc\.exe|New-Service|Set-Service|Stop-Service|Start-Service)\b"),
+     "управление на системни услуги"),
+    (_c(r"\bschtasks\b|\b(New|Register)-ScheduledTask\b"),
+     "промяна на планирани задачи"),
+    (_c(r"\b(winget|choco|scoop)\s+install\b|\bInstall-(Module|Package)\b"),
+     "инсталиране на пакети"),
+    (_c(r"\b(bcdedit|diskpart)\b"),
+     "промяна на дискови дялове/boot конфигурация"),
+    (_c(r"\brobocopy\b[^\n]*\s/(mir|purge)\b"),
+     "robocopy /MIR (огледално копиране — трие в целта)"),
+    (_c(r"\b(Move-Item|Copy-Item|xcopy)\b[^\n]*\s-?/?(Force|y|e)\b"),
+     "принудително преместване/копиране (презаписва целта)"),
+    (_c(r"System32\\drivers\\etc\\hosts|[A-Za-z]:\\Windows\\System32\\"),
+     "запис в системни файлове (System32)"),
+    (_c(r"\.ssh\\|\.aws\\|\bcredentials\b"),
+     "достъп до чувствителни файлове (ключове/тайни)"),
+]
+
+_BLOCK_PATTERNS += _WIN_BLOCK_PATTERNS
+_CONFIRM_PATTERNS += _WIN_CONFIRM_PATTERNS
+
 # ── Файлови операции: структурна проверка, не regex (design note, 2026-07-27) ──────
 # Дотук барierата пазеше ТРИЕНЕТО (rm -r/-f, rmtree), но не и ПРЕМЕСТВАНЕТО.
 # `mv` и `cp` изобщо не фигурираха в образците → минаваха като SAFE и се
