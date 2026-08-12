@@ -82,7 +82,11 @@ def env_facts(workspace: str = "") -> str:
     except OSError:
         pass  # без XDG конфигурация остават разумните подразбирания
 
-    lines = [f"- Домашна директория: {home}   (потребител: {os.environ.get('USER', 'unknown')})"]
+    # USERNAME преди USER: на Windows `USER` не е зададен, така че този ред
+    # казваше буквално "(потребител: unknown)" на всяка сесия там — точно вида
+    # факт, който функцията съществува да НЕ оставя на модела да отгатва.
+    user = os.environ.get("USER") or os.environ.get("USERNAME") or home.name or "unknown"
+    lines = [f"- Домашна директория: {home}   (потребител: {user})"]
     for label, key in (("Десктоп", "DESKTOP"), ("Изтегляния", "DOWNLOAD"),
                        ("Документи", "DOCUMENTS"), ("Снимки", "PICTURES")):
         p = dirs[key]

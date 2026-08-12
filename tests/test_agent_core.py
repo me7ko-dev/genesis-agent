@@ -35,6 +35,23 @@ class TestEnvFacts:
         assert "Работна директория" not in ac.env_facts()
         assert "Работна директория" in ac.env_facts("/some/workspace")
 
+    def test_the_user_name_is_found_on_windows_too(self, monkeypatch, tmp_path) -> None:
+        """Windows sets USERNAME, not USER, so this line read literally
+        "(потребител: unknown)" in every session there — precisely the kind of
+        machine fact this function exists to stop the model guessing at."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("USER", raising=False)
+        monkeypatch.setenv("USERNAME", "roika")
+        assert "roika" in ac.env_facts()
+
+    def test_neither_variable_falls_back_to_the_home_directory_name(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("USER", raising=False)
+        monkeypatch.delenv("USERNAME", raising=False)
+        assert tmp_path.name in ac.env_facts()
+
     def test_xdg_user_dirs_override_the_default(self, monkeypatch, tmp_path) -> None:
         monkeypatch.setenv("HOME", str(tmp_path))
         (tmp_path / ".config").mkdir()
