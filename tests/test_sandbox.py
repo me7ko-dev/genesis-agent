@@ -252,13 +252,20 @@ def test_shell_argv_uses_posix_sh_on_posix(monkeypatch) -> None:
 
 def test_shell_argv_prefers_bash_on_windows_when_available(monkeypatch) -> None:
     monkeypatch.setattr(sandbox.os, "name", "nt")
+    monkeypatch.setattr(sandbox, "_WIN_SHELL_PREFIX", None)
+    monkeypatch.setattr(sandbox.os.path, "exists", lambda _p: False)
     monkeypatch.setattr("shutil.which", lambda _: r"C:\Program Files\Git\bin\bash.exe")
+    # Candidates are probed for real before being chosen (see
+    # TestWindowsShellSelection); a Windows path cannot start on this host.
+    monkeypatch.setattr(sandbox, "_shell_works", lambda _a: True)
     argv = sandbox._shell_argv("echo hi")
     assert argv == [r"C:\Program Files\Git\bin\bash.exe", "-c", "echo hi"]
 
 
 def test_shell_argv_falls_back_to_cmd_on_windows_without_bash(monkeypatch) -> None:
     monkeypatch.setattr(sandbox.os, "name", "nt")
+    monkeypatch.setattr(sandbox, "_WIN_SHELL_PREFIX", None)
+    monkeypatch.setattr(sandbox.os.path, "exists", lambda _p: False)
     monkeypatch.setattr("shutil.which", lambda _: None)
     assert sandbox._shell_argv("echo hi") == ["cmd.exe", "/c", "echo hi"]
 
@@ -284,3 +291,89 @@ def test_run_shell_confirm_command_allowed_in_allow_mode(tmp_path) -> None:
     res = sandbox.run_shell("echo would-normally-confirm", cwd=tmp_path, policy=policy)
     assert res.blocked is False
     assert res.ok is True
+
+
+# ── Коя обвивка се ползва на Windows ─────────────────────────────────────────
+# Found end-to-end (2026-08-12): `shutil.which("bash")` on a normal Windows
+# dev box returns ...\AppData\Local\Microsoft\WindowsApps\bash.EXE — the WSL
+# launcher, not Git Bash. Every RUN_CMD and every `genesis fix` test command
+# was therefore executed inside a different operating system, against a
+# filesystem and a Python the caller never meant. The observed symptom was a
+# correct repair reported as "НЕ е поправено", with run_tests returning rc=1
+# and UTF-16 text from WSL ("Bash/Service/0x8007072c").
+#
+# These run on any OS: the selection helpers are pure and take their
+# environment through shutil/os.path, which the tests replace.
+
+class TestWindowsShellSelection:
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self, monkeypatch):
+        monkeypatch.setattr(sandbox, "_WIN_SHELL_PREFIX", None)
+
+    @pytest.mark.parametrize("path", [
+        r"C:\Users\x\AppData\Local\Microsoft\WindowsApps\bash.EXE",
+        r"C:\Windows\System32\bash.exe",
+        "C:/Windows/system32/BASH.EXE",
+    ])
+    def test_wsl_launchers_are_recognised(self, path) -> None:
+        assert sandbox._is_wsl_launcher(path) is True
+
+    @pytest.mark.parametrize("path", [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\tools\msys64\usr\bin\bash.exe",
+        "/bin/bash",
+    ])
+    def test_real_shells_are_not_mistaken_for_wsl(self, path) -> None:
+        assert sandbox._is_wsl_launcher(path) is False
+
+    def test_git_bash_wins_over_whatever_is_first_on_path(self, monkeypatch) -> None:
+        git_bash = sandbox._GIT_BASH_CANDIDATES[0]
+        monkeypatch.setattr(sandbox.os.path, "exists", lambda p: p == git_bash)
+        monkeypatch.setattr("shutil.which",
+                            lambda _n: r"C:\Users\x\AppData\Local\Microsoft\WindowsApps\bash.EXE")
+        monkeypatch.setattr(sandbox, "_shell_works", lambda _a: True)
+        assert sandbox._windows_shell_prefix() == [git_bash, "-c"]
+
+    def test_the_wsl_launcher_is_never_selected(self, monkeypatch) -> None:
+        """Not even as a last resort before cmd.exe: even when it starts
+        cleanly it runs the command in another OS, so a Windows interpreter
+        path in the test command cannot execute at all."""
+        monkeypatch.setattr(sandbox.os.path, "exists", lambda _p: False)
+        monkeypatch.setattr("shutil.which",
+                            lambda _n: r"C:\Windows\System32\bash.exe")
+        monkeypatch.setattr(sandbox, "_shell_works", lambda _a: True)
+        assert sandbox._windows_shell_prefix() == ["cmd.exe", "/c"]
+
+    def test_a_bash_elsewhere_on_path_is_still_used(self, monkeypatch) -> None:
+        monkeypatch.setattr(sandbox.os.path, "exists", lambda _p: False)
+        monkeypatch.setattr("shutil.which", lambda _n: r"C:\tools\msys64\usr\bin\bash.exe")
+        monkeypatch.setattr(sandbox, "_shell_works", lambda _a: True)
+        assert sandbox._windows_shell_prefix() == [r"C:\tools\msys64\usr\bin\bash.exe", "-c"]
+
+    def test_a_shell_that_does_not_start_is_skipped(self, monkeypatch) -> None:
+        """WSL fell over mid-session on the machine this was found on. A broken
+        shell must degrade to another shell, not to 'all your tests fail'."""
+        git_bash = sandbox._GIT_BASH_CANDIDATES[0]
+        monkeypatch.setattr(sandbox.os.path, "exists", lambda p: p == git_bash)
+        monkeypatch.setattr("shutil.which", lambda _n: None)
+        monkeypatch.setattr(sandbox, "_shell_works", lambda _a: False)
+        assert sandbox._windows_shell_prefix() == ["cmd.exe", "/c"]
+
+    def test_the_choice_is_probed_once_and_cached(self, monkeypatch) -> None:
+        git_bash = sandbox._GIT_BASH_CANDIDATES[0]
+        monkeypatch.setattr(sandbox.os.path, "exists", lambda p: p == git_bash)
+        monkeypatch.setattr("shutil.which", lambda _n: None)
+        probes: list[str] = []
+        monkeypatch.setattr(sandbox, "_shell_works", lambda a: probes.append(a) or True)
+        for _ in range(3):
+            sandbox._windows_shell_prefix()
+        assert probes == [git_bash]
+
+    def test_posix_is_untouched(self, monkeypatch) -> None:
+        monkeypatch.setattr(sandbox.os, "name", "posix")
+        assert sandbox._shell_argv("echo hi") == ["/bin/sh", "-c", "echo hi"]
+
+    def test_windows_argv_is_prefix_plus_command(self, monkeypatch) -> None:
+        monkeypatch.setattr(sandbox.os, "name", "nt")
+        monkeypatch.setattr(sandbox, "_WIN_SHELL_PREFIX", ["bash.exe", "-c"])
+        assert sandbox._shell_argv("pytest -q") == ["bash.exe", "-c", "pytest -q"]

@@ -610,23 +610,90 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
                              returncode=None)
 
 
-def _shell_argv(command: str) -> list[str]:
-    """Argv за подадената команда, портативно.
+# Кеш за избраната Windows обвивка — изборът включва реална проба (виж
+# _windows_shell_prefix), а тя не бива да се плаща на всяка команда.
+_WIN_SHELL_PREFIX: list[str] | None = None
 
-    `/bin/sh` буквално не съществува извън POSIX — на native Windows Python
-    (нужен за реален Ollama inference, виж genesis_agent/model_router.py)
-    всяка RUN_CMD команда гърмеше с "[WinError 2] The system cannot find the
-    file specified" (наблюдавано на живо, 2026-08-11). Всички RUN_CMD примери
-    в config.yaml/промпта са POSIX синтаксис (&&, rm -rf, apt-get) — затова
-    предпочитаме Git Bash/WSL `bash.exe`, ако е на PATH (обичайно е на
-    Windows dev машина), и падаме на `cmd.exe /c` само ако липсва."""
+# Обичайните места на Git Bash. Нарочно ПРЕДИ `which("bash")`: на типична
+# Windows машина WindowsApps е по-рано в PATH и `which` намира WSL шима.
+_GIT_BASH_CANDIDATES = (
+    r"C:\Program Files\Git\bin\bash.exe",
+    r"C:\Program Files\Git\usr\bin\bash.exe",
+    r"C:\Program Files (x86)\Git\bin\bash.exe",
+)
+
+
+def _is_wsl_launcher(path: str) -> bool:
+    """`bash.exe` от System32/WindowsApps НЕ е обвивка на тази машина — това е
+    стартерът на WSL, тоест друга операционна система с друга файлова система
+    и друг Python."""
+    low = path.replace("/", "\\").lower()
+    return "\\windowsapps\\" in low or "\\system32\\" in low
+
+
+def _shell_works(argv0: str) -> bool:
+    """Тръгва ли изобщо тази обвивка. Проба, не разпознаване по низ."""
+    try:
+        proc = subprocess.run([argv0, "-c", "exit 0"] if argv0.endswith("bash.exe")
+                              else [argv0, "/c", "exit 0"],
+                              capture_output=True, timeout=20, check=False)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return False
+    return proc.returncode == 0
+
+
+def _windows_shell_prefix() -> list[str]:
+    """Обвивката, през която минават RUN_CMD и тестовите команди на Windows.
+
+    `/bin/sh` не съществува извън POSIX — на native Windows Python (нужен за
+    реален Ollama inference) всяка RUN_CMD гърмеше с "[WinError 2] The system
+    cannot find the file specified" (наблюдавано на живо, 2026-08-11), затова
+    се предпочита bash. Дотук обаче изборът беше просто `shutil.which("bash")`,
+    а това е грешният bash (bug found end-to-end, 2026-08-12):
+
+    На тази машина `which("bash")` връща
+    `...\\AppData\\Local\\Microsoft\\WindowsApps\\bash.EXE` — стартерът на WSL,
+    не Git Bash (който съществува, но е по-надолу в PATH). Разликата не е
+    козметична: командата се изпълнява в ДРУГА операционна система, с друга
+    файлова система и друг Python. Тестовата команда, която repo_map съставя,
+    сочи `C:/Users/.../python.exe` — път, който WSL не може да изпълни, а
+    `cwd` е Windows път, в който не може да влезе. Тоест присъдата „тестовете
+    падат" беше предрешена, независимо от кода.
+
+    Наблюдавано директно: `genesis fix` поправи median() правилно (ръчен
+    `pytest -q` → 3 passed), а run_tests върна rc=1 с UTF-16 текст от WSL:
+    "The RPC call contains a handle that differs from the declared handle
+    type. Error code: Bash/Service/0x8007072c". Това обяснява и открития
+    въпрос от 2026-08-12 („тестовата присъда не съвпадна с ръчен pytest,
+    подозрение за стар байткод") — не е байткод, а обвивката; и „минаваше
+    моменти по-късно на същата команда" пасва точно на нестабилен WSL.
+
+    Затова: изрично Git Bash, после `which("bash")` АКО не е WSL шим, после
+    `cmd.exe`. Всеки кандидат се проверява с реална проба (`exit 0`), за да
+    не се превърне счупен WSL/липсваща инсталация в „всичките ти тестове
+    падат"; резултатът се кешира.
+    """
+    global _WIN_SHELL_PREFIX
+    if _WIN_SHELL_PREFIX is not None:
+        return _WIN_SHELL_PREFIX
+    import shutil
+    candidates: list[str] = [p for p in _GIT_BASH_CANDIDATES if os.path.exists(p)]
+    found = shutil.which("bash")
+    if found and not _is_wsl_launcher(found) and found not in candidates:
+        candidates.append(found)
+    for cand in candidates:
+        if _shell_works(cand):
+            _WIN_SHELL_PREFIX = [cand, "-c"]
+            return _WIN_SHELL_PREFIX
+    _WIN_SHELL_PREFIX = ["cmd.exe", "/c"]
+    return _WIN_SHELL_PREFIX
+
+
+def _shell_argv(command: str) -> list[str]:
+    """Argv за подадената команда, портативно."""
     if os.name == "posix":
         return ["/bin/sh", "-c", command]
-    import shutil
-    bash = shutil.which("bash")
-    if bash:
-        return [bash, "-c", command]
-    return ["cmd.exe", "/c", command]
+    return [*_windows_shell_prefix(), command]
 
 
 def run_shell(command: str, *, cwd: Path | None = None,
