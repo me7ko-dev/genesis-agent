@@ -170,6 +170,106 @@
         "method": "self_test_passed",
         "detail": "OK"
       }
+    },
+    {
+      "name": "implement_a_stdlib_only_function_chunked_seq_n_t",
+      "category": "autonomous",
+      "file_path": "skills/implement_a_stdlib_only_function_chunked_seq_n_t.md",
+      "description": "Implement a stdlib-only function chunked(seq, n) that splits a sequence into lists of length n (last one may be shorter), with type hints, docstring and an assert-based self-test that prints OK.",
+      "triggers": [
+        "implement a stdlib only function chunked seq n t"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-08-12T15:25:57.441903+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      },
+      "signature": "248bfdaeedd5c4fb48b3745483a31d1cbe4b32c25a5adbebce40bc2928239e13415e2f6ebf57b3b0077b1f5596959b192fb8d471c38e05e7a30880fea718a3447f817d87a21885d4cb15b3bdbe98ca6b42cb4727a036edc3dad1d1ada6fc493e65ef9bb62b602e3845ff240953fe7045dbfda75513b6272c714579fae63f45a956e8185aa7b2df1a61e6ee7057cacff1295a7fe15ada18feab43323cd537c8a149985602b2c1f4cbdafe58ddf21e67ce1a9666c9f6e13d923635e67df723a57f3637c60c4afdbf27628c97fa20d82b8d28344493e615ae071a2e0f900ca67f268e65523241ebb3cb5b5fc5df321ba6c820f65b7139334816979e6c3a0a73c33a",
+      "extra": {
+        "rounds": 6,
+        "test_gated": true,
+        "operator": null,
+        "is_sovereign": false,
+        "red_zone_active": false
+      }
+    },
+    {
+      "name": "implement_a_stdlib_only_function_flatten_nested",
+      "category": "autonomous",
+      "file_path": "skills/implement_a_stdlib_only_function_flatten_nested.md",
+      "description": "Implement a stdlib-only function flatten(nested) that flattens an arbitrarily nested list of ints into a flat list, with type hints, docstring and an assert-based self-test that prints OK.",
+      "triggers": [
+        "implement a stdlib only function flatten nested"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-08-12T15:27:21.468246+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      },
+      "signature": "7d5bb3c0518a45a9281dcb56ac08b128818f81385861e45c0ecebe292ad4dee20ad767ff1d5ae5543d4fa22f7069602d987b5b7e3bcaa445540fc05cd843d7f62baf78a9d476f6d953e2147e0b86dd362c3876e0d5a203c5bed83e30262b78dbee090291d4af5f96d91db9069ef733f275ef45e1796b80696dbca89919c0ae2872d73387e729175e4fd0a6a922627bef9588957a268d0d2d7299b89af6cb02bcf685a72b93331a13d79db8c7824b1c33434a92e218eabe3eeaddeab6601ce805c3a56037d5287ed21326a5ff99d19f6de0a493867d97f67d909724fecfb6da00ee0fc41a5f3f39f2f7a75f360bcc3900197782a2845532b4e3ca99d45b9263b3",
+      "extra": {
+        "rounds": 1,
+        "test_gated": true,
+        "operator": null,
+        "is_sovereign": false,
+        "red_zone_active": false
+      }
+    },
+    {
+      "name": "build_a_stdlib_only_in_process_job_queue_with_re",
+      "category": "autonomous",
+      "file_path": "skills/build_a_stdlib_only_in_process_job_queue_with_re.md",
+      "description": "Build a stdlib-only in-process job queue with retry and exponential backoff, with type hints, docstring and an assert-based self-test that prints OK.",
+      "triggers": [
+        "build a stdlib only in process job queue with re"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-08-12T15:37:22.066407+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      },
+      "signature": "cb2fec521e5eb634f6e131e0018586fdee080ffe8f8be9eed335241433e8d610302d702a82d19751306a849789acf649d3f9c7abcfc2a87b96f097edf926f6dbbc750a5a7e07d42bbbcedb0e6d884fab395d7f92366247943229252ad8ce108f9a57df72ad2550b518ebc0b3bb40e13de1442e71edcb5d26073ec690e3b6265654902aefaaf4b1e85f84f2ea794d1e76977434288385a8db4ef65a9cb2fb62d151962b523d53ecb8ab2d49842ccd792cec59beb9efd2af73134dacde49244ea27523a4c144c7c126907d2fe7da3ad156cd9c0a35478381c7466f844366942ba96fe663dacc2c4377e820ff169c6e2f52a8be628fbf593d3a32e2fca878199657",
+      "extra": {
+        "rounds": 8,
+        "test_gated": true,
+        "operator": null,
+        "is_sovereign": false,
+        "red_zone_active": false
+      }
+    },
+    {
+      "name": "build_a_stdlib_only_in_process_rate_limiter_usin",
+      "category": "autonomous",
+      "file_path": "skills/build_a_stdlib_only_in_process_rate_limiter_usin.md",
+      "description": "Build a stdlib-only in-process rate limiter using a token bucket, with type hints, docstring and an assert-based self-test that prints OK.",
+      "triggers": [
+        "build a stdlib only in process rate limiter usin"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-08-12T15:47:47.662977+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      },
+      "signature": "15d6e39022e7619ac2fc0931c834f50b34d7f83007a609b7f18daffd05affd08206f2464e21bd3a38490edd4da2d8100b040c824987d977436829bf833546996177682a3f06906a58c7ff9f44e372a12f8da25ef1ffff8cac5b5950355b9af28a4cf8cb1719c9cf0d1eec691930e0c5bb246d1f447d93b19faed4b09efcdf8be7d81d60236d2dcdfb37335d59d8356c6ed5d82bce7b7c9d6b34d37bcc9099207c611ebc9bfc165b93fdde7d91a7866fea6b69192ed53ceb53d0bd54b43e23266f24a09d67fd786ec5f9b95ed83a9f4cd44d7403d2899d139d809aa2b6461561a65f3d2d658d2a4a5c84cf019be604ce0f9e6bc1ba4d708d0138f527491399c88",
+      "extra": {
+        "rounds": 7,
+        "test_gated": true,
+        "operator": null,
+        "is_sovereign": false,
+        "red_zone_active": false
+      }
     }
   ]
 }
