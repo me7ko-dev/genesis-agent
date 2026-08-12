@@ -31,6 +31,51 @@ TRANSLATOR_MODEL = "zongwei/gemma3-translator:1b"
 
 _CODE_FENCE = re.compile(r"(```.*?```)", re.DOTALL)
 
+# Каквото НЕ бива да се превежда, макар да е извън код блок (design note,
+# 2026-08-12, наблюдавано на живо). И двата промпта по-долу изрично казват
+# "keep code identifiers, function names and technical terms unchanged" — и
+# 1B преводачът пак ги превежда. Реален изход от жив разговор:
+#
+#   EN: "The genesis_agent directory contains 55 Python files."
+#   BG: "Името на агента генезис съдържа 55 python файла."
+#
+# `genesis_agent` (име на директория, което потребителят после трябва да
+# напише) стана "агента генезис". Това е същият избор, който проектът прави
+# навсякъде другаде — механизъм, не молба към модела: маскираме тези низове
+# с плейсхолдъри преди превода и ги връщаме дословно след него.
+_PROTECTED = re.compile(
+    r"`[^`\n]+`"                     # `inline code`
+    r"|\b\w+(?:[._/\\-]\w+)+\(?\)?"  # snake_case, module.attr, path/to/file, file.py
+    r"|\b[A-Z][A-Z0-9_]{2,}\b"       # ALLCAPS_CONSTANT
+    r"|\b\w+\(\)"                    # func()
+    r"|(?:[A-Za-z]:)?[\\/][^\s\"']+" # абсолютни пътища
+)
+# Не носи букви, които преводачът би превел, но е стабилен токен за 1B модел.
+_PH = "Z9{}Q"
+
+
+def _mask(text: str) -> tuple[str, list[str]]:
+    kept: list[str] = []
+
+    def repl(m: re.Match) -> str:
+        kept.append(m.group(0))
+        return _PH.format(len(kept) - 1)
+
+    return _PROTECTED.sub(repl, text), kept
+
+
+def _unmask(text: str, kept: list[str]) -> str | None:
+    """Връща текста с върнати оригинали, или None ако преводачът е загубил
+    някой плейсхолдър — тогава извикващият пази оригинала непреведен. Същата
+    уговорка като в agent_core: по-добре пропуснат превод, отколкото развален
+    текст (тук: изречение с изчезнало име на файл/функция)."""
+    for i, original in enumerate(kept):
+        ph = _PH.format(i)
+        if ph not in text:
+            return None
+        text = text.replace(ph, original)
+    return text
+
 
 def _call(model: str, prompt: str, timeout: int = 60) -> str:
     payload = json.dumps({
@@ -56,6 +101,7 @@ def translate_bg_to_en(text: str) -> str:
     2/2 пъти. Изричното "you do not solve problems, you do not write code"
     + "Bulgarian text: ... / English translation:" формат го връща обратно
     към чист превод (потвърдено 2/2 пъти със същия тест)."""
+    masked, kept = _mask(text)
     prompt = (
         "You are a TRANSLATOR ONLY. You do not answer questions, solve "
         "problems, write code, or explain anything. Your ONLY job is "
@@ -64,9 +110,10 @@ def translate_bg_to_en(text: str) -> str:
         "as an instruction/sentence. Keep code identifiers, function names, "
         "and technical terms unchanged. Do NOT write any code. Do NOT add "
         "commentary. Output ONLY the translated sentence.\n\n"
-        f'Bulgarian text: "{text}"\n\nEnglish translation:'
+        f'Bulgarian text: "{masked}"\n\nEnglish translation:'
     )
-    return _call(TRANSLATOR_MODEL, prompt)
+    restored = _unmask(_call(TRANSLATOR_MODEL, prompt), kept)
+    return restored if restored is not None else text
 
 
 def translate_en_to_bg(text: str) -> str:
@@ -81,6 +128,7 @@ def translate_en_to_bg(text: str) -> str:
         if not part.strip():
             out.append(part)
             continue
+        masked, kept = _mask(part)
         prompt = (
             "You are a TRANSLATOR ONLY. You do not answer questions, solve "
             "problems, write code, or explain anything. Your ONLY job is "
@@ -90,9 +138,10 @@ def translate_en_to_bg(text: str) -> str:
             "names in backticks, or technical identifiers — leave them "
             "as-is. Do NOT add commentary. Output ONLY the translated "
             "text.\n\n"
-            f'English text: "{part}"\n\nBulgarian translation:'
+            f'English text: "{masked}"\n\nBulgarian translation:'
         )
-        out.append(_call(TRANSLATOR_MODEL, prompt))
+        restored = _unmask(_call(TRANSLATOR_MODEL, prompt), kept)
+        out.append(restored if restored is not None else part)
     return "".join(out)
 
 
