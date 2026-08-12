@@ -329,6 +329,23 @@ def _tool_call_paths(name: str, args: dict) -> list[str]:
     return []
 
 
+def _edit_succeeded(result: str) -> bool:
+    """Дали резултатът от EDIT_FILE/WRITE_FILE отчита РЕАЛНА промяна.
+
+    `touched` се пълнеше от аргументите на извикването, тоест провалена
+    редакция (несъвпаднал anchor, отказан от sandbox запис) се броеше за
+    променен файл (bug found end-to-end, 2026-08-12). Две последствия, и
+    второто е същественото:
+      • финалният отчет изброяваше файлове като „променени", които не са;
+      • `_nudge_if_stalled` мълчи, щом `touched` не е празен — значи един
+        ПРОВАЛЕН EDIT_FILE изключваше подсещането „стига четене, действай"
+        за остатъка от ремонта, точно когато моделът има най-голяма нужда
+        от него, защото още не е променил нищо.
+    genesis_skills слага "✓" при успех и "❌" при отказ и в двата инструмента.
+    """
+    return "✓" in (result or "")
+
+
 def _relative(root: Path, path_str: str) -> str:
     p = Path(path_str)
     if not p.is_absolute():
@@ -408,7 +425,8 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
                         args = {}
                     say(f"  ⚙️  {name} {str(args.get('path') or args.get('pattern') or args.get('command') or '')[:70]}")
                     result = genesis_skills.dispatch_tool_call(name, args)
-                    touched += [_relative(root, p) for p in _tool_call_paths(name, args)]
+                    if _edit_succeeded(result):
+                        touched += [_relative(root, p) for p in _tool_call_paths(name, args)]
                     messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                                      "content": result[:_MAX_TOOL_OUTPUT]})
                 messages = _compact_history(messages)
@@ -470,6 +488,21 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
     finally:
         genesis_skills.set_workspace(prev_workspace)
 
+    # Финален тестов пас, ако цикълът е свършил, без нито веднъж да е стигнал
+    # до run_tests (bug found end-to-end, 2026-08-12). `after` се инициализира
+    # като `before`, а run_tests се вика САМО в клона „моделът не върна tool
+    # call". Модел, който изразходва целия бюджет от рундове по tool calls —
+    # напълно нормално: REPO_MAP → READ_FILE → GLOB → EDIT_FILE → RUN_CMD са
+    # вече пет — излизаше оттук с присъда, изчислена от състоянието ОТПРЕДИ
+    # промяната. Наблюдавано на живо: поправката беше приложена и вярна,
+    # тестовете минаваха, а инструментът каза „НЕ е поправено" и посъветва
+    # `--revert`, тоест да изхвърлиш работеща поправка. За подсистема, чийто
+    # пръв принцип е „ТЕСТОВЕТЕ СА ПРИСЪДАТА", присъда по остарели данни е
+    # по-лоша от липсваща.
+    if touched and after is before and cmd:
+        say("🧪 Рундовете свършиха — пускам тестовете за финална присъда…")
+        after = run_tests(root, cmd)
+
     diff = project_diff(root, checkpoint, touched)
     files = sorted(set(touched))
 
@@ -494,6 +527,8 @@ def _paths_from_tag_results(root: Path, results: list[str]) -> list[str]:
     out: list[str] = []
     for r in results:
         head = r.splitlines()[0] if r else ""
+        if not _edit_succeeded(head):
+            continue  # виж _edit_succeeded — отказана редакция не е промяна
         for tag in ("[EDIT_FILE: ", "[WRITE_FILE: "):
             if head.startswith(tag) and "]" in head:
                 out.append(_relative(root, head[len(tag):head.index("]")]))

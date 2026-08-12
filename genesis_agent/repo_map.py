@@ -26,6 +26,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -171,14 +172,35 @@ def search_code(pattern: str, path: str | Path = ".", glob: str | None = None,
 
 # ── Project shape ────────────────────────────────────────────────────────────
 
+def _python_cmd() -> str:
+    """Как да извикаме СЪЩИЯ интерпретатор, на който върви Genesis.
+
+    Не голото "python3" (bug found end-to-end, 2026-08-12). На Windows това име
+    сочи към Microsoft Store alias-а / Python install manager-а — различен
+    интерпретатор от този, който изпълнява Genesis, обикновено без pytest в
+    него. Наблюдавано на живо: `genesis fix` поправи бъга ПРАВИЛНО, после пусна
+    `python3 -m pytest -q`, което задейства install manager-а („Downloading…"),
+    върна код 1 и репортва „тестовете още падат" — при вече минаващи тестове.
+    А „тестовете са присъдата" е основният принцип на repo_agent, тоест
+    подсистемата не можеше да отчете успех на тази машина изобщо.
+
+    Наклонените черти стават прави, защото командата се подава на shell
+    (виж sandbox._shell_argv, който на Windows предпочита bash) — там
+    обратната наклонена черта е escape знак. Windows приема и двата вида.
+    """
+    exe = sys.executable or "python3"
+    exe = exe.replace("\\", "/")
+    return f'"{exe}"' if " " in exe else exe
+
+
 # Ordered: the first match wins, so a Python project that also carries a
 # package.json for its docs site is still tested with pytest.
 _TEST_RULES: list[tuple[str, str, str]] = [
     # (marker file, language, test command)
-    ("pytest.ini", "python", "python3 -m pytest -q"),
-    ("tox.ini", "python", "python3 -m pytest -q"),
-    ("pyproject.toml", "python", "python3 -m pytest -q"),
-    ("setup.py", "python", "python3 -m pytest -q"),
+    ("pytest.ini", "python", f"{_python_cmd()} -m pytest -q"),
+    ("tox.ini", "python", f"{_python_cmd()} -m pytest -q"),
+    ("pyproject.toml", "python", f"{_python_cmd()} -m pytest -q"),
+    ("setup.py", "python", f"{_python_cmd()} -m pytest -q"),
     ("Cargo.toml", "rust", "cargo test"),
     ("go.mod", "go", "go test ./..."),
     ("package.json", "javascript", "npm test"),

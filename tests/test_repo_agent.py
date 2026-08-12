@@ -153,3 +153,74 @@ def test_stall_nudge_fires_only_after_rounds_without_edits() -> None:
     assert repo_agent._nudge_if_stalled(msgs, ["stats.py"], 9) is False
     assert repo_agent._nudge_if_stalled(msgs, [], repo_agent._STALL_ROUNDS) is True
     assert "НИТО ЕДНА промяна" in msgs[-1]["content"]
+
+
+class TestVerdictIsNeverStale:
+    """Found by running `genesis fix` against a real broken project
+    (2026-08-12). run_tests() was only reached in the "model returned no tool
+    calls" branch, while `after` started life as `before`. A model that spends
+    its whole round budget on tool calls — REPO_MAP, READ_FILE, GLOB,
+    EDIT_FILE, RUN_CMD is already five — left the loop with a verdict computed
+    from the state BEFORE its changes. Observed live: the fix was applied and
+    correct, the tests passed, and the tool answered "НЕ е поправено" and
+    recommended --revert, i.e. throw the working fix away. For a subsystem
+    whose first principle is "THE TESTS ARE THE VERDICT", a verdict from stale
+    data is worse than none.
+    """
+
+    def test_tests_are_rerun_when_the_loop_ends_without_a_verdict(
+        self, project, monkeypatch
+    ) -> None:
+        runs: list[str] = []
+
+        def _fake_run_tests(root, command):
+            runs.append(command)
+            # Red before any change, green once something has been touched.
+            passed = len(runs) > 1
+            return repo_agent.TestRun(ran=True, passed=passed, output="", command=command)
+
+        monkeypatch.setattr(repo_agent, "run_tests", _fake_run_tests)
+        # A brain that only ever makes tool calls, never a plain reply.
+        class _ToolOnlyBrain:
+            def __init__(self, *a, **kw) -> None:
+                pass
+
+            def complete(self, messages, tools=None):
+                return type("R", (), {
+                    "raw_text": "",
+                    "tool_calls": [{"id": "1", "function": {
+                        "name": "EDIT_FILE",
+                        "arguments": '{"path": "stats.py", "old": "a", "new": "b"}'}}],
+                })()
+
+        monkeypatch.setattr(repo_agent, "Brain", _ToolOnlyBrain)
+        monkeypatch.setattr("genesis_skills.dispatch_tool_call",
+                            lambda name, args: "[EDIT_FILE: stats.py] ✓ 1 замяна")
+
+        out = repo_agent.repair(str(project), "fix it", max_rounds=2)
+
+        # Two calls: the "before" baseline and the final verdict pass.
+        assert len(runs) == 2, "the tests must be re-run once the rounds are spent"
+        assert out.success is True
+
+
+class TestTouchedTracksRealChanges:
+    """A refused edit is not a change. `touched` was filled from the tool's
+    ARGUMENTS, so a failed EDIT_FILE counted as one — which also silenced
+    _nudge_if_stalled (it only nudges while `touched` is empty), removing the
+    "stop reading, act" push exactly when the model still had not changed
+    anything."""
+
+    def test_a_failed_edit_is_not_counted_as_a_change(self) -> None:
+        assert repo_agent._edit_succeeded("[EDIT_FILE: a.py] ❌ Anchor-ът не е намерен") is False
+
+    def test_a_successful_edit_is_counted(self) -> None:
+        assert repo_agent._edit_succeeded("[EDIT_FILE: a.py] ✓ 1 замяна, +2/-1 реда") is True
+
+    def test_tag_results_ignore_refused_edits(self, project) -> None:
+        results = [
+            "[EDIT_FILE: stats.py] ❌ Anchor-ът не е намерен в stats.py",
+            "[WRITE_FILE: notes.md] ✓ записани 12 символа",
+        ]
+        paths = repo_agent._paths_from_tag_results(project, results)
+        assert paths == ["notes.md"]
