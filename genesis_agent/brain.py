@@ -467,27 +467,73 @@ class Brain:
 
         self.current = (self.chain[0] if self.chain else None) or self.local
 
+    def _on_local_tier(self) -> bool:
+        """Дали `self.current` реално сочи локалния модел точно сега."""
+        if self.local is None or not isinstance(self.current, dict):
+            return False
+        return (self.current is self.local
+                or (self.current.get("provider") == self.local.get("provider")
+                    and self.current.get("model") == self.local.get("model")))
+
+    def _set_local(self, model: str) -> None:
+        """Сменя локалния tier. `self.current` се пренасочва САМО ако мисията
+        реално върви на локалния модел в момента (виж `escalate`)."""
+        was_local = self._on_local_tier() or self.current is None
+        self.local = {"provider": "ollama_local", "model": model}
+        if was_local:
+            self.current = self.local
+
     def route_for_goal(self, goal: str) -> None:
         """Адаптивно избира локалния модел според сложността на задачата."""
         try:
             from genesis_agent.model_router import pick_model
             m = pick_model(goal)
             if m:
-                self.local = {"provider": "ollama_local", "model": m}
-                self.current = self.local
+                self._set_local(m)
         except Exception as e:
             log.debug("route_for_goal: model_router недостъпен, местният модел остава по подразбиране: %s", e)
 
     def escalate(self) -> bool:
-        """Качва локалния мозък на следващия по-голям НАЛИЧЕН модел. True ако е сменен."""
+        """Качва ЛОКАЛНИЯ мозък на следващия по-голям НАЛИЧЕН модел. True ако е сменен.
+
+        Само локалния tier — облачната верига се качва през отделния
+        `escalate_to_coding_chain()`. Затова и `self.current` се пренасочва
+        само когато мисията РЕАЛНО върви на локалния модел.
+
+        Бъг, хванат на живо (2026-08-12, проследена мисия): `self.current` се
+        пренасочваше безусловно, така че мисия на `ollama_cloud/gpt-oss:120b-
+        cloud` при първия провален рунд печаташе "⬆️ Ескалация към по-голям
+        модел: qwen2.5-coder:7b-instruct-q3_K_M" — 120B облачен модел, "качен"
+        до локален 7B. Самата маршрутизация не се променяше (`complete()`
+        винаги обхожда веригата отгоре и презаписва `current` при успех), но
+        два реални консуматора четат `brain.current` МЕЖДУ два `complete()`
+        разговора:
+          • `autonomous_loop._note_quality_failure` записва провала на
+            качеството срещу `current["provider"]` — тоест срещу
+            "ollama_local" вместо срещу облачния доставчик, който наистина е
+            написал лошия код (точно обратното на целта: деприоритизира
+            здравия и оставя проблемния недокоснат);
+          • критикът подава `avoid=writer_pair` от `current`, за да не си
+            рецензира собствената работа — сгрешена двойка изключва невинен
+            модел и оставя истинския автор да се самооцени.
+        Плюс операторът чете лъжлив ред в лога за нещо, което не се е случило.
+        """
         try:
             from genesis_agent.model_router import next_tier_model
             cur = self.local["model"] if self.local else None
             nxt = next_tier_model(cur)
             if nxt and nxt != cur:
-                self.local = {"provider": "ollama_local", "model": nxt}
-                self.current = self.local
-                print(f"  [Brain] ⬆️ Ескалация към по-голям модел: {nxt}")
+                on_local = self._on_local_tier()
+                self._set_local(nxt)
+                if on_local:
+                    print(f"  [Brain] ⬆️ Ескалация към по-голям модел: {nxt}")
+                else:
+                    # Не сме на локалния tier — само подготвяме по-силна резерва
+                    # за евентуален fallback; нищо в текущия рунд не се сменя,
+                    # затова и не се обявява като ескалация пред оператора.
+                    log.debug("escalate: локалната резерва вдигната до %s "
+                              "(мисията върви на %s — маршрутът не се пипа)",
+                              nxt, self.current)
                 return True
         except Exception as e:
             log.debug("escalate: model_router недостъпен, оставам на текущия модел: %s", e)
