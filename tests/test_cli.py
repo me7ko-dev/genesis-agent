@@ -101,10 +101,30 @@ def test_discord_delegates_to_discord_bot_main(monkeypatch) -> None:
 
 class TestGuiVoiceMissingScript:
     def test_missing_gui_script_prints_clone_hint_and_returns_1(self, monkeypatch, tmp_path, capsys) -> None:
+        # Exercises the "script not found" branch specifically — the
+        # Windows platform gate (tested below) sits in front of it and
+        # would otherwise short-circuit this on a Windows test runner.
+        monkeypatch.setattr("sys.platform", "linux")
         monkeypatch.setattr("genesis_agent.paths.PACKAGE_DIR", tmp_path)
         rc = cli_mod.main(["gui"])
         assert rc == 1
         assert "git clone" in capsys.readouterr().out
+
+
+class TestGuiVoiceWindowsGate:
+    @pytest.mark.parametrize("cmd", ["gui", "voice"])
+    def test_gated_with_a_friendly_message_instead_of_a_raw_import_error(
+        self, monkeypatch, cmd, capsys
+    ) -> None:
+        # Both frontends hard-depend on GTK4/libadwaita, which has no
+        # Windows build — without this gate the failure users actually hit
+        # is a raw ModuleNotFoundError deep inside a third-party import.
+        monkeypatch.setattr("sys.platform", "win32")
+        rc = cli_mod.main([cmd])
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert "GTK4" in out
+        assert "genesis" in out  # points at the terminal chat as the alternative
 
 
 class TestFixArgParsing:

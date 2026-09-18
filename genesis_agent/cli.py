@@ -156,6 +156,17 @@ def main(argv: list[str] | None = None) -> int:
         return _fix(argv[1:])
 
     if cmd in ("gui", "voice"):
+        # Both frontends hard-depend on GTK4/libadwaita (`import gi`), and
+        # `voice` additionally shells out to `arecord` (ALSA) — Linux-desktop
+        # tooling with no Windows build, unlike the other optional extras.
+        # Without this gate the failure is a raw ModuleNotFoundError deep in
+        # a third-party import, not an actionable message.
+        if sys.platform == "win32":
+            print(f"`genesis {cmd}` изисква GTK4/libadwaita, налични само на Linux "
+                  f"работен плот — няма Windows версия.\n"
+                  f"Ползвай терминалния чат (`genesis`) вместо това, или го пусни през WSL.")
+            return 1
+
         import runpy
 
         from genesis_agent.paths import PACKAGE_DIR
