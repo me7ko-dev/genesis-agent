@@ -7,10 +7,26 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.10", "3.12"]
+        include:
+          # One Windows leg is enough to catch platform regressions (path
+          # handling, console encoding, permission-model assumptions) — the
+          # kind of bug that has repeatedly slipped in silently because this
+          # matrix never ran anywhere but Linux.
+          - os: windows-latest
+            python-version: "3.12"
+    # windows-latest defaults `run:` steps to pwsh, which can't parse this
+    # file's bash syntax (if/grep/heredoc-style blocks below). Force Git
+    # Bash — present on every GitHub-hosted Windows runner — everywhere so
+    # the same steps run unmodified on both platforms.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
