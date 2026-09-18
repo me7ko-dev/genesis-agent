@@ -40,7 +40,12 @@ jobs:
           # tests/test_cryptography_utils.py actually run instead of silently
           # skipping via pytest.importorskip.
           pip install -e .[dev,discord,signing]
-          pip install mypy ruff
+          # Pinned: this step exists to gate a "0 findings" claim, and an
+          # unpinned tool version silently re-breaking that claim on its own
+          # release schedule is exactly the drift it was added to prevent.
+          # Bump deliberately, in the same commit that fixes whatever the
+          # new version flags.
+          pip install mypy==2.3.1 ruff==0.16.8
 
       - name: Everything imports and compiles
         run: |
