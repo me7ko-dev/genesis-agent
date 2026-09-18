@@ -861,6 +861,9 @@ def _sandbox_dir() -> Path:
 # Бърз self-check (dry-run на образците, без реално изпълнение)
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    from genesis_agent.paths import ensure_utf8_streams
+    ensure_utf8_streams()
+
     samples = [
         ("echo hello", RiskLevel.SAFE),
         ("ls -la /tmp", RiskLevel.SAFE),

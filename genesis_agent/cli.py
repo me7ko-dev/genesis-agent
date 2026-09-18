@@ -109,24 +109,9 @@ def _fix(args: list[str]) -> int:
     return 0 if out.success else 1
 
 
-def _fix_console_encoding() -> None:
-    """
-    A default Windows console is cp1251/cp866, not UTF-8, so the first
-    Cyrillic or emoji character this CLI prints (before a user has even seen
-    a prompt) crashes with UnicodeEncodeError. Force UTF-8 on stdout/stderr;
-    harmless on platforms where they are already UTF-8.
-    """
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is not None:
-            try:
-                reconfigure(encoding="utf-8", errors="replace")
-            except (ValueError, OSError):
-                pass
-
-
 def main(argv: list[str] | None = None) -> int:
-    _fix_console_encoding()
+    from genesis_agent.paths import ensure_utf8_streams
+    ensure_utf8_streams()
     argv = list(sys.argv[1:] if argv is None else argv)
     cmd = argv[0] if argv else "chat"
 

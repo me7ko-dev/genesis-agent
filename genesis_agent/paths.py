@@ -19,6 +19,7 @@ files are gitignored.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 # The package itself: .../genesis_agent/
@@ -46,6 +47,24 @@ ENV_FILES: tuple[str, ...] = (
     str(PROJECT_ROOT / ".env"),
     str(ENV_FILE),
 )
+
+
+def ensure_utf8_streams() -> None:
+    """
+    A default Windows console is cp1251/cp866, not UTF-8, so the first
+    Cyrillic or emoji character any entrypoint prints crashes with
+    UnicodeEncodeError — before the user has even seen a prompt. Every
+    standalone entrypoint (the `genesis` CLI, `python -m genesis_agent.sandbox`,
+    ...) should call this first. No-op on platforms where the streams are
+    already UTF-8.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
 
 
 def workspace_dir() -> Path:
