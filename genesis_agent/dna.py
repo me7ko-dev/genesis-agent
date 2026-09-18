@@ -95,8 +95,16 @@ def is_sovereign_operator(name: str | None) -> bool:
 
 
 def validate_code_before_execution(code: str) -> str | None:
+    """Returns a reason string when blocked, None when clear — never raises.
+
+    Its two callers (executor.run_python_subprocess/_inprocess) convert a
+    truthy return into a graceful ExecResult(ok=False, ...); this used to
+    raise GenesisDNAError instead, which the return type never promised and
+    which neither caller caught — an uncaught exception straight out of a
+    mission's code-execution step instead of the intended failure result
+    (bug found writing executor tests, 2026-09-18)."""
     if "HKEY_" in code and not red_zone_elevation_granted():
-        raise GenesisDNAError("GENE-SECURITY: Red Zone access locked.")
+        return "GENE-SECURITY: Red Zone access locked."
     return None
 
 
