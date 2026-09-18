@@ -381,7 +381,13 @@ def run() -> int:
         lines += [f"{k}={v}" for k, v in preserved.items()]
     _write_private(ENV_FILE, "\n".join(lines) + "\n")
 
-    print(f"  ✅ Записано в {ENV_FILE} (права 600 — само ти можеш да го четеш)")
+    # chmod(0o600) is a real, enforced permission on POSIX. On Windows it is
+    # a no-op — NTFS has no POSIX mode bits — so claiming "600" there would
+    # be a false promise; the file is only as private as the user's own
+    # profile/ACLs, same as any other file under %USERPROFILE%.
+    perms = ("права 600 — само ти можеш да го четеш" if sys.platform != "win32"
+             else "защитен от твоя Windows профил, както всеки друг файл в него")
+    print(f"  ✅ Записано в {ENV_FILE} ({perms})")
     print(f"  {working} работещи доставчика.\n")
     print("  Пусни агента:   genesis\n")
     return 0

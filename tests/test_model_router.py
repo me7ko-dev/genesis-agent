@@ -5,6 +5,8 @@ routing logic, not a peripheral feature.
 """
 from __future__ import annotations
 
+import pytest
+
 import genesis_agent.model_router as mr
 
 
@@ -90,6 +92,15 @@ class TestPickModel:
 
 
 class TestNextTierModel:
+    @pytest.fixture(autouse=True)
+    def _fixed_tiers(self, monkeypatch) -> None:
+        # LOCAL_TIERS is read from GENESIS_TIER0/1/2 env vars at import time.
+        # A dev machine with those exported can end up with duplicate
+        # entries in the real list, which breaks the .index()-based lookup
+        # these tests assume is unambiguous. Pin a known, distinct set
+        # instead of trusting whatever the environment happens to hold.
+        monkeypatch.setattr(mr, "LOCAL_TIERS", ["tier-a", "tier-b", "tier-c"])
+
     def test_escalates_to_the_next_available_tier(self, monkeypatch) -> None:
         monkeypatch.setattr(mr, "available_tiers", lambda: [True, True, True])
         assert mr.next_tier_model(mr.LOCAL_TIERS[0]) == mr.LOCAL_TIERS[1]

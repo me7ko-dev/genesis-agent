@@ -9,6 +9,7 @@ worse, tells them a dead key is fine.
 from __future__ import annotations
 
 import stat
+import sys
 
 import pytest
 
@@ -151,6 +152,11 @@ class TestWritePrivate:
         sw._write_private(p, "HELLO=world\n")
         assert p.read_text(encoding="utf-8") == "HELLO=world\n"
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="NTFS has no POSIX mode bits — os.chmod(0o600) is not meaningfully "
+               "enforceable there, it is a real platform difference, not a bug.",
+    )
     def test_file_is_owner_only_readable(self, tmp_path) -> None:
         p = tmp_path / "secret.env"
         sw._write_private(p, "x")

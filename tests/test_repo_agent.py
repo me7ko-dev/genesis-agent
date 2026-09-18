@@ -8,11 +8,18 @@ the loop is not simulated — a fake model proves nothing about a real one.
 """
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from genesis_agent import repo_agent
 
 SRC = "def median(v):\n    return sorted(v)[len(v) // 2]\n"
+
+# `python3` is not guaranteed to exist under that name (Windows ships `python`
+# / the `py` launcher, not `python3`). Use the interpreter actually running
+# these tests, quoted for paths containing spaces.
+_PYTEST_CMD = f'"{sys.executable}" -m pytest -q'
 
 
 @pytest.fixture
@@ -80,12 +87,12 @@ def test_snapshot_skips_dependency_dirs(project) -> None:
 def test_run_tests_reports_pass_and_fail(project) -> None:
     (project / "tests" / "test_ok.py").write_text("def test_x():\n    assert True\n",
                                                   encoding="utf-8")
-    good = repo_agent.run_tests(project, "python3 -m pytest -q")
+    good = repo_agent.run_tests(project, _PYTEST_CMD)
     assert good.ran and good.passed
 
     (project / "tests" / "test_bad.py").write_text("def test_y():\n    assert False\n",
                                                    encoding="utf-8")
-    bad = repo_agent.run_tests(project, "python3 -m pytest -q")
+    bad = repo_agent.run_tests(project, _PYTEST_CMD)
     assert bad.ran and not bad.passed
     assert "test_y" in bad.output
 
