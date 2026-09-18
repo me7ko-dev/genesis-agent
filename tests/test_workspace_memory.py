@@ -235,6 +235,20 @@ class TestAutoCapture:
         messages = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
         assert wm.auto_capture(messages) == {"decisions": 0, "preferences": 0, "threads": 0}
 
+    def test_extraction_failure_is_logged_not_silent(self, monkeypatch, caplog) -> None:
+        """A real failure (model down, rate-limited, bad JSON) must be
+        distinguishable from "genuinely nothing new to remember" — both
+        return zero counts, but only one of them should leave a trace."""
+        def _boom(self, messages):
+            raise RuntimeError("provider down")
+
+        monkeypatch.setattr("genesis_agent.brain.Brain.complete", _boom)
+        messages = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
+        with caplog.at_level("WARNING", logger="genesis.workspace_memory"):
+            wm.auto_capture(messages)
+        assert "auto_capture" in caplog.text
+        assert "provider down" in caplog.text
+
 
 class TestStaleThreadsAndCloseThread:
     def test_stale_threads_lists_only_old_ones(self) -> None:

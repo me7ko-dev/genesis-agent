@@ -21,11 +21,14 @@ KV реда. Нищо за това какво реално работи пот�
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
 from genesis_agent.config import DATA_DIR
+
+log = logging.getLogger("genesis.workspace_memory")
 
 DB_PATH = DATA_DIR / "workspace_memory.db"
 
@@ -356,6 +359,11 @@ def auto_capture(messages: list[dict], max_chars: int = 6000) -> dict:
             return written
         data = _json.loads(raw[start:end + 1])
     except Exception:
+        # A real failure here (model unreachable, rate-limited, bad JSON)
+        # looks identical to "genuinely nothing new to remember" without
+        # this — the only user-visible symptom was the absence of a line
+        # in the session summary. Log it so the two are distinguishable.
+        log.warning("auto_capture: extraction failed, nothing written this round", exc_info=True)
         return written
 
     try:
@@ -372,7 +380,8 @@ def auto_capture(messages: list[dict], max_chars: int = 6000) -> dict:
                 add_thread(t["title"], t.get("next_step", ""))
                 written["threads"] += 1
     except Exception:
-        pass
+        log.warning("auto_capture: writing extracted memory failed partway through "
+                    "(written so far: %r)", written, exc_info=True)
     return written
 
 
