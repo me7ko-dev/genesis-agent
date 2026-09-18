@@ -69,7 +69,11 @@ def env_facts(workspace: str = "") -> str:
     четат от XDG (user-dirs.dirs), защото на локализирана система "Desktop"
     може да е "Работен плот" — жестоко закованото `~/Desktop` би било грешно.
     """
-    home = Path.home()
+    # Path.home() ignores $HOME on Windows (it reads USERPROFILE instead), so
+    # an explicit HOME override — the standard way to redirect a program's
+    # home directory, including in this project's own tests — silently had
+    # no effect there. Respect HOME when set, on every platform.
+    home = Path(os.environ["HOME"]) if os.environ.get("HOME") else Path.home()
     dirs = {"DESKTOP": home / "Desktop", "DOWNLOAD": home / "Downloads",
             "DOCUMENTS": home / "Documents", "PICTURES": home / "Pictures",
             "MUSIC": home / "Music", "VIDEOS": home / "Videos"}
