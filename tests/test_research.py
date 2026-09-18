@@ -8,6 +8,7 @@ search results or a real model.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import ClassVar
 
 import genesis_agent.research as rs
 
@@ -125,7 +126,7 @@ class TestUnreachableModelIsNotDressedUpAsVerified:
     for the difference between verified and merely verified-looking.
     """
 
-    _SOURCES = [
+    _SOURCES: ClassVar = [
         {"title": "A", "url": "https://a.example", "snippet": "text a"},
         {"title": "B", "url": "https://b.example", "snippet": "text b"},
     ]

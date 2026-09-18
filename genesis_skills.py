@@ -161,7 +161,7 @@ def _tool_read_file(arg: str, offset=None, limit=None) -> str:
         numbered = [f"{i:>5}\t{ln}" for i, ln in enumerate(lines[start:end], start + 1)]
         chunk = "\n".join(numbered)
         if len(chunk) > 8000:
-            chunk = chunk[:8000] + f"\n… [отрязано, диапазонът е по-голям от 8000 символа]"
+            chunk = chunk[:8000] + "\n… [отрязано, диапазонът е по-голям от 8000 символа]"
         _log_episode(f"READ_FILE {path}", "прочетен (диапазон)", ["tool", "read_file"])
         return (f"[READ_FILE: {path}]  (редове {start + 1}-{min(end, len(lines))} от {len(lines)})\n"
                 + chunk)
@@ -638,7 +638,7 @@ def _safe_tool(name: str, fn: Callable[..., str], *args) -> str:
     """
     try:
         return fn(*args)
-    except Exception as e:  # noqa: BLE001 — точно това е гаранцията
+    except Exception as e:
         return f"[{name}] Грешка при изпълнение: {e}"
 
 

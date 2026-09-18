@@ -25,7 +25,7 @@ def _isolated_keys(tmp_path_factory, monkeypatch):
     """save_skill() now signs with cryptography_utils — redirect its key
     storage to a throwaway directory so tests never touch the real
     ~/.genesis/private_key.pem, same isolation as test_cryptography_utils.py."""
-    cryptography = pytest.importorskip("cryptography")
+    pytest.importorskip("cryptography")
     from genesis_agent import cryptography_utils as cu
     key_dir = tmp_path_factory.mktemp("keys")
     monkeypatch.setattr(cu, "KEY_DIR", key_dir)

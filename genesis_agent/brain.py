@@ -1203,6 +1203,7 @@ class Brain:
                 raw_text, _tc = self._call(self.local["provider"], model, trimmed,
                                            extra={"temperature": temp})
             except Exception:
+                log.debug("ensemble candidate %s failed, skipping it", model, exc_info=True)
                 continue
             if not raw_text or not raw_text.strip():
                 continue

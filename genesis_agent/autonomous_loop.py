@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from genesis_agent import dna
+from genesis_agent import dna, provider_stats
 from genesis_agent.brain import Brain
 from genesis_agent.config import MAX_LLM_RETRIES, PROJECT_ROOT
 from genesis_agent.executor import format_failure_for_brain, run_python_subprocess
@@ -14,7 +14,6 @@ from genesis_agent.local_repair_agent import emergency_repair
 from genesis_agent.skill_loader import SKILLS_ROOT
 from genesis_agent.skills_manager import save_skill, slugify
 from genesis_agent.storage_monitor import check_storage, human_gb
-from genesis_agent import provider_stats
 from genesis_agent.tool_schemas import MISSION_TOOLS
 
 # Колко ДОПЪЛНИТЕЛНИ кандидата (отвъд първия опит) да генерираме от локалния

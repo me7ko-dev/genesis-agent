@@ -424,7 +424,7 @@ def call_openai_compatible(messages, provider_key, model_id, tools=None):
                 from genesis_agent.brain import _is_truncated
                 if _is_truncated(content):
                     raise RuntimeError(
-                        f"HTTP_TRUNCATED: отговорът е отрязан на тавана от 2048 "
+                        "HTTP_TRUNCATED: отговорът е отрязан на тавана от 2048 "
                         "токена, посред код-ограда (finish_reason=length)."
                     )
             return content, (message.get("tool_calls") or None)

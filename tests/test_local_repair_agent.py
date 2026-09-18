@@ -7,8 +7,6 @@ genesis_agent.sandbox in deny mode (it used to shell out to a bare
 production path, fixed 2026-08-12, see TestTestCodeGoesThroughSandbox)."""
 from __future__ import annotations
 
-import pytest
-
 from genesis_agent.local_repair_agent import LocalRepairAgent, PatternFixer, TinyLLM
 
 
