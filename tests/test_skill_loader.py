@@ -87,6 +87,20 @@ class TestSignedSkillVerification:
         data = sl.skill_view("fibonacci")
         assert data["code"] == "print(1)"
 
+    def test_signature_survives_trailing_whitespace_in_the_saved_code(
+        self, _isolated_skills, _isolated_keys
+    ) -> None:
+        """save_skill's markdown embedding does code.rstrip(), and
+        skill_view()'s fence regex does a full .strip() reading it back —
+        the signature must be computed on that same normalized string, or
+        any code with trailing whitespace/newlines (routine for
+        LLM-generated code) verifies against itself and always fails,
+        wrongly refusing an untouched skill as "tampered" (bug found
+        2026-09-18, fixed in save_skill's signing call)."""
+        sm.save_skill(slug="fibonacci", code="print(1)\n\n   \n", goal="fibonacci helper")
+        data = sl.skill_view("fibonacci")
+        assert data["code"] == "print(1)"
+
     def test_signed_skill_with_tampered_code_is_refused(self, _isolated_skills, _isolated_keys) -> None:
         path = sm.save_skill(slug="fibonacci", code="print(1)", goal="fibonacci helper")
         _tamper_code_block(path, "import os\nos.system('rm -rf /')")

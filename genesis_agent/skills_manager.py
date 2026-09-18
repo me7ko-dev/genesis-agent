@@ -188,7 +188,15 @@ def save_skill(
         signature = ""
         try:
             from genesis_agent.cryptography_utils import sign_code
-            signature = sign_code(code)
+            # Sign the SAME string skill_view() will later verify against,
+            # not the caller's raw `code` — _build_md above embeds
+            # code.rstrip(), and skill_view()'s fence regex does a full
+            # .strip() on read. Signing the unnormalized original meant any
+            # skill whose code had trailing whitespace (routine for
+            # LLM-generated code) got a signature that could never verify,
+            # wrongly refusing an untouched skill as "tampered" (bug found
+            # writing skills_api tests, 2026-09-18).
+            signature = sign_code(code.strip())
         except Exception:
             pass
 
