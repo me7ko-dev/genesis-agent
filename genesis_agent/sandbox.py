@@ -374,6 +374,21 @@ def _describe_paths(paths: list[Path], limit: int = 8) -> str:
     return f"{len(paths)} {noun} от {src} → {', '.join(names)}{tail}"
 
 
+def _shlex_split_for_classification(seg: str) -> list[str]:
+    """
+    shlex.split() defaults to POSIX mode, where backslash is an escape
+    character. On Windows that mangles native paths like C:\\Users\\x.txt
+    (`\\U`, `\\x` etc. get eaten), which silently defeats the existing-file
+    overwrite check below — a destructive `mv` onto a real file gets
+    classified SAFE instead of CONFIRM. Windows accepts forward slashes in
+    paths too, so normalize before splitting; this string is only used for
+    classification here, never executed.
+    """
+    if os.name == "nt":
+        seg = seg.replace("\\", "/")
+    return shlex.split(seg)
+
+
 def _assess_file_ops(command: str, cwd: Path | None = None) -> RiskVerdict:
     """Структурна оценка на файлови операции + РАЗГЪНАТ преглед кои файлове
     реално ще бъдат засегнати. Виж коментара при _DESTRUCTIVE_MOVE_CMDS."""
@@ -387,7 +402,7 @@ def _assess_file_ops(command: str, cwd: Path | None = None) -> RiskVerdict:
 
     for seg in _split_segments(command):
         try:
-            argv = shlex.split(seg)
+            argv = _shlex_split_for_classification(seg)
         except ValueError:  # неуравновесени кавички — не гадаем
             continue
         if not argv:
