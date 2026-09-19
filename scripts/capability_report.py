@@ -34,7 +34,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from genesis_agent import claim_check  # noqa: E402
+from genesis_agent import claim_check
 
 
 @dataclass
