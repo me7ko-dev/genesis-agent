@@ -531,8 +531,11 @@ def _run_autonomous_loop_impl(
             # слепите петна на първото. brain.current още сочи towards писателя тук
             # (нищо не го е сменило между генерирането на кода и този ред).
             writer = getattr(brain, "current", None)
-            writer_pair = ((writer.get("provider"), writer.get("model"))
-                           if isinstance(writer, dict) and writer.get("provider") else None)
+            writer_pair: tuple[str, str] | None = None
+            if isinstance(writer, dict):
+                w_provider, w_model = writer.get("provider"), writer.get("model")
+                if isinstance(w_provider, str) and isinstance(w_model, str):
+                    writer_pair = (w_provider, w_model)
             critic_eval = brain.complete(critic_msg, avoid=writer_pair).raw_text.strip()
 
             if critic_eval.upper().startswith("NO"):
@@ -641,20 +644,20 @@ def _run_autonomous_loop_impl(
         # - т.е. НУЛЕВА верификация - и после се преизползва от бъдещи мисии през
         # RAG (Brain.build_context), пренасяйки бъга нататък. Минава през СЪЩИЯ
         # sandbox verify_skill гейт като нормалния успешен path по-горе.
+        from genesis_agent.verifier import verify_skill
         repair_verified = False
-        vres = None
+        repair_vres = None
         if repair.fixed:
-            from genesis_agent.verifier import verify_skill
-            vres = verify_skill(repair.code)
-            repair_verified = vres.verified
+            repair_vres = verify_skill(repair.code)
+            repair_verified = repair_vres.verified
             if not repair_verified:
                 print(f"  [РЕМОНТ ОТХВЪРЛЕН] Поправеният код не мина verify_skill "
-                      f"({vres.method}) - вероятно маскира грешката вместо да я "
+                      f"({repair_vres.method}) - вероятно маскира грешката вместо да я "
                       "поправя; НЕ се записва в библиотеката непроверен.")
 
-        if repair_verified:
+        if repair_verified and repair_vres is not None:
             print(f"\n  [\u2705 \u0410\u0412\u0410\u0420\u0418\u0415\u041d \u0420\u0415\u041c\u041e\u041d\u0422 \u0423\u0421\u041f\u0415\u0428\u0415\u041d] {repair.fix_desc}")
-            print(f"  Метод: {repair.method} | Рундове: {repair.rounds} | verify: {vres.method}")
+            print(f"  Метод: {repair.method} | Рундове: {repair.rounds} | verify: {repair_vres.method}")
 
             slug = (skill_slug or slugify(goal)) + "_repaired"
             try:
@@ -662,10 +665,10 @@ def _run_autonomous_loop_impl(
                     slug=slug,
                     code=repair.code,
                     goal=goal + " [repaired by LocalRepairAgent]",
-                    verification_stdout=vres.detail,
+                    verification_stdout=repair_vres.detail,
                     extra={"repair_method": repair.method,
                            "repair_rounds": repair.rounds,
-                           "verify_method": vres.method,
+                           "verify_method": repair_vres.method,
                            "operator": operator_id or "operator"}
                 )
                 rel = str(path.relative_to(SKILLS_ROOT)).replace("\\", "/")
