@@ -293,6 +293,72 @@
         "operator": "operator",
         "verify_method": "self_test_passed"
       }
+    },
+    {
+      "name": "first_real_failure_not_the_cascade",
+      "category": "autonomous",
+      "file_path": "skills/first_real_failure_not_the_cascade.md",
+      "description": "From pytest/ruff/mypy output, identify the FIRST REAL failure to fix — the root cause — rather than the last red line on screen, which is usually a downstream consequence (a broken import knocks out thirty tests).",
+      "triggers": [
+        "first real failure not the cascade"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-09-19T23:00:09.199511+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      },
+      "signature": "17ce6f5e5e44b52f2747d4a9f305d0d71e66a1b75da7526d78d96a0f7262448d3b6b86f2d5a54a7f68433d7e029d5feae2c8aa31dc1413fafcd32b97d18af0de0295d73a3887995f3e9d731decfb87746b01aa2e5c54815dd6030975bd34699403f18455db8cd622c9adc7c6093b5e57f9715c52931e0b88ad8efb233a38998af7309737726325f02c07244b865288554826606669b9411bb9ce7049215f026d8f25198e48d6148cef7860c06e38dbf42dde74010ab9bf13dd31128479a3e1fbae4d2f3bd1b90a812062659c003c27b816f22fbd455d06190fe5261ee535345605b91fd520c941a17048680613ade16977a68c2f2b02a7047f5ec78e7c5d92b8",
+      "extra": {
+        "category": "workflow",
+        "operator": "operator"
+      }
+    },
+    {
+      "name": "safe_edit_probe_anchor_uniqueness",
+      "category": "autonomous",
+      "file_path": "skills/safe_edit_probe_anchor_uniqueness.md",
+      "description": "Before an anchor-based file edit, check whether the anchor is unique in the file; on ambiguity report every matching line and offer a widened anchor that is verified unique, so the edit never silently lands on the wrong occurrence.",
+      "triggers": [
+        "safe edit probe anchor uniqueness"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-09-19T23:01:40.288352+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      },
+      "signature": "5fb7ddb6467aed013d606eb720f40b6433c6e20b748b2a6c284d947c81cc39e230835d044b0359c7713c7e359a03c70dca219b2f005f4829bbb928cfe3d4dfe37564233c44f92ea16c3a57a99605ca538189f18cb323df68d82dccb1cec94d9e95d3898b8f9bdb97787994a40fa64f1f636636d26ba554e21263bfe3e387f5e2c3bec925b1d732c6d4f68766279e5482d99da655ce471eda696d5734caf05bceefde6fb7a54a413901ce5cc5b0e3c7ee29c2b3bf1cac81aa38c79e5bc94aaf5336c13334a443c2d4f868ba40648e788c148f9eac44e8220a610cc195e27a314c03ee8af2493e7e771f6c90adc36f7268354a58bab8db0470c47f4ccf9e2e7e47",
+      "extra": {
+        "category": "workflow",
+        "operator": "operator"
+      }
+    },
+    {
+      "name": "changed_surface_which_tests_to_run",
+      "category": "autonomous",
+      "file_path": "skills/changed_surface_which_tests_to_run.md",
+      "description": "List what changed (git diff plus untracked files) and which test files cover it, so the fix-and-verify cycle runs the affected tests instead of the whole suite — falling back to the full suite whenever coverage cannot be established.",
+      "triggers": [
+        "changed surface which tests to run"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-09-19T23:02:53.150612+00:00",
+      "verified": false,
+      "verification": {
+        "verified": false,
+        "method": "blocked",
+        "detail": "[SANDBOX DENIED] Операцията изисква потвърждение, но режимът е неинтерактивен (autonomous). Причини: стартиране на подпроцес"
+      },
+      "signature": "818117400b3a70de05c73d2c7d9289255544ca3517fc728d27f05d02a974a74f43fd4e3802852558b812e316e2cfc9fe889eba2a8705374eb6ec6542a34910463be2d95ec37b8448ddfc9519b5f57c93caf91a4653c2613330f21719ca73eba4bdd50d86a3a6c14a89e3ddd6890d59bd21f3a135dde492ecb4022dd8af3d8bd075882fa397d7c2dcae6cdf9c2addb83cb38993b69cbad6b3c3c99dda4cb7da1f57063291a39f217d76e542619a148ffe19f0bd38219ac3d3a8a0c954d9dbc11f6e727f755a3c0a7983b381a83619262c7d83f1dce9ef39e517425a00b3ec90a37e5fbfb1922d8bc68ad8a436d002059bb51fe9960150e1e422c9118ab8c5c734",
+      "extra": {
+        "category": "workflow",
+        "operator": "operator"
+      }
     }
   ]
 }
