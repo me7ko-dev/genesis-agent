@@ -19,7 +19,6 @@ import shutil
 import subprocess
 import sys
 import time
-import urllib.request
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -181,8 +180,6 @@ KEYS = {
     "GROQ_API_KEY": "", "GEMINI_API_KEY": "", "OPENROUTER_API_KEY": "",
     "NVIDIA_API_KEY": "", "GITHUB_TOKEN": "", "OPENAI_API_KEY": "",
     "HF_TOKEN": "", "COHERE_API_KEY": "", "OLLAMA_API_KEY": "",
-    "GENESIS_DISCORD_WEBHOOK": config.get("discord", {}).get("webhook", ""),
-    "GENESIS_DISCORD_BOT_TOKEN": config.get("discord", {}).get("bot_token", ""),
     "OLLAMA_MODEL": config.get("models", {}).get("ollama_model", "llama3.2")
 }
 
@@ -687,23 +684,6 @@ def parse_and_execute_tools(response_text):
     except NameError:
         return ["[Грешка: genesis_skills не е зареден]"]
 
-# ── Discord ────────────────────────────────────────────────────────────────────
-def discord_send(text: str) -> bool:
-    """Праща в Discord. Връща True при успех; логва грешките вместо да ги гълта тихо."""
-    webhook = KEYS.get("GENESIS_DISCORD_WEBHOOK","")
-    if not webhook:
-        return False
-    if len(text) > 1990: text = text[:1990] + "…"
-    try:
-        payload = json.dumps({"content": text}).encode("utf-8")
-        req = urllib.request.Request(webhook, data=payload,
-            headers={"Content-Type":"application/json","User-Agent":"Genesis/5.0"}, method="POST")
-        with urllib.request.urlopen(req, timeout=8) as r:
-            return r.status in (200, 204)
-    except Exception as e:
-        console.print(f"[dim red]⚠ Discord грешка: {str(e)[:80]}[/]")
-        return False
-
 # ── Epic GENESIS Banner ───────────────────────────────────────────────────────
 def get_system_info() -> dict:
     """Collect system status info for the banner."""
@@ -825,7 +805,7 @@ def print_minimal_banner():
         padding=(0, 1)
     ))
     console.print()
-    console.print("[dim]  Команди: [cyan]/model[/] [cyan]/models[/] [cyan]/clear[/] [cyan]/status[/] [cyan]/discord[/] [cyan]/backup[/] [cyan]/tasks[/] [cyan]/help[/]  │  Изход: [cyan]exit[/][/]")
+    console.print("[dim]  Команди: [cyan]/model[/] [cyan]/models[/] [cyan]/clear[/] [cyan]/status[/] [cyan]/backup[/] [cyan]/tasks[/] [cyan]/help[/]  │  Изход: [cyan]exit[/][/]")
     console.print(f"[dim]  Fallback: [green]{len(FALLBACK_CHAIN)} модела[/] верига | Активен: [cyan]{current_model_id.split('/')[-1][:30]}[/][/]")
     # Без нито един ключ нищо облачно няма да проработи, а "0 / 5 активни" в
     # таблицата отгоре е твърде тихо за фатално условие — първото съобщение
@@ -1005,7 +985,6 @@ def main():
 
             # ── Commands ──
             if user_input.lower() in ["exit", "quit", "изход"]:
-                discord_send("🔴 Genesis изключен.")
                 break
 
             if user_input.lower() == "/agent":
@@ -1039,7 +1018,6 @@ def main():
                         stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
                         start_new_session=True)
                 console.print(f"[green]✓ Работи. Лог: {logf}[/]")
-                discord_send("🔨 **Genesis стартира ковачницата.**")
                 continue
 
             if user_input.lower() == "/backup":
@@ -1062,7 +1040,6 @@ def main():
                     capture_output=True, text=True, check=False)
                 if r.returncode == 0:
                     console.print("[green]✅ Архивирането завърши.[/]")
-                    discord_send(f"💾 **Архив готов** → `{dest}`")
                 else:
                     console.print(f"[red]❌ rsync се провали:[/] {r.stderr.strip()[:200]}")
                 continue
@@ -1155,7 +1132,6 @@ def main():
                 help_table.add_row("/clear", "Нов разговор (изчиства историята)")
                 help_table.add_row("/status", "Системна информация и статистика")
                 help_table.add_row("/history", "Преглед и зареждане на стари сесии")
-                help_table.add_row("/discord <текст>", "Изпрати съобщение в Discord")
                 help_table.add_row("/autoupgrade", "Пуска ковачницата (нови умения) на заден план")
                 help_table.add_row("/backup", "Архивиране към GENESIS_BACKUP_DIR")
                 help_table.add_row("/tasks", "Състояние на работата — отворени нишки, решения")
@@ -1192,22 +1168,6 @@ def main():
                         border_style="cyan", padding=(1, 2)))
                 except Exception as e:
                     console.print(f"[red]⚠ {e}[/]")
-                continue
-
-            # ── Discord command ──
-            if user_input.lower().startswith("/discord"):
-                parts = user_input.split(" ", 1)
-                if len(parts) > 1 and parts[1].strip():
-                    msg = parts[1].strip()
-                    if discord_send(f"💬 **Genesis (ръчно):** {msg}"):
-                        console.print("[green]✓ Изпратено в Discord![/]")
-                    else:
-                        console.print("[red]✗ Неуспешно изпращане (провери webhook-а).[/]")
-                else:
-                    webhook = KEYS.get("GENESIS_DISCORD_WEBHOOK", "")
-                    status = "[green]✅ Настроен[/]" if webhook else "[red]❌ Не е настроен (добави в .env)[/]"
-                    console.print(f"[cyan]Discord webhook: {status}[/]")
-                    console.print("[dim]Използване: /discord <твоето съобщение>[/]")
                 continue
 
             # ── Show full fallback chain ──

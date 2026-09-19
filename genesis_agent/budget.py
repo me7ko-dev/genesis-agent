@@ -3,7 +3,7 @@
 genesis_agent.budget — token/call observability слой.
 
 Единствената обща дупка във всичко построено в тази сесия (мисии, ensemble,
-self-modify, Discord чат, 24/7 цикъл): всички минават през Brain.complete(),
+self-modify, 24/7 цикъл): всички минават през Brain.complete(),
 но никой досега не четеше 'usage' полето от API отговора. Този модул го
 пази — просто JSONL лог, никакви external dependencies, никога не хвърля.
 

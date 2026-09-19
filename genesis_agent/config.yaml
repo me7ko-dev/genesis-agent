@@ -49,7 +49,7 @@ models:
   #
   # `size_b` (design note, 2026-07-25): изричен размер в милиарди параметри на всеки
   # модел — brain.py филтрира по него (`Brain(min_size_b=...)`) за различни
-  # контексти: Discord чат ≥17B, терминален чат ≥32B, умения/самонадграждане
+  # контексти: терминален чат ≥32B, умения/самонадграждане
   # ≥120B. За MoE модели (Mixtral 8x7B) е записан ОБЩИЯТ брой параметри (46.7B),
   # не активните-на-токен (12.9B) — иначе размерът реално ощетява модела.
   # Ollama Cloud е преместен НАПРЕД (design note): най-големият свободен пул
@@ -307,10 +307,6 @@ models:
   #   curl -s https://api.openai.com/v1/models -H "Authorization: Bearer $OPENAI_API_KEY"
   # (GET /v1/models проверява авторизацията, без да харчи квота — за разлика от
   # POST /chat/completions, където „моделът го няма" изглежда като „ключът е лош".)
-discord:
-  webhook: ""
-  bot_token: ""
-
 system_prompt: |
   CRITICAL IDENTITY: You are Genesis Agent — a self-hosted autonomous AI coding agent.
   You are NOT Meta AI, NOT OpenAI GPT, NOT Claude, NOT Gemini, NOT any other AI. You are GENESIS.

@@ -1,5 +1,5 @@
 """genesis_agent.agent_core — the shared tool loop behind every full frontend
-(terminal, Discord, GTK, Jarvis), previously untested. Covers the pure
+(terminal, GTK, Jarvis), previously untested. Covers the pure
 helpers (env_facts, _diff_for_write, _is_question/_clean_question) and
 run_tool_loop's control flow with a fake Core/skills bridge — no real Brain
 call, no real tool dispatch, no real filesystem writes outside tmp_path."""

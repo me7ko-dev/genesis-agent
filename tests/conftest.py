@@ -22,8 +22,8 @@ def _no_real_notifications(monkeypatch):
     calls run_autonomous_loop() (not the private _impl) directly with real goals like
     "kill the background process" / "a goal that always fails". Caught live on
     2026-07-31: every `pytest` run was posting those fake mission results to the
-    operator's real, configured Discord webhook. resolve_setting() is the single
-    place notify()/send_message() look up GENESIS_DISCORD_WEBHOOK/GENESIS_TELEGRAM_*,
+    operator's real, configured notification channel. resolve_setting() is the
+    single place notify()/send_message() look up GENESIS_TELEGRAM_*,
     so forcing it empty here blocks the network call regardless of which module
     calls notify() next, without having to chase every call site individually."""
     monkeypatch.setattr("genesis_agent.notifier.resolve_setting", lambda *a, **kw: "")

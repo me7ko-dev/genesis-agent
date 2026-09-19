@@ -1,4 +1,4 @@
-"""genesis_agent.goal_engine — feeds the Discord bot's `!start24_7` loop and
+"""genesis_agent.goal_engine — feeds the 24/7 loop and
 `parallel_forge.py` (both real, documented entrypoints) with gap-driven goals
 instead of a static list. Zero coverage before this file.
 

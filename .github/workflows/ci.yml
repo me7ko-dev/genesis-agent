@@ -36,10 +36,10 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          # discord/signing extras pulled in so tests/test_discord_bot.py and
+          # signing extra pulled in so
           # tests/test_cryptography_utils.py actually run instead of silently
           # skipping via pytest.importorskip.
-          pip install -e .[dev,discord,signing]
+          pip install -e .[dev,signing]
           # Pinned: this step exists to gate a "0 findings" claim, and an
           # unpinned tool version silently re-breaking that claim on its own
           # release schedule is exactly the drift it was added to prevent.

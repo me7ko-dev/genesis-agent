@@ -8,7 +8,6 @@ genesis_agent.cli — the `genesis` command.
     genesis fix PATH "..."  fix a bug in an existing project (checkpoint + tests + diff)
     genesis gui             GTK chat window
     genesis voice           voice frontend
-    genesis discord         Discord bot
     genesis skills          library status
     genesis --version
 """
@@ -138,11 +137,6 @@ def main(argv: list[str] | None = None) -> int:
         if getattr(out, "skill_path", ""):
             print(f"умение: {out.skill_path}")
         return 0 if out.success else 1
-
-    if cmd == "discord":
-        from genesis_agent import discord_bot
-        discord_bot.main()
-        return 0
 
     if cmd == "skills":
         from genesis_agent.skill_loader import load_skills_index

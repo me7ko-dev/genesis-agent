@@ -22,7 +22,7 @@ GTK/libadwaita import and construct fine with no display connected (verified
 manually); only actually *showing* a window needs one, which nothing here does.
 
 PyGObject (`gi`) is a system package (apt python3-gi + GTK4/libadwaita
-typelibs), not a pip-installable extra like discord.py — CI does not have it
+typelibs), not a pip-installable extra — CI does not have it
 and getting it there is a separate, riskier change (system library
 dependencies, not just a pip install). This file skips gracefully when the
 GTK4 stack is absent; it runs locally wherever the desktop app itself would

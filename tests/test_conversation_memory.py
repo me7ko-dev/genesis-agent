@@ -1,5 +1,5 @@
 """genesis_agent.conversation_memory — persistent chat history + auto-summary,
-used by genesis_terminal_agent.py, agent_core.py, and discord_bot.py. Zero
+used by genesis_terminal_agent.py and agent_core.py. Zero
 coverage before this file, including of the exact regression its own
 docstring describes (2026-07-25): compacting to `threshold` instead of a
 buffer under it made get_history() look "frozen" because every add past the

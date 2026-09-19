@@ -52,9 +52,9 @@ file. They are not configurable, on purpose.
   secrets.
 - Commands the agent runs get a **minimal environment**. Your keys are not in
   it, so a generated script cannot read them and phone home.
-- Findings reported to Discord pass through `redact_secrets()` first, so a
-  model that quotes a line from a `.env` file does not publish your key to a
-  chat channel.
+- Findings reported over a notification channel pass through `redact_secrets()`
+  first, so a model that quotes a line from a `.env` file does not publish your
+  key to a chat channel.
 
 If you ever paste a key into a chat, a commit, or a log — rotate it. Providers
 issue new keys for free; assuming an exposed key is still private is how
@@ -81,7 +81,7 @@ site you are logged into — which is a feature, not a missing one.
 
 ## Autonomous mode
 
-The 24/7 loop (`!start24_7` in Discord) sets the sandbox policy to `deny`:
+The 24/7 loop sets the sandbox policy to `deny`:
 anything at `CONFIRM` level is refused rather than queued, because there is
 nobody there to answer. The preparatory worker (`thread_worker.py`) is
 narrower still — it may only read files, list directories, and search the web.

@@ -322,7 +322,7 @@ def _tool_run_cmd(arg: str) -> str:
     res = sandbox.run_shell(command, cwd=_WORKSPACE)
     if res.blocked:
         _log_episode(f"RUN_CMD {command}", f"отказан: {res.stderr}", ["tool", "run_cmd", "blocked"])
-        # Security alert в Discord/Telegram — блокирана опасна операция.
+        # Security alert през notifier — блокирана опасна операция.
         try:
             from genesis_agent.notifier import notify
             notify(f"🛡️ **Genesis Sandbox** блокира опасна команда:\n`{command[:300]}`\n{res.stderr[:200]}")
@@ -352,7 +352,7 @@ def _tool_ask_user(question: str, options=None) -> str:
     Нищо не се изпълнява — този инструмент СПИРА цикъла. Реалното "изчакване"
     е връщането на контрола към човека: фронтендът показва въпроса, а
     следващото съобщение на потребителя е отговорът. Затова тук няма input() —
-    той би увиснал в Discord/GUI/systemd, където няма кой да пише в stdin.
+    той би увиснал в GUI/systemd, където няма кой да пише в stdin.
     """
     q = (question or "").strip()
     if not q:

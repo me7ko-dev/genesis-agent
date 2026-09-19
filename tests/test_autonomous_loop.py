@@ -325,7 +325,7 @@ class TestPublicWrapperNeverCrashesOnNotification:
                              lambda **kw: SKILLS_ROOT / "x.md")
 
         def _boom(*a, **kw):
-            raise RuntimeError("Discord webhook unreachable")
+            raise RuntimeError("notification channel unreachable")
 
         monkeypatch.setattr("genesis_agent.reflection.record_mission", _boom)
         monkeypatch.setattr("genesis_agent.notifier.notify", _boom)

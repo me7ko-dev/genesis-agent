@@ -91,14 +91,6 @@ def test_skills_prints_verified_count(monkeypatch, capsys) -> None:
     assert "3" in out and "2" in out
 
 
-def test_discord_delegates_to_discord_bot_main(monkeypatch) -> None:
-    pytest.importorskip("discord")  # optional dependency; discord_bot.py SystemExits without it
-    called = []
-    monkeypatch.setattr("genesis_agent.discord_bot.main", lambda: called.append(True))
-    assert cli_mod.main(["discord"]) == 0
-    assert called == [True]
-
-
 class TestGuiVoiceMissingScript:
     def test_missing_gui_script_prints_clone_hint_and_returns_1(self, monkeypatch, tmp_path, capsys) -> None:
         # Exercises the "script not found" branch specifically — the

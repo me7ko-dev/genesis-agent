@@ -78,7 +78,7 @@ def _one(goal: str, provider: str) -> ForgeResult:
         return ForgeResult(goal, provider, False, 0, f"err:{e}", round(time.time() - t0, 1))
 
 
-def forge(goals: list[str], *, workers: int | None = None, notify_discord: bool = True) -> list[ForgeResult]:
+def forge(goals: list[str], *, workers: int | None = None, notify_result: bool = True) -> list[ForgeResult]:
     """Изпълнява целите паралелно, всяка на ротиращ доставчик (претеглен по
     реален брой ключове — design note, 2026-07-25). workers=None → авто, колкото
     общо ключове има в PROVIDERS_CYCLE (максимална легитимна паралелност)."""
@@ -115,7 +115,7 @@ def forge(goals: list[str], *, workers: int | None = None, notify_discord: bool 
     print(f"\n  ГОТОВО: {ok}/{len(results)} успешни за {elapsed}s "
           f"(≈{round(elapsed/max(1,len(results)),1)}s/цел паралелно)")
 
-    if notify_discord:
+    if notify_result:
         try:
             from genesis_agent.notifier import notify
             by_prov: dict[str, int] = {}

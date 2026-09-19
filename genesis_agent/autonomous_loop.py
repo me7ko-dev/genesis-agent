@@ -181,7 +181,7 @@ def run_autonomous_loop(
     operator_id: str | None = None,
 ) -> LoopOutcome:
     """
-    Публична обвивка: изпълнява мисията и известява резултата в Discord/Telegram
+    Публична обвивка: изпълнява мисията и известява резултата през notifier
     (ако са конфигурирани). Известията никога не чупят цикъла.
     """
     outcome = _run_autonomous_loop_impl(

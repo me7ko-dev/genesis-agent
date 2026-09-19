@@ -2,7 +2,7 @@
 """
 Genesis Agent — нативно GTK4/libadwaita приложение за Linux.
 
-Трети фронтенд към СЪЩОТО ядро (след терминалния чат и Discord бота). Не
+Втори фронтенд към СЪЩОТО ядро (след терминалния чат). Не
 дублира логика: provider веригата е genesis_agent.brain.Brain, изпълнението на
 инструменти е genesis_skills (същите backend-и), паметта е споделената
 workspace_memory/conversation_memory. Затова умение, записано от терминала,

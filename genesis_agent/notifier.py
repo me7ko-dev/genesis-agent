@@ -2,10 +2,9 @@
 """
 genesis_agent/notifier.py — Multi-channel delivery за Genesis Agent.
 
-Поддържа: Telegram, Discord Webhook.
+Поддържа: Telegram.
 Конфигурира се от .env:
     GENESIS_TELEGRAM_TOKEN, GENESIS_TELEGRAM_CHAT_ID
-    GENESIS_DISCORD_WEBHOOK
 
 Употреба:
     from genesis_agent.notifier import send_message
@@ -34,12 +33,12 @@ def _from_env_files(key: str) -> str:
     отдавна няма:
 
       • съпоставяше имената с `line.startswith(key)` — ПРЕФИКС, не точно
-        съвпадение, така че `GENESIS_DISCORD_WEBHOOK` хващаше и
-        `GENESIS_DISCORD_WEBHOOK_2=...`, ако то стои по-нагоре във файла.
-        Тук цената е известията да заминат към ЧУЖД webhook/бот — не просто
-        грешна конфигурация, а изпращане на съдържание не където трябва.
+        съвпадение, така че `GENESIS_TELEGRAM_TOKEN` хващаше и
+        `GENESIS_TELEGRAM_TOKEN_2=...`, ако то стои по-нагоре във файла.
+        Тук цената е известията да заминат към ЧУЖД бот — не просто грешна
+        конфигурация, а изпращане на съдържание не където трябва.
       • не махаше inline коментар, тоест
-        `GENESIS_DISCORD_WEBHOOK=https://... # моят hook` връщаше URL с
+        `GENESIS_TELEGRAM_TOKEN=123:abc # моят бот` връщаше стойност със
         залепен коментар и заявката просто се проваляше.
     """
     from genesis_agent.paths import read_env_files
@@ -91,31 +90,6 @@ def _send_telegram(text: str, token: str, chat_id: str) -> bool:
         return False
 
 
-# ─── Discord ─────────────────────────────────────────────────────────────────
-
-def _send_discord(text: str, webhook_url: str) -> bool:
-    """Изпраща съобщение чрез Discord Webhook."""
-    # Discord ограничава до 2000 символа
-    if len(text) > 1990:
-        text = text[:1990] + "…"
-    payload = json.dumps({"content": text}).encode("utf-8")
-    try:
-        req = urllib.request.Request(
-            webhook_url,
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Genesis/0.15 Python/3.11"
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.status in (200, 204)
-    except urllib.error.URLError as e:
-        print(f"[notifier] Discord грешка: {e}")
-        return False
-
-
 # ─── Публичен интерфейс ───────────────────────────────────────────────────────
 
 def send_message(
@@ -128,16 +102,16 @@ def send_message(
 
     Args:
         text:     Текстът на съобщението.
-        channels: Списък от канали ['telegram', 'discord'].
+        channels: Списък от канали ['telegram'].
                   По подразбиране — всички налични.
 
     Returns:
-        dict с резултат за всеки канал: {'telegram': True, 'discord': False}
+        dict с резултат за всеки канал: {'telegram': True}
     """
     results: dict[str, bool] = {}
 
     if channels is None:
-        channels = ["telegram", "discord"]
+        channels = ["telegram"]
 
     if "telegram" in channels:
         token = resolve_setting("GENESIS_TELEGRAM_TOKEN")
@@ -146,14 +120,6 @@ def send_message(
             results["telegram"] = _send_telegram(text, token, chat_id)
         else:
             results["telegram"] = False  # Не е конфигуриран
-
-    if "discord" in channels:
-        webhook = resolve_setting("GENESIS_DISCORD_WEBHOOK",
-                                  yaml_section="discord", yaml_field="webhook")
-        if webhook:
-            results["discord"] = _send_discord(text, webhook)
-        else:
-            results["discord"] = False  # Не е конфигуриран
 
     return results
 
@@ -178,4 +144,3 @@ if __name__ == "__main__":
     if not any(r.values()):
         print("⚠️  Нито един канал не е конфигуриран.")
         print("   Задайте: GENESIS_TELEGRAM_TOKEN + GENESIS_TELEGRAM_CHAT_ID")
-        print("   или:     GENESIS_DISCORD_WEBHOOK")

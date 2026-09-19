@@ -312,39 +312,6 @@ def run() -> int:
         print("  Пусни `genesis setup` пак, когато имаш ключ.\n")
         return 1
 
-    # ── Discord (optional) ────────────────────────────────────────────────
-    # Carried over silently when already configured — there is nothing to
-    # verify here without connecting to the gateway, so re-asking is noise.
-    for var in ("GENESIS_DISCORD_BOT_TOKEN", "GENESIS_DISCORD_OWNER_ID",
-                "GENESIS_DISCORD_WEBHOOK"):
-        val = _existing(var)
-        if val:
-            collected[var] = val
-
-    if collected.get("GENESIS_DISCORD_BOT_TOKEN"):
-        has_owner = bool(collected.get("GENESIS_DISCORD_OWNER_ID"))
-        print(f"  Discord бот: настроен {'✅' if has_owner else '⚠️'}")
-        if not has_owner:
-            print("    Липсва GENESIS_DISCORD_OWNER_ID — без него ботът НЕ отговаря")
-            print("    на никого (Settings → Advanced → Developer Mode → десен")
-            print("    клик на профила ти → Copy User ID).")
-            owner = _prompt("    GENESIS_DISCORD_OWNER_ID = ")
-            if owner:
-                collected["GENESIS_DISCORD_OWNER_ID"] = owner
-    else:
-        print("  Discord бот (по избор — чат с агента от телефона).")
-        token = _prompt("    GENESIS_DISCORD_BOT_TOKEN (Enter = пропусни) = ")
-        if token:
-            collected["GENESIS_DISCORD_BOT_TOKEN"] = token
-            print("    Твоят Discord user ID е ЗАДЪЛЖИТЕЛЕН — без него ботът не")
-            print("    отговаря на никого.")
-            owner = _prompt("    GENESIS_DISCORD_OWNER_ID = ")
-            if owner:
-                collected["GENESIS_DISCORD_OWNER_ID"] = owner
-            else:
-                print("    ⚠️  Без ID ботът ще мълчи. Добави го по-късно в", ENV_FILE)
-    print()
-
     # ── Write ─────────────────────────────────────────────────────────────
     ensure_genesis_home()
 
