@@ -554,3 +554,44 @@ class TestToolResultsAreClippedBeforeEnteringHistory:
                     if m.get("role") == "system" and "[Резултат]" in m.get("content", "")]
         assert injected, "текстовият път трябва да инжектира резултата"
         assert len(injected[0]["content"]) < 1200
+
+
+class TestSimulatedWorkIsCaughtMidLoop:
+    """The old check only fired on round 0, so any harmless tool call bought
+    the model a free pass for the rest of the turn. These assert the check
+    now follows what was actually executed, whatever the round."""
+
+    def test_a_claim_after_an_unrelated_tool_call_is_challenged(self) -> None:
+        calls = [{"id": "1", "function": {"name": "LIST_DIR",
+                                          "arguments": '{"path": "/home/user"}'}}]
+        core = _FakeCore([
+            ("", calls, "p", "m"),
+            ("Готово — инсталирах пакета.", None, "p", "m"),
+            ("Не съм. Ето какво остава.", None, "p", "m"),
+        ])
+        core.skills = _FakeToolSkills(["file1\nfile2"])
+        messages = ac.run_tool_loop(
+            core, [{"role": "user", "content": "инсталирай пакета"}],
+            on_assistant=lambda t, p, m: None,
+            on_tool_result=lambda *a: None,
+        )
+        nudges = [m for m in messages if m.get("role") == "system"
+                  and "нито един изпълнен инструмент" in str(m.get("content", ""))]
+        assert nudges, "неподкрепеното твърдение трябваше да бъде оспорено"
+
+    def test_a_claim_backed_by_the_matching_command_passes_untouched(self) -> None:
+        calls = [{"id": "1", "function": {"name": "RUN_CMD",
+                                          "arguments": '{"cmd": "pip install ruff"}'}}]
+        core = _FakeCore([
+            ("", calls, "p", "m"),
+            ("Инсталирах ruff.", None, "p", "m"),
+        ])
+        core.skills = _FakeToolSkills(["Successfully installed ruff"])
+        messages = ac.run_tool_loop(
+            core, [{"role": "user", "content": "инсталирай ruff"}],
+            on_assistant=lambda t, p, m: None,
+            on_tool_result=lambda *a: None,
+        )
+        nudges = [m for m in messages if m.get("role") == "system"
+                  and "нито един изпълнен инструмент" in str(m.get("content", ""))]
+        assert not nudges, "истинската инсталация не бива да се оспорва"

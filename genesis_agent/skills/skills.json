@@ -270,6 +270,29 @@
         "is_sovereign": false,
         "red_zone_active": false
       }
+    },
+    {
+      "name": "project_checks_detect_and_run",
+      "category": "autonomous",
+      "file_path": "skills/project_checks_detect_and_run.md",
+      "description": "Detect and run a project's OWN checks (ruff/mypy/pytest/npm/cargo/go), cheapest first, and report exactly what passed, failed or was skipped — so a change can be verified before claiming it is done.",
+      "triggers": [
+        "project checks detect and run"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-09-19T18:50:25.138798+00:00",
+      "verified": false,
+      "verification": {
+        "verified": false,
+        "method": "blocked",
+        "detail": "[SANDBOX DENIED] Операцията изисква потвърждение, но режимът е неинтерактивен (autonomous). Причини: стартиране на подпроцес"
+      },
+      "signature": "40246b45a40992e683f74b43a611dfce1854e293575dd5039c4cc059d6f9ed2839923458a4de9d76f0a2d7e336aefd64114cc8b82448f003234c3be5ef409849a1f7ff877c5ef05c6109feaa5fabdde14054f1e8b6bb2a09aac9cb53078927a1c2d7412e96c8c3dfb0f856932fa79ca0e5ce2fbf7b6ae71eecfdb2acc91f285ba4789f48e47be352d31babf4837406512139dd9c8cdb5982607d83d3049099d512a641d178ac09ddacc4ef30c6387e55f542eaf58de4cba90aadf0f2b035bbab8d905bd829339ff23b968078eed2d8b4b52ad82d6c0b0d3b63986ff5b7050cc043e534e6dfd0d2b892e5c1639de207c1f2b44af836a903b6809dc518b36bdc90",
+      "extra": {
+        "category": "workflow",
+        "operator": "operator",
+        "verify_method": "self_test_passed"
+      }
     }
   ]
 }

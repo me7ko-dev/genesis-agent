@@ -378,12 +378,18 @@ def run_tool_loop(
     Хвърля само ако Core.complete() хвърли; извикващият решава как да покаже
     грешка (всеки фронтенд има собствен error-widget/глас).
     """
+    from genesis_agent import claim_check
     from genesis_agent.budget import clip_for_context
 
     _status = on_status or (lambda _s: None)
     rounds = 0
     malformed_tag_retries = 0
     completion_claim_retries = 0
+    # Какво РЕАЛНО е изпълнено в тази реплика — сверява се срещу това, което
+    # моделът твърди накрая (claim_check). Само броячът на рундове не стига:
+    # един `LIST_DIR` прави rounds=1 и с това "оправдава" твърдение за
+    # инсталация, която никога не е текла.
+    executed: list[tuple[str, str]] = []
 
     _translate_last_user_message_to_en(messages)
     text, tool_calls, prov, model = core.complete(messages)
@@ -410,6 +416,7 @@ def run_tool_loop(
                     args = {}
                 diff = _diff_for_write(core.skills, args) if name == "WRITE_FILE" else None
                 result = core.skills.dispatch_tool_call(name, args)
+                executed.append((name, " ".join(str(v) for v in args.values())))
                 on_tool_result(name, result, diff)
                 messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                                  "name": name,
@@ -435,6 +442,14 @@ def run_tool_loop(
 
         # Текстови тагове — за модели без native tool-calling в тази ротация.
         results = core.skills.parse_and_execute_tools(text)
+        # Текстовият път не носи име на инструмент отделно — резултатът го
+        # започва като `[RUN_CMD: ...]`, така че го вадим оттам. Без това
+        # моделите без native tool-calling биха останали изцяло без
+        # claim_check, а точно те блъфират най-често.
+        for _r in results:
+            _m = re.match(r"\[([A-Z_]+)[:\]]\s*([^\]]*)", _r or "")
+            if _m:
+                executed.append((_m.group(1), _m.group(2)))
         if not results:
             # Празен резултат означава две различни неща и трябва да ги
             # различим: моделът реално приключи, ИЛИ моделът се опита да
@@ -466,16 +481,17 @@ def run_tool_loop(
             # текстът твърди завършено действие въпреки това, е неподкрепено
             # твърдение (git история: "Fix Genesis handing work back instead
             # of doing it" — същият клас бъг).
-            if (rounds == 0 and completion_claim_retries < 1
-                    and _gs.looks_like_unverified_completion_claim(text)):
+            #
+            # Проверката е по ВИД на твърдението, не по броя рундове (виж
+            # claim_check.py): `rounds == 0` пропускаше точно интересния случай
+            # — един безобиден LIST_DIR прави rounds=1 и оттам "инсталирах
+            # пакета" минаваше без нито една инсталационна команда.
+            unsupported = claim_check.unsupported_claims(text, executed)
+            if unsupported and completion_claim_retries < 1:
                 completion_claim_retries += 1
                 messages.append({
                     "role": "system",
-                    "content": "[Система]: Твърдиш, че действие е завършено, но никой tool "
-                               "resultat по-горе не го доказва. Ако наистина трябва да "
-                               "изпълниш нещо — извикай съответния инструмент СЕГА, не го "
-                               "описвай. Ако вече е било изпълнено в по-ранен рунд — игнорирай "
-                               "тази бележка и продължи с финалния отговор.",
+                    "content": claim_check.nudge_text(unsupported),
                 })
                 _status("проверява дали действието наистина е изпълнено…")
                 text, tool_calls, prov, model = core.complete(messages)
