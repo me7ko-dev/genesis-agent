@@ -89,6 +89,8 @@ except Exception:
 # --- Load Config ---
 # All paths come from genesis_agent.paths, which derives them from the
 # installed package and the user's own home — nothing machine-specific here.
+from genesis_agent.budget import clip_for_context
+from genesis_agent.config import TOOL_ROUND_CAP as _TOOL_ROUND_CAP
 from genesis_agent.paths import (
     CONFIG_PATH,
     ENV_FILES,
@@ -1276,7 +1278,6 @@ def main():
             # останалите вместо да ги изпълни (точно репортнатият проблем с
             # многостъпкова инсталация). Сега цикълът продължава рунд по рунд,
             # докато Genesis сам спре да вика тулове или се удари в тавана.
-            _TOOL_ROUND_CAP = 8
             round_i = 0
             _malformed_tag_retries = 0
             with console.status("[dim]Genesis мисли...[/]", spinner="dots2"):
@@ -1313,7 +1314,8 @@ def main():
                         result = genesis_skills.dispatch_tool_call(name, args)
                         console.print(Panel(Text(result[:2000]), title=f"🔧 {name}", border_style="green"))
                         messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
-                                          "name": name, "content": result})
+                                          "name": name,
+                                          "content": clip_for_context(result)})
                         if genesis_skills.ASK_USER_MARKER in result:
                             asked = result
                     if asked:
@@ -1371,7 +1373,8 @@ def main():
                                    "за това съобщение — спирам тук, продължи с ново съобщение.[/]")
                     break
                 messages.append({"role": "system",
-                                  "content": "[Резултат]:\n" + "\n\n".join(tool_results) +
+                                  "content": "[Резултат]:\n" +
+                                  "\n\n".join(clip_for_context(r) for r in tool_results) +
                                   "\n\nАко тези резултати вече изпълняват заявката на потребителя "
                                   "напълно — дай КРАТКО финално обобщение БЕЗ никакви нови tool тагове. "
                                   "Викай нов tool САМО ако наистина има следваща реална стъпка. "

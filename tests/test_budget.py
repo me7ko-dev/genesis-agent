@@ -102,3 +102,45 @@ def test_daily_totals_skips_corrupt_lines(tmp_path, monkeypatch) -> None:
     _write_entry(log, ts=f"{today_utc.isoformat()}T00:00:00+00:00", provider="p1", prompt=1, completion=1)
     totals = budget.today_totals()
     assert totals["calls"] == 1
+
+
+class TestClipForContext:
+    """clip_for_context() is what keeps one noisy tool result from being
+    re-sent to the model on every subsequent round. Two properties matter:
+    it must not touch anything that already fits, and when it does cut, the
+    END must survive — that is where the traceback and the verdict line live,
+    and a plain text[:limit] would throw exactly that away.
+    """
+
+    def test_short_results_pass_through_byte_identical(self) -> None:
+        text = "line\n" * 50
+        assert budget.clip_for_context(text) == text
+
+    def test_a_result_exactly_at_the_limit_is_untouched(self) -> None:
+        text = "x" * 100
+        assert budget.clip_for_context(text, limit=100) == text
+
+    def test_both_ends_survive_the_cut(self) -> None:
+        body = "".join(f"line {i}\n" for i in range(4000))
+        out = budget.clip_for_context(body, limit=2000)
+        assert len(out) < len(body)
+        assert out.startswith("line 0\n")
+        # The tail is the half a naive truncation drops, and the half that
+        # usually carries the error the model has to react to.
+        assert out.rstrip().endswith("line 3999")
+
+    def test_the_cut_is_announced_so_the_model_knows_it_is_partial(self) -> None:
+        out = budget.clip_for_context("y" * 9000, limit=1000)
+        assert "отрязани" in out
+
+    def test_zero_disables_the_cap_entirely(self) -> None:
+        body = "z" * 50_000
+        assert budget.clip_for_context(body, limit=0) == body
+
+    def test_output_stays_within_the_budget_it_was_given(self) -> None:
+        # The notice itself adds a little, but the payload must obey the cap —
+        # otherwise the "cap" silently is not one.
+        for limit in (500, 1000, 4000):
+            out = budget.clip_for_context("q" * 200_000, limit=limit)
+            payload = out.replace("q", "")
+            assert len(out) - len(payload) <= limit

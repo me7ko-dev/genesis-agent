@@ -22,9 +22,40 @@ from typing import Any
 
 log = logging.getLogger("genesis.budget")
 
-from genesis_agent.config import DATA_DIR
+from genesis_agent.config import DATA_DIR, TOOL_RESULT_MAX_CHARS
 
 LOG_PATH = DATA_DIR / "budget_log.jsonl"
+
+
+def clip_for_context(text: str, limit: int | None = None) -> str:
+    """Реже ЕДИН tool резултат до config.TOOL_RESULT_MAX_CHARS, преди да влезе
+    в историята на разговора. Операторът вижда пълния изход както винаги —
+    конзолата и GUI-то не минават оттук; пести се само контекстът на модела.
+
+    Защо изобщо: до момента целият изход на един tool влизаше в messages и
+    оттам се препращаше пак на ВСЕКИ следващ рунд, докато не изпадне от
+    прозореца. Един `cat` на голям лог или шумен `pip install` така се плаща
+    по десет пъти. record_usage() по-долу го МЕРИ; това е другата половина —
+    да го ограничи.
+
+    Реже средата, не края: началото казва какво е тръгнало да се прави, краят
+    носи изхода, който решава нещо (traceback, "Successfully installed",
+    последните редове на лога). Средата на дълъг изход е точно частта, която
+    никой не чете. Обичайното `text[:limit]` изхвърля именно грешката накрая и
+    после моделът гадае защо е паднало.
+    """
+    if limit is None:
+        limit = TOOL_RESULT_MAX_CHARS
+    if limit <= 0 or len(text) <= limit:
+        return text
+    cut = len(text) - limit
+    head = limit * 2 // 3
+    tail = limit - head
+    return (
+        text[:head]
+        + f"\n\n… [отрязани {cut} символа от средата — операторът вижда пълния изход] …\n\n"
+        + text[-tail:]
+    )
 
 
 def record_usage(*, provider: str, model: str, prompt_tokens: int,

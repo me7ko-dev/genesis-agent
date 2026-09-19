@@ -65,6 +65,25 @@ if _INSTALLED:
 MAX_LLM_RETRIES: int = int(os.environ.get("GENESIS_MAX_RETRIES", "8"))
 EXEC_TIMEOUT_SEC: int = int(os.environ.get("GENESIS_EXEC_TIMEOUT", "120"))
 
+# Таван на ЕДИН tool резултат, както влиза в контекста на модела (не на това,
+# което операторът вижда — конзолата/GUI показват пълния изход). Без този таван
+# едно `cat` на голям лог или шумен `pip install` влиза цял в историята и после
+# се праща пак на ВСЕКИ следващ рунд, докато не изпадне от прозореца: тихо е
+# най-скъпото нещо в един tool-loop. 12000 символа ≈ 3000 токена — типичен
+# pytest/ls/pip изход минава непокътнат, режат се само наистина големите.
+# 0 изключва тавана напълно (старото поведение).
+TOOL_RESULT_MAX_CHARS: int = int(os.environ.get("GENESIS_TOOL_RESULT_MAX_CHARS", "12000"))
+
+# Колко tool рунда има правото да направи агентът за ЕДНО съобщение, преди
+# цикълът да спре и да върне контрола. Това е предпазителят срещу зацикляне,
+# НЕ бюджет за работа — а на 8 беше точно бюджет: реална многостъпкова задача
+# (диагностицирай → поправи → пусни тестовете → поправи пак → потвърди) тихо
+# се удряше в тавана по средата и потребителят получаваше половин работа с
+# обяснение — точно поведението, което целият tool-loop беше добавен да спре
+# (виж коментара при цикъла в genesis_terminal_agent.py). Цената на рунд вече
+# е ограничена отделно, през TOOL_RESULT_MAX_CHARS.
+TOOL_ROUND_CAP: int = int(os.environ.get("GENESIS_TOOL_ROUNDS", "25"))
+
 # Optional: set GENESIS_OPERATOR=<your-name> for an audit trail (CLI --operator).
 # GENESIS_STRICT_AUTHORITY=1 requires sovereign operator to start the autonomous loop.
 # Red Zone manual approval contract: GENESIS_RED_ZONE_SECRET (host) + GENESIS_RED_ZONE_TOKEN (process) must match.

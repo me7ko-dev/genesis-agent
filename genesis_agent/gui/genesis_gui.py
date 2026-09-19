@@ -66,7 +66,6 @@ from genesis_agent.agent_core import (
 from genesis_agent.gui import gui_sessions
 
 APP_ID = "org.genesis.Agent"
-TOOL_ROUND_CAP = 8
 
 _HELP_TEXT = (
     "/model — отвори избора на модел\n"

@@ -20,9 +20,10 @@ from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 
+from genesis_agent.config import TOOL_ROUND_CAP
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-TOOL_ROUND_CAP = 8
 MIN_SIZE_B = 32          # само модели ≥32B за интерактивен чат (като терминала)
 COMPACT_THRESHOLD = 16
 COMPACT_KEEP_RECENT = 10
@@ -377,6 +378,8 @@ def run_tool_loop(
     Хвърля само ако Core.complete() хвърли; извикващият решава как да покаже
     грешка (всеки фронтенд има собствен error-widget/глас).
     """
+    from genesis_agent.budget import clip_for_context
+
     _status = on_status or (lambda _s: None)
     rounds = 0
     malformed_tag_retries = 0
@@ -409,7 +412,8 @@ def run_tool_loop(
                 result = core.skills.dispatch_tool_call(name, args)
                 on_tool_result(name, result, diff)
                 messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
-                                 "name": name, "content": result})
+                                 "name": name,
+                                 "content": clip_for_context(result)})
                 if _is_question(result):
                     asked = result
             if asked:
@@ -489,7 +493,8 @@ def run_tool_loop(
             break
         messages.append({
             "role": "system",
-            "content": "[Резултат]:\n" + "\n\n".join(results) +
+            "content": "[Резултат]:\n" +
+                       "\n\n".join(clip_for_context(r) for r in results) +
                        "\n\nАко това вече изпълнява заявката напълно — дай КРАТКО "
                        "финално обобщение БЕЗ нови tool тагове. Викай нов tool САМО "
                        "ако наистина има следваща реална стъпка. Ако команда е отказана "

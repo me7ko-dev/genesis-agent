@@ -498,3 +498,59 @@ class TestRestoredHistory:
         assert len(out) == 5
         assert out[0]["role"] == "system"
         assert out[-1]["content"] == "m19"
+
+
+class TestToolResultsAreClippedBeforeEnteringHistory:
+    """A tool result enters `messages` and is then re-sent on every later
+    round until it falls out of the window, so one noisy `cat`/`pip install`
+    is paid for repeatedly. run_tool_loop must clip what it stores while the
+    frontend callback still receives the full output to show the operator.
+    """
+
+    def test_a_huge_native_tool_result_is_clipped_in_messages_but_not_for_the_frontend(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("genesis_agent.budget.TOOL_RESULT_MAX_CHARS", 500)
+        huge = "".join(f"log line {i}\n" for i in range(3000))
+        tool_calls = [{"id": "1", "function": {"name": "RUN_CMD", "arguments": '{"cmd": "cat big.log"}'}}]
+        core = _FakeCore([
+            ("", tool_calls, "groq", "llama"),
+            ("done", None, "groq", "llama"),
+        ])
+        core.skills = _FakeToolSkills([huge])
+        seen = []
+        messages = ac.run_tool_loop(
+            core, [{"role": "user", "content": "read the log"}],
+            on_assistant=lambda t, p, m: None,
+            on_tool_result=lambda name, r, extra: seen.append(r),
+        )
+        assert seen == [huge], "операторът трябва да вижда пълния изход"
+        stored = next(m for m in messages if m.get("role") == "tool")["content"]
+        # Близо до зададения таван, не просто "по-малко от огромното" — иначе
+        # тестът минава и когато клипването изобщо не се е приложило.
+        assert len(stored) < 800
+        assert stored.startswith("log line 0")
+        assert stored.rstrip().endswith("log line 2999")
+
+    def test_text_tag_results_are_clipped_too(self, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.budget.TOOL_RESULT_MAX_CHARS", 400)
+        huge = "x" * 40_000
+        core = _FakeCore([
+            ("[RUN_CMD: cat big.log]", None, "groq", "llama"),
+            ("done", None, "groq", "llama"),
+        ])
+
+        class _TextTagSkills(_FakeToolSkills):
+            def parse_and_execute_tools(self, text):
+                return [huge] if "[RUN_CMD" in text else []
+
+        core.skills = _TextTagSkills([])
+        messages = ac.run_tool_loop(
+            core, [{"role": "user", "content": "read it"}],
+            on_assistant=lambda t, p, m: None,
+            on_tool_result=lambda *a: None,
+        )
+        injected = [m for m in messages
+                    if m.get("role") == "system" and "[Резултат]" in m.get("content", "")]
+        assert injected, "текстовият път трябва да инжектира резултата"
+        assert len(injected[0]["content"]) < 1200

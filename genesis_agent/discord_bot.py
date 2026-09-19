@@ -112,7 +112,7 @@ except Exception:  # pragma: no cover
     genesis_skills = None  # type: ignore
     _DISCORD_TOOL_SCHEMAS = None  # type: ignore[assignment]
 
-_TOOL_ROUND_CAP = 6
+from genesis_agent.config import TOOL_ROUND_CAP as _TOOL_ROUND_CAP
 
 
 def _chat_brain(local_only_model: str | None = None):
