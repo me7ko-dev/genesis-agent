@@ -225,3 +225,60 @@ class TestBudgetHistory:
             return sum(len(str(m["content"])) for m in out) / \
                    sum(len(str(m["content"])) for m in original)
         assert ratio(self._history(12), long) < ratio(self._history(3), short)
+
+
+class TestDuplicateResultsArePaidForOnce:
+    """The model re-reads the same file before editing it, re-runs the same
+    pytest after each fix, repeats `git status`. Every copy used to be sent
+    again on every later round. Keep the newest copy (that's the one being
+    worked on) and replace the earlier ones with a pointer.
+    """
+
+    @staticmethod
+    def _msgs(contents: list[str]) -> list[dict]:
+        out: list[dict] = [{"role": "system", "content": "S"}]
+        for i, c in enumerate(contents):
+            out.append({"role": "tool", "tool_call_id": str(i),
+                        "name": "READ_FILE", "content": c})
+        return out
+
+    def test_repeated_identical_results_collapse_to_one_copy(self) -> None:
+        same = "FILE BODY\n" + "x" * 3000
+        out = budget.budget_history(self._msgs([same, "other" * 100, same, same]),
+                                    fresh=1, stale_limit=2000)
+        bodies = [str(m["content"]) for m in out if m.get("role") == "tool"]
+        assert bodies.count(same) == 1, "само едно пълно копие трябва да остане"
+        assert sum("идентичен" in b for b in bodies) == 2
+
+    def test_the_newest_copy_is_the_one_kept(self) -> None:
+        same = "BODY " + "y" * 3000
+        out = budget.budget_history(self._msgs([same, same]), fresh=1, stale_limit=2000)
+        assert "идентичен" in str(out[1]["content"])
+        assert str(out[2]["content"]) == same
+
+    def test_short_results_are_not_deduplicated(self) -> None:
+        """A pointer longer than the content itself is not a saving."""
+        out = budget.budget_history(self._msgs(["OK", "OK", "OK"]),
+                                    fresh=1, stale_limit=2000)
+        assert [str(m["content"]) for m in out if m.get("role") == "tool"] == ["OK"] * 3
+
+    def test_different_results_are_left_alone(self) -> None:
+        a, b = "A" * 3000, "B" * 3000
+        out = budget.budget_history(self._msgs([a, b]), fresh=2, stale_limit=2000)
+        assert str(out[1]["content"]) == a
+        assert str(out[2]["content"]) == b
+
+    def test_dedup_applies_even_to_the_fresh_window(self) -> None:
+        """Two identical results back to back are still two copies of one
+        thing — recency does not make the older one worth its tokens."""
+        same = "Z" * 4000
+        out = budget.budget_history(self._msgs([same, same]), fresh=2, stale_limit=2000)
+        assert "идентичен" in str(out[1]["content"])
+        assert str(out[2]["content"]) == same
+
+    def test_the_callers_history_is_still_not_mutated(self) -> None:
+        same = "W" * 3000
+        msgs = self._msgs([same, same])
+        before = [dict(m) for m in msgs]
+        budget.budget_history(msgs, fresh=1, stale_limit=500)
+        assert msgs == before

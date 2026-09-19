@@ -37,6 +37,12 @@ LOG_PATH = DATA_DIR / "budget_log.jsonl"
 # иначе половината фронтенди го заобикалят тихо.
 _TEXT_RESULT_PREFIX = "[Резултат]:"
 
+# Под този размер дедупликацията не си струва — препратката е по-дълга от
+# самото съдържание ("✓ записано", "OK", кратък git status).
+_DEDUP_MIN_CHARS = 200
+_DEDUP_NOTICE = ("[идентичен резултат — същото съдържание стои по-долу в този "
+                 "разговор; не го извиквай пак, вече го имаш]")
+
 
 def clip_for_context(text: str, limit: int | None = None) -> str:
     """Реже ЕДИН tool резултат до config.TOOL_RESULT_MAX_CHARS, преди да влезе
@@ -107,12 +113,29 @@ def budget_history(messages, *, fresh: int | None = None,
 
     result_idx = [i for i, m in enumerate(msgs) if isinstance(m, dict) and _is_tool_result(m)]
     stale = set(result_idx[:-fresh] if fresh > 0 else result_idx)
-    if not stale:
+
+    # Дедупликация: моделът често пуска ЕДНО И СЪЩО нещо по няколко пъти в
+    # една сесия — препрочита същия файл преди да го редактира, пуска същия
+    # `pytest` след всяка поправка, повтаря `git status`. Всяко копие досега
+    # се плащаше отделно и на всеки следващ рунд. Пазим НАЙ-НОВОТО срещу всяко
+    # съдържание (то е това, върху което се работи) и заменяме по-старите
+    # копия с един ред препратка. Кратките резултати се пропускат — при тях
+    # препратката би била по-дълга от самото съдържание.
+    latest_of: dict[str, int] = {}
+    for i in result_idx:
+        content = str(msgs[i].get("content", ""))
+        if len(content) >= _DEDUP_MIN_CHARS:
+            latest_of[content] = i
+    duplicates = {i for i in result_idx
+                  if latest_of.get(str(msgs[i].get("content", ""))) not in (None, i)}
+    if not stale and not duplicates:
         return msgs
 
     out = []
     for i, m in enumerate(msgs):
-        if i in stale:
+        if i in duplicates:
+            m = {**m, "content": _DEDUP_NOTICE}
+        elif i in stale:
             content = str(m.get("content", ""))
             if len(content) > stale_limit:
                 m = {**m, "content": clip_for_context(content, limit=stale_limit)}
