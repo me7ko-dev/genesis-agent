@@ -9,6 +9,7 @@ genesis_agent.cli — the `genesis` command.
     genesis gui             GTK chat window
     genesis voice           voice frontend
     genesis skills          library status
+    genesis models          the model chain; `--refresh` re-scans free models
     genesis --version
 """
 from __future__ import annotations
@@ -52,6 +53,35 @@ _FIX_USAGE = """Употреба:
 
 Преди първата промяна се прави снимка на проекта. `--revert` я връща обратно.
 """
+
+
+def _models(args: list[str]) -> int:
+    """`genesis models [--refresh]` — какво реално ще бъде извикано и в какъв ред."""
+    from genesis_agent import free_models
+
+    if "--refresh" in args:
+        count, message = free_models.refresh()
+        print(message)
+        if not count:
+            return 1
+
+    from genesis_agent.brain import _load_chain
+    chain = _load_chain()
+    manual = len(chain) - len(free_models.cached())
+    print(f"\nВерига: {len(chain)} модела "
+          f"(≈{max(manual, 0)} ръчно проверени + автоматично открити безплатни)\n")
+    for i, c in enumerate(chain, 1):
+        size = f"{c['size_b']:g}B" if c["size_b"] else "?"
+        tools = "tools" if c["supports_tools"] else "text-tags"
+        print(f"  {i:>2}. {c['provider']:<13} {c['model']:<52} {size:>6}  {tools}")
+
+    age = free_models.cache_age_days()
+    if age is None:
+        print("\nБезплатните модели не са сканирани още — пусни `genesis models --refresh`.")
+    elif age > 7:
+        print(f"\nСписъкът с безплатни е отпреди {age:.0f} дни — той се мени всеки месец; "
+              "`genesis models --refresh` го обновява.")
+    return 0
 
 
 def _fix(args: list[str]) -> int:
@@ -145,6 +175,9 @@ def main(argv: list[str] | None = None) -> int:
         verified = sum(1 for s in index.values() if s.get("verified"))
         print(f"{len(index)} умения, {verified} verified")
         return 0
+
+    if cmd == "models":
+        return _models(argv[1:])
 
     if cmd == "fix":
         return _fix(argv[1:])

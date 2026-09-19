@@ -288,6 +288,20 @@ def _load_chain() -> list[dict]:
         _add(fb.get("provider"), fb.get("model"), fb.get("size_b", 0),
              bool(fb.get("supports_tools", False)))
 
+    # Автоматично откритите безплатни модели вървят НАКРАЯ, като резерва под
+    # ръчно курираните: всеки запис в config.yaml е проверен наживо с реален
+    # ключ, докато тези идват от каталог, който казва само какво твърди
+    # доставчикът. `_add` вече дедуплицира, така че модел, присъстващ и на
+    # двете места, запазва ръчната си позиция и ръчните си метаданни.
+    try:
+        from genesis_agent import free_models
+        for fm in free_models.cached():
+            _add(fm.get("provider"), fm.get("model"), fm.get("size_b", 0),
+                 bool(fm.get("supports_tools", False)))
+    except Exception as e:
+        # Резервен слой — никога не спира старта.
+        log.debug("_load_chain: без автоматично открити модели (%s)", e)
+
     # Само доставчици, които знаем как да викаме.
     return [c for c in chain if c["provider"] in _PROVIDERS]
 
