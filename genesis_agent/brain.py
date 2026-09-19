@@ -1298,6 +1298,14 @@ class Brain:
         if not self.chain and not self.local:
             return self._error_result("Error: няма конфигурирани модели (config.yaml)")
 
+        # Бюджетът на контекста се прилага ТУК, а не във фронтендите: това е
+        # единствената точка, през която минава всичко — терминал, GUI, Jarvis,
+        # Discord, мисиите, ensemble, orchestrator. Историята на извикващия
+        # остава пълна (budget_history не мутира входа); свива се само копието,
+        # което тръгва по мрежата.
+        from genesis_agent.budget import budget_history
+        messages = budget_history(messages)
+
         last_error = "неизвестна грешка"
         local_only = os.environ.get("GENESIS_LOCAL_ONLY") == "1"
 

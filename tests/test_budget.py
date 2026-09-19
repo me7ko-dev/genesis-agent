@@ -144,3 +144,84 @@ class TestClipForContext:
             out = budget.clip_for_context("q" * 200_000, limit=limit)
             payload = out.replace("q", "")
             assert len(out) - len(payload) <= limit
+
+
+class TestBudgetHistory:
+    """budget_history() is where the actual saving happens: a tool result is
+    re-sent on every later round until it falls out of the window, so by
+    round 10 the first one has been paid for ten times while being useful
+    for two. It must shrink the old ones WITHOUT touching the caller's own
+    history, the system prompt, or the tool_call_id wiring.
+    """
+
+    @staticmethod
+    def _history(n_results: int, size: int = 20_000) -> list[dict]:
+        msgs: list[dict] = [{"role": "system", "content": "SYSTEM"}]
+        for i in range(n_results):
+            msgs.append({"role": "assistant", "content": f"call {i}"})
+            msgs.append({"role": "tool", "tool_call_id": str(i), "name": "RUN_CMD",
+                         "content": f"START{i}" + "x" * size + f"END{i}"})
+        return msgs
+
+    def test_the_freshest_results_are_left_untouched(self) -> None:
+        msgs = self._history(4)
+        out = budget.budget_history(msgs, fresh=2, stale_limit=1000)
+        assert out[-1]["content"] == msgs[-1]["content"]
+        assert out[-3]["content"] == msgs[-3]["content"]
+
+    def test_older_results_are_shrunk_but_keep_both_ends(self) -> None:
+        msgs = self._history(4)
+        out = budget.budget_history(msgs, fresh=2, stale_limit=1000)
+        first = out[2]["content"]
+        assert len(first) < 1300
+        assert first.startswith("START0")
+        assert first.endswith("END0")
+
+    def test_the_callers_history_is_never_mutated(self) -> None:
+        msgs = self._history(4)
+        before = [dict(m) for m in msgs]
+        budget.budget_history(msgs, fresh=1, stale_limit=500)
+        assert msgs == before
+
+    def test_tool_call_wiring_and_roles_survive(self) -> None:
+        msgs = self._history(3)
+        out = budget.budget_history(msgs, fresh=1, stale_limit=500)
+        for original, produced in zip(msgs, out):
+            assert produced["role"] == original["role"]
+            assert produced.get("tool_call_id") == original.get("tool_call_id")
+            assert produced.get("name") == original.get("name")
+
+    def test_the_system_prompt_is_never_shrunk(self) -> None:
+        msgs = self._history(3)
+        msgs[0] = {"role": "system", "content": "S" * 50_000}
+        out = budget.budget_history(msgs, fresh=0, stale_limit=100)
+        assert out[0]["content"] == msgs[0]["content"]
+
+    def test_text_tag_results_are_budgeted_too(self) -> None:
+        """The text-tag path injects results as a system message, not role=tool.
+        Missing that would silently exempt every non-native model."""
+        msgs = [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "system", "content": "[Резултат]:\n" + "y" * 30_000},
+            {"role": "assistant", "content": "ok"},
+            {"role": "system", "content": "[Резултат]:\n" + "z" * 30_000},
+        ]
+        out = budget.budget_history(msgs, fresh=1, stale_limit=800)
+        assert len(out[1]["content"]) < 1100, "старият текстов резултат трябва да е свит"
+        assert out[3]["content"] == msgs[3]["content"], "последният остава пълен"
+
+    def test_a_short_history_is_returned_as_is(self) -> None:
+        msgs = self._history(1, size=50)
+        assert budget.budget_history(msgs) == msgs
+
+    def test_zero_stale_limit_disables_the_whole_pass(self) -> None:
+        msgs = self._history(5)
+        assert budget.budget_history(msgs, fresh=1, stale_limit=0) == msgs
+
+    def test_it_saves_more_the_longer_the_session_runs(self) -> None:
+        short = budget.budget_history(self._history(3), fresh=2, stale_limit=1000)
+        long = budget.budget_history(self._history(12), fresh=2, stale_limit=1000)
+        def ratio(original, out):
+            return sum(len(str(m["content"])) for m in out) / \
+                   sum(len(str(m["content"])) for m in original)
+        assert ratio(self._history(12), long) < ratio(self._history(3), short)

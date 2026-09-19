@@ -22,9 +22,20 @@ from typing import Any
 
 log = logging.getLogger("genesis.budget")
 
-from genesis_agent.config import DATA_DIR, TOOL_RESULT_MAX_CHARS
+from genesis_agent.config import (
+    DATA_DIR,
+    FRESH_TOOL_RESULTS,
+    STALE_TOOL_RESULT_MAX_CHARS,
+    TOOL_RESULT_MAX_CHARS,
+)
 
 LOG_PATH = DATA_DIR / "budget_log.jsonl"
+
+# Маркерът, с който текстовият tool път (genesis_skills.parse_and_execute_tools
+# → "[Резултат]:\n...") инжектира резултати като system съобщение. Native
+# пътят ги слага като role="tool"; и двата трябва да минават през бюджета,
+# иначе половината фронтенди го заобикалят тихо.
+_TEXT_RESULT_PREFIX = "[Резултат]:"
 
 
 def clip_for_context(text: str, limit: int | None = None) -> str:
@@ -56,6 +67,57 @@ def clip_for_context(text: str, limit: int | None = None) -> str:
         + f"\n\n… [отрязани {cut} символа от средата — операторът вижда пълния изход] …\n\n"
         + text[-tail:]
     )
+
+
+def _is_tool_result(msg: dict) -> bool:
+    """Съобщение, което носи ИЗХОД от инструмент — по който и от двата пътя."""
+    if msg.get("role") == "tool":
+        return True
+    return (msg.get("role") == "system"
+            and str(msg.get("content", "")).startswith(_TEXT_RESULT_PREFIX))
+
+
+def budget_history(messages, *, fresh: int | None = None,
+                   stale_limit: int | None = None) -> list[dict]:
+    """Свива СТАРИТЕ tool резултати точно преди заявката тръгне към модела.
+
+    Това е другата половина на clip_for_context() и същинската икономия.
+    clip_for_context пази историята от абсурдни размери на входа, но не решава
+    основния разход: един tool резултат се праща наново на ВСЕКИ следващ рунд,
+    докато не изпадне от прозореца. На рунд 10 първият `pytest` изход се плаща
+    за десети път, макар моделът да е реагирал на него още на рунд 2 — оттам
+    нататък от него е нужно само "какво беше пуснато и как завърши".
+
+    Затова: последните `fresh` резултата остават както са (моделът работи
+    върху тях СЕГА), всичко по-старо пада до `stale_limit`. Свиването е
+    същото middle-out — началото казва какво е било пуснато, краят как е
+    завършило; изяжда се средата, която на този етап никой не чете.
+
+    Никога не мутира входа и никога не пипа system промпта, ролите или
+    tool_call_id-тата — връща нов списък с нови dict-ове само за съобщенията,
+    които реално се свиват. Извикващият (Brain.complete) праща резултата;
+    неговата собствена история остава пълна, за да може операторът да я
+    запише/прегледа непокътната.
+    """
+    fresh = FRESH_TOOL_RESULTS if fresh is None else fresh
+    stale_limit = STALE_TOOL_RESULT_MAX_CHARS if stale_limit is None else stale_limit
+    msgs = list(messages)
+    if stale_limit <= 0:
+        return msgs
+
+    result_idx = [i for i, m in enumerate(msgs) if isinstance(m, dict) and _is_tool_result(m)]
+    stale = set(result_idx[:-fresh] if fresh > 0 else result_idx)
+    if not stale:
+        return msgs
+
+    out = []
+    for i, m in enumerate(msgs):
+        if i in stale:
+            content = str(m.get("content", ""))
+            if len(content) > stale_limit:
+                m = {**m, "content": clip_for_context(content, limit=stale_limit)}
+        out.append(m)
+    return out
 
 
 def record_usage(*, provider: str, model: str, prompt_tokens: int,

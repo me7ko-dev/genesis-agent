@@ -510,3 +510,49 @@ class TestCompactChatHistory:
         msgs = deque(self._history(), maxlen=30)
         out = Brain.compact_chat_history(msgs, threshold=16, keep_recent=5)
         assert out.maxlen == 30
+
+
+class TestContextBudgetIsAppliedOnTheWayOut:
+    """Brain.complete() is the single chokepoint every frontend and every
+    mission goes through, so the context budget is applied there rather than
+    in each caller. Two things must hold: what goes over the wire is shrunk,
+    and the caller's own history is NOT — the terminal keeps it in a deque it
+    saves to disk, and silently rewriting it would corrupt the session file.
+    """
+
+    def test_old_results_are_shrunk_on_the_wire_but_kept_in_the_caller_history(
+        self, monkeypatch
+    ) -> None:
+        sent: list[list[dict]] = []
+
+        def _fake_http(self, url, key, model, messages, timeout, tools=None, **kw):
+            sent.append(messages)
+            return "ok", None
+
+        monkeypatch.setattr(Brain, "_http", _fake_http, raising=False)
+        monkeypatch.setattr(Brain, "_provider_key", staticmethod(lambda _p: "key"),
+                            raising=False)
+        monkeypatch.setattr("genesis_agent.budget.STALE_TOOL_RESULT_MAX_CHARS", 500)
+        monkeypatch.setattr("genesis_agent.budget.FRESH_TOOL_RESULTS", 1)
+
+        b = Brain()
+        # One real chain entry (a fabricated provider name has no endpoint and
+        # would blow up long before the wire, which is how an earlier version
+        # of this test passed while never reaching _http at all).
+        b.chain = [dict(b.chain[0])]
+        b.local = None
+
+        history = [{"role": "system", "content": "SYSTEM"}]
+        for i in range(3):
+            history.append({"role": "tool", "tool_call_id": str(i),
+                            "name": "RUN_CMD", "content": f"S{i}" + "x" * 30_000})
+        snapshot = [dict(m) for m in history]
+
+        b.complete(history)
+
+        assert len(sent) == 1, "заявката трябва наистина да е стигнала до _http"
+        wire = sent[0]
+        assert len(str(wire[1]["content"])) < 800, "старият резултат трябва да е свит"
+        assert str(wire[1]["content"]).startswith("S0"), "началото се пази"
+        assert wire[-1]["content"] == history[-1]["content"], "последният остава пълен"
+        assert history == snapshot, "историята на извикващия не бива да се пипа"
