@@ -15,8 +15,9 @@ pip вече знае отговора и го записва: инсталац�
 
 Проверено срещу реална инсталация от клона на 2026-09-20, не по памет.
 
-Мрежата се пипа само при изрично `genesis update` — стартирането не пита
-никого нищо.
+Мрежата се пипа само при изрично `genesis update` или `/update` в чата —
+стартирането не пита никого нищо. Самото обновяване (pipx install --force)
+не тръгва оттук нарочно — виж genesis_agent.self_update защо.
 """
 from __future__ import annotations
 
@@ -112,21 +113,47 @@ def install_command(src: Source) -> str:
     return f'pipx install --force "git+{src.url}{ref}"'
 
 
+@dataclass
+class UpdateCheck:
+    """„Има ли по-ново" — пресметнато веднъж, а не низ за печат.
+
+    И `genesis update` (CLI, само проверява), и `/update` (чат, реално
+    обновява — genesis_agent.self_update) тръгват оттук, за да не се
+    разминават в самата логика на сравнението, само в отговора към човека.
+    """
+    src: Source | None
+    latest: str | None  # None = GitHub не отговори (мрежа/лимит), не "няма ново"
+
+    @property
+    def up_to_date(self) -> bool | None:
+        """True/False, или None ако изобщо не можахме да сравним."""
+        if self.src is None or self.latest is None:
+            return None
+        return self.latest == self.src.commit
+
+
+def check_update(*, timeout: int = _TIMEOUT) -> UpdateCheck:
+    """Пита веднъж: инсталирано ли е от git, и ако да — има ли по-нов комит."""
+    src = installed_source()
+    latest = latest_commit(src.owner_repo, src.ref, timeout=timeout) if src else None
+    return UpdateCheck(src=src, latest=latest)
+
+
 def update_report(*, version: str, timeout: int = _TIMEOUT) -> str:
     """Човешкият отговор на „това новата версия ли е"."""
-    src = installed_source()
+    check = check_update(timeout=timeout)
+    src = check.src
     if src is None:
         return ("Това копие не е инсталирано от git (чекаут за разработка или "
                 "разархивирано), затова няма с какво да се сравни.\n"
                 "В чекаут: `git pull`.")
     head = f"genesis-agent {version} — {src.short}" + (f" ({src.ref})" if src.ref else "")
-    latest = latest_commit(src.owner_repo, src.ref, timeout=timeout)
-    if latest is None:
+    if check.latest is None:
         return (f"{head}\nНе можах да питам GitHub (мрежа или лимит). "
                 f"Обновяване:\n  {install_command(src)}")
-    if latest == src.commit:
+    if check.up_to_date:
         return f"{head}\n✅ Това е най-новото на {src.ref or 'този клон'}."
-    return (f"{head}\n⬆️  Има по-ново: {latest[:7]}. Обнови с:\n"
+    return (f"{head}\n⬆️  Има по-ново: {check.latest[:7]}. Обнови с:\n"
             f"  {install_command(src)}\n"
             "После отвори НОВ терминал и пусни `genesis --version` — "
             "комитът трябва да е новият.")

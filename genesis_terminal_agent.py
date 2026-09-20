@@ -810,7 +810,7 @@ def print_minimal_banner():
         padding=(0, 1)
     ))
     console.print()
-    console.print("[dim]  Команди: [cyan]/model[/] [cyan]/models[/] [cyan]/clear[/] [cyan]/status[/] [cyan]/backup[/] [cyan]/tasks[/] [cyan]/help[/]  │  Изход: [cyan]exit[/][/]")
+    console.print("[dim]  Команди: [cyan]/model[/] [cyan]/models[/] [cyan]/clear[/] [cyan]/status[/] [cyan]/backup[/] [cyan]/update[/] [cyan]/tasks[/] [cyan]/help[/]  │  Изход: [cyan]exit[/][/]")
     console.print(f"[dim]  Fallback: [green]{len(FALLBACK_CHAIN)} модела[/] верига | Активен: [cyan]{current_model_id.split('/')[-1][:30]}[/][/]")
     # Без нито един ключ нищо облачно няма да проработи, а "0 / 5 активни" в
     # таблицата отгоре е твърде тихо за фатално условие — първото съобщение
@@ -937,6 +937,19 @@ def main():
 
     print_minimal_banner()
 
+    # ── Резултат от /update, стартирано в ПРЕДИШНА сесия ──────────────────
+    # Обновяването тръгва на заден план чак след като старият процес излезе
+    # (genesis_agent.self_update) — затова отговорът чака точно тук, при
+    # следващото стартиране, а не веднага след `/update`.
+    try:
+        from genesis_agent import self_update
+        pending = self_update.report_pending()
+        if pending:
+            console.print(pending)
+            console.print()
+    except Exception:
+        pass
+
     SYSTEM_PROMPT = config.get("system_prompt", "CRITICAL: You are Genesis, autonomous AI coding agent.")
 
     # Реалните пътища на машината — иначе моделът ги отгатва (жив тест: писа в
@@ -1049,6 +1062,42 @@ def main():
                     console.print(f"[red]❌ rsync се провали:[/] {r.stderr.strip()[:200]}")
                 continue
 
+            # ── /update — реално обновяване от GitHub, не само проверка ──
+            # `genesis update` (CLI) нарочно само пита; тук питаме за
+            # потвърждение и, при „да", НАСРОЧВАМЕ обновяването на заден
+            # план (genesis_agent.self_update), защото pipx би подменил
+            # точно този процес, докато чатът чака отговор от нас — а на
+            # Windows заключен .exe не се презаписва. Затова резултатът се
+            # вижда чак при следващото `genesis`, не веднага тук.
+            if user_input.lower() in ("/update", "/ъпдейт"):
+                from genesis_agent import self_update, version_info
+                with console.status("[dim]Питам GitHub...[/]", spinner="dots"):
+                    check = version_info.check_update()
+                if check.src is None:
+                    console.print("[yellow]Това копие не е инсталирано от git (чекаут за "
+                                  "разработка или разархивирано) — няма с какво да се сравни. "
+                                  "В чекаут: `git pull`.[/]")
+                    continue
+                if check.latest is None:
+                    console.print("[red]Не можах да питам GitHub (мрежа или лимит). Ръчно:\n[/]"
+                                  f"  {version_info.install_command(check.src)}")
+                    continue
+                if check.up_to_date:
+                    console.print(f"[green]✅ Вече си на последното "
+                                  f"({check.src.short}, {check.src.ref}).[/]")
+                    continue
+                console.print(f"[cyan]⬆ Има по-ново на {check.src.ref}: "
+                              f"{check.src.short} → {check.latest[:7]}[/]")
+                confirm = console.input("[bold yellow]Обнови сега? (да/не) > [/]").strip().lower()
+                if confirm not in ("да", "d", "y", "yes", "д"):
+                    console.print("[dim]Пропуснато.[/]")
+                    continue
+                self_update.request_update(pid=os.getpid(), url=check.src.url, ref=check.src.ref)
+                console.print(
+                    "[green]✓ Обновяването е насрочено на заден план.[/]\n"
+                    "[dim]  Приключва СЛЕД като излезеш оттук (`exit`) — pipx не може да "
+                    "презапише файла, докато тече. Следващото `genesis` ще каже дали е минало.[/]")
+                continue
 
             if user_input.lower() == "/model":
                 show_agent_menu()
@@ -1139,6 +1188,7 @@ def main():
                 help_table.add_row("/history", "Преглед и зареждане на стари сесии")
                 help_table.add_row("/autoupgrade", "Пуска ковачницата (нови умения) на заден план")
                 help_table.add_row("/backup", "Архивиране към GENESIS_BACKUP_DIR")
+                help_table.add_row("/update", "Провери и обнови от GitHub (питa за потвърждение)")
                 help_table.add_row("/tasks", "Състояние на работата — отворени нишки, решения")
                 help_table.add_row("/done <id>", "Затвори нишка като готова (/drop <id> = изхвърли)")
                 help_table.add_row("exit / quit", "Изход")

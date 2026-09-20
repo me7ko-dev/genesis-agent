@@ -82,6 +82,12 @@ directory is on your PATH.
 writes `~/.genesis/.env` with mode 600. Skip any provider you do not have —
 one key is enough.
 
+**Updating:** `genesis --version` names the exact installed commit, so
+"is this the new version" has an answer. `genesis update` checks GitHub and
+prints the command; `/update` inside the terminal chat does the same check
+and, on confirmation, runs it for you — on the background, after you exit,
+since pipx cannot overwrite the `genesis` executable while it is running.
+
 Optional extras:
 
 ```bash
