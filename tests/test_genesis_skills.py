@@ -379,3 +379,61 @@ class TestBothDispatchPathsFailAlike:
 
     def test_safe_tool_passes_a_healthy_result_through_untouched(self) -> None:
         assert gs._safe_tool("X", lambda a: f"ok:{a}", "arg") == "ok:arg"
+
+
+class TestReadingSecretsGoesThroughTheSameGate:
+    """`cat ~/.genesis/.env` е CONFIRM операция от 2026 насам (sandbox
+    _CONFIRM_PATTERNS). `[READ_FILE: ~/.genesis/.env]` не минаваше през нищо —
+    тоест по-лесният път беше отворен, а той е точно този, който моделът
+    ползва.
+
+    Цената не е на машината: прочетеното влиза в историята и се праща на
+    СЛЕДВАЩИЯ доставчик във веригата, който при тази конфигурация е чужда
+    безплатна услуга. SECURITY.md обещава точно обратното („a generated script
+    cannot read them and phone home").
+    """
+
+    def _env_file(self, workspace: Path) -> Path:
+        p = workspace / ".env"
+        p.write_text("OPENROUTER_API_KEY=sk-or-v1-тайно\n", encoding="utf-8")
+        return p
+
+    def test_autonomous_mode_refuses_and_leaks_nothing(self, _workspace, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="deny"))
+        out = gs._tool_read_file(str(self._env_file(_workspace)))
+        assert "SANDBOX DENIED" in out
+        assert "sk-or-v1-тайно" not in out
+
+    def test_allow_mode_still_reads_it(self, _workspace, monkeypatch) -> None:
+        """Гейтът е същият, не по-строг: операторът, който е избрал `allow`,
+        е взел това решение съзнателно — както при `cat`."""
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="allow"))
+        out = gs._tool_read_file(str(self._env_file(_workspace)))
+        assert "sk-or-v1-тайно" in out
+
+    def test_an_example_env_is_not_a_secret(self, _workspace, monkeypatch) -> None:
+        """`.env.example` е в репото, за да се чете. Гейт, който пита и за
+        него, е гейт, който операторът изключва."""
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="deny"))
+        p = _workspace / ".env.example"
+        p.write_text("OPENROUTER_API_KEY=\n", encoding="utf-8")
+        assert "[READ_FILE:" in gs._tool_read_file(str(p))
+
+    def test_an_ordinary_file_is_untouched(self, _workspace, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="deny"))
+        p = _workspace / "notes.md"
+        p.write_text("обикновен текст", encoding="utf-8")
+        assert "обикновен текст" in gs._tool_read_file(str(p))
+
+    def test_a_private_key_path_is_gated_too(self, _workspace, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="deny"))
+        key = _workspace / "id_rsa"
+        key.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n", encoding="utf-8")
+        out = gs._tool_read_file(str(key))
+        assert "SANDBOX DENIED" in out
+        assert "PRIVATE KEY" not in out

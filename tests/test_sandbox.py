@@ -442,3 +442,33 @@ class TestWindowsDestructiveCommands:
         bug and let every Remove-Item through as SAFE."""
         assert sandbox.assess_command(
             r"Remove-Item -Recurse -Force .\dist").level is CONFIRM
+
+
+class TestSensitivePathReason:
+    """Един образец за „това е тайна", ползван и от shell пътя, и от
+    инструментите. Различни правила за `cat ~/.env` и `READ_FILE ~/.env`
+    значат, че по-слабото решава."""
+
+    @pytest.mark.parametrize("path", [
+        "/home/user/.genesis/.env",
+        "~/.ssh/id_rsa",
+        "/home/user/.aws/credentials",
+        "/etc/shadow",
+        "project/.env",
+    ])
+    def test_secrets_are_recognised(self, path: str) -> None:
+        assert sandbox.sensitive_path_reason(path)
+
+    @pytest.mark.parametrize("path", [
+        ".env.example", ".env.sample", ".env.template",
+        "config.yaml.example", "README.md", "src/main.py",
+    ])
+    def test_ordinary_and_shipped_files_are_not(self, path: str) -> None:
+        assert sandbox.sensitive_path_reason(path) is None
+
+    def test_the_reason_names_what_matched(self) -> None:
+        reason = sandbox.sensitive_path_reason("/home/user/.ssh/id_rsa")
+        assert reason and ".ssh/" in reason
+
+    def test_a_path_object_works_too(self, tmp_path) -> None:
+        assert sandbox.sensitive_path_reason(tmp_path / ".env")

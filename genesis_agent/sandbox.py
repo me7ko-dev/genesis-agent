@@ -820,6 +820,29 @@ _SENSITIVE_PATH_RE = re.compile(
     r"(/etc/(passwd|shadow|sudoers)|\.ssh/|\.aws/|id_rsa|\.env\b|credentials\b)"
 )
 
+# Шаблоните, които се РАЗПРОСТРАНЯВАТ нарочно: `.env.example` е в репото, за да
+# се чете. Без това изключение образецът отгоре ги хваща (`\.env\b` съвпада и
+# преди точката) и гейтът пита за файл, който всеки може да отвори в GitHub.
+_SENSITIVE_PATH_EXEMPT_RE = re.compile(
+    r"\.(example|sample|template|dist)$|\.env\.(example|sample|template)\b",
+    re.IGNORECASE,
+)
+
+
+def sensitive_path_reason(path: str | os.PathLike[str]) -> str | None:
+    """Описание, ако този път е ключ/тайна; иначе None.
+
+    Същият образец, който _CONFIRM_PATTERNS прилага върху shell команди —
+    изнесен като функция, за да не се налага всеки път, по който се стига до
+    файла, да си пише собствено правило. Различни правила за `cat ~/.env` и за
+    `READ_FILE ~/.env` значат, че по-слабото решава.
+    """
+    text = str(path)
+    if _SENSITIVE_PATH_EXEMPT_RE.search(text):
+        return None
+    match = _SENSITIVE_PATH_RE.search(text)
+    return f"достъп до чувствителен файл ({match.group(0)})" if match else None
+
 
 def _python_reads_sensitive_path(code: str) -> bool:
     """True ако код реално ЧЕТЕ чувствителен път (не само го споменава/сравнява).

@@ -63,6 +63,12 @@ file. They are not configurable, on purpose.
   secrets.
 - Commands the agent runs get a **minimal environment**. Your keys are not in
   it, so a generated script cannot read them and phone home.
+- Reading a secret **from disk** goes through the same gate as `cat` does:
+  `.env`, `.ssh/`, `.aws/`, `id_rsa`, `/etc/shadow` and friends are a CONFIRM
+  operation for `READ_FILE` too, which means refused in autonomous mode. This
+  matters because the content would not stay on the machine — it enters the
+  conversation and is sent to whichever provider is next in the chain.
+  `.env.example` and other shipped templates are deliberately exempt.
 - Findings reported over a notification channel pass through `redact_secrets()`
   first, so a model that quotes a line from a `.env` file does not publish your
   key to a chat channel.

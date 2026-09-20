@@ -142,6 +142,18 @@ def _tool_read_file(arg: str, offset=None, limit=None) -> str:
         limit_i = None
 
     path = _resolve(path_str)
+    # Четенето на ключове минава през СЪЩОТО решение като `cat ~/.genesis/.env`
+    # (design note, 2026-09-20). Дотук не минаваше през нищо: shell пътят беше
+    # с гейт, а инструментът — не, тоест по-лесният път беше отворен. А
+    # съдържанието не остава на машината: то влиза в историята и се праща на
+    # следващия доставчик във веригата, който при тази конфигурация е чужда,
+    # безплатна услуга. SECURITY.md обещава точно обратното.
+    sensitive = sandbox.sensitive_path_reason(path)
+    if sensitive:
+        verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM, [sensitive])
+        allowed, reason = sandbox._decide(f"READ_FILE {path}", verdict, sandbox.get_policy())
+        if not allowed:
+            return f"[READ_FILE] {reason}"
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
