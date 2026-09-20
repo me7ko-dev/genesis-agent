@@ -4,7 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "genesis-agent"
-version = "0.1.0"
+# Едно място за номера: genesis_agent/__init__.py. Беше на три, с три
+# различни стойности.
+dynamic = ["version"]
 description = "Self-hosted autonomous coding agent with a library of verified, executable skills and memory that survives sessions."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -64,6 +66,9 @@ Security = "https://github.com/me7ko-dev/genesis-agent/blob/main/SECURITY.md"
 
 [project.scripts]
 genesis = "genesis_agent.cli:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "genesis_agent.__version__"}
 
 [tool.setuptools]
 packages = ["genesis_agent"]

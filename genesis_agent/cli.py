@@ -10,13 +10,17 @@ genesis_agent.cli — the `genesis` command.
     genesis voice           voice frontend
     genesis skills          library status
     genesis models          the model chain; `--refresh` re-scans free models
+    genesis update          is there a newer commit on the installed branch
     genesis --version
 """
 from __future__ import annotations
 
 import sys
 
-__version__ = "0.1.0"
+# Едно място за номера — беше на три (pyproject 0.1.0, __init__ 0.2.0, тук
+# 0.1.0), а `--version` печаташе третото. Версия, която не съвпада със себе
+# си, е по-лоша от липсваща: тя изглежда като отговор.
+from genesis_agent import __version__
 
 USAGE = __doc__.split("    genesis", 1)[0].strip() + "\n\n" + "\n".join(
     line for line in (__doc__ or "").splitlines() if line.startswith("    genesis")
@@ -171,7 +175,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if cmd in ("-V", "--version", "version"):
-        print(f"genesis-agent {__version__}")
+        from genesis_agent.version_info import describe
+        print(describe(__version__))
         return 0
 
     if cmd == "setup":
@@ -196,6 +201,15 @@ def main(argv: list[str] | None = None) -> int:
         # The index records `verified: true`, not a `status` string.
         verified = sum(1 for s in index.values() if s.get("verified"))
         print(f"{len(index)} умения, {verified} verified")
+        return 0
+
+    if cmd == "update":
+        # Само ПИТА. Обновяването не се пуска оттук нарочно: pipx подменя
+        # точно този изпълним файл, а на Windows работещ .exe не може да бъде
+        # заменен — командата щеше да се проваля най-често там, където е
+        # най-нужна. Затова печатаме реда, който се пуска в чист терминал.
+        from genesis_agent.version_info import update_report
+        print(update_report(version=__version__))
         return 0
 
     if cmd == "models":
