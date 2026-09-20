@@ -655,6 +655,12 @@ _WRITE_RE = re.compile(r"\[WRITE_FILE:\s*(?P<path>[^\]]+)\](?P<body>.*?)\[END_WR
 # USE_SKILL е също двучастен — умение + опционален driver код до [END_USE_SKILL].
 _USE_SKILL_RE = re.compile(r"\[USE_SKILL:\s*(?P<name>[^\]]+)\](?P<body>.*?)\[END_USE_SKILL\]",
                            re.DOTALL)
+# ...но driver кодът е опционален, така че `[USE_SKILL: име]` САМ по себе си е
+# валидната минимална форма (виж skill_loader.use_skill: празен driver = зареди
+# умението и пусни self-test-а). Отделен pattern за нея — той се прилага само
+# върху тагове, които затвореният вариант по-горе НЕ е consume-нал, и хваща
+# точно самия таг, за да не изяде останалата част от отговора.
+_BARE_USE_SKILL_RE = re.compile(r"\[USE_SKILL:\s*(?P<name>[^\]\n]+)\]")
 # EDIT_FILE е тричастен — файл + anchor + замяна. Разделителят е дълъг и
 # нетипичен нарочно: и двете половини са СУРОВ код, така че всичко по-късо
 # (--- или ===) рано или късно се среща вътре в самия код и реже редакцията
@@ -754,66 +760,107 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
     """
     Извлича и изпълнява всички тул-тагове в реда, в който се появяват.
     Връща списък от резултати (по един низ на тул). Празен списък = няма тулове.
+
+    Блоковите тагове (WRITE_FILE / EDIT_FILE / USE_SKILL) се събират ЗАЕДНО и
+    се решава влагането ПРЕДИ който и да е от тях да се изпълни (bug fix,
+    2026-09-20). Преди това всеки тип се обхождаше в отделен цикъл и пазачът
+    `_inside_write` се прилагаше само върху едноредовите тагове — затова
+    `[USE_SKILL: x]...[END_USE_SKILL]` или `[EDIT_FILE: ...]`, написани ВЪТРЕ в
+    тялото на `[WRITE_FILE: doc.md]`, реално се изпълняваха. Тоест молба от рода
+    на "запиши ми в README как се вика умение" изпълняваше умението вместо (и
+    освен) да запише файла. Сега най-външният блок печели, а всичко вътре в него
+    е текст, какъвто и да е типът му.
     """
     if not response_text:
         return []
 
     # (позиция_в_текста, изход) — сортира се по позиция, после се връщат само изходите.
     results: list[tuple[int, str]] = []
+
+    # ── 1. Блокови тагове: събираме кандидатите, после решаваме влагането ────
+    # (start, end, kind, match) за трите блокови типа, подредени по позиция.
+    block_candidates: list[tuple[int, int, str, re.Match]] = []
+    for kind, rx in (("WRITE_FILE", _WRITE_RE), ("EDIT_FILE", _EDIT_RE),
+                     ("USE_SKILL", _USE_SKILL_RE)):
+        for m in rx.finditer(response_text):
+            block_candidates.append((m.start(), m.end(), kind, m))
+    # По-ранният старт печели; при равен старт — по-дългият блок е външният.
+    block_candidates.sort(key=lambda c: (c[0], -c[1]))
+
     consumed_spans: list[tuple[int, int]] = []
 
-    # 1. WRITE_FILE блокове (с тяло).
-    for m in _WRITE_RE.finditer(response_text):
-        results.append((m.start(), _safe_tool("WRITE_FILE", _tool_write_file,
-                                              m.group("path"), m.group("body"))))
-        consumed_spans.append((m.start(), m.end()))
+    def _inside_block(pos: int) -> bool:
+        return any(s <= pos < e for s, e in consumed_spans)
 
-    # 1a. EDIT_FILE блокове (anchor + замяна, разделени с _EDIT_SEPARATOR).
-    for m in _EDIT_RE.finditer(response_text):
-        body = m.group("body")
-        if _EDIT_SEPARATOR not in body:
-            results.append((m.start(),
-                            (f"[EDIT_FILE: {m.group('path').strip()}] ❌ Липсва разделителят "
-                             f"{_EDIT_SEPARATOR} между стария и новия текст.")))
-        else:
-            old_part, new_part = body.split(_EDIT_SEPARATOR, 1)
-            results.append((m.start(), _safe_tool("EDIT_FILE", _tool_edit_file,
+    for start, end, kind, m in block_candidates:
+        if _inside_block(start):
+            continue  # вложен в вече приет блок → това е текст, не тул
+        consumed_spans.append((start, end))
+        if kind == "WRITE_FILE":
+            results.append((start, _safe_tool("WRITE_FILE", _tool_write_file,
+                                              m.group("path"), m.group("body"))))
+        elif kind == "EDIT_FILE":
+            body = m.group("body")
+            if _EDIT_SEPARATOR not in body:
+                results.append((start,
+                                (f"[EDIT_FILE: {m.group('path').strip()}] ❌ Липсва разделителят "
+                                 f"{_EDIT_SEPARATOR} между стария и новия текст.")))
+            else:
+                old_part, new_part = body.split(_EDIT_SEPARATOR, 1)
+                results.append((start, _safe_tool("EDIT_FILE", _tool_edit_file,
                                                   m.group("path"),
                                                   _strip_one_newline(old_part),
                                                   _strip_one_newline(new_part))))
-        consumed_spans.append((m.start(), m.end()))
-
-    # 1b. USE_SKILL блокове (умение + опционален driver код).
-    for m in _USE_SKILL_RE.finditer(response_text):
-        results.append((m.start(), _safe_tool("USE_SKILL", _tool_use_skill,
+        else:  # USE_SKILL
+            results.append((start, _safe_tool("USE_SKILL", _tool_use_skill,
                                               m.group("name"), m.group("body"))))
+
+    # ── 1b. USE_SKILL БЕЗ затварящ [END_USE_SKILL] ──────────────────────────
+    # Най-скъпият пропуск в целия парсер (bug fix, 2026-09-20). driver кодът е
+    # ИЗРИЧНО опционален — `use_skill()` документира, че при празен driver само
+    # зарежда умението и пуска self-test-а му — така че `[USE_SKILL: име]` сам
+    # по себе си е напълно валидната минимална форма и точно тази форма моделът
+    # пише най-често. Дотук тя не съвпадаше с НИЩО: `_USE_SKILL_RE` изисква
+    # затварящия таг, а `_SIMPLE_RE` не познава USE_SKILL. Резултат: нула
+    # изпълнени тула за реплика, която ВИДИМО вика умение. Викащият цикъл
+    # (agent_core.run_tool_loop / терминалът) тогава хваща само
+    # `looks_like_attempted_tool_tag`, праща "сгрешил си синтаксиса", моделът
+    # пише същото пак — и рундовете изгарят, без нито един скил да е тръгнал.
+    # Тук consume-ваме САМО самия таг (не остатъка от отговора), за да могат
+    # другите тагове след него пак да се изпълнят.
+    for m in _BARE_USE_SKILL_RE.finditer(response_text):
+        if _inside_block(m.start()):
+            continue
         consumed_spans.append((m.start(), m.end()))
+        out = _safe_tool("USE_SKILL", _tool_use_skill, m.group("name"), "")
+        # Изпълнено е — но ако моделът е искал да ВИКА нещо от умението, нека
+        # научи точния синтаксис, вместо да гадае пак следващия рунд.
+        out += ("\n(Без driver код — блокът не беше затворен. За да извикаш функция "
+                "от умението: [USE_SKILL: име]<твоят код>[END_USE_SKILL].)")
+        results.append((m.start(), out))
 
-    # 2. Едноредови тулове — прескачаме тези вътре във WRITE_FILE блок.
-    def _inside_write(pos: int) -> bool:
-        return any(s <= pos < e for s, e in consumed_spans)
-
+    # ── 2. Едноредови тулове — прескачаме тези вътре в блоков таг ───────────
     for m in _SIMPLE_RE.finditer(response_text):
-        if _inside_write(m.start()):
+        if _inside_block(m.start()):
             continue
         fn = _SIMPLE_DISPATCH[m.group("tool")]
         results.append((m.start(), _safe_tool(m.group("tool"), fn, m.group("arg"))))
 
     # 3. BROWSER_READ — без аргумент (като LOOK_AT_SCREEN).
     for m in _BROWSER_READ_RE.finditer(response_text):
-        if _inside_write(m.start()):
+        if _inside_block(m.start()):
             continue
         results.append((m.start(), _safe_tool("BROWSER_READ", _tool_browser_read)))
 
     # 3b. REPO_MAP без аргумент — картира текущия workspace.
     for m in _REPO_MAP_RE.finditer(response_text):
-        if _inside_write(m.start()):
+        if _inside_block(m.start()):
             continue
         results.append((m.start(), _safe_tool("REPO_MAP", _tool_repo_map, "")))
 
     # 4. TASK_LIST без аргумент — [TASK_LIST] показва отворените нишки.
     for m in _TASK_LIST_RE.finditer(response_text):
-        if _inside_write(m.start()):
+        if _inside_block(m.start()):
             continue
         results.append((m.start(), _safe_tool("TASK_LIST", _tool_task_list, "open")))
 

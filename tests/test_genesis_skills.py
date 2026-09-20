@@ -280,6 +280,98 @@ def test_tool_tags_inside_a_write_file_body_are_not_separately_executed(_workspa
     assert "[READ_FILE: secrets.txt]" in (_workspace / "doc.txt").read_text(encoding="utf-8")
 
 
+def test_bare_use_skill_tag_without_the_closing_marker_still_runs(_workspace, monkeypatch) -> None:
+    """`[END_USE_SKILL]` closes an OPTIONAL driver block — skill_loader.use_skill
+    documents an empty driver as "load the skill and run its self-test", so
+    `[USE_SKILL: name]` alone is the valid minimal form and the one a model
+    writes most often. It used to match nothing at all: the closed-block regex
+    needs the terminator and the single-line regex doesn't know USE_SKILL, so
+    the reply *looked* like a tool call and executed zero tools — the caller
+    then burned its rounds re-prompting for syntax instead of running anything."""
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(gs, "_tool_use_skill",
+                        lambda name, driver="": seen.append((name, driver)) or "ran")
+    results = gs.parse_and_execute_tools("[USE_SKILL: reverse_a_string]")
+    assert len(results) == 1
+    assert seen == [("reverse_a_string", "")]
+
+
+def test_bare_use_skill_tag_consumes_only_itself_not_the_rest_of_the_reply(
+    _workspace, monkeypatch
+) -> None:
+    """An unterminated USE_SKILL must not swallow the tags that follow it."""
+    monkeypatch.setattr(gs, "_tool_use_skill", lambda name, driver="": "skill ran")
+    (_workspace / "after.txt").write_text("still here", encoding="utf-8")
+    results = gs.parse_and_execute_tools(
+        "[USE_SKILL: some_skill]\nand then\n[READ_FILE: after.txt]"
+    )
+    assert len(results) == 2
+    assert "skill ran" in results[0]
+    assert "still here" in results[1]
+
+
+def test_closed_use_skill_block_still_passes_its_driver_code(_workspace, monkeypatch) -> None:
+    """The bare-tag fallback must not shadow the terminated form."""
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(gs, "_tool_use_skill",
+                        lambda name, driver="": seen.append((name, driver)) or "ran")
+    gs.parse_and_execute_tools("[USE_SKILL: s]\nprint(1)\n[END_USE_SKILL]")
+    assert seen == [("s", "\nprint(1)\n")]
+
+
+def test_use_skill_block_inside_a_write_file_body_is_not_executed(
+    _workspace, monkeypatch
+) -> None:
+    """Same rule the single-line tags already followed, now for block tags:
+    writing documentation that *shows* the USE_SKILL syntax must not also run
+    the skill. The per-type loops used to apply the containment guard only to
+    single-line tags, so a `[USE_SKILL: ...][END_USE_SKILL]` inside a
+    `[WRITE_FILE: ...]` body really did execute."""
+    monkeypatch.setattr(gs, "_tool_use_skill",
+                        lambda name, driver="": pytest.fail("skill must not run"))
+    text = ("[WRITE_FILE: doc.md]How to call one:\n"
+            "[USE_SKILL: demo]\nprint('x')\n[END_USE_SKILL]\n[END_WRITE]")
+    results = gs.parse_and_execute_tools(text)
+    assert len(results) == 1
+    assert "[USE_SKILL: demo]" in (_workspace / "doc.md").read_text(encoding="utf-8")
+
+
+def test_bare_use_skill_tag_inside_a_write_file_body_is_not_executed(
+    _workspace, monkeypatch
+) -> None:
+    monkeypatch.setattr(gs, "_tool_use_skill",
+                        lambda name, driver="": pytest.fail("skill must not run"))
+    results = gs.parse_and_execute_tools("[WRITE_FILE: d.md]eg: [USE_SKILL: demo][END_WRITE]")
+    assert len(results) == 1
+
+
+def test_edit_file_block_inside_a_write_file_body_is_not_executed(
+    _workspace, monkeypatch
+) -> None:
+    monkeypatch.setattr(gs, "_tool_edit_file",
+                        lambda *a, **kw: pytest.fail("edit must not run"))
+    text = ("[WRITE_FILE: doc.md][EDIT_FILE: real.py]old"
+            f"{gs._EDIT_SEPARATOR}new[END_EDIT][END_WRITE]")
+    results = gs.parse_and_execute_tools(text)
+    assert len(results) == 1
+
+
+def test_outermost_block_wins_when_two_block_tags_overlap(_workspace, monkeypatch) -> None:
+    """Containment is resolved across ALL block types at once, so which loop
+    happened to run first no longer decides who wins."""
+    monkeypatch.setattr(gs, "_tool_use_skill",
+                        lambda name, driver="": pytest.fail("inner tag must stay text"))
+    text = ("[USE_SKILL: outer]\n"
+            "[WRITE_FILE: nested.txt]x[END_WRITE]\n"
+            "[END_USE_SKILL]")
+    calls: list[str] = []
+    monkeypatch.setattr(gs, "_tool_use_skill", lambda name, driver="": calls.append(name) or "ok")
+    results = gs.parse_and_execute_tools(text)
+    assert calls == ["outer"]
+    assert len(results) == 1
+    assert not (_workspace / "nested.txt").exists()
+
+
 def test_multiple_tags_execute_in_the_order_they_appear(_workspace) -> None:
     (_workspace / "first.txt").write_text("1st", encoding="utf-8")
     (_workspace / "second.txt").write_text("2nd", encoding="utf-8")
