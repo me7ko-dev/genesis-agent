@@ -22,12 +22,15 @@ genesis_agent.embeddings — семантична памет: локални emb
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import struct
 
 import requests
 
 from genesis_agent.config import DATA_DIR
+
+log = logging.getLogger("genesis.embeddings")
 
 DB_PATH = DATA_DIR / "embeddings.db"
 MODEL = "nomic-embed-text"
@@ -86,6 +89,21 @@ def embed(text: str, timeout: int = 60) -> list[float] | None:
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
+    """Косинусова близост. 0.0 за вектори, които НЕ са сравними.
+
+    Дължината се проверява, защото `zip` реже до по-късия мълчаливо (bug fix,
+    2026-09-20). Таблицата пази `dim` за всеки ред поотделно, тоест вектори от
+    различни модели могат да съжителстват — смени се `MODEL`, или Ollama
+    издаде `nomic-embed-text` с друга размерност, и заявка от 768 измерения се
+    сравняваше с 384-мерен запис по първите 384 числа. Това не е "по-слабо
+    съвпадение", а число без смисъл: измерено между два несвързани случайни
+    вектора дава 0.50 при праг за семантично попадение 0.55 в
+    skill_loader.search_skills — тоест чист шанс решава дали умение ще бъде
+    предложено. По-скъпо е в semantic_duplicate (праг 0.92), където фалшиво
+    съвпадение спира записването на ново умение с "вече има такова".
+    """
+    if len(a) != len(b):
+        return 0.0
     dot = sum(x * y for x, y in zip(a, b))
     na = sum(x * x for x in a) ** 0.5
     nb = sum(y * y for y in b) ** 0.5
@@ -109,6 +127,11 @@ def index_skill(name: str, text: str) -> bool:
     return True
 
 
+def _count_vectors() -> int:
+    with _conn() as c:
+        return int(c.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0])
+
+
 def _all_vectors() -> list[tuple[str, list[float]]]:
     with _conn() as c:
         rows = c.execute("SELECT name, vector, dim FROM embeddings").fetchall()
@@ -120,7 +143,16 @@ def semantic_search(query: str, top_k: int = 5) -> list[tuple[str, float]]:
     qvec = embed(query)
     if not qvec:
         return []
-    scored = [(name, _cosine(qvec, vec)) for name, vec in _all_vectors()]
+    # Записи с друга размерност са от друг модел — несравними, не "далечни".
+    # Изключват се от класирането, вместо да висят с нула: така броят им е
+    # видим и наличието на стар индекс не изглежда като "няма съвпадения".
+    usable = [(name, vec) for name, vec in _all_vectors() if len(vec) == len(qvec)]
+    skipped = _count_vectors() - len(usable)
+    if skipped > 0:
+        log.warning(
+            "%d записа в индекса са с друга размерност от текущия модел (%s) и се "
+            "пропускат — пусни reindex_all(), за да се преизчислят.", skipped, MODEL)
+    scored = [(name, _cosine(qvec, vec)) for name, vec in usable]
     scored.sort(key=lambda x: x[1], reverse=True)
     return scored[:top_k]
 
