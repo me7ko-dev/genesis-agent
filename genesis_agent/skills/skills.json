@@ -367,6 +367,27 @@
         "category": "workflow",
         "operator": "operator"
       }
+    },
+    {
+      "name": "regression_proof_against_old_code",
+      "category": "autonomous",
+      "file_path": "skills/regression_proof_against_old_code.md",
+      "description": "Run a new test against the pre-fix code from git to prove it actually catches the bug, restoring the working copy unconditionally.",
+      "triggers": [
+        "regression proof against old code",
+        "Run a new test against the pre-fix code from git to prove it actually catches the bug, restoring the working copy uncond",
+        "докажи че тестът хваща бъга",
+        "пусни теста срещу стария код"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-09-20T14:57:28.860262+00:00",
+      "verified": false,
+      "verification": {
+        "verified": false,
+        "method": "needs_confirmation",
+        "detail": "[SANDBOX DENIED] Операцията изисква потвърждение, но режимът е неинтерактивен (autonomous). Причини: убиване на процеси; стартиране на подпроцес"
+      },
+      "signature": "52dbd12724ebc949777f9fb2ae2753f41f67f3c4b2a4e49473abdfd850fe4ad23fea078bd3ecb948b0f2ec808a9228b473788cf302705f0164de71826e738b297cd7f36c96aee463f3ae7423a54a65f1b56f1e6a9a2a7eb65887ed099c98eb9f845426b7445979cf33658a359964ddb570bdae931779ef7323f5d60cbdcec2798f26a1af6a3b6b59dc058a75545f033b343fb1e3a663b082bd425950f64fdada26926ca8ee86b70b6269b8f04c26d5961e85cd3f9f2503cfb909b923a92f082ed4d6bb519db39ab617fae8b0a35292fb7f63f2d83121800b67d37a2a56c086e7718763d7265f167e0ec3d53a3f298b5db91c03ae16d14c3404060a4e5828f9fa"
     }
   ]
 }
