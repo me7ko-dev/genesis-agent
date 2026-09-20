@@ -9,6 +9,7 @@ scripts/unify_skills_format.py had to clean up once already.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import logging
@@ -18,6 +19,8 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from genesis_agent import dna
 from genesis_agent.config import SKILLS_DIR
@@ -35,11 +38,47 @@ log = logging.getLogger("genesis.skills_manager")
 _SAVE_LOCK = threading.Lock()
 
 
+# Каквото slugify връща, когато от текста не остава нищо използваемо. Стои
+# като константа, защото save_skill го разпознава, за да потърси име другаде.
+SLUG_FALLBACK = "skill"
+
+# Имена, които не описват нищо — почти всеки скрипт има `main`.
+_UNINFORMATIVE_NAMES = frozenset({"main", "run", "test", "demo", "example", "solve"})
+
+
 def slugify(text: str, max_len: int = 48) -> str:
     s = text.lower().strip()
     s = re.sub(r"[^a-z0-9]+", "_", s)
-    s = s.strip("_") or "skill"
+    s = s.strip("_") or SLUG_FALLBACK
     return s[:max_len]
+
+
+def english_name_from_code(code: str) -> str:
+    """Име на умението, взето от собствения му код.
+
+    Имената на уменията се пазят на английски, а целта идва на езика на
+    оператора — за изцяло кирилска цел `slugify` не оставя нищо и всички
+    такива умения се събират на `skill` + хеш суфикс. Идентификаторите в кода
+    обаче са английски и описателни (`def cleanup_temp_files(...)`), защото
+    моделите пишат кода на английски. Тоест името вече съществува в самото
+    умение — просто не се четеше оттам.
+
+    Връща празен низ, ако кодът не се парсва или няма подходящо име.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return ""
+    public: list[str] = []
+    fallback: list[str] = []
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if node.name.startswith("_"):
+            continue
+        (fallback if node.name.lower() in _UNINFORMATIVE_NAMES else public).append(node.name)
+    chosen = (public or fallback)[:1]
+    return chosen[0] if chosen else ""
 
 
 def _index_path() -> Path:
@@ -163,17 +202,22 @@ def list_skills() -> list[dict[str, Any]]:
 
 def _build_md(*, slug: str, description: str, triggers: list[str], code: str,
               last_updated: str, note: str) -> str:
-    frontmatter = (
-        "---\n"
-        f"name: '{slug}'\n"
-        "category: 'autonomous'\n"
-        f"description: '{description}'\n"
-        f"triggers: {json.dumps(triggers, ensure_ascii=False)}\n"
-        "version: '1.0'\n"
-        "author: 'Genesis'\n"
-        f"last_updated: '{last_updated}'\n"
-        "---\n"
-    )
+    # Сглобяваше се на ръка с единични кавички: цел, съдържаща апостроф
+    # ("don't repeat the user's work"), даваше НЕВАЛИДЕН YAML, а
+    # skill_loader лови YAMLError и продължава с празни метаданни — тоест
+    # умението се зарежда, но описанието и тригерите му изчезват и то не може
+    # да бъде намерено никога. Тихо, без грешка. Кавичките са работа на YAML.
+    meta = {
+        "name": slug,
+        "category": "autonomous",
+        "description": description,
+        "triggers": triggers,
+        "version": "1.0",
+        "author": "Genesis",
+        "last_updated": last_updated,
+    }
+    frontmatter = "---\n" + yaml.safe_dump(
+        meta, allow_unicode=True, sort_keys=False, default_flow_style=False) + "---\n"
     body = (
         f"\n## Описание\n{description}\n\n"
         f"## Python Код\n```python\n{code.rstrip()}\n```\n\n"
@@ -213,6 +257,14 @@ def save_skill(
 
     ensure_skills_layout()
     base_slug = slugify(slug)
+    if base_slug == SLUG_FALLBACK:
+        # Целта не оставя нищо на латиница (обикновено: написана е на
+        # български). Името се взима от кода, за да е английско И смислено,
+        # вместо `skill_4f1a2b`. Намирането на български минава по тригерите
+        # и описанието по-долу, не по името.
+        derived = english_name_from_code(code)
+        if derived:
+            base_slug = slugify(derived)
     now = datetime.now(timezone.utc).isoformat()
     note = (verification_stdout or "")[:2000] or "Автоматично генерирано от autonomous_loop."
 
@@ -237,7 +289,14 @@ def save_skill(
                 final_slug = f"{base_slug[:40]}_{suffix}"
 
         md_path = SKILLS_DIR / f"{final_slug}.md"
+        # Тригерите носят И оригиналната цел, дума по дума. Името е английско,
+        # а операторът пише на български — trigger_engine брои съвпадения само
+        # по тригери и име (не по описание), така че без този ред българска
+        # заявка не може да достигне прага при никакво умение.
         triggers = [final_slug.replace("_", " ")]
+        goal_trigger = " ".join((goal or "").split())[:120]
+        if goal_trigger and goal_trigger.lower() != triggers[0].lower():
+            triggers.append(goal_trigger)
         md_path.write_text(
             _build_md(slug=final_slug, description=goal, triggers=triggers, code=code,
                        last_updated=now, note=note),

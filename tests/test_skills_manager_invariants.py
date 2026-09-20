@@ -187,15 +187,16 @@ class TestCyrillicGoalsAreDistinguishable:
         entries = _index(_isolated_library)
         assert len(entries) == 2, f"кирилска цел презаписа друга: {entries}"
 
-    def test_known_limitation_a_fully_cyrillic_goal_loses_its_name(self) -> None:
-        """Документира текущото поведение, за да е видимо, а не изненада.
+    def test_slugify_itself_still_keeps_only_latin(self) -> None:
+        """`slugify` нарочно си остава такава: смесените цели запазват
+        латинското ("извлечи данни от csv" -> "csv"), а изцяло кирилската не
+        оставя нищо и пада на фолбека.
 
-        Нюансът е по-точен, отколкото изглежда отначало: латинските части
-        оцеляват ("извлечи данни от csv" -> "csv"), така че смесените цели
-        запазват нещо. ЧИСТО кирилска цел обаче не остава с нищо и двете
-        по-долу дават един и същ базов slug — различават се само по хеша,
-        който колизионната защита добавя. Оправянето иска транслитерация,
-        тоест промяна в схемата на именуване: решение на поддържащия."""
+        Това вече не е дупка. Операторът реши (2026-09-20) имената да се пазят
+        на АНГЛИЙСКИ, не транслитерирани — затова `save_skill` взима името от
+        кода на самото умение, когато целта не оставя нищо, а намирането на
+        български минава по тригерите и описанието. Виж
+        TestNamedInEnglishFoundInBulgarian по-долу."""
         assert sm.slugify("извлечи данни от csv") == "csv", "латиницата оцелява"
         assert sm.slugify("съвсем различна цел") == "skill"
         assert sm.slugify("напиши отчет") == "skill"
@@ -244,3 +245,131 @@ class TestIndexRecoveryIsNarrow:
         assert not (_isolated_library / "skills.json.corrupt").exists(), (
             "преходна грешка не бива да мести здрав индекс")
         assert len(_index(_isolated_library)) == 1, "умението трябва още да е в индекса"
+
+
+class TestNamedInEnglishFoundInBulgarian:
+    """Решение на оператора (2026-09-20): имената на уменията се пазят на
+    английски, но българска заявка трябва да стига до точното умение.
+
+    Двете заедно, защото поотделно всяко е безполезно: английско име, което
+    не може да се намери на български, е умение, което не съществува за своя
+    оператор; а намираемо умение с име `skill_4f1a2b` не казва нищо на човека,
+    който гледа библиотеката.
+    """
+
+    _CYRILLIC_GOAL = "Изчисти временните файлове по график"
+    _REAL_CODE = (
+        "import os\n\n"
+        "def cleanup_temp_files(root='/tmp'):\n"
+        "    return [p for p in os.listdir(root) if p.endswith('.tmp')]\n\n"
+        "assert isinstance(cleanup_temp_files('/tmp'), list)\n"
+        "print('OK')\n"
+    )
+
+    def test_a_cyrillic_goal_is_named_from_the_code_not_from_a_hash(
+        self, _isolated_library
+    ) -> None:
+        """`slugify` не оставя нищо от изцяло кирилска цел, тоест всички
+        такива умения се казваха `skill` + хеш суфикс. Името обаче вече
+        съществува в самото умение: моделите пишат идентификаторите на
+        английски."""
+        sm.save_skill(slug=self._CYRILLIC_GOAL, code=self._REAL_CODE,
+                      goal=self._CYRILLIC_GOAL)
+        names = [e["name"] for e in _index(_isolated_library)]
+        assert names == ["cleanup_temp_files"], names
+
+    def test_the_original_goal_is_kept_as_a_trigger(self, _isolated_library) -> None:
+        """trigger_engine брои съвпадения само по тригери и име — не по
+        описание. Без цялата цел тук българска заявка не може да достигне
+        прага при никое умение."""
+        sm.save_skill(slug=self._CYRILLIC_GOAL, code=self._REAL_CODE,
+                      goal=self._CYRILLIC_GOAL)
+        triggers = _index(_isolated_library)[0]["triggers"]
+        assert self._CYRILLIC_GOAL in triggers, triggers
+        assert "cleanup temp files" in triggers, triggers
+
+    def test_a_bulgarian_query_finds_the_english_named_skill(
+        self, _isolated_library, monkeypatch
+    ) -> None:
+        from genesis_agent import skill_loader as sl
+        sm.save_skill(slug=self._CYRILLIC_GOAL, code=self._REAL_CODE,
+                      goal=self._CYRILLIC_GOAL)
+        monkeypatch.setattr(sl, "SKILLS_DIR", _isolated_library)
+        monkeypatch.setattr(sl, "SKILLS_ROOT", _isolated_library.parent)
+        monkeypatch.setattr(sl, "_SKILLS_INDEX_CACHE", None)
+
+        hits = sl.search_skills("изчисти временните файлове", top_n=3,
+                                use_semantic=False)
+        assert [h["name"] for h in hits] == ["cleanup_temp_files"], hits
+
+        from genesis_agent.trigger_engine import TriggerEngine
+        assert TriggerEngine().match("изчисти временните файлове по график")
+
+    def test_an_english_goal_is_still_named_after_the_goal(
+        self, _isolated_library
+    ) -> None:
+        """Правилото важи САМО когато целта не оставя нищо — иначе името би
+        спряло да описва за какво е поискано умението."""
+        sm.save_skill(slug="parse a csv report", code=self._REAL_CODE,
+                      goal="parse a csv report")
+        assert [e["name"] for e in _index(_isolated_library)] == ["parse_a_csv_report"]
+
+    def test_uninformative_and_private_names_are_passed_over(self) -> None:
+        code = ("def _helper():\n    pass\n\n"
+                "def main():\n    pass\n\n"
+                "def summarise_invoices():\n    pass\n")
+        assert sm.english_name_from_code(code) == "summarise_invoices"
+
+    def test_only_main_is_better_than_nothing(self) -> None:
+        assert sm.english_name_from_code("def main():\n    pass\n") == "main"
+
+    def test_code_that_does_not_parse_falls_back_instead_of_raising(
+        self, _isolated_library
+    ) -> None:
+        assert sm.english_name_from_code("def broken(:\n") == ""
+        sm.save_skill(slug=self._CYRILLIC_GOAL, code="x = 1\nprint('OK')\n",
+                      goal=self._CYRILLIC_GOAL)
+        assert [e["name"] for e in _index(_isolated_library)] == [sm.SLUG_FALLBACK]
+
+
+class TestFrontmatterSurvivesRealText:
+    """Frontmatter-ът се сглобяваше на ръка с единични кавички. Апостроф в
+    целта ("don't repeat the user's work") дава невалиден YAML, а
+    skill_loader лови YAMLError и продължава с ПРАЗНИ метаданни: умението се
+    зарежда, но описанието и тригерите му изчезват и то не може да бъде
+    намерено никога. Тихо, без грешка."""
+
+    def _metadata(self, lib, name: str, monkeypatch) -> dict:
+        from genesis_agent import skill_loader as sl
+        monkeypatch.setattr(sl, "SKILLS_DIR", lib)
+        monkeypatch.setattr(sl, "SKILLS_ROOT", lib.parent)
+        monkeypatch.setattr(sl, "_SKILLS_INDEX_CACHE", None)
+        return sl.skill_view(name)["metadata"]
+
+    def test_an_apostrophe_no_longer_erases_the_metadata(
+        self, _isolated_library, monkeypatch
+    ) -> None:
+        goal = "don't repeat the user's work"
+        sm.save_skill(slug="apostrophe test", code=_CODE, goal=goal)
+        md = self._metadata(_isolated_library, "apostrophe_test", monkeypatch)
+        assert md["description"] == goal
+        assert goal in md["triggers"]
+
+    def test_a_colon_and_a_hash_survive_too(
+        self, _isolated_library, monkeypatch
+    ) -> None:
+        goal = "fix: bug #42 in the parser"
+        sm.save_skill(slug="colon test", code=_CODE, goal=goal)
+        md = self._metadata(_isolated_library, "colon_test", monkeypatch)
+        assert md["description"] == goal
+
+    def test_cyrillic_is_written_as_text_not_as_escapes(
+        self, _isolated_library
+    ) -> None:
+        """`allow_unicode=False` би записало \\u0418... — валиден YAML, но
+        файлът става нечитаем за човека, който отваря умението."""
+        goal = "Изчисти временните файлове"
+        sm.save_skill(slug="cyrillic desc", code=_CODE, goal=goal)
+        text = (_isolated_library / "cyrillic_desc.md").read_text(encoding="utf-8")
+        assert goal in text
+        assert "\\u" not in text
