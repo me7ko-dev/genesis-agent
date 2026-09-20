@@ -10,6 +10,10 @@ genesis_agent.verifier — реална верификация на умение
     verified=False, method="syntax_err"        — не се парсва
     verified=False, method="placeholder"       — съдържа заместващ ключ (няма да работи)
     verified=False, method="blocked"           — sandbox-ът го блокира (опасен)
+    verified=False, method="needs_confirmation"— иска операция, която проверката
+                                                 отказва без надзор (подпроцес,
+                                                 chmod, инсталация) — НЕдоказано,
+                                                 не доказано опасно
     verified=False, method="runtime_err"       — гръмна при изпълнение (вкл. липсващ пакет)
 
 Забележка: sandbox-ът дава минимална среда, затова умения, които искат външни
@@ -23,6 +27,11 @@ import re
 from dataclasses import dataclass
 
 from genesis_agent import sandbox
+
+# `[SANDBOX DENIED]` = CONFIRM операция при неинтерактивен режим;
+# `[SANDBOX BLOCKED]` = катастрофално, отказва се винаги. Маркерите се пишат в
+# sandbox._decide и са частта от stderr, която различава двете.
+_DENIED_RE = re.compile(r"\[SANDBOX (DENIED|DECLINED)\]")
 
 _PLACEHOLDER_RE = re.compile(
     r"your_api_key|YOUR_API_KEY|your-api-key|api_key\s*=\s*['\"]your|"
@@ -74,6 +83,16 @@ def verify_skill(code: str, *, timeout: int = 30) -> VerifyResult:
     # 2. Реално изпълнение в sandbox (deny режим → опасното не се пуска).
     res = sandbox.run_python(code, policy=sandbox.SandboxPolicy(mode="deny"), timeout=timeout)
     if res.blocked:
+        # Две много различни неща излизаха с една и съща дума. Измерено:
+        # умение, което вика `git rev-parse` през subprocess, получаваше
+        # същата присъда ("blocked", в документацията — „опасен“), както
+        # `os.system("rm -rf /")`. Първото е НЕдоказано, второто е доказано
+        # опасно, а разликата решава какво да се каже на модела после: при
+        # смесването единственият начин да изпълни инструкцията е да махне
+        # подпроцеса, тоест да направи умението безполезно, или да си
+        # измисли тест. Гейтът не се разхлабва — и двете остават verified=False.
+        if _DENIED_RE.match(res.stderr.lstrip()):
+            return VerifyResult(False, "needs_confirmation", res.stderr[:300])
         return VerifyResult(False, "blocked", res.stderr[:300])
     if not res.ok:
         return VerifyResult(False, "runtime_err", (res.stderr or res.stdout)[:300])

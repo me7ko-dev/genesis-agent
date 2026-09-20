@@ -500,6 +500,33 @@ def _run_autonomous_loop_impl(
             vres = verify_skill(reply.code)
             if vres.method != "self_test_passed":
                 _quality_failures = _note_quality_failure(brain, _quality_failures, _quality_escalate_after)
+                # Обратната връзка трябва да описва ИСТИНСКАТА причина. Когато
+                # проверката е отказана заради нужното потвърждение, кодът има
+                # преминаващ self-test — просто не е бил пуснат. Общото
+                # съобщение („няма self-test, добави assert-и“) остави на
+                # модела един-единствен начин да се подчини: да махне
+                # подпроцеса, тоест да обезсмисли умението, или да си измисли
+                # тест. Гейтът е същият — умението пак не се приема — сменя се
+                # само какво се иска да се поправи.
+                if vres.method == "needs_confirmation":
+                    report_thought(
+                        "🧪 Тест-гейт: self-testът не може да се пусне без надзор "
+                        f"({vres.detail[:120]})")
+                    messages.append({"role": "assistant", "content": reply.raw_text})
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "The self-test could NOT be run: verification runs unattended and "
+                            "the code performs an operation that requires confirmation "
+                            f"({vres.detail[:200]}). Do NOT remove that capability — it is the "
+                            "point of the skill. Restructure instead: keep the privileged call "
+                            "inside a function, and make the `__main__` self-test verify the "
+                            "logic around it without performing it (assert on argument "
+                            "assembly, parsing of a sample output, a dry-run flag). Print 'OK' "
+                            "on success and return the FULL corrected script."
+                        ),
+                    })
+                    continue
                 report_thought(f"🧪 Тест-гейт отхвърли: няма преминаващ self-test ({vres.method})")
                 messages.append({"role": "assistant", "content": reply.raw_text})
                 messages.append({
