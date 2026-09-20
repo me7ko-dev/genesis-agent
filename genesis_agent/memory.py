@@ -8,7 +8,8 @@ Cross-session memory interface, свързан директно с episodic_memo
   - memory_store(key, value)     → запазва произволен ключ/стойност
   - memory_recall(key)           → извлича по ключ
   - memory_search(query)         → семантично търсене в епизодите
-  - memory_context(n)            → последните N епизода като контекст за LLM
+  - memory_context(n)            → последните N МИСИИ като контекст за LLM
+                                   (извикванията на инструменти са лог, не контекст)
 
 Съхранение:
   - Прости key/value → SQLite таблица "persistent_memory"
@@ -202,7 +203,18 @@ def memory_context(n: int = 10) -> str:
     Returns:
         Форматиран текст готов за вграждане в системен промпт.
     """
-    summary = episodic.summarize_sessions(last_n=n)
+    # САМО мисии (design note, 2026-09-20). Измерено на живо: този текст влиза
+    # в системния промпт при всяка заявка, а последните N епизода бяха 555
+    # успешни `READ_FILE` записа — включително от собствения тестов пакет:
+    #
+    #   1. Цел: READ_FILE /tmp/pytest-of-root/.../note.txt -> Резултат: прочетен
+    #
+    # Нито един ред не казваше нищо за работата на оператора, а моделът вижда
+    # точно това като „скорошна активност“ и плаща за него на всеки рунд.
+    # Мисиите носят цел, изход и урок; извикването на инструмент е ред от лог.
+    # Коментарът в genesis_terminal_agent вече описваше този проблем — поправен
+    # беше само редът на блоковете, не и съдържанието на този.
+    summary = episodic.summarize_sessions(last_n=n, kinds=("mission",))
     keys = memory_list_keys()
     kv_info = ""
     if keys:
