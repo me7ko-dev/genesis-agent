@@ -243,3 +243,66 @@ class TestFuzzyResolveNeedsRealEvidence:
             "build_a_stdlib_only_an_in_process_event_bus_pub")
         assert resolved == "build_a_stdlib_only_an_in_process_event_bus_pub"
         assert candidates == []
+
+
+class TestSearchSeesTheOperatorsLanguage:
+    """`_keywords` беше `[a-z0-9_]+` — само ASCII. Операторът пише на
+    български, а `search_skills` е механизмът, по който изобщо се стига до
+    преизползване на умение (когато embeddings липсват, а те са незадължителна
+    зависимост, това е ЕДИНСТВЕНИЯТ механизъм).
+
+    Измерено преди поправката: „искам умение за четене на конфигурационен
+    файл“ → празно множество думи → score 0 за всяко умение → нито едно не
+    може да се намери никога. Библиотеката съществува заради преизползването;
+    на езика на оператора то беше изключено.
+    """
+
+    def test_a_cyrillic_query_produces_keywords_at_all(self) -> None:
+        words = sl._keywords("обработка на CSV файлове")
+        assert "обработка" in words
+        assert "файлове" in words
+        assert "csv" in words, "латиницата в смесен текст трябва да оцелее"
+
+    def test_a_fully_cyrillic_query_is_no_longer_empty(self) -> None:
+        assert sl._keywords("четене на конфигурационен файл")
+
+    def test_template_verbs_are_filtered_in_bulgarian_too(self) -> None:
+        """Английските шаблонни глаголи вече се махат („build“, „write“).
+        Без същото за българските две напълно несвързани цели съвпадат само
+        защото и двете започват с „Направи“."""
+        assert sl._keywords("Направи нещо с това") == set()
+
+    def test_a_cyrillic_trigger_can_be_found_by_a_cyrillic_query(
+        self, _isolated_skills, monkeypatch
+    ) -> None:
+        """Целите от goals_from_real_work са на български, тоест уменията,
+        които агентът сам създава, ще имат български тригери."""
+        skills_dir = _isolated_skills
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        (skills_dir / "skills.json").write_text(json.dumps({"skills": [
+            {"name": "obrabotka_na_otcheti", "file_path": "skills/x.md",
+             "description": "Обработка на месечни отчети от CSV",
+             "triggers": ["обработка отчети csv"]},
+            {"name": "retry_backoff", "file_path": "skills/y.md",
+             "description": "Exponential backoff retry helper",
+             "triggers": ["retry backoff"]},
+        ]}, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(sl, "_SKILLS_INDEX_CACHE", None)
+
+        hits = sl.search_skills("обработка на отчети", top_n=3, use_semantic=False)
+        assert hits, "нито едно умение не беше намерено по българска заявка"
+        assert hits[0]["name"] == "obrabotka_na_otcheti"
+
+    def test_english_search_is_unchanged(self, _isolated_skills, monkeypatch) -> None:
+        skills_dir = _isolated_skills
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        (skills_dir / "skills.json").write_text(json.dumps({"skills": [
+            {"name": "retry_backoff", "file_path": "skills/y.md",
+             "description": "Exponential backoff retry helper",
+             "triggers": ["retry backoff"]},
+        ]}, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(sl, "_SKILLS_INDEX_CACHE", None)
+
+        hits = sl.search_skills("exponential backoff retry", top_n=3, use_semantic=False)
+        assert hits and hits[0]["name"] == "retry_backoff"
+        assert hits[0]["_kw_score"] == 3
