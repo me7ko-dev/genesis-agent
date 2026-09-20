@@ -380,6 +380,9 @@ def _tool_glob(arg: str) -> str:
 def _tool_repo_map(arg: str = "") -> str:
     from genesis_agent.repo_map import repo_map
     root = _resolve(arg) if arg.strip() else _WORKSPACE
+    refusal = _sensitive_root_refusal("REPO_MAP", root)
+    if refusal:
+        return refusal
     try:
         out = repo_map(root)
     except OSError as e:

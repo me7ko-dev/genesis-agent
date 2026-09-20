@@ -609,3 +609,27 @@ class TestSearchAndGlobAreTheFourthDoor:
                             gs.sandbox.SandboxPolicy(mode="allow"))
         out = gs._tool_search_code("PRIVATE-KEY-BODY", path=str(self._ssh(_workspace)))
         assert "PRIVATE-KEY-BODY" in out
+
+
+class TestRepoMapIsTheFifthDoor:
+    """Същият клас като LIST_DIR: не съдържание, а имена. `REPO_MAP ~/.ssh`
+    връщаше `id_rsa` в режим „deny". Намерено при последното преминаване с
+    `sibling_paths_missing_the_guard`, след като другите четири бяха затворени
+    — и точно затова одитът се пуска пак, а не веднъж."""
+
+    def test_mapping_ssh_is_refused(self, _workspace, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="deny"))
+        d = _workspace / ".ssh"
+        d.mkdir()
+        (d / "id_rsa").write_text("PRIVATE\n", encoding="utf-8")
+        out = gs._tool_repo_map(str(d))
+        assert "SANDBOX DENIED" in out
+        assert "id_rsa" not in out
+
+    def test_an_ordinary_project_is_still_mapped(self, _workspace, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="deny"))
+        (_workspace / "main.py").write_text("print(1)\n", encoding="utf-8")
+        out = gs._tool_repo_map(str(_workspace))
+        assert "SANDBOX" not in out
