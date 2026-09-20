@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import threading
@@ -27,6 +28,8 @@ from genesis_agent.config import SKILLS_DIR
 SKILLS_ROOT = SKILLS_DIR.parent
 
 SKILLS_INDEX_NAME = "skills.json"
+
+log = logging.getLogger("genesis.skills_manager")
 
 # Заключване за паралелни записи — за да не си повредят skills.json.
 _SAVE_LOCK = threading.Lock()
@@ -54,8 +57,32 @@ def ensure_skills_layout() -> None:
 
 
 def _load_index() -> dict[str, Any]:
+    """Индексът, или пресен празен, ако наличният е нечетим.
+
+    `_save_index` по-долу описва защо това има значение: повреден индекс
+    правеше всяко следващо `save_skill` да гърми, а библиотеката — невидима.
+    Атомарният запис затвори най-честата причина (прекъснат запис), но не
+    всички: ръчна редакция, повреда на носителя, или файл, останал повреден
+    отпреди онзи фикс. Дотук `_load_index` вдигаше JSONDecodeError и агентът
+    не можеше да запише нито едно умение повече, докато човек не оправи
+    файла — при положение че .md файловете са напълно здрави.
+
+    Повреденият файл се премества настрани, а не се изтрива: той е картата
+    към умения, които още съществуват на диска, и някой може да я
+    възстанови. Тихото връщане на празен индекс върху него би загубило
+    точно това.
+    """
     ensure_skills_layout()
-    return json.loads(_index_path().read_text(encoding="utf-8"))
+    idx = _index_path()
+    try:
+        return json.loads(idx.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+        log.warning("skills.json е нечетим (%s) — преместен настрани, започва нов индекс", e)
+        try:
+            idx.replace(idx.with_name(f"{idx.name}.corrupt"))
+        except OSError:
+            pass
+        return {"version": "1.0", "skills": []}
 
 
 def _save_index(data: dict[str, Any]) -> None:

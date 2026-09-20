@@ -1,0 +1,180 @@
+"""Инварианти на genesis_agent.skills_manager — той пише библиотеката.
+
+Провалите тук са тихи и трайни: презаписано умение не се забелязва, докато
+не потрябва, а разминат индекс прави умение невидимо, без нищо да гръмне.
+Историята на репото пази и двата случая — "Drop a skills.json entry whose
+.md file was never committed" и колизионния бъг, отбелязан в самия
+save_skill (2026-07-26).
+
+Подредено по цена на провала:
+  1. нищо записано не се губи — нито при колизия, нито при конкурентност;
+  2. индексът и файловете на диска не се разминават;
+  3. името, под което умението се записва, не може да излезе от директорията.
+"""
+from __future__ import annotations
+
+import json
+import threading
+
+import pytest
+
+from genesis_agent import skills_manager as sm
+
+_CODE = "def f():\n    return 1\n\n\nassert f() == 1\nprint('OK')\n"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_library(tmp_path, monkeypatch):
+    """Истинска, но собствена библиотека — тестовете никога не пипат тази на
+    машината."""
+    lib = tmp_path / "skills"
+    lib.mkdir()
+    monkeypatch.setattr(sm, "SKILLS_DIR", lib)
+    # SKILLS_ROOT също: save_skill записва пътя в индекса като относителен
+    # спрямо него (`md_path.relative_to(SKILLS_ROOT)`), така че подмяната само
+    # на SKILLS_DIR оставя двете сочещи в различни дървета.
+    monkeypatch.setattr(sm, "SKILLS_ROOT", tmp_path)
+    monkeypatch.setattr(sm, "_index_path", lambda: lib / "skills.json")
+    # Подписването иска ключове; тук проверяваме индекса, не криптографията.
+    monkeypatch.setattr(sm, "_sign", lambda *a, **kw: "", raising=False)
+    return lib
+
+
+def _index(lib) -> list[dict]:
+    p = lib / "skills.json"
+    if not p.is_file():
+        return []
+    return json.loads(p.read_text(encoding="utf-8")).get("skills", [])
+
+
+class TestNothingWrittenIsEverLost:
+    def test_two_different_goals_with_the_same_slug_both_survive(
+        self, _isolated_library
+    ) -> None:
+        """slugify реже на 48 символа, така че различни цели с общ дълъг
+        префикс се сблъскват. Втората не бива да презапише първата — точно
+        случаят, който save_skill's own comment records as caught by hand."""
+        long_prefix = "build a stdlib only utility that does something useful with"
+        sm.save_skill(slug=long_prefix + " retries",
+                      code=_CODE, goal=long_prefix + " retries")
+        sm.save_skill(slug=long_prefix + " timeouts",
+                      code=_CODE, goal=long_prefix + " timeouts")
+        names = [s["name"] for s in _index(_isolated_library)]
+        assert len(names) == 2, names
+        assert len(set(names)) == 2, f"вторият запис е презаписал първия: {names}"
+        md_files = sorted(p.name for p in _isolated_library.glob("*.md"))
+        assert len(md_files) == 2, md_files
+
+    def test_resaving_the_same_goal_deduplicates_instead_of_growing(
+        self, _isolated_library
+    ) -> None:
+        """deep_verifier преверифицира умения; ако всяко минаване добавяше нов
+        запис, библиотеката щеше да расте безкрайно от повторни проверки."""
+        for _ in range(4):
+            sm.save_skill(slug="същата цел", code=_CODE, goal="една и съща цел")
+        assert len(_index(_isolated_library)) == 1, _index(_isolated_library)
+
+    def test_concurrent_saves_do_not_drop_entries(self, _isolated_library) -> None:
+        """_SAVE_LOCK съществува точно за това. Без него read-modify-write на
+        индекса губи записи при паралелни мисии (parallel_forge стартира
+        няколко наведнъж)."""
+        def _save(i: int) -> None:
+            sm.save_skill(slug=f"concurrent goal number {i}",
+                          code=_CODE, goal=f"concurrent goal number {i}")
+
+        threads = [threading.Thread(target=_save, args=(i,)) for i in range(12)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        entries = _index(_isolated_library)
+        assert len(entries) == 12, f"загубени записи при конкурентност: {len(entries)}"
+        assert len({s["name"] for s in entries}) == 12
+
+
+class TestIndexAndDiskStayInSync:
+    def test_every_index_entry_has_its_file(self, _isolated_library) -> None:
+        for i in range(5):
+            sm.save_skill(slug=f"goal {i}", code=_CODE, goal=f"goal number {i}")
+        for entry in _index(_isolated_library):
+            md = _isolated_library / f"{entry['name']}.md"
+            assert md.is_file(), f"индексът сочи към липсващ файл: {md.name}"
+
+    def test_every_file_has_its_index_entry(self, _isolated_library) -> None:
+        for i in range(5):
+            sm.save_skill(slug=f"goal {i}", code=_CODE, goal=f"goal number {i}")
+        names = {s["name"] for s in _index(_isolated_library)}
+        for md in _isolated_library.glob("*.md"):
+            assert md.stem in names, f"файл без запис в индекса: {md.name}"
+
+    def test_the_saved_code_round_trips_into_the_md(self, _isolated_library) -> None:
+        """Чете се от самия .md, не през skill_loader: той резолвва по своите
+        пътища и тук щеше да сочи към истинската библиотека, не към тази."""
+        sm.save_skill(slug="round trip", code=_CODE, goal="round trip goal")
+        name = _index(_isolated_library)[0]["name"]
+        md = (_isolated_library / f"{name}.md").read_text(encoding="utf-8")
+        assert "def f():" in md
+        assert "```python" in md, "форматът трябва да остане този, който skill_loader чете"
+
+    def test_a_corrupt_index_does_not_crash_the_next_save(
+        self, _isolated_library
+    ) -> None:
+        (_isolated_library / "skills.json").write_text("{ не е json", encoding="utf-8")
+        sm.save_skill(slug="после повредата", code=_CODE, goal="след повреден индекс")
+        assert len(_index(_isolated_library)) == 1
+
+
+class TestTheSlugCannotEscapeTheDirectory:
+    @pytest.mark.parametrize("hostile", [
+        "../../../etc/passwd",
+        "..\\..\\windows\\system32",
+        "a/b/c",
+        "....//....//x",
+        "/absolute/path",
+        "name\x00truncated",
+    ])
+    def test_hostile_names_stay_inside(self, _isolated_library, hostile) -> None:
+        sm.save_skill(slug=hostile, code=_CODE, goal=f"цел: {hostile}")
+        written = list(_isolated_library.glob("**/*.md"))
+        assert written, "нищо не е записано"
+        for p in written:
+            assert p.parent == _isolated_library, f"файл извън библиотеката: {p}"
+
+    def test_slugify_never_returns_an_empty_or_dotted_name(self) -> None:
+        for text in ("", "   ", "...", "///", "\x00", "..", "ЦЕЛ на кирилица"):
+            s = sm.slugify(text)
+            assert s, f"празен slug за {text!r}"
+            assert "/" not in s and "\\" not in s
+            assert s.strip(".") == s, f"slug от точки: {s!r}"
+
+
+class TestCyrillicGoalsAreDistinguishable:
+    """Проектът е на български и операторът пише целите на български, но
+    slugify маха всичко извън [a-z0-9] — така всяка кирилска цел дава един и
+    същ базов slug. Колизионната защита го спасява от презапис (виж тестовете
+    по-горе), но името и тригерът остават нечитаеми.
+    """
+
+    def test_different_cyrillic_goals_do_not_overwrite_each_other(
+        self, _isolated_library
+    ) -> None:
+        sm.save_skill(slug="извлечи данни от csv", code=_CODE,
+                      goal="извлечи данни от csv файл")
+        sm.save_skill(slug="изпрати отчет по поща", code=_CODE,
+                      goal="изпрати отчет по поща")
+        entries = _index(_isolated_library)
+        assert len(entries) == 2, f"кирилска цел презаписа друга: {entries}"
+
+    def test_known_limitation_a_fully_cyrillic_goal_loses_its_name(self) -> None:
+        """Документира текущото поведение, за да е видимо, а не изненада.
+
+        Нюансът е по-точен, отколкото изглежда отначало: латинските части
+        оцеляват ("извлечи данни от csv" -> "csv"), така че смесените цели
+        запазват нещо. ЧИСТО кирилска цел обаче не остава с нищо и двете
+        по-долу дават един и същ базов slug — различават се само по хеша,
+        който колизионната защита добавя. Оправянето иска транслитерация,
+        тоест промяна в схемата на именуване: решение на поддържащия."""
+        assert sm.slugify("извлечи данни от csv") == "csv", "латиницата оцелява"
+        assert sm.slugify("съвсем различна цел") == "skill"
+        assert sm.slugify("напиши отчет") == "skill"
