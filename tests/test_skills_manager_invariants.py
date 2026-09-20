@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -198,3 +199,48 @@ class TestCyrillicGoalsAreDistinguishable:
         assert sm.slugify("извлечи данни от csv") == "csv", "латиницата оцелява"
         assert sm.slugify("съвсем различна цел") == "skill"
         assert sm.slugify("напиши отчет") == "skill"
+
+
+class TestIndexRecoveryIsNarrow:
+    """Спасяването трябва да се задейства при ПОВРЕДА, не при всяка грешка.
+    Прекалено широкият catch е също толкова опасен, колкото липсващият:
+    премества здрав индекс настрани и следващият запис прави загубата трайна.
+    """
+
+    @pytest.mark.parametrize("payload", ['[]', '"низ"', 'null', '42',
+                                         '{"skills": "не е списък"}'])
+    def test_valid_json_of_the_wrong_shape_is_also_rescued(
+        self, _isolated_library, payload
+    ) -> None:
+        """`[]` минава през json.loads, после `.get("skills")` гърми при всяко
+        следващо извикване — същият провал, просто по друг път дотам."""
+        (_isolated_library / "skills.json").write_text(payload, encoding="utf-8")
+        assert sm.list_skills() == []
+        sm.save_skill(slug="след грешна форма", code=_CODE, goal="цел")
+        assert len(_index(_isolated_library)) == 1
+
+    def test_a_transient_read_error_does_not_move_a_healthy_index(
+        self, _isolated_library, monkeypatch
+    ) -> None:
+        """Windows дава PermissionError, когато редактор/антивирус държи
+        файла. Ако това броеше за повреда, здравият индекс щеше да бъде
+        преместен настрани и следващият запис щеше да направи загубата
+        трайна — при положение че нищо не е било счупено."""
+        sm.save_skill(slug="ценно умение", code=_CODE, goal="ценна цел")
+        assert len(_index(_isolated_library)) == 1
+
+        real_read = Path.read_text
+
+        def _locked(self, *a, **kw):
+            if self.name == "skills.json":
+                raise PermissionError("файлът е зает от друг процес")
+            return real_read(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "read_text", _locked)
+        with pytest.raises(PermissionError):
+            sm.list_skills()
+
+        monkeypatch.undo()
+        assert not (_isolated_library / "skills.json.corrupt").exists(), (
+            "преходна грешка не бива да мести здрав индекс")
+        assert len(_index(_isolated_library)) == 1, "умението трябва още да е в индекса"

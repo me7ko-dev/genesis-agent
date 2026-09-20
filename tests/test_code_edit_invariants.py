@@ -177,3 +177,44 @@ class TestNeverRaises:
         res = edit_file(tmp_path, old="x", new="y")
         assert not res.ok
         assert res.detail
+
+
+class TestMixedAndModelSuppliedLineEndings:
+    """Вторият кръг по краищата на редове. Първият фикс (запомни стила на
+    файла, наложи го при запис) оправяше чистите CRLF файлове и чупеше
+    смесените — същата повреда, само за друг вид файл. Файл без един стил
+    няма как да получи "възстановен" стил; заменя се точно намереното.
+    """
+
+    def test_a_mixed_file_keeps_every_line_as_it_was(self, tmp_path) -> None:
+        p = tmp_path / "mixed.py"
+        p.write_bytes(b"alpha = 1\r\nbeta = 2\ngamma = 3\n")
+        res = edit_file(p, old="beta = 2", new="beta = 22")
+        assert res.ok, res.detail
+        assert p.read_bytes() == b"alpha = 1\r\nbeta = 22\ngamma = 3\n", p.read_bytes()
+
+    def test_crlf_in_the_replacement_does_not_double_up(self, tmp_path) -> None:
+        """Моделът редовно връща CRLF в `new`, ако е цитирал Windows файл
+        по-рано в разговора. Без привеждане това ставаше `\\r\\r\\n`."""
+        p = tmp_path / "crlf.py"
+        p.write_bytes(b"a = 1\r\nb = 2\r\n")
+        res = edit_file(p, old="b = 2", new="b = 2\r\nc = 3")
+        assert res.ok, res.detail
+        assert b"\r\r\n" not in p.read_bytes(), p.read_bytes()
+        assert p.read_bytes() == b"a = 1\r\nb = 2\r\nc = 3\r\n"
+
+    def test_a_multiline_lf_anchor_matches_inside_a_crlf_file(self, tmp_path) -> None:
+        """Иначе редакцията се отказва с подвеждащото "няма такъв текст" за
+        файл, в който текстът си е точно там."""
+        p = tmp_path / "win.py"
+        p.write_bytes(b"def f():\r\n    return 1\r\n\r\ndef g():\r\n    pass\r\n")
+        res = edit_file(p, old="def f():\n    return 1", new="def f():\n    return 42")
+        assert res.ok, res.detail
+        assert p.read_bytes() == b"def f():\r\n    return 42\r\n\r\ndef g():\r\n    pass\r\n"
+
+    def test_an_lf_file_is_not_given_crlf_by_a_crlf_replacement(self, tmp_path) -> None:
+        p = tmp_path / "unix.py"
+        p.write_bytes(b"a = 1\nb = 2\n")
+        res = edit_file(p, old="b = 2", new="b = 2\r\nc = 3")
+        assert res.ok, res.detail
+        assert b"\r" not in p.read_bytes(), p.read_bytes()

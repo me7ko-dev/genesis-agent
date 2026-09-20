@@ -75,8 +75,15 @@ def _load_index() -> dict[str, Any]:
     ensure_skills_layout()
     idx = _index_path()
     try:
-        return json.loads(idx.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+        data = json.loads(idx.read_text(encoding="utf-8"))
+    except OSError:
+        # ВАЖНО: OSError не е повреда. Windows дава PermissionError, когато
+        # друг процес (редактор, антивирус, бекъп) държи файла отворен, и
+        # спасяването тогава би преместило напълно ЗДРАВ индекс настрани, а
+        # следващият запис би направил загубата трайна. Преходната грешка се
+        # оставя да се вдигне — извикващият ще опита пак.
+        raise
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
         try:
             kept = _free_corrupt_name(idx)
             idx.replace(kept)
@@ -86,6 +93,21 @@ def _load_index() -> dict[str, Any]:
             log.warning("skills.json е нечетим (%s) и не можа да бъде преместен; "
                         "започва нов индекс", e)
         return {"version": "1.0", "skills": []}
+
+    # Валиден JSON с грешна форма е също толкова фатален: `[]` или низ
+    # минават през json.loads, после `.get("skills")` гърми при всяко
+    # следващо извикване — точно поведението отпреди фикса, просто по
+    # друг път дотам.
+    if not isinstance(data, dict) or not isinstance(data.get("skills"), list):
+        try:
+            kept = _free_corrupt_name(idx)
+            idx.replace(kept)
+            log.warning("skills.json е с неочаквана структура (%s) — запазен като %s",
+                        type(data).__name__, kept.name)
+        except OSError:
+            log.warning("skills.json е с неочаквана структура и не можа да бъде преместен")
+        return {"version": "1.0", "skills": []}
+    return data
 
 
 def _free_corrupt_name(idx: Path) -> Path:

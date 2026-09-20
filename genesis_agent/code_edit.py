@@ -67,6 +67,40 @@ def _count_changed(diff: str) -> tuple[int, int]:
     return added, removed
 
 
+def _match_line_endings(haystack: str, old: str, new: str) -> tuple[str, str]:
+    """Привежда anchor-а (и заместителя) към краищата, с които е записан файлът.
+
+    Моделът почти винаги пише `\n`, дори когато е цитирал CRLF файл. Без това
+    anchor-ът просто нямаше да съвпадне и редакцията щеше да бъде отказана с
+    подвеждащото "няма такъв текст". `new` минава през същото привеждане, за
+    да не се получи `\r\r\n` от вече CRLF заместител.
+    """
+    flat_old = old.replace("\r\n", "\n").replace("\r", "\n")
+    flat_new = new.replace("\r\n", "\n").replace("\r", "\n")
+
+    if "\n" in old:
+        # Многоредов anchor: опитваме както е, после с CRLF.
+        if flat_old in haystack:
+            return flat_old, flat_new
+        crlf_old = flat_old.replace("\n", "\r\n")
+        if crlf_old in haystack:
+            return crlf_old, flat_new.replace("\n", "\r\n")
+        return flat_old, flat_new
+
+    # Едноредов anchor, но `new` може да е многоредов и да носи CRLF —
+    # ранното връщане тук вкарваше `\r` в чист LF файл (хванато от
+    # tests/test_code_edit_invariants.py, не на око). Нямаме локален контекст
+    # за стила, затова следваме файла; при смесен файл LF е по-безопасният
+    # избор, защото не въвежда CR там, където го е нямало.
+    if "\n" not in flat_new:
+        return flat_old, flat_new
+    crlf_count = haystack.count("\r\n")
+    lf_only = haystack.count("\n") - crlf_count
+    if crlf_count and not lf_only:
+        return flat_old, flat_new.replace("\n", "\r\n")
+    return flat_old, flat_new
+
+
 def _occurrence_lines(text: str, needle: str) -> list[int]:
     """1-indexed line numbers where `needle` starts."""
     lines: list[int] = []
@@ -128,26 +162,30 @@ def edit_file(path: str | Path, old: str, new: str, *,
         return EditResult(False, "Празен anchor: 'old' трябва да е точен текст, "
                                  "който вече съществува във файла.")
     try:
-        # Четем СУРОВО, за да видим какви са истинските краища на редове, после
-        # нормализираме за съпоставянето. Само `read_text` би върнал вече
-        # преобразуван текст (universal newlines) и записът после щеше да сложи
-        # LF навсякъде — един редактиран ред пренаписваше краищата на ЦЕЛИЯ
-        # файл. На машина с CRLF това прави diff-а нечетим и е точно тихата
-        # повреда, която този модул съществува да не прави.
-        raw = p.read_bytes().decode("utf-8")
-        before = raw.replace("\r\n", "\n").replace("\r", "\n")
-        if "\r\n" in raw:
-            newline = "\r\n"
-        elif "\r" in raw:
-            newline = "\r"
-        else:
-            newline = "\n"
+        # Работим върху СУРОВИЯ текст — без universal newlines и без
+        # нормализация. `read_text` връща вече преобразуван текст и записът
+        # после слагаше LF навсякъде: един редактиран ред пренаписваше
+        # краищата на ЦЕЛИЯ файл.
+        #
+        # Първият опит за фикс (запомни стила, наложи го при запис) поправяше
+        # чистите CRLF файлове и чупеше смесените: файл с `\r\n` И `\n`
+        # (обичайно за репо, редактирано и на двете платформи) излизаше изцяло
+        # CRLF — същата повреда, само за друг вид файл. Няма как да
+        # "възстановиш стила" на файл, който няма един стил.
+        #
+        # Затова: заменя се ТОЧНО намереното парче, а всичко останало се
+        # пренася байт по байт. Anchor-ът се привежда към краищата, с които
+        # реално е записан файлът (моделът почти винаги пише `\n`), и `new`
+        # получава същото третиране — иначе CRLF в new се удвояваше до
+        # `\r\r\n`.
+        before = p.read_bytes().decode("utf-8")
     except FileNotFoundError:
         return EditResult(False, f"Файлът не съществува: {p} "
                                  "(за нов файл ползвай WRITE_FILE)")
     except OSError as e:
         return EditResult(False, f"Грешка при четене: {e}")
 
+    old, new = _match_line_endings(before, old, new)
     hits = _occurrence_lines(before, old)
     if not hits:
         return EditResult(False,
@@ -173,11 +211,10 @@ def edit_file(path: str | Path, old: str, new: str, *,
 
     diff = _unified_diff(before, after, p.name)
     try:
-        # Възстановяваме стила, с който файлът е дошъл. `newline=""` спира
-        # повторното преобразуване от самия Python при запис.
-        payload = after if newline == "\n" else after.replace("\n", newline)
+        # `newline=""` спира Python да преобразува каквото и да било при
+        # запис — извън заменения участък файлът излиза точно както е влязъл.
         with p.open("w", encoding="utf-8", newline="") as f:
-            f.write(payload)
+            f.write(after)
     except OSError as e:
         return EditResult(False, f"Грешка при запис: {e}")
 
