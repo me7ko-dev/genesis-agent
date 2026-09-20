@@ -107,8 +107,84 @@ class TestNextGoals:
         monkeypatch.setattr("genesis_agent.embeddings.available", _boom)
         ge.next_goals(2, use_semantic=False)  # must not raise
 
-    def test_low_coverage_high_weight_domain_is_prioritized(self) -> None:
+    def test_low_coverage_high_weight_domain_is_prioritized(self, monkeypatch) -> None:
         """reliability (weight=5) has no skills yet -> its topics should be
-        the very first ones returned, ahead of lower-weight domains."""
+        the very first ones returned, ahead of lower-weight domains.
+
+        Real work is now offered ahead of the catalogue entirely, so this is
+        pinned with that source switched off: what it checks is the ordering
+        WITHIN the catalogue, which is unchanged.
+        """
+        monkeypatch.setattr(ge, "goals_from_real_work", lambda limit=5: [])
         goals = ge.next_goals(1, use_semantic=False)
         assert goals[0].startswith("Implement a production-grade")  # reliability's template
+
+
+class TestGoalsFromRealWork:
+    """`_DOMAINS` is a hardcoded catalogue of textbook exercises. Whatever it
+    produces has, by construction, no connection to what the operator is
+    actually doing — which is why the library filled up with rate limiters and
+    not one skill that helped in a real session. These pin down the other
+    source: work that actually happened.
+    """
+
+    def test_open_threads_become_goals_with_the_next_step_leading(
+        self, monkeypatch
+    ) -> None:
+        import genesis_agent.workspace_memory as wm
+        monkeypatch.setattr(wm, "list_threads", lambda **kw: [
+            {"title": "Мигрирай billing към нов API", "next_step": "напиши адаптера"},
+            {"title": "Без следваща стъпка", "next_step": ""},
+        ])
+        import genesis_agent.episodic_memory as em
+        monkeypatch.setattr(em, "_fetch_all_episodes", list)
+        goals = ge.goals_from_real_work(limit=5)
+        assert any("напиши адаптера" in g for g in goals), goals
+        assert any("Без следваща стъпка" in g for g in goals), goals
+
+    def test_only_repeated_successful_missions_become_goals(self, monkeypatch) -> None:
+        """Without this filter the top candidate was literally "a goal that
+        always fails", repeated 85 times — a test fixture whose only merit is
+        failing reliably. Tool episodes are single calls, not tasks."""
+        import genesis_agent.episodic_memory as em
+        episodes = (
+            [{"goal": "deploy the staging stack", "outcome": "success",
+              "tags": "['mission', 'success']"}] * 4
+            + [{"goal": "a goal that always fails", "outcome": "failed",
+                "tags": "['mission', 'failure']"}] * 40
+            + [{"goal": "read a file somewhere", "outcome": "success",
+                "tags": "['tool', 'read_file']"}] * 30
+        )
+        monkeypatch.setattr(em, "_fetch_all_episodes", lambda: episodes)
+        import genesis_agent.workspace_memory as wm
+        monkeypatch.setattr(wm, "list_threads", lambda **kw: [])
+        goals = ge.goals_from_real_work(limit=5)
+        assert any("deploy the staging stack" in g for g in goals), goals
+        assert not any("always fails" in g for g in goals), goals
+        assert not any("read a file" in g for g in goals), goals
+
+    def test_a_task_done_only_twice_is_not_yet_worth_a_skill(self, monkeypatch) -> None:
+        import genesis_agent.episodic_memory as em
+        import genesis_agent.workspace_memory as wm
+        monkeypatch.setattr(wm, "list_threads", lambda **kw: [])
+        monkeypatch.setattr(em, "_fetch_all_episodes", lambda: [
+            {"goal": "something done twice", "outcome": "success",
+             "tags": "['mission', 'success']"}] * 2)
+        assert ge.goals_from_real_work(limit=5) == []
+
+    def test_real_work_is_offered_before_the_catalogue(self, monkeypatch) -> None:
+        monkeypatch.setattr(ge, "goals_from_real_work",
+                            lambda limit=5: ["РЕАЛНА недовършена работа"])
+        goals = ge.next_goals(3, use_semantic=False)
+        assert goals[0] == "РЕАЛНА недовършена работа", goals
+        assert len(goals) == 3, "каталогът трябва да допълни останалото"
+
+    def test_a_broken_memory_layer_never_breaks_goal_generation(
+        self, monkeypatch
+    ) -> None:
+        import genesis_agent.workspace_memory as wm
+        def _boom(**_kw):
+            raise RuntimeError("memory db locked")
+        monkeypatch.setattr(wm, "list_threads", _boom)
+        assert isinstance(ge.goals_from_real_work(), list)
+        assert len(ge.next_goals(3, use_semantic=False)) == 3
