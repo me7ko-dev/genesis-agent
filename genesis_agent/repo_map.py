@@ -120,11 +120,21 @@ def _search_ripgrep(root: Path, pattern: str, glob: str | None,
             continue
         if ev.get("type") != "match":
             continue
-        d = ev["data"]
+        # Всичко през .get(): това е изход на ВЪНШНА програма, чийто JSON
+        # формат зависи от версията ѝ. Директният достъп вдигаше KeyError,
+        # който минава покрай `except (OSError, TimeoutExpired)` по-горе и
+        # излиза от функцията — при положение че целият ѝ договор е "не можах
+        # да отговоря → None, извикващият пада към Python пътя". Един непознат
+        # вариант на match убиваше търсенето, вместо да го прехвърли на
+        # резервния път, който работи винаги.
+        data = ev.get("data") or {}
+        line_no = data.get("line_number")
+        if not isinstance(line_no, int):
+            continue
         out.append(Match(
-            d["path"].get("text", "?"),
-            d["line_number"],
-            (d["lines"].get("text") or "").rstrip()[:_LINE_CLIP],
+            (data.get("path") or {}).get("text", "?"),
+            line_no,
+            ((data.get("lines") or {}).get("text") or "").rstrip()[:_LINE_CLIP],
         ))
         if len(out) >= max_results:
             break

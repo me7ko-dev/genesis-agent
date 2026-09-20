@@ -7,6 +7,8 @@ quietly rots.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from genesis_agent import repo_map
@@ -192,3 +194,62 @@ def test_find_files_no_matches_returns_empty_list(tree) -> None:
 def test_find_files_missing_root_raises(tmp_path) -> None:
     with pytest.raises(FileNotFoundError):
         repo_map.find_files("*.py", tmp_path / "nope")
+
+
+class TestRipgrepOutputIsTreatedAsUntrusted:
+    """`_search_ripgrep`'s contract is "could not answer -> None, caller falls
+    back to the Python path". That only holds if nothing inside it raises:
+    an exception escapes past the `except (OSError, TimeoutExpired)` and kills
+    the search instead of handing it to the fallback that always works.
+
+    The JSON here comes from an EXTERNAL program whose shape depends on its
+    version, so every field goes through .get().
+    """
+
+    @staticmethod
+    def _with_events(monkeypatch, events):
+        import subprocess
+
+        class _Proc:
+            returncode = 0
+            stderr = ""
+            stdout = "\n".join(json.dumps(e) for e in events)
+
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: _Proc())
+
+    def test_a_match_without_line_number_is_skipped_not_raised(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        self._with_events(monkeypatch, [{"type": "match",
+                                         "data": {"path": {"text": "a.py"}}}])
+        assert repo_map._search_ripgrep(tmp_path, "x", None, 10) == []
+
+    def test_a_match_without_data_is_skipped(self, monkeypatch, tmp_path) -> None:
+        self._with_events(monkeypatch, [{"type": "match"}])
+        assert repo_map._search_ripgrep(tmp_path, "x", None, 10) == []
+
+    def test_a_match_without_lines_still_reports_the_location(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Мястото е полезно дори без текста на реда — не го изхвърляй."""
+        self._with_events(monkeypatch, [
+            {"type": "match", "data": {"path": {"text": "a.py"}, "line_number": 5}}])
+        got = repo_map._search_ripgrep(tmp_path, "x", None, 10)
+        assert len(got) == 1 and got[0].line == 5
+
+    def test_a_well_formed_match_is_parsed(self, monkeypatch, tmp_path) -> None:
+        self._with_events(monkeypatch, [
+            {"type": "match", "data": {"path": {"text": "a.py"}, "line_number": 7,
+                                       "lines": {"text": "код\n"}}}])
+        got = repo_map._search_ripgrep(tmp_path, "x", None, 10)
+        assert (got[0].path, got[0].line, got[0].text) == ("a.py", 7, "код")
+
+    def test_garbage_lines_do_not_stop_the_good_ones(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        self._with_events(monkeypatch, [
+            {"type": "match", "data": {"broken": True}},
+            {"type": "match", "data": {"path": {"text": "b.py"}, "line_number": 2,
+                                       "lines": {"text": "ok"}}}])
+        got = repo_map._search_ripgrep(tmp_path, "x", None, 10)
+        assert [m.path for m in got] == ["b.py"]
