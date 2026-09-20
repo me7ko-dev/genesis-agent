@@ -194,3 +194,68 @@ class TestTheSummaryKeepsItsPlaceInTheConversation:
         assert summaries, "резюметата изчезнаха"
         assert summaries == sorted(summaries)
         assert max(summaries) < len(history) - 1, "резюме не бива да е последното"
+
+
+class TestTheSummaryKeepsWhatMatters:
+    """Резюмето се праща наново при ВСЯКА заявка до края на сесията, затова
+    съдържанието му е и въпрос на цена, и въпрос на памет.
+
+    Измерено върху реалната база преди поправката: 21 съобщения се свиха до
+    360 знака, които бяха ЕДНО И СЪЩО съобщение за грешка, повторено четири
+    пъти — защото старата версия слепваше всичко и режеше първите 300 знака.
+    Всяка реплика на човека от този блок изчезна.
+    """
+
+    def test_the_humans_messages_lead(self) -> None:
+        out = cm._simple_summarize([
+            {"role": "assistant", "content": "работя по въпроса"},
+            {"role": "user", "content": "мигрирай billing към новото API"},
+        ])
+        assert out.index("user: мигрирай") < out.index("assistant: работя")
+
+    def test_a_repeated_error_does_not_eat_the_whole_summary(self) -> None:
+        err = "Error: цялата верига е изчерпана | последна: skip: no HF_TOKEN configured"
+        out = cm._simple_summarize(
+            [{"role": "user", "content": "мигрирай billing"}]
+            + [{"role": "assistant", "content": err}] * 12
+        )
+        assert out.count("HF_TOKEN") == 1, out
+        assert "мигрирай billing" in out
+
+    def test_a_long_message_is_truncated_not_dropped(self) -> None:
+        out = cm._simple_summarize([{"role": "user", "content": "х" * 500}])
+        assert "х" * 50 in out
+        assert len(out) < 300
+
+    def test_many_messages_keep_the_first_and_the_last(self) -> None:
+        """Началото казва с какво сме тръгнали, краят — докъде сме стигнали.
+        Произволен отрязък от средата не казва нито едното."""
+        msgs = [{"role": "user", "content": f"стъпка {i}"} for i in range(20)]
+        out = cm._simple_summarize(msgs)
+        assert "стъпка 0" in out
+        assert "стъпка 19" in out
+        assert "…" in out
+        assert "стъпка 9" not in out
+
+    def test_the_header_still_reports_the_real_count_and_roles(self) -> None:
+        out = cm._simple_summarize([
+            {"role": "user", "content": "а"}, {"role": "assistant", "content": "б"},
+        ])
+        assert out.startswith("[Context summary] 2 messages from roles: assistant, user")
+
+    def test_empty_and_whitespace_messages_are_skipped(self) -> None:
+        out = cm._simple_summarize([
+            {"role": "user", "content": "   "},
+            {"role": "user", "content": ""},
+            {"role": "user", "content": "истинско съобщение"},
+        ])
+        assert "истинско съобщение" in out
+        assert "| user:  |" not in out
+
+    def test_a_block_with_no_user_messages_still_summarises(self) -> None:
+        out = cm._simple_summarize([{"role": "assistant", "content": "само аз говорих"}])
+        assert "само аз говорих" in out
+
+    def test_it_stays_bounded_even_for_a_huge_block(self) -> None:
+        msgs = [{"role": "user", "content": f"{i} " + "дума " * 200} for i in range(200)]
+        assert len(cm._simple_summarize(msgs)) < 1400
