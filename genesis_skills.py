@@ -89,6 +89,25 @@ def _resolve(path_str: str) -> Path:
     return p if p.is_absolute() else (_WORKSPACE / p)
 
 
+def _sensitive_root_refusal(tool: str, root: Path) -> str | None:
+    """Отказът, ако този КОРЕН е чувствителен — иначе None.
+
+    Общо за SEARCH_CODE и GLOB, защото са две имена на един и същ въпрос:
+    „покажи ми какво има там". Измерено преди това, в режим „deny":
+    `SEARCH_CODE PRIVATE-KEY-BODY | ~/.ssh` връщаше самия ред от `id_rsa`.
+    Не имена — СЪДЪРЖАНИЕ, тоест същото, което READ_FILE вече отказва.
+
+    Разделителят накрая е нужен, защото образецът пази `.ssh/` и `.aws/` с
+    наклонена черта — виж sandbox.sensitive_path_reason.
+    """
+    sensitive = sandbox.sensitive_path_reason(root.as_posix() + "/")
+    if not sensitive:
+        return None
+    verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM, [sensitive])
+    allowed, reason = sandbox._decide(f"{tool} {root}", verdict, sandbox.get_policy())
+    return None if allowed else f"[{tool}] {reason}"
+
+
 def _strip_one_newline(part: str) -> str:
     """Маха ЕДИН водещ и ЕДИН завършващ нов ред от част на EDIT_FILE блок.
 
@@ -295,15 +314,41 @@ def _tool_search_code(arg: str, path: str = "", glob: str = "") -> str:
         return "[SEARCH_CODE] Празен шаблон."
     from genesis_agent.repo_map import search_code
     root = _resolve(path) if path else _WORKSPACE
+    refusal = _sensitive_root_refusal("SEARCH_CODE", root)
+    if refusal:
+        return refusal
     try:
         hits = search_code(pattern, root, glob or None)
     except (ValueError, FileNotFoundError) as e:
         return f"[SEARCH_CODE: {pattern}] {e}"
+    # Отделен от корена въпрос: единично чувствително попадение в иначе
+    # нормална папка (`credentials.json` до кода). Решението е ЕДНО за всички
+    # такива попадения — не по едно на ред — и е същото, което пази READ_FILE.
+    # В режим „allow" операторът вече е казал да; безусловното криене там
+    # правеше инструмента негоден за работа, която той е одобрил.
+    # Скритото попадение се БРОИ на глас: премълчаното значи „низът го няма",
+    # а е точно обратното, и моделът строи план върху грешен извод.
+    sensitive_hits = [h for h in hits if sandbox.sensitive_path_reason(h.path)]
+    hidden: list = []
+    if sensitive_hits:
+        reasons = sorted({sandbox.sensitive_path_reason(h.path) or "" for h in sensitive_hits})
+        verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM, reasons)
+        allowed, _ = sandbox._decide(f"SEARCH_CODE съвпадения в {len(sensitive_hits)} "
+                                     "чувствителни файла", verdict, sandbox.get_policy())
+        if not allowed:
+            hidden = sensitive_hits
+            hits = [h for h in hits if not sandbox.sensitive_path_reason(h.path)]
+    if not hits and hidden:
+        return (f"[SEARCH_CODE: {pattern}] {len(hidden)} съвпадения, всички в "
+                "чувствителни файлове (ключове/тайни) — съдържанието им не се показва.")
     if not hits:
         return (f"[SEARCH_CODE: {pattern}] Няма съвпадения в {root}. "
                 "Това означава, че низът наистина го няма — не предполагай, че е скрит.")
     lines = [f"[SEARCH_CODE: {pattern}] {len(hits)} съвпадения в {root}"]
     lines += [f"  {h.path}:{h.line}: {h.text.strip()}" for h in hits]
+    if hidden:
+        lines.append(f"  (+{len(hidden)} в чувствителни файлове — съдържанието "
+                     "им не се показва)")
     _log_episode(f"SEARCH_CODE {pattern}", f"{len(hits)} съвпадения", ["tool", "search_code"])
     return "\n".join(lines)
 
@@ -318,6 +363,9 @@ def _tool_glob(arg: str) -> str:
         return "[GLOB] Празен шаблон."
     from genesis_agent.repo_map import find_files
     root = _resolve(path) if path else _WORKSPACE
+    refusal = _sensitive_root_refusal("GLOB", root)
+    if refusal:
+        return refusal
     try:
         hits = find_files(pattern, root)
     except (ValueError, FileNotFoundError) as e:

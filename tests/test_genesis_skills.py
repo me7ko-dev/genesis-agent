@@ -548,3 +548,64 @@ class TestTheGuardReadsWindowsPathsToo:
 
     def test_the_example_exemption_survives_backslashes(self) -> None:
         assert gs.sandbox.sensitive_path_reason(r"C:\repo\.env.example") is None
+
+
+class TestSearchAndGlobAreTheFourthDoor:
+    """Най-лошата от четирите: LIST_DIR даваше имена, а това дава СЪДЪРЖАНИЕ.
+
+    Измерено преди поправката, в режим „deny":
+
+        SEARCH_CODE PRIVATE-KEY-BODY | ~/.ssh
+          → ~/.ssh/id_rsa:1: PRIVATE-KEY-BODY
+
+    Търсене в нормална папка не стига до `.env` (ripgrep пропуска скритите
+    файлове) — но насочено към самата чувствителна папка стига до всичко в нея.
+    """
+
+    def _ssh(self, workspace: Path) -> Path:
+        d = workspace / ".ssh"
+        d.mkdir()
+        (d / "id_rsa").write_text("PRIVATE-KEY-BODY\n", encoding="utf-8")
+        return d
+
+    def _deny(self, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="deny"))
+
+    def test_searching_inside_ssh_no_longer_returns_the_key(self, _workspace, monkeypatch) -> None:
+        self._deny(monkeypatch)
+        out = gs._tool_search_code("PRIVATE-KEY-BODY", path=str(self._ssh(_workspace)))
+        assert "SANDBOX DENIED" in out
+        assert "PRIVATE-KEY-BODY" not in out.split("Причини")[0]
+
+    def test_globbing_inside_ssh_is_refused(self, _workspace, monkeypatch) -> None:
+        self._deny(monkeypatch)
+        out = gs._tool_glob(f"**/* | {self._ssh(_workspace)}")
+        assert "SANDBOX DENIED" in out
+        assert "id_rsa" not in out
+
+    def test_an_ordinary_search_is_untouched(self, _workspace, monkeypatch) -> None:
+        self._deny(monkeypatch)
+        (_workspace / "app.py").write_text("TOKEN = 'намери ме'\n", encoding="utf-8")
+        out = gs._tool_search_code("намери ме", path=str(_workspace))
+        assert "намери ме" in out
+        assert "SANDBOX" not in out
+
+    def test_a_sensitive_hit_is_counted_not_silently_dropped(self, _workspace, monkeypatch) -> None:
+        """Премълчано попадение се чете като „низът го няма" — а е обратното."""
+        self._deny(monkeypatch)
+        (_workspace / "credentials.json").write_text("{\"k\": \"тайна\"}\n", encoding="utf-8")
+        out = gs._tool_search_code("тайна", path=str(_workspace))
+        # Шаблонът се повтаря в заглавието — той идва от модела и не е тайна.
+        # Важното е, че НИТО редът, НИТО файлът се показват.
+        assert "credentials.json" not in out
+        assert '"k"' not in out
+        assert "1 съвпадения" in out, "броят трябва да се каже на глас"
+
+    def test_allow_mode_still_searches_them(self, _workspace, monkeypatch) -> None:
+        """Гейтът пита оператора; не решава вместо него. В „allow" той вече е
+        казал да, и безусловното криене прави инструмента негоден."""
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="allow"))
+        out = gs._tool_search_code("PRIVATE-KEY-BODY", path=str(self._ssh(_workspace)))
+        assert "PRIVATE-KEY-BODY" in out
