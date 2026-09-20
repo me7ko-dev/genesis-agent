@@ -45,7 +45,10 @@ from pathlib import Path
 
 import pytest
 
-gi = pytest.importorskip("gi")
+try:
+    import gi
+except ImportError as exc:  # not installed, or installed but broken (no _gi)
+    pytest.skip(f"PyGObject unavailable: {exc}", allow_module_level=True)
 try:
     gi.require_version("Gtk", "4.0")
     gi.require_version("Adw", "1")
