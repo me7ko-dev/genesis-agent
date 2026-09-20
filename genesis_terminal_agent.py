@@ -741,6 +741,8 @@ def get_system_info() -> dict:
         info["gpu"] = "Няма NVIDIA GPU"
     # Disk
     try:
+        if sys.platform == "win32":
+            raise OSError("statvfs липсва на Windows — виж except по-долу")
         st = os.statvfs(str(Path.home()))
         total_gb = (st.f_blocks * st.f_frsize) // (1024**3)
         free_gb  = (st.f_bfree  * st.f_frsize) // (1024**3)

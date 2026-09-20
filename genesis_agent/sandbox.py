@@ -667,6 +667,14 @@ def _count_user_processes() -> int:
 
 
 def _preexec(policy: SandboxPolicy, nproc_cap: int):  # изпълнява се в детето, преди exec
+    # `sys.platform`, не `os.name`: mypy стеснява типовете по него нативно, така
+    # че POSIX-only извикванията отдолу изчезват от проверката при
+    # `--platform win32` — точно както CI я пуска на Windows runner-а. С
+    # `os.name` mypy не стеснява и всеки ред тук иска `type: ignore`, което
+    # заглушава и истинските грешки. Извикващият и без това подава този
+    # preexec_fn само на posix; тук връщането е за проверяващия, не за runtime.
+    if sys.platform == "win32":
+        return
     # Нова process group → можем да убием цялото дърво при timeout.
     os.setsid()
     if resource is None:
@@ -716,7 +724,7 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
         # преди тази проверка timeout на native Windows гърмеше необработено
         # вместо да падне грациозно на proc.kill(), design note 2026-08-11).
         try:
-            if os.name == "posix":
+            if sys.platform != "win32":
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             else:
                 proc.kill()
