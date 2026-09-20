@@ -246,6 +246,34 @@ class TestRunToolLoopNativeToolCalls:
 
 
 class TestRunToolLoopTextTagFallback:
+    def test_the_round_cap_is_announced_here_too_not_only_in_the_native_path(
+        self
+    ) -> None:
+        """Native клонът казва „достигнат таван“; текстовият спираше нямо.
+        Последното, което човекът вижда, е репликата с tool таговете — разказ
+        за започната работа — така прекъснатата работа изглежда като
+        завършена. И точно този клон обслужва моделите без native tool-calling,
+        тоест безплатните: там таванът се удря най-често."""
+        core = _FakeCore([
+            ("[RUN_CMD: стъпка 1]", None, "p", "m"),
+            ("[RUN_CMD: стъпка 2]", None, "p", "m"),
+        ])
+
+        class _AlwaysTagged(_FakeToolSkills):
+            def parse_and_execute_tools(self, text):
+                return ["ok"] if "[RUN_CMD" in text else []
+
+        core.skills = _AlwaysTagged([])
+        assistant_msgs: list[str] = []
+        ac.run_tool_loop(
+            core, [{"role": "user", "content": "върти безкрайно"}],
+            on_assistant=lambda t, p, m: assistant_msgs.append(t),
+            on_tool_result=lambda *a: None,
+            round_cap=2,
+        )
+        assert assistant_msgs, "нито едно съобщение до човека при удрян таван"
+        assert "таван" in assistant_msgs[-1], assistant_msgs
+
     def test_text_tag_tools_are_parsed_and_executed(self) -> None:
         core = _FakeCore([
             ("[RUN_CMD: ls]", None, "p", "m"),
