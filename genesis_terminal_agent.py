@@ -15,6 +15,7 @@ rich rendering, and the interactive sandbox confirmation prompt.
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -88,6 +89,7 @@ except Exception:
 # --- Load Config ---
 # All paths come from genesis_agent.paths, which derives them from the
 # installed package and the user's own home — nothing machine-specific here.
+from genesis_agent import claim_check
 from genesis_agent.budget import clip_for_context
 from genesis_agent.config import TOOL_ROUND_CAP as _TOOL_ROUND_CAP
 from genesis_agent.paths import (
@@ -1240,6 +1242,12 @@ def main():
             # докато Genesis сам спре да вика тулове или се удари в тавана.
             round_i = 0
             _malformed_tag_retries = 0
+            _claim_retries = 0
+            # Какво РЕАЛНО е изпълнено в тази реплика. Терминалът е фронтендът
+            # по подразбиране (`genesis`), а до момента беше ЕДИНСТВЕНИЯТ без
+            # никаква проверка срещу симулирана работа: claim_check влезе само
+            # в agent_core (GUI/Jarvis), а тукашният tool цикъл е отделен код.
+            _executed: list[tuple[str, str]] = []
             with console.status("[dim]Genesis мисли...[/]", spinner="dots2"):
                 response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
 
@@ -1272,6 +1280,7 @@ def main():
                         except (json.JSONDecodeError, TypeError):
                             args = {}
                         result = genesis_skills.dispatch_tool_call(name, args)
+                        _executed.append((name, " ".join(str(v) for v in args.values())))
                         console.print(Panel(Text(result[:2000]), title=f"🔧 {name}", border_style="green"))
                         messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                                           "name": name,
@@ -1299,6 +1308,10 @@ def main():
                 # Стар text-tag режим — моделът не поддържа native tool-calling
                 # (или просто избра да не вика нищо тази реплика).
                 tool_results = parse_and_execute_tools(response)
+                for _r in tool_results:
+                    _m = re.match(r"\[([A-Z_]+)[:\]]\s*([^\]]*)", _r or "")
+                    if _m:
+                        _executed.append((_m.group(1), _m.group(2)))
                 if not tool_results:
                     # Празно ≠ непременно "приключи" — може да е объркан tool tag
                     # (виж agent_core.run_tool_loop, същият фикс, design note
@@ -1317,6 +1330,16 @@ def main():
                                        "отговор БЕЗ скоби във формàт на таг.",
                         })
                         with console.status("[dim]Анализирам...[/]", spinner="aesthetic"):
+                            response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
+                        continue
+                    _unsupported = claim_check.unsupported_claims(response, _executed)
+                    if _unsupported and _claim_retries < 1:
+                        _claim_retries += 1
+                        console.print("[yellow]⚠ Твърди свършена работа, която никой "
+                                       "изпълнен инструмент не доказва — питам пак.[/]")
+                        messages.append({"role": "system",
+                                          "content": claim_check.nudge_text(_unsupported)})
+                        with console.status("[dim]Проверявам…[/]", spinner="aesthetic"):
                             response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
                         continue
                     break

@@ -9,6 +9,8 @@ max_tokens ceiling came back looking like a normal, complete answer.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 import genesis_terminal_agent as gta
@@ -135,3 +137,32 @@ class TestRestoreSession:
         restored = gta._restore_session(loaded, "CURRENT PROMPT")
         assert restored[0]["content"] == "CURRENT PROMPT"
         assert sum(1 for m in restored if m.get("role") == "system") == 1
+
+
+class TestTerminalHasTheSameIntegrityCheckAsTheSharedCore:
+    """The terminal is the DEFAULT frontend (`genesis`) but runs its own tool
+    loop, separate from agent_core.run_tool_loop. claim_check was wired into
+    the shared core only, which left the most-used entry point with no check
+    against simulated work at all. These pin the two together so they cannot
+    drift apart again silently.
+    """
+
+    def test_the_terminal_module_wires_in_claim_check(self) -> None:
+        import genesis_terminal_agent as gta
+        src = Path(gta.__file__).read_text(encoding="utf-8")
+        assert "claim_check.unsupported_claims" in src, (
+            "терминалният цикъл трябва да проверява твърденията, както ядрото")
+        assert "claim_check.nudge_text" in src
+
+    def test_it_records_what_was_executed_on_both_tool_paths(self) -> None:
+        """The check is only as good as its evidence: native dispatch AND the
+        text-tag path must both append to the executed list."""
+        import genesis_terminal_agent as gta
+        src = Path(gta.__file__).read_text(encoding="utf-8")
+        assert src.count("_executed.append(") >= 2, (
+            "и native, и текстовият път трябва да записват изпълненото")
+
+    def test_the_shared_core_still_has_it_too(self) -> None:
+        from genesis_agent import agent_core
+        src = Path(agent_core.__file__).read_text(encoding="utf-8")
+        assert "claim_check.unsupported_claims" in src
