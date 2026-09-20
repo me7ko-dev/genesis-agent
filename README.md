@@ -51,6 +51,12 @@ pipx install git+https://github.com/me7ko-dev/genesis-agent
 
 On Debian/Ubuntu, get pipx first with `sudo apt install pipx && pipx ensurepath`.
 
+**On Windows**, `scripts/install_windows.ps1` does the same and first checks
+the three things that actually break there — the Microsoft Store Python stub, a
+stale PATH, and `bash.exe` resolving to the WSL launcher instead of Git Bash.
+See [docs/WINDOWS.md](docs/WINDOWS.md), which also lists what differs on that
+platform (no GUI; sandbox resource limits are POSIX-only).
+
 <details>
 <summary>Without pipx</summary>
 

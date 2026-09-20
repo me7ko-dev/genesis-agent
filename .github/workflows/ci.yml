@@ -81,6 +81,16 @@ jobs:
       - name: Sandbox classification
         run: python -m genesis_agent.sandbox
 
+      # The Windows installer's own logic, run by the Windows PowerShell the
+      # users actually have. `shell: powershell` is 5.1 on GitHub runners, not
+      # pwsh 7 — the point is to catch syntax or cmdlet use that only 7
+      # accepts. Nothing is installed; -SelfTest exercises the decisions
+      # (version floor, WSL-launcher detection) and prints OK.
+      - name: Windows installer self-test
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: .\scripts\install_windows.ps1 -SelfTest
+
       - name: No secrets committed
         run: |
           if grep -rEn "(sk-[a-zA-Z0-9]{20,}|hf_[a-zA-Z0-9]{25,}|gsk_[a-zA-Z0-9]{25,}|nvapi-[a-zA-Z0-9]{25,}|discord\.com/api/webhooks/[0-9]{8,})" \
