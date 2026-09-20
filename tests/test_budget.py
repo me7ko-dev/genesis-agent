@@ -282,3 +282,62 @@ class TestDuplicateResultsArePaidForOnce:
         before = [dict(m) for m in msgs]
         budget.budget_history(msgs, fresh=1, stale_limit=500)
         assert msgs == before
+
+
+class TestCachedTokensAreCountedSeparately:
+    """Prompt caching прави схемите на инструментите и системния промпт евтини
+    при повтарящи се заявки, но проваля се БЕЗШУМНО: при развален префикс
+    всичко продължава да работи и просто струва пълна цена. Затова
+    прочетеното от кеша се записва отделно — нула при повтарящи се заявки е
+    сигналът, който иначе никой не вижда."""
+
+    def test_record_usage_stores_the_cache_fields(self, tmp_path, monkeypatch) -> None:
+        log = tmp_path / "budget_log.jsonl"
+        monkeypatch.setattr(budget, "LOG_PATH", log)
+        budget.record_usage(provider="anthropic", model="m", prompt_tokens=100,
+                            completion_tokens=20, cached_read_tokens=4300,
+                            cached_write_tokens=15)
+        entry = json.loads(log.read_text(encoding="utf-8").splitlines()[0])
+        assert entry["cached_read_tokens"] == 4300
+        assert entry["cached_write_tokens"] == 15
+
+    def test_cached_reads_are_not_folded_into_prompt_tokens(self, tmp_path, monkeypatch) -> None:
+        """Таксуват се различно — събирането им би скрило точно икономията,
+        заради която съществуват."""
+        log = tmp_path / "budget_log.jsonl"
+        monkeypatch.setattr(budget, "LOG_PATH", log)
+        budget.record_usage(provider="anthropic", model="m", prompt_tokens=100,
+                            completion_tokens=20, cached_read_tokens=4300)
+        entry = json.loads(log.read_text(encoding="utf-8").splitlines()[0])
+        assert entry["prompt_tokens"] == 100
+        assert entry["total_tokens"] == 120
+
+    def test_a_provider_without_caching_records_zeroes(self, tmp_path, monkeypatch) -> None:
+        log = tmp_path / "budget_log.jsonl"
+        monkeypatch.setattr(budget, "LOG_PATH", log)
+        budget.record_usage(provider="ollama", model="m", prompt_tokens=5, completion_tokens=5)
+        entry = json.loads(log.read_text(encoding="utf-8").splitlines()[0])
+        assert entry["cached_read_tokens"] == 0
+
+    def test_totals_sum_the_cache_reads(self, tmp_path, monkeypatch) -> None:
+        log = tmp_path / "budget_log.jsonl"
+        monkeypatch.setattr(budget, "LOG_PATH", log)
+        for _ in range(3):
+            budget.record_usage(provider="anthropic", model="m", prompt_tokens=10,
+                                completion_tokens=5, cached_read_tokens=1000)
+        assert budget.today_totals()["cached_read_tokens"] == 3000
+        assert budget.range_totals(days=7)["cached_read_tokens"] == 3000
+
+    def test_entries_written_before_this_field_existed_still_total(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Логът е append-only и вече съдържа редове без тези ключове —
+        отчетът за деня не бива да гръмне заради стар запис."""
+        log = tmp_path / "budget_log.jsonl"
+        monkeypatch.setattr(budget, "LOG_PATH", log)
+        today_utc = datetime.now(timezone.utc).date()
+        _write_entry(log, ts=f"{today_utc.isoformat()}T10:00:00+00:00",
+                     provider="p1", prompt=10, completion=5)
+        totals = budget.today_totals()
+        assert totals["calls"] == 1
+        assert totals["cached_read_tokens"] == 0

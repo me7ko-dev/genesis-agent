@@ -155,9 +155,19 @@ def budget_history(messages, *, fresh: int | None = None,
 
 
 def record_usage(*, provider: str, model: str, prompt_tokens: int,
-                  completion_tokens: int, context: str = "") -> None:
+                  completion_tokens: int, context: str = "",
+                  cached_read_tokens: int = 0,
+                  cached_write_tokens: int = 0) -> None:
     """Append-only запис. Безопасно — никога не хвърля (логването не бива
-    да чупи мисии)."""
+    да чупи мисии).
+
+    `cached_*` идват от доставчици с prompt caching (Anthropic ги връща като
+    `cache_read_input_tokens`/`cache_creation_input_tokens`). Стоят отделно от
+    `prompt_tokens`, защото се таксуват различно — прочитането от кеша е
+    порядък по-евтино от същите токени, изпратени наново. Нула при доставчик
+    без кеш е нормално; нула при повтарящи се заявки към Anthropic значи, че
+    префиксът се разваля някъде.
+    """
     try:
         entry = {
             "ts": datetime.now(timezone.utc).isoformat(),
@@ -166,6 +176,8 @@ def record_usage(*, provider: str, model: str, prompt_tokens: int,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": prompt_tokens + completion_tokens,
+            "cached_read_tokens": cached_read_tokens,
+            "cached_write_tokens": cached_write_tokens,
             "context": context[:120],
         }
         with LOG_PATH.open("a", encoding="utf-8") as f:
@@ -203,6 +215,7 @@ def daily_totals(day: date | None = None) -> dict:
     # Смесени стойности (броячи + вложена разбивка), затова Any.
     totals: dict[str, Any] = {
         "calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+        "cached_read_tokens": 0, "cached_write_tokens": 0,
         "by_provider": defaultdict(lambda: {"calls": 0, "total_tokens": 0})}
     for e in _read_entries():
         ts = e.get("ts", "")
@@ -212,6 +225,8 @@ def daily_totals(day: date | None = None) -> dict:
         totals["prompt_tokens"] += e.get("prompt_tokens", 0)
         totals["completion_tokens"] += e.get("completion_tokens", 0)
         totals["total_tokens"] += e.get("total_tokens", 0)
+        totals["cached_read_tokens"] += e.get("cached_read_tokens", 0)
+        totals["cached_write_tokens"] += e.get("cached_write_tokens", 0)
         prov = e.get("provider", "?")
         totals["by_provider"][prov]["calls"] += 1
         totals["by_provider"][prov]["total_tokens"] += e.get("total_tokens", 0)
@@ -228,6 +243,7 @@ def range_totals(days: int = 7) -> dict:
     from datetime import timedelta
     totals: dict[str, Any] = {
         "calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+        "cached_read_tokens": 0, "cached_write_tokens": 0,
         "by_provider": defaultdict(lambda: {"calls": 0, "total_tokens": 0})}
     cutoff = datetime.now(timezone.utc).date() - timedelta(days=days - 1)
     for e in _read_entries():
@@ -243,6 +259,8 @@ def range_totals(days: int = 7) -> dict:
         totals["prompt_tokens"] += e.get("prompt_tokens", 0)
         totals["completion_tokens"] += e.get("completion_tokens", 0)
         totals["total_tokens"] += e.get("total_tokens", 0)
+        totals["cached_read_tokens"] += e.get("cached_read_tokens", 0)
+        totals["cached_write_tokens"] += e.get("cached_write_tokens", 0)
         prov = e.get("provider", "?")
         totals["by_provider"][prov]["calls"] += 1
         totals["by_provider"][prov]["total_tokens"] += e.get("total_tokens", 0)

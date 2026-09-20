@@ -994,7 +994,20 @@ class Brain:
             "output_config": {"effort": effort or ANTHROPIC_EFFORT},
         }
         if system:
-            params["system"] = system
+            # Prompt caching (design note, 2026-09-20). Редът на рендиране е
+            # tools → system → messages, затова една точка на последния
+            # системен блок покрива И схемите на инструментите: при тази
+            # конфигурация това е ~10 100 символа схеми + ~8 500 системен
+            # промпт, които се изпращат наново при ВСЯКО обръщение, а при
+            # 25 рунда инструменти се плащат 25 пъти.
+            #
+            # Нарочно НЯМА точка в `messages`: budget.budget_history свива
+            # по-старите резултати с напредването на рундовете, тоест байтовете
+            # в средата на историята се променят между заявките. Кешът е
+            # съвпадение по префикс — точка там щеше да се разминава почти
+            # винаги и само да харчи запис в кеша.
+            params["system"] = [{"type": "text", "text": system,
+                                 "cache_control": {"type": "ephemeral"}}]
         if tools:
             params["tools"] = self._to_anthropic_tools(tools)
 
@@ -1037,9 +1050,16 @@ class Brain:
                                    "function": {"name": block.name,
                                                 "arguments": json.dumps(block.input)}})
         usage = getattr(resp, "usage", None)
+        # Прочетените от кеша токени се отчитат ОТДЕЛНО, за да е проверимо, че
+        # кеширането работи: ако `cached_read_tokens` стои на нула при
+        # повтарящи се заявки, нещо мълчаливо разваля префикса (променлив
+        # системен промпт, различен набор инструменти) — и това се вижда в
+        # `genesis budget`, вместо да се приема на доверие.
         self._last_usage = {
             "prompt_tokens": getattr(usage, "input_tokens", 0) or 0,
             "completion_tokens": getattr(usage, "output_tokens", 0) or 0,
+            "cached_read_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
+            "cached_write_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
         } if usage else None
 
         text = "".join(text_parts).strip()
@@ -1504,6 +1524,8 @@ class Brain:
                 model=self.current.get("model", "?"),
                 prompt_tokens=int(self._last_usage.get("prompt_tokens", 0) or 0),
                 completion_tokens=int(self._last_usage.get("completion_tokens", 0) or 0),
+                cached_read_tokens=int(self._last_usage.get("cached_read_tokens", 0) or 0),
+                cached_write_tokens=int(self._last_usage.get("cached_write_tokens", 0) or 0),
             )
         except Exception as e:
             log.debug("budget недостъпен, usage не е записан: %s", e)

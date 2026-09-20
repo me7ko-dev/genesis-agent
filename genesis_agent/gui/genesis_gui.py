@@ -905,9 +905,14 @@ class Window(Adw.ApplicationWindow):
             from genesis_agent import budget
 
             t = budget.today_totals()
+            cached = t.get("cached_read_tokens", 0)
             txt = (
                 f"Днес: {t.get('calls', 0)} обаждания · "
-                f"{t.get('total_tokens', 0):,} токена\n"
+                f"{t.get('total_tokens', 0):,} токена"
+                # Спестеното се показва само когато има какво: доставчик без
+                # prompt caching иначе получава реда „0 от кеша“ завинаги.
+                + (f" (от които {cached:,} от кеша)" if cached else "")
+                + "\n"
                 + "\n".join(
                     f"  {p}: {d.get('calls',0)} · {d.get('total_tokens',0):,}"
                     for p, d in (t.get("by_provider") or {}).items()
