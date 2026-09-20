@@ -15,7 +15,6 @@ rich rendering, and the interactive sandbox confirmation prompt.
 import glob
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -1282,7 +1281,10 @@ def main():
                         except (json.JSONDecodeError, TypeError):
                             args = {}
                         result = genesis_skills.dispatch_tool_call(name, args)
-                        _executed.append((name, " ".join(str(v) for v in args.values())))
+                        _entry = claim_check.counts_as_executed(
+                            name, " ".join(str(v) for v in args.values()), result)
+                        if _entry:
+                            _executed.append(_entry)
                         console.print(Panel(Text(result[:2000]), title=f"🔧 {name}", border_style="green"))
                         messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                                           "name": name,
@@ -1310,10 +1312,7 @@ def main():
                 # Стар text-tag режим — моделът не поддържа native tool-calling
                 # (или просто избра да не вика нищо тази реплика).
                 tool_results = parse_and_execute_tools(response)
-                for _r in tool_results:
-                    _m = re.match(r"\[([A-Z_]+)[:\]]\s*([^\]]*)", _r or "")
-                    if _m:
-                        _executed.append((_m.group(1), _m.group(2)))
+                _executed.extend(claim_check.executed_from_text_results(tool_results))
                 if not tool_results:
                     # Празно ≠ непременно "приключи" — може да е объркан tool tag
                     # (виж agent_core.run_tool_loop, същият фикс, design note

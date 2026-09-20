@@ -416,7 +416,10 @@ def run_tool_loop(
                     args = {}
                 diff = _diff_for_write(core.skills, args) if name == "WRITE_FILE" else None
                 result = core.skills.dispatch_tool_call(name, args)
-                executed.append((name, " ".join(str(v) for v in args.values())))
+                entry = claim_check.counts_as_executed(
+                    name, " ".join(str(v) for v in args.values()), result)
+                if entry:
+                    executed.append(entry)
                 on_tool_result(name, result, diff)
                 messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                                  "name": name,
@@ -442,14 +445,10 @@ def run_tool_loop(
 
         # Текстови тагове — за модели без native tool-calling в тази ротация.
         results = core.skills.parse_and_execute_tools(text)
-        # Текстовият път не носи име на инструмент отделно — резултатът го
-        # започва като `[RUN_CMD: ...]`, така че го вадим оттам. Без това
-        # моделите без native tool-calling биха останали изцяло без
-        # claim_check, а точно те блъфират най-често.
-        for _r in results:
-            _m = re.match(r"\[([A-Z_]+)[:\]]\s*([^\]]*)", _r or "")
-            if _m:
-                executed.append((_m.group(1), _m.group(2)))
+        # Името на инструмента стои в самия резултат (`[RUN_CMD: ...]`).
+        # Извличането живее в claim_check, за да не се дублира между
+        # фронтендите — иначе промяна във формата ги обезоръжава наведнъж.
+        executed.extend(claim_check.executed_from_text_results(results))
         if not results:
             # Празен резултат означава две различни неща и трябва да ги
             # различим: моделът реално приключи, ИЛИ моделът се опита да

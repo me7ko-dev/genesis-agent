@@ -16,6 +16,7 @@ So the false-alarm cases below are not padding — they are the constraint.
 """
 from __future__ import annotations
 
+from genesis_agent import claim_check
 from genesis_agent.claim_check import Claim, nudge_text, unsupported_claims
 
 
@@ -94,3 +95,50 @@ class TestNudgeText:
         summaries of work executed several rounds back."""
         text = nudge_text([Claim(kind="инсталация", quote="q", needed="RUN_CMD")])
         assert "по-ранен рунд" in text
+
+
+class TestAFailedToolIsNotEvidence:
+    """Най-острият пропуск в първата версия: записваше се ОПИТЪТ, не
+    резултатът. Моделът иска инсталация, sandbox я блокира, моделът обявява
+    "инсталирах пакета" — и проверката мълчеше, защото извикване е имало.
+    Точно сценарият, за който тя съществува."""
+
+    def test_a_blocked_command_does_not_prove_an_install(self) -> None:
+        assert claim_check.counts_as_executed(
+            "RUN_CMD", "sudo apt install nmap",
+            "[RUN_CMD: ...] [SANDBOX BLOCKED] катастрофална команда") is None
+
+    def test_a_declined_command_does_not_prove_anything(self) -> None:
+        assert claim_check.counts_as_executed(
+            "RUN_CMD", "rm -rf /tmp/x", "[SANDBOX DECLINED] операторът отказа") is None
+
+    def test_a_failed_write_does_not_prove_a_write(self) -> None:
+        assert claim_check.counts_as_executed(
+            "WRITE_FILE", "/etc/hosts", "[TOOL] Грешка при изпълнение: Permission denied"
+        ) is None
+
+    def test_a_successful_command_does_count(self) -> None:
+        assert claim_check.counts_as_executed(
+            "RUN_CMD", "pip install ruff", "Successfully installed ruff-0.16.8"
+        ) == ("RUN_CMD", "pip install ruff")
+
+    def test_end_to_end_a_blocked_install_is_still_challenged(self) -> None:
+        entry = claim_check.counts_as_executed(
+            "RUN_CMD", "sudo apt install nmap", "[SANDBOX BLOCKED] отказано")
+        found = claim_check.unsupported_claims(
+            "Готово, инсталирах пакета.", [e for e in [entry] if e])
+        assert [c.kind for c in found] == ["инсталация"]
+
+
+class TestTextResultParsing:
+    def test_it_extracts_the_tool_name_from_the_result_prefix(self) -> None:
+        got = claim_check.executed_from_text_results(["[READ_FILE: /a/b.py]\nсъдържание"])
+        assert got == [("READ_FILE", "/a/b.py")]
+
+    def test_failed_results_are_excluded(self) -> None:
+        got = claim_check.executed_from_text_results([
+            "[RUN_CMD: ls]\nfile1", "[RUN_CMD: rm -rf /]\n[SANDBOX BLOCKED] не"])
+        assert got == [("RUN_CMD", "ls")]
+
+    def test_unrecognised_shapes_are_skipped_not_guessed(self) -> None:
+        assert claim_check.executed_from_text_results(["просто текст", "", None]) == []

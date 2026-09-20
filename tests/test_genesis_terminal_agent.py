@@ -154,13 +154,29 @@ class TestTerminalHasTheSameIntegrityCheckAsTheSharedCore:
             "терминалният цикъл трябва да проверява твърденията, както ядрото")
         assert "claim_check.nudge_text" in src
 
-    def test_it_records_what_was_executed_on_both_tool_paths(self) -> None:
-        """The check is only as good as its evidence: native dispatch AND the
-        text-tag path must both append to the executed list."""
-        import genesis_terminal_agent as gta
-        src = Path(gta.__file__).read_text(encoding="utf-8")
-        assert src.count("_executed.append(") >= 2, (
-            "и native, и текстовият път трябва да записват изпълненото")
+    def test_both_frontends_share_one_text_result_parser(self) -> None:
+        """Доказателството за claim_check се вади от формата на резултата
+        (`[RUN_CMD: ...]`). Този разбор живее в claim_check и се ползва и от
+        двата цикъла — по-рано беше копиран дословно и на двете места, което
+        значи, че промяна във формата ги обезоръжава едновременно и мълчаливо.
+        Затова тук се проверява самата функция, а не текстът на модула."""
+        from genesis_agent import claim_check
+        results = [
+            "[RUN_CMD: pip install ruff]\nSuccessfully installed",
+            "[RUN_CMD: rm -rf /]\n[SANDBOX BLOCKED] катастрофално",
+            "без разпознаваем префикс",
+        ]
+        executed = claim_check.executed_from_text_results(results)
+        assert ("RUN_CMD", "pip install ruff") in executed
+        assert not any("rm -rf" in args for _n, args in executed), (
+            "блокирана команда не е изпълнение"
+        )
+        assert len(executed) == 1
+
+        for module in ("genesis_terminal_agent", "genesis_agent.agent_core"):
+            src = Path(__import__(module, fromlist=["x"]).__file__).read_text(
+                encoding="utf-8")
+            assert "executed_from_text_results" in src, f"{module} не ползва общия разбор"
 
     def test_the_shared_core_still_has_it_too(self) -> None:
         from genesis_agent import agent_core

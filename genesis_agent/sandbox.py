@@ -477,6 +477,75 @@ def _assess_file_ops(command: str, cwd: Path | None = None) -> RiskVerdict:
     return RiskVerdict(level, reasons)
 
 
+# Пътища, чието рекурсивно триене е катастрофа, а не просто опасно. Сравнява
+# се СЛЕД нормализация, така че `~/` и `~` са едно и също, а `/home/user` е
+# критичен, докато `/home/user/projects` не е — там се трие проект, не живот.
+# Записано с МАЛКИ букви, защото _normalise_target свежда до малки (Windows
+# пътищата не различават регистър). Оттам и `$home` — иначе сравнението
+# мълчаливо се разминава точно за променливата, която сочи към дома.
+_CATASTROPHIC_ROOTS = frozenset({
+    "/", "/*", "~", "~/*", "$home", "$home/*", "${home}", "${home}/*",
+    "%userprofile%", "/home", "/home/*", "/root", "/root/*", "/users", "/users/*",
+    "/etc", "/var", "/usr", "/bin", "/sbin", "/lib", "/boot", "/sys", "/proc",
+})
+
+# Домът на конкретен потребител: `/home/ivan` е катастрофа, `/home/ivan/proj`
+# не е. Затова се мери дълбочината, а не се изброяват имена.
+_HOME_PARENTS = ("/home/", "/users/", "/root/")
+
+_RECURSIVE_LONG = frozenset({"--recursive", "--force", "-R", "-r"})
+
+
+def _normalise_target(token: str) -> str:
+    """Токен от командния ред → сравним път. Маха кавичките и завършващия
+    разделител; `~/` и `~` трябва да значат едно и също за проверката."""
+    t = token.strip().strip("'\"")
+    if len(t) > 1 and t.endswith(("/", "\\")):
+        t = t.rstrip("/\\") or "/"
+    return t.lower()
+
+
+def _catastrophic_rm_reason(command: str) -> str | None:
+    """Описание, ако командата рекурсивно трие критичен корен; иначе None.
+
+    Разлага на токени вместо да изброява форми, затова редът на флаговете,
+    дългите им имена и кавичките около пътя не я заблуждават. Гледа всеки
+    сегмент поотделно, за да не се скрие зад `;`, `&&` или тръба.
+    """
+    for segment in re.split(r"[;&|\n]+", command):
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            tokens = segment.split()
+        while tokens and tokens[0] in ("sudo", "doas", "env", "nohup", "time"):
+            tokens = tokens[1:]
+        if not tokens or Path(tokens[0]).name != "rm":
+            continue
+
+        recursive = False
+        targets: list[str] = []
+        for tok in tokens[1:]:
+            if tok.startswith("--"):
+                if tok in _RECURSIVE_LONG:
+                    recursive = True
+            elif tok.startswith("-") and len(tok) > 1:
+                if "r" in tok.lower():
+                    recursive = True
+            else:
+                targets.append(tok)
+
+        if not recursive:
+            continue
+        for target in targets:
+            norm = _normalise_target(target)
+            if norm in _CATASTROPHIC_ROOTS:
+                return f"рекурсивно триене на критичен корен ({target})"
+            for parent in _HOME_PARENTS:
+                if norm.startswith(parent) and norm.count("/") == parent.count("/"):
+                    return f"рекурсивно триене на цяла home директория ({target})"
+    return None
+
+
 def assess_command(command: str, cwd: Path | None = None) -> RiskVerdict:
     """Оценява риска на shell команда.
 
@@ -485,6 +554,20 @@ def assess_command(command: str, cwd: Path | None = None) -> RiskVerdict:
     описанието на засегнатите файлове е по-бедно."""
     reasons: list[str] = []
     level = RiskLevel.SAFE
+
+    # Структурната проверка върви ПРЕДИ образците. Регексите отдолу са
+    # изброяване на форми, а формите на едно и също опасно нещо са
+    # неограничено много: всяка добавена алтернация покрива предишния
+    # пропуск, не следващия. Най-острият пример е `rm --no-preserve-root -rf /`
+    # — минаваше като SAFE (изпълняваше се автоматично дори в `deny` режим),
+    # а това е точно флагът, който GNU rm ИЗИСКВА, за да изтрие наистина `/`.
+    # Тоест единствената форма, която реално работи, беше тази, която гейтът
+    # пропускаше като безобидна. Тук командата се разлага на флагове и пътища
+    # и се решава по смисъл, а образците остават като втори слой.
+    structural = _catastrophic_rm_reason(command)
+    if structural:
+        return RiskVerdict(RiskLevel.BLOCKED, [structural])
+
     for rx, why in _BLOCK_PATTERNS:
         if rx.search(command):
             reasons.append(why)

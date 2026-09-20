@@ -232,3 +232,48 @@ class TestClaimCheckRobustness:
         assert claim_check.unsupported_claims("", []) == []
         assert claim_check.unsupported_claims("   ", [("RUN_CMD", "")]) == []
         assert claim_check.unsupported_claims("няма твърдения тук", []) == []
+
+
+class TestStructuralRmDetection:
+    """Регексите изброяват форми; формите са неограничено много. Тези случаи
+    минаваха покрай тях, докато проверката не стана структурна (токени,
+    флагове, пътища) вместо изброяване на изрази.
+
+    Най-острият е първият: `--no-preserve-root` е флагът, който GNU rm
+    ИЗИСКВА, за да изтрие `/` наистина — тоест единствената форма, която
+    реално работи, минаваше като SAFE и се изпълняваше без да пита никого.
+    """
+
+    _MISSED_BEFORE = (
+        "rm --no-preserve-root -rf /",
+        "rm -rf --no-preserve-root /",
+        "rm -rf ~/",
+        "rm -rf $HOME/",
+        "rm -rf ${HOME}",
+        "rm -rf /home/user/",
+        "rm -rf /home/ivan",
+        "rm -rf /Users/ivan",
+        "doas rm -rf /",
+        "echo hi; rm -rf /",
+        "rm -R -f ~",
+        "rm -rf /etc",
+    )
+
+    def test_each_of_them_is_blocked_in_every_mode(self) -> None:
+        for cmd in self._MISSED_BEFORE:
+            verdict = sandbox.assess_command(cmd)
+            for mode in ("allow", "deny", "interactive"):
+                allowed, _ = sandbox._decide(
+                    cmd, verdict, sandbox.SandboxPolicy(mode=mode))
+                assert not allowed, f"ПРОПУСНАТА: {cmd!r} при mode={mode}"
+
+    def test_deleting_a_project_inside_home_is_still_allowed(self) -> None:
+        """Обратната грешка е също толкова лоша: гейт, който отказва
+        `rm -rf ~/projects/old`, е гейт, който операторът изключва."""
+        for cmd in ("rm -rf ~/projects/old", "rm -rf /home/user/projects",
+                    "rm -rf /home/user/.cache", "rm -rf ./build",
+                    "rm -rf /tmp/mydir", "rm --recursive ./node_modules"):
+            verdict = sandbox.assess_command(cmd)
+            allowed, reason = sandbox._decide(
+                cmd, verdict, sandbox.SandboxPolicy(mode="allow"))
+            assert allowed, f"фалшива тревога за {cmd!r}: {reason}"

@@ -115,6 +115,46 @@ def _supported(tool_names: set[str], command_text: str,
     return bool(words & ok_words)
 
 
+# Резултат, носещ някой от тези, НЕ доказва извършено действие. Пропускането
+# им обезсмисля проверката точно в случая, за който съществува: моделът иска
+# инсталация, sandbox я блокира, моделът обявява "инсталирах пакета" — и
+# твърдението минаваше, защото извикването е било записано. Записва се
+# опитът, не резултатът.
+_FAILURE_MARKERS = (
+    "[SANDBOX BLOCKED]", "[SANDBOX DENIED]", "[SANDBOX DECLINED]",
+    "Грешка при изпълнение", "Грешка при запис", "Грешка при четене",
+    "не съществува", "Traceback (most recent call last)",
+)
+
+# Текстовият път връща резултати, започващи с името на тула: `[RUN_CMD: ls]`.
+_RESULT_PREFIX_RE = re.compile(r"\[([A-Z_]+)[:\]]\s*([^\]]*)")
+
+
+def counts_as_executed(name: str, args: str, result: str) -> tuple[str, str] | None:
+    """Записът за `executed`, или None, ако резултатът не доказва изпълнение."""
+    if any(marker in (result or "") for marker in _FAILURE_MARKERS):
+        return None
+    return (name, args)
+
+
+def executed_from_text_results(results: list[str]) -> list[tuple[str, str]]:
+    """Същото за текстовия tool път, където името стои в самия резултат.
+
+    Живее тук, а не дублирано във всеки фронтенд: форматът, който се парсва,
+    се произвежда от genesis_skills, и когато той се промени, двата цикъла
+    иначе тихо губят доказателствата си едновременно.
+    """
+    out: list[tuple[str, str]] = []
+    for result in results:
+        match = _RESULT_PREFIX_RE.match(result or "")
+        if not match:
+            continue
+        entry = counts_as_executed(match.group(1), match.group(2), result)
+        if entry:
+            out.append(entry)
+    return out
+
+
 def unsupported_claims(text: str, executed: list[tuple[str, str]]) -> list[Claim]:
     """Твърденията в `text`, които изпълненото не подкрепя.
 
