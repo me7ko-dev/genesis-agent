@@ -74,6 +74,25 @@ MAX_OUTPUT_TOKENS = int(os.environ.get("GENESIS_MAX_TOKENS", "4096"))
 ANTHROPIC_MAX_TOKENS = 16000
 ANTHROPIC_EFFORT = "xhigh"
 
+# Не всеки модел на Anthropic приема тези два параметъра. `output_config.effort`
+# и adaptive thinking вървят от поколение 4.6 нагоре; на Haiku 4.5 и по-старите
+# (Sonnet 4.5 и назад) `effort` връща 400, а thinking иска `budget_tokens`.
+# Изпращахме и двата безусловно, тоест всеки, който смени модела в config.yaml
+# на по-евтин — точно което прави човек, който пести — получаваше HTTP 400 без
+# следа защо. Списъкът е allowlist по префикс: непознат модел получава заявка
+# без тези параметри, което всеки модел приема.
+_ADAPTIVE_EFFORT_MODELS = (
+    "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
+    "claude-sonnet-5", "claude-sonnet-4-6",
+    "claude-fable-5", "claude-mythos-5",
+)
+
+
+def _supports_adaptive_effort(model: str) -> bool:
+    """Приема ли този модел adaptive thinking + output_config.effort."""
+    name = (model or "").strip().lower()
+    return any(name.startswith(prefix) for prefix in _ADAPTIVE_EFFORT_MODELS)
+
 # OpenAI-съвместими доставчици (base_url + env ключ; None ключ = без auth, локален).
 _PROVIDERS = {
     "ollama_local": ("http://localhost:11434/v1", None),   # СОБСТВЕН локален мозък
@@ -987,12 +1006,13 @@ class Brain:
             "model": model,
             "max_tokens": ANTHROPIC_MAX_TOKENS,
             "messages": msgs,
+        }
+        if _supports_adaptive_effort(model):
             # Adaptive thinking: моделът сам решава колко да мисли по задачата.
             # Точно това искаме тук — MAX режимът съществува заради трудните
             # случаи, а лесните не бива да плащат за размисъл, който не им трябва.
-            "thinking": {"type": "adaptive"},
-            "output_config": {"effort": effort or ANTHROPIC_EFFORT},
-        }
+            params["thinking"] = {"type": "adaptive"}
+            params["output_config"] = {"effort": effort or ANTHROPIC_EFFORT}
         if system:
             # Prompt caching (design note, 2026-09-20). Редът на рендиране е
             # tools → system → messages, затова една точка на последния

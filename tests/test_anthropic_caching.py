@@ -154,3 +154,36 @@ class TestCacheTokensAreReportedNotAssumed:
         _call(brain, sent)
         assert brain._last_usage["cached_read_tokens"] == 0
         assert brain._last_usage["cached_write_tokens"] == 0
+
+
+class TestParametersMatchWhatTheModelAccepts:
+    """`output_config.effort` и adaptive thinking съществуват от поколение 4.6
+    нагоре. На Haiku 4.5 и по-старите `effort` връща 400 — а именно към тях
+    посяга човек, който иска да плаща по-малко. Пращахме ги безусловно, тоест
+    смяната на модела в config.yaml даваше HTTP 400 без обяснение."""
+
+    def test_a_current_model_gets_adaptive_thinking_and_effort(self, sent) -> None:
+        Brain()._call_anthropic("k", "claude-opus-5", MESSAGES, TOOLS, "high")
+        assert sent.params["thinking"] == {"type": "adaptive"}
+        assert sent.params["output_config"] == {"effort": "high"}
+
+    def test_sonnet_5_is_treated_as_current_too(self, sent) -> None:
+        Brain()._call_anthropic("k", "claude-sonnet-5", MESSAGES, TOOLS, "")
+        assert "thinking" in sent.params
+        assert sent.params["output_config"]["effort"] == "xhigh"   # ANTHROPIC_EFFORT
+
+    def test_haiku_gets_neither_instead_of_a_400(self, sent) -> None:
+        Brain()._call_anthropic("k", "claude-haiku-4-5", MESSAGES, TOOLS, "high")
+        assert "thinking" not in sent.params
+        assert "output_config" not in sent.params
+
+    def test_an_unknown_model_falls_back_to_the_accepted_everywhere_shape(self, sent) -> None:
+        """Имената се менят по-често от този файл — непознато име трябва да
+        даде работеща заявка, а не отказана."""
+        Brain()._call_anthropic("k", "claude-future-9", MESSAGES, TOOLS, "high")
+        assert "output_config" not in sent.params
+        assert sent.params["messages"], "заявката пак тръгва"
+
+    def test_the_system_prompt_is_still_cached_on_every_model(self, sent) -> None:
+        Brain()._call_anthropic("k", "claude-haiku-4-5", MESSAGES, TOOLS, "high")
+        assert sent.params["system"][0]["cache_control"] == {"type": "ephemeral"}

@@ -296,6 +296,10 @@ models:
       model: "claude-opus-5"          # native Messages API (не OpenAI-съвместим)
       supports_tools: true
       effort: "xhigh"                 # препоръчаното ниво за кодинг/агентна работа
+    - provider: "anthropic"
+      model: "claude-sonnet-5"        # 2.5× по-евтин от Opus 5, същият ключ и
+      supports_tools: true            # същият формат — затова е втори, преди
+      effort: "high"                  # да се минава към друг доставчик/ключ
     - provider: "openai"
       model: "gpt-5.5"                # проверено наживо срещу GET /v1/models, 2026-07-30
       supports_tools: true
