@@ -84,6 +84,28 @@ models:
     # продължава надолу — за да се върне старото поведение, преместѝ двата
     # `ollama_cloud` записа обратно най-отгоре.
 
+    # ─── Google Gemini (AI Studio) — ЗАКОМЕНТИРАНО НАРОЧНО ────────────
+    # Правилото на този файл е, че всеки запис е проверен с РЕАЛНО обаждане.
+    # Адресът е проверен (HTTP 400 „Please pass a valid API key" от самия
+    # generativelanguage, тоест пътят съществува), но имената на моделите и
+    # реалният tool_call НЕ са — за това трябва ключ, какъвто нямаше при
+    # добавянето. Затова стоят закоментирани, вместо да влязат на доверие.
+    #
+    # Провери и разкоментирай за 30 секунди:
+    #   export GEMINI_API_KEY=...            # aistudio.google.com/apikey
+    #   curl -s https://generativelanguage.googleapis.com/v1beta/openai/models \
+    #        -H "Authorization: Bearer $GEMINI_API_KEY" | head -40
+    # После с реално обаждане (и виж дали връща tool_calls):
+    #   genesis models --refresh
+    #
+    # Gemini Flash е евтиният, който върши ежедневната работа; безплатният
+    # слой на AI Studio го покрива. Pro е за трудното — сложи го в
+    # premium_models, не тук, за да не гори пари в нормалната верига.
+    # - provider: "gemini"
+    #   model: "gemini-2.5-flash"
+    #   size_b: 100          # оценка за min_size_b филтъра, не публикуван брой
+    #   supports_tools: true # ПРОВЕРИ, преди да разчиташ на това
+
     # ─── NVIDIA NIM — най-големите проверени (отделна квота) ──────────
     - provider: "nvidia"
       model: "deepseek-ai/deepseek-v4-flash-0731"
@@ -300,6 +322,20 @@ models:
       model: "claude-sonnet-5"        # 2.5× по-евтин от Opus 5, същият ключ и
       supports_tools: true            # същият формат — затова е втори, преди
       effort: "high"                  # да се минава към друг доставчик/ключ
+    # Google, платените варианти — същата бележка като при безплатния:
+    # адресите са проверени, имената на моделите не са. Разкоментирай, след
+    # като `genesis models --refresh` ги потвърди с твоя ключ/проект.
+    #
+    # През AI Studio (статичен ключ, най-лесно):
+    # - provider: "gemini"
+    #   model: "gemini-2.5-pro"
+    #   supports_tools: true
+    #
+    # През Vertex (твой GCP проект, OAuth вместо ключ; на Vertex имената на
+    # моделите носят префикс на издателя — виж genesis_agent/vertex_auth.py):
+    # - provider: "vertex"
+    #   model: "google/gemini-2.5-pro"
+    #   supports_tools: true
     - provider: "openai"
       model: "gpt-5.5"                # проверено наживо срещу GET /v1/models, 2026-07-30
       supports_tools: true

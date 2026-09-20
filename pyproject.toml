@@ -32,6 +32,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Vertex AI: OAuth вместо статичен ключ (genesis_agent/vertex_auth.py).
+# Само за Vertex — Gemini през AI Studio работи с обикновен ключ и
+# не иска нищо допълнително.
+google = ["google-auth>=2.0"]
 dev = ["pytest>=8.0"]                    # test suite, see tests/
 browser = ["playwright>=1.40"]           # then: playwright install chromium
 voice = ["faster-whisper>=1.0", "edge-tts>=6.1"]
@@ -50,6 +54,7 @@ all = [
     "ruff>=0.6",
     "cryptography>=42",
     "anthropic>=0.40",
+    "google-auth>=2.0",
 ]
 
 [project.urls]

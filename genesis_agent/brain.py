@@ -133,6 +133,21 @@ _PROVIDERS = {
     # (system отделно от messages, tool_use/tool_result блокове, adaptive
     # thinking). base_url-ът тук е само маркер за _PROVIDERS проверките.
     "anthropic": ("native://anthropic", "ANTHROPIC_API_KEY"),
+    # ── Google (добавено 2026-09-20) ──────────────────────────────────────────
+    # И двата адреса са проверени срещу живите услуги, не преписани по памет:
+    # заявка с невалиден ключ връща 400 „Please pass a valid API key" от
+    # generativelanguage и 401 „Expected OAuth 2 access token" от Vertex —
+    # тоест пътищата съществуват точно така.
+    #
+    # gemini = Gemini API (AI Studio): статичен ключ, има безплатен слой,
+    # OpenAI-съвместим е, значи влиза като всеки друг доставчик — включително
+    # в ротацията на ключове (GEMINI_API_KEY_2..10).
+    "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY"),
+    # vertex = същите модели през Google Cloud: без статичен ключ, с OAuth
+    # токен и адрес, който зависи от проекта и локацията. Затова има свой клон
+    # в `_call` и свой модул (genesis_agent.vertex_auth), вместо ред тук с
+    # фиксиран base_url. key_env сочи проекта — „конфигуриран" значи „има проект".
+    "vertex": ("dynamic://vertex", "GOOGLE_CLOUD_PROJECT"),
 }
 
 # Кои доставчици се викат през native SDK вместо през OpenAI-съвместим HTTP.
@@ -1101,6 +1116,11 @@ class Brain:
              tools: list[dict] | None = None,
              extra: dict[str, Any] | None = None) -> tuple[str, list | None]:
         base_url, key_env = _PROVIDERS[provider]
+        if provider == "vertex":
+            # Адресът и токенът се смятат при извикване (проект + локация +
+            # OAuth), затова Vertex не минава през общия път с фиксиран
+            # base_url и статичен ключ.
+            return self._call_vertex(model, messages, tools, extra)
         if not key_env:  # локален — без ключ
             # reasoning_effort="none" (design note, 2026-07-31, живо измерено):
             # Qwen3 мисли по подразбиране дори за тривиални задачи — >3 минути
@@ -1189,6 +1209,54 @@ class Brain:
         if not tried_any:
             raise RuntimeError(f"HTTP_429: all configured {key_env}* are cooling down")
         raise last_err or RuntimeError(f"HTTP_502: {key_env} key rotation exhausted")
+
+    def _call_vertex(self, model: str, messages: list[dict],
+                      tools: list[dict] | None,
+                      extra: dict[str, Any] | None = None) -> tuple[str, list | None]:
+        """Google Vertex AI през OpenAI-съвместимия му endpoint.
+
+        Ротацията тук е по ПРОЕКТ, не по ключ: всеки проект в Google Cloud има
+        своя квота и своя сметка, тоест това са собствени ресурси на оператора,
+        а не няколко безплатни акаунта при един доставчик (разликата е описана
+        в `_numbered_keys`). Проект, който върне 429/403, влиза в същия
+        cooldown като всеки друг ключ и веригата продължава.
+
+        Липсващ проект, липсващ `google-auth` или липсващи credentials дават
+        `skip:`, което веригата третира като „този доставчик го няма" — без
+        грешка и без прекъсване на мисията.
+        """
+        from genesis_agent import vertex_auth
+
+        project_list = vertex_auth.projects()
+        if not project_list:
+            raise RuntimeError("skip: no GOOGLE_CLOUD_PROJECT configured")
+        if not vertex_auth.auth_available():
+            raise RuntimeError("skip: google-auth not installed (pip install 'genesis-agent[google]')")
+
+        last_err: Exception | None = None
+        tried_any = False
+        for idx, project in enumerate(project_list, start=1):
+            kid = f"key::VERTEX#{idx}"
+            if _is_exhausted(kid):
+                continue
+            access_token = vertex_auth.token(project)
+            if not access_token:
+                continue
+            tried_any = True
+            try:
+                return self._http(vertex_auth.endpoint(project), access_token, model,
+                                  messages, self.timeout, tools=tools, extra=extra)
+            except RuntimeError as e:
+                last = str(e)
+                last_err = e
+                if any(f"HTTP_{c}" in last for c in _EXHAUST_CODES | {401, 403}):
+                    _mark_exhausted(kid)
+                    print(f"  [Brain] 🔑 vertex/{project} unavailable ({last[:60]}) → next")
+                    continue
+                raise
+        if not tried_any:
+            raise RuntimeError("skip: no usable Vertex credentials (ADC not configured or all cooling down)")
+        raise last_err or RuntimeError("HTTP_502: vertex project rotation exhausted")
 
     def _call_local(self, messages: list[dict], attempts: int = 1) -> tuple[str, str] | None:
         """Пробва локалния мозък (текущия tier — 3b/7b/14b, каквото е в self.local).
