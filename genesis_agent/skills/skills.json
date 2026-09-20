@@ -187,7 +187,6 @@
         "method": "self_test_passed",
         "detail": "OK"
       },
-      "signature": "248bfdaeedd5c4fb48b3745483a31d1cbe4b32c25a5adbebce40bc2928239e13415e2f6ebf57b3b0077b1f5596959b192fb8d471c38e05e7a30880fea718a3447f817d87a21885d4cb15b3bdbe98ca6b42cb4727a036edc3dad1d1ada6fc493e65ef9bb62b602e3845ff240953fe7045dbfda75513b6272c714579fae63f45a956e8185aa7b2df1a61e6ee7057cacff1295a7fe15ada18feab43323cd537c8a149985602b2c1f4cbdafe58ddf21e67ce1a9666c9f6e13d923635e67df723a57f3637c60c4afdbf27628c97fa20d82b8d28344493e615ae071a2e0f900ca67f268e65523241ebb3cb5b5fc5df321ba6c820f65b7139334816979e6c3a0a73c33a",
       "extra": {
         "rounds": 6,
         "test_gated": true,
@@ -212,7 +211,6 @@
         "method": "self_test_passed",
         "detail": "OK"
       },
-      "signature": "7d5bb3c0518a45a9281dcb56ac08b128818f81385861e45c0ecebe292ad4dee20ad767ff1d5ae5543d4fa22f7069602d987b5b7e3bcaa445540fc05cd843d7f62baf78a9d476f6d953e2147e0b86dd362c3876e0d5a203c5bed83e30262b78dbee090291d4af5f96d91db9069ef733f275ef45e1796b80696dbca89919c0ae2872d73387e729175e4fd0a6a922627bef9588957a268d0d2d7299b89af6cb02bcf685a72b93331a13d79db8c7824b1c33434a92e218eabe3eeaddeab6601ce805c3a56037d5287ed21326a5ff99d19f6de0a493867d97f67d909724fecfb6da00ee0fc41a5f3f39f2f7a75f360bcc3900197782a2845532b4e3ca99d45b9263b3",
       "extra": {
         "rounds": 1,
         "test_gated": true,
@@ -237,7 +235,6 @@
         "method": "self_test_passed",
         "detail": "OK"
       },
-      "signature": "cb2fec521e5eb634f6e131e0018586fdee080ffe8f8be9eed335241433e8d610302d702a82d19751306a849789acf649d3f9c7abcfc2a87b96f097edf926f6dbbc750a5a7e07d42bbbcedb0e6d884fab395d7f92366247943229252ad8ce108f9a57df72ad2550b518ebc0b3bb40e13de1442e71edcb5d26073ec690e3b6265654902aefaaf4b1e85f84f2ea794d1e76977434288385a8db4ef65a9cb2fb62d151962b523d53ecb8ab2d49842ccd792cec59beb9efd2af73134dacde49244ea27523a4c144c7c126907d2fe7da3ad156cd9c0a35478381c7466f844366942ba96fe663dacc2c4377e820ff169c6e2f52a8be628fbf593d3a32e2fca878199657",
       "extra": {
         "rounds": 8,
         "test_gated": true,
@@ -262,7 +259,6 @@
         "method": "self_test_passed",
         "detail": "OK"
       },
-      "signature": "15d6e39022e7619ac2fc0931c834f50b34d7f83007a609b7f18daffd05affd08206f2464e21bd3a38490edd4da2d8100b040c824987d977436829bf833546996177682a3f06906a58c7ff9f44e372a12f8da25ef1ffff8cac5b5950355b9af28a4cf8cb1719c9cf0d1eec691930e0c5bb246d1f447d93b19faed4b09efcdf8be7d81d60236d2dcdfb37335d59d8356c6ed5d82bce7b7c9d6b34d37bcc9099207c611ebc9bfc165b93fdde7d91a7866fea6b69192ed53ceb53d0bd54b43e23266f24a09d67fd786ec5f9b95ed83a9f4cd44d7403d2899d139d809aa2b6461561a65f3d2d658d2a4a5c84cf019be604ce0f9e6bc1ba4d708d0138f527491399c88",
       "extra": {
         "rounds": 7,
         "test_gated": true,
@@ -289,7 +285,6 @@
         "method": "needs_confirmation",
         "detail": "[SANDBOX DENIED] Операцията изисква потвърждение, но режимът е неинтерактивен (autonomous). Причини: стартиране на подпроцес"
       },
-      "signature": "40246b45a40992e683f74b43a611dfce1854e293575dd5039c4cc059d6f9ed2839923458a4de9d76f0a2d7e336aefd64114cc8b82448f003234c3be5ef409849a1f7ff877c5ef05c6109feaa5fabdde14054f1e8b6bb2a09aac9cb53078927a1c2d7412e96c8c3dfb0f856932fa79ca0e5ce2fbf7b6ae71eecfdb2acc91f285ba4789f48e47be352d31babf4837406512139dd9c8cdb5982607d83d3049099d512a641d178ac09ddacc4ef30c6387e55f542eaf58de4cba90aadf0f2b035bbab8d905bd829339ff23b968078eed2d8b4b52ad82d6c0b0d3b63986ff5b7050cc043e534e6dfd0d2b892e5c1639de207c1f2b44af836a903b6809dc518b36bdc90",
       "extra": {
         "category": "workflow",
         "operator": "operator",
@@ -314,7 +309,6 @@
         "method": "self_test_passed",
         "detail": "OK"
       },
-      "signature": "17ce6f5e5e44b52f2747d4a9f305d0d71e66a1b75da7526d78d96a0f7262448d3b6b86f2d5a54a7f68433d7e029d5feae2c8aa31dc1413fafcd32b97d18af0de0295d73a3887995f3e9d731decfb87746b01aa2e5c54815dd6030975bd34699403f18455db8cd622c9adc7c6093b5e57f9715c52931e0b88ad8efb233a38998af7309737726325f02c07244b865288554826606669b9411bb9ce7049215f026d8f25198e48d6148cef7860c06e38dbf42dde74010ab9bf13dd31128479a3e1fbae4d2f3bd1b90a812062659c003c27b816f22fbd455d06190fe5261ee535345605b91fd520c941a17048680613ade16977a68c2f2b02a7047f5ec78e7c5d92b8",
       "extra": {
         "category": "workflow",
         "operator": "operator"
@@ -338,7 +332,6 @@
         "method": "self_test_passed",
         "detail": "OK"
       },
-      "signature": "5fb7ddb6467aed013d606eb720f40b6433c6e20b748b2a6c284d947c81cc39e230835d044b0359c7713c7e359a03c70dca219b2f005f4829bbb928cfe3d4dfe37564233c44f92ea16c3a57a99605ca538189f18cb323df68d82dccb1cec94d9e95d3898b8f9bdb97787994a40fa64f1f636636d26ba554e21263bfe3e387f5e2c3bec925b1d732c6d4f68766279e5482d99da655ce471eda696d5734caf05bceefde6fb7a54a413901ce5cc5b0e3c7ee29c2b3bf1cac81aa38c79e5bc94aaf5336c13334a443c2d4f868ba40648e788c148f9eac44e8220a610cc195e27a314c03ee8af2493e7e771f6c90adc36f7268354a58bab8db0470c47f4ccf9e2e7e47",
       "extra": {
         "category": "workflow",
         "operator": "operator"
@@ -362,7 +355,6 @@
         "method": "needs_confirmation",
         "detail": "[SANDBOX DENIED] Операцията изисква потвърждение, но режимът е неинтерактивен (autonomous). Причини: стартиране на подпроцес"
       },
-      "signature": "818117400b3a70de05c73d2c7d9289255544ca3517fc728d27f05d02a974a74f43fd4e3802852558b812e316e2cfc9fe889eba2a8705374eb6ec6542a34910463be2d95ec37b8448ddfc9519b5f57c93caf91a4653c2613330f21719ca73eba4bdd50d86a3a6c14a89e3ddd6890d59bd21f3a135dde492ecb4022dd8af3d8bd075882fa397d7c2dcae6cdf9c2addb83cb38993b69cbad6b3c3c99dda4cb7da1f57063291a39f217d76e542619a148ffe19f0bd38219ac3d3a8a0c954d9dbc11f6e727f755a3c0a7983b381a83619262c7d83f1dce9ef39e517425a00b3ec90a37e5fbfb1922d8bc68ad8a436d002059bb51fe9960150e1e422c9118ab8c5c734",
       "extra": {
         "category": "workflow",
         "operator": "operator"
@@ -386,8 +378,7 @@
         "verified": false,
         "method": "needs_confirmation",
         "detail": "[SANDBOX DENIED] Операцията изисква потвърждение, но режимът е неинтерактивен (autonomous). Причини: убиване на процеси; стартиране на подпроцес"
-      },
-      "signature": "52dbd12724ebc949777f9fb2ae2753f41f67f3c4b2a4e49473abdfd850fe4ad23fea078bd3ecb948b0f2ec808a9228b473788cf302705f0164de71826e738b297cd7f36c96aee463f3ae7423a54a65f1b56f1e6a9a2a7eb65887ed099c98eb9f845426b7445979cf33658a359964ddb570bdae931779ef7323f5d60cbdcec2798f26a1af6a3b6b59dc058a75545f033b343fb1e3a663b082bd425950f64fdada26926ca8ee86b70b6269b8f04c26d5961e85cd3f9f2503cfb909b923a92f082ed4d6bb519db39ab617fae8b0a35292fb7f63f2d83121800b67d37a2a56c086e7718763d7265f167e0ec3d53a3f298b5db91c03ae16d14c3404060a4e5828f9fa"
+      }
     },
     {
       "name": "sibling_paths_missing_the_guard",
@@ -407,8 +398,7 @@
         "verified": false,
         "method": "needs_confirmation",
         "detail": "[SANDBOX DENIED] Операцията изисква потвърждение, но режимът е неинтерактивен (autonomous). Причини: стартиране на подпроцес"
-      },
-      "signature": "242a516b4f6eb8a07a34ab7c3b2359051053b1aa97301b4c30bb55c9bc031167bb5156ff6fde7e2559aa0d148c3b6142a1e8e758d26449fe824501cf5a61a3482f7de86e8c3a93084fe679169ffa54350605e09f1bb6185366afd9fc3377c4616c1b4eb382c4f78b64bc9f1ccc929eaba2d002e5eba65f8f91d7624a1345e15144a4fbd931c37497b1197d84af96e2bd5cc73e9f5f54dbbc60629a4ef575672a37d68bd2094c46933f2ba127144b95c60aa4cec35a612ee43c796e013da6b6d49c3195004a5af55f373d98f2478873fed8fc11e5ba1758f04ee9381c877da4aef705bb7dbf28f561993d4129d776825c922a60bd5c734a728f8f604c4bc5167c"
+      }
     },
     {
       "name": "probe_endpoint_before_coding_against_it",
@@ -429,8 +419,7 @@
         "verified": true,
         "method": "self_test_passed",
         "detail": "OK"
-      },
-      "signature": "7ad9d46a871d05c67fbaca578a9d6e0ea56d9808be15d82c8af9b4da4dd33c2e7c74f70e9c6950183e9ea2d81e4708d5b47c4b4f5c68aea631670fb81b5e5d6aebaa3aec304250ca42d32e9c7bbc8b47f7859f6878aaf9ec8995e3c8e31b045cca7266900f32538e0839399e7e8ec61b3a1c1b1722cae6bfef109a50c00c6ceef5ca37be23d5740b16ebceb185059469d468ed80a272db5658869afdf2a07c9a8f48b8af672829b3788942db714f0ff1d14ccfbe8f0d3826f0d385b807ac07ec8218a6dbe040c42a481ef275400bfd08512e7cb31b1568a7f8626cccc7aa9a64693ab5492728de99277d491b92d5024c49332e4c7f8afdc5abaecfd101755d8a"
+      }
     }
   ]
 }

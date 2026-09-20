@@ -23,7 +23,7 @@ from typing import Any
 import yaml
 
 from genesis_agent import dna
-from genesis_agent.config import SKILLS_DIR
+from genesis_agent.config import PACKAGE_DIR, SKILLS_DIR
 
 # `file_path` in skills.json is relative to this, not PROJECT_ROOT — see the
 # comment on skill_loader.SKILLS_ROOT for why the two are not the same thing
@@ -315,19 +315,27 @@ def save_skill(
         # generation hiccup, ...): an optional integrity upgrade must not
         # block saving a skill that would have saved fine yesterday.
         signature = ""
-        try:
-            from genesis_agent.cryptography_utils import sign_code
-            # Sign the SAME string skill_view() will later verify against,
-            # not the caller's raw `code` — _build_md above embeds
-            # code.rstrip(), and skill_view()'s fence regex does a full
-            # .strip() on read. Signing the unnormalized original meant any
-            # skill whose code had trailing whitespace (routine for
-            # LLM-generated code) got a signature that could never verify,
-            # wrongly refusing an untouched skill as "tampered" (bug found
-            # writing skills_api tests, 2026-09-18).
-            signature = sign_code(code.strip())
-        except Exception:
-            pass
+        # Подписва се САМО умение, което остава на тази машина. Умение в
+        # ДОСТАВЯНАТА папка пътува до чужди машини, а там подписът е от ЧУЖД
+        # ключ — проверката не може да различи „подписано от друг" от
+        # „подправено" и отказва умението, обвинявайки потребителя в намеса.
+        # Измерено с генериран собствен ключ: 11 доставени умения станаха
+        # незаредими с точно това съобщение. Файловете в репото се пазят от
+        # git; подписът пази другото — записаното локално, след това.
+        if SKILLS_DIR != PACKAGE_DIR / "skills":
+            try:
+                from genesis_agent.cryptography_utils import sign_code
+                # Sign the SAME string skill_view() will later verify against,
+                # not the caller's raw `code` — _build_md above embeds
+                # code.rstrip(), and skill_view()'s fence regex does a full
+                # .strip() on read. Signing the unnormalized original meant any
+                # skill whose code had trailing whitespace (routine for
+                # LLM-generated code) got a signature that could never verify,
+                # wrongly refusing an untouched skill as "tampered" (bug found
+                # writing skills_api tests, 2026-09-18).
+                signature = sign_code(code.strip())
+            except Exception:
+                pass
 
         rel = str(md_path.relative_to(SKILLS_ROOT)).replace("\\", "/")
         entry: dict[str, Any] = {

@@ -52,22 +52,84 @@ PROJECT_ROOT: Path = PACKAGE_DIR.parent
 _INSTALLED = PROJECT_ROOT.name in ("site-packages", "dist-packages")
 
 
+def seed_user_skills(shipped: Path, user_dir: Path) -> int:
+    """Донася в личната папка доставените умения, които ги няма там. Връща броя.
+
+    САМО добавя. Файл, който вече съществува, не се пипа — операторът може да
+    е променил доставено умение и неговата версия печели.
+
+    Защо не е „копирай веднъж, ако папката липсва", както беше: тогава всяка
+    вече съществуваща инсталация спираше да получава умения завинаги. Измерено
+    на живо преди поправката: прясна инсталация → 20 умения; същата версия при
+    налична ~/.genesis/skills с едно умение → 1 умение. Тоест кодът се
+    обновяваше, а библиотеката не — и нищо не го казваше.
+
+    Съзнателна цена: доставено умение, което операторът е ИЗТРИЛ, се връща при
+    следващото обновяване. Доставеният набор е част от версията; който иска да
+    го няма, го празни, а не го трие.
+    """
+    import json
+    import shutil
+
+    user_dir.mkdir(parents=True, exist_ok=True)
+    added: list[str] = []
+    for md in sorted(shipped.glob("*.md")):
+        target = user_dir / md.name
+        if not target.exists():
+            shutil.copy2(md, target)
+            added.append(md.stem)
+    if not added:
+        return 0
+
+    # Индексът се слива по име. Записът на оператора за същото име печели —
+    # той сочи неговия файл, който току-що НЕ презаписахме.
+    index_path = user_dir / "skills.json"
+    try:
+        current = json.loads(index_path.read_text(encoding="utf-8"))
+        entries = list(current.get("skills") or [])
+    except (OSError, ValueError):
+        current, entries = {"version": "1.0"}, []
+    known = {e.get("name") for e in entries}
+    try:
+        shipped_index = json.loads((shipped / "skills.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        shipped_index = {"skills": []}
+    for entry in shipped_index.get("skills") or []:
+        if entry.get("name") in added and entry.get("name") not in known:
+            entries.append(entry)
+    current["skills"] = entries
+    # Пише се през временен файл: прекъснат запис на индекса прави ЦЯЛАТА
+    # библиотека незаредима, а това се случва при стартиране.
+    tmp = index_path.with_suffix(".json.tmp")
+    try:
+        tmp.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n",
+                       encoding="utf-8")
+        tmp.replace(index_path)
+    except OSError:
+        log.warning("не можах да обновя %s — новите умения са копирани, но не са в индекса",
+                    index_path)
+    return len(added)
+
+
 def _default_skills_dir() -> Path:
     shipped = PACKAGE_DIR / "skills"
     if not _INSTALLED:
         return shipped
     # Installed copy: skills a mission writes go to ~/.genesis/skills instead.
-    # Seeded once from the shipped starter set, so `genesis skills` still
-    # shows them immediately on a fresh install — this only copies, it never
-    # writes back into site-packages.
+    # The shipped set is seeded there — copied, never written back into
+    # site-packages — and topped up on every start, so an upgrade actually
+    # delivers the new skills instead of only the new code.
     from genesis_agent.paths import GENESIS_HOME
     user_dir = GENESIS_HOME / "skills"
-    if not user_dir.exists():
-        if shipped.exists():
-            import shutil
-            shutil.copytree(shipped, user_dir)
-        else:
-            user_dir.mkdir(parents=True, exist_ok=True)
+    if shipped.exists():
+        try:
+            seed_user_skills(shipped, user_dir)
+        except OSError as e:
+            # Достъпът до диска не бива да спира стартирането: по-добре със
+            # старите умения, отколкото никак.
+            log.warning("не можах да обновя уменията в %s: %s", user_dir, e)
+    else:
+        user_dir.mkdir(parents=True, exist_ok=True)
     return user_dir
 
 

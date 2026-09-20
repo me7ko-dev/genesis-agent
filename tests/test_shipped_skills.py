@@ -92,3 +92,50 @@ class TestTheWorkflowSkillsAnswerInBulgarian:
         sl._SKILLS_INDEX_CACHE = None
         resolved, _ = sl.resolve_skill("нещо съвсем несвързано за марсианци")
         assert resolved is None
+
+
+class TestNoShippedSkillCarriesAPrivateSignature:
+    """Подпис в доставяния индекс е направен с ЛИЧНИЯ ключ на този, който го е
+    записал. На всяка друга машина той не съвпада — а `skill_view` не може да
+    различи „подписано от друг" от „подправено" и отказва умението, обвинявайки
+    потребителя в намеса.
+
+    Измерено: с генериран собствен ключ 11 доставени умения станаха незаредими
+    с точно това съобщение. Файловете в репото се пазят от git; подписът пази
+    другото — локално записаното, след записването му.
+    """
+
+    def test_the_index_has_no_signatures(self) -> None:
+        index = json.loads((SKILLS_DIR / "skills.json").read_text(encoding="utf-8"))
+        signed = [s["name"] for s in index["skills"] if s.get("signature")]
+        assert not signed, (
+            "доставени умения с чужд подпис (махни полето 'signature'): " + ", ".join(signed))
+
+    def _save_into(self, monkeypatch, tmp_path, skills_dir, package_dir):
+        from genesis_agent import skills_manager as sm
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(sm, "SKILLS_DIR", skills_dir)
+        monkeypatch.setattr(sm, "SKILLS_ROOT", skills_dir.parent)
+        monkeypatch.setattr(sm, "PACKAGE_DIR", package_dir)
+        sm.save_skill(slug="signing probe", goal="Signing probe skill.",
+                      code="def probe():\n    return 1\n\nassert probe() == 1\nprint('OK')\n")
+        index = json.loads((skills_dir / "skills.json").read_text(encoding="utf-8"))
+        assert len(index["skills"]) == 1, index["skills"]
+        return index["skills"][0]
+
+    def test_saving_into_the_shipped_dir_does_not_sign(self, monkeypatch, tmp_path) -> None:
+        """Пазачът е в кода, не в дисциплината: иначе следващото умение,
+        записано по време на разработка, връща проблема тихо."""
+        package_dir = tmp_path / "pkg"
+        entry = self._save_into(monkeypatch, tmp_path, package_dir / "skills", package_dir)
+        assert not entry.get("signature"), (
+            "умение в доставяната папка не бива да носи личен подпис")
+
+    def test_saving_into_the_operators_own_dir_still_signs(self, monkeypatch, tmp_path) -> None:
+        """Поправката не бива да изключи подписването изобщо — то пази точно
+        локално записаните умения от промяна след записа."""
+        pytest.importorskip("cryptography")
+        monkeypatch.setenv("GENESIS_KEY_DIR", str(tmp_path / "keys"))
+        entry = self._save_into(monkeypatch, tmp_path, tmp_path / "home" / "skills",
+                                tmp_path / "pkg")
+        assert entry.get("signature"), "локалното умение трябва да остане подписано"
