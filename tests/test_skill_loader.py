@@ -306,3 +306,53 @@ class TestSearchSeesTheOperatorsLanguage:
         hits = sl.search_skills("exponential backoff retry", top_n=3, use_semantic=False)
         assert hits and hits[0]["name"] == "retry_backoff"
         assert hits[0]["_kw_score"] == 3
+
+
+class TestUseSkillResolvesFromBulgarian:
+    """Изискването на оператора, проверено там, където се решава: `USE_SKILL`
+    минава през `resolve_skill`, а тя иска поне 2 съвпадащи думи, преди да
+    изпълни умение. Това е прагът, който пази от увереното грешно умение
+    (реален случай в коментара на функцията: „in-process job queue" резолвна
+    до event bus само по думата „process" и изгори 5 от 8 рунда).
+
+    Тоест българската заявка трябва да прескочи прага ЧЕСТНО — по истински
+    съвпадащи думи, а не с понижен праг.
+    """
+
+    @pytest.fixture
+    def _library(self, _isolated_skills, monkeypatch):
+        from genesis_agent import skills_manager as sm
+        code = ("import os\n\n"
+                "def cleanup_temp_files(root='/tmp'):\n"
+                "    return [p for p in os.listdir(root) if p.endswith('.tmp')]\n\n"
+                "assert isinstance(cleanup_temp_files('/tmp'), list)\nprint('OK')\n")
+        sm.save_skill(slug="Изчисти временните файлове по график", code=code,
+                      goal="Изчисти временните файлове по график")
+        monkeypatch.setattr(sl, "_SKILLS_INDEX_CACHE", None)
+        return _isolated_skills
+
+    def test_a_bulgarian_request_resolves_to_the_english_named_skill(
+        self, _library
+    ) -> None:
+        name, _ = sl.resolve_skill("изчисти временните файлове")
+        assert name == "cleanup_temp_files"
+
+    def test_a_longer_sentence_around_it_still_resolves(self, _library) -> None:
+        name, _ = sl.resolve_skill("искам да изчистя временните файлове по график")
+        assert name == "cleanup_temp_files"
+
+    def test_the_exact_english_name_resolves_directly(self, _library) -> None:
+        name, candidates = sl.resolve_skill("cleanup_temp_files")
+        assert name == "cleanup_temp_files"
+        assert candidates == [], "точното име не минава през търсене"
+
+    def test_an_unrelated_bulgarian_request_resolves_to_nothing(self, _library) -> None:
+        """Прагът важи еднакво за двата езика. Уверено грешно умение е
+        по-скъпо от никакво: изходът му се представя като отговор на
+        заявката."""
+        name, _ = sl.resolve_skill("направи ми справка за продажбите")
+        assert name is None
+
+    def test_one_shared_word_is_not_enough_in_bulgarian_either(self, _library) -> None:
+        name, _ = sl.resolve_skill("файлове")
+        assert name is None
