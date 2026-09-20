@@ -277,3 +277,98 @@ class TestStructuralRmDetection:
             allowed, reason = sandbox._decide(
                 cmd, verdict, sandbox.SandboxPolicy(mode="allow"))
             assert allowed, f"фалшива тревога за {cmd!r}: {reason}"
+
+
+class TestTargetsDecidedAtRuntime:
+    """Втората половина на същия проблем. Структурната проверка гледа целта,
+    но целта невинаги е в текста: `$(echo /)` се решава от шела, а
+    `echo / | xargs rm -rf` изобщо няма цел на командния ред — тя идва по
+    тръбата. И двете минаваха като SAFE, тоест се изпълняваха автоматично
+    дори в `deny` режим, защото нито един регекс не виждаше `rm` с корен.
+    """
+
+    _MISSED_BEFORE = (
+        # стойността се решава при изпълнение
+        "rm --no-preserve-root -rf $(echo /)",
+        'rm -rf "$(echo /)"',
+        "rm -rf `echo /`",
+        "rm -rf $TARGET",
+        "rm -rf $HOME/*",
+        "rm -rf ~user",
+        "rm -rf /h*",
+        # целите идват по тръбата
+        "echo / | xargs rm -rf",
+        "echo / | xargs -0 rm -rf",
+        "echo / | xargs -n 1 rm -rf",
+        "echo / | xargs -I {} rm -rf {}",
+        "echo / | xargs -i rm -rf {}",
+        "echo $HOME | xargs rm -rf",
+        "find / | xargs sudo rm -rf",
+        "printf /home/user | xargs rm -rf",
+        # обвивки и продължение на реда
+        "env FOO=1 sudo rm --recursive --force /",
+        "timeout 5 rm -rf /",
+        "sudo -u root rm -rf /",
+        "sudo -n rm -rf /",
+        "nice -n 10 rm -rf /",
+        "env -u PATH rm -rf /",
+        "rm -rf \\\n  /",
+    )
+
+    def test_each_of_them_is_blocked_in_every_mode(self) -> None:
+        for cmd in self._MISSED_BEFORE:
+            verdict = sandbox.assess_command(cmd)
+            for mode in ("allow", "deny", "interactive"):
+                allowed, _ = sandbox._decide(
+                    cmd, verdict, sandbox.SandboxPolicy(mode=mode))
+                assert not allowed, f"ПРОПУСНАТА: {cmd!r} при mode={mode}"
+
+    def test_ordinary_cleanup_through_xargs_still_runs(self) -> None:
+        """Обратната грешка е по-скъпа тук, отколкото изглежда: `find ... |
+        xargs rm -rf` е начинът, по който се чисти репо. Гейт, който отказва и
+        него, спира нормалната работа — и операторът го изключва изцяло."""
+        for cmd in (
+            "find . -name '__pycache__' | xargs rm -rf",
+            "find . -name '*.pyc' -print0 | xargs -0 rm -rf",
+            "find ./build -type d | xargs -I {} rm -rf {}",
+            "git ls-files --others | xargs rm -rf",
+            "ls /tmp | xargs rm -rf",
+        ):
+            verdict = sandbox.assess_command(cmd)
+            allowed, reason = sandbox._decide(
+                cmd, verdict, sandbox.SandboxPolicy(mode="allow"))
+            assert allowed, f"фалшива тревога за {cmd!r}: {reason}"
+
+    def test_a_command_word_is_never_read_as_the_rm_behind_a_wrapper(self) -> None:
+        """Прескачането на флаговете на обвивката спира на първата истинска
+        дума-команда. Иначе `sudo grep -r rm -rf /etc` — търсене на текста
+        „rm“ — се четеше като rm върху /etc и се отказваше."""
+        for cmd in ("sudo grep -r rm -rf /etc", "grep -rn rm /etc/hosts",
+                    "sudo -u root rm -rf ./build"):
+            verdict = sandbox.assess_command(cmd)
+            allowed, reason = sandbox._decide(
+                cmd, verdict, sandbox.SandboxPolicy(mode="allow"))
+            assert allowed, f"фалшива тревога за {cmd!r}: {reason}"
+
+    def test_a_literal_name_after_the_expansion_is_what_limits_the_damage(self) -> None:
+        """Каквото и да е `$X`, `$X/artifacts` трие нещо на име artifacts.
+        Затова се гледа опашката СЛЕД разгъването, а не самото разгъване —
+        иначе всяко `rm -rf $BUILD_DIR/out` става невъзможно."""
+        for cmd in ("rm -rf $BUILD_DIR/artifacts", "rm -rf ${TMPDIR}/cache",
+                    "rm -rf $(pwd)/build", "rm -rf $HOME/projects/old"):
+            verdict = sandbox.assess_command(cmd)
+            allowed, reason = sandbox._decide(
+                cmd, verdict, sandbox.SandboxPolicy(mode="allow"))
+            assert allowed, f"фалшива тревога за {cmd!r}: {reason}"
+
+    def test_the_pipeline_check_reads_only_literals(self) -> None:
+        """Съзнателна граница, записана като тест, за да не се чете като
+        пропуск: целта на `... | xargs rm -rf` по дефиниция се изчислява при
+        изпълнение. Литерален критичен корен по-рано в тръбата се хваща;
+        изчислен — не. Ако някой ден това се промени, тестът ще падне и ще
+        се вземе съзнателно решение, вместо да се открие след загуба."""
+        computed = "ls $SOMEWHERE | xargs rm -rf"
+        verdict = sandbox.assess_command(computed)
+        assert verdict.level != sandbox.RiskLevel.BLOCKED
+        assert verdict.level == sandbox.RiskLevel.CONFIRM, (
+            "недоказуемото минава, но не безшумно — остава за потвърждение")

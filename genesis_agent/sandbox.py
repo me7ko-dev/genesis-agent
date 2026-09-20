@@ -128,7 +128,10 @@ _BLOCK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 
 # Опасни — изискват потвърждение (interactive) или отказ (autonomous).
 _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (_c(r"\brm\s+(-[a-z]*\s+)*-[a-z]*[rf]"),
+    # И дългите форми: без `--(recursive|force)` тук `rm --recursive нещо`
+    # изобщо не стигаше до CONFIRM и се изпълняваше автоматично навсякъде,
+    # защото `-[a-z]*[rf]` не може да опише флаг с две тирета.
+    (_c(r"\brm\s+((-|--)[a-z-]*\s+)*(-[a-z]*[rf]|--(recursive|force))"),
      "рекурсивно/принудително триене (rm -r/-f)"),
     (_c(r"\brmdir\b"),
      "триене на директория"),
@@ -495,14 +498,223 @@ _HOME_PARENTS = ("/home/", "/users/", "/root/")
 
 _RECURSIVE_LONG = frozenset({"--recursive", "--force", "-R", "-r"})
 
+# Програми, които само подават командата нататък. Пропускат се, за да стигнем
+# до истинското `rm`; `xargs`, `exec`, `command` и приятели липсваха и
+# `echo / | xargs rm -rf` така не се разпознаваше като rm изобщо.
+_WRAPPERS = frozenset({
+    "sudo", "doas", "env", "nohup", "time", "exec", "command", "nice",
+    "timeout", "setsid", "stdbuf", "ionice", "busybox",
+})
+
+# Разгъвания, чиято стойност шелът решава при изпълнение: заместване на
+# команда, променлива, позиционен параметър. Нужни са като РЕГЕКС, а не като
+# списък от знаци, защото важното е не че ги има, а КЪДЕ свършват.
+_EXPANSION = re.compile(
+    r"\$\((?:[^()]|\([^()]*\))*\)"   # $( ... ), с едно ниво вложени скоби
+    r"|`[^`]*`"                       # ` ... `
+    r"|\$\{[^}]*\}"                  # ${VAR}
+    r"|\$[A-Za-z_][A-Za-z0-9_]*"      # $VAR
+    r"|\$[0-9@*#?$!]"                 # $1, $@, $* ...
+)
+
+
+def _target_is_unresolvable(token: str) -> bool:
+    """Може ли тази цел да се разгъне до критичен корен, без да го виждаме.
+
+    Решава се по това какво остава СЛЕД последното разгъване. Литерално име
+    отзад ограничава щетата до поддърво с това име: каквото и да е `$X`,
+    `$X/artifacts` трие нещо на име artifacts, не корена. Празна опашка или
+    само разделители и глобове (`$X`, `$X/`, `$X/*`) не ограничават нищо —
+    `X=/` дава точно `/` и `/*`. Затова първото е нормална работа, а второто
+    за рекурсивно триене се третира като опасно: недоказуемото не е безопасно.
+
+    Литерален ПРЕФИКС не спасява (`build$S` при `S=" /"` се разделя на две
+    думи, втората `/`), затова опашката е единственото, което се брои.
+    """
+    raw = token.strip().strip("'\"")
+    if raw.startswith("~") and len(raw) > 1 and raw[1] != "/":
+        return True          # `~user` — домът на ДРУГ потребител. `~/нещо` е
+                             # собственият дом и е напълно нормална цел.
+    # Незатворено заместване: `$(echo /)` съдържа интервал, така че токените
+    # излизат като `$(echo` и `/)`. Краят му не е в този токен — значи нищо
+    # видимо не ограничава целта.
+    if any(m in _EXPANSION.sub("", raw) for m in ("$(", "`", "${")):
+        return True
+    matches = list(_EXPANSION.finditer(raw))
+    if matches:
+        return not raw[matches[-1].end():].strip("/*?.[]")
+    if raw.startswith("/"):
+        # glob в ПЪРВИЯ сегмент на абсолютен път (`/h*`, `/[a-z]*`) се разгъва
+        # точно до корените, които пазим. Нарочно не важи за `./build/*` или
+        # `/tmp/x*`: там първият сегмент е известен и разгъването не може да
+        # излезе от него.
+        first = raw[1:].split("/", 1)[0]
+        if any(ch in first for ch in "*?["):
+            return True
+    return False
+
 
 def _normalise_target(token: str) -> str:
     """Токен от командния ред → сравним път. Маха кавичките и завършващия
     разделител; `~/` и `~` трябва да значат едно и също за проверката."""
     t = token.strip().strip("'\"")
+    # `/home/./user` и `/home/user/../user` сочат същото място като
+    # `/home/user`, но без канонизация се четат като по-дълбоки пътища и
+    # проверката за дълбочина ги пропускаше.
+    if t.startswith("/") and (".." in t or "/." in t):
+        t = os.path.normpath(t)
     if len(t) > 1 and t.endswith(("/", "\\")):
         t = t.rstrip("/\\") or "/"
     return t.lower()
+
+
+# `xargs` не е обвивка като `sudo`: тя сменя ОТКЪДЕ идват целите — от
+# командния ред към stdin. Флаговете ѝ трябва да се прескочат, за да се стигне
+# до самата команда; тези тук поглъщат и следващия токен (`-n 1`, `-I {}`).
+_XARGS_FLAGS_WITH_ARG = frozenset({
+    "-n", "-P", "-L", "-l", "-s", "-d", "-E", "-a",
+    "--max-args", "--max-procs", "--max-lines", "--max-chars",
+    "--delimiter", "--eof", "--arg-file",
+})
+
+
+# Флагове на обвивките, които поглъщат и следващия токен. Зависят от
+# обвивката, защото едно и също `-n` значи различно: `sudo -n` е „не питай“ и
+# НЕ взема аргумент, а `nice -n 10` взема. Един общ списък правеше от
+# `sudo -n rm -rf /` команда без rm — тоест изяждаше точно това, което пазим.
+_WRAPPER_FLAGS_WITH_ARG: dict[str, frozenset[str]] = {
+    "sudo": frozenset({"-u", "-g", "-U", "-C", "-p", "-D", "-R",
+                       "--user", "--group", "--chdir", "--prompt"}),
+    "doas": frozenset({"-u", "-C", "--user"}),
+    "env": frozenset({"-u", "--unset", "-C", "--chdir"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "ionice": frozenset({"-c", "-n", "-p", "-P"}),
+    "timeout": frozenset({"-k", "-s", "--kill-after", "--signal"}),
+    "stdbuf": frozenset({"-i", "-o", "-e"}),
+    "setsid": frozenset(),
+}
+
+
+def _strip_wrappers(tokens: list[str]) -> list[str]:
+    """Маха водещите обвивки и присвояванията на променливи, за да остане
+    истинската команда: `sudo -u root env FOO=1 nice -n 10 rm ...` е пак
+    `rm ...`.
+
+    Флагове и числови аргументи се прескачат САМО след разпозната обвивка, и
+    никога дума-команда (`sudo grep -r rm -rf /etc` спира на `grep`, не се
+    чете като rm). Иначе всяко търсене на текста „rm“ ставаше фалшива тревога.
+    """
+    last_wrapper = ""
+    while tokens:
+        head = tokens[0]
+        if head in _WRAPPERS:
+            last_wrapper = head
+            tokens = tokens[1:]
+        elif last_wrapper and "=" in head and not head.startswith("-"):
+            tokens = tokens[1:]          # `env FOO=1`
+        elif not last_wrapper and "=" in head and not head.startswith("-"):
+            last_wrapper = "env"
+            tokens = tokens[1:]          # голо `FOO=1 rm ...`
+        elif last_wrapper and head.startswith("-") and len(head) > 1:
+            takes_arg = head in _WRAPPER_FLAGS_WITH_ARG.get(last_wrapper, frozenset())
+            tokens = tokens[1:]
+            if takes_arg and tokens:
+                tokens = tokens[1:]
+        elif last_wrapper and head.rstrip("smhd").isdigit():
+            tokens = tokens[1:]          # `timeout 5`, `timeout 5s`, `nice 10`
+        else:
+            break
+    return tokens
+
+
+def _stage_command(segment: str) -> tuple[list[str], bool, str]:
+    """Един етап от тръбата → (токени на реалната команда, идват ли целите от
+    stdin, заместителят на `xargs -I`). Без разгъването на `xargs` командата
+    `rm` зад нея не се виждаше изобщо и `echo / | xargs rm -rf` минаваше като
+    напълно безобидна."""
+    try:
+        tokens = shlex.split(segment)
+    except ValueError:
+        tokens = segment.split()
+    tokens = _strip_wrappers(tokens)
+    from_stdin = False
+    placeholder = ""
+    while tokens and Path(tokens[0]).name == "xargs":
+        from_stdin = True
+        tokens = tokens[1:]
+        while tokens and tokens[0].startswith("-"):
+            flag = tokens[0]
+            tokens = tokens[1:]
+            # Заместителят е важен сам по себе си: без него
+            # `echo / | xargs -I {} rm -rf {}` изглежда като rm с
+            # най-обикновена цел на име `{}`. Формите са три — отделен
+            # аргумент (`-I {}`), слята (`-I{}`, `--replace={}`) и
+            # подразбираща се (`-i` без стойност значи `{}`).
+            if flag in ("-I", "-i", "--replace"):
+                if flag == "-I" and tokens:
+                    placeholder = tokens[0]
+                    tokens = tokens[1:]
+                else:
+                    placeholder = "{}"
+            elif flag.startswith("--replace="):
+                placeholder = flag.split("=", 1)[1]
+            elif flag.startswith(("-I", "-i")) and len(flag) > 2:
+                placeholder = flag[2:]
+            elif flag in _XARGS_FLAGS_WITH_ARG and tokens:
+                tokens = tokens[1:]
+        tokens = _strip_wrappers(tokens)
+    return tokens, from_stdin, placeholder
+
+
+def _rm_flags_and_targets(tokens: list[str]) -> tuple[bool, list[str]]:
+    """Токените на едно `rm` → (рекурсивно ли е, кои са целите). Редът на
+    флаговете и дългите им имена не влияят — затова се гледа структурата, а не
+    формата на командата."""
+    recursive = False
+    targets: list[str] = []
+    for tok in tokens[1:]:
+        if tok.startswith("--"):
+            if tok in _RECURSIVE_LONG:
+                recursive = True
+        elif tok.startswith("-") and len(tok) > 1:
+            if "r" in tok.lower():
+                recursive = True
+        else:
+            targets.append(tok)
+    return recursive, targets
+
+
+def _critical_root_reason(target: str) -> str | None:
+    """Описание, ако този ЛИТЕРАЛЕН път е критичен корен или нечий цял дом."""
+    norm = _normalise_target(target)
+    if norm in _CATASTROPHIC_ROOTS:
+        return f"критичен корен ({target})"
+    for parent in _HOME_PARENTS:
+        if norm.startswith(parent) and norm.count("/") == parent.count("/"):
+            return f"цяла home директория ({target})"
+    return None
+
+
+def _upstream_critical_root(stages: list[str]) -> str | None:
+    """Критичен път, изписан буквално в по-ранен етап на същата тръба.
+
+    Нарочно гледа само литерали. Целите на `... | xargs rm -rf` по дефиниция се
+    изчисляват при изпълнение, така че проверка за „недоказуемо“ тук би обявила
+    за опасен всеки `find ... | xargs rm -rf` — тоест обичайната употреба.
+    Това е съзнателната граница на статичната проверка: `echo / | xargs rm -rf`
+    и `find / | xargs rm -rf` се хващат, `ls $DIR | xargs rm -rf` — не.
+    """
+    for stage in stages:
+        try:
+            tokens = shlex.split(stage)
+        except ValueError:
+            tokens = stage.split()
+        for tok in _strip_wrappers(tokens)[1:]:
+            if tok.startswith("-"):
+                continue
+            if _critical_root_reason(tok):
+                return tok
+    return None
 
 
 def _catastrophic_rm_reason(command: str) -> str | None:
@@ -510,39 +722,42 @@ def _catastrophic_rm_reason(command: str) -> str | None:
 
     Разлага на токени вместо да изброява форми, затова редът на флаговете,
     дългите им имена и кавичките около пътя не я заблуждават. Гледа всеки
-    сегмент поотделно, за да не се скрие зад `;`, `&&` или тръба.
+    етап поотделно, за да не се скрие зад `;`, `&&` или тръба.
     """
-    for segment in re.split(r"[;&|\n]+", command):
-        try:
-            tokens = shlex.split(segment)
-        except ValueError:
-            tokens = segment.split()
-        while tokens and tokens[0] in ("sudo", "doas", "env", "nohup", "time"):
-            tokens = tokens[1:]
-        if not tokens or Path(tokens[0]).name != "rm":
-            continue
+    # Продължението на ред (`\` + нов ред) е ЕДНА команда за шела; ако не го
+    # слепим, разделянето по `\n` я накъсва и нито една част не изглежда като
+    # rm с критична цел.
+    command = re.sub(r"\\\s*\n", " ", command)
+    # Първо на отделни команди, после на етапи на тръбата: етапите трябва да
+    # останат групирани, за да се знае какво подава на какво.
+    for statement in re.split(r"[;&\n]+", command):
+        stages = statement.split("|")
+        for index, stage in enumerate(stages):
+            tokens, from_stdin, placeholder = _stage_command(stage)
+            if not tokens or Path(tokens[0]).name != "rm":
+                continue
 
-        recursive = False
-        targets: list[str] = []
-        for tok in tokens[1:]:
-            if tok.startswith("--"):
-                if tok in _RECURSIVE_LONG:
-                    recursive = True
-            elif tok.startswith("-") and len(tok) > 1:
-                if "r" in tok.lower():
-                    recursive = True
-            else:
-                targets.append(tok)
+            recursive, targets = _rm_flags_and_targets(tokens)
+            if not recursive:
+                continue
 
-        if not recursive:
-            continue
-        for target in targets:
-            norm = _normalise_target(target)
-            if norm in _CATASTROPHIC_ROOTS:
-                return f"рекурсивно триене на критичен корен ({target})"
-            for parent in _HOME_PARENTS:
-                if norm.startswith(parent) and norm.count("/") == parent.count("/"):
-                    return f"рекурсивно триене на цяла home директория ({target})"
+            literal = [t for t in targets
+                       if not (placeholder and placeholder in t)]
+            for target in literal:
+                if _target_is_unresolvable(target):
+                    return (f"рекурсивно триене с цел, чиято стойност се решава при "
+                            f"изпълнение ({target}) — не може да бъде доказана за безопасна")
+                reason = _critical_root_reason(target)
+                if reason:
+                    return f"рекурсивно триене на {reason}"
+
+            # Или изобщо няма цели на командния ред, или всички са заместители
+            # на `xargs -I` — и в двата случая истинските цели идват от тръбата.
+            if from_stdin and not literal:
+                upstream = _upstream_critical_root(stages[:index])
+                if upstream:
+                    return (f"рекурсивно триене на целите от тръбата, в която "
+                            f"по-рано стои {upstream}")
     return None
 
 

@@ -37,6 +37,17 @@ The sandbox is a good second layer and a poor first one.
 These are refused even in `allow` mode, even if you explicitly ask for them:
 
 - `rm -rf /` and equivalents, fork bombs, `mkfs`, raw `dd` to a device
+
+  "Equivalents" is decided structurally, not by matching strings: the command
+  is split into pipeline stages and tokens, wrappers (`sudo`, `env FOO=1`,
+  `nice -n 10`, `timeout`) are peeled off, `xargs` is followed to the command
+  behind it, and the target is compared after canonicalisation — so flag order,
+  long flags, quotes, `/home/./user` and `--no-preserve-root` do not change the
+  answer. A target whose value the shell decides at run time (`$X`, `$(...)`,
+  `/h*`) is refused for recursive deletion unless a literal name follows it
+  (`$BUILD_DIR/artifacts` is ordinary work and still runs). The known limit:
+  when targets arrive through a pipe, only a literal critical path upstream is
+  caught — `echo / | xargs rm -rf` is refused, `ls $DIR | xargs rm -rf` is not.
 - Typing into a password field, a card/CVV/IBAN/SSN-shaped field, or a
   private-key field in the browser
 - Clicking "buy now" / "place order" / "confirm payment"
