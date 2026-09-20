@@ -388,6 +388,27 @@
         "detail": "[SANDBOX DENIED] Операцията изисква потвърждение, но режимът е неинтерактивен (autonomous). Причини: убиване на процеси; стартиране на подпроцес"
       },
       "signature": "52dbd12724ebc949777f9fb2ae2753f41f67f3c4b2a4e49473abdfd850fe4ad23fea078bd3ecb948b0f2ec808a9228b473788cf302705f0164de71826e738b297cd7f36c96aee463f3ae7423a54a65f1b56f1e6a9a2a7eb65887ed099c98eb9f845426b7445979cf33658a359964ddb570bdae931779ef7323f5d60cbdcec2798f26a1af6a3b6b59dc058a75545f033b343fb1e3a663b082bd425950f64fdada26926ca8ee86b70b6269b8f04c26d5961e85cd3f9f2503cfb909b923a92f082ed4d6bb519db39ab617fae8b0a35292fb7f63f2d83121800b67d37a2a56c086e7718763d7265f167e0ec3d53a3f298b5db91c03ae16d14c3404060a4e5828f9fa"
+    },
+    {
+      "name": "sibling_paths_missing_the_guard",
+      "category": "autonomous",
+      "file_path": "skills/sibling_paths_missing_the_guard.md",
+      "description": "Find the sibling code paths that reach the same resource without the guard one path already has — a check added on the hard path leaves the easy one open.",
+      "triggers": [
+        "sibling paths missing the guard",
+        "Find the sibling code paths that reach the same resource without the guard one path already has — a check added on the h",
+        "кои пътища нямат същата проверка",
+        "съседните врати към същия ресурс"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-09-20T15:09:36.409754+00:00",
+      "verified": false,
+      "verification": {
+        "verified": false,
+        "method": "needs_confirmation",
+        "detail": "[SANDBOX DENIED] Операцията изисква потвърждение, но режимът е неинтерактивен (autonomous). Причини: стартиране на подпроцес"
+      },
+      "signature": "242a516b4f6eb8a07a34ab7c3b2359051053b1aa97301b4c30bb55c9bc031167bb5156ff6fde7e2559aa0d148c3b6142a1e8e758d26449fe824501cf5a61a3482f7de86e8c3a93084fe679169ffa54350605e09f1bb6185366afd9fc3377c4616c1b4eb382c4f78b64bc9f1ccc929eaba2d002e5eba65f8f91d7624a1345e15144a4fbd931c37497b1197d84af96e2bd5cc73e9f5f54dbbc60629a4ef575672a37d68bd2094c46933f2ba127144b95c60aa4cec35a612ee43c796e013da6b6d49c3195004a5af55f373d98f2478873fed8fc11e5ba1758f04ee9381c877da4aef705bb7dbf28f561993d4129d776825c922a60bd5c734a728f8f604c4bc5167c"
     }
   ]
 }

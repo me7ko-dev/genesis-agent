@@ -242,6 +242,17 @@ def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False
     workspace-а — редакцията е по-малка по обхват, но не е по-малко реална.
     """
     path = _resolve(path_arg)
+    # Същата бариера като при READ_FILE, по същата причина — и намерена по
+    # същия начин: `EDIT_FILE` връща unified diff, а диффът носи КОНТЕКСТНИ
+    # редове. Редакция на `.env` с произволна котва връща в отговора реда
+    # `OPENROUTER_API_KEY=...`, който никой не е искал да вижда. Гейтът на
+    # READ_FILE пазеше едната врата; тази водеше към същото съдържание.
+    sensitive = sandbox.sensitive_path_reason(path)
+    if sensitive:
+        verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM, [sensitive])
+        allowed, reason = sandbox._decide(f"EDIT_FILE {path}", verdict, sandbox.get_policy())
+        if not allowed:
+            return f"[EDIT_FILE] {reason}"
     try:
         inside = path.resolve().is_relative_to(_WORKSPACE.resolve())
     except (ValueError, OSError):

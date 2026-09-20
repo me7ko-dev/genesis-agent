@@ -437,3 +437,54 @@ class TestReadingSecretsGoesThroughTheSameGate:
         out = gs._tool_read_file(str(key))
         assert "SANDBOX DENIED" in out
         assert "PRIVATE KEY" not in out
+
+
+class TestEditFileIsTheOtherDoorToTheSameSecret:
+    """Намерено от `sibling_paths_missing_the_guard` върху самия този файл,
+    после проверено на живо: `READ_FILE` вече минава през гейта, но
+    `EDIT_FILE` връща unified diff — а диффът носи КОНТЕКСТНИ редове.
+
+    Редакция на `.env` с произволна котва връщаше в отговора реда
+    `OPENROUTER_API_KEY=…`, който никой не е искал да види, и го пращаше на
+    следващия доставчик във веригата. Едната врата беше заключена, съседната
+    водеше към същото съдържание.
+    """
+
+    def _env(self, workspace: Path) -> Path:
+        p = workspace / ".env"
+        p.write_text("OPENROUTER_API_KEY=sk-or-v1-тайно\nHF_TOKEN=hf_x\n", encoding="utf-8")
+        return p
+
+    def test_the_diff_no_longer_carries_the_key(self, _workspace, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="deny"))
+        self._env(_workspace)
+        out = gs._tool_edit_file(".env", "HF_TOKEN", "HF_TOKEN_X")
+        assert "sk-or-v1-тайно" not in out
+        assert "SANDBOX DENIED" in out
+
+    def test_the_file_is_not_modified_when_refused(self, _workspace, monkeypatch) -> None:
+        """Отказът трябва да е ПРЕДИ редакцията — иначе файлът е променен, а
+        отговорът твърди, че операцията не е минала."""
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="deny"))
+        env = self._env(_workspace)
+        before = env.read_text(encoding="utf-8")
+        gs._tool_edit_file(".env", "HF_TOKEN", "HF_TOKEN_X")
+        assert env.read_text(encoding="utf-8") == before
+
+    def test_allow_mode_still_edits_it(self, _workspace, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="allow"))
+        self._env(_workspace)
+        out = gs._tool_edit_file(".env", "HF_TOKEN", "HF_TOKEN_X")
+        assert "✓" in out
+
+    def test_an_ordinary_file_is_edited_without_a_prompt(self, _workspace, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="deny"))
+        f = _workspace / "notes.md"
+        f.write_text("ред едно\nред две\n", encoding="utf-8")
+        out = gs._tool_edit_file("notes.md", "ред две", "ред 2")
+        assert "SANDBOX" not in out
+        assert "ред 2" in f.read_text(encoding="utf-8")
