@@ -91,15 +91,45 @@ found = search_skills("e2e integration probe")
 names = [s["name"] for s in found]
 check("ново умение е видимо от trigger_engine", test_slug in names, str(names[:3]))
 
+print("\n─── 7. българска заявка → умение с английско име ─────────")
+# Изискването на оператора, проверено от край до край, а не само на модулно
+# ниво: умението се ПАЗИ с английско име, взето от кода му, а заявка на
+# български трябва да стига точно до него. И обратното е част от проверката:
+# несвързана заявка не бива да резолвва нищо — уверено грешно умение е
+# по-скъпо от никакво, защото изходът му се представя като отговор.
+bg_goal = "Изчисти временните файлове по график"
+skills_manager.save_skill(
+    slug=bg_goal,
+    code=("import os\n\n"
+          "def cleanup_temp_files(root='/tmp'):\n"
+          "    return [p for p in os.listdir(root) if p.endswith('.tmp')]\n\n"
+          "assert isinstance(cleanup_temp_files('/tmp'), list)\n"
+          "print('OK')\n"),
+    goal=bg_goal,
+)
+reload_skills_index()
+from genesis_agent.skill_loader import resolve_skill
+
+bg_slug = "cleanup_temp_files"
+check("умението е записано с английско име",
+      bg_slug in [s["name"] for s in search_skills("cleanup temp files")],
+      bg_slug)
+resolved, _cands = resolve_skill("изчисти временните файлове")
+check("българска заявка резолвва до него", resolved == bg_slug, str(resolved))
+unrelated, _ = resolve_skill("направи ми справка за продажбите")
+check("несвързана заявка не резолвва нищо", unrelated is None, str(unrelated))
+
 # ── Почистване на тестовите артефакти ─────────────────────────────
 import json
 
 conversation_memory.clear_session() if n0 == 0 else None
 skills_json = ROOT / "genesis_agent" / "skills" / "skills.json"
 idx = json.loads(skills_json.read_text(encoding="utf-8"))
-idx["skills"] = [s for s in idx["skills"] if s["name"] != test_slug]
+_probe_names = {test_slug, bg_slug}
+idx["skills"] = [s for s in idx["skills"] if s["name"] not in _probe_names]
 skills_json.write_text(json.dumps(idx, indent=2, ensure_ascii=False), encoding="utf-8")
-(ROOT / "genesis_agent" / "skills" / f"{test_slug}.md").unlink(missing_ok=True)
+for _name in _probe_names:
+    (ROOT / "genesis_agent" / "skills" / f"{_name}.md").unlink(missing_ok=True)
 
 print("\n" + ("═" * 50))
 print("ВСИЧКО МИНАВА ✅" if _ok else "ИМА ПРОВАЛ ❌")

@@ -153,17 +153,24 @@ def summarize_old_context(threshold: int = 50, keep: int | None = None) -> None:
     # Създаваме резюме.
     summary_text = _simple_summarize(old_messages)
 
-    # Инсертваме ново системно съобщение след последно изтрито (за запазване на хронологията).
-    # Изтриваме старите съобщения.
+    # Изтриваме старите съобщения; мястото им се заема от резюмето отдолу.
     ids_to_delete = tuple(msg["id"] for msg in old_messages)
     conn.execute(
         f"DELETE FROM conversations WHERE id IN ({','.join('?' * len(ids_to_delete))});",
         ids_to_delete,
     )
-    # Инсертваме резюмето – използваме ролята "system".
+    # Резюмето заема МЯСТОТО на обобщения блок, не опашката на разговора.
+    # Редът по-горе твърдеше точно това („след последно изтрито, за запазване
+    # на хронологията"), но вмъкваше без id — а AUTOINCREMENT дава следващото
+    # СВОБОДНО, тоест най-голямото. Резултатът: резюме на НАЙ-СТАРИТЕ съобщения
+    # се нареждаше като НАЙ-НОВОТО (`get_history` сортира по id). Моделът
+    # виждаше „[Context summary] 21 messages…" след последния въпрос на човека,
+    # тоест разговорът му се поднасяше разбъркан точно в момента, в който вече
+    # е достатъчно дълъг, за да има значение. Най-малкото изтрито id е точно
+    # позицията на блока и е свободно след DELETE-а отгоре.
     conn.execute(
-        "INSERT INTO conversations (role, content) VALUES (?, ?);",
-        ("system", summary_text),
+        "INSERT INTO conversations (id, role, content) VALUES (?, ?, ?);",
+        (min(ids_to_delete), "system", summary_text),
     )
     conn.commit()
     conn.close()

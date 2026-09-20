@@ -56,14 +56,18 @@ class TestSummarizeOldContext:
             cm.add_message("user", f"msg {i}")
         cm.summarize_old_context(threshold=10, keep=4)
         history = cm.get_history(last_n=1000)
-        # 4 kept originals + 1 summary message appended by the compression —
-        # the summary is INSERTed after the DELETE, so it gets the newest
-        # (highest) id and sorts last, not first.
+        # 4 kept originals + 1 summary. The summary replaces the OLDEST
+        # messages, so it sorts first — this assertion used to expect it last
+        # and explained why in a comment ("INSERTed after the DELETE, so it
+        # gets the highest id"), which described the implementation, not the
+        # intent: the module's own comment said the insert was meant to
+        # "запази хронологията". It now does. See
+        # TestTheSummaryKeepsItsPlaceInTheConversation for what that buys.
         assert len(history) == 5
-        assert history[-1]["role"] == "system"
-        assert "[Context summary]" in history[-1]["content"]
+        assert history[0]["role"] == "system"
+        assert "[Context summary]" in history[0]["content"]
         # The most recent originals must survive untouched, in order.
-        assert [h["content"] for h in history[:-1]] == ["msg 8", "msg 9", "msg 10", "msg 11"]
+        assert [h["content"] for h in history[1:]] == ["msg 8", "msg 9", "msg 10", "msg 11"]
 
     def test_growth_is_not_erased_by_repeated_compression_near_the_threshold(self) -> None:
         """The exact bug the module's docstring documents: compacting to
@@ -142,3 +146,51 @@ class TestClearSession:
         cm.clear_session()
         cm.add_message("user", "after")
         assert cm.get_history() == [{"role": "user", "content": "after"}]
+
+
+class TestTheSummaryKeepsItsPlaceInTheConversation:
+    """Резюмето замества най-старите съобщения, значи стои на ТЯХНОТО място.
+
+    Вмъкваше се без id, а AUTOINCREMENT дава най-голямото свободно — тоест
+    резюме на НАЙ-СТАРИТЕ съобщения се нареждаше като НАЙ-НОВОТО, защото
+    `get_history` сортира по id. Моделът получаваше „[Context summary] 21
+    messages…" СЛЕД последния въпрос на човека: разговорът му се поднасяше
+    разбъркан точно когато е станал достатъчно дълъг, за да има значение.
+    """
+
+    def _fill(self, n: int) -> None:
+        for i in range(n):
+            cm.add_message("user" if i % 2 == 0 else "assistant", f"съобщение {i}")
+
+    def test_the_summary_comes_first_not_last(self) -> None:
+        self._fill(55)
+        history = cm.get_history(last_n=200)
+        assert history[0]["role"] == "system"
+        assert "[Context summary]" in history[0]["content"]
+        assert all("[Context summary]" not in m["content"] for m in history[1:])
+
+    def test_the_kept_messages_stay_in_order_after_it(self) -> None:
+        self._fill(55)
+        kept = [m["content"] for m in cm.get_history(last_n=200)[1:]]
+        numbers = [int(c.split()[-1]) for c in kept]
+        assert numbers == sorted(numbers), numbers
+        assert numbers[-1] == 54, "последното съобщение трябва да е най-новото"
+
+    def test_the_newest_messages_are_the_last_two_even_after_compression(self) -> None:
+        """Точно проверката, която прави e2e тестът: добавям две и очаквам да
+        са на опашката. Докато резюмето падаше най-отзад, това беше невярно
+        всеки път, когато компресията се задейства."""
+        self._fill(54)
+        cm.add_message("user", "въпрос")
+        cm.add_message("assistant", "отговор")
+        last_two = cm.get_history(last_n=200)[-2:]
+        assert [m["content"] for m in last_two] == ["въпрос", "отговор"]
+
+    def test_a_second_compression_does_not_bury_the_first_summary(self) -> None:
+        self._fill(55)
+        self._fill(55)
+        history = cm.get_history(last_n=200)
+        summaries = [i for i, m in enumerate(history) if "[Context summary]" in m["content"]]
+        assert summaries, "резюметата изчезнаха"
+        assert summaries == sorted(summaries)
+        assert max(summaries) < len(history) - 1, "резюме не бива да е последното"
