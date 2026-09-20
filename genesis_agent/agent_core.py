@@ -380,9 +380,15 @@ def run_tool_loop(
     """
     from genesis_agent import claim_check
     from genesis_agent.budget import clip_for_context
+    from genesis_agent.repeat_guard import RepeatGuard
 
     _status = on_status or (lambda _s: None)
     rounds = 0
+    # Таванът на рундовете ограничава цената на въртенето на място, но не го
+    # разпознава — виж genesis_agent.repeat_guard за защо това стана по-скъпо,
+    # откакто таванът е 25.
+    guard = RepeatGuard()
+    spinning = ""
     malformed_tag_retries = 0
     completion_claim_retries = 0
     # Какво РЕАЛНО е изпълнено в тази реплика — сверява се срещу това, което
@@ -407,6 +413,7 @@ def run_tool_loop(
         if tool_calls:
             _status("изпълнява инструменти…")
             asked = ""
+            repeat_note = ""
             for tc in tool_calls:
                 fn = tc.get("function", {}) or {}
                 name = fn.get("name", "")
@@ -424,6 +431,11 @@ def run_tool_loop(
                 messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                                  "name": name,
                                  "content": clip_for_context(result)})
+                verdict = guard.observe(name, args, result)
+                if verdict.stop:
+                    spinning = verdict.note
+                elif verdict.note:
+                    repeat_note = verdict.note
                 if _is_question(result):
                     asked = result
             if asked:
@@ -434,6 +446,15 @@ def run_tool_loop(
                 on_assistant(_to_user_text(_clean_question(asked)), prov, model)
                 _status("чака отговор")
                 break
+            if spinning:
+                # Същият извик, същият резултат, трети пореден път — нищо ново
+                # не може да дойде от още рундове. Спираме СЕГА и казваме защо,
+                # вместо да догорим до тавана и да завършим с "достигнат таван".
+                on_assistant(_to_user_text(spinning), prov, model)
+                _status("спряно — въртене на място")
+                break
+            if repeat_note:
+                messages.append({"role": "system", "content": repeat_note})
             rounds += 1
             if rounds >= round_cap:
                 on_assistant(f"Достигнат таван от {round_cap} инструмент-рунда. "
@@ -498,11 +519,24 @@ def run_tool_loop(
             break
         for r in results:
             on_tool_result("инструмент", r, None)
+        text_note = ""
+        for r in results:
+            v = guard.observe_text_result(r)
+            if v.stop:
+                spinning = v.note
+            elif v.note:
+                text_note = v.note
         asked = next((r for r in results if _is_question(r)), "")
         if asked:
             on_assistant(_to_user_text(_clean_question(asked)), prov, model)
             _status("чака отговор")
             break
+        if spinning:
+            on_assistant(_to_user_text(spinning), prov, model)
+            _status("спряно — въртене на място")
+            break
+        if text_note:
+            messages.append({"role": "system", "content": text_note})
         rounds += 1
         if rounds >= round_cap:
             # Същото съобщение като в native клона по-горе. Без него текстовият

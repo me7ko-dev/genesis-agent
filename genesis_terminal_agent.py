@@ -98,6 +98,7 @@ from genesis_agent.paths import (
     history_dir,
     workspace_dir,
 )
+from genesis_agent.repeat_guard import RepeatGuard as _RepeatGuard
 
 try:
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -1301,6 +1302,11 @@ def main():
             # никаква проверка срещу симулирана работа: claim_check влезе само
             # в agent_core (GUI/Jarvis), а тукашният tool цикъл е отделен код.
             _executed: list[tuple[str, str]] = []
+            # Въртене на място: същият извик, същият резултат, пореден път.
+            # Таванът го ограничава по цена, но не го разпознава — виж
+            # genesis_agent.repeat_guard.
+            _guard = _RepeatGuard()
+            _spinning = ""
             with console.status("[dim]Genesis мисли...[/]", spinner="dots2"):
                 response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
 
@@ -1325,6 +1331,7 @@ def main():
                     # като regex-tag режима (genesis_skills.dispatch_tool_call),
                     # но без риск от грешно написан таг/синтаксис.
                     asked = ""
+                    _repeat_note = ""
                     for tc in tool_calls:
                         fn = tc.get("function", {}) or {}
                         name = fn.get("name", "")
@@ -1341,6 +1348,11 @@ def main():
                         messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                                           "name": name,
                                           "content": clip_for_context(result)})
+                        _v = _guard.observe(name, args, result)
+                        if _v.stop:
+                            _spinning = _v.note
+                        elif _v.note:
+                            _repeat_note = _v.note
                         if genesis_skills.ASK_USER_MARKER in result:
                             asked = result
                     if asked:
@@ -1352,6 +1364,14 @@ def main():
                         console.print(Panel(Text(q), title="❓ Genesis пита",
                                             border_style="yellow", padding=(1, 2)))
                         break
+                    if _spinning:
+                        # Нищо ново не може да дойде от още рундове — спираме
+                        # СЕГА и казваме защо, вместо да догорим до тавана.
+                        console.print(Panel(Text(_spinning), title="🔁 Въртене на място",
+                                            border_style="yellow", padding=(1, 2)))
+                        break
+                    if _repeat_note:
+                        messages.append({"role": "system", "content": _repeat_note})
                     round_i += 1
                     if round_i >= _TOOL_ROUND_CAP:
                         console.print(f"[yellow]⚠ Достигнат таван от {_TOOL_ROUND_CAP} инструмент-рунда "
@@ -1396,6 +1416,13 @@ def main():
                             response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
                         continue
                     break
+                _text_note = ""
+                for _r in tool_results:
+                    _v = _guard.observe_text_result(_r)
+                    if _v.stop:
+                        _spinning = _v.note
+                    elif _v.note:
+                        _text_note = _v.note
                 asked = next((r for r in tool_results
                               if genesis_skills.ASK_USER_MARKER in r), "")
                 if asked:
@@ -1403,6 +1430,12 @@ def main():
                     console.print(Panel(Text(q), title="❓ Genesis пита",
                                         border_style="yellow", padding=(1, 2)))
                     break
+                if _spinning:
+                    console.print(Panel(Text(_spinning), title="🔁 Въртене на място",
+                                        border_style="yellow", padding=(1, 2)))
+                    break
+                if _text_note:
+                    messages.append({"role": "system", "content": _text_note})
                 round_i += 1
                 if round_i >= _TOOL_ROUND_CAP:
                     console.print(f"[yellow]⚠ Достигнат таван от {_TOOL_ROUND_CAP} инструмент-рунда "

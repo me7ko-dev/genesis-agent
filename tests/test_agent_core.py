@@ -192,6 +192,78 @@ class TestRunToolLoopTextOnly:
         assert result[-1] == {"role": "assistant", "content": "hello there"}
 
 
+class TestRunToolLoopStopsSpinning:
+    """Таванът ограничава ЦЕНАТА на въртенето на място, не го разпознава.
+    Откакто е 25 (беше 8), един повтарян извик изгаря три пъти повече рундове
+    и завършва с "достигнат таван" — най-скъпото съобщение, защото пристига
+    последно и не носи нито резултат, нито причина."""
+
+    @staticmethod
+    def _spin(dispatch_result, replies=60):
+        tc = [{"id": "1", "function": {"name": "USE_SKILL",
+                                       "arguments": '{"name_or_query": "foo"}'}}]
+        core = _FakeCore([("", tc, "groq", "llama")] * replies)
+
+        class _Repeating:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict]] = []
+
+            def dispatch_tool_call(self, name, args):
+                self.calls.append((name, args))
+                return dispatch_result(len(self.calls))
+
+            def parse_and_execute_tools(self, text):
+                return []
+
+            def _resolve(self, path):
+                raise RuntimeError("not used")
+
+        core.skills = _Repeating()
+        said: list[str] = []
+        ac.run_tool_loop(core, [{"role": "user", "content": "hi"}],
+                         on_assistant=lambda t, p, m: said.append(t),
+                         on_tool_result=lambda *a: None)
+        return core.skills.calls, said
+
+    def test_identical_call_and_result_stops_long_before_the_cap(self) -> None:
+        from genesis_agent.repeat_guard import STOP_AT
+        calls, said = self._spin(lambda i: "няма такова умение")
+        assert len(calls) == STOP_AT
+        assert "USE_SKILL" in said[-1]
+
+    def test_a_changing_result_is_progress_and_runs_to_the_cap(self) -> None:
+        """Обратната страна: предпазителят не бива да реже истинска работа."""
+        from genesis_agent.config import TOOL_ROUND_CAP
+        calls, said = self._spin(lambda i: f"резултат {i}")
+        assert len(calls) == TOOL_ROUND_CAP
+        assert "таван" in said[-1]
+
+    def test_text_tag_mode_stops_spinning_too(self) -> None:
+        from genesis_agent.repeat_guard import STOP_AT
+        core = _FakeCore([("[RUN_CMD: ls]", None, "groq", "llama")] * 60)
+
+        class _RepeatingText:
+            def __init__(self) -> None:
+                self.runs = 0
+
+            def parse_and_execute_tools(self, text):
+                self.runs += 1
+                return ["[RUN_CMD: ls]\nсъщият изход"]
+
+            def dispatch_tool_call(self, name, args):
+                raise AssertionError("native path must not run here")
+
+            def _resolve(self, path):
+                raise RuntimeError("not used")
+
+        core.skills = _RepeatingText()
+        said: list[str] = []
+        ac.run_tool_loop(core, [{"role": "user", "content": "hi"}],
+                         on_assistant=lambda t, p, m: said.append(t),
+                         on_tool_result=lambda *a: None)
+        assert core.skills.runs == STOP_AT
+
+
 class TestRunToolLoopNativeToolCalls:
     def test_dispatches_a_tool_call_and_continues(self) -> None:
         tool_calls = [{"id": "1", "function": {"name": "RUN_CMD", "arguments": '{"cmd": "ls"}'}}]
