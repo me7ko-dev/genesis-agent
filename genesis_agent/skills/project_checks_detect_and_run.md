@@ -1,10 +1,15 @@
 ---
-name: 'project_checks_detect_and_run'
-category: 'autonomous'
-description: 'Detect and run a project's OWN checks (ruff/mypy/pytest/npm/cargo/go), cheapest first, and report exactly what passed, failed or was skipped — so a change can be verified before claiming it is done.'
-triggers: ["project checks detect and run"]
+name: project_checks_detect_and_run
+category: autonomous
+description: Detect and run a project's OWN checks (ruff/mypy/pytest/npm/cargo/go),
+  cheapest first, and report exactly what passed, failed or was skipped — so a change
+  can be verified before claiming it is done.
+triggers:
+- project checks detect and run
+- пусни проверките на проекта
+- кои линтери и тестове има проектът
 version: '1.0'
-author: 'Genesis'
+author: Genesis
 last_updated: '2026-09-19T18:50:25.138798+00:00'
 ---
 

@@ -277,7 +277,9 @@
       "file_path": "skills/project_checks_detect_and_run.md",
       "description": "Detect and run a project's OWN checks (ruff/mypy/pytest/npm/cargo/go), cheapest first, and report exactly what passed, failed or was skipped — so a change can be verified before claiming it is done.",
       "triggers": [
-        "project checks detect and run"
+        "project checks detect and run",
+        "пусни проверките на проекта",
+        "кои линтери и тестове има проектът"
       ],
       "version": "1.0",
       "last_updated": "2026-09-19T18:50:25.138798+00:00",
@@ -300,7 +302,9 @@
       "file_path": "skills/first_real_failure_not_the_cascade.md",
       "description": "From pytest/ruff/mypy output, identify the FIRST REAL failure to fix — the root cause — rather than the last red line on screen, which is usually a downstream consequence (a broken import knocks out thirty tests).",
       "triggers": [
-        "first real failure not the cascade"
+        "first real failure not the cascade",
+        "коя е първата истинска грешка",
+        "каскада от грешки коя е истинската"
       ],
       "version": "1.0",
       "last_updated": "2026-09-19T23:00:09.199511+00:00",
@@ -322,7 +326,9 @@
       "file_path": "skills/safe_edit_probe_anchor_uniqueness.md",
       "description": "Before an anchor-based file edit, check whether the anchor is unique in the file; on ambiguity report every matching line and offer a widened anchor that is verified unique, so the edit never silently lands on the wrong occurrence.",
       "triggers": [
-        "safe edit probe anchor uniqueness"
+        "safe edit probe anchor uniqueness",
+        "как да редактирам файл безопасно",
+        "уникален anchor за редакция"
       ],
       "version": "1.0",
       "last_updated": "2026-09-19T23:01:40.288352+00:00",
@@ -344,7 +350,9 @@
       "file_path": "skills/changed_surface_which_tests_to_run.md",
       "description": "List what changed (git diff plus untracked files) and which test files cover it, so the fix-and-verify cycle runs the affected tests instead of the whole suite — falling back to the full suite whenever coverage cannot be established.",
       "triggers": [
-        "changed surface which tests to run"
+        "changed surface which tests to run",
+        "кои тестове да пусна за промените",
+        "променена повърхност кои тестове"
       ],
       "version": "1.0",
       "last_updated": "2026-09-19T23:02:53.150612+00:00",

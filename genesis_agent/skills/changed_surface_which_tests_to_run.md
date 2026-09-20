@@ -1,10 +1,15 @@
 ---
-name: 'changed_surface_which_tests_to_run'
-category: 'autonomous'
-description: 'List what changed (git diff plus untracked files) and which test files cover it, so the fix-and-verify cycle runs the affected tests instead of the whole suite — falling back to the full suite whenever coverage cannot be established.'
-triggers: ["changed surface which tests to run"]
+name: changed_surface_which_tests_to_run
+category: autonomous
+description: List what changed (git diff plus untracked files) and which test files
+  cover it, so the fix-and-verify cycle runs the affected tests instead of the whole
+  suite — falling back to the full suite whenever coverage cannot be established.
+triggers:
+- changed surface which tests to run
+- кои тестове да пусна за промените
+- променена повърхност кои тестове
 version: '1.0'
-author: 'Genesis'
+author: Genesis
 last_updated: '2026-09-19T23:02:53.150612+00:00'
 ---
 

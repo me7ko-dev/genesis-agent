@@ -1,10 +1,15 @@
 ---
-name: 'safe_edit_probe_anchor_uniqueness'
-category: 'autonomous'
-description: 'Before an anchor-based file edit, check whether the anchor is unique in the file; on ambiguity report every matching line and offer a widened anchor that is verified unique, so the edit never silently lands on the wrong occurrence.'
-triggers: ["safe edit probe anchor uniqueness"]
+name: safe_edit_probe_anchor_uniqueness
+category: autonomous
+description: Before an anchor-based file edit, check whether the anchor is unique
+  in the file; on ambiguity report every matching line and offer a widened anchor
+  that is verified unique, so the edit never silently lands on the wrong occurrence.
+triggers:
+- safe edit probe anchor uniqueness
+- как да редактирам файл безопасно
+- уникален anchor за редакция
 version: '1.0'
-author: 'Genesis'
+author: Genesis
 last_updated: '2026-09-19T23:01:40.288352+00:00'
 ---
 

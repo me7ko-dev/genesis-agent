@@ -1,10 +1,15 @@
 ---
-name: 'first_real_failure_not_the_cascade'
-category: 'autonomous'
-description: 'From pytest/ruff/mypy output, identify the FIRST REAL failure to fix — the root cause — rather than the last red line on screen, which is usually a downstream consequence (a broken import knocks out thirty tests).'
-triggers: ["first real failure not the cascade"]
+name: first_real_failure_not_the_cascade
+category: autonomous
+description: From pytest/ruff/mypy output, identify the FIRST REAL failure to fix
+  — the root cause — rather than the last red line on screen, which is usually a downstream
+  consequence (a broken import knocks out thirty tests).
+triggers:
+- first real failure not the cascade
+- коя е първата истинска грешка
+- каскада от грешки коя е истинската
 version: '1.0'
-author: 'Genesis'
+author: Genesis
 last_updated: '2026-09-19T23:00:09.199511+00:00'
 ---
 
