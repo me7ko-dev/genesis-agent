@@ -65,6 +65,46 @@ def _is_tautological_assert(node: ast.Assert) -> bool:
     return False
 
 
+def _has_real_check(tree: ast.AST) -> bool:
+    """Съдържа ли кодът проверка, която МОЖЕ да се провали?
+
+    Два начина се броят: нетавтологичен `assert`, и условно `raise`
+    (`if got != expected: raise ValueError(...)`) — вторият е напълно
+    легитимен self-test и е причината `__main__` блокът някога да се брои.
+
+    Присъствието на `__main__` НЕ се брои (bug fix, 2026-09-20). Дотук
+    условието беше `"__main__" in code` — търсене на НИЗ, което хваща и
+    коментар, и docstring, и име на променлива. И дори истински
+    `if __name__ == "__main__": print("OK")` не проверява нищо: точно това
+    пише слаб модел, инструктиран „винаги слагай self-test и печатай OK",
+    и точно него `_is_tautological_assert` вече отказваше по другия клон.
+    Присъдата отиваше в библиотеката като self_test_passed и оттам се
+    преизползва от бъдещи мисии през RAG.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assert) and not _is_tautological_assert(node):
+            return True
+        if isinstance(node, (ast.If, ast.For, ast.While)) and any(
+            isinstance(b, ast.Raise) for b in node.body
+        ):
+            return True
+    return False
+
+
+# Промптите навсякъде искат „print 'OK' on success", и всяко умение в
+# библиотеката наистина печата OK на отделен ред. Проверката обаче беше
+# `"OK" in stdout` — подниз, който се съдържа в BROKEN, TOKEN, LOOKUP и в
+# самото „NOT OK" (bug fix, 2026-09-20). Умение, което ИЗРИЧНО съобщава, че
+# е счупено, минаваше за преминал self-test. Иска се ред, който ЗАПОЧВА с
+# OK като отделна дума — така „OK", „OK: 5 проверки" и „OK (3)" минават,
+# а BROKEN и NOT OK не.
+_OK_LINE_RE = re.compile(r"^OK\b")
+
+
+def _printed_ok(stdout: str) -> bool:
+    return any(_OK_LINE_RE.match(line.strip()) for line in (stdout or "").splitlines())
+
+
 def verify_skill(code: str, *, timeout: int = 30) -> VerifyResult:
     """Изпълнява умението в sandbox и връща обективна присъда."""
     # 1. Статични проверки (бързи, без изпълнение).
@@ -75,10 +115,7 @@ def verify_skill(code: str, *, timeout: int = 30) -> VerifyResult:
     if _PLACEHOLDER_RE.search(code):
         return VerifyResult(False, "placeholder", "съдържа заместващ ключ/стойност")
 
-    has_self_test = "__main__" in code or any(
-        isinstance(n, ast.Assert) and not _is_tautological_assert(n)
-        for n in ast.walk(tree)
-    )
+    has_self_test = _has_real_check(tree)
 
     # 2. Реално изпълнение в sandbox (deny режим → опасното не се пуска).
     res = sandbox.run_python(code, policy=sandbox.SandboxPolicy(mode="deny"), timeout=timeout)
@@ -103,7 +140,7 @@ def verify_skill(code: str, *, timeout: int = 30) -> VerifyResult:
     # е спазил — само дали ИМА assert. Двете заедно (нетавтологичен assert +
     # действително отпечатано OK) са единствената комбинация, приемана за
     # self_test_passed.
-    if has_self_test and "OK" in res.stdout:
+    if has_self_test and _printed_ok(res.stdout):
         return VerifyResult(True, "self_test_passed", res.stdout.strip()[:300])
     return VerifyResult(True, "runs_clean", res.stdout.strip()[:300])
 

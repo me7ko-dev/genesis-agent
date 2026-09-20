@@ -111,3 +111,76 @@ class TestResultShape:
         assert d["verified"] is False
         assert d["method"] == "runtime_err"
         assert len(d["detail"]) == 500, "индексът не бива да поема цял traceback"
+
+
+class TestWhatCountsAsASelfTest:
+    """`self_test_passed` е присъдата, с която умение влиза в библиотеката като
+    доказано и оттам се преизползва от бъдещи мисии през RAG. Две дупки я
+    раздаваха на код, който не проверява нищо."""
+
+    def test_a_main_block_that_only_prints_is_not_a_self_test(self) -> None:
+        """Условието беше `"__main__" in code` — низ, не структура. Точно това
+        пише слаб модел, инструктиран „винаги слагай self-test и печатай OK":
+        блокът е налице, проверка няма."""
+        res = verify_skill(
+            'def add(a, b):\n    return a + b\n'
+            'if __name__ == "__main__":\n    print("OK")\n'
+        )
+        assert res.method == "runs_clean"
+
+    def test_the_word_main_in_a_comment_does_not_make_a_self_test(self) -> None:
+        res = verify_skill(
+            'def add(a, b):\n    return a + b\n'
+            '# no __main__ block here\nprint("OK")\n'
+        )
+        assert res.method == "runs_clean"
+
+    def test_a_real_assert_is_a_self_test(self) -> None:
+        res = verify_skill(
+            'def add(a, b):\n    return a + b\nassert add(2, 3) == 5\nprint("OK")\n'
+        )
+        assert res.method == "self_test_passed"
+
+    def test_a_conditional_raise_is_a_self_test_too(self) -> None:
+        """Легитимна алтернатива на assert — и причината `__main__` някога да
+        се брои изобщо."""
+        res = verify_skill(
+            'def add(a, b):\n    return a + b\n'
+            'if add(2, 3) != 5:\n    raise ValueError("грешно")\nprint("OK")\n'
+        )
+        assert res.method == "self_test_passed"
+
+    def test_a_tautological_assert_is_still_not_a_self_test(self) -> None:
+        res = verify_skill('def add(a, b):\n    return a + b\nassert True\nprint("OK")\n')
+        assert res.method == "runs_clean"
+
+
+class TestWhatCountsAsPrintingOK:
+    """`"OK" in stdout` е проверка за ПОДНИЗ, а "OK" се съдържа в BROKEN,
+    TOKEN, LOOKUP — и в самото "NOT OK"."""
+
+    def test_a_skill_announcing_that_it_is_broken_does_not_pass(self) -> None:
+        res = verify_skill('x = 1\nassert x == 1\nprint("BROKEN")\n')
+        assert res.method == "runs_clean"
+
+    def test_not_ok_does_not_pass(self) -> None:
+        res = verify_skill('x = 1\nassert x == 1\nprint("NOT OK")\n')
+        assert res.method == "runs_clean"
+
+    def test_a_token_in_the_output_does_not_pass(self) -> None:
+        res = verify_skill('x = 1\nassert x == 1\nprint("TOKEN refreshed")\n')
+        assert res.method == "runs_clean"
+
+    def test_a_bare_ok_line_passes(self) -> None:
+        res = verify_skill('x = 1\nassert x == 1\nprint("OK")\n')
+        assert res.method == "self_test_passed"
+
+    def test_ok_followed_by_detail_passes(self) -> None:
+        res = verify_skill('x = 1\nassert x == 1\nprint("OK: 3 проверки")\n')
+        assert res.method == "self_test_passed"
+
+    def test_ok_on_a_later_line_among_other_output_passes(self) -> None:
+        res = verify_skill(
+            'x = 1\nassert x == 1\nprint("работя...")\nprint("OK")\n'
+        )
+        assert res.method == "self_test_passed"
