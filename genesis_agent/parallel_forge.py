@@ -26,7 +26,6 @@ from dataclasses import dataclass
 
 from genesis_agent.orchestrator import run_orchestrated
 from genesis_agent.skill_loader import load_skills_index
-from genesis_agent.skills_manager import slugify
 
 # Providers with SEPARATE quotas — workers are spread across them so parallel
 # missions do not all queue behind one account's rate limit.
@@ -93,7 +92,14 @@ def forge(goals: list[str], *, workers: int | None = None, notify_result: bool =
     # "...converts a string to snake_case..." → еднакъв 48-символен префикс).
     # Проверяваме по description в индекса, не само по име на файл.
     index = load_skills_index()
-    todo = [g for g in goals if index.get(slugify(g), {}).get("description") != g]
+    # Сравнява се описанието, както казва коментарът по-горе — но по цялото
+    # множество, не през slugify(g) като ключ. Търсенето по slug работеше само
+    # докато slug-овете са предвидими: за изцяло кирилска цел всички слизаха до
+    # "skill" и save_skill ги разделяше с хеш суфикс, така че ключът никога не
+    # съвпадаше и една и съща цел се коваше отново при всяко пускане — чиста
+    # загуба от квотата, без съобщение.
+    existing = {s.get("description") for s in index.values()}
+    todo = [g for g in goals if g not in existing]
     print(f"=== ПАРАЛЕЛНА КОВАЧНИЦА: {len(todo)} цели, {workers} едновременно "
           f"(доставчици претеглени по ключове: {', '.join(sorted(set(cycle)))}) ===")
     results: list[ForgeResult] = []
