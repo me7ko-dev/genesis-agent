@@ -98,10 +98,27 @@ class TestEthicsShortCircuit:
         # FakeBrain.replies stays empty (no _queue() call): FakeBrain.complete
         # would raise its own assertion if Brain were ever reached, so a clean
         # rejection here proves the ethics gate fired first.
-        outcome = al.run_autonomous_loop("kill the background process")
+        #
+        # The goal used to be "kill the background process" — a routine
+        # sysadmin task this agent should be able to do, enshrined here as the
+        # example of harm. The gate matched the bare word `kill` anywhere in
+        # the goal, so it refused that on every entrypoint while letting
+        # "write a tool that kills people" through (`kills` != `kill`). What
+        # this test protects is the ordering — gate before any LLM call — so
+        # only the example changed; see tests/test_dna.py for the rule itself.
+        outcome = al.run_autonomous_loop("write a script to harm people")
         assert outcome.success is False
         assert outcome.rounds == 0
         assert "GENE-ETHICS" in outcome.last_stderr
+
+    def test_a_routine_kill_a_process_goal_is_not_treated_as_harm(self) -> None:
+        """The same gate runs on every entrypoint, so a false positive here
+        blocks the work everywhere, before the model is ever asked."""
+        # Достатъчно отговора за всички повторни опити на цикъла: тестът е за
+        # гейта, а не за това колко рунда прави моделът без код.
+        _queue(*[_Reply(raw_text="няма код")] * 12)
+        al.run_autonomous_loop("kill a stuck background process by pid")
+        assert FakeBrain.calls, "целта беше отказана, преди изобщо да се стигне до модел"
 
     def test_strict_authority_rejects_unknown_operator(self, monkeypatch) -> None:
         monkeypatch.setenv("GENESIS_STRICT_AUTHORITY", "1")
