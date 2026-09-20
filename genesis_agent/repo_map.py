@@ -104,7 +104,7 @@ def _search_ripgrep(root: Path, pattern: str, glob: str | None,
         cmd += ["--glob", glob]
     cmd.append(str(root))
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False)
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, check=False)
     except (OSError, subprocess.TimeoutExpired):
         return None
     # rc 1 is "no matches" — a real answer, not a failure. Anything above that
@@ -326,7 +326,7 @@ def detect_project(path: str | Path) -> ProjectInfo:
     if is_git:
         try:
             proc = subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
-                                  capture_output=True, text=True, timeout=15, check=False)
+                                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15, check=False)
             dirty = bool(proc.stdout.strip())
         except (OSError, subprocess.TimeoutExpired):
             pass

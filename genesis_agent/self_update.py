@@ -107,7 +107,7 @@ def find_pipx() -> list[str] | None:
         candidates.append([py, "-m", "pipx"])
     for c in candidates:
         try:
-            r = subprocess.run(c + ["--version"], capture_output=True, text=True,
+            r = subprocess.run(c + ["--version"], capture_output=True, text=True, encoding="utf-8", errors="replace",
                                 timeout=_PROBE_TIMEOUT_SECONDS, check=False)
         except (OSError, subprocess.TimeoutExpired):
             continue
@@ -147,7 +147,7 @@ def run_updater(pid: int, url: str, ref: str) -> int:
     spec = f"git+{url}" + (f"@{ref}" if ref else "")
     try:
         result = subprocess.run(pipx + ["install", "--force", spec],
-                                capture_output=True, text=True,
+                                capture_output=True, text=True, encoding="utf-8", errors="replace",
                                 timeout=_PIPX_TIMEOUT_SECONDS, check=False)
     except subprocess.TimeoutExpired:
         _write_state(ok=False, error=f"pipx install надхвърли {_PIPX_TIMEOUT_SECONDS}s")

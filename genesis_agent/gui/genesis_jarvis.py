@@ -452,14 +452,14 @@ class Window(Adw.ApplicationWindow):
             r = subprocess.run(
                 [sys.executable, "-m", "edge_tts", "--voice", TTS_VOICE,
                  "--text", text, "--write-media", path],
-                capture_output=True, timeout=20, text=True, check=False,
+                capture_output=True, timeout=20, text=True, encoding="utf-8", errors="replace", check=False,
             )
             if r.returncode != 0:
                 return False, (r.stderr or r.stdout or f"rc={r.returncode}").strip()[:200]
             if Path(path).stat().st_size == 0:
                 return False, "празен mp3 файл"
             play = subprocess.run(["ffplay", "-nodisp", "-autoexit", "-loglevel", "error", path],
-                                  capture_output=True, timeout=60, text=True, check=False)
+                                  capture_output=True, timeout=60, text=True, encoding="utf-8", errors="replace", check=False)
             if play.returncode != 0:
                 # mp3-ят е реален (сигурен признак, че edge-tts е успял), но
                 # възпроизвеждането е гръмнало — това НЕ е причина да минаваме

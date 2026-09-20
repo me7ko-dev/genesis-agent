@@ -1034,6 +1034,20 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            # Изрично UTF-8, а не локалното кодиране (bug fix, 2026-09-20,
+            # хванат от Windows CI). `text=True` само по себе си декодира с
+            # locale.getpreferredencoding() — cp1252 на англоезичен Windows,
+            # cp1251 на български. Детето обаче пише UTF-8: _build_env му
+            # задава PYTHONIOENCODING=utf-8 няколко реда по-горе. Двете страни
+            # се разминаваха, и всяко умение или команда, отпечатала кирилица,
+            # чуплеше reader нишката с UnicodeDecodeError — изходът се губеше,
+            # а причината не личеше отникъде. Това е проектът, чийто оператор
+            # пише на български; изходите също.
+            # errors="replace", защото sandbox-ът изпълнява ПРОИЗВОЛЕН код:
+            # програма, която извади двоични байтове на stdout, трябва да
+            # даде повреден текст, не да срине четенето.
+            encoding="utf-8",
+            errors="replace",
             env=env,
             preexec_fn=(lambda: _preexec(policy, nproc_cap)) if os.name == "posix" else None,  # noqa: PLW1509 — fork()+exec() is immediate; setrlimit-only preexec, no locks touched
         )

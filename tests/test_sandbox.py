@@ -305,6 +305,75 @@ def test_run_shell_confirm_command_allowed_in_allow_mode(tmp_path) -> None:
 # These run on any OS: the selection helpers are pure and take their
 # environment through shutil/os.path, which the tests replace.
 
+class TestNonAsciiOutputSurvives:
+    """Изходът се декодира като UTF-8, не с локалното кодиране на машината.
+
+    `text=True` само по себе си ползва locale.getpreferredencoding() — cp1252
+    на англоезичен Windows, cp1251 на български. Детето обаче пише UTF-8,
+    защото _build_env му задава PYTHONIOENCODING=utf-8. Разминаването чупеше
+    reader нишката с UnicodeDecodeError и изходът изчезваше — при това само на
+    Windows, тоест невидимо за всеки, който тества на Linux (хванато от
+    Windows CI, 2026-09-20).
+
+    Това не е крайна хипотеза за този проект: операторът пише на български,
+    промптите искат българските умения да печатат български текст, а всеки
+    такъв изход минава точно оттук.
+    """
+
+    def test_cyrillic_stdout_comes_back_intact(self, tmp_path) -> None:
+        res = sandbox.run_python('print("работя, после OK")', cwd=tmp_path)
+        assert res.ok
+        assert "работя, после OK" in res.stdout
+
+    def test_cyrillic_stderr_comes_back_intact(self, tmp_path) -> None:
+        res = sandbox.run_python(
+            'import sys; sys.stderr.write("грешка при четене\\n")', cwd=tmp_path
+        )
+        assert "грешка при четене" in res.stderr
+
+    def test_emoji_and_accents_survive_too(self, tmp_path) -> None:
+        res = sandbox.run_python('print("café ✓ naïve")', cwd=tmp_path)
+        assert res.ok
+        assert "café ✓ naïve" in res.stdout
+
+    def test_the_decoding_is_pinned_explicitly_not_left_to_the_locale(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Тест на самия аргумент, нарочно.
+
+        Тестовете за поведение по-горе минават на Linux и БЕЗ поправката,
+        защото там локалното кодиране вече е UTF-8 — падат само на Windows.
+        Тоест на машината, на която се разработва, те мълчат, и изтриването на
+        `encoding=` би останало незабелязано до следващия Windows пробег. Този
+        пада навсякъде.
+        """
+        seen: dict = {}
+        real = sandbox.subprocess.Popen
+
+        def _spy(*args, **kwargs):
+            seen.update(kwargs)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(sandbox.subprocess, "Popen", _spy)
+        sandbox.run_python('print("x")', cwd=tmp_path)
+
+        assert seen.get("encoding") == "utf-8", (
+            "без изрично encoding текстът се декодира с локалното кодиране "
+            "на машината — cp1252/cp1251 на Windows"
+        )
+        assert seen.get("errors") == "replace"
+
+    def test_undecodable_bytes_do_not_kill_the_read(self, tmp_path) -> None:
+        """errors="replace", защото sandbox-ът изпълнява ПРОИЗВОЛЕН код:
+        двоични байтове на stdout трябва да дадат повреден текст, не срив."""
+        res = sandbox.run_python(
+            'import sys; sys.stdout.buffer.write(b"\\xff\\xfe"); '
+            'sys.stdout.flush(); print("\\nстигнах дотук")',
+            cwd=tmp_path,
+        )
+        assert "стигнах дотук" in res.stdout
+
+
 class TestWindowsShellSelection:
     @pytest.fixture(autouse=True)
     def _clear_cache(self, monkeypatch):
