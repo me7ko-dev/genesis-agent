@@ -147,13 +147,43 @@ def _resolve_element(target: str, *, kind: str = "any") -> dict | None:
     candidates = _last_elements
     if kind == "field":
         candidates = [e for e in candidates if e["tag"] in ("input", "textarea", "select")]
-    best = None
+
+    # Съпоставя се в двете посоки: заявката е част от етикета ("Search" ~
+    # "Search products"), или етикетът е част от заявката ("кликни бутона
+    # Вход" ~ "Вход"). Втората посока изискваше пазачи, които липсваха
+    # (bug fix, 2026-09-20).
+    #
+    # Елемент БЕЗ текст и без name даваше hay=" " — един интервал — и
+    # `" " in tl` е истина за ВСЯКА заявка, съдържаща интервал. Тоест всеки
+    # многодумен target улучваше първия безименен елемент на страницата.
+    # Не е само грешен клик: click() взема label от `el["text"] or el["name"]
+    # or target`, тоест при безименен елемент етикетът става текстът на
+    # ЗАЯВКАТА, и sandbox.assess_browser_click преценява по него, а не по
+    # реалния бутон. Безименен бутон "Плати" под заявка "continue to next
+    # page" минаваше като обикновен клик.
+    #
+    # Затова: празните не са кандидати за нищо, а за посоката "етикетът е част
+    # от заявката" се иска поне 3 символа, за да не лепне "ок" или "x" върху
+    # всяко изречение. Точното съвпадение печели пред двете частични, а
+    # "заявката е част от етикета" — пред обратното, защото е по-силният знак.
+    # Текстът и `name` се сравняват ПООТДЕЛНО, не слепени с интервал. Слепени,
+    # посоката "етикетът е част от заявката" на практика не работеше винаги,
+    # когато елементът има name: "кликни Купи сега" срещу hay "купи сега buy"
+    # не съвпада заради опашката, макар видимият текст да е точно този.
+    contained = None
+    containing = None
     for e in candidates:
-        hay = f"{e['text']} {e['name']}".lower()
-        if tl in hay or hay in tl:
-            best = e
-            break
-    return best
+        parts = [p for p in (str(e.get("text") or "").strip().lower(),
+                             str(e.get("name") or "").strip().lower()) if p]
+        if not parts:
+            continue
+        if any(p == tl for p in parts):
+            return e
+        if contained is None and any(tl in p for p in parts):
+            contained = e
+        if containing is None and any(len(p) >= 3 and p in tl for p in parts):
+            containing = e
+    return contained or containing
 
 
 def navigate(url: str) -> str:
