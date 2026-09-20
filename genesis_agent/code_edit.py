@@ -128,7 +128,20 @@ def edit_file(path: str | Path, old: str, new: str, *,
         return EditResult(False, "Празен anchor: 'old' трябва да е точен текст, "
                                  "който вече съществува във файла.")
     try:
-        before = p.read_text(encoding="utf-8")
+        # Четем СУРОВО, за да видим какви са истинските краища на редове, после
+        # нормализираме за съпоставянето. Само `read_text` би върнал вече
+        # преобразуван текст (universal newlines) и записът после щеше да сложи
+        # LF навсякъде — един редактиран ред пренаписваше краищата на ЦЕЛИЯ
+        # файл. На машина с CRLF това прави diff-а нечетим и е точно тихата
+        # повреда, която този модул съществува да не прави.
+        raw = p.read_bytes().decode("utf-8")
+        before = raw.replace("\r\n", "\n").replace("\r", "\n")
+        if "\r\n" in raw:
+            newline = "\r\n"
+        elif "\r" in raw:
+            newline = "\r"
+        else:
+            newline = "\n"
     except FileNotFoundError:
         return EditResult(False, f"Файлът не съществува: {p} "
                                  "(за нов файл ползвай WRITE_FILE)")
@@ -160,7 +173,11 @@ def edit_file(path: str | Path, old: str, new: str, *,
 
     diff = _unified_diff(before, after, p.name)
     try:
-        p.write_text(after, encoding="utf-8")
+        # Възстановяваме стила, с който файлът е дошъл. `newline=""` спира
+        # повторното преобразуване от самия Python при запис.
+        payload = after if newline == "\n" else after.replace("\n", newline)
+        with p.open("w", encoding="utf-8", newline="") as f:
+            f.write(payload)
     except OSError as e:
         return EditResult(False, f"Грешка при запис: {e}")
 
