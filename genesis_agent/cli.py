@@ -65,15 +65,37 @@ def _models(args: list[str]) -> int:
         if not count:
             return 1
 
+    from genesis_agent.agent_core import MIN_SIZE_B
     from genesis_agent.brain import _load_chain
     chain = _load_chain()
-    manual = len(chain) - len(free_models.cached())
+
+    # Броят се РЕАЛНИТЕ членове на веригата, не се вади дължината на кеша:
+    # `_load_chain` дедуплицира срещу config.yaml и филтрира по познати
+    # доставчици, така че изваждането подценяваше ръчните записи с всеки
+    # застъпен модел — а при силно застъпване стигаше до отрицателно число,
+    # което `max(..., 0)` показваше като „≈0 ръчно проверени" до верига,
+    # която е почти изцяло ръчна.
+    discovered = {(m.get("provider"), m.get("model")) for m in free_models.cached()}
+    auto = sum(1 for c in chain if (c["provider"], c["model"]) in discovered)
     print(f"\nВерига: {len(chain)} модела "
-          f"(≈{max(manual, 0)} ръчно проверени + автоматично открити безплатни)\n")
+          f"({len(chain) - auto} ръчно проверени + {auto} автоматично открити)\n")
+
+    unsized = 0
     for i, c in enumerate(chain, 1):
         size = f"{c['size_b']:g}B" if c["size_b"] else "?"
         tools = "tools" if c["supports_tools"] else "text-tags"
-        print(f"  {i:>2}. {c['provider']:<13} {c['model']:<52} {size:>6}  {tools}")
+        # Модел без размер в името се изхвърля от всеки контекст, който
+        # филтрира по размер (чат: ≥32B). Без този знак `genesis models`
+        # изброява модели, които работещият агент никога не вика.
+        skipped = "" if c["size_b"] >= MIN_SIZE_B else "  ← не и в чат"
+        if not c["size_b"]:
+            unsized += 1
+        print(f"  {i:>2}. {c['provider']:<13} {c['model']:<52} {size:>6}  {tools}{skipped}")
+
+    if unsized:
+        print(f"\n{unsized} модела не обявяват размер в името си и затова не влизат "
+              f"в контекстите с праг (чат иска ≥{MIN_SIZE_B:g}B). Мисиите и "
+              "по-ниските прагове ги ползват.")
 
     age = free_models.cache_age_days()
     if age is None:

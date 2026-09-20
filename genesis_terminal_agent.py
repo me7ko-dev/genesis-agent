@@ -740,13 +740,15 @@ def get_system_info() -> dict:
         info["gpu"] = "Няма NVIDIA GPU"
     # Disk
     try:
-        if sys.platform == "win32":
-            raise OSError("statvfs липсва на Windows — виж except по-долу")
-        st = os.statvfs(str(Path.home()))
-        total_gb = (st.f_blocks * st.f_frsize) // (1024**3)
-        free_gb  = (st.f_bfree  * st.f_frsize) // (1024**3)
-        info["disk"] = f"{free_gb}GB свободни / {total_gb}GB"
-    except Exception:
+        # `shutil.disk_usage` работи навсякъде, включително на Windows, където
+        # `os.statvfs` изобщо не съществува. По-ранен опит тук хвърляше нарочен
+        # OSError на Windows само за да замълчи mypy — това правеше контролния
+        # поток нечетим И оставяше банера с „N/A" завинаги там, при положение
+        # че `shutil` е внесен три реда по-горе и дава същото число.
+        usage = shutil.disk_usage(Path.home())
+        info["disk"] = (f"{usage.free // (1024**3)}GB свободни "
+                        f"/ {usage.total // (1024**3)}GB")
+    except OSError:
         info["disk"] = "N/A"
     return info
 

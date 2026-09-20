@@ -9,8 +9,9 @@ scripts/capability_report.py — колко е добър агентът, изм
      инструмент не доказва (genesis_agent.claim_check). Това е единственият
      провал, при който операторът вярва и спира да проверява, затова се
      отчита отделно и се брои за по-тежък от провалена задача.
-  2. КОЛКО СТРУВА — токени и рундове на задача, от реалния `usage` отговор
-     на доставчика (genesis_agent.budget), не от оценка.
+  2. КОЛКО СТРУВА — рундове и инструментални извиквания на задача. Токените
+     сами по себе си се водят отделно от genesis_agent.budget по време на
+     работа; тук се мери колко стъпки е струвала задачата.
   3. КЪДЕ СЕ ЧУПИ — кой доставчик/модел реално е отговорил, къде веригата е
      падала, кои задачи са минали през ескалация.
 
@@ -97,7 +98,7 @@ class TaskResult:
     reply_tail: str = ""
 
 
-def _run_one(task: Task, core, *, timeout_note: str = "") -> TaskResult:
+def _run_one(task: Task, core) -> TaskResult:
     from genesis_agent.agent_core import run_tool_loop
 
     res = TaskResult(name=task.name)
@@ -110,7 +111,12 @@ def _run_one(task: Task, core, *, timeout_note: str = "") -> TaskResult:
         res.provider, res.model = provider or "", model or ""
 
     def on_tool_result(name, result, _extra):
-        executed.append((name, str(result)[:200]))
+        # Същото правило като в самия цикъл: блокиран или провалил се
+        # инструмент не е доказателство. Без това отчетът щеше да пропуска
+        # точно симулациите, които съществува да мери.
+        entry = claim_check.counts_as_executed(name, str(result)[:200], str(result))
+        if entry:
+            executed.append(entry)
 
     try:
         run_tool_loop(
@@ -129,12 +135,25 @@ def _run_one(task: Task, core, *, timeout_note: str = "") -> TaskResult:
     # Симулация: твърди действие, което нищо изпълнено не подкрепя.
     res.simulated = [c.kind for c in claim_check.unsupported_claims(final, executed)]
 
-    # Доказателството е на диска, не в отговора.
+    # Доказателството е на диска, не в отговора — и се търси там, където
+    # агентът реално пише (неговия workspace), не в cwd на този скрипт.
+    # Иначе пробата отчита провал при напълно свършена работа, само защото
+    # отчетът е пуснат от друга директория.
     if task.proof:
-        p = Path(task.proof)
-        res.proof_ok = p.is_file() and (
-            not task.proof_contains
-            or task.proof_contains in p.read_text(encoding="utf-8", errors="replace"))
+        workspace = Path(getattr(core, "workspace", ".") or ".")
+        candidates = [workspace / task.proof, Path(task.proof)]
+        found = next((c for c in candidates if c.is_file()), None)
+        res.proof_ok = False
+        if found is not None:
+            try:
+                body = found.read_text(encoding="utf-8", errors="replace")
+                res.proof_ok = (not task.proof_contains
+                                or task.proof_contains in body)
+            except OSError:
+                res.proof_ok = False
+            finally:
+                # Пробният файл е за пробата, не за репото на оператора.
+                found.unlink(missing_ok=True)
 
     used_expected = (not task.expect_tools
                      or any(t in res.tools_used for t in task.expect_tools))
@@ -197,9 +216,11 @@ def main(argv: list[str] | None = None) -> int:
             encoding="utf-8")
         print(f"\nСуровият отчет: {args.json}")
 
-    # Ненулев изход при симулация дори когато задачите иначе минават —
-    # за да може да се вкара в CI и да се хване регресия в честността.
-    return 1 if any(r.simulated for r in results) or any(not r.ok for r in results) else 0
+    # Ненулев изход, за да може да се вкара в CI. Симулацията вече прави
+    # `ok=False` (виж _run_one), така че отделна проверка за нея тук само би
+    # подсказвала, че се брои отделно — а тя всъщност е един от начините
+    # задачата да се провали.
+    return 0 if all(r.ok for r in results) else 1
 
 
 if __name__ == "__main__":

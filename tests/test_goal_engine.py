@@ -188,3 +188,60 @@ class TestGoalsFromRealWork:
         monkeypatch.setattr(wm, "list_threads", _boom)
         assert isinstance(ge.goals_from_real_work(), list)
         assert len(ge.next_goals(3, use_semantic=False)) == 3
+
+
+class TestCyrillicGoalsSurviveDeduplication:
+    """Функцията съществува, защото операторът пише на български — а
+    дедупликацията ползваше `slugify`, която прави имена на ФАЙЛОВЕ и свежда
+    всяка изцяло кирилска цел до фолбека "skill". Подадени три нишки,
+    връщаше една; другите две изчезваха тихо."""
+
+    def test_three_cyrillic_threads_return_three_goals(self, monkeypatch) -> None:
+        import genesis_agent.episodic_memory as em
+        import genesis_agent.workspace_memory as wm
+        monkeypatch.setattr(wm, "list_threads", lambda **kw: [
+            {"title": "Мигрирай базата", "next_step": "напиши миграцията"},
+            {"title": "Оправи отчета", "next_step": "добави филтър по дата"},
+            {"title": "Прегледай логовете", "next_step": "търси грешки"},
+        ])
+        monkeypatch.setattr(em, "_fetch_all_episodes", list)
+        goals = ge.goals_from_real_work(limit=5)
+        assert len(goals) == 3, goals
+
+    def test_genuinely_identical_goals_still_collapse(self, monkeypatch) -> None:
+        """Дедупликацията трябва да остане дедупликация: разликата е само в
+        регистъра и интервалите."""
+        import genesis_agent.episodic_memory as em
+        import genesis_agent.workspace_memory as wm
+        monkeypatch.setattr(wm, "list_threads", lambda **kw: [
+            {"title": "Задача", "next_step": "Направи нещо"},
+            {"title": "Задача", "next_step": "направи   нещо"},
+        ])
+        monkeypatch.setattr(em, "_fetch_all_episodes", list)
+        assert len(ge.goals_from_real_work(limit=5)) == 1
+
+    def test_repeated_cyrillic_missions_are_counted_separately(self, monkeypatch) -> None:
+        import genesis_agent.episodic_memory as em
+        import genesis_agent.workspace_memory as wm
+        monkeypatch.setattr(wm, "list_threads", lambda **kw: [])
+        monkeypatch.setattr(em, "_fetch_all_episodes", lambda: (
+            [{"goal": "изтегли отчета за деня", "outcome": "success",
+              "tags": "['mission', 'success']"}] * 3
+            + [{"goal": "изчисти временните файлове", "outcome": "success",
+                "tags": "['mission', 'success']"}] * 4))
+        goals = ge.goals_from_real_work(limit=5)
+        assert len(goals) == 2, goals
+        assert any("изтегли отчета" in g for g in goals), goals
+        assert any("изчисти временните" in g for g in goals), goals
+
+    def test_cyrillic_real_work_is_not_filtered_out_by_a_past_skill(
+        self, monkeypatch
+    ) -> None:
+        """`slugify` свежда и минали умения до "skill"; филтрирането по него
+        изхвърляше всяка кирилска цел веднага щом едно такова умение
+        съществува."""
+        monkeypatch.setattr(ge, "_load_past_goals", lambda: {"skill"})
+        monkeypatch.setattr(ge, "goals_from_real_work",
+                            lambda limit=5: ["направи нещо на български"])
+        goals = ge.next_goals(3, use_semantic=False)
+        assert goals[0] == "направи нещо на български", goals

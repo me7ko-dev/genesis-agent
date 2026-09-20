@@ -179,6 +179,19 @@ def _load_past_goals() -> set[str]:
     return seen
 
 
+def _dedup_key(text: str) -> str:
+    """Ключ за сравнение на ЦЕЛИ помежду им.
+
+    Нарочно НЕ `slugify`: тя прави имена на ФАЙЛОВЕ и маха всичко извън
+    [a-z0-9], тоест всяка изцяло кирилска цел се свежда до фолбека "skill".
+    В проект, чийто оператор пише на български, това слива несвързани цели в
+    една кофа — подадени три нишки, функцията връщаше една, а останалите две
+    изчезваха тихо. Тук стига свеждане до малки букви и свиване на
+    интервалите: сравняваме текст с текст, не строим път.
+    """
+    return " ".join(text.lower().split())
+
+
 def goals_from_real_work(limit: int = 5) -> list[str]:
     """Цели, извлечени от РЕАЛНАТА работа на оператора, не от каталога отгоре.
 
@@ -229,21 +242,20 @@ def goals_from_real_work(limit: int = 5) -> list[str]:
             outcome = str(ep.get("outcome", "")).lower()
             if "mission" not in tags or "success" not in tags or "fail" in outcome:
                 continue
-            counts[slugify(goal)] = counts.get(slugify(goal), 0) + 1
+            counts[_dedup_key(goal)] = counts.get(_dedup_key(goal), 0) + 1
         for slug, times in sorted(counts.items(), key=lambda kv: kv[1], reverse=True):
             if times < 3:
                 break            # подредено низходящо — под прага няма смисъл да се гледа нататък
-            goals.append(f"Направи умение за повтаряща се задача ({times} пъти): "
-                         f"{slug.replace('_', ' ')}")
+            goals.append(f"Направи умение за повтаряща се задача ({times} пъти): {slug}")
     except Exception:
         pass
 
     seen: set[str] = set()
     unique = []
     for g in goals:
-        s = slugify(g)
-        if s and s not in seen:
-            seen.add(s)
+        key = _dedup_key(g)
+        if key and key not in seen:
+            seen.add(key)
             unique.append(g)
     return unique[:limit]
 
@@ -296,8 +308,13 @@ def next_goals(n: int = 10, *, use_semantic: bool = True) -> list[str]:
     # празна библиотека все пак трябва да тръгне отнякъде.
     for goal in goals_from_real_work(limit=max(1, n // 2)):
         slug = slugify(goal)
-        if slug and slug not in existing and slug not in seen_slugs:
-            seen_slugs.add(slug)
+        # `slug == "skill"` е фолбекът на slugify за текст без латиница, тоест
+        # носи нула информация. Филтрирането по него изхвърляше ВСЯКА кирилска
+        # цел веднага щом едно минало умение също се е свело до "skill".
+        known = slug in existing and slug != "skill"
+        key = _dedup_key(goal)
+        if slug and not known and key not in seen_slugs:
+            seen_slugs.add(key)
             goals.append(goal)
             if len(goals) >= n:
                 return goals
