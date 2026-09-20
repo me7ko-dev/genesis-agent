@@ -744,11 +744,22 @@ class Brain:
         преди — извикващите БЕЗ tools (orchestrator/project_builder) никога не
         произвеждат role='tool' съобщения, значи условието долу никога не се
         задейства за тях.
+
+        Проверката гледаше само ПОСЛЕДНОТО съобщение в разреза (bug fix,
+        2026-09-20). Така пазеше сирака, когато tool резултатът е последен, но
+        пропускаше точно толкова невалидния случай, в който след него стои още
+        едно съобщение — а autonomous_loop добавя такова при всяка обратна
+        връзка след tool рунд (заповедта "STOP calling tools", резултат от
+        read-only таг, ruff бележка). Разрезът тогава е
+        [system, цел, tool, user] — 'tool' без родителския си assistant, тоест
+        HTTP 400 от всеки OpenAI-съвместим доставчик. Сега условието пита
+        дали в разреза ИЗОБЩО има 'tool' без родител, независимо къде стои.
         """
         if len(messages) <= 4:
             return messages
         tail = messages[-2:]
-        if tail and tail[-1].get("role") == "tool" and not tail[0].get("tool_calls"):
+        if (any(m.get("role") == "tool" for m in tail)
+                and not tail[0].get("tool_calls")):
             for i in range(len(messages) - 1, 1, -1):
                 if messages[i].get("role") == "assistant":
                     tail = messages[i:]

@@ -511,7 +511,13 @@ class TestNativeToolCallsDoNotStarveCodeWriting:
             _Reply(raw_text="```python\n" + code + "\n```", code=code),  # round 5: finally writes
             _Reply(raw_text="YES"),  # critic
         )
-        monkeypatch.setattr("genesis_skills.dispatch_tool_call", lambda name, args: "[RESEARCH] found nothing useful")
+        # A DIFFERENT result each round, so this exercises the round-budget
+        # rule on its own: the guard against spinning (identical call AND
+        # identical result) must not be what fires here, or the budget rule
+        # would be left untested. The spinning path has its own test below.
+        _n = iter(range(100))
+        monkeypatch.setattr("genesis_skills.dispatch_tool_call",
+                            lambda name, args: f"[RESEARCH] partial finding {next(_n)}")
         monkeypatch.setattr(al, "run_python_subprocess",
                              lambda c: ExecResult(ok=True, stdout="OK\n", stderr="", returncode=0))
         monkeypatch.setattr("genesis_agent.code_validate.validate_code_with_ruff", lambda c: (True, ""))
@@ -527,3 +533,79 @@ class TestNativeToolCallsDoNotStarveCodeWriting:
         nudges = [m for m in FakeBrain.calls[4]
                   if m.get("role") == "user" and "STOP calling tools" in str(m.get("content", ""))]
         assert nudges, "expected a forced-code directive after _force_code_after tool-only rounds"
+
+    def test_the_directive_outlives_the_round_it_was_issued_in(self, monkeypatch) -> None:
+        """trim_round_history keeps only messages[:2] + the last exchanged
+        pair, so a `user` directive survives exactly ONE round: obey it at once
+        and all is well, ignore it and the pressure vanishes precisely when it
+        is needed. Re-appending it every later round (as before) compensated,
+        but invisibly and at a fresh cost each round. Putting it in the system
+        message — which the trim never cuts — is what actually makes it hold."""
+        tc = [{"id": "1", "function": {"name": "RESEARCH", "arguments": '{"question": "x"}'}}]
+        _queue(*([_Reply(raw_text="", tool_calls=tc)] * 8))
+        _n = iter(range(100))
+        monkeypatch.setattr("genesis_skills.dispatch_tool_call",
+                            lambda name, args: f"[RESEARCH] finding {next(_n)}")
+
+        al.run_autonomous_loop("a goal", max_rounds=6)
+
+        issued_at = next(i for i, sent in enumerate(FakeBrain.calls)
+                         if any("STOP calling tools" in str(m.get("content", ""))
+                                for m in sent))
+        later = FakeBrain.calls[issued_at + 1:]
+        assert later, "test needs at least one round after the directive"
+        for i, sent in enumerate(later, start=issued_at + 1):
+            assert any("STOP calling tools" in str(m.get("content", "")) for m in sent), (
+                f"directive was gone by round {i}"
+            )
+
+    def test_the_trimmed_history_never_sends_an_orphan_tool_message(
+        self, monkeypatch
+    ) -> None:
+        """A `role: tool` message whose parent assistant was cut away is a 400
+        from every OpenAI-compatible provider. The guard checked only the LAST
+        message in the slice, so it held when the tool result was last and
+        missed it when anything followed — which is every round where the loop
+        appends feedback after a tool round."""
+        tc = [{"id": "1", "function": {"name": "RESEARCH", "arguments": '{"question": "x"}'}}]
+        _queue(*([_Reply(raw_text="", tool_calls=tc)] * 8))
+        _n = iter(range(100))
+        monkeypatch.setattr("genesis_skills.dispatch_tool_call",
+                            lambda name, args: f"[RESEARCH] finding {next(_n)}")
+
+        al.run_autonomous_loop("a goal", max_rounds=6)
+
+        for r, sent in enumerate(FakeBrain.calls):
+            for i, m in enumerate(sent):
+                if m.get("role") != "tool":
+                    continue
+                assert i > 0 and sent[i - 1].get("tool_calls"), (
+                    f"round {r}: tool message at {i} has no parent assistant "
+                    f"({[x.get('role') for x in sent]})"
+                )
+
+    def test_an_identical_call_returning_identical_output_forces_code_sooner(
+        self, monkeypatch
+    ) -> None:
+        """Rounds on a mission are 8, not the chat's 25, so three burned going
+        in a circle is over a third of the whole budget for the task. Same
+        tool, same arguments, same output — nothing new can come of a fourth."""
+        tc = [{"id": "1", "function": {"name": "RESEARCH", "arguments": '{"question": "x"}'}}]
+        _queue(*([_Reply(raw_text="", tool_calls=tc)] * 8))
+        monkeypatch.setattr("genesis_skills.dispatch_tool_call",
+                            lambda name, args: "[RESEARCH] found nothing useful")
+
+        al.run_autonomous_loop("a goal", max_rounds=6)
+
+        # Round 3 is where the streak reaches STOP_AT; the budget rule alone
+        # would not have fired until round 4.
+        from genesis_agent.repeat_guard import STOP_AT
+        forced_at = next(
+            (i for i, sent in enumerate(FakeBrain.calls)
+             if any(m.get("role") == "user"
+                    and "STOP calling tools" in str(m.get("content", ""))
+                    for m in sent)),
+            None,
+        )
+        assert forced_at is not None, "spinning never forced code"
+        assert forced_at == STOP_AT

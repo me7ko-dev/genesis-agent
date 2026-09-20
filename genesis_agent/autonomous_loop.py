@@ -11,6 +11,7 @@ from genesis_agent.brain import Brain
 from genesis_agent.config import MAX_LLM_RETRIES, PROJECT_ROOT
 from genesis_agent.executor import format_failure_for_brain, run_python_subprocess
 from genesis_agent.local_repair_agent import emergency_repair
+from genesis_agent.repeat_guard import RepeatGuard
 from genesis_agent.skill_loader import SKILLS_ROOT
 from genesis_agent.skills_manager import save_skill, slugify
 from genesis_agent.storage_monitor import check_storage, human_gb
@@ -275,6 +276,19 @@ def _run_autonomous_loop_impl(
     # след него моделът трябва изрично да спре и да пише.
     _tool_only_rounds = 0
     _force_code_after = max(3, (max_rounds * 2) // 3)
+    # Заповедта се издава веднъж — но в system съобщението, не само като
+    # пореден user ред (bug fix, 2026-09-20). Trim_round_history пази само
+    # messages[:2] + последния разменен чифт, така че user заповед оцелява
+    # РОВНО един рунд: подчини ли се моделът веднага, добре; не се ли подчини,
+    # натискът изчезва точно когато е най-нужен. Повтарянето на всеки следващ
+    # рунд (както беше) го компенсираше, но по начин, който не си личи от
+    # кода и плаща наново на всеки рунд. system частта оцелява до края на
+    # мисията; user редът остава за непосредствената сила.
+    _forced_code = False
+    # Същият извик, същият изход, пореден път — виж genesis_agent.repeat_guard.
+    # Тук е по-остро, отколкото в чата: рундовете на мисия са 8, не 25, така че
+    # три изгорени в кръг са над една трета от целия бюджет за задачата.
+    _spin_guard = RepeatGuard()
 
     red_note = ""
     if dna.red_zone_elevation_granted():
@@ -368,6 +382,7 @@ def _run_autonomous_loop_impl(
         # обратно към върха на цикъла ПРЕДИ да стигнем до код-екстракция.
         if reply.tool_calls:
             report_thought("🔧 Brain вика инструмент (native)...")
+            _spin_now = False
             messages.append({"role": "assistant", "content": reply.raw_text or "",
                               "tool_calls": reply.tool_calls})
             try:
@@ -386,24 +401,33 @@ def _run_autonomous_loop_impl(
                     tool_out = genesis_skills.dispatch_tool_call(name, args)
                     messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                                       "name": name, "content": tool_out[:4000]})
+                    if _spin_guard.observe(name, args, tool_out).stop:
+                        _spin_now = True
             except Exception as _e:
                 messages.append({"role": "tool", "tool_call_id": "error",
                                   "name": "error", "content": f"[tool грешка: {_e}]"})
 
             _tool_only_rounds += 1
-            if _tool_only_rounds >= _force_code_after:
-                report_thought(f"⏱️ {_tool_only_rounds} рунда само tool calls, без код — "
-                               "принуждавам писане сега.")
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "STOP calling tools. You have used most of the round budget "
-                        "searching/looking things up without writing any code. Whatever "
-                        "you have found so far is enough — write the final Python script "
-                        "NOW, in a single ```python``` fence, with the required self-test. "
-                        "Do not call USE_SKILL or any other tool in your next reply."
-                    ),
-                })
+            if not _forced_code and (_tool_only_rounds >= _force_code_after or _spin_now):
+                _forced_code = True
+                if _spin_now:
+                    report_thought("🔁 Същият инструмент, същият резултат, трети пореден път — "
+                                   "търсенето не води доникъде; принуждавам писане сега.")
+                else:
+                    report_thought(f"⏱️ {_tool_only_rounds} рунда само tool calls, без код — "
+                                   "принуждавам писане сега.")
+                _stop_order = (
+                    "STOP calling tools. You have used most of the round budget "
+                    "searching/looking things up without writing any code. Whatever "
+                    "you have found so far is enough — write the final Python script "
+                    "NOW, in a single ```python``` fence, with the required self-test. "
+                    "Do not call USE_SKILL or any other tool in your next reply."
+                )
+                messages.append({"role": "user", "content": _stop_order})
+                # ...и в system-а, който trim_round_history никога не реже.
+                if messages and messages[0].get("role") == "system":
+                    messages[0] = {**messages[0],
+                                   "content": f"{messages[0].get('content', '')}\n\n{_stop_order}"}
             continue
 
         # ─── TOOL USE ПО ВРЕМЕ НА МИСИЯ (стар text-tag режим, само read-only) ───
