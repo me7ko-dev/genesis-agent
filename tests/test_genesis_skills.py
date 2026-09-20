@@ -488,3 +488,63 @@ class TestEditFileIsTheOtherDoorToTheSameSecret:
         out = gs._tool_edit_file("notes.md", "ред две", "ред 2")
         assert "SANDBOX" not in out
         assert "ред 2" in f.read_text(encoding="utf-8")
+
+
+class TestListDirIsTheThirdDoor:
+    """Третият път към същия ресурс, намерен от `sibling_paths_missing_the_guard`
+    след като READ_FILE и EDIT_FILE вече бяха затворени.
+
+    Изброяването не дава съдържание — дава ИМЕНАТА. Това е първата стъпка на
+    всяко „кое си струва да прочета", а измерено преди поправката `LIST_DIR
+    ~/.ssh` връщаше `id_rsa` дори в режим `deny`.
+    """
+
+    def _ssh_dir(self, workspace: Path) -> Path:
+        d = workspace / ".ssh"
+        d.mkdir()
+        (d / "id_rsa").write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n", encoding="utf-8")
+        return d
+
+    def test_the_key_names_are_not_listed_under_deny(self, _workspace, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="deny"))
+        out = gs._tool_list_dir(str(self._ssh_dir(_workspace)))
+        assert "SANDBOX DENIED" in out
+        assert "id_rsa" not in out
+
+    def test_an_ordinary_directory_still_lists(self, _workspace, monkeypatch) -> None:
+        """Гейт, който пита за всяка папка, е гейт, който операторът изключва."""
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="deny"))
+        (_workspace / "src").mkdir()
+        (_workspace / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
+        out = gs._tool_list_dir(str(_workspace / "src"))
+        assert "main.py" in out
+        assert "SANDBOX" not in out
+
+    def test_allow_mode_still_lists_it(self, _workspace, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="allow"))
+        out = gs._tool_list_dir(str(self._ssh_dir(_workspace)))
+        assert "id_rsa" in out
+
+
+class TestTheGuardReadsWindowsPathsToo:
+    """Образецът е писан за shell команди, в които пътят носи `/`. Подаден
+    като Windows път, `.ssh\\config` не съвпадаше с `\\.ssh/` — същият файл
+    беше пазен на Linux и отворен на Windows."""
+
+    def test_a_backslash_ssh_path_is_recognised(self) -> None:
+        assert gs.sandbox.sensitive_path_reason(r"C:\Users\x\.ssh\config")
+
+    def test_a_backslash_aws_path_is_recognised(self) -> None:
+        assert gs.sandbox.sensitive_path_reason(r"C:\Users\x\.aws\credentials")
+
+    def test_a_forward_slash_path_still_works(self) -> None:
+        assert gs.sandbox.sensitive_path_reason("/home/x/.ssh/id_ed25519")
+
+    def test_an_ordinary_windows_path_is_not_flagged(self) -> None:
+        assert gs.sandbox.sensitive_path_reason(r"C:\Users\x\project\main.py") is None
+
+    def test_the_example_exemption_survives_backslashes(self) -> None:
+        assert gs.sandbox.sensitive_path_reason(r"C:\repo\.env.example") is None

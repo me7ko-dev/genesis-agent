@@ -422,6 +422,21 @@ def _tool_list_dir(arg: str) -> str:
     path = _resolve(arg)
     if not path.is_dir():
         return f"[LIST_DIR] Не е директория: {path}"
+    # Изброяването на `~/.ssh` не дава съдържание, но дава ИМЕНАТА на ключовете
+    # — първата стъпка на всяко "кое има смисъл да прочета". Същият пазач,
+    # който вече стои на READ_FILE и EDIT_FILE (design note, 2026-09-20);
+    # измерено преди това: `LIST_DIR ~/.ssh` изброяваше `id_rsa` дори в
+    # режим "deny".
+    #
+    # Разделителят накрая НЕ е козметика: образецът пази `\.ssh/` и `\.aws/`
+    # със наклонена черта, защото е писан за shell команди, в които пътят до
+    # файл винаги я носи. Директория, подадена без нея, не съвпада с нищо.
+    sensitive = sandbox.sensitive_path_reason(path.as_posix() + "/")
+    if sensitive:
+        verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM, [sensitive])
+        allowed, reason = sandbox._decide(f"LIST_DIR {path}", verdict, sandbox.get_policy())
+        if not allowed:
+            return f"[LIST_DIR] {reason}"
     try:
         entries = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
     except OSError as e:

@@ -837,7 +837,12 @@ def sensitive_path_reason(path: str | os.PathLike[str]) -> str | None:
     файла, да си пише собствено правило. Различни правила за `cat ~/.env` и за
     `READ_FILE ~/.env` значат, че по-слабото решава.
     """
-    text = str(path)
+    # Образецът е писан за shell команди, където пътят винаги носи `/`.
+    # На Windows `Path` дава `C:\Users\x\.ssh\config`, което не съвпада с
+    # `\.ssh/` — тоест същият файл е пазен на Linux и отворен на Windows.
+    # sandbox._split_segment вече прави точно тази нормализация, и то по
+    # същата причина.
+    text = str(path).replace("\\", "/")
     if _SENSITIVE_PATH_EXEMPT_RE.search(text):
         return None
     match = _SENSITIVE_PATH_RE.search(text)
