@@ -77,12 +77,33 @@ def _load_index() -> dict[str, Any]:
     try:
         return json.loads(idx.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
-        log.warning("skills.json е нечетим (%s) — преместен настрани, започва нов индекс", e)
         try:
-            idx.replace(idx.with_name(f"{idx.name}.corrupt"))
+            kept = _free_corrupt_name(idx)
+            idx.replace(kept)
+            log.warning("skills.json е нечетим (%s) — запазен като %s, започва нов индекс",
+                        e, kept.name)
         except OSError:
-            pass
+            log.warning("skills.json е нечетим (%s) и не можа да бъде преместен; "
+                        "започва нов индекс", e)
         return {"version": "1.0", "skills": []}
+
+
+def _free_corrupt_name(idx: Path) -> Path:
+    """Незаето име за повредения индекс.
+
+    Фиксиран `.corrupt` изглежда достатъчен, но губи точно най-ценното: след
+    първа повреда индексът се пресъздава празен, и ако после се повреди и
+    ТОЙ, вторият (почти празен) би презаписал първия — картата към всички
+    стари умения. Номерирането е евтино, а повредите са редки.
+    """
+    base = idx.with_name(f"{idx.name}.corrupt")
+    if not base.exists():
+        return base
+    for n in range(2, 100):
+        candidate = idx.with_name(f"{idx.name}.corrupt.{n}")
+        if not candidate.exists():
+            return candidate
+    return base  # сто повреди: по-нататъшното номериране не носи нищо
 
 
 def _save_index(data: dict[str, Any]) -> None:

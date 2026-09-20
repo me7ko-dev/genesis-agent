@@ -123,6 +123,26 @@ class TestIndexAndDiskStayInSync:
         (_isolated_library / "skills.json").write_text("{ не е json", encoding="utf-8")
         sm.save_skill(slug="после повредата", code=_CODE, goal="след повреден индекс")
         assert len(_index(_isolated_library)) == 1
+        assert (_isolated_library / "skills.json.corrupt").is_file(), (
+            "повреденият индекс е картата към умения, които още са на диска — "
+            "запазва се, не се трие")
+
+    def test_a_second_corruption_does_not_overwrite_the_first_rescue(
+        self, _isolated_library
+    ) -> None:
+        """Ръбът, който обезсмисля самото запазване: след първа повреда
+        индексът тръгва празен, и ако после се повреди И той, вторият (почти
+        празен) не бива да презапише първия — там са старите умения."""
+        (_isolated_library / "skills.json").write_text(
+            '{"skills": [{"name": "ЦЕННО"}] повреден', encoding="utf-8")
+        sm.save_skill(slug="първи", code=_CODE, goal="първа цел")
+
+        (_isolated_library / "skills.json").write_text("{ пак повреда", encoding="utf-8")
+        sm.save_skill(slug="втори", code=_CODE, goal="втора цел")
+
+        first = (_isolated_library / "skills.json.corrupt").read_text(encoding="utf-8")
+        assert "ЦЕННО" in first, "първото спасяване беше презаписано"
+        assert (_isolated_library / "skills.json.corrupt.2").is_file()
 
 
 class TestTheSlugCannotEscapeTheDirectory:
