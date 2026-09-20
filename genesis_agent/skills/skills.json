@@ -409,6 +409,28 @@
         "detail": "[SANDBOX DENIED] Операцията изисква потвърждение, но режимът е неинтерактивен (autonomous). Причини: стартиране на подпроцес"
       },
       "signature": "242a516b4f6eb8a07a34ab7c3b2359051053b1aa97301b4c30bb55c9bc031167bb5156ff6fde7e2559aa0d148c3b6142a1e8e758d26449fe824501cf5a61a3482f7de86e8c3a93084fe679169ffa54350605e09f1bb6185366afd9fc3377c4616c1b4eb382c4f78b64bc9f1ccc929eaba2d002e5eba65f8f91d7624a1345e15144a4fbd931c37497b1197d84af96e2bd5cc73e9f5f54dbbc60629a4ef575672a37d68bd2094c46933f2ba127144b95c60aa4cec35a612ee43c796e013da6b6d49c3195004a5af55f373d98f2478873fed8fc11e5ba1758f04ee9381c877da4aef705bb7dbf28f561993d4129d776825c922a60bd5c734a728f8f604c4bc5167c"
+    },
+    {
+      "name": "probe_endpoint_before_coding_against_it",
+      "category": "autonomous",
+      "file_path": "skills/probe_endpoint_before_coding_against_it.md",
+      "description": "Probe an endpoint before writing code against it — a 400 or 401 proves the path exists, a 404 proves the address is wrong, and no valid key is needed to tell those apart.",
+      "triggers": [
+        "probe endpoint before coding against it",
+        "Probe an endpoint before writing code against it — a 400 or 401 proves the path exists, a 404 proves the address is wron",
+        "провери адреса преди да пишеш код срещу него",
+        "ударѝ endpoint-а и виж какво връща",
+        "съществува ли този адрес изобщо"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-09-20T15:23:22.415077+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      },
+      "signature": "7ad9d46a871d05c67fbaca578a9d6e0ea56d9808be15d82c8af9b4da4dd33c2e7c74f70e9c6950183e9ea2d81e4708d5b47c4b4f5c68aea631670fb81b5e5d6aebaa3aec304250ca42d32e9c7bbc8b47f7859f6878aaf9ec8995e3c8e31b045cca7266900f32538e0839399e7e8ec61b3a1c1b1722cae6bfef109a50c00c6ceef5ca37be23d5740b16ebceb185059469d468ed80a272db5658869afdf2a07c9a8f48b8af672829b3788942db714f0ff1d14ccfbe8f0d3826f0d385b807ac07ec8218a6dbe040c42a481ef275400bfd08512e7cb31b1568a7f8626cccc7aa9a64693ab5492728de99277d491b92d5024c49332e4c7f8afdc5abaecfd101755d8a"
     }
   ]
 }
