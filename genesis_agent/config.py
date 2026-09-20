@@ -2,11 +2,45 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from pathlib import Path
 
+log = logging.getLogger("genesis.config")
+
 stop_event = threading.Event()
+
+
+def _int_env(name: str, default: int, *, minimum: int = 0) -> int:
+    """Цяло число от променлива на средата, с връщане към стойността по
+    подразбиране вместо срив.
+
+    Всички долу бяха голи `int(os.environ.get(...))`, тоест се изчисляваха при
+    ВНАСЯНЕ на този модул — а него го внася всичко. Празна стойност беше
+    достатъчна, за да умре целият агент с ValueError, преди каквото и да е:
+
+        $ GENESIS_TOOL_ROUNDS= genesis
+        ValueError: invalid literal for int() with base 10: ''
+
+    „Зададена, но празна“ не е рядкост — `docker run -e GENESIS_TOOL_ROUNDS`
+    без стойност прави точно това, както и ред в shell профила, от който е
+    махната стойността. Сгрешена настройка трябва да даде предупреждение и
+    разумна стойност, не мъртъв агент със стектрейс.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        log.warning("%s=%r не е цяло число — ползвам %d", name, raw, default)
+        return default
+    if value < minimum:
+        log.warning("%s=%d е под допустимото (%d) — ползвам %d",
+                    name, value, minimum, default)
+        return default
+    return value
 
 
 # The directory containing the genesis_agent package. For a git checkout
@@ -62,8 +96,8 @@ if _INSTALLED:
 
 # За локални малки модели (DeepSeek 8B, Qwen 7B и т.н.) намали ретрите!
 # Малък модел = бърз провал, не 300 рунда по 130 секунди
-MAX_LLM_RETRIES: int = int(os.environ.get("GENESIS_MAX_RETRIES", "8"))
-EXEC_TIMEOUT_SEC: int = int(os.environ.get("GENESIS_EXEC_TIMEOUT", "120"))
+MAX_LLM_RETRIES: int = _int_env("GENESIS_MAX_RETRIES", 8, minimum=1)
+EXEC_TIMEOUT_SEC: int = _int_env("GENESIS_EXEC_TIMEOUT", 120, minimum=1)
 
 # ─── Бюджет на контекста: щедро към свежото, безмилостно към старото ───────
 #
@@ -85,10 +119,9 @@ EXEC_TIMEOUT_SEC: int = int(os.environ.get("GENESIS_EXEC_TIMEOUT", "120"))
 # от това, което вече е изиграло ролята си.
 #
 # 0 изключва съответния таван (старото поведение).
-TOOL_RESULT_MAX_CHARS: int = int(os.environ.get("GENESIS_TOOL_RESULT_MAX_CHARS", "40000"))
-STALE_TOOL_RESULT_MAX_CHARS: int = int(
-    os.environ.get("GENESIS_STALE_TOOL_RESULT_MAX_CHARS", "2000"))
-FRESH_TOOL_RESULTS: int = int(os.environ.get("GENESIS_FRESH_TOOL_RESULTS", "2"))
+TOOL_RESULT_MAX_CHARS: int = _int_env("GENESIS_TOOL_RESULT_MAX_CHARS", 40000)
+STALE_TOOL_RESULT_MAX_CHARS: int = _int_env("GENESIS_STALE_TOOL_RESULT_MAX_CHARS", 2000)
+FRESH_TOOL_RESULTS: int = _int_env("GENESIS_FRESH_TOOL_RESULTS", 2)
 
 # Колко tool рунда има правото да направи агентът за ЕДНО съобщение, преди
 # цикълът да спре и да върне контрола. Това е предпазителят срещу зацикляне,
@@ -98,13 +131,12 @@ FRESH_TOOL_RESULTS: int = int(os.environ.get("GENESIS_FRESH_TOOL_RESULTS", "2"))
 # обяснение — точно поведението, което целият tool-loop беше добавен да спре
 # (виж коментара при цикъла в genesis_terminal_agent.py). Цената на рунд вече
 # е ограничена отделно, през TOOL_RESULT_MAX_CHARS.
-TOOL_ROUND_CAP: int = int(os.environ.get("GENESIS_TOOL_ROUNDS", "25"))
+TOOL_ROUND_CAP: int = _int_env("GENESIS_TOOL_ROUNDS", 25, minimum=1)
 
 # Optional: set GENESIS_OPERATOR=<your-name> for an audit trail (CLI --operator).
 # GENESIS_STRICT_AUTHORITY=1 requires sovereign operator to start the autonomous loop.
 # Red Zone manual approval contract: GENESIS_RED_ZONE_SECRET (host) + GENESIS_RED_ZONE_TOKEN (process) must match.
 
 # Storage safety: total project tree size
-STORAGE_THRESHOLD_BYTES: int = int(
-    os.environ.get("GENESIS_STORAGE_THRESHOLD_GB", "100")
-) * (1024**3)
+STORAGE_THRESHOLD_BYTES: int = _int_env(
+    "GENESIS_STORAGE_THRESHOLD_GB", 100, minimum=1) * (1024**3)
