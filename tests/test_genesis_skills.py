@@ -296,6 +296,22 @@ def test_bare_use_skill_tag_without_the_closing_marker_still_runs(_workspace, mo
     assert seen == [("reverse_a_string", "")]
 
 
+def test_the_syntax_hint_is_dropped_when_no_skill_was_found(_workspace, monkeypatch) -> None:
+    """If no such skill exists, how to write a driver block is beside the
+    point — the hint is pure noise in a context this branch pays to keep small."""
+    monkeypatch.setattr(gs, "_tool_use_skill",
+                        lambda name, driver="": "[USE_SKILL: x] Няма достатъчно близко умение.")
+    out = gs.parse_and_execute_tools("[USE_SKILL: nothing_like_this]")[0]
+    assert "END_USE_SKILL" not in out
+
+
+def test_the_syntax_hint_is_added_when_the_skill_did_run(_workspace, monkeypatch) -> None:
+    monkeypatch.setattr(gs, "_tool_use_skill",
+                        lambda name, driver="": "[USE_SKILL: x] Достъпни: def f()\nOK")
+    out = gs.parse_and_execute_tools("[USE_SKILL: x]")[0]
+    assert "END_USE_SKILL" in out
+
+
 def test_bare_use_skill_tag_consumes_only_itself_not_the_rest_of_the_reply(
     _workspace, monkeypatch
 ) -> None:
