@@ -28,7 +28,9 @@ from dataclasses import dataclass
 
 _DIST = "genesis-agent"
 _API = "https://api.github.com/repos/{owner_repo}/commits/{ref}"
+_COMPARE_API = "https://api.github.com/repos/{owner_repo}/compare/{base}...{head}"
 _TIMEOUT = 15
+_CHANGELOG_LIMIT = 10
 
 
 @dataclass
@@ -107,6 +109,40 @@ def latest_commit(owner_repo: str, ref: str, *, timeout: int = _TIMEOUT) -> str 
     return sha if isinstance(sha, str) and sha else None
 
 
+def changelog(owner_repo: str, base: str, head: str, *,
+              limit: int = _CHANGELOG_LIMIT, timeout: int = _TIMEOUT) -> list[str] | None:
+    """Първите редове на комитите между `base` (инсталираното) и `head`
+    (най-новото), най-новият пръв — какво точно носи обновяването, не само
+    че има такова. None само при мрежа/лимит; „няма нищо ново" не се стига
+    дотук, защото `up_to_date` вече го хваща преди тази функция да се извика.
+
+    Тук е нормално `total_commits` да е повече от каквото връщаме — GitHub
+    ги дава най-стари-първо и вече орязани откъм API-я само по `limit`,
+    затова взимаме опашката, после обръщаме, вместо да режем главата.
+    """
+    if not owner_repo or not base or not head:
+        return None
+    request = urllib.request.Request(
+        _COMPARE_API.format(owner_repo=owner_repo, base=base, head=head),
+        headers={"Accept": "application/vnd.github+json",
+                 "User-Agent": "genesis-agent"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read(1 << 20).decode("utf-8", "replace"))
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+        return None
+    commits = data.get("commits") if isinstance(data, dict) else None
+    if not isinstance(commits, list):
+        return None
+    subjects = []
+    for c in commits[-limit:]:
+        message = ((c.get("commit") or {}).get("message") or "").strip()
+        if message:
+            subjects.append(message.splitlines()[0])
+    subjects.reverse()
+    return subjects
+
+
 def install_command(src: Source) -> str:
     """Командата, която обновява точно това копие."""
     ref = f"@{src.ref}" if src.ref else ""
@@ -153,7 +189,12 @@ def update_report(*, version: str, timeout: int = _TIMEOUT) -> str:
                 f"Обновяване:\n  {install_command(src)}")
     if check.up_to_date:
         return f"{head}\n✅ Това е най-новото на {src.ref or 'този клон'}."
-    return (f"{head}\n⬆️  Има по-ново: {check.latest[:7]}. Обнови с:\n"
-            f"  {install_command(src)}\n"
-            "После отвори НОВ терминал и пусни `genesis --version` — "
-            "комитът трябва да е новият.")
+    lines = [f"{head}\n⬆️  Има по-ново: {check.latest[:7]}."]
+    subjects = changelog(src.owner_repo, src.commit, check.latest, timeout=timeout)
+    if subjects:
+        lines.append("  Какво носи:")
+        lines.extend(f"    • {s}" for s in subjects)
+    lines.append(f"  Обнови с:\n  {install_command(src)}\n"
+                 "После отвори НОВ терминал и пусни `genesis --version` — "
+                 "комитът трябва да е новият.")
+    return "\n".join(lines)

@@ -110,10 +110,53 @@ class TestAskingGitHub:
         assert vi.latest_commit("", "main") is None
 
 
+class TestChangelogBetweenTwoCommits:
+    def _answer(self, monkeypatch, payload, *, fail=None):
+        class _Response:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self, _n=None): return json.dumps(payload).encode()
+
+        def _open(_req, timeout=None):
+            if fail:
+                raise fail
+            return _Response()
+
+        monkeypatch.setattr(vi.urllib.request, "urlopen", _open)
+
+    def test_subjects_come_back_newest_first(self, monkeypatch) -> None:
+        self._answer(monkeypatch, {"commits": [
+            {"commit": {"message": "fix: старото\n\nтяло"}},
+            {"commit": {"message": "feat: новото"}},
+        ]})
+        assert vi.changelog("a/b", "aaa", "bbb") == ["feat: новото", "fix: старото"]
+
+    def test_more_commits_than_the_limit_keeps_the_newest(self, monkeypatch) -> None:
+        self._answer(monkeypatch, {"commits": [
+            {"commit": {"message": f"commit {i}"}} for i in range(5)
+        ]})
+        assert vi.changelog("a/b", "aaa", "bbb", limit=2) == ["commit 4", "commit 3"]
+
+    def test_no_network_is_not_a_crash(self, monkeypatch) -> None:
+        self._answer(monkeypatch, {}, fail=OSError("няма мрежа"))
+        assert vi.changelog("a/b", "aaa", "bbb") is None
+
+    def test_an_unexpected_answer_is_not_a_crash(self, monkeypatch) -> None:
+        self._answer(monkeypatch, {"nope": True})
+        assert vi.changelog("a/b", "aaa", "bbb") is None
+
+    def test_missing_arguments_mean_no_request(self, monkeypatch) -> None:
+        self._answer(monkeypatch, {}, fail=AssertionError("не биваше да пита"))
+        assert vi.changelog("", "aaa", "bbb") is None
+        assert vi.changelog("a/b", "", "bbb") is None
+        assert vi.changelog("a/b", "aaa", "") is None
+
+
 class TestTheReportAnswersThePlainQuestion:
-    def _both(self, monkeypatch, latest):
+    def _both(self, monkeypatch, latest, *, subjects=None):
         _installed(monkeypatch, _REAL)
         monkeypatch.setattr(vi, "latest_commit", lambda *a, **k: latest)
+        monkeypatch.setattr(vi, "changelog", lambda *a, **k: subjects)
 
     def test_up_to_date_says_so(self, monkeypatch) -> None:
         self._both(monkeypatch, _REAL["vcs_info"]["commit_id"])
@@ -125,6 +168,18 @@ class TestTheReportAnswersThePlainQuestion:
         assert "fffffff" in out
         assert "pipx install --force" in out
         assert "claude/token-upgrade-ipe4yg" in out
+
+    def test_behind_lists_what_the_update_actually_brings(self, monkeypatch) -> None:
+        self._both(monkeypatch, "f" * 40, subjects=["fix(x): нещо", "feat(y): друго"])
+        out = vi.update_report(version="0.2.0")
+        assert "fix(x): нещо" in out
+        assert "feat(y): друго" in out
+
+    def test_no_changelog_is_not_a_crash(self, monkeypatch) -> None:
+        """Compare API-то може да е недостъпно, докато /commits е отговорило."""
+        self._both(monkeypatch, "f" * 40, subjects=None)
+        out = vi.update_report(version="0.2.0")
+        assert "pipx install --force" in out
 
     def test_an_unreachable_github_still_gives_the_command(self, monkeypatch) -> None:
         """Отговор „не знам" пак трябва да е полезен."""

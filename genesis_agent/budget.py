@@ -268,6 +268,33 @@ def range_totals(days: int = 7) -> dict:
     return totals
 
 
+def format_report(totals: dict, *, title: str) -> str:
+    """Човешки ред за `genesis budget` — досега тези числа излизаха само през
+    `python -m genesis_agent.budget` (суров JSON, нищо в USAGE-а на `genesis`).
+
+    Показва изрично каква част от prompt токените са дошли от кеша:
+    `record_usage`-ната бележка казва, че нула кеш-четения при повтарящи се
+    заявки към Anthropic значи развален префикс — но никой път досега не
+    печаташе тази цифра, за да се провери на око.
+    """
+    lines = [f"=== {title} ==="]
+    if not totals["calls"]:
+        lines.append("Няма записани обръщения.")
+        return "\n".join(lines)
+    lines.append(f"Обръщения: {totals['calls']}   "
+                 f"Токени: {totals['total_tokens']} "
+                 f"(prompt {totals['prompt_tokens']} + completion {totals['completion_tokens']})")
+    read, write = totals["cached_read_tokens"], totals["cached_write_tokens"]
+    if read or write:
+        prompt = totals["prompt_tokens"] or 1
+        pct = 100 * read / prompt
+        lines.append(f"Кеш: {read} прочетени ({pct:.0f}% от prompt), {write} записани")
+    for prov, stats in sorted(totals["by_provider"].items(),
+                              key=lambda kv: -kv[1]["total_tokens"]):
+        lines.append(f"  {prov:<13} {stats['calls']:>4} обръщения  {stats['total_tokens']:>8} токена")
+    return "\n".join(lines)
+
+
 if __name__ == "__main__":
     print("=== Днес ===")
     print(json.dumps(today_totals(), indent=2, ensure_ascii=False))

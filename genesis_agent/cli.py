@@ -11,6 +11,7 @@ genesis_agent.cli — the `genesis` command.
     genesis skills          library status
     genesis models          the model chain; `--refresh` re-scans free models
     genesis update          is there a newer commit on the installed branch
+    genesis budget [N]      token usage today + last N days (default 7)
     genesis --version
 """
 from __future__ import annotations
@@ -210,6 +211,20 @@ def main(argv: list[str] | None = None) -> int:
         # най-нужна. Затова печатаме реда, който се пуска в чист терминал.
         from genesis_agent.version_info import update_report
         print(update_report(version=__version__))
+        return 0
+
+    if cmd == "budget":
+        from genesis_agent import budget
+        days = 7
+        if len(argv) > 1:
+            try:
+                days = max(1, int(argv[1]))
+            except ValueError:
+                print(f"`genesis budget` иска число дни, не {argv[1]!r}")
+                return 2
+        print(budget.format_report(budget.today_totals(), title="Днес"))
+        print()
+        print(budget.format_report(budget.range_totals(days), title=f"Последните {days} дни"))
         return 0
 
     if cmd == "models":

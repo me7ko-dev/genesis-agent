@@ -341,3 +341,37 @@ class TestCachedTokensAreCountedSeparately:
         totals = budget.today_totals()
         assert totals["calls"] == 1
         assert totals["cached_read_tokens"] == 0
+
+
+class TestFormatReport:
+    def test_no_calls_says_so(self) -> None:
+        totals = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                  "total_tokens": 0, "cached_read_tokens": 0, "cached_write_tokens": 0,
+                  "by_provider": {}}
+        out = budget.format_report(totals, title="Днес")
+        assert "Днес" in out
+        assert "Няма записани" in out
+
+    def test_totals_and_provider_breakdown_show(self) -> None:
+        totals = {"calls": 3, "prompt_tokens": 1000, "completion_tokens": 200,
+                  "total_tokens": 1200, "cached_read_tokens": 0, "cached_write_tokens": 0,
+                  "by_provider": {"anthropic": {"calls": 2, "total_tokens": 900},
+                                  "deepseek": {"calls": 1, "total_tokens": 300}}}
+        out = budget.format_report(totals, title="Днес")
+        assert "3" in out and "1200" in out
+        assert "anthropic" in out and "deepseek" in out
+        # По-скъпият доставчик излиза пръв.
+        assert out.index("anthropic") < out.index("deepseek")
+
+    def test_cache_line_only_appears_when_there_is_cache_activity(self) -> None:
+        no_cache = {"calls": 1, "prompt_tokens": 100, "completion_tokens": 10,
+                    "total_tokens": 110, "cached_read_tokens": 0, "cached_write_tokens": 0,
+                    "by_provider": {}}
+        assert "Кеш" not in budget.format_report(no_cache, title="Днес")
+
+    def test_cache_line_shows_the_read_percentage_of_prompt_tokens(self) -> None:
+        totals = {"calls": 1, "prompt_tokens": 1000, "completion_tokens": 10,
+                  "total_tokens": 1010, "cached_read_tokens": 900, "cached_write_tokens": 50,
+                  "by_provider": {}}
+        out = budget.format_report(totals, title="Днес")
+        assert "900" in out and "90%" in out and "50" in out

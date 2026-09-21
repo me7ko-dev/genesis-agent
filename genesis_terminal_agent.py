@@ -1111,6 +1111,12 @@ def main():
                     continue
                 console.print(f"[cyan]⬆ Има по-ново на {check.src.ref}: "
                               f"{check.src.short} → {check.latest[:7]}[/]")
+                subjects = version_info.changelog(
+                    check.src.owner_repo, check.src.commit, check.latest)
+                if subjects:
+                    console.print("[dim]  Какво носи:[/]")
+                    for s in subjects:
+                        console.print(f"[dim]    • {s}[/]")
                 confirm = console.input("[bold yellow]Обнови сега? (да/не) > [/]").strip().lower()
                 if confirm not in ("да", "d", "y", "yes", "д"):
                     console.print("[dim]Пропуснато.[/]")
