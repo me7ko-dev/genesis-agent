@@ -199,3 +199,46 @@ class TestTheVersionHasOneSource:
         import genesis_agent
         from genesis_agent import cli
         assert cli.__version__ is genesis_agent.__version__
+
+
+class TestTheChangelogNeverBreaksUpdate:
+    """Модулът обещава, че променен API е „не знам сега", а не срив — и това
+    се изпълнява при `/update` на машината на оператора. Заявката и разборът
+    бяха в `try`, но цикълът над комитите — не, и `c.get` върху низ вдигаше
+    `'str' object has no attribute 'get'`: същата грешка, която
+    `dispatch_tool_call` вече е хващал веднъж.
+    """
+
+    def _answer(self, monkeypatch, payload):
+        class _Resp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self, _n=None):
+                return json.dumps(payload).encode()
+
+        monkeypatch.setattr(vi.urllib.request, "urlopen", lambda *a, **k: _Resp())
+
+    def test_the_normal_answer_gives_subject_lines(self, monkeypatch) -> None:
+        self._answer(monkeypatch, {"commits": [{"commit": {"message": "първи ред\nтяло"}}]})
+        assert vi.changelog("a/b", "x", "y") == ["първи ред"]
+
+    @pytest.mark.parametrize("payload", [
+        {"commits": ["само низ"]},
+        {"commits": [{"commit": "не е речник"}]},
+        {"commits": [None]},
+        {"commits": [42, {"commit": {"message": "истински"}}]},
+    ])
+    def test_a_changed_shape_is_not_a_crash(self, monkeypatch, payload) -> None:
+        self._answer(monkeypatch, payload)
+        result = vi.changelog("a/b", "x", "y")
+        assert isinstance(result, list)
+
+    def test_the_good_entries_survive_a_bad_neighbour(self, monkeypatch) -> None:
+        """Един счупен елемент не бива да отнася останалите."""
+        self._answer(monkeypatch, {"commits": ["боклук", {"commit": {"message": "истински"}}]})
+        assert vi.changelog("a/b", "x", "y") == ["истински"]
+
+    def test_newest_first(self, monkeypatch) -> None:
+        self._answer(monkeypatch, {"commits": [{"commit": {"message": "стар"}},
+                                               {"commit": {"message": "нов"}}]})
+        assert vi.changelog("a/b", "x", "y") == ["нов", "стар"]

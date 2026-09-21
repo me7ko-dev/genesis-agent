@@ -136,7 +136,19 @@ def changelog(owner_repo: str, base: str, head: str, *,
         return None
     subjects = []
     for c in commits[-limit:]:
-        message = ((c.get("commit") or {}).get("message") or "").strip()
+        # Елемент, който не е речник, пропада: заявката и разборът са в `try`
+        # по-горе, но този цикъл НЕ е, а `c.get` върху низ вдига
+        # AttributeError, който излиза навън. Целият модул обещава обратното —
+        # променен API е „не знам сега", не срив — а това се изпълнява при
+        # `/update` на машината на оператора. Измерено: отговор
+        # `{"commits": ["низ"]}` гърмеше с `'str' object has no attribute 'get'`,
+        # същата грешка, която dispatch_tool_call вече е хващал веднъж.
+        if not isinstance(c, dict):
+            continue
+        commit = c.get("commit")
+        if not isinstance(commit, dict):
+            continue
+        message = (commit.get("message") or "").strip()
         if message:
             subjects.append(message.splitlines()[0])
     subjects.reverse()
