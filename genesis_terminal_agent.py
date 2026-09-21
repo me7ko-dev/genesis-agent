@@ -531,7 +531,29 @@ def _sanitize_for_textmode(messages):
 # останалите са рядко ползвани/неактивни). Достъпни са САМО чрез ръчен избор от
 # `/model` менюто — никога не са били в автоматичната верига (config.yaml).
 # За тях пазим стария директен път като escape hatch.
-_BRAIN_UNKNOWN_PROVIDERS = {"gemini", "github", "openai", "llmstudio", "ollama"}
+# Имена, които съществуват САМО в терминала: Brain не ги знае изобщо (github,
+# llmstudio), или ги знае под друго име с друго поведение (ollama → неговите
+# `ollama_local`/`ollama_cloud`, а локалният мозък и без това му е последна
+# резерва по отделен път).
+#
+# Преди това беше твърд списък, който включваше и `gemini`, и `openai` — а
+# Brain знае и двете. `gemini` влезе в brain.py с този клон (0944032), и от
+# този момент избор на Gemini в `/model` тихо минаваше по стария път, тоест
+# БЕЗ кеширане на промпта, без cooldown при 429/402/503, без деприоритизация
+# на болни доставчици и без общото отчитане. Списък, който описва друг списък,
+# се разминава с него — затова сега се пита самият `_PROVIDERS`.
+_TERMINAL_ONLY_PROVIDERS = {"github", "llmstudio", "ollama"}
+
+
+def _brain_handles(provider: str) -> bool:
+    """Знае ли Brain този доставчик под това име."""
+    if provider in _TERMINAL_ONLY_PROVIDERS:
+        return False
+    try:
+        from genesis_agent.brain import _PROVIDERS
+    except Exception:
+        return False
+    return provider in _PROVIDERS
 
 
 def _ask_via_legacy(messages, tools, prov, model):
@@ -588,7 +610,7 @@ def ask_genesis(messages, tools=None):
     global total_input_tokens, total_output_tokens
 
     # Ръчно избран доставчик, който Brain не познава → стария директен път.
-    if current_provider in _BRAIN_UNKNOWN_PROVIDERS:
+    if not _brain_handles(current_provider):
         return _ask_via_legacy(messages, tools, current_provider, current_model_id)
 
     from genesis_agent.brain import Brain

@@ -182,3 +182,57 @@ class TestTerminalHasTheSameIntegrityCheckAsTheSharedCore:
         from genesis_agent import agent_core
         src = Path(agent_core.__file__).read_text(encoding="utf-8")
         assert "claim_check.unsupported_claims" in src
+
+
+class TestTheTerminalRoutesThroughBrainWhenItCan:
+    """Терминалът има собствен, по-стар път към доставчиците — escape hatch за
+    доставчик, който Brain не знае. Кои са те беше ТВЪРД списък, а той се
+    разминава с това, което описва: `gemini` влезе в brain.py с този клон, а
+    остана изброен като „непознат", тоест избор на Gemini в `/model` тихо
+    заобикаляше кеширането на промпта, cooldown-а при 429/402/503,
+    деприоритизацията на болни доставчици и общото отчитане.
+
+    Сега се пита самият `brain._PROVIDERS`, а тестът пази двете страни да не се
+    разминат отново.
+    """
+
+    def test_a_provider_brain_knows_goes_through_brain(self) -> None:
+        import genesis_terminal_agent as t
+        from genesis_agent.brain import _PROVIDERS
+        for name in sorted(_PROVIDERS):
+            assert t._brain_handles(name), f"{name} е в _PROVIDERS, но отива по стария път"
+
+    def test_gemini_and_openai_specifically(self) -> None:
+        """Двете, които бяха в твърдия списък по погрешка."""
+        import genesis_terminal_agent as t
+        assert t._brain_handles("gemini")
+        assert t._brain_handles("openai")
+
+    def test_the_terminal_only_names_are_really_unknown_to_brain(self) -> None:
+        """Обратната посока: ако Brain научи някое от тези имена, списъкът
+        трябва да се смали, а не да остане да ги отклонява."""
+        import genesis_terminal_agent as t
+        from genesis_agent.brain import _PROVIDERS
+        for name in sorted(t._TERMINAL_ONLY_PROVIDERS):
+            assert name not in _PROVIDERS, (
+                f"Brain вече знае {name!r} — махни го от _TERMINAL_ONLY_PROVIDERS")
+
+    def test_an_unknown_name_falls_back_instead_of_crashing(self) -> None:
+        import genesis_terminal_agent as t
+        assert t._brain_handles("нещо-което-никой-не-знае") is False
+
+    def test_a_broken_brain_import_does_not_take_the_terminal_down(self, monkeypatch) -> None:
+        """Терминалът е фронтендът по подразбиране: счупен внос на brain трябва
+        да го прати по стария път, не да го убие."""
+        import builtins
+
+        import genesis_terminal_agent as t
+        real_import = builtins.__import__
+
+        def _boom(name, *a, **kw):
+            if name == "genesis_agent.brain":
+                raise ImportError("нарочно")
+            return real_import(name, *a, **kw)
+
+        monkeypatch.setattr(builtins, "__import__", _boom)
+        assert t._brain_handles("gemini") is False
