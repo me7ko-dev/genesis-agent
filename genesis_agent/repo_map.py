@@ -96,8 +96,30 @@ def _search_python(root: Path, pattern: str, glob: str | None,
 
 def _search_ripgrep(root: Path, pattern: str, glob: str | None,
                     max_results: int) -> list[Match] | None:
-    """None means 'ripgrep could not answer' — the caller falls back."""
-    cmd = ["rg", "--json", "--max-count", str(max_results), "-e", pattern]
+    """None means 'ripgrep could not answer' — the caller falls back.
+
+    The flags exist to make this path answer the SAME question as
+    `_search_python`, because which one runs depends only on whether `rg`
+    happens to be installed. Measured on this repository before they were
+    added: `search_code("Windows installer self-test", ".")` returned 0 hits
+    with ripgrep and 1 without — the string is in `.github/workflows/ci.yml`,
+    and `.github` is a hidden directory, which ripgrep skips by default. The
+    tool that wraps this tells the model "it really is not there; do not assume
+    it is hidden", so an engine that quietly skips files makes that a lie.
+
+      --hidden        `.github/`, `.claude/`, `.env.example` are real content
+      --no-ignore     `.gitignore` applies to rg and not to the Python path;
+                      generated trees are excluded by `_SKIP_DIRS` instead,
+                      which BOTH paths honour
+      --max-filesize  the Python path skips files over `_MAX_FILE_BYTES`
+
+    `.git/` stays excluded because it is in `_SKIP_DIRS`, which is turned into
+    `--glob !.git/` below — so `--hidden --no-ignore` does not drag in object
+    files.
+    """
+    cmd = ["rg", "--json", "--max-count", str(max_results),
+           "--hidden", "--no-ignore", "--max-filesize", str(_MAX_FILE_BYTES),
+           "-e", pattern]
     for d in sorted(_SKIP_DIRS):
         cmd += ["--glob", f"!{d}/"]
     if glob:
@@ -335,7 +357,20 @@ def detect_project(path: str | Path) -> ProjectInfo:
 
 
 def repo_map(path: str | Path, max_dirs: int = 40) -> str:
-    """A compact, model-readable summary of a project."""
+    """A compact, model-readable summary of a project.
+
+    A file as the root is a routine call — the model has just read
+    `src/main.py` and asks to be shown around it. Before, that raised
+    NotADirectoryError, which `_tool_repo_map` turned into
+    `[REPO_MAP] Грешка: [Errno 20] Not a directory: …`: an errno where an
+    instruction belonged. `search_code` already handles the same input by
+    working on the file's directory, so this does too, and says that it did.
+    """
+    given = Path(path).expanduser()
+    note = ""
+    if given.is_file():
+        note = f"(подаден е файл — картирам папката му: {given.name})\n"
+        path = given.parent
     info = detect_project(path)
     total = sum(info.file_counts.values())
     top = ", ".join(f"{ext or '(без разширение)'}×{n}"
@@ -365,4 +400,4 @@ def repo_map(path: str | Path, max_dirs: int = 40) -> str:
         lines.append("вход: " + ", ".join(info.entry_points))
     lines.append("съдържание:")
     lines.extend(dirs)
-    return "\n".join(lines)
+    return note + "\n".join(lines)
