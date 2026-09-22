@@ -83,6 +83,9 @@ pip install "genesis-agent[browser]" && playwright install chromium   # web auto
 pip install "genesis-agent[discord]"                                  # phone access
 pip install "genesis-agent[voice]"                                    # speak to it
 pip install "genesis-agent[quality]"                                  # lint generated code with ruff
+pip install "genesis-agent[vision]" && ollama pull moondream          # screen understanding
+pip install "genesis-agent[signing]"                                  # RSA-signed skills
+pip install "genesis-agent[all]"                                      # everything above, plus [premium]
 ```
 
 For a local fallback that costs nothing, install [Ollama](https://ollama.com)
@@ -225,8 +228,8 @@ container.
 
 ## The skill library
 
-Ten verified, dependency-free skills ship in `genesis_agent/skills/` — enough to see the
-format and the reuse working. They are not the product; the mechanism is.
+Fourteen verified, dependency-free skills ship in `genesis_agent/skills/` — enough to see
+the format and the reuse working. They are not the product; the mechanism is.
 Point the agent at real work, or run the forge, and the library becomes yours:
 
 ```bash
