@@ -232,7 +232,12 @@ for _k in _OLLAMA_CLOUD_EXTRA_KEYS:
 HAS_OLLAMA_CLOUD_KEY = bool(KEYS.get("OLLAMA_API_KEY") or _ollama_cloud_multi)
 
 # ── Providers & Models ────────────────────────────────────────────────────────
-PROVIDERS = {
+# Анотацията не е козметика: без нея mypy чете стойностите като `object` и
+# всяка ПРОВЕРЕНА функция, която ги индексира, гърми — докато съседните,
+# неанотирани функции минават, защото телата им не се проверяват изобщо.
+# Проверено: всички стойности са str или None и ключовете са едни и същи
+# във всички записи.
+PROVIDERS: dict[str, dict[str, str | None]] = {
     "groq":         {"name": "⚡ Groq",              "key_env": "GROQ_API_KEY",       "base_url": "https://api.groq.com/openai/v1",                        "type": "openai"},
     "gemini":       {"name": "✨ Gemini",             "key_env": "GEMINI_API_KEY",    "base_url": "https://generativelanguage.googleapis.com/v1beta/models",  "type": "gemini"},
     "openrouter":   {"name": "🌌 OpenRouter",         "key_env": "OPENROUTER_API_KEY","base_url": "https://openrouter.ai/api/v1",                          "type": "openai"},
@@ -257,6 +262,13 @@ PROVIDERS = {
     # горните два, затова е маркиран PAID в /model менюто (виж FREE_PROVIDERS).
     "together":     {"name": "🔗 Together AI",        "key_env": "TOGETHER_API_KEY",  "base_url": "https://api.together.xyz/v1",                           "type": "openai"},
     "llmstudio":    {"name": "🖥️  LLM Studio",        "key_env": None,                "base_url": "http://127.0.0.1:1234/v1",                             "type": "openai"},
+    # Vertex няма статичен ключ и няма фиксиран адрес: и двете зависят от
+    # проекта в Google Cloud, а „ключът" е OAuth токен с живот около час.
+    # Затова `key_env` е None и `base_url` се сглобява при нужда — виж
+    # genesis_agent.vertex_auth. Доставчикът беше в brain.py от 0944032, но
+    # не и в това меню, тоест операторът можеше да го настрои и да не може
+    # да го избере.
+    "vertex":       {"name": "🔷 Vertex AI (Google)",  "key_env": None,                "base_url": None,                                                    "type": "vertex"},
 }
 FALLBACKS = {
     "groq":         ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
@@ -271,6 +283,10 @@ FALLBACKS = {
     # Резерва САМО ако живият GET /v1/models не отговори — реалният списък
     # винаги идва от доставчика (fetch_models). Имената на моделите се менят
     # често, затова тук са само няколко потвърдени за август 2026.
+    # Формата `google/<модел>` е тази, която brain.py и тестовете на този клон
+    # вече ползват за Vertex. Живият списък от `/models` се предпочита; това
+    # се показва само ако заявката не мине (липсва токен, няма мрежа).
+    "vertex":       ["google/gemini-2.5-pro", "google/gemini-2.5-flash"],
     "cerebras":     ["llama-4-scout-17b-16e-instruct", "qwen-3-32b"],
     "sambanova":    ["DeepSeek-V3-0324", "Meta-Llama-3.3-70B-Instruct", "gpt-oss-120b"],
     "together":     ["meta-llama/Llama-3.3-70B-Instruct-Turbo"],
@@ -345,6 +361,27 @@ def model_badge(provider_key: str, model_id: str) -> str:
     return "[green bold]FREE[/]" if is_free_model(provider_key, model_id) else "[yellow dim]PAID[/]"
 
 # ── API Calls ────────────────────────────────────────────────────────────────
+def provider_ready(provider_key: str) -> tuple[bool, str]:
+    """(готов ли е, какво липсва) — ЕДИН източник за менюто и за избора.
+
+    Статусът в таблицата и проверката при избор се смятаха поотделно, а
+    условието `key_env is None` значеше „няма нужда от ключ", тоест зелена
+    отметка. За Vertex това е грешно: той няма ключ, но има три други
+    условия (проект, пакет google-auth, credentials) и без тях изборът води
+    до провал по време на разговор, вместо до ясно съобщение тук.
+    """
+    if provider_key not in PROVIDERS:
+        return False, f"непознат доставчик: {provider_key}"
+    p = PROVIDERS[provider_key]
+    if p["type"] == "vertex":
+        from genesis_agent import vertex_auth
+        return vertex_auth.ready(), vertex_auth.status()
+    key_env = p["key_env"]
+    if key_env is None:
+        return True, ""
+    return bool(KEYS.get(key_env)), f"липсва {key_env}"
+
+
 def fetch_models(provider_key):
     if provider_key in MODELS_CACHE:
         return MODELS_CACHE[provider_key]
@@ -369,6 +406,23 @@ def fetch_models(provider_key):
                 MODELS_CACHE[provider_key] = models
                 return models
         except Exception: pass
+    elif p["type"] == "vertex":
+        # Адресът и токенът се вадят при извикване — и двата зависят от
+        # проекта, а токенът живее около час.
+        try:
+            from genesis_agent import vertex_auth
+            projects = vertex_auth.projects()
+            token = vertex_auth.token(projects[0]) if projects else None
+            if token:
+                r = requests.get(f"{vertex_auth.endpoint(projects[0])}/models",
+                                 headers={"Authorization": f"Bearer {token}"}, timeout=10)
+                if r.status_code == 200:
+                    models = sorted(m.get("id", "") for m in r.json().get("data", []))
+                    if models:
+                        MODELS_CACHE[provider_key] = models
+                        return models
+        except Exception:
+            pass
     elif p["type"] == "ollama":
         # Local Ollama — use /api/tags
         try:
@@ -875,8 +929,8 @@ def show_agent_menu():
     opts = list(PROVIDERS.keys())
     for i, pk in enumerate(opts, 1):
         p = PROVIDERS[pk]
-        key_val = KEYS.get(p["key_env"] or "", "") or (p["key_env"] is None)
-        status = "[green]✅[/]" if key_val else "[red]❌[/]"
+        ready, _hint = provider_ready(pk)
+        status = "[green]✅[/]" if ready else "[red]❌[/]"
         active = " [yellow]◀[/]" if pk == current_provider else ""
         table.add_row(str(i), p["name"] + active, status)
     table.add_row("0", "Назад", "")
@@ -891,8 +945,12 @@ def show_agent_menu():
 
     pk = opts[sel-1]
     p = PROVIDERS[pk]
-    if p["key_env"] and not KEYS.get(p["key_env"]):
-        console.print(f"[red]⚠ Няма ключ за {p['name']}![/]")
+    ready, hint = provider_ready(pk)
+    if not ready:
+        # Казва КАКВО липсва, не само че липсва: за Vertex това са три
+        # различни неща (проект, пакет, credentials) и всяко има различна
+        # поправка.
+        console.print(f"[red]⚠ {p['name']} не е готов: {hint}[/]")
         return
 
     with console.status("[dim]Извличам модели...[/]", spinner="dots"):

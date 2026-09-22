@@ -236,3 +236,87 @@ class TestTheTerminalRoutesThroughBrainWhenItCan:
 
         monkeypatch.setattr(builtins, "__import__", _boom)
         assert t._brain_handles("gemini") is False
+
+
+class TestVertexIsSelectableFromTheMenu:
+    """Vertex влезе в brain.py с този клон, но не и в таблицата на терминала —
+    операторът можеше да го настрои по указанията в docs/WINDOWS.md и после да
+    не го намери в `/model`. Проверено преди поправката: `grep -i vertex
+    genesis_terminal_agent.py` не връщаше нищо.
+    """
+
+    def test_it_is_in_the_provider_table(self) -> None:
+        import genesis_terminal_agent as t
+        assert "vertex" in t.PROVIDERS
+
+    def test_choosing_it_goes_through_brain(self) -> None:
+        """Брейн знае `vertex`; ако терминалът го прати по стария път, Vertex
+        губи ротацията на проекти и кеширането."""
+        import genesis_terminal_agent as t
+        assert t._brain_handles("vertex")
+
+    def test_it_is_not_advertised_as_free(self) -> None:
+        """Vertex е платен GCP ресурс. Зелен етикет „free" върху него е
+        подвеждащ по начин, който струва пари."""
+        import genesis_terminal_agent as t
+        assert "vertex" not in t.FREE_PROVIDERS
+        assert t.is_free_model("vertex", "google/gemini-2.5-pro") is False
+
+
+class TestReadinessIsComputedInOnePlace:
+    """Статусът в таблицата и проверката при избора се смятаха поотделно, и
+    двете през `key_env`. За Vertex това дава зелена отметка винаги, защото
+    той НЯМА ключ — има проект, пакет и credentials, и всяко от трите липсва
+    по различен начин."""
+
+    def test_a_provider_without_a_key_is_ready(self) -> None:
+        import genesis_terminal_agent as t
+        ready, _ = t.provider_ready("ollama")
+        assert ready is True
+
+    def test_a_missing_key_is_named(self) -> None:
+        import genesis_terminal_agent as t
+        t.KEYS["GROQ_API_KEY"] = ""
+        ready, hint = t.provider_ready("groq")
+        assert ready is False
+        assert "GROQ_API_KEY" in hint
+
+    def test_vertex_without_a_project_is_not_ready(self, monkeypatch) -> None:
+        import genesis_terminal_agent as t
+        monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+        for i in range(2, 11):
+            monkeypatch.delenv(f"GOOGLE_CLOUD_PROJECT_{i}", raising=False)
+        ready, hint = t.provider_ready("vertex")
+        assert ready is False
+        assert "GOOGLE_CLOUD_PROJECT" in hint, "подсказката трябва да КАЖЕ какво липсва"
+
+    def test_vertex_with_a_project_and_auth_is_ready(self, monkeypatch) -> None:
+        import genesis_terminal_agent as t
+        from genesis_agent import vertex_auth
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "моят-проект")
+        monkeypatch.setattr(vertex_auth, "auth_available", lambda: True)
+        ready, _ = t.provider_ready("vertex")
+        assert ready is True
+
+    def test_an_unknown_provider_is_not_ready(self) -> None:
+        import genesis_terminal_agent as t
+        ready, hint = t.provider_ready("няма-такъв")
+        assert ready is False
+        assert "непознат" in hint
+
+
+class TestTheVertexModelListDegradesInsteadOfFailing:
+    def test_without_credentials_it_falls_back(self, monkeypatch) -> None:
+        """Без ADC заявката за живия списък не може да мине — менюто трябва да
+        покаже нещо, вместо да е празно."""
+        import genesis_terminal_agent as t
+        from genesis_agent import vertex_auth
+        t.MODELS_CACHE.pop("vertex", None)
+        monkeypatch.setattr(vertex_auth, "token", lambda _p: None)
+        models = t.fetch_models("vertex")
+        assert models == t.FALLBACKS["vertex"]
+
+    def test_the_fallback_uses_the_form_the_chain_expects(self) -> None:
+        """`google/<модел>` е формата, с която brain.py вика Vertex."""
+        import genesis_terminal_agent as t
+        assert all(m.startswith("google/") for m in t.FALLBACKS["vertex"])
