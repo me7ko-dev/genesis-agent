@@ -110,6 +110,16 @@ models:
 
     # ─── NVIDIA NIM — най-големите проверени (отделна квота) ──────────
     # deepseek-ai/deepseek-v4-flash-0731 махнат 2026-09-23: 410 Gone (спрян).
+    # 2026-09-23, измерено (bench_models --tasks 21 + първи ход с инструменти):
+    # след стартовия groq gpt-oss-120b (95%, ~1s) идва ollama gpt-oss-120b —
+    # 95%, ~2s/задача, отделна квота и надежден. nemotron-ultra е 100%, когато
+    # е свободен, но 7-14s и NVIDIA реже с лимит след ~8-18 поредни заявки.
+    - provider: "ollama_cloud"
+      model: "gpt-oss:120b-cloud"          # голям общ, потвърден наживо (200)
+      max_tokens: 16384       # мисли и размисълът яде тавана — 4096 се удари наживо;
+                               # 16384 и 32768 приети наживо 2026-09-23
+      size_b: 120
+      supports_tools: true    # потвърдено наживо
     - provider: "nvidia"
       model: "nvidia/nemotron-3-ultra-550b-a55b"   # 550B/55B активни
       size_b: 550
@@ -135,12 +145,6 @@ models:
       max_tokens: 16384       # приет наживо 2026-09-23 (и 32768)
       size_b: 253   # точен брой неизвестен, вероятно същото семейство като
                      # OpenRouter nemotron-3-ultra-550b — консервативна оценка
-      supports_tools: true    # потвърдено наживо
-    - provider: "ollama_cloud"
-      model: "gpt-oss:120b-cloud"          # голям общ, потвърден наживо (200)
-      max_tokens: 16384       # мисли и размисълът яде тавана — 4096 се удари наживо;
-                               # 16384 и 32768 приети наживо 2026-09-23
-      size_b: 120
       supports_tools: true    # потвърдено наживо
 
     # ─── OpenRouter free, по-малките (550B-ят е вече най-горе) ───────
@@ -283,12 +287,12 @@ models:
     - provider: "groq"
       model: "openai/gpt-oss-20b"
       size_b: 20
-    - provider: "nvidia"
-      model: "nvidia/nemotron-3-super-120b-a12b"
-      size_b: 120
     - provider: "ollama_cloud"
       model: "gpt-oss:20b-cloud"
       size_b: 20
+    - provider: "nvidia"
+      model: "nvidia/nemotron-3-super-120b-a12b"
+      size_b: 120
 
   # 2026-09-23: `ling-3.0-flash:free` вече не е безплатен (404 "unavailable for
   # free") — махнат; водач е nemotron-ultra. Измерването по-горе е историческо.

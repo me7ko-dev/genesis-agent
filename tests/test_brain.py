@@ -612,3 +612,32 @@ class TestLightMode:
         head = {(c["provider"], c["model"]) for c in b.chain[:len(light)]}
         assert head == light
         assert len(b.chain) > len(light), "без резерва лека задача може да остане без модел"
+
+
+class TestOverloadIsPerModelNotPerKey:
+    """Bench 2026-09-23: NVIDIA върна 503 „overloaded" за ultra, Brain спря
+    ЦЕЛИЯ NVIDIA ключ за 5 минути и здравият nemotron-super под същия ключ
+    получи 0/21, без нито една заявка."""
+
+    def test_503_on_one_model_leaves_the_next_model_on_the_same_key_usable(self, monkeypatch) -> None:
+        tried: list[str] = []
+
+        def _http(self, base_url, key, model, messages, timeout, tools=None, extra=None):
+            tried.append(model)
+            if model == "busy":
+                raise RuntimeError("HTTP_503: Service temporarily overloaded")
+            return "ok", None
+
+        monkeypatch.setattr(Brain, "_http", _http)
+        monkeypatch.setattr(Brain, "_provider_key", lambda self, env: "k")
+        monkeypatch.setattr(Brain, "_numbered_keys", lambda self, env: ["k"])
+        b = Brain(use_local=False)
+        b.chain = [{"provider": "nvidia", "model": "busy", "size_b": 0, "supports_tools": False},
+                   {"provider": "nvidia", "model": "healthy", "size_b": 0, "supports_tools": False}]
+        assert b.complete([{"role": "user", "content": "x"}]).raw_text == "ok"
+        assert tried == ["busy", "healthy"]
+        assert not brain_mod._is_exhausted("key::NVIDIA_API_KEY")
+
+    def test_quota_errors_still_stop_the_whole_key(self) -> None:
+        assert {429, 402, 401, 403} <= brain_mod._KEY_DEAD_CODES
+        assert 503 not in brain_mod._KEY_DEAD_CODES

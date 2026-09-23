@@ -225,6 +225,11 @@ def _local_available(model: str) -> bool:
 _FALLBACK_CODES = {400, 401, 402, 403, 404, 408, 429, 500, 502, 503}
 # Кодове, при които моделът/квотата е ВРЕМЕННО изчерпан → cooldown, не го пробвай пак веднага.
 _EXHAUST_CODES = {429, 402, 503}
+# Кодове, които значат, че КЛЮЧЪТ е негоден (квота, плащане, auth) — тогава
+# се спира целият ключ. 503 „претоварен" НЕ е тук (bench 2026-09-23): той е за
+# един модел, а спирането на ключа прати 0/21 и на здравия nemotron-super под
+# същия NVIDIA ключ. 503 остава cooldown само за модела (в complete()).
+_KEY_DEAD_CODES = {429, 402, 401, 403}
 _EXHAUST_COOLDOWN = 300  # секунди (5 мин) — колкото типичен OpenRouter free reset
 # 410 Gone = доставчикът е спрял модела завинаги (на живо 2026-09-23: NVIDIA
 # openai/gpt-oss-120b). Пет минути cooldown само го отлагат — пропуска се до
@@ -1200,10 +1205,10 @@ class Brain:
             return self._http(base_url, key, model, messages, self.timeout, tools=tools)
         except RuntimeError as e:
             last = str(e)
-            # 429/402/503 (quota gone) or 401/403 (bad or forbidden key): this
+            # 429/402 (quota gone) or 401/403 (bad or forbidden key): this
             # provider is unusable for a while. Mark it and let the chain move
             # on to the next provider rather than hammering a dead endpoint.
-            if any(f"HTTP_{c}" in last for c in _EXHAUST_CODES | {401, 403}):
+            if any(f"HTTP_{c}" in last for c in _KEY_DEAD_CODES):
                 _mark_exhausted(kid)
                 print(f"  [Brain] 🔑 {key_env} unavailable ({last[:60]}) → next provider")
             raise
@@ -1236,7 +1241,7 @@ class Brain:
             except RuntimeError as e:
                 last = str(e)
                 last_err = e
-                if any(f"HTTP_{c}" in last for c in _EXHAUST_CODES | {401, 403}):
+                if any(f"HTTP_{c}" in last for c in _KEY_DEAD_CODES):
                     _mark_exhausted(kid)
                     print(f"  [Brain] 🔑 {key_env}#{idx} unavailable ({last[:60]}) → next key")
                     continue
@@ -1284,7 +1289,7 @@ class Brain:
             except RuntimeError as e:
                 last = str(e)
                 last_err = e
-                if any(f"HTTP_{c}" in last for c in _EXHAUST_CODES | {401, 403}):
+                if any(f"HTTP_{c}" in last for c in _KEY_DEAD_CODES):
                     _mark_exhausted(kid)
                     print(f"  [Brain] 🔑 vertex/{project} unavailable ({last[:60]}) → next")
                     continue
