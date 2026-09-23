@@ -1281,10 +1281,19 @@ def main():
                 help_table.add_row("/autoupgrade", "Пуска ковачницата (нови умения) на заден план")
                 help_table.add_row("/backup", "Архивиране към GENESIS_BACKUP_DIR")
                 help_table.add_row("/update", "Провери и обнови от GitHub (питa за потвърждение)")
+                help_table.add_row("/skills", "Списък с уменията (без модел, мигновено)")
                 help_table.add_row("/tasks", "Състояние на работата — отворени нишки, решения")
                 help_table.add_row("/done <id>", "Затвори нишка като готова (/drop <id> = изхвърли)")
                 help_table.add_row("exit / quit", "Изход")
                 console.print(Panel(help_table, title="[bold cyan]◈ GENESIS КОМАНДИ ◈[/]", border_style="cyan"))
+                continue
+
+            if user_input.lower() in ("/skills", "/умения"):
+                try:
+                    from genesis_agent.skill_loader import format_skill_list
+                    console.print(format_skill_list(), markup=False, highlight=False)
+                except Exception as e:
+                    console.print(f"[red]⚠ {e}[/]")
                 continue
 
             # ── Затваряне/изхвърляне на нишка (хигиена) ──

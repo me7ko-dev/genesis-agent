@@ -356,3 +356,17 @@ class TestUseSkillResolvesFromBulgarian:
     def test_one_shared_word_is_not_enough_in_bulgarian_either(self, _library) -> None:
         name, _ = sl.resolve_skill("файлове")
         assert name is None
+
+
+def test_format_skill_list_names_every_skill_and_marks_verified(monkeypatch) -> None:
+    """`/skills` и `genesis skills` — без модел. На живо въпросът „какви
+    умения имаш" изгори два рунда в USE_SKILL заявки, които нямаше как да
+    сработят."""
+    monkeypatch.setattr(sl, "_SKILLS_INDEX_CACHE", {
+        "zeta": {"verified": False, "description": "draft"},
+        "alpha": {"verified": True, "description": "x" * 200},
+    })
+    out = sl.format_skill_list(width=20).splitlines()
+    assert out[0] == "2 умения, 1 verified"
+    assert out[1].startswith("  ✓ alpha — ") and len(out[1]) < 50
+    assert out[2] == "  · zeta — draft"

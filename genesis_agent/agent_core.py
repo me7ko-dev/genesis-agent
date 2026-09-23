@@ -18,6 +18,7 @@ import re
 import traceback
 from collections import deque
 from collections.abc import Callable
+from datetime import date
 from pathlib import Path
 
 from genesis_agent.config import TOOL_ROUND_CAP
@@ -91,7 +92,11 @@ def env_facts(workspace: str = "") -> str:
     # казваше буквално "(потребител: unknown)" на всяка сесия там — точно вида
     # факт, който функцията съществува да НЕ оставя на модела да отгатва.
     user = os.environ.get("USER") or os.environ.get("USERNAME") or home.name or "unknown"
-    lines = [f"- Домашна директория: {home}   (потребител: {user})"]
+    # Датата също е факт, не догадка: на живо моделът кръсти архив
+    # `...-20260812.zip` на 2026-09-23. Системните промптове се сглобяват в
+    # началото на сесия, така че денят не се сменя под краката на кеша.
+    lines = [f"- Днес: {date.today().isoformat()}",
+             f"- Домашна директория: {home}   (потребител: {user})"]
     for label, key in (("Десктоп", "DESKTOP"), ("Изтегляния", "DOWNLOAD"),
                        ("Документи", "DOCUMENTS"), ("Снимки", "PICTURES")):
         p = dirs[key]
