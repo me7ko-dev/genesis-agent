@@ -42,3 +42,4 @@ htmlcov/
 .DS_Store
 .idea/
 .vscode/
+model_check.json
