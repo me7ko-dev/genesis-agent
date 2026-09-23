@@ -1,0 +1,124 @@
+{
+  "checked_at": "2026-09-23T22:14:57.828872+00:00",
+  "results": [
+    {
+      "provider": "groq",
+      "model": "openai/gpt-oss-120b",
+      "status": "ok",
+      "code": 200,
+      "latency": 0.5,
+      "detail": ""
+    },
+    {
+      "provider": "ollama_cloud",
+      "model": "gpt-oss:120b-cloud",
+      "status": "ok",
+      "code": 200,
+      "latency": 1.0,
+      "detail": ""
+    },
+    {
+      "provider": "nvidia",
+      "model": "nvidia/nemotron-3-ultra-550b-a55b",
+      "status": "ok",
+      "code": 200,
+      "latency": 1.5,
+      "detail": ""
+    },
+    {
+      "provider": "openrouter",
+      "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+      "status": "ok",
+      "code": 200,
+      "latency": 2.6,
+      "detail": ""
+    },
+    {
+      "provider": "ollama_cloud",
+      "model": "nemotron-3-ultra:cloud",
+      "status": "ok",
+      "code": 200,
+      "latency": 2.3,
+      "detail": ""
+    },
+    {
+      "provider": "openrouter",
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "status": "ok",
+      "code": 200,
+      "latency": 1.0,
+      "detail": ""
+    },
+    {
+      "provider": "openrouter",
+      "model": "google/gemma-4-31b-it:free",
+      "status": "busy",
+      "code": 429,
+      "latency": 0.7,
+      "detail": "{\"error\":{\"message\":\"Provider returned error\",\"code\":429,\"metadata\":{\"raw\":\"google/gemma-4-31b-it:free is temporarily ra"
+    },
+    {
+      "provider": "huggingface",
+      "model": "deepseek-ai/DeepSeek-V3-0324",
+      "status": "nokey",
+      "detail": "HF_TOKEN"
+    },
+    {
+      "provider": "huggingface",
+      "model": "meta-llama/Llama-3.3-70B-Instruct",
+      "status": "nokey",
+      "detail": "HF_TOKEN"
+    },
+    {
+      "provider": "huggingface",
+      "model": "Qwen/Qwen2.5-72B-Instruct",
+      "status": "nokey",
+      "detail": "HF_TOKEN"
+    },
+    {
+      "provider": "huggingface",
+      "model": "Qwen/Qwen2.5-Coder-32B-Instruct",
+      "status": "nokey",
+      "detail": "HF_TOKEN"
+    },
+    {
+      "provider": "nvidia",
+      "model": "nvidia/nemotron-3-super-120b-a12b",
+      "status": "ok",
+      "code": 200,
+      "latency": 1.4,
+      "detail": ""
+    },
+    {
+      "provider": "nvidia",
+      "model": "mistralai/mistral-nemotron",
+      "status": "error",
+      "detail": "ReadTimeout",
+      "latency": 30.3
+    },
+    {
+      "provider": "openrouter",
+      "model": "poolside/laguna-s-2.1:free",
+      "status": "busy",
+      "code": 429,
+      "latency": 0.7,
+      "detail": "{\"error\":{\"message\":\"Provider returned error\",\"code\":429,\"metadata\":{\"raw\":\"poolside/laguna-s-2.1:free is temporarily ra"
+    },
+    {
+      "provider": "groq",
+      "model": "openai/gpt-oss-20b",
+      "status": "ok",
+      "code": 200,
+      "latency": 0.3,
+      "detail": ""
+    },
+    {
+      "provider": "ollama_cloud",
+      "model": "gpt-oss:20b-cloud",
+      "status": "ok",
+      "code": 200,
+      "latency": 2.0,
+      "detail": ""
+    }
+  ]
+}
