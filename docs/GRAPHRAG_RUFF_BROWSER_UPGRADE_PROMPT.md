@@ -1,5 +1,11 @@
 # Upgrade plan: Ruff pre-validation, browser bbox, graph memory
 
+> **Status: implemented.** All three features have landed — see
+> `genesis_agent/code_validate.py` (the `[quality]` extra),
+> `_SCAN_JS` in `genesis_agent/browser.py`, and
+> `genesis_agent/knowledge_graph.py`. The "status check" below describes the
+> repo as it was on 2026-07-29 and is kept only as history.
+
 Written 2026-07-29 at end of a session that ran out of quota — this is the
 implementation prompt for whoever (human or Claude) picks this up next.
 **Grounded against the actual code, not assumptions** — the original ask
