@@ -27,9 +27,6 @@ def _no_local_probe(monkeypatch):
     monkeypatch.setattr("genesis_agent.brain._local_available", lambda _m: False)
 
 
-@pytest.fixture(autouse=True)
-def _no_last_model(monkeypatch):
-    monkeypatch.setattr("genesis_agent.brain._load_last_model", lambda: None)
 
 
 @pytest.fixture
