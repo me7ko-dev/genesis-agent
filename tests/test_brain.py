@@ -614,3 +614,32 @@ class TestGoneModelIsSkipped:
         assert b.complete([{"role": "user", "content": "hi"}]).raw_text == "ok"
         assert b.complete([{"role": "user", "content": "hi"}]).raw_text == "ok"
         assert calls == ["dead", "alive", "alive"]
+
+class TestLightMode:
+    """Второстепенна работа (извличане на памет, резюмета) — първо на бързите
+    `light_models`. Наживо: 0.6-3s срещу 8-45s на nemotron-ultra за едно и
+    също JSON извличане."""
+
+    def test_light_models_go_first_and_the_full_chain_stays_below(self) -> None:
+        light = {(c["provider"], c["model"]) for c in brain_mod._load_light_chain()}
+        assert light, "config.yaml трябва да има light_models"
+        b = Brain(light=True, use_local=False)
+        head = {(c["provider"], c["model"]) for c in b.chain[:len(light)]}
+        assert head == light
+        assert len(b.chain) > len(light), "без резерва лека задача може да остане без модел"
+
+    def test_a_light_success_is_not_remembered_as_the_chat_model(self, monkeypatch) -> None:
+        saved: list = []
+        monkeypatch.setattr(brain_mod, "_save_last_model", lambda p, m: saved.append((p, m)))
+        monkeypatch.setattr(Brain, "_call", lambda self, p, m, msgs, tools=None, extra=None: ("ok", None))
+        b = Brain(light=True, use_local=False)
+        assert b.complete([{"role": "user", "content": "x"}]).raw_text == "ok"
+        assert saved == [], "иначе следващият чат тръгва от малкия модел"
+
+    def test_light_mode_ignores_the_remembered_chat_model(self, monkeypatch) -> None:
+        big = ("ollama_cloud", "nemotron-3-ultra:cloud")
+        monkeypatch.setattr(brain_mod, "_load_last_model", lambda: big)
+        assert (Brain(use_local=False).chain[0]["provider"], Brain(use_local=False).chain[0]["model"]) == big
+        light_first = brain_mod._load_light_chain()[0]
+        b = Brain(light=True, use_local=False)
+        assert (b.chain[0]["provider"], b.chain[0]["model"]) == (light_first["provider"], light_first["model"])

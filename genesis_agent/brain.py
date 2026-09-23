@@ -400,6 +400,23 @@ def _load_coding_chain() -> list[dict]:
     return out
 
 
+def _load_light_chain() -> list[dict]:
+    """`models.light_models` — бързите модели за второстепенната работа
+    (извличане на памет, резюмета). Виж коментара в config.yaml за мерките."""
+    try:
+        cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return []
+    out: list[dict] = []
+    for entry in (cfg.get("models", {}) or {}).get("light_models", []) or []:
+        provider, model = entry.get("provider"), entry.get("model")
+        if provider in _PROVIDERS and model:
+            out.append({"provider": provider, "model": model,
+                        "size_b": entry.get("size_b", 0),
+                        "supports_tools": bool(entry.get("supports_tools", False))})
+    return out
+
+
 def _load_premium_chain() -> list[dict]:
     """
     Платените модели от config.yaml (`models.premium_models`).
@@ -437,7 +454,7 @@ class Brain:
 
     def __init__(self, prefer_provider: str | None = None, use_local: bool = True,
                  min_size_b: float = 0, pin_model: tuple[str, str] | None = None,
-                 quality: str | None = None):
+                 quality: str | None = None, light: bool = False):
         self.keys = _load_keys()
         self.chain = _load_chain()
         self.timeout = CLOUD_TIMEOUT
@@ -462,6 +479,16 @@ class Brain:
         # свършена квота значи по-слаб отговор, не спрял агент. Прилага се
         # СЛЕД min_size_b нарочно: филтърът рангира безплатни модели по размер и
         # няма власт над изричен избор на оператора.
+        # light (design note, 2026-09-23): второстепенна работа — извличане на
+        # памет, резюмета — отива първо на бързите `light_models` (0.6-3s срещу
+        # 8-45s на голям модел), с цялата верига отдолу като резерва. Курира се
+        # под min_size_b по същата причина като coding: изричен избор, не размер.
+        self.light = light
+        if light:
+            fast = _load_light_chain()
+            already = {(c["provider"], c["model"]) for c in fast}
+            self.chain = fast + [c for c in self.chain
+                                 if (c["provider"], c["model"]) not in already]
         self.quality = (quality or os.environ.get("GENESIS_QUALITY") or "").strip().lower()
         self.premium: list[dict] = []
         self._premium_meta: dict[tuple[str, str], dict] = {}
@@ -520,7 +547,9 @@ class Brain:
         # завършил успешно предния път — записано от `_save_last_model` в
         # complete()/_call_local(). Съвсем същият механизъм като pin_model
         # по-долу: първо в опашката, но с нормален fallback ако вече не е наличен.
-        if not pin_model and not prefer_provider:
+        # Не и в лекия режим: „последният модел" е този на главния разговор —
+        # да го сложим пред бързите модели би обезсмислило целия режим.
+        if not pin_model and not prefer_provider and not light:
             last = _load_last_model()
             if last:
                 pin_model = last
@@ -839,7 +868,7 @@ class Brain:
             return deque(parts, maxlen=maxlen) if maxlen else parts
 
         try:
-            brain = Brain()
+            brain = Brain(light=True)  # резюме — второстепенна работа
             summary_reply = brain.complete([
                 {"role": "system", "content": (
                     "Обобщи накратко (5-8 изречения) ключовите факти, решения и контекст "
@@ -1314,7 +1343,8 @@ class Brain:
                 raw_text, _tc = self._call(loc["provider"], loc["model"], trimmed)
                 self._fail_count = 0
                 self.current = self.local
-                _save_last_model(loc["provider"], loc["model"])
+                if not getattr(self, "light", False):
+                    _save_last_model(loc["provider"], loc["model"])
                 code = ""
                 if "```python" in raw_text:
                     code = raw_text.split("```python")[1].split("```")[0].strip()
@@ -1584,7 +1614,10 @@ class Brain:
                         self._record_stat(prov, time.time() - t0, True)
                         self._fail_count = 0
                         self.current = attempt
-                        _save_last_model(prov, model)
+                        if not getattr(self, "light", False):
+                            # Лек успех не е „последният модел" на разговора —
+                            # иначе чатът ще тръгне следващия път от малкия модел.
+                            _save_last_model(prov, model)
                         if step > 0 or round_i > 0:
                             print(f"  [Brain] ↪ модел: {prov}/{model}")
                         code = ""

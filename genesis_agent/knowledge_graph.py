@@ -104,7 +104,7 @@ def compact_and_graph_memory(session_logs: str) -> dict[str, Any]:
         prompt = _EXTRACT_PROMPT.replace(
             "__TRANSCRIPT__", session_logs[-_MAX_LOG_CHARS:]
         )
-        reply = Brain(min_size_b=120).complete([{"role": "user", "content": prompt}])
+        reply = Brain(min_size_b=120, light=True).complete([{"role": "user", "content": prompt}])
         extracted = _parse_llm_json(reply.raw_text)
         # Валиден JSON със СГРЕШЕНА форма минаваше през except-а по-долу,
         # защото парсването е успяло — и after that `extracted.get(...)` гърми
