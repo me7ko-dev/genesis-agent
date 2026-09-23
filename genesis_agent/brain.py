@@ -44,7 +44,6 @@ from genesis_agent.paths import (
     CONFIG_PATH,
     ENV_FILES,
     _strip_inline_comment,
-    last_model_path,
 )
 
 # Extra ollama_cloud keys an operator may add THEMSELVES to their own
@@ -263,31 +262,6 @@ def _is_truncated(text: str) -> bool:
     целия LLM път до тази поправка.
     """
     return text.count("```") % 2 == 1
-
-
-def _load_last_model() -> tuple[str, str] | None:
-    """(provider, model) Brain last completed successfully with, or None on
-    first run / corrupt file. Never raises — a missing or bad file just means
-    'start from the top of the chain', the same as before this existed."""
-    try:
-        data = json.loads(last_model_path().read_text(encoding="utf-8"))
-        provider, model = data.get("provider"), data.get("model")
-        if provider and model:
-            return str(provider), str(model)
-    except Exception:
-        pass
-    return None
-
-
-def _save_last_model(provider: str, model: str) -> None:
-    """Best-effort — a failed write should never break a completion that
-    already succeeded, so this swallows its own errors."""
-    try:
-        p = last_model_path()
-        p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        p.write_text(json.dumps({"provider": provider, "model": model}), encoding="utf-8")
-    except Exception as e:
-        log.debug("could not persist last_model: %s", e)
 
 
 def _load_keys() -> dict[str, str]:
@@ -540,19 +514,10 @@ class Brain:
             if use_local and _local_available(LOCAL_MODEL):
                 self.local = {"provider": "ollama_local", "model": LOCAL_MODEL}
 
-        # Резюме на последния успешен модел (design note, added at operator's
-        # request): ако никой не е избрал изрично pin_model за тази сесия (и
-        # не сме в prefer_provider паралелен worker, който има собствена
-        # логика), опитваме последното (provider, model), с което Brain е
-        # завършил успешно предния път — записано от `_save_last_model` в
-        # complete()/_call_local(). Съвсем същият механизъм като pin_model
-        # по-долу: първо в опашката, но с нормален fallback ако вече не е наличен.
-        # Не и в лекия режим: „последният модел" е този на главния разговор —
-        # да го сложим пред бързите модели би обезсмислило целия режим.
-        if not pin_model and not prefer_provider and not light:
-            last = _load_last_model()
-            if last:
-                pin_model = last
+        # Последният модел НЕ се помни между сесиите (махнато 2026-09-23 по
+        # искане на оператора): стартът е винаги default_model_id от
+        # config.yaml. Помненето залепваше чата за бавен 550B модел, а тест с
+        # фалшива верига веднъж го презаписа с несъществуващ модел.
 
         # pin_model (design note, 2026-07-25): ТОЧЕН (provider, model) отпред — за
         # ръчния избор от терминалния `/model` меню. Не РЕЖЕ веригата (за
@@ -1343,8 +1308,6 @@ class Brain:
                 raw_text, _tc = self._call(loc["provider"], loc["model"], trimmed)
                 self._fail_count = 0
                 self.current = self.local
-                if not getattr(self, "light", False):
-                    _save_last_model(loc["provider"], loc["model"])
                 code = ""
                 if "```python" in raw_text:
                     code = raw_text.split("```python")[1].split("```")[0].strip()
@@ -1614,10 +1577,6 @@ class Brain:
                         self._record_stat(prov, time.time() - t0, True)
                         self._fail_count = 0
                         self.current = attempt
-                        if not getattr(self, "light", False):
-                            # Лек успех не е „последният модел" на разговора —
-                            # иначе чатът ще тръгне следващия път от малкия модел.
-                            _save_last_model(prov, model)
                         if step > 0 or round_i > 0:
                             print(f"  [Brain] ↪ модел: {prov}/{model}")
                         code = ""

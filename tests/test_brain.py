@@ -247,33 +247,18 @@ class TestExhaustionCooldown:
         assert "groq" not in brain_mod._EXHAUSTED
 
 
-class TestLastModelPersistence:
-    def _isolate(self, monkeypatch, tmp_path):
-        p = tmp_path / "last_model.json"
-        monkeypatch.setattr(brain_mod, "last_model_path", lambda: p)
-        return p
+class TestNoModelIsRemembered:
+    """Операторът (2026-09-23): стартът е бърз модел и нищо не се помни."""
 
-    def test_missing_file_returns_none(self, monkeypatch, tmp_path) -> None:
-        self._isolate(monkeypatch, tmp_path)
-        assert brain_mod._load_last_model() is None
+    def test_the_default_is_the_fast_model_not_the_550b(self) -> None:
+        first = Brain(use_local=False).chain[0]
+        assert (first["provider"], first["model"]) == ("groq", "openai/gpt-oss-120b")
 
-    def test_corrupt_file_returns_none_not_an_exception(self, monkeypatch, tmp_path) -> None:
-        p = self._isolate(monkeypatch, tmp_path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("not json at all", encoding="utf-8")
-        assert brain_mod._load_last_model() is None
-
-    def test_save_then_load_round_trips(self, monkeypatch, tmp_path) -> None:
-        self._isolate(monkeypatch, tmp_path)
-        brain_mod._save_last_model("groq", "llama-3.3-70b-versatile")
-        assert brain_mod._load_last_model() == ("groq", "llama-3.3-70b-versatile")
-
-    def test_save_never_raises_even_if_the_path_is_unwritable(self, monkeypatch, tmp_path) -> None:
-        # Point at a path whose parent cannot be created (a file, not a dir).
-        blocker = tmp_path / "blocker"
-        blocker.write_text("x", encoding="utf-8")
-        monkeypatch.setattr(brain_mod, "last_model_path", lambda: blocker / "last_model.json")
-        brain_mod._save_last_model("groq", "some-model")  # must not raise
+    def test_nothing_about_the_last_model_is_kept(self) -> None:
+        from genesis_agent import paths
+        assert not hasattr(brain_mod, "_save_last_model")
+        assert not hasattr(brain_mod, "_load_last_model")
+        assert not hasattr(paths, "last_model_path")
 
 
 class TestOllamaCloudKeys:
@@ -627,19 +612,3 @@ class TestLightMode:
         head = {(c["provider"], c["model"]) for c in b.chain[:len(light)]}
         assert head == light
         assert len(b.chain) > len(light), "без резерва лека задача може да остане без модел"
-
-    def test_a_light_success_is_not_remembered_as_the_chat_model(self, monkeypatch) -> None:
-        saved: list = []
-        monkeypatch.setattr(brain_mod, "_save_last_model", lambda p, m: saved.append((p, m)))
-        monkeypatch.setattr(Brain, "_call", lambda self, p, m, msgs, tools=None, extra=None: ("ok", None))
-        b = Brain(light=True, use_local=False)
-        assert b.complete([{"role": "user", "content": "x"}]).raw_text == "ok"
-        assert saved == [], "иначе следващият чат тръгва от малкия модел"
-
-    def test_light_mode_ignores_the_remembered_chat_model(self, monkeypatch) -> None:
-        big = ("ollama_cloud", "nemotron-3-ultra:cloud")
-        monkeypatch.setattr(brain_mod, "_load_last_model", lambda: big)
-        assert (Brain(use_local=False).chain[0]["provider"], Brain(use_local=False).chain[0]["model"]) == big
-        light_first = brain_mod._load_light_chain()[0]
-        b = Brain(light=True, use_local=False)
-        assert (b.chain[0]["provider"], b.chain[0]["model"]) == (light_first["provider"], light_first["model"])

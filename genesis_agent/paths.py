@@ -142,9 +142,3 @@ def ensure_genesis_home() -> Path:
     return GENESIS_HOME
 
 
-def last_model_path() -> Path:
-    """Where Brain remembers the last (provider, model) it completed with,
-    so the next process start resumes on it instead of always re-picking
-    the top of the chain. Same directory as the API keys, same privacy
-    expectations — gitignored, per-machine, never committed."""
-    return GENESIS_HOME / "last_model.json"

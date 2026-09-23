@@ -36,10 +36,12 @@ models:
   # по себе си не ги променяше — стартовият модел си оставаше gpt-oss:120b,
   # въпреки че веригата вече води с 550B. Сега сочат към същия най-голям
   # проверен модел, който е и №1 във веригата.
-  # ЗАБЕЛЕЖКА: `~/.genesis/last_model.json` (resume-last-model) има ПРИОРИТЕТ
-  # над това при следващ старт — виж `_load_last_model` в brain.py.
-  default_provider: "nvidia"
-  default_model_id: "nvidia/nemotron-3-ultra-550b-a55b"
+  # 2026-09-23, по искане на оператора: стартът е БЪРЗ модел, не 550B. Groq
+  # gpt-oss-120b беше най-бързият с инструменти наживо (0.4-1.5s срещу 8-45s за
+  # ollama nemotron-ultra), с native tool_calls. При 429 веригата продължава
+  # надолу както преди. Последният модел вече НЕ се помни между сесиите.
+  default_provider: "groq"
+  default_model_id: "openai/gpt-oss-120b"
   context_window: 131072
 
   # МИНИМУМ ~20-30B параметъра за ВСЕКИ модел във веригата (design note, 2026-07-25:

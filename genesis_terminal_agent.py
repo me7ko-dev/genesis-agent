@@ -295,7 +295,7 @@ FALLBACKS = {
 
 MODELS_CACHE: dict[str, list[str]] = {}
 current_provider = config.get("models", {}).get("default_provider", "groq")
-current_model_id = config.get("models", {}).get("default_model_id", "llama-3.3-70b-versatile")
+current_model_id = config.get("models", {}).get("default_model_id", "openai/gpt-oss-120b")
 
 # Fallback chain from config (in order, tried on quota/rate-limit errors).
 # min 32B (design note, 2026-07-25): терминалният чат е основният coding assistant —
