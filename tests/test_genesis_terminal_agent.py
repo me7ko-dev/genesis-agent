@@ -10,6 +10,7 @@ max_tokens ceiling came back looking like a normal, complete answer.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -320,3 +321,53 @@ class TestTheVertexModelListDegradesInsteadOfFailing:
         """`google/<модел>` е формата, с която brain.py вика Vertex."""
         import genesis_terminal_agent as t
         assert all(m.startswith("google/") for m in t.FALLBACKS["vertex"])
+
+
+class _FakeBrain:
+    """Brain с предварително зададени отговори: лек и силен поотделно."""
+    calls: ClassVar[list] = []
+    light_reply: ClassVar[tuple] = ("лек отговор", None)
+    strong_reply: ClassVar[tuple] = ("силен отговор", None)
+
+    def __init__(self, *a, light=False, **kw) -> None:
+        self.light = light
+        self.current = {"provider": "groq" if light else "nvidia",
+                        "model": "small" if light else "big"}
+
+    def complete(self, messages, tools=None, **kw):
+        _FakeBrain.calls.append("light" if self.light else "strong")
+        text, calls = _FakeBrain.light_reply if self.light else _FakeBrain.strong_reply
+        return type("R", (), {"raw_text": text, "tool_calls": calls, "usage": None})()
+
+
+@pytest.fixture
+def _routed(monkeypatch):
+    _FakeBrain.calls = []
+    _FakeBrain.light_reply = ("лек отговор", None)
+    monkeypatch.setattr("genesis_agent.brain.Brain", _FakeBrain)
+    monkeypatch.setattr(gta, "_brain_handles", lambda p: True)
+    monkeypatch.setattr(gta, "_CODING_MODE", False)
+    monkeypatch.delenv("GENESIS_CHAT_ROUTING", raising=False)
+    return _FakeBrain
+
+
+def test_a_plain_question_is_answered_by_the_small_model(_routed) -> None:
+    text, _ = gta.ask_genesis([{"role": "user", "content": "какво е рекурсия?"}], tools=[{}])
+    assert text == "лек отговор" and _routed.calls == ["light"]
+
+
+def test_work_goes_straight_to_the_strong_model(_routed) -> None:
+    text, _ = gta.ask_genesis([{"role": "user", "content": "napravi backup na proekta"}], tools=[{}])
+    assert text == "силен отговор" and _routed.calls == ["strong"]
+
+
+def test_the_small_model_reaching_for_a_tool_hands_the_turn_to_the_strong_one(_routed) -> None:
+    _routed.light_reply = ("[LIST_DIR: ~]", None)
+    text, _ = gta.ask_genesis([{"role": "user", "content": "какво е рекурсия?"}], tools=[{}])
+    assert text == "силен отговор" and _routed.calls == ["light", "strong"]
+
+
+def test_maxcoding_never_routes_to_the_small_model(_routed, monkeypatch) -> None:
+    monkeypatch.setattr(gta, "_CODING_MODE", True)
+    gta.ask_genesis([{"role": "user", "content": "какво е рекурсия?"}], tools=[{}])
+    assert _routed.calls == ["strong"]

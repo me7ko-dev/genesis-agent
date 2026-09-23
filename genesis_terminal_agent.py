@@ -668,6 +668,36 @@ def ask_genesis(messages, tools=None):
         return _ask_via_legacy(messages, tools, current_provider, current_model_id)
 
     from genesis_agent.brain import Brain
+
+    # Лек въпрос → малък модел (виж model_router.is_light_turn). Не и в
+    # /maxcoding — операторът изрично е поискал най-силните.
+    if not _CODING_MODE:
+        try:
+            from genesis_agent.model_router import (
+                is_light_turn,
+                light_reply_needs_escalation,
+            )
+            if is_light_turn(messages):
+                lb = Brain(light=True, use_local=False)
+                # БЕЗ инструменти, нарочно: с tools Brain слага отпред моделите
+                # със supports_tools и леките слизат отзад (на живо отговаряше
+                # gpt-oss-120b, не 20b), а ~2.5k токена схеми на лек въпрос са
+                # чист разход. Поиска ли все пак инструмент (текстов таг) —
+                # ескалира по-долу.
+                lr = lb.complete(list(messages), tools=None)
+                l_text = lr.raw_text or ""
+                l_calls = getattr(lr, "tool_calls", None)
+                if not light_reply_needs_escalation(l_text, l_calls):
+                    usage = getattr(lr, "usage", None) or {}
+                    total_input_tokens += usage.get("prompt_tokens", 0)
+                    total_output_tokens += usage.get("completion_tokens", 0)
+                    if lb.current:
+                        console.print(f"[dim]⚡ лек въпрос → {lb.current.get('provider')}/"
+                                      f"{lb.current.get('model')}[/]")
+                    return l_text, None
+        except Exception:
+            pass  # маршрутизацията е оптимизация — при каквато и да е грешка, силният модел
+
     # Кодинг режимът (/maxcoding) нарочно бие ръчния пин: ако избраният в
     # `/model` модел остане пръв, режимът не прави нищо, а изглежда включен.
     brain = Brain(min_size_b=_TERMINAL_MIN_SIZE_B,

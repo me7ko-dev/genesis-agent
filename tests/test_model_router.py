@@ -120,3 +120,78 @@ class TestNextTierModel:
     def test_none_current_starts_escalation_from_the_bottom(self, monkeypatch) -> None:
         monkeypatch.setattr(mr, "available_tiers", lambda: [False, True, False])
         assert mr.next_tier_model(None) == mr.LOCAL_TIERS[1]
+
+
+# ── Чат маршрутизация: лек въпрос → малък модел ──────────────────────────────
+# Примерите са от реалния начин, по който операторът пише — кирилица И латиница.
+
+@pytest.mark.parametrize("text", [
+    "здрасти",
+    "какво е рекурсия?",
+    "колко е 17 по 23",
+    "obqsni mi razlikata mejdu tcp i udp",
+    "what is a closure in python?",
+    "благодаря!",
+])
+def test_plain_questions_are_light(text) -> None:
+    assert mr.is_light_request(text) is True
+
+
+@pytest.mark.parametrize("text", [
+    "nameri i napravi backup genesis v disk D: v zip fail",   # реално съобщение
+    "napravi go v C diska",
+    "поправи бъга в stats.py",
+    "да",                      # потвърждение продължава предишната задача
+    "davai",
+    "da, slei PR-a i pochistvai",
+    "колко файла има на десктопа?",
+    "fix the failing test",
+    "какво има в C:\\Users\\roika",
+    "виж https://example.com",
+    "```print(1)```",
+    "x" * 200,                 # дълго = вероятно задача
+    "какво време е навън?",    # актуално → търсене в мрежата
+    "kakav e kursa na evroto",
+    "latest news about AI",
+])
+def test_work_and_confirmations_go_to_the_strong_model(text) -> None:
+    assert mr.is_light_request(text) is False
+
+
+def test_mid_tool_loop_is_never_light() -> None:
+    msgs = [{"role": "user", "content": "здрасти"},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "1"}]},
+            {"role": "tool", "tool_call_id": "1", "content": "..."}]
+    assert mr.is_light_turn(msgs) is False
+
+
+def test_a_follow_up_right_after_tool_work_is_not_light() -> None:
+    """„а колко са?" след търсене на файлове е продължение на работата."""
+    msgs = [{"role": "user", "content": "намери снимките"},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "1"}]},
+            {"role": "tool", "tool_call_id": "1", "content": "a.jpg b.jpg"},
+            {"role": "assistant", "content": "Намерих 2."},
+            {"role": "user", "content": "а колко са големи общо?"}]
+    assert mr.is_light_turn(msgs) is False
+
+
+def test_a_fresh_plain_question_is_light(monkeypatch) -> None:
+    monkeypatch.delenv("GENESIS_CHAT_ROUTING", raising=False)
+    msgs = [{"role": "system", "content": "s"},
+            {"role": "user", "content": "какво е рекурсия?"}]
+    assert mr.is_light_turn(msgs) is True
+
+
+def test_routing_can_be_switched_off(monkeypatch) -> None:
+    monkeypatch.setenv("GENESIS_CHAT_ROUTING", "0")
+    assert mr.is_light_turn([{"role": "user", "content": "здрасти"}]) is False
+
+
+@pytest.mark.parametrize("text,calls,expected", [
+    ("Рекурсията е...", None, False),
+    ("", [{"id": "1"}], True),                       # native tool call
+    ("[LIST_DIR: ~/Desktop]", None, True),           # text-tag tool call
+    ("Error: цялата верига е изчерпана", None, True),
+])
+def test_escalation_when_the_small_model_reaches_for_a_tool(text, calls, expected) -> None:
+    assert mr.light_reply_needs_escalation(text, calls) is expected
