@@ -140,12 +140,12 @@ class Core:
             genesis_skills.set_workspace(workspace)
             self.workspace = workspace
 
-            from genesis_agent.tool_schemas import FULL_TOOLS
+            from genesis_agent.tool_schemas import FULL_TOOLS, fit_system_prompt
 
             self.tools = FULL_TOOLS
-            self.system_prompt = cfg.get(
+            self.system_prompt = fit_system_prompt(cfg.get(
                 "system_prompt", "You are Genesis, an autonomous AI coding agent."
-            )
+            ))
             self.system_prompt += "\n\n" + env_facts(workspace)
             self.provider = cfg.get("models", {}).get("default_provider", "")
             self.model = ""

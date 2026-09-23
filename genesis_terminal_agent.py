@@ -1032,6 +1032,11 @@ def main():
         pass
 
     SYSTEM_PROMPT = config.get("system_prompt", "CRITICAL: You are Genesis, autonomous AI coding agent.")
+    try:
+        from genesis_agent.tool_schemas import fit_system_prompt
+        SYSTEM_PROMPT = fit_system_prompt(SYSTEM_PROMPT)
+    except Exception:
+        pass
 
     # Реалните пътища на машината — иначе моделът ги отгатва (жив тест: писа в
     # несъществуваща измислена sandbox директория). Виж agent_core.env_facts.
