@@ -69,9 +69,6 @@ file. They are not configurable, on purpose.
   matters because the content would not stay on the machine — it enters the
   conversation and is sent to whichever provider is next in the chain.
   `.env.example` and other shipped templates are deliberately exempt.
-- Findings reported over a notification channel pass through `redact_secrets()`
-  first, so a model that quotes a line from a `.env` file does not publish your
-  key to a chat channel.
 
 If you ever paste a key into a chat, a commit, or a log — rotate it. Providers
 issue new keys for free; assuming an exposed key is still private is how
@@ -98,12 +95,10 @@ site you are logged into — which is a feature, not a missing one.
 
 ## Autonomous mode
 
-The 24/7 loop sets the sandbox policy to `deny`:
-anything at `CONFIRM` level is refused rather than queued, because there is
-nobody there to answer. The preparatory worker (`thread_worker.py`) is
-narrower still — it may only read files, list directories, and search the web.
-It cannot run commands, write files, or drive the browser. It gathers
-information while you sleep; it does not change your machine while you sleep.
+When stdin is not a terminal (a script, a pipe, CI), the sandbox policy
+defaults to `deny`: anything at `CONFIRM` level is refused rather than queued,
+because there is nobody there to answer. Skill verification always runs under
+`deny`, whatever the terminal.
 
 ## Known, honest limitations
 

@@ -1,9 +1,9 @@
 """The Skills Library — persist verified tools under skills/<slug>.md + skills.json index.
 
-Writes the same format genesis_agent.skill_loader/trigger_engine read (YAML
+Writes the same format genesis_agent.skill_loader reads (YAML
 frontmatter + fenced python block, indexed in skills/skills.json). Do not
-reintroduce the old .py + metadata.json format here — skill_loader.py and
-trigger_engine.py cannot see it, which is exactly the split-brain that
+reintroduce the old .py + metadata.json format here — skill_loader.py cannot
+see it, which is exactly the split-brain that
 scripts/unify_skills_format.py had to clean up once already.
 """
 
@@ -236,8 +236,8 @@ def save_skill(
     require_verified: bool | None = None,
 ) -> Path:
     """
-    Write skills/<slug>.md and update skills.json — the format skill_loader.py/
-    trigger_engine.py actually read.
+    Write skills/<slug>.md and update skills.json — the format skill_loader.py
+    actually reads.
 
     Всяко умение се проверява реално (genesis_agent.verifier) и получава verified печат
     в индекса. Ако require_verified е True (или env GENESIS_REQUIRE_VERIFIED=1) и
@@ -290,9 +290,8 @@ def save_skill(
 
         md_path = SKILLS_DIR / f"{final_slug}.md"
         # Тригерите носят И оригиналната цел, дума по дума. Името е английско,
-        # а операторът пише на български — trigger_engine брои съвпадения само
-        # по тригери и име (не по описание), така че без този ред българска
-        # заявка не може да достигне прага при никакво умение.
+        # а операторът пише на български — без този ред българска заявка
+        # няма с какво да съвпадне при умение с английско име.
         triggers = [final_slug.replace("_", " ")]
         goal_trigger = " ".join((goal or "").split())[:120]
         if goal_trigger and goal_trigger.lower() != triggers[0].lower():

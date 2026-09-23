@@ -830,7 +830,7 @@ class Brain:
             # доставчиците са изчерпани — тоест когато вече върви зле.
             # `startswith("Error:")` е установената конвенция в проекта: седем
             # други места (autonomous_loop, orchestrator, project_builder,
-            # thread_worker, терминала) вече проверяват точно това.
+            # терминала) вече проверяват точно това.
             if not summary or summary.startswith("Error:"):
                 raise ValueError(f"неизползваемо резюме: {summary[:80] or 'празно'}")
         except Exception:

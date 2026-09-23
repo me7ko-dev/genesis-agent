@@ -92,9 +92,7 @@ Optional extras:
 
 ```bash
 pip install "genesis-agent[browser]" && playwright install chromium   # web automation
-pip install "genesis-agent[voice]"                                    # speak to it
 pip install "genesis-agent[quality]"                                  # lint generated code with ruff
-pip install "genesis-agent[vision]" && ollama pull moondream          # screen understanding
 pip install "genesis-agent[signing]"                                  # RSA-signed skills
 pip install "genesis-agent[all]"                                      # everything above, plus [premium]
 ```
@@ -133,15 +131,13 @@ Optional paid tier, off unless you ask for it — see [MAX mode](#max-mode):
 provider to multiply a quota — that violates most providers' terms of service.
 Resilience comes from breadth instead. See [SECURITY.md](SECURITY.md).
 
-## Frontends, one core
+## Commands
 
-Every frontend calls the same engine (`genesis_agent/agent_core.py`), so tools,
-skills, sandbox and memory behave identically in all of them.
+Genesis is terminal-only. Every command runs on the same engine
+(`genesis_agent/agent_core.py`).
 
 ```bash
 genesis                       # terminal chat
-genesis gui                   # GTK window
-genesis voice                 # speak, it speaks back
 genesis mission "write a retry decorator with exponential backoff"
 genesis fix ~/code/theirs "median() is wrong for even-length input"
 ```

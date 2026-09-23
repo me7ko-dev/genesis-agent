@@ -125,9 +125,6 @@ py -m pipx uninstall genesis-agent
 
 ## Какво е различно на Windows
 
-**GUI-то не тръгва.** `genesis gui` и `genesis jarvis` искат GTK4/libadwaita,
-което го има само на Linux. CLI-ят и всичко останало работят.
-
 **Лимитите на sandbox-а са по-слаби.** Ограниченията за CPU, памет и размер на
 файл идват от POSIX `setrlimit` и на Windows просто не се прилагат
 (`genesis_agent/sandbox.py`, `_preexec`). Това, което работи еднакво и на двете

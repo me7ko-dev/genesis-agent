@@ -35,10 +35,9 @@ GENESIS_HOME: Path = Path(os.environ.get("GENESIS_HOME", Path.home() / ".genesis
 
 ENV_FILE: Path = GENESIS_HOME / ".env"
 
-# config.yaml, the starter skills and the GUI scripts live INSIDE the package.
-# They used to sit beside it, which meant an installed copy dropped `config.yaml`,
-# `skills/` and `gui/` straight into site-packages — `import gui` in an unrelated
-# project would then have found ours.
+# config.yaml and the starter skills live INSIDE the package. They used to sit
+# beside it, which meant an installed copy dropped `config.yaml` and `skills/`
+# straight into site-packages, where an unrelated project could import them.
 CONFIG_PATH: Path = PACKAGE_DIR / "config.yaml"
 
 # Searched in order. The project-local .env wins over the home one, so a
