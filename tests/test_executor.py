@@ -1,7 +1,7 @@
 """genesis_agent.executor — runs LLM-produced Python and captures its
 output. Zero coverage before this file despite being one of the two modules
 the codebase's own ruff-ignore comment names as reliability-critical
-(alongside sandbox/brain/skills_api/scheduler/budget): every autonomous
+(alongside sandbox/brain/skills_api/budget): every autonomous
 mission round and every `genesis fix` repair round goes through this.
 
 What matters here: the DNA gate actually blocks before anything runs (both

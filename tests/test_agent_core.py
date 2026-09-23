@@ -30,6 +30,12 @@ class TestEnvFacts:
         desktop_line = next(line for line in out.splitlines() if "Десктоп" in line)
         assert "НЕ съществува" not in desktop_line
 
+    def test_todays_date_is_a_fact_not_a_guess(self, monkeypatch, tmp_path) -> None:
+        """На живо моделът кръсти архив с измислена дата отпреди месец."""
+        from datetime import date
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert f"Днес: {date.today().isoformat()}" in ac.env_facts()
+
     def test_workspace_line_included_only_when_given(self, monkeypatch, tmp_path) -> None:
         monkeypatch.setenv("HOME", str(tmp_path))
         assert "Работна директория" not in ac.env_facts()

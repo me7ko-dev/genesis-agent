@@ -517,14 +517,6 @@ def _tool_list_dir(arg: str) -> str:
     return "\n".join(lines)
 
 
-def _tool_look_at_screen(arg: str) -> str:
-    try:
-        from genesis_agent.vision import describe_screen
-    except Exception as e:
-        return f"[LOOK_AT_SCREEN] vision модулът не е наличен: {e}"
-    return f"[LOOK_AT_SCREEN] {describe_screen(arg.strip())}"
-
-
 def _tool_browse(arg: str) -> str:
     if _browser_mod is None:
         return "[BROWSE] browser модулът не е наличен (Playwright не е инсталиран)."
@@ -681,7 +673,7 @@ _SIMPLE_RE = re.compile(
 )
 # REPO_MAP без аргумент = текущият workspace (както BROWSER_READ/TASK_LIST).
 _REPO_MAP_RE = re.compile(r"\[REPO_MAP\]")
-# BROWSER_READ е без аргумент (като LOOK_AT_SCREEN) — отделен pattern.
+# BROWSER_READ е без аргумент — отделен pattern.
 _BROWSER_READ_RE = re.compile(r"\[BROWSER_READ\]")
 # TASK_LIST без аргумент — най-честата форма ([TASK_LIST] = отворените нишки).
 _TASK_LIST_RE = re.compile(r"\[TASK_LIST\]")
@@ -716,9 +708,6 @@ _READONLY_DISPATCH = {
     "RESEARCH": _tool_research,
     "LIST_DIR": _tool_list_dir,
 }
-# LOOK_AT_SCREEN е с ОПЦИОНАЛЕН аргумент ([LOOK_AT_SCREEN] или с въпрос) —
-# различен pattern от другите read-only тулове, които изискват ":arg]".
-_VISION_RE = re.compile(r"\[LOOK_AT_SCREEN(?::\s*(?P<arg>[^\]]*))?\]")
 
 
 def _safe_tool(name: str, fn: Callable[..., str], *args) -> str:
@@ -745,7 +734,7 @@ def _safe_tool(name: str, fn: Callable[..., str], *args) -> str:
 def parse_and_execute_readonly_tools(response_text: str) -> list[str]:
     """
     Изпълнява САМО безопасните read-only инструменти (READ_FILE/WEB_SEARCH/
-    LIST_DIR/LOOK_AT_SCREEN). За автономния цикъл — Brain-ът може да събере
+    LIST_DIR). За автономния цикъл — Brain-ът може да събере
     информация по време на мисия, без риск от RUN_CMD/WRITE_FILE/DELEGATE.
     Връща списък от резултати.
     """
@@ -755,8 +744,6 @@ def parse_and_execute_readonly_tools(response_text: str) -> list[str]:
     for m in _READONLY_RE.finditer(response_text):
         fn = _READONLY_DISPATCH[m.group("tool")]
         results.append((m.start(), _safe_tool(m.group("tool"), fn, m.group("arg"))))
-    for m in _VISION_RE.finditer(response_text):
-        results.append((m.start(), _safe_tool("LOOK_AT_SCREEN", _tool_look_at_screen, m.group("arg") or "")))
     results.sort(key=lambda t: t[0])
     return [r for _, r in results]
 
@@ -854,7 +841,7 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
         fn = _SIMPLE_DISPATCH[m.group("tool")]
         results.append((m.start(), _safe_tool(m.group("tool"), fn, m.group("arg"))))
 
-    # 3. BROWSER_READ — без аргумент (като LOOK_AT_SCREEN).
+    # 3. BROWSER_READ — без аргумент.
     for m in _BROWSER_READ_RE.finditer(response_text):
         if _inside_block(m.start()):
             continue

@@ -6,8 +6,6 @@ genesis_agent.cli — the `genesis` command.
     genesis setup           configure API keys
     genesis mission "..."   run one autonomous mission and print the result
     genesis fix PATH "..."  fix a bug in an existing project (checkpoint + tests + diff)
-    genesis gui             GTK chat window
-    genesis voice           voice frontend
     genesis skills          library status
     genesis models          the model chain; `--refresh` re-scans free models
     genesis update          is there a newer commit on the installed branch
@@ -197,11 +195,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if out.success else 1
 
     if cmd == "skills":
-        from genesis_agent.skill_loader import load_skills_index
-        index = load_skills_index()
-        # The index records `verified: true`, not a `status` string.
-        verified = sum(1 for s in index.values() if s.get("verified"))
-        print(f"{len(index)} умения, {verified} verified")
+        from genesis_agent.skill_loader import format_skill_list
+        print(format_skill_list())
         return 0
 
     if cmd == "update":
@@ -234,29 +229,10 @@ def main(argv: list[str] | None = None) -> int:
         return _fix(argv[1:])
 
     if cmd in ("gui", "voice"):
-        # Both frontends hard-depend on GTK4/libadwaita (`import gi`), and
-        # `voice` additionally shells out to `arecord` (ALSA) — Linux-desktop
-        # tooling with no Windows build, unlike the other optional extras.
-        # Without this gate the failure is a raw ModuleNotFoundError deep in
-        # a third-party import, not an actionable message.
-        if sys.platform == "win32":
-            print(f"`genesis {cmd}` изисква GTK4/libadwaita, налични само на Linux "
-                  f"работен плот — няма Windows версия.\n"
-                  f"Ползвай терминалния чат (`genesis`) вместо това, или го пусни през WSL.")
-            return 1
-
-        import runpy
-
-        from genesis_agent.paths import PACKAGE_DIR
-        sys.path.insert(0, str(_project_root()))
-        script = PACKAGE_DIR / "gui" / ("genesis_gui.py" if cmd == "gui" else "genesis_jarvis.py")
-        if not script.exists():
-            print(f"Липсва {script}.\n"
-                  f"Този фронтенд се пуска от копие на repo-то:\n"
-                  f"  git clone https://github.com/me7ko-dev/genesis-agent")
-            return 1
-        runpy.run_path(str(script), run_name="__main__")
-        return 0
+        # Махнати на 2026-09-23 — Genesis е само терминален. Изрично съобщение,
+        # защото „Непозната команда" би звучало като счупена инсталация.
+        print(f"`genesis {cmd}` е махнат — Genesis вече е само терминален. Пусни `genesis`.")
+        return 2
 
     if cmd == "chat":
         return _chat()

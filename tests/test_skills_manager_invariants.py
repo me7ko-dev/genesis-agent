@@ -279,9 +279,8 @@ class TestNamedInEnglishFoundInBulgarian:
         assert names == ["cleanup_temp_files"], names
 
     def test_the_original_goal_is_kept_as_a_trigger(self, _isolated_library) -> None:
-        """trigger_engine брои съвпадения само по тригери и име — не по
-        описание. Без цялата цел тук българска заявка не може да достигне
-        прага при никое умение."""
+        """Името е английско, затова българската заявка съвпада само ако
+        цялата цел е запазена като тригер."""
         sm.save_skill(slug=self._CYRILLIC_GOAL, code=self._REAL_CODE,
                       goal=self._CYRILLIC_GOAL)
         triggers = _index(_isolated_library)[0]["triggers"]
@@ -301,9 +300,6 @@ class TestNamedInEnglishFoundInBulgarian:
         hits = sl.search_skills("изчисти временните файлове", top_n=3,
                                 use_semantic=False)
         assert [h["name"] for h in hits] == ["cleanup_temp_files"], hits
-
-        from genesis_agent.trigger_engine import TriggerEngine
-        assert TriggerEngine().match("изчисти временните файлове по график")
 
     def test_an_english_goal_is_still_named_after_the_goal(
         self, _isolated_library

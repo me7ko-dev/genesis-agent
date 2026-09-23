@@ -56,6 +56,23 @@ def load_skills_index() -> dict[str, dict[str, Any]]:
     return _SKILLS_INDEX_CACHE  # type: ignore[return-value]
 
 
+def format_skill_list(width: int = 70) -> str:
+    """Списък с уменията за човек — `genesis skills` и `/skills` в чата.
+
+    Без модел: на живо „кажи какви умения имаш" изгори два рунда в
+    USE_SKILL заявки, които нямаше как да сработят."""
+    index = load_skills_index()
+    verified = sum(1 for s in index.values() if s.get("verified"))
+    lines = [f"{len(index)} умения, {verified} verified"]
+    for name in sorted(index):
+        entry = index[name]
+        desc = " ".join((entry.get("description") or "").split())
+        if len(desc) > width:
+            desc = desc[:width - 1] + "…"
+        lines.append(f"  {'✓' if entry.get('verified') else '·'} {name}" + (f" — {desc}" if desc else ""))
+    return "\n".join(lines)
+
+
 def skill_view(name: str, *, file_path: Path | None = None) -> dict[str, Any]:
     """
     Зарежда .md файл на умение и връща YAML метаданни + код.

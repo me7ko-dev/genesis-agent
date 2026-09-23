@@ -1,7 +1,7 @@
 """genesis_agent.skills_api — reuse of existing skills as building blocks for
 generated code. Zero coverage before this file despite being one of the two
 modules the codebase's own ruff-ignore comment names as reliability-critical
-(alongside sandbox/brain/executor/scheduler/budget).
+(alongside sandbox/brain/executor/budget).
 
 What matters here: verified-only is the default and actually gates load()/
 list_available(), a skill's own __main__ self-test block never runs on load

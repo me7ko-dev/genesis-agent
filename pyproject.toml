@@ -26,7 +26,7 @@ classifiers = [
 ]
 
 # Deliberately small. Everything heavier is an extra, so `pip install
-# genesis-agent` stays fast and the browser/voice stacks are opt-in.
+# genesis-agent` stays fast and the browser stack is opt-in.
 dependencies = [
     "requests>=2.31",
     "PyYAML>=6.0",
@@ -40,8 +40,6 @@ dependencies = [
 google = ["google-auth>=2.0"]
 dev = ["pytest>=8.0"]                    # test suite, see tests/
 browser = ["playwright>=1.40"]           # then: playwright install chromium
-voice = ["faster-whisper>=1.0", "edge-tts>=6.1"]
-vision = ["mss>=9.0"]                    # then: ollama pull moondream
 quality = ["ruff>=0.6"]                  # code_validate.py pre-checks generated code
 signing = ["cryptography>=42"]           # cryptography_utils.py — RSA skill signing
 # Only needed for the paid MAX tier (GENESIS_QUALITY=max) — Anthropic's Messages
@@ -50,9 +48,6 @@ signing = ["cryptography>=42"]           # cryptography_utils.py — RSA skill s
 premium = ["anthropic>=0.40"]
 all = [
     "playwright>=1.40",
-    "faster-whisper>=1.0",
-    "edge-tts>=6.1",
-    "mss>=9.0",
     "ruff>=0.6",
     "cryptography>=42",
     "anthropic>=0.40",
@@ -80,8 +75,8 @@ py-modules = ["genesis_skills", "genesis_terminal_agent"]
 [tool.setuptools.package-data]
 # These live inside the package. When they sat beside it (named here as
 # "../config.yaml" and friends) an installed copy unpacked `config.yaml`,
-# `skills/` and `gui/` into site-packages itself — top-level names generic
-# enough that an unrelated project's `import gui` could have found ours.
+# `skills/` into site-packages itself — top-level names generic enough that an
+# unrelated project's import could have found ours.
 # Anything missing from this list is missing from an installed copy while
 # still working from a git checkout: exactly the gap that only shows up for
 # other people.
@@ -89,7 +84,6 @@ genesis_agent = [
     "config.yaml",
     "skills/*.md",
     "skills/skills.json",
-    "gui/*.py",
 ]
 
 [tool.pytest.ini_options]
@@ -108,10 +102,10 @@ ignore = [
     # Accepted debt, not a false positive: ~220 call sites across the codebase
     # (mostly best-effort optional-integration fallbacks) blindly catch or
     # swallow exceptions. The security/reliability-critical modules (sandbox,
-    # brain, executor, scheduler, budget, skills_api) have been triaged —
+    # brain, executor, budget, skills_api) have been triaged —
     # broad catches there are either narrowed, logged, or annotated with a
     # specific `# noqa` explaining why. The remaining call sites (peripheral
-    # modules, GUI, terminal frontend) still need per-site review; enabling
+    # modules, terminal frontend) still need per-site review; enabling
     # these two rules repo-wide now would make the CI gate fail on pre-existing
     # code instead of catching new regressions. Tighten file-by-file as those
     # modules get touched, then drop the corresponding ignore.
@@ -119,7 +113,7 @@ ignore = [
 ]
 
 [tool.mypy]
-# Third-party libs used only by optional frontends (gi/GTK, croniter,
-# faster_whisper, edge_tts) ship no type stubs. Without this, mypy
+# Optional third-party libs (playwright, google-auth, anthropic) may be
+# missing or ship no type stubs. Without this, mypy
 # on those files is 100% import-resolution noise, not real findings.
 ignore_missing_imports = true

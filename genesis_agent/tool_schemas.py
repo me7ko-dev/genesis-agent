@@ -386,6 +386,30 @@ FULL_TOOLS: list[dict] = [
     },
 ]
 
+_BROWSER_TOOLS = frozenset({"BROWSE", "BROWSER_READ", "BROWSER_CLICK", "BROWSER_TYPE"})
+
+
+def browser_available() -> bool:
+    """Инсталиран ли е extra-то `[browser]` (playwright)."""
+    import importlib.util
+    return importlib.util.find_spec("playwright") is not None
+
+
+# Без playwright четирите браузърни схеми са ~1100 знака във ВСЯКО обръщение
+# за инструменти, които могат само да върнат грешка — и канят модела да ги
+# пробва. Премахват се от списъка, не от кода: с `[browser]` се връщат сами.
+if not browser_available():
+    FULL_TOOLS = [t for t in FULL_TOOLS if t["function"]["name"] not in _BROWSER_TOOLS]
+
+
+def fit_system_prompt(prompt: str) -> str:
+    """Маха абзаца „BROWSER SAFETY" от config.yaml, когато браузърът го няма —
+    правила за инструменти, които моделът не вижда, са чист разход."""
+    if browser_available():
+        return prompt
+    import re
+    return re.sub(r"BROWSER SAFETY — NON-NEGOTIABLE:.*?\n\s*\n", "", prompt, count=1, flags=re.DOTALL)
+
 # Read-only подмножество — за автономни мисии (autonomous_loop.py), където
 # писане/команди минават през отделния code-generation път, не през tool tags.
 READONLY_TOOLS: list[dict] = [

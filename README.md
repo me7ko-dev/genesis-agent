@@ -92,8 +92,9 @@ Optional extras:
 
 ```bash
 pip install "genesis-agent[browser]" && playwright install chromium   # web automation
-pip install "genesis-agent[voice]"                                    # speak to it
 pip install "genesis-agent[quality]"                                  # lint generated code with ruff
+pip install "genesis-agent[signing]"                                  # RSA-signed skills
+pip install "genesis-agent[all]"                                      # everything above, plus [premium]
 ```
 
 For a local fallback that costs nothing, install [Ollama](https://ollama.com)
@@ -130,15 +131,13 @@ Optional paid tier, off unless you ask for it — see [MAX mode](#max-mode):
 provider to multiply a quota — that violates most providers' terms of service.
 Resilience comes from breadth instead. See [SECURITY.md](SECURITY.md).
 
-## Frontends, one core
+## Commands
 
-Every frontend calls the same engine (`genesis_agent/agent_core.py`), so tools,
-skills, sandbox and memory behave identically in all of them.
+Genesis is terminal-only. Every command runs on the same engine
+(`genesis_agent/agent_core.py`).
 
 ```bash
 genesis                       # terminal chat
-genesis gui                   # GTK window
-genesis voice                 # speak, it speaks back
 genesis mission "write a retry decorator with exponential backoff"
 genesis fix ~/code/theirs "median() is wrong for even-length input"
 ```
@@ -235,8 +234,8 @@ container.
 
 ## The skill library
 
-Ten verified, dependency-free skills ship in `genesis_agent/skills/` — enough to see the
-format and the reuse working. They are not the product; the mechanism is.
+Fourteen verified, dependency-free skills ship in `genesis_agent/skills/` — enough to see
+the format and the reuse working. They are not the product; the mechanism is.
 Point the agent at real work, or run the forge, and the library becomes yours:
 
 ```bash

@@ -315,7 +315,7 @@ def _run_autonomous_loop_impl(
         {"role": "system", "content": system_content},
         {
             "role": "user",
-            "content": f"High-level goal:\n{goal}{rag_block}\n\nIf you need external info FIRST, you may reply with ONLY a read-only tool tag ([WEB_SEARCH: query] for raw results, [RESEARCH: question] for a cross-verified grounded answer across multiple sources when accuracy matters, [READ_FILE: /path], [LIST_DIR: /path], or [LOOK_AT_SCREEN] / [LOOK_AT_SCREEN: question] to see the current screen if screen context would help) and I will return the result before you write code. A USE_SKILL tool is also available (native function-calling) — prefer calling an existing verified skill directly over reimplementing it from scratch when one already covers part of the goal. Otherwise implement as a single Python script. CRITICAL: You MUST include verification code at the bottom of the script (e.g. asserts or checks) that explicitly verifies the goal was achieved. If verification fails, raise an Exception.{red_note}",
+            "content": f"High-level goal:\n{goal}{rag_block}\n\nIf you need external info FIRST, you may reply with ONLY a read-only tool tag ([WEB_SEARCH: query] for raw results, [RESEARCH: question] for a cross-verified grounded answer across multiple sources when accuracy matters, [READ_FILE: /path], or [LIST_DIR: /path]) and I will return the result before you write code. A USE_SKILL tool is also available (native function-calling) — prefer calling an existing verified skill directly over reimplementing it from scratch when one already covers part of the goal. Otherwise implement as a single Python script. CRITICAL: You MUST include verification code at the bottom of the script (e.g. asserts or checks) that explicitly verifies the goal was achieved. If verification fails, raise an Exception.{red_note}",
         },
     ]
 
@@ -434,7 +434,7 @@ def _run_autonomous_loop_impl(
         # За модели БЕЗ native function-calling (fallback опашката в Brain) —
         # ако поискат информация (WEB_SEARCH/READ_FILE/LIST_DIR) вместо код,
         # изпълняваме я и я връщаме, за да напише кода информирано. Не е провал.
-        if not reply.code and any(t in reply.raw_text for t in ("[WEB_SEARCH:", "[RESEARCH:", "[READ_FILE:", "[LIST_DIR:", "[LOOK_AT_SCREEN")):
+        if not reply.code and any(t in reply.raw_text for t in ("[WEB_SEARCH:", "[RESEARCH:", "[READ_FILE:", "[LIST_DIR:")):
             try:
                 import sys as _sys
                 _sys.path.insert(0, str(PROJECT_ROOT))

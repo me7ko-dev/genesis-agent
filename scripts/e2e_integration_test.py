@@ -8,7 +8,7 @@ End-to-end integration тест за свързаната Genesis система
   3. Безопасните команди се изпълняват реално.
   4. Тул-повикванията се логват в споделената episodic памет.
   5. Разговорът се пише в споделената conversation_memory.
-  6. Умение, генерирано през skills_manager, е видимо от trigger_engine.
+  6. Умение, генерирано през skills_manager, се намира от skill_loader.
 
 Изход: 0 при пълен успех, 1 при провал.
 """
@@ -79,17 +79,17 @@ wrote_ok = (
 check("разговорът се пише в споделената база", wrote_ok,
       f"{n0} → {n1} (общата бройка може да спадне при компресия — проверени са последните 2 записа)")
 
-print("\n─── 6. skills_manager → trigger_engine видимост ──────────")
+print("\n─── 6. skills_manager → skill_loader видимост ──────────")
 test_slug = "e2e_integration_probe_skill"
 skills_manager.save_skill(
     slug=test_slug,
     code="print('e2e probe skill ran')",
-    goal="E2E probe: verify save_skill is visible to trigger_engine search",
+    goal="E2E probe: verify save_skill is visible to skill_loader search",
 )
 reload_skills_index()
 found = search_skills("e2e integration probe")
 names = [s["name"] for s in found]
-check("ново умение е видимо от trigger_engine", test_slug in names, str(names[:3]))
+check("ново умение се намира от skill_loader", test_slug in names, str(names[:3]))
 
 print("\n─── 7. българска заявка → умение с английско име ─────────")
 # Изискването на оператора, проверено от край до край, а не само на модулно
