@@ -556,3 +556,90 @@ class TestContextBudgetIsAppliedOnTheWayOut:
         assert str(wire[1]["content"]).startswith("S0"), "началото се пази"
         assert wire[-1]["content"] == history[-1]["content"], "последният остава пълен"
         assert history == snapshot, "историята на извикващия не бива да се пипа"
+
+
+class TestOutputCapPerModel:
+    """На живо (2026-09-23) gpt-oss свърши отговор точно на 4096 — размисълът
+    се брои в тавана. Таванът вече може да е по модел в config.yaml."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_cache(self, monkeypatch):
+        monkeypatch.delenv("GENESIS_MAX_TOKENS", raising=False)
+        monkeypatch.setattr(brain_mod, "_OUTPUT_CAPS", None)
+
+    def test_shipped_config_lifts_the_models_checked_live(self) -> None:
+        assert brain_mod._output_cap("gpt-oss:120b-cloud") == 16384
+        assert brain_mod._output_cap("nvidia/nemotron-3-ultra-550b-a55b") == 16384
+
+    def test_every_other_model_keeps_the_safe_default(self) -> None:
+        assert brain_mod._output_cap("some/unlisted-model") == brain_mod.MAX_OUTPUT_TOKENS
+
+    def test_an_explicit_env_override_wins_everywhere(self, monkeypatch) -> None:
+        monkeypatch.setenv("GENESIS_MAX_TOKENS", "4096")
+        assert brain_mod._output_cap("gpt-oss:120b-cloud") == brain_mod.MAX_OUTPUT_TOKENS
+
+    def test_the_cap_is_what_goes_over_the_wire(self, monkeypatch) -> None:
+        sent: list[dict] = []
+
+        def _post(url, headers=None, json=None, timeout=None):
+            sent.append(json)
+            return _FakeResponse(200, {"choices": [{"message": {"content": "ok"}}]})
+
+        monkeypatch.setattr("genesis_agent.brain.requests.post", _post)
+        Brain.__new__(Brain)._http("https://x", "k", "gpt-oss:120b-cloud", [], 30)
+        assert sent[0]["max_tokens"] == 16384
+
+
+class TestGoneModelIsSkipped:
+    """410 Gone = спрян завинаги (на живо: NVIDIA openai/gpt-oss-120b). С
+    5-минутен cooldown щеше да се пробва отново при всяко следващо обръщение
+    и да се брои като провал на целия доставчик."""
+
+    def test_a_410_model_is_not_tried_again(self, monkeypatch) -> None:
+        calls: list[str] = []
+
+        def _fake_call(self, provider, model, messages, tools=None, extra=None):
+            calls.append(model)
+            if model == "dead":
+                raise RuntimeError("HTTP_410: Gone")
+            return "ok", None
+
+        monkeypatch.setattr(Brain, "_call", _fake_call)
+        b = Brain()
+        real = b.chain[0]
+        b.chain = [dict(real, model="dead"), dict(real, model="alive")]
+        b.local = None
+        b._pinned = None
+
+        assert b.complete([{"role": "user", "content": "hi"}]).raw_text == "ok"
+        assert b.complete([{"role": "user", "content": "hi"}]).raw_text == "ok"
+        assert calls == ["dead", "alive", "alive"]
+
+class TestLightMode:
+    """Второстепенна работа (извличане на памет, резюмета) — първо на бързите
+    `light_models`. Наживо: 0.6-3s срещу 8-45s на nemotron-ultra за едно и
+    също JSON извличане."""
+
+    def test_light_models_go_first_and_the_full_chain_stays_below(self) -> None:
+        light = {(c["provider"], c["model"]) for c in brain_mod._load_light_chain()}
+        assert light, "config.yaml трябва да има light_models"
+        b = Brain(light=True, use_local=False)
+        head = {(c["provider"], c["model"]) for c in b.chain[:len(light)]}
+        assert head == light
+        assert len(b.chain) > len(light), "без резерва лека задача може да остане без модел"
+
+    def test_a_light_success_is_not_remembered_as_the_chat_model(self, monkeypatch) -> None:
+        saved: list = []
+        monkeypatch.setattr(brain_mod, "_save_last_model", lambda p, m: saved.append((p, m)))
+        monkeypatch.setattr(Brain, "_call", lambda self, p, m, msgs, tools=None, extra=None: ("ok", None))
+        b = Brain(light=True, use_local=False)
+        assert b.complete([{"role": "user", "content": "x"}]).raw_text == "ok"
+        assert saved == [], "иначе следващият чат тръгва от малкия модел"
+
+    def test_light_mode_ignores_the_remembered_chat_model(self, monkeypatch) -> None:
+        big = ("ollama_cloud", "nemotron-3-ultra:cloud")
+        monkeypatch.setattr(brain_mod, "_load_last_model", lambda: big)
+        assert (Brain(use_local=False).chain[0]["provider"], Brain(use_local=False).chain[0]["model"]) == big
+        light_first = brain_mod._load_light_chain()[0]
+        b = Brain(light=True, use_local=False)
+        assert (b.chain[0]["provider"], b.chain[0]["model"]) == (light_first["provider"], light_first["model"])

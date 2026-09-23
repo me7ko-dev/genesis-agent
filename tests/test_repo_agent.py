@@ -211,6 +211,41 @@ class TestVerdictIsNeverStale:
         assert out.success is True
 
 
+class TestSnapshotOnlyOnRequest:
+    """Операторът иска бекъп само ръчно (2026-09-23): `repair` не прави снимка,
+    освен ако не е поискана с `checkpoint=True` / `--checkpoint`."""
+
+    def _run(self, project, monkeypatch, **kw):
+        monkeypatch.setattr(repo_agent, "run_tests", lambda root, command:
+                            repo_agent.TestRun(ran=True, passed=False, output="", command=command))
+
+        class _NoEditBrain:
+            def __init__(self, *a, **k) -> None:
+                pass
+
+            def complete(self, messages, tools=None):
+                return type("R", (), {"raw_text": "не знам", "tool_calls": None})()
+
+        monkeypatch.setattr(repo_agent, "Brain", _NoEditBrain)
+        return repo_agent.repair(str(project), "fix it", max_rounds=1, test_command="x",
+                                 on_status=lambda msg: None, **kw)
+
+    def test_no_snapshot_by_default(self, project, monkeypatch) -> None:
+        out = self._run(project, monkeypatch)
+        assert out.checkpoint is None
+        assert not list(repo_agent.CHECKPOINT_DIR.glob("*.tar.gz"))
+
+    def test_snapshot_when_asked(self, project, monkeypatch) -> None:
+        out = self._run(project, monkeypatch, checkpoint=True)
+        assert out.checkpoint is not None and out.checkpoint.exists()
+
+    def test_undo_hint_matches_what_exists(self, tmp_path) -> None:
+        assert "--revert" in repo_agent._undo_hint(tmp_path, tmp_path / "x.tar.gz")
+        assert "връщане няма" in repo_agent._undo_hint(tmp_path, None)
+        (tmp_path / ".git").mkdir()
+        assert "git checkout" in repo_agent._undo_hint(tmp_path, None)
+
+
 class TestTouchedTracksRealChanges:
     """A refused edit is not a change. `touched` was filled from the tool's
     ARGUMENTS, so a failed EDIT_FILE counted as one — which also silenced

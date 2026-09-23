@@ -346,7 +346,7 @@ def auto_capture(messages: list[dict], max_chars: int = 6000) -> dict:
 
         from genesis_agent.brain import Brain
 
-        reply = Brain(min_size_b=32).complete([
+        reply = Brain(min_size_b=32, light=True).complete([
             {"role": "system", "content": _CAPTURE_PROMPT + known},
             {"role": "user", "content": text},
         ])

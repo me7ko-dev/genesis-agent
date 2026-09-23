@@ -150,10 +150,10 @@ fail loudly — it fails later, somewhere else, looking like a different bug.
 Three things carry that difference, and all three are code rather than
 instructions to the model:
 
-- **A checkpoint before the first edit.** A snapshot of the project, taken
-  before anything is touched. `genesis fix --revert PATH` puts it all back. Git
-  is used too when present, but never relied on — the projects most likely to
-  need this are the ones not under version control.
+- **A way back.** `genesis fix --checkpoint` snapshots the project before
+  anything is touched, and `genesis fix --revert PATH` puts it all back. The
+  snapshot is opt-in. Without it, a git project is undone with `git checkout .`,
+  and a project that is not under git gets a warning that it has no way back.
 - **The project's own test suite is the verdict.** Tests run before any change
   (so an already-red suite is not later blamed on the agent) and after every
   round of edits. "Fixed" means red → green; nothing else is reported as fixed.

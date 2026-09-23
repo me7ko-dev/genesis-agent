@@ -107,14 +107,11 @@ models:
     #   supports_tools: true # ПРОВЕРИ, преди да разчиташ на това
 
     # ─── NVIDIA NIM — най-големите проверени (отделна квота) ──────────
-    - provider: "nvidia"
-      model: "deepseek-ai/deepseek-v4-flash-0731"
-      size_b: 400   # "flash" вариант — точният брой не е публикуван; оценката
-                     # е консервативна и служи само за min_size_b филтъра
-      supports_tools: true    # потвърдено наживо 2026-08-11 (реален tool_call)
+    # deepseek-ai/deepseek-v4-flash-0731 махнат 2026-09-23: 410 Gone (спрян).
     - provider: "nvidia"
       model: "nvidia/nemotron-3-ultra-550b-a55b"   # 550B/55B активни
       size_b: 550
+      max_tokens: 16384       # приет наживо 2026-09-23 (32768 → 503 претоварен)
       supports_tools: true    # потвърдено наживо 2026-08-11 — И НАЙ-БЪРЗИЯТ
                                # от всички тествани (2.5с срещу 4.8-7.1с на
                                # 120B-те), т.е. тук "най-голям" не значи "бавен"
@@ -133,11 +130,14 @@ models:
     # Преместен ПОД най-големите (2026-08-11) — виж бележката най-горе. ──────
     - provider: "ollama_cloud"
       model: "nemotron-3-ultra:cloud"      # NVIDIA голям, потвърден наживо (200)
+      max_tokens: 16384       # приет наживо 2026-09-23 (и 32768)
       size_b: 253   # точен брой неизвестен, вероятно същото семейство като
                      # OpenRouter nemotron-3-ultra-550b — консервативна оценка
       supports_tools: true    # потвърдено наживо
     - provider: "ollama_cloud"
       model: "gpt-oss:120b-cloud"          # голям общ, потвърден наживо (200)
+      max_tokens: 16384       # мисли и размисълът яде тавана — 4096 се удари наживо;
+                               # 16384 и 32768 приети наживо 2026-09-23
       size_b: 120
       supports_tools: true    # потвърдено наживо
 
@@ -182,14 +182,7 @@ models:
       model: "nvidia/nemotron-3-super-120b-a12b"
       size_b: 120
       supports_tools: true    # потвърдено наживо 2026-08-11 (реален tool_call)
-    - provider: "nvidia"
-      model: "openai/gpt-oss-120b"
-      size_b: 120
-      supports_tools: true    # потвърдено наживо 2026-08-11 (реален tool_call)
-    - provider: "nvidia"
-      model: "meta/llama-3.3-70b-instruct"
-      size_b: 70
-      supports_tools: true    # потвърдено наживо 2026-08-11 (реален tool_call)
+    # meta/llama-3.3-70b-instruct махнат 2026-09-23: 410 Gone (спрян).
     - provider: "nvidia"
       model: "mistralai/mistral-nemotron"
       size_b: 70   # точен брой непубликуван — консервативна оценка
@@ -197,10 +190,11 @@ models:
 
     # ─── Groq (отделна квота, 3 ключа — добавени 2026-07-24, проверени
     # наживо; по-рано отсъстваше от веригата заради стар 403 блок) ────
+    # llama-3.3-70b-versatile вече не съществува в Groq (404, 2026-09-23).
     - provider: "groq"
-      model: "llama-3.3-70b-versatile"
-      size_b: 70
-      supports_tools: true    # потвърдено наживо (с валиден ключ, не #1)
+      model: "openai/gpt-oss-120b"
+      size_b: 120
+      supports_tools: true    # 200 с tools, 0.4s — проверено наживо 2026-09-23
 
     # ─── Cerebras — НЕ Е ВЪВ ВЕРИГАТА, нарочно (проверено наживо 2026-08-11) ──
     # Добавен беше със CEREBRAS_API_KEY и очакване за "1M токена/ден безплатно".
@@ -273,11 +267,30 @@ models:
   #
   # Цената на режима не е в пари, а в квота и скорост: това са най-търсените
   # безплатни модели, тоест най-често заетите. Затова НЕ е по подразбиране.
+  # ─── ЛЕКИ модели — второстепенната работа (design note, 2026-09-23) ─────────
+  # Извличане на памет след сесия, резюме на стара история, извличане за графа
+  # със знания. Досега отиваха в главната верига, тоест на nemotron-ultra:
+  # 8-45s за едно JSON извличане. Измерено наживо със същата задача (валиден
+  # JSON и при трите):
+  #   groq    openai/gpt-oss-20b                 0.6-1.4s
+  #   nvidia  nvidia/nemotron-3-super-120b-a12b  2.4-3.2s
+  #   ollama  gpt-oss:20b-cloud                  2.4-3.3s
+  # Щадят и квотата на големите модели. Ако и трите са заети, Brain(light=True)
+  # пада към нормалната верига — второстепенна задача никога не остава без модел.
+  light_models:
+    - provider: "groq"
+      model: "openai/gpt-oss-20b"
+      size_b: 20
+    - provider: "nvidia"
+      model: "nvidia/nemotron-3-super-120b-a12b"
+      size_b: 120
+    - provider: "ollama_cloud"
+      model: "gpt-oss:20b-cloud"
+      size_b: 20
+
+  # 2026-09-23: `ling-3.0-flash:free` вече не е безплатен (404 "unavailable for
+  # free") — махнат; водач е nemotron-ultra. Измерването по-горе е историческо.
   coding_models:
-    - provider: "openrouter"
-      model: "inclusionai/ling-3.0-flash:free"          # 124B MoE / 5.1B активни, най-бърз
-      size_b: 124                                       # издържа последователни обаждания
-      supports_tools: true
     - provider: "openrouter"
       model: "nvidia/nemotron-3-ultra-550b-a55b:free"   # 550B/55B активни, 1M контекст
       size_b: 550

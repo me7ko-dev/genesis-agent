@@ -67,6 +67,32 @@ RETRY_ROUNDS = 2  # колко пъти да обходим цялата вер�
 # преди, когато таванът се удари.
 MAX_OUTPUT_TOKENS = int(os.environ.get("GENESIS_MAX_TOKENS", "4096"))
 
+# Таван по модел (design note, 2026-09-23): `max_tokens:` на запис в config.yaml.
+# Поводът: gpt-oss мисли, и размисълът се брои в тавана — на живо отговорът
+# му свърши точно на 4096. Общият таван остава 4096, защото по-високият го
+# отхвърлят някои доставчици; вдига се само за модели, проверени наживо, че
+# го приемат. GENESIS_MAX_TOKENS, ако е зададен, важи за всички (операторът
+# го е поискал изрично).
+_OUTPUT_CAPS: dict[str, int] | None = None
+
+
+def _output_cap(model: str) -> int:
+    global _OUTPUT_CAPS
+    if os.environ.get("GENESIS_MAX_TOKENS"):
+        return MAX_OUTPUT_TOKENS
+    if _OUTPUT_CAPS is None:
+        caps: dict[str, int] = {}
+        try:
+            models = (yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}).get("models", {}) or {}
+            for group in ("fallback_models", "coding_models"):
+                for entry in models.get(group, []) or []:
+                    if entry.get("model") and entry.get("max_tokens"):
+                        caps[entry["model"]] = int(entry["max_tokens"])
+        except Exception as e:
+            log.debug("_output_cap: config.yaml не се чете (%s), таванът остава общ", e)
+        _OUTPUT_CAPS = caps
+    return _OUTPUT_CAPS.get(model, MAX_OUTPUT_TOKENS)
+
 # Anthropic native (само при quality="max"). max_tokens покрива И размисъла, И
 # отговора — 16k стига за код без да изисква streaming (над ~16k SDK-то иска
 # stream, за да не удари HTTP timeout). `xhigh` е препоръчаното ниво за кодинг
@@ -201,6 +227,10 @@ _FALLBACK_CODES = {400, 401, 402, 403, 404, 408, 429, 500, 502, 503}
 # Кодове, при които моделът/квотата е ВРЕМЕННО изчерпан → cooldown, не го пробвай пак веднага.
 _EXHAUST_CODES = {429, 402, 503}
 _EXHAUST_COOLDOWN = 300  # секунди (5 мин) — колкото типичен OpenRouter free reset
+# 410 Gone = доставчикът е спрял модела завинаги (на живо 2026-09-23: NVIDIA
+# openai/gpt-oss-120b). Пет минути cooldown само го отлагат — пропуска се до
+# края на процеса.
+_GONE_COOLDOWN = 24 * 3600
 
 # Модул-ниво: изчерпани модели (survive-ва между мисии в един процес, напр. маратона).
 _EXHAUSTED: dict[str, float] = {}
@@ -370,6 +400,23 @@ def _load_coding_chain() -> list[dict]:
     return out
 
 
+def _load_light_chain() -> list[dict]:
+    """`models.light_models` — бързите модели за второстепенната работа
+    (извличане на памет, резюмета). Виж коментара в config.yaml за мерките."""
+    try:
+        cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return []
+    out: list[dict] = []
+    for entry in (cfg.get("models", {}) or {}).get("light_models", []) or []:
+        provider, model = entry.get("provider"), entry.get("model")
+        if provider in _PROVIDERS and model:
+            out.append({"provider": provider, "model": model,
+                        "size_b": entry.get("size_b", 0),
+                        "supports_tools": bool(entry.get("supports_tools", False))})
+    return out
+
+
 def _load_premium_chain() -> list[dict]:
     """
     Платените модели от config.yaml (`models.premium_models`).
@@ -407,7 +454,7 @@ class Brain:
 
     def __init__(self, prefer_provider: str | None = None, use_local: bool = True,
                  min_size_b: float = 0, pin_model: tuple[str, str] | None = None,
-                 quality: str | None = None):
+                 quality: str | None = None, light: bool = False):
         self.keys = _load_keys()
         self.chain = _load_chain()
         self.timeout = CLOUD_TIMEOUT
@@ -432,6 +479,16 @@ class Brain:
         # свършена квота значи по-слаб отговор, не спрял агент. Прилага се
         # СЛЕД min_size_b нарочно: филтърът рангира безплатни модели по размер и
         # няма власт над изричен избор на оператора.
+        # light (design note, 2026-09-23): второстепенна работа — извличане на
+        # памет, резюмета — отива първо на бързите `light_models` (0.6-3s срещу
+        # 8-45s на голям модел), с цялата верига отдолу като резерва. Курира се
+        # под min_size_b по същата причина като coding: изричен избор, не размер.
+        self.light = light
+        if light:
+            fast = _load_light_chain()
+            already = {(c["provider"], c["model"]) for c in fast}
+            self.chain = fast + [c for c in self.chain
+                                 if (c["provider"], c["model"]) not in already]
         self.quality = (quality or os.environ.get("GENESIS_QUALITY") or "").strip().lower()
         self.premium: list[dict] = []
         self._premium_meta: dict[tuple[str, str], dict] = {}
@@ -490,7 +547,9 @@ class Brain:
         # завършил успешно предния път — записано от `_save_last_model` в
         # complete()/_call_local(). Съвсем същият механизъм като pin_model
         # по-долу: първо в опашката, но с нормален fallback ако вече не е наличен.
-        if not pin_model and not prefer_provider:
+        # Не и в лекия режим: „последният модел" е този на главния разговор —
+        # да го сложим пред бързите модели би обезсмислило целия режим.
+        if not pin_model and not prefer_provider and not light:
             last = _load_last_model()
             if last:
                 pin_model = last
@@ -809,7 +868,7 @@ class Brain:
             return deque(parts, maxlen=maxlen) if maxlen else parts
 
         try:
-            brain = Brain()
+            brain = Brain(light=True)  # резюме — второстепенна работа
             summary_reply = brain.complete([
                 {"role": "system", "content": (
                     "Обобщи накратко (5-8 изречения) ключовите факти, решения и контекст "
@@ -908,7 +967,7 @@ class Brain:
         if key:
             headers["Authorization"] = f"Bearer {key}"
         payload: dict[str, Any] = {"model": model, "messages": messages,
-                                   "temperature": 0.7, "max_tokens": MAX_OUTPUT_TOKENS}
+                                   "temperature": 0.7, "max_tokens": _output_cap(model)}
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
@@ -951,9 +1010,9 @@ class Brain:
         # не е изчерпана квота и не бива да вкарва модела в cooldown.
         if finish_reason == "length" and _is_truncated(content or ""):
             raise RuntimeError(
-                f"HTTP_TRUNCATED: отговорът е отрязан на тавана от {MAX_OUTPUT_TOKENS} "
+                f"HTTP_TRUNCATED: отговорът е отрязан на тавана от {_output_cap(model)} "
                 f"токена, посред код-ограда (finish_reason=length). Вдигни го с "
-                f"GENESIS_MAX_TOKENS, ако доставчикът го позволява."
+                f"`max_tokens:` за модела в config.yaml, ако доставчикът го позволява."
             )
         # usage липсва при локален Ollama /v1 понякога — None е ОК, budget.py го обработва.
         self._last_usage = data.get("usage")
@@ -1284,7 +1343,8 @@ class Brain:
                 raw_text, _tc = self._call(loc["provider"], loc["model"], trimmed)
                 self._fail_count = 0
                 self.current = self.local
-                _save_last_model(loc["provider"], loc["model"])
+                if not getattr(self, "light", False):
+                    _save_last_model(loc["provider"], loc["model"])
                 code = ""
                 if "```python" in raw_text:
                     code = raw_text.split("```python")[1].split("```")[0].strip()
@@ -1554,7 +1614,10 @@ class Brain:
                         self._record_stat(prov, time.time() - t0, True)
                         self._fail_count = 0
                         self.current = attempt
-                        _save_last_model(prov, model)
+                        if not getattr(self, "light", False):
+                            # Лек успех не е „последният модел" на разговора —
+                            # иначе чатът ще тръгне следващия път от малкия модел.
+                            _save_last_model(prov, model)
                         if step > 0 or round_i > 0:
                             print(f"  [Brain] ↪ модел: {prov}/{model}")
                         code = ""
@@ -1579,6 +1642,10 @@ class Brain:
                             if f"HTTP_{c}" in last_error:
                                 _mark_exhausted(key)
                                 break
+                        if "HTTP_410" in last_error:
+                            _EXHAUSTED[key] = time.time() + _GONE_COOLDOWN
+                            print(f"  [Brain] ⛔ {prov}/{model} е спрян от доставчика (410) — "
+                                  "пропускам го; махни го от config.yaml")
                         continue
                 if round_i + 1 < RETRY_ROUNDS:
                     print("  [Brain] Всички облачни модели заети/изчерпани, кратка пауза и нов кръг...")
