@@ -115,6 +115,7 @@ models:
     - provider: "nvidia"
       model: "nvidia/nemotron-3-ultra-550b-a55b"   # 550B/55B активни
       size_b: 550
+      max_tokens: 16384       # приет наживо 2026-09-23 (32768 → 503 претоварен)
       supports_tools: true    # потвърдено наживо 2026-08-11 — И НАЙ-БЪРЗИЯТ
                                # от всички тествани (2.5с срещу 4.8-7.1с на
                                # 120B-те), т.е. тук "най-голям" не значи "бавен"
@@ -133,11 +134,14 @@ models:
     # Преместен ПОД най-големите (2026-08-11) — виж бележката най-горе. ──────
     - provider: "ollama_cloud"
       model: "nemotron-3-ultra:cloud"      # NVIDIA голям, потвърден наживо (200)
+      max_tokens: 16384       # приет наживо 2026-09-23 (и 32768)
       size_b: 253   # точен брой неизвестен, вероятно същото семейство като
                      # OpenRouter nemotron-3-ultra-550b — консервативна оценка
       supports_tools: true    # потвърдено наживо
     - provider: "ollama_cloud"
       model: "gpt-oss:120b-cloud"          # голям общ, потвърден наживо (200)
+      max_tokens: 16384       # мисли и размисълът яде тавана — 4096 се удари наживо;
+                               # 16384 и 32768 приети наживо 2026-09-23
       size_b: 120
       supports_tools: true    # потвърдено наживо
 
@@ -180,10 +184,6 @@ models:
     # /models на този акаунт): HTTP 200 + реален структуриран `tool_calls`.
     - provider: "nvidia"
       model: "nvidia/nemotron-3-super-120b-a12b"
-      size_b: 120
-      supports_tools: true    # потвърдено наживо 2026-08-11 (реален tool_call)
-    - provider: "nvidia"
-      model: "openai/gpt-oss-120b"
       size_b: 120
       supports_tools: true    # потвърдено наживо 2026-08-11 (реален tool_call)
     - provider: "nvidia"

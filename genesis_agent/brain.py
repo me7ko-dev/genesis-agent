@@ -67,6 +67,32 @@ RETRY_ROUNDS = 2  # колко пъти да обходим цялата вер�
 # преди, когато таванът се удари.
 MAX_OUTPUT_TOKENS = int(os.environ.get("GENESIS_MAX_TOKENS", "4096"))
 
+# Таван по модел (design note, 2026-09-23): `max_tokens:` на запис в config.yaml.
+# Поводът: gpt-oss мисли, и размисълът се брои в тавана — на живо отговорът
+# му свърши точно на 4096. Общият таван остава 4096, защото по-високият го
+# отхвърлят някои доставчици; вдига се само за модели, проверени наживо, че
+# го приемат. GENESIS_MAX_TOKENS, ако е зададен, важи за всички (операторът
+# го е поискал изрично).
+_OUTPUT_CAPS: dict[str, int] | None = None
+
+
+def _output_cap(model: str) -> int:
+    global _OUTPUT_CAPS
+    if os.environ.get("GENESIS_MAX_TOKENS"):
+        return MAX_OUTPUT_TOKENS
+    if _OUTPUT_CAPS is None:
+        caps: dict[str, int] = {}
+        try:
+            models = (yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}).get("models", {}) or {}
+            for group in ("fallback_models", "coding_models"):
+                for entry in models.get(group, []) or []:
+                    if entry.get("model") and entry.get("max_tokens"):
+                        caps[entry["model"]] = int(entry["max_tokens"])
+        except Exception as e:
+            log.debug("_output_cap: config.yaml не се чете (%s), таванът остава общ", e)
+        _OUTPUT_CAPS = caps
+    return _OUTPUT_CAPS.get(model, MAX_OUTPUT_TOKENS)
+
 # Anthropic native (само при quality="max"). max_tokens покрива И размисъла, И
 # отговора — 16k стига за код без да изисква streaming (над ~16k SDK-то иска
 # stream, за да не удари HTTP timeout). `xhigh` е препоръчаното ниво за кодинг
@@ -201,6 +227,10 @@ _FALLBACK_CODES = {400, 401, 402, 403, 404, 408, 429, 500, 502, 503}
 # Кодове, при които моделът/квотата е ВРЕМЕННО изчерпан → cooldown, не го пробвай пак веднага.
 _EXHAUST_CODES = {429, 402, 503}
 _EXHAUST_COOLDOWN = 300  # секунди (5 мин) — колкото типичен OpenRouter free reset
+# 410 Gone = доставчикът е спрял модела завинаги (на живо 2026-09-23: NVIDIA
+# openai/gpt-oss-120b). Пет минути cooldown само го отлагат — пропуска се до
+# края на процеса.
+_GONE_COOLDOWN = 24 * 3600
 
 # Модул-ниво: изчерпани модели (survive-ва между мисии в един процес, напр. маратона).
 _EXHAUSTED: dict[str, float] = {}
@@ -908,7 +938,7 @@ class Brain:
         if key:
             headers["Authorization"] = f"Bearer {key}"
         payload: dict[str, Any] = {"model": model, "messages": messages,
-                                   "temperature": 0.7, "max_tokens": MAX_OUTPUT_TOKENS}
+                                   "temperature": 0.7, "max_tokens": _output_cap(model)}
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
@@ -951,9 +981,9 @@ class Brain:
         # не е изчерпана квота и не бива да вкарва модела в cooldown.
         if finish_reason == "length" and _is_truncated(content or ""):
             raise RuntimeError(
-                f"HTTP_TRUNCATED: отговорът е отрязан на тавана от {MAX_OUTPUT_TOKENS} "
+                f"HTTP_TRUNCATED: отговорът е отрязан на тавана от {_output_cap(model)} "
                 f"токена, посред код-ограда (finish_reason=length). Вдигни го с "
-                f"GENESIS_MAX_TOKENS, ако доставчикът го позволява."
+                f"`max_tokens:` за модела в config.yaml, ако доставчикът го позволява."
             )
         # usage липсва при локален Ollama /v1 понякога — None е ОК, budget.py го обработва.
         self._last_usage = data.get("usage")
@@ -1579,6 +1609,10 @@ class Brain:
                             if f"HTTP_{c}" in last_error:
                                 _mark_exhausted(key)
                                 break
+                        if "HTTP_410" in last_error:
+                            _EXHAUSTED[key] = time.time() + _GONE_COOLDOWN
+                            print(f"  [Brain] ⛔ {prov}/{model} е спрян от доставчика (410) — "
+                                  "пропускам го; махни го от config.yaml")
                         continue
                 if round_i + 1 < RETRY_ROUNDS:
                     print("  [Brain] Всички облачни модели заети/изчерпани, кратка пауза и нов кръг...")
