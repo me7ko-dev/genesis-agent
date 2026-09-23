@@ -42,13 +42,13 @@ def validate_code_with_ruff(code: str) -> tuple[bool, str]:
         fixed = subprocess.run(
             ["ruff", "check", "--fix", "--exit-zero",
              "--stdin-filename", "generated.py", "-"],
-            input=code, capture_output=True, text=True, timeout=_RUFF_TIMEOUT,
+            input=code, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=_RUFF_TIMEOUT,
             check=False,
         )
         checked = subprocess.run(
             ["ruff", "check", "--output-format", "json",
              "--stdin-filename", "generated.py", "-"],
-            input=fixed.stdout or code, capture_output=True, text=True,
+            input=fixed.stdout or code, capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=_RUFF_TIMEOUT, check=False,
         )
     except (subprocess.TimeoutExpired, OSError):
@@ -92,7 +92,7 @@ def lint_note(code: str) -> str:
         checked = subprocess.run(
             ["ruff", "check", "--output-format", "json",
              "--stdin-filename", "generated.py", "-"],
-            input=code, capture_output=True, text=True,
+            input=code, capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=_RUFF_TIMEOUT, check=False,
         )
     except (subprocess.TimeoutExpired, OSError):

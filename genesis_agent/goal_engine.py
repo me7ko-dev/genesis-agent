@@ -179,6 +179,87 @@ def _load_past_goals() -> set[str]:
     return seen
 
 
+def _dedup_key(text: str) -> str:
+    """Ключ за сравнение на ЦЕЛИ помежду им.
+
+    Нарочно НЕ `slugify`: тя прави имена на ФАЙЛОВЕ и маха всичко извън
+    [a-z0-9], тоест всяка изцяло кирилска цел се свежда до фолбека "skill".
+    В проект, чийто оператор пише на български, това слива несвързани цели в
+    една кофа — подадени три нишки, функцията връщаше една, а останалите две
+    изчезваха тихо. Тук стига свеждане до малки букви и свиване на
+    интервалите: сравняваме текст с текст, не строим път.
+    """
+    return " ".join(text.lower().split())
+
+
+def goals_from_real_work(limit: int = 5) -> list[str]:
+    """Цели, извлечени от РЕАЛНАТА работа на оператора, не от каталога отгоре.
+
+    `_DOMAINS` е закован списък с учебникарски теми ("token-bucket rate
+    limiter", "CSV schema validator"). Той върши работа, докато библиотеката е
+    празна, но каквото и да произведе, то по построение няма връзка с това,
+    което операторът реално прави — затова библиотеката се напълни с
+    упражнения, а нито едно умение не свърши работа в истинска сесия.
+
+    Тук източниците са два, и двата описват случила се работа:
+      • отворени нишки с конкретна следваща стъпка (workspace_memory) —
+        това, което е недовършено СЕГА;
+      • повтарящи се епизоди (episodic_memory) — правено е няколко пъти на
+        ръка, значи си заслужава да стане умение.
+
+    Мек внос и празен списък при всякакъв проблем: това е предложение за
+    какво да се работи, не нещо, заради което си струва да падне цикълът.
+    """
+    goals: list[str] = []
+
+    try:
+        from genesis_agent import workspace_memory as wm
+        for thread in wm.list_threads(status="open", limit=limit * 2):
+            title = str(thread.get("title", "")).strip()
+            step = str(thread.get("next_step", "")).strip()
+            if not title:
+                continue
+            # Следващата стъпка е по-конкретна от заглавието на нишката, затова
+            # тя води, когато я има.
+            goals.append(
+                f"{step or title} (от отворена нишка: {title})" if step else title)
+    except Exception:
+        pass
+
+    try:
+        from genesis_agent.episodic_memory import _fetch_all_episodes
+        counts: dict[str, int] = {}
+        for ep in _fetch_all_episodes():
+            goal = str(ep.get("goal", "")).strip()
+            if len(goal) <= 10:
+                continue
+            # Само УСПЕШНИ МИСИИ. Без този филтър първият кандидат тук беше
+            # "a goal that always fails", повторен 85 пъти — тестов епизод,
+            # чиято единствена заслуга е, че пада надеждно. Отделно `tool`
+            # епизодите са единични извиквания (READ_FILE и подобни), не
+            # задачи, които изобщо могат да станат умение.
+            tags = str(ep.get("tags", ""))
+            outcome = str(ep.get("outcome", "")).lower()
+            if "mission" not in tags or "success" not in tags or "fail" in outcome:
+                continue
+            counts[_dedup_key(goal)] = counts.get(_dedup_key(goal), 0) + 1
+        for slug, times in sorted(counts.items(), key=lambda kv: kv[1], reverse=True):
+            if times < 3:
+                break            # подредено низходящо — под прага няма смисъл да се гледа нататък
+            goals.append(f"Направи умение за повтаряща се задача ({times} пъти): {slug}")
+    except Exception:
+        pass
+
+    seen: set[str] = set()
+    unique = []
+    for g in goals:
+        key = _dedup_key(g)
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(g)
+    return unique[:limit]
+
+
 def coverage_report() -> dict[str, int]:
     """Брой умения на домейн (по ключови думи в имената)."""
     names = _load_skill_names()
@@ -220,6 +301,24 @@ def next_goals(n: int = 10, *, use_semantic: bool = True) -> list[str]:
 
     goals: list[str] = []
     seen_slugs: set[str] = set()
+
+    # Реалната работа на оператора ВОДИ пред каталога: недовършена нишка и
+    # задача, правена три пъти на ръка, струват повече от още едно учебникарско
+    # упражнение. Каталогът остава като попълване, когато няма реална работа —
+    # празна библиотека все пак трябва да тръгне отнякъде.
+    for goal in goals_from_real_work(limit=max(1, n // 2)):
+        slug = slugify(goal)
+        # `slug == "skill"` е фолбекът на slugify за текст без латиница, тоест
+        # носи нула информация. Филтрирането по него изхвърляше ВСЯКА кирилска
+        # цел веднага щом едно минало умение също се е свело до "skill".
+        known = slug in existing and slug != "skill"
+        key = _dedup_key(goal)
+        if slug and not known and key not in seen_slugs:
+            seen_slugs.add(key)
+            goals.append(goal)
+            if len(goals) >= n:
+                return goals
+
     # Обхождаме домейните по стойност, взимаме по една тема наведнъж (round-robin),
     # докато напълним n.
     topic_pools = {d: list(cfg["topics"]) for d, cfg in _DOMAINS.items()}

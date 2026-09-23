@@ -9,6 +9,8 @@ max_tokens ceiling came back looking like a normal, complete answer.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 import genesis_terminal_agent as gta
@@ -135,3 +137,186 @@ class TestRestoreSession:
         restored = gta._restore_session(loaded, "CURRENT PROMPT")
         assert restored[0]["content"] == "CURRENT PROMPT"
         assert sum(1 for m in restored if m.get("role") == "system") == 1
+
+
+class TestTerminalHasTheSameIntegrityCheckAsTheSharedCore:
+    """The terminal is the DEFAULT frontend (`genesis`) but runs its own tool
+    loop, separate from agent_core.run_tool_loop. claim_check was wired into
+    the shared core only, which left the most-used entry point with no check
+    against simulated work at all. These pin the two together so they cannot
+    drift apart again silently.
+    """
+
+    def test_the_terminal_module_wires_in_claim_check(self) -> None:
+        import genesis_terminal_agent as gta
+        src = Path(gta.__file__).read_text(encoding="utf-8")
+        assert "claim_check.unsupported_claims" in src, (
+            "терминалният цикъл трябва да проверява твърденията, както ядрото")
+        assert "claim_check.nudge_text" in src
+
+    def test_both_frontends_share_one_text_result_parser(self) -> None:
+        """Доказателството за claim_check се вади от формата на резултата
+        (`[RUN_CMD: ...]`). Този разбор живее в claim_check и се ползва и от
+        двата цикъла — по-рано беше копиран дословно и на двете места, което
+        значи, че промяна във формата ги обезоръжава едновременно и мълчаливо.
+        Затова тук се проверява самата функция, а не текстът на модула."""
+        from genesis_agent import claim_check
+        results = [
+            "[RUN_CMD: pip install ruff]\nSuccessfully installed",
+            "[RUN_CMD: rm -rf /]\n[SANDBOX BLOCKED] катастрофално",
+            "без разпознаваем префикс",
+        ]
+        executed = claim_check.executed_from_text_results(results)
+        assert ("RUN_CMD", "pip install ruff") in executed
+        assert not any("rm -rf" in args for _n, args in executed), (
+            "блокирана команда не е изпълнение"
+        )
+        assert len(executed) == 1
+
+        for module in ("genesis_terminal_agent", "genesis_agent.agent_core"):
+            src = Path(__import__(module, fromlist=["x"]).__file__).read_text(
+                encoding="utf-8")
+            assert "executed_from_text_results" in src, f"{module} не ползва общия разбор"
+
+    def test_the_shared_core_still_has_it_too(self) -> None:
+        from genesis_agent import agent_core
+        src = Path(agent_core.__file__).read_text(encoding="utf-8")
+        assert "claim_check.unsupported_claims" in src
+
+
+class TestTheTerminalRoutesThroughBrainWhenItCan:
+    """Терминалът има собствен, по-стар път към доставчиците — escape hatch за
+    доставчик, който Brain не знае. Кои са те беше ТВЪРД списък, а той се
+    разминава с това, което описва: `gemini` влезе в brain.py с този клон, а
+    остана изброен като „непознат", тоест избор на Gemini в `/model` тихо
+    заобикаляше кеширането на промпта, cooldown-а при 429/402/503,
+    деприоритизацията на болни доставчици и общото отчитане.
+
+    Сега се пита самият `brain._PROVIDERS`, а тестът пази двете страни да не се
+    разминат отново.
+    """
+
+    def test_a_provider_brain_knows_goes_through_brain(self) -> None:
+        import genesis_terminal_agent as t
+        from genesis_agent.brain import _PROVIDERS
+        for name in sorted(_PROVIDERS):
+            assert t._brain_handles(name), f"{name} е в _PROVIDERS, но отива по стария път"
+
+    def test_gemini_and_openai_specifically(self) -> None:
+        """Двете, които бяха в твърдия списък по погрешка."""
+        import genesis_terminal_agent as t
+        assert t._brain_handles("gemini")
+        assert t._brain_handles("openai")
+
+    def test_the_terminal_only_names_are_really_unknown_to_brain(self) -> None:
+        """Обратната посока: ако Brain научи някое от тези имена, списъкът
+        трябва да се смали, а не да остане да ги отклонява."""
+        import genesis_terminal_agent as t
+        from genesis_agent.brain import _PROVIDERS
+        for name in sorted(t._TERMINAL_ONLY_PROVIDERS):
+            assert name not in _PROVIDERS, (
+                f"Brain вече знае {name!r} — махни го от _TERMINAL_ONLY_PROVIDERS")
+
+    def test_an_unknown_name_falls_back_instead_of_crashing(self) -> None:
+        import genesis_terminal_agent as t
+        assert t._brain_handles("нещо-което-никой-не-знае") is False
+
+    def test_a_broken_brain_import_does_not_take_the_terminal_down(self, monkeypatch) -> None:
+        """Терминалът е фронтендът по подразбиране: счупен внос на brain трябва
+        да го прати по стария път, не да го убие."""
+        import builtins
+
+        import genesis_terminal_agent as t
+        real_import = builtins.__import__
+
+        def _boom(name, *a, **kw):
+            if name == "genesis_agent.brain":
+                raise ImportError("нарочно")
+            return real_import(name, *a, **kw)
+
+        monkeypatch.setattr(builtins, "__import__", _boom)
+        assert t._brain_handles("gemini") is False
+
+
+class TestVertexIsSelectableFromTheMenu:
+    """Vertex влезе в brain.py с този клон, но не и в таблицата на терминала —
+    операторът можеше да го настрои по указанията в docs/WINDOWS.md и после да
+    не го намери в `/model`. Проверено преди поправката: `grep -i vertex
+    genesis_terminal_agent.py` не връщаше нищо.
+    """
+
+    def test_it_is_in_the_provider_table(self) -> None:
+        import genesis_terminal_agent as t
+        assert "vertex" in t.PROVIDERS
+
+    def test_choosing_it_goes_through_brain(self) -> None:
+        """Брейн знае `vertex`; ако терминалът го прати по стария път, Vertex
+        губи ротацията на проекти и кеширането."""
+        import genesis_terminal_agent as t
+        assert t._brain_handles("vertex")
+
+    def test_it_is_not_advertised_as_free(self) -> None:
+        """Vertex е платен GCP ресурс. Зелен етикет „free" върху него е
+        подвеждащ по начин, който струва пари."""
+        import genesis_terminal_agent as t
+        assert "vertex" not in t.FREE_PROVIDERS
+        assert t.is_free_model("vertex", "google/gemini-2.5-pro") is False
+
+
+class TestReadinessIsComputedInOnePlace:
+    """Статусът в таблицата и проверката при избора се смятаха поотделно, и
+    двете през `key_env`. За Vertex това дава зелена отметка винаги, защото
+    той НЯМА ключ — има проект, пакет и credentials, и всяко от трите липсва
+    по различен начин."""
+
+    def test_a_provider_without_a_key_is_ready(self) -> None:
+        import genesis_terminal_agent as t
+        ready, _ = t.provider_ready("ollama")
+        assert ready is True
+
+    def test_a_missing_key_is_named(self) -> None:
+        import genesis_terminal_agent as t
+        t.KEYS["GROQ_API_KEY"] = ""
+        ready, hint = t.provider_ready("groq")
+        assert ready is False
+        assert "GROQ_API_KEY" in hint
+
+    def test_vertex_without_a_project_is_not_ready(self, monkeypatch) -> None:
+        import genesis_terminal_agent as t
+        monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+        for i in range(2, 11):
+            monkeypatch.delenv(f"GOOGLE_CLOUD_PROJECT_{i}", raising=False)
+        ready, hint = t.provider_ready("vertex")
+        assert ready is False
+        assert "GOOGLE_CLOUD_PROJECT" in hint, "подсказката трябва да КАЖЕ какво липсва"
+
+    def test_vertex_with_a_project_and_auth_is_ready(self, monkeypatch) -> None:
+        import genesis_terminal_agent as t
+        from genesis_agent import vertex_auth
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "моят-проект")
+        monkeypatch.setattr(vertex_auth, "auth_available", lambda: True)
+        ready, _ = t.provider_ready("vertex")
+        assert ready is True
+
+    def test_an_unknown_provider_is_not_ready(self) -> None:
+        import genesis_terminal_agent as t
+        ready, hint = t.provider_ready("няма-такъв")
+        assert ready is False
+        assert "непознат" in hint
+
+
+class TestTheVertexModelListDegradesInsteadOfFailing:
+    def test_without_credentials_it_falls_back(self, monkeypatch) -> None:
+        """Без ADC заявката за живия списък не може да мине — менюто трябва да
+        покаже нещо, вместо да е празно."""
+        import genesis_terminal_agent as t
+        from genesis_agent import vertex_auth
+        t.MODELS_CACHE.pop("vertex", None)
+        monkeypatch.setattr(vertex_auth, "token", lambda _p: None)
+        models = t.fetch_models("vertex")
+        assert models == t.FALLBACKS["vertex"]
+
+    def test_the_fallback_uses_the_form_the_chain_expects(self) -> None:
+        """`google/<модел>` е формата, с която brain.py вика Vertex."""
+        import genesis_terminal_agent as t
+        assert all(m.startswith("google/") for m in t.FALLBACKS["vertex"])

@@ -11,6 +11,7 @@ from genesis_agent.brain import Brain
 from genesis_agent.config import MAX_LLM_RETRIES, PROJECT_ROOT
 from genesis_agent.executor import format_failure_for_brain, run_python_subprocess
 from genesis_agent.local_repair_agent import emergency_repair
+from genesis_agent.repeat_guard import RepeatGuard
 from genesis_agent.skill_loader import SKILLS_ROOT
 from genesis_agent.skills_manager import save_skill, slugify
 from genesis_agent.storage_monitor import check_storage, human_gb
@@ -181,7 +182,7 @@ def run_autonomous_loop(
     operator_id: str | None = None,
 ) -> LoopOutcome:
     """
-    Публична обвивка: изпълнява мисията и известява резултата в Discord/Telegram
+    Публична обвивка: изпълнява мисията и известява резултата през notifier
     (ако са конфигурирани). Известията никога не чупят цикъла.
     """
     outcome = _run_autonomous_loop_impl(
@@ -275,6 +276,19 @@ def _run_autonomous_loop_impl(
     # след него моделът трябва изрично да спре и да пише.
     _tool_only_rounds = 0
     _force_code_after = max(3, (max_rounds * 2) // 3)
+    # Заповедта се издава веднъж — но в system съобщението, не само като
+    # пореден user ред (bug fix, 2026-09-20). Trim_round_history пази само
+    # messages[:2] + последния разменен чифт, така че user заповед оцелява
+    # РОВНО един рунд: подчини ли се моделът веднага, добре; не се ли подчини,
+    # натискът изчезва точно когато е най-нужен. Повтарянето на всеки следващ
+    # рунд (както беше) го компенсираше, но по начин, който не си личи от
+    # кода и плаща наново на всеки рунд. system частта оцелява до края на
+    # мисията; user редът остава за непосредствената сила.
+    _forced_code = False
+    # Същият извик, същият изход, пореден път — виж genesis_agent.repeat_guard.
+    # Тук е по-остро, отколкото в чата: рундовете на мисия са 8, не 25, така че
+    # три изгорени в кръг са над една трета от целия бюджет за задачата.
+    _spin_guard = RepeatGuard()
 
     red_note = ""
     if dna.red_zone_elevation_granted():
@@ -368,6 +382,7 @@ def _run_autonomous_loop_impl(
         # обратно към върха на цикъла ПРЕДИ да стигнем до код-екстракция.
         if reply.tool_calls:
             report_thought("🔧 Brain вика инструмент (native)...")
+            _spin_now = False
             messages.append({"role": "assistant", "content": reply.raw_text or "",
                               "tool_calls": reply.tool_calls})
             try:
@@ -386,24 +401,33 @@ def _run_autonomous_loop_impl(
                     tool_out = genesis_skills.dispatch_tool_call(name, args)
                     messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                                       "name": name, "content": tool_out[:4000]})
+                    if _spin_guard.observe(name, args, tool_out).stop:
+                        _spin_now = True
             except Exception as _e:
                 messages.append({"role": "tool", "tool_call_id": "error",
                                   "name": "error", "content": f"[tool грешка: {_e}]"})
 
             _tool_only_rounds += 1
-            if _tool_only_rounds >= _force_code_after:
-                report_thought(f"⏱️ {_tool_only_rounds} рунда само tool calls, без код — "
-                               "принуждавам писане сега.")
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "STOP calling tools. You have used most of the round budget "
-                        "searching/looking things up without writing any code. Whatever "
-                        "you have found so far is enough — write the final Python script "
-                        "NOW, in a single ```python``` fence, with the required self-test. "
-                        "Do not call USE_SKILL or any other tool in your next reply."
-                    ),
-                })
+            if not _forced_code and (_tool_only_rounds >= _force_code_after or _spin_now):
+                _forced_code = True
+                if _spin_now:
+                    report_thought("🔁 Същият инструмент, същият резултат, трети пореден път — "
+                                   "търсенето не води доникъде; принуждавам писане сега.")
+                else:
+                    report_thought(f"⏱️ {_tool_only_rounds} рунда само tool calls, без код — "
+                                   "принуждавам писане сега.")
+                _stop_order = (
+                    "STOP calling tools. You have used most of the round budget "
+                    "searching/looking things up without writing any code. Whatever "
+                    "you have found so far is enough — write the final Python script "
+                    "NOW, in a single ```python``` fence, with the required self-test. "
+                    "Do not call USE_SKILL or any other tool in your next reply."
+                )
+                messages.append({"role": "user", "content": _stop_order})
+                # ...и в system-а, който trim_round_history никога не реже.
+                if messages and messages[0].get("role") == "system":
+                    messages[0] = {**messages[0],
+                                   "content": f"{messages[0].get('content', '')}\n\n{_stop_order}"}
             continue
 
         # ─── TOOL USE ПО ВРЕМЕ НА МИСИЯ (стар text-tag режим, само read-only) ───
@@ -500,6 +524,33 @@ def _run_autonomous_loop_impl(
             vres = verify_skill(reply.code)
             if vres.method != "self_test_passed":
                 _quality_failures = _note_quality_failure(brain, _quality_failures, _quality_escalate_after)
+                # Обратната връзка трябва да описва ИСТИНСКАТА причина. Когато
+                # проверката е отказана заради нужното потвърждение, кодът има
+                # преминаващ self-test — просто не е бил пуснат. Общото
+                # съобщение („няма self-test, добави assert-и“) остави на
+                # модела един-единствен начин да се подчини: да махне
+                # подпроцеса, тоест да обезсмисли умението, или да си измисли
+                # тест. Гейтът е същият — умението пак не се приема — сменя се
+                # само какво се иска да се поправи.
+                if vres.method == "needs_confirmation":
+                    report_thought(
+                        "🧪 Тест-гейт: self-testът не може да се пусне без надзор "
+                        f"({vres.detail[:120]})")
+                    messages.append({"role": "assistant", "content": reply.raw_text})
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "The self-test could NOT be run: verification runs unattended and "
+                            "the code performs an operation that requires confirmation "
+                            f"({vres.detail[:200]}). Do NOT remove that capability — it is the "
+                            "point of the skill. Restructure instead: keep the privileged call "
+                            "inside a function, and make the `__main__` self-test verify the "
+                            "logic around it without performing it (assert on argument "
+                            "assembly, parsing of a sample output, a dry-run flag). Print 'OK' "
+                            "on success and return the FULL corrected script."
+                        ),
+                    })
+                    continue
                 report_thought(f"🧪 Тест-гейт отхвърли: няма преминаващ self-test ({vres.method})")
                 messages.append({"role": "assistant", "content": reply.raw_text})
                 messages.append({
@@ -531,8 +582,11 @@ def _run_autonomous_loop_impl(
             # слепите петна на първото. brain.current още сочи towards писателя тук
             # (нищо не го е сменило между генерирането на кода и този ред).
             writer = getattr(brain, "current", None)
-            writer_pair = ((writer.get("provider"), writer.get("model"))
-                           if isinstance(writer, dict) and writer.get("provider") else None)
+            writer_pair: tuple[str, str] | None = None
+            if isinstance(writer, dict):
+                w_provider, w_model = writer.get("provider"), writer.get("model")
+                if isinstance(w_provider, str) and isinstance(w_model, str):
+                    writer_pair = (w_provider, w_model)
             critic_eval = brain.complete(critic_msg, avoid=writer_pair).raw_text.strip()
 
             if critic_eval.upper().startswith("NO"):
@@ -641,20 +695,20 @@ def _run_autonomous_loop_impl(
         # - т.е. НУЛЕВА верификация - и после се преизползва от бъдещи мисии през
         # RAG (Brain.build_context), пренасяйки бъга нататък. Минава през СЪЩИЯ
         # sandbox verify_skill гейт като нормалния успешен path по-горе.
+        from genesis_agent.verifier import verify_skill
         repair_verified = False
-        vres = None
+        repair_vres = None
         if repair.fixed:
-            from genesis_agent.verifier import verify_skill
-            vres = verify_skill(repair.code)
-            repair_verified = vres.verified
+            repair_vres = verify_skill(repair.code)
+            repair_verified = repair_vres.verified
             if not repair_verified:
                 print(f"  [РЕМОНТ ОТХВЪРЛЕН] Поправеният код не мина verify_skill "
-                      f"({vres.method}) - вероятно маскира грешката вместо да я "
+                      f"({repair_vres.method}) - вероятно маскира грешката вместо да я "
                       "поправя; НЕ се записва в библиотеката непроверен.")
 
-        if repair_verified:
+        if repair_verified and repair_vres is not None:
             print(f"\n  [\u2705 \u0410\u0412\u0410\u0420\u0418\u0415\u041d \u0420\u0415\u041c\u041e\u041d\u0422 \u0423\u0421\u041f\u0415\u0428\u0415\u041d] {repair.fix_desc}")
-            print(f"  Метод: {repair.method} | Рундове: {repair.rounds} | verify: {vres.method}")
+            print(f"  Метод: {repair.method} | Рундове: {repair.rounds} | verify: {repair_vres.method}")
 
             slug = (skill_slug or slugify(goal)) + "_repaired"
             try:
@@ -662,10 +716,10 @@ def _run_autonomous_loop_impl(
                     slug=slug,
                     code=repair.code,
                     goal=goal + " [repaired by LocalRepairAgent]",
-                    verification_stdout=vres.detail,
+                    verification_stdout=repair_vres.detail,
                     extra={"repair_method": repair.method,
                            "repair_rounds": repair.rounds,
-                           "verify_method": vres.method,
+                           "verify_method": repair_vres.method,
                            "operator": operator_id or "operator"}
                 )
                 rel = str(path.relative_to(SKILLS_ROOT)).replace("\\", "/")

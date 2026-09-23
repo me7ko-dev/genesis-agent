@@ -96,15 +96,37 @@ def _search_python(root: Path, pattern: str, glob: str | None,
 
 def _search_ripgrep(root: Path, pattern: str, glob: str | None,
                     max_results: int) -> list[Match] | None:
-    """None means 'ripgrep could not answer' — the caller falls back."""
-    cmd = ["rg", "--json", "--max-count", str(max_results), "-e", pattern]
+    """None means 'ripgrep could not answer' — the caller falls back.
+
+    The flags exist to make this path answer the SAME question as
+    `_search_python`, because which one runs depends only on whether `rg`
+    happens to be installed. Measured on this repository before they were
+    added: `search_code("Windows installer self-test", ".")` returned 0 hits
+    with ripgrep and 1 without — the string is in `.github/workflows/ci.yml`,
+    and `.github` is a hidden directory, which ripgrep skips by default. The
+    tool that wraps this tells the model "it really is not there; do not assume
+    it is hidden", so an engine that quietly skips files makes that a lie.
+
+      --hidden        `.github/`, `.claude/`, `.env.example` are real content
+      --no-ignore     `.gitignore` applies to rg and not to the Python path;
+                      generated trees are excluded by `_SKIP_DIRS` instead,
+                      which BOTH paths honour
+      --max-filesize  the Python path skips files over `_MAX_FILE_BYTES`
+
+    `.git/` stays excluded because it is in `_SKIP_DIRS`, which is turned into
+    `--glob !.git/` below — so `--hidden --no-ignore` does not drag in object
+    files.
+    """
+    cmd = ["rg", "--json", "--max-count", str(max_results),
+           "--hidden", "--no-ignore", "--max-filesize", str(_MAX_FILE_BYTES),
+           "-e", pattern]
     for d in sorted(_SKIP_DIRS):
         cmd += ["--glob", f"!{d}/"]
     if glob:
         cmd += ["--glob", glob]
     cmd.append(str(root))
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False)
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, check=False)
     except (OSError, subprocess.TimeoutExpired):
         return None
     # rc 1 is "no matches" — a real answer, not a failure. Anything above that
@@ -120,11 +142,21 @@ def _search_ripgrep(root: Path, pattern: str, glob: str | None,
             continue
         if ev.get("type") != "match":
             continue
-        d = ev["data"]
+        # Всичко през .get(): това е изход на ВЪНШНА програма, чийто JSON
+        # формат зависи от версията ѝ. Директният достъп вдигаше KeyError,
+        # който минава покрай `except (OSError, TimeoutExpired)` по-горе и
+        # излиза от функцията — при положение че целият ѝ договор е "не можах
+        # да отговоря → None, извикващият пада към Python пътя". Един непознат
+        # вариант на match убиваше търсенето, вместо да го прехвърли на
+        # резервния път, който работи винаги.
+        data = ev.get("data") or {}
+        line_no = data.get("line_number")
+        if not isinstance(line_no, int):
+            continue
         out.append(Match(
-            d["path"].get("text", "?"),
-            d["line_number"],
-            (d["lines"].get("text") or "").rstrip()[:_LINE_CLIP],
+            (data.get("path") or {}).get("text", "?"),
+            line_no,
+            ((data.get("lines") or {}).get("text") or "").rstrip()[:_LINE_CLIP],
         ))
         if len(out) >= max_results:
             break
@@ -316,7 +348,7 @@ def detect_project(path: str | Path) -> ProjectInfo:
     if is_git:
         try:
             proc = subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
-                                  capture_output=True, text=True, timeout=15, check=False)
+                                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15, check=False)
             dirty = bool(proc.stdout.strip())
         except (OSError, subprocess.TimeoutExpired):
             pass
@@ -325,7 +357,20 @@ def detect_project(path: str | Path) -> ProjectInfo:
 
 
 def repo_map(path: str | Path, max_dirs: int = 40) -> str:
-    """A compact, model-readable summary of a project."""
+    """A compact, model-readable summary of a project.
+
+    A file as the root is a routine call — the model has just read
+    `src/main.py` and asks to be shown around it. Before, that raised
+    NotADirectoryError, which `_tool_repo_map` turned into
+    `[REPO_MAP] Грешка: [Errno 20] Not a directory: …`: an errno where an
+    instruction belonged. `search_code` already handles the same input by
+    working on the file's directory, so this does too, and says that it did.
+    """
+    given = Path(path).expanduser()
+    note = ""
+    if given.is_file():
+        note = f"(подаден е файл — картирам папката му: {given.name})\n"
+        path = given.parent
     info = detect_project(path)
     total = sum(info.file_counts.values())
     top = ", ".join(f"{ext or '(без разширение)'}×{n}"
@@ -355,4 +400,4 @@ def repo_map(path: str | Path, max_dirs: int = 40) -> str:
         lines.append("вход: " + ", ".join(info.entry_points))
     lines.append("съдържание:")
     lines.extend(dirs)
-    return "\n".join(lines)
+    return note + "\n".join(lines)

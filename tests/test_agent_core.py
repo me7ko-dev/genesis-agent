@@ -1,5 +1,5 @@
 """genesis_agent.agent_core — the shared tool loop behind every full frontend
-(terminal, Discord, GTK, Jarvis), previously untested. Covers the pure
+(terminal, GTK, Jarvis), previously untested. Covers the pure
 helpers (env_facts, _diff_for_write, _is_question/_clean_question) and
 run_tool_loop's control flow with a fake Core/skills bridge — no real Brain
 call, no real tool dispatch, no real filesystem writes outside tmp_path."""
@@ -192,6 +192,78 @@ class TestRunToolLoopTextOnly:
         assert result[-1] == {"role": "assistant", "content": "hello there"}
 
 
+class TestRunToolLoopStopsSpinning:
+    """Таванът ограничава ЦЕНАТА на въртенето на място, не го разпознава.
+    Откакто е 25 (беше 8), един повтарян извик изгаря три пъти повече рундове
+    и завършва с "достигнат таван" — най-скъпото съобщение, защото пристига
+    последно и не носи нито резултат, нито причина."""
+
+    @staticmethod
+    def _spin(dispatch_result, replies=60):
+        tc = [{"id": "1", "function": {"name": "USE_SKILL",
+                                       "arguments": '{"name_or_query": "foo"}'}}]
+        core = _FakeCore([("", tc, "groq", "llama")] * replies)
+
+        class _Repeating:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict]] = []
+
+            def dispatch_tool_call(self, name, args):
+                self.calls.append((name, args))
+                return dispatch_result(len(self.calls))
+
+            def parse_and_execute_tools(self, text):
+                return []
+
+            def _resolve(self, path):
+                raise RuntimeError("not used")
+
+        core.skills = _Repeating()
+        said: list[str] = []
+        ac.run_tool_loop(core, [{"role": "user", "content": "hi"}],
+                         on_assistant=lambda t, p, m: said.append(t),
+                         on_tool_result=lambda *a: None)
+        return core.skills.calls, said
+
+    def test_identical_call_and_result_stops_long_before_the_cap(self) -> None:
+        from genesis_agent.repeat_guard import STOP_AT
+        calls, said = self._spin(lambda i: "няма такова умение")
+        assert len(calls) == STOP_AT
+        assert "USE_SKILL" in said[-1]
+
+    def test_a_changing_result_is_progress_and_runs_to_the_cap(self) -> None:
+        """Обратната страна: предпазителят не бива да реже истинска работа."""
+        from genesis_agent.config import TOOL_ROUND_CAP
+        calls, said = self._spin(lambda i: f"резултат {i}")
+        assert len(calls) == TOOL_ROUND_CAP
+        assert "таван" in said[-1]
+
+    def test_text_tag_mode_stops_spinning_too(self) -> None:
+        from genesis_agent.repeat_guard import STOP_AT
+        core = _FakeCore([("[RUN_CMD: ls]", None, "groq", "llama")] * 60)
+
+        class _RepeatingText:
+            def __init__(self) -> None:
+                self.runs = 0
+
+            def parse_and_execute_tools(self, text):
+                self.runs += 1
+                return ["[RUN_CMD: ls]\nсъщият изход"]
+
+            def dispatch_tool_call(self, name, args):
+                raise AssertionError("native path must not run here")
+
+            def _resolve(self, path):
+                raise RuntimeError("not used")
+
+        core.skills = _RepeatingText()
+        said: list[str] = []
+        ac.run_tool_loop(core, [{"role": "user", "content": "hi"}],
+                         on_assistant=lambda t, p, m: said.append(t),
+                         on_tool_result=lambda *a: None)
+        assert core.skills.runs == STOP_AT
+
+
 class TestRunToolLoopNativeToolCalls:
     def test_dispatches_a_tool_call_and_continues(self) -> None:
         tool_calls = [{"id": "1", "function": {"name": "RUN_CMD", "arguments": '{"cmd": "ls"}'}}]
@@ -246,6 +318,34 @@ class TestRunToolLoopNativeToolCalls:
 
 
 class TestRunToolLoopTextTagFallback:
+    def test_the_round_cap_is_announced_here_too_not_only_in_the_native_path(
+        self
+    ) -> None:
+        """Native клонът казва „достигнат таван“; текстовият спираше нямо.
+        Последното, което човекът вижда, е репликата с tool таговете — разказ
+        за започната работа — така прекъснатата работа изглежда като
+        завършена. И точно този клон обслужва моделите без native tool-calling,
+        тоест безплатните: там таванът се удря най-често."""
+        core = _FakeCore([
+            ("[RUN_CMD: стъпка 1]", None, "p", "m"),
+            ("[RUN_CMD: стъпка 2]", None, "p", "m"),
+        ])
+
+        class _AlwaysTagged(_FakeToolSkills):
+            def parse_and_execute_tools(self, text):
+                return ["ok"] if "[RUN_CMD" in text else []
+
+        core.skills = _AlwaysTagged([])
+        assistant_msgs: list[str] = []
+        ac.run_tool_loop(
+            core, [{"role": "user", "content": "върти безкрайно"}],
+            on_assistant=lambda t, p, m: assistant_msgs.append(t),
+            on_tool_result=lambda *a: None,
+            round_cap=2,
+        )
+        assert assistant_msgs, "нито едно съобщение до човека при удрян таван"
+        assert "таван" in assistant_msgs[-1], assistant_msgs
+
     def test_text_tag_tools_are_parsed_and_executed(self) -> None:
         core = _FakeCore([
             ("[RUN_CMD: ls]", None, "p", "m"),
@@ -498,3 +598,100 @@ class TestRestoredHistory:
         assert len(out) == 5
         assert out[0]["role"] == "system"
         assert out[-1]["content"] == "m19"
+
+
+class TestToolResultsAreClippedBeforeEnteringHistory:
+    """A tool result enters `messages` and is then re-sent on every later
+    round until it falls out of the window, so one noisy `cat`/`pip install`
+    is paid for repeatedly. run_tool_loop must clip what it stores while the
+    frontend callback still receives the full output to show the operator.
+    """
+
+    def test_a_huge_native_tool_result_is_clipped_in_messages_but_not_for_the_frontend(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("genesis_agent.budget.TOOL_RESULT_MAX_CHARS", 500)
+        huge = "".join(f"log line {i}\n" for i in range(3000))
+        tool_calls = [{"id": "1", "function": {"name": "RUN_CMD", "arguments": '{"cmd": "cat big.log"}'}}]
+        core = _FakeCore([
+            ("", tool_calls, "groq", "llama"),
+            ("done", None, "groq", "llama"),
+        ])
+        core.skills = _FakeToolSkills([huge])
+        seen = []
+        messages = ac.run_tool_loop(
+            core, [{"role": "user", "content": "read the log"}],
+            on_assistant=lambda t, p, m: None,
+            on_tool_result=lambda name, r, extra: seen.append(r),
+        )
+        assert seen == [huge], "операторът трябва да вижда пълния изход"
+        stored = next(m for m in messages if m.get("role") == "tool")["content"]
+        # Близо до зададения таван, не просто "по-малко от огромното" — иначе
+        # тестът минава и когато клипването изобщо не се е приложило.
+        assert len(stored) < 800
+        assert stored.startswith("log line 0")
+        assert stored.rstrip().endswith("log line 2999")
+
+    def test_text_tag_results_are_clipped_too(self, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.budget.TOOL_RESULT_MAX_CHARS", 400)
+        huge = "x" * 40_000
+        core = _FakeCore([
+            ("[RUN_CMD: cat big.log]", None, "groq", "llama"),
+            ("done", None, "groq", "llama"),
+        ])
+
+        class _TextTagSkills(_FakeToolSkills):
+            def parse_and_execute_tools(self, text):
+                return [huge] if "[RUN_CMD" in text else []
+
+        core.skills = _TextTagSkills([])
+        messages = ac.run_tool_loop(
+            core, [{"role": "user", "content": "read it"}],
+            on_assistant=lambda t, p, m: None,
+            on_tool_result=lambda *a: None,
+        )
+        injected = [m for m in messages
+                    if m.get("role") == "system" and "[Резултат]" in m.get("content", "")]
+        assert injected, "текстовият път трябва да инжектира резултата"
+        assert len(injected[0]["content"]) < 1200
+
+
+class TestSimulatedWorkIsCaughtMidLoop:
+    """The old check only fired on round 0, so any harmless tool call bought
+    the model a free pass for the rest of the turn. These assert the check
+    now follows what was actually executed, whatever the round."""
+
+    def test_a_claim_after_an_unrelated_tool_call_is_challenged(self) -> None:
+        calls = [{"id": "1", "function": {"name": "LIST_DIR",
+                                          "arguments": '{"path": "/home/user"}'}}]
+        core = _FakeCore([
+            ("", calls, "p", "m"),
+            ("Готово — инсталирах пакета.", None, "p", "m"),
+            ("Не съм. Ето какво остава.", None, "p", "m"),
+        ])
+        core.skills = _FakeToolSkills(["file1\nfile2"])
+        messages = ac.run_tool_loop(
+            core, [{"role": "user", "content": "инсталирай пакета"}],
+            on_assistant=lambda t, p, m: None,
+            on_tool_result=lambda *a: None,
+        )
+        nudges = [m for m in messages if m.get("role") == "system"
+                  and "нито един изпълнен инструмент" in str(m.get("content", ""))]
+        assert nudges, "неподкрепеното твърдение трябваше да бъде оспорено"
+
+    def test_a_claim_backed_by_the_matching_command_passes_untouched(self) -> None:
+        calls = [{"id": "1", "function": {"name": "RUN_CMD",
+                                          "arguments": '{"cmd": "pip install ruff"}'}}]
+        core = _FakeCore([
+            ("", calls, "p", "m"),
+            ("Инсталирах ruff.", None, "p", "m"),
+        ])
+        core.skills = _FakeToolSkills(["Successfully installed ruff"])
+        messages = ac.run_tool_loop(
+            core, [{"role": "user", "content": "инсталирай ruff"}],
+            on_assistant=lambda t, p, m: None,
+            on_tool_result=lambda *a: None,
+        )
+        nudges = [m for m in messages if m.get("role") == "system"
+                  and "нито един изпълнен инструмент" in str(m.get("content", ""))]
+        assert not nudges, "истинската инсталация не бива да се оспорва"

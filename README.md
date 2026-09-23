@@ -31,7 +31,7 @@ it solves something new, it saves that as a skill, so the library grows into
 **Memory of the work, not of the commands.** Open threads with a concrete next
 step, decisions with the reason behind them, preferences it learned from your
 corrections. This is injected at the start of every session — including on your
-phone, if you use the Discord frontend. Crucially it is captured by a
+phone. Crucially it is captured by a
 mechanism, not by asking the model nicely to remember: an extraction pass runs
 on session end and on context compaction, whether or not the model cooperated.
 
@@ -50,6 +50,12 @@ pipx install git+https://github.com/me7ko-dev/genesis-agent
 ```
 
 On Debian/Ubuntu, get pipx first with `sudo apt install pipx && pipx ensurepath`.
+
+**On Windows**, `scripts/install_windows.ps1` does the same and first checks
+the three things that actually break there — the Microsoft Store Python stub, a
+stale PATH, and `bash.exe` resolving to the WSL launcher instead of Git Bash.
+See [docs/WINDOWS.md](docs/WINDOWS.md), which also lists what differs on that
+platform (no GUI; sandbox resource limits are POSIX-only).
 
 <details>
 <summary>Without pipx</summary>
@@ -76,11 +82,16 @@ directory is on your PATH.
 writes `~/.genesis/.env` with mode 600. Skip any provider you do not have —
 one key is enough.
 
+**Updating:** `genesis --version` names the exact installed commit, so
+"is this the new version" has an answer. `genesis update` checks GitHub and
+prints the command; `/update` inside the terminal chat does the same check
+and, on confirmation, runs it for you — on the background, after you exit,
+since pipx cannot overwrite the `genesis` executable while it is running.
+
 Optional extras:
 
 ```bash
 pip install "genesis-agent[browser]" && playwright install chromium   # web automation
-pip install "genesis-agent[discord]"                                  # phone access
 pip install "genesis-agent[voice]"                                    # speak to it
 pip install "genesis-agent[quality]"                                  # lint generated code with ruff
 ```
@@ -128,7 +139,6 @@ skills, sandbox and memory behave identically in all of them.
 genesis                       # terminal chat
 genesis gui                   # GTK window
 genesis voice                 # speak, it speaks back
-genesis discord               # chat from your phone
 genesis mission "write a retry decorator with exponential backoff"
 genesis fix ~/code/theirs "median() is wrong for even-length input"
 ```

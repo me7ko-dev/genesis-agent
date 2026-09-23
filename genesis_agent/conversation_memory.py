@@ -41,23 +41,53 @@ def _init_db() -> sqlite3.Connection:
 # --------------------------------------------------------------
 # Вътрешна помощна функция за сумиране (placeholder)
 # --------------------------------------------------------------
+# Граници на резюмето. То се праща при ВСЯКА заявка до края на сесията,
+# затова е ограничено — но 300 знака от слепен текст се оказаха твърде малко,
+# за да остане каквото и да е (виж мерката в docstring-а отдолу).
+_SUMMARY_ITEM_CHARS = 120
+_SUMMARY_MAX_ITEMS = 8
+
+
 def _simple_summarize(messages: list[dict[str, str]]) -> str:
+    """Детерминистично резюме на блок съобщения — без LLM повикване.
+
+    Старата версия слепваше ВСИЧКО и взимаше първите 300 знака. Измерено върху
+    реалната база на оператора, 21 съобщения се свиха до това:
+
+        [Context summary] 21 messages from roles: assistant, user |
+        Error: цялата верига е изчерпана | последна: skip: no HF_TOKEN
+        configured  (×4, до изчерпване на знаците)
+
+    Тоест цялото резюме беше едно и също съобщение за грешка, повторено
+    четири пъти, а всяка реплика на ЧОВЕКА от този блок изчезна. Това е
+    паметта, която се праща наново при всяка заявка до края на сесията:
+    плаща се за нея, а не носи нищо.
+
+    Затова сега: репликите на човека водят (те носят НАМЕРЕНИЕТО — какво е
+    поискано; отговорите на модела се извеждат от тях), повторенията отпадат,
+    и всяка реплика влиза съкратена. Ако не се събират, остават първата (с
+    какво започнахме) и последните (докъде стигнахме) — и двата края са
+    по-полезни от произволен отрязък от средата.
     """
-    Проста (плейхолдър) функция за обобщаване.
-    Тя взема списъка от съобщения и създава кратко резюме,
-    което може да бъде заменен с истинска AI‑моделна функция.
-    """
-    # Базово резюме – броят съобщения и уникалните роли.
-    roles = {msg["role"] for msg in messages}
-    summary = (
-        f"[Context summary] {len(messages)} messages from roles: "
-        + ", ".join(sorted(roles))
-    )
-    # Добавяме част от съдържанието, за да е по‑информативно.
-    # Ограничаваме до максимум 300 знака.
-    combined = " ".join(msg["content"] for msg in messages)
-    summary += " | " + combined[:300].replace("\n", " ").strip()
-    return summary
+    roles = {msg.get("role", "?") for msg in messages}
+    header = (f"[Context summary] {len(messages)} messages from roles: "
+              + ", ".join(sorted(roles)))
+
+    ordered = ([m for m in messages if m.get("role") == "user"]
+               + [m for m in messages if m.get("role") != "user"])
+    items: list[str] = []
+    seen: set[str] = set()
+    for msg in ordered:
+        text = " ".join((msg.get("content") or "").split())[:_SUMMARY_ITEM_CHARS]
+        key = text.lower()
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        items.append(f"{msg.get('role', '?')}: {text}")
+
+    if len(items) > _SUMMARY_MAX_ITEMS:
+        items = [items[0], "…"] + items[-(_SUMMARY_MAX_ITEMS - 1):]
+    return header + (" | " + " | ".join(items) if items else "")
 
 # --------------------------------------------------------------
 # Основни публични функции
@@ -153,17 +183,24 @@ def summarize_old_context(threshold: int = 50, keep: int | None = None) -> None:
     # Създаваме резюме.
     summary_text = _simple_summarize(old_messages)
 
-    # Инсертваме ново системно съобщение след последно изтрито (за запазване на хронологията).
-    # Изтриваме старите съобщения.
+    # Изтриваме старите съобщения; мястото им се заема от резюмето отдолу.
     ids_to_delete = tuple(msg["id"] for msg in old_messages)
     conn.execute(
         f"DELETE FROM conversations WHERE id IN ({','.join('?' * len(ids_to_delete))});",
         ids_to_delete,
     )
-    # Инсертваме резюмето – използваме ролята "system".
+    # Резюмето заема МЯСТОТО на обобщения блок, не опашката на разговора.
+    # Редът по-горе твърдеше точно това („след последно изтрито, за запазване
+    # на хронологията"), но вмъкваше без id — а AUTOINCREMENT дава следващото
+    # СВОБОДНО, тоест най-голямото. Резултатът: резюме на НАЙ-СТАРИТЕ съобщения
+    # се нареждаше като НАЙ-НОВОТО (`get_history` сортира по id). Моделът
+    # виждаше „[Context summary] 21 messages…" след последния въпрос на човека,
+    # тоест разговорът му се поднасяше разбъркан точно в момента, в който вече
+    # е достатъчно дълъг, за да има значение. Най-малкото изтрито id е точно
+    # позицията на блока и е свободно след DELETE-а отгоре.
     conn.execute(
-        "INSERT INTO conversations (role, content) VALUES (?, ?);",
-        ("system", summary_text),
+        "INSERT INTO conversations (id, role, content) VALUES (?, ?, ?);",
+        (min(ids_to_delete), "system", summary_text),
     )
     conn.commit()
     conn.close()

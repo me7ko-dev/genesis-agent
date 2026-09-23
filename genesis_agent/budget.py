@@ -3,7 +3,7 @@
 genesis_agent.budget — token/call observability слой.
 
 Единствената обща дупка във всичко построено в тази сесия (мисии, ensemble,
-self-modify, Discord чат, 24/7 цикъл): всички минават през Brain.complete(),
+self-modify, 24/7 цикъл): всички минават през Brain.complete(),
 но никой досега не четеше 'usage' полето от API отговора. Този модул го
 пази — просто JSONL лог, никакви external dependencies, никога не хвърля.
 
@@ -22,15 +22,152 @@ from typing import Any
 
 log = logging.getLogger("genesis.budget")
 
-from genesis_agent.config import DATA_DIR
+from genesis_agent.config import (
+    DATA_DIR,
+    FRESH_TOOL_RESULTS,
+    STALE_TOOL_RESULT_MAX_CHARS,
+    TOOL_RESULT_MAX_CHARS,
+)
 
 LOG_PATH = DATA_DIR / "budget_log.jsonl"
 
+# Маркерът, с който текстовият tool път (genesis_skills.parse_and_execute_tools
+# → "[Резултат]:\n...") инжектира резултати като system съобщение. Native
+# пътят ги слага като role="tool"; и двата трябва да минават през бюджета,
+# иначе половината фронтенди го заобикалят тихо.
+_TEXT_RESULT_PREFIX = "[Резултат]:"
+
+# Под този размер дедупликацията не си струва — препратката е по-дълга от
+# самото съдържание ("✓ записано", "OK", кратък git status).
+_DEDUP_MIN_CHARS = 200
+
+# Държи се на едно място, защото clip_for_context() сравнява СПЕСТЕНОТО срещу
+# дължината на самата бележка: две копия на този текст биха се разминали.
+_CLIP_NOTICE_TEMPLATE = ("\n\n… [отрязани {cut} символа от средата — "
+                         "операторът вижда пълния изход] …\n\n")
+_DEDUP_NOTICE = ("[идентичен резултат — същото съдържание стои по-долу в този "
+                 "разговор; не го извиквай пак, вече го имаш]")
+
+
+def clip_for_context(text: str, limit: int | None = None) -> str:
+    """Реже ЕДИН tool резултат до config.TOOL_RESULT_MAX_CHARS, преди да влезе
+    в историята на разговора. Операторът вижда пълния изход както винаги —
+    конзолата и GUI-то не минават оттук; пести се само контекстът на модела.
+
+    Защо изобщо: до момента целият изход на един tool влизаше в messages и
+    оттам се препращаше пак на ВСЕКИ следващ рунд, докато не изпадне от
+    прозореца. Един `cat` на голям лог или шумен `pip install` така се плаща
+    по десет пъти. record_usage() по-долу го МЕРИ; това е другата половина —
+    да го ограничи.
+
+    Реже средата, не края: началото казва какво е тръгнало да се прави, краят
+    носи изхода, който решава нещо (traceback, "Successfully installed",
+    последните редове на лога). Средата на дълъг изход е точно частта, която
+    никой не чете. Обичайното `text[:limit]` изхвърля именно грешката накрая и
+    после моделът гадае защо е паднало.
+    """
+    if limit is None:
+        limit = TOOL_RESULT_MAX_CHARS
+    if limit <= 0 or len(text) <= limit:
+        return text
+    cut = len(text) - limit
+    # Бележката за отрязването сама е ~90 символа, така че за текст малко над
+    # тавана "свиването" произвеждаше ПО-ДЪЛЪГ низ от оригинала — плащаше се
+    # повече за по-малко съдържание, и то мълчаливо. Свиваме само когато реално
+    # спестява (намерено от tests/test_stress_invariants.py, не на око).
+    if cut <= len(_CLIP_NOTICE_TEMPLATE) + 16:
+        return text
+    head = limit * 2 // 3
+    tail = limit - head
+    return (
+        text[:head]
+        + _CLIP_NOTICE_TEMPLATE.format(cut=cut)
+        + text[-tail:]
+    )
+
+
+def _is_tool_result(msg: dict) -> bool:
+    """Съобщение, което носи ИЗХОД от инструмент — по който и от двата пътя."""
+    if msg.get("role") == "tool":
+        return True
+    return (msg.get("role") == "system"
+            and str(msg.get("content", "")).startswith(_TEXT_RESULT_PREFIX))
+
+
+def budget_history(messages, *, fresh: int | None = None,
+                   stale_limit: int | None = None) -> list[dict]:
+    """Свива СТАРИТЕ tool резултати точно преди заявката тръгне към модела.
+
+    Това е другата половина на clip_for_context() и същинската икономия.
+    clip_for_context пази историята от абсурдни размери на входа, но не решава
+    основния разход: един tool резултат се праща наново на ВСЕКИ следващ рунд,
+    докато не изпадне от прозореца. На рунд 10 първият `pytest` изход се плаща
+    за десети път, макар моделът да е реагирал на него още на рунд 2 — оттам
+    нататък от него е нужно само "какво беше пуснато и как завърши".
+
+    Затова: последните `fresh` резултата остават както са (моделът работи
+    върху тях СЕГА), всичко по-старо пада до `stale_limit`. Свиването е
+    същото middle-out — началото казва какво е било пуснато, краят как е
+    завършило; изяжда се средата, която на този етап никой не чете.
+
+    Никога не мутира входа и никога не пипа system промпта, ролите или
+    tool_call_id-тата — връща нов списък с нови dict-ове само за съобщенията,
+    които реално се свиват. Извикващият (Brain.complete) праща резултата;
+    неговата собствена история остава пълна, за да може операторът да я
+    запише/прегледа непокътната.
+    """
+    fresh = FRESH_TOOL_RESULTS if fresh is None else fresh
+    stale_limit = STALE_TOOL_RESULT_MAX_CHARS if stale_limit is None else stale_limit
+    msgs = list(messages)
+    if stale_limit <= 0:
+        return msgs
+
+    result_idx = [i for i, m in enumerate(msgs) if isinstance(m, dict) and _is_tool_result(m)]
+    stale = set(result_idx[:-fresh] if fresh > 0 else result_idx)
+
+    # Дедупликация: моделът често пуска ЕДНО И СЪЩО нещо по няколко пъти в
+    # една сесия — препрочита същия файл преди да го редактира, пуска същия
+    # `pytest` след всяка поправка, повтаря `git status`. Всяко копие досега
+    # се плащаше отделно и на всеки следващ рунд. Пазим НАЙ-НОВОТО срещу всяко
+    # съдържание (то е това, върху което се работи) и заменяме по-старите
+    # копия с един ред препратка. Кратките резултати се пропускат — при тях
+    # препратката би била по-дълга от самото съдържание.
+    latest_of: dict[str, int] = {}
+    for i in result_idx:
+        content = str(msgs[i].get("content", ""))
+        if len(content) >= _DEDUP_MIN_CHARS:
+            latest_of[content] = i
+    duplicates = {i for i in result_idx
+                  if latest_of.get(str(msgs[i].get("content", ""))) not in (None, i)}
+    if not stale and not duplicates:
+        return msgs
+
+    out = []
+    for i, m in enumerate(msgs):
+        if i in duplicates:
+            m = {**m, "content": _DEDUP_NOTICE}
+        elif i in stale:
+            content = str(m.get("content", ""))
+            if len(content) > stale_limit:
+                m = {**m, "content": clip_for_context(content, limit=stale_limit)}
+        out.append(m)
+    return out
+
 
 def record_usage(*, provider: str, model: str, prompt_tokens: int,
-                  completion_tokens: int, context: str = "") -> None:
+                  completion_tokens: int, context: str = "",
+                  cached_read_tokens: int = 0,
+                  cached_write_tokens: int = 0) -> None:
     """Append-only запис. Безопасно — никога не хвърля (логването не бива
-    да чупи мисии)."""
+    да чупи мисии).
+
+    `cached_*` идват от доставчици с prompt caching (Anthropic ги връща като
+    `cache_read_input_tokens`/`cache_creation_input_tokens`). Стоят отделно от
+    `prompt_tokens`, защото се таксуват различно — прочитането от кеша е
+    порядък по-евтино от същите токени, изпратени наново. Нула при доставчик
+    без кеш е нормално; нула при повтарящи се заявки към Anthropic значи, че
+    префиксът се разваля някъде.
+    """
     try:
         entry = {
             "ts": datetime.now(timezone.utc).isoformat(),
@@ -39,6 +176,8 @@ def record_usage(*, provider: str, model: str, prompt_tokens: int,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": prompt_tokens + completion_tokens,
+            "cached_read_tokens": cached_read_tokens,
+            "cached_write_tokens": cached_write_tokens,
             "context": context[:120],
         }
         with LOG_PATH.open("a", encoding="utf-8") as f:
@@ -76,6 +215,7 @@ def daily_totals(day: date | None = None) -> dict:
     # Смесени стойности (броячи + вложена разбивка), затова Any.
     totals: dict[str, Any] = {
         "calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+        "cached_read_tokens": 0, "cached_write_tokens": 0,
         "by_provider": defaultdict(lambda: {"calls": 0, "total_tokens": 0})}
     for e in _read_entries():
         ts = e.get("ts", "")
@@ -85,6 +225,8 @@ def daily_totals(day: date | None = None) -> dict:
         totals["prompt_tokens"] += e.get("prompt_tokens", 0)
         totals["completion_tokens"] += e.get("completion_tokens", 0)
         totals["total_tokens"] += e.get("total_tokens", 0)
+        totals["cached_read_tokens"] += e.get("cached_read_tokens", 0)
+        totals["cached_write_tokens"] += e.get("cached_write_tokens", 0)
         prov = e.get("provider", "?")
         totals["by_provider"][prov]["calls"] += 1
         totals["by_provider"][prov]["total_tokens"] += e.get("total_tokens", 0)
@@ -101,6 +243,7 @@ def range_totals(days: int = 7) -> dict:
     from datetime import timedelta
     totals: dict[str, Any] = {
         "calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+        "cached_read_tokens": 0, "cached_write_tokens": 0,
         "by_provider": defaultdict(lambda: {"calls": 0, "total_tokens": 0})}
     cutoff = datetime.now(timezone.utc).date() - timedelta(days=days - 1)
     for e in _read_entries():
@@ -116,11 +259,40 @@ def range_totals(days: int = 7) -> dict:
         totals["prompt_tokens"] += e.get("prompt_tokens", 0)
         totals["completion_tokens"] += e.get("completion_tokens", 0)
         totals["total_tokens"] += e.get("total_tokens", 0)
+        totals["cached_read_tokens"] += e.get("cached_read_tokens", 0)
+        totals["cached_write_tokens"] += e.get("cached_write_tokens", 0)
         prov = e.get("provider", "?")
         totals["by_provider"][prov]["calls"] += 1
         totals["by_provider"][prov]["total_tokens"] += e.get("total_tokens", 0)
     totals["by_provider"] = dict(totals["by_provider"])
     return totals
+
+
+def format_report(totals: dict, *, title: str) -> str:
+    """Човешки ред за `genesis budget` — досега тези числа излизаха само през
+    `python -m genesis_agent.budget` (суров JSON, нищо в USAGE-а на `genesis`).
+
+    Показва изрично каква част от prompt токените са дошли от кеша:
+    `record_usage`-ната бележка казва, че нула кеш-четения при повтарящи се
+    заявки към Anthropic значи развален префикс — но никой път досега не
+    печаташе тази цифра, за да се провери на око.
+    """
+    lines = [f"=== {title} ==="]
+    if not totals["calls"]:
+        lines.append("Няма записани обръщения.")
+        return "\n".join(lines)
+    lines.append(f"Обръщения: {totals['calls']}   "
+                 f"Токени: {totals['total_tokens']} "
+                 f"(prompt {totals['prompt_tokens']} + completion {totals['completion_tokens']})")
+    read, write = totals["cached_read_tokens"], totals["cached_write_tokens"]
+    if read or write:
+        prompt = totals["prompt_tokens"] or 1
+        pct = 100 * read / prompt
+        lines.append(f"Кеш: {read} прочетени ({pct:.0f}% от prompt), {write} записани")
+    for prov, stats in sorted(totals["by_provider"].items(),
+                              key=lambda kv: -kv[1]["total_tokens"]):
+        lines.append(f"  {prov:<13} {stats['calls']:>4} обръщения  {stats['total_tokens']:>8} токена")
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":

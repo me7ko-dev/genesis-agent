@@ -36,10 +36,10 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          # discord/signing extras pulled in so tests/test_discord_bot.py and
+          # signing extra pulled in so
           # tests/test_cryptography_utils.py actually run instead of silently
           # skipping via pytest.importorskip.
-          pip install -e .[dev,discord,signing]
+          pip install -e .[dev,signing]
           # Pinned: this step exists to gate a "0 findings" claim, and an
           # unpinned tool version silently re-breaking that claim on its own
           # release schedule is exactly the drift it was added to prevent.
@@ -80,6 +80,16 @@ jobs:
       # matters. These checks need no API key and no network.
       - name: Sandbox classification
         run: python -m genesis_agent.sandbox
+
+      # The Windows installer's own logic, run by the Windows PowerShell the
+      # users actually have. `shell: powershell` is 5.1 on GitHub runners, not
+      # pwsh 7 — the point is to catch syntax or cmdlet use that only 7
+      # accepts. Nothing is installed; -SelfTest exercises the decisions
+      # (version floor, WSL-launcher detection) and prints OK.
+      - name: Windows installer self-test
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: .\scripts\install_windows.ps1 -SelfTest
 
       - name: No secrets committed
         run: |

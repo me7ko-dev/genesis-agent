@@ -19,9 +19,13 @@ genesis_agent/trigger_engine.py — Skill Trigger система за Genesis Ag
 from __future__ import annotations
 
 import logging
-import re
 
-from genesis_agent.skill_loader import load_skills_index, search_skills, skill_view
+from genesis_agent.skill_loader import (
+    _keywords,
+    load_skills_index,
+    search_skills,
+    skill_view,
+)
 
 log = logging.getLogger("genesis.trigger")
 
@@ -50,15 +54,17 @@ class TriggerEngine:
             return None
 
         best = results[0]
-        # Изчисляваме score ръчно за да проверим threshold
-        query_words = set(re.findall(r"[a-z0-9_]+", query.lower()))
+        # Score-ът се смята наново тук, за да се провери прагът. Ползва се
+        # `skill_loader._keywords`, а не собствен регекс (какъвто стоеше тук):
+        # дублираният `[a-z0-9_]+` беше само ASCII, тоест заявка на кирилица
+        # даваше нула думи и прагът не можеше да бъде достигнат никога. Една
+        # функция значи и една поправка следващия път.
+        query_words = _keywords(query)
         triggers = best.get("triggers", [])
         if isinstance(triggers, str):
             triggers = [triggers]
-        trigger_words = {
-            w for t in triggers for w in re.findall(r"[a-z0-9_]+", t.lower())
-        }
-        name_words = set(re.findall(r"[a-z0-9_]+", best.get("name", "").lower()))
+        trigger_words = {w for t in triggers for w in _keywords(t)}
+        name_words = _keywords(best.get("name", ""))
         score = len(query_words & (trigger_words | name_words))
 
         log.debug(f"[trigger] Query='{query}' → Best='{best.get('name')}' score={score}")

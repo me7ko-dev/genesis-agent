@@ -19,7 +19,6 @@ import shutil
 import subprocess
 import sys
 import time
-import urllib.request
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -89,6 +88,9 @@ except Exception:
 # --- Load Config ---
 # All paths come from genesis_agent.paths, which derives them from the
 # installed package and the user's own home — nothing machine-specific here.
+from genesis_agent import claim_check
+from genesis_agent.budget import clip_for_context
+from genesis_agent.config import TOOL_ROUND_CAP as _TOOL_ROUND_CAP
 from genesis_agent.paths import (
     CONFIG_PATH,
     ENV_FILES,
@@ -96,6 +98,7 @@ from genesis_agent.paths import (
     history_dir,
     workspace_dir,
 )
+from genesis_agent.repeat_guard import RepeatGuard as _RepeatGuard
 
 try:
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -179,8 +182,6 @@ KEYS = {
     "GROQ_API_KEY": "", "GEMINI_API_KEY": "", "OPENROUTER_API_KEY": "",
     "NVIDIA_API_KEY": "", "GITHUB_TOKEN": "", "OPENAI_API_KEY": "",
     "HF_TOKEN": "", "COHERE_API_KEY": "", "OLLAMA_API_KEY": "",
-    "GENESIS_DISCORD_WEBHOOK": config.get("discord", {}).get("webhook", ""),
-    "GENESIS_DISCORD_BOT_TOKEN": config.get("discord", {}).get("bot_token", ""),
     "OLLAMA_MODEL": config.get("models", {}).get("ollama_model", "llama3.2")
 }
 
@@ -231,7 +232,12 @@ for _k in _OLLAMA_CLOUD_EXTRA_KEYS:
 HAS_OLLAMA_CLOUD_KEY = bool(KEYS.get("OLLAMA_API_KEY") or _ollama_cloud_multi)
 
 # ── Providers & Models ────────────────────────────────────────────────────────
-PROVIDERS = {
+# Анотацията не е козметика: без нея mypy чете стойностите като `object` и
+# всяка ПРОВЕРЕНА функция, която ги индексира, гърми — докато съседните,
+# неанотирани функции минават, защото телата им не се проверяват изобщо.
+# Проверено: всички стойности са str или None и ключовете са едни и същи
+# във всички записи.
+PROVIDERS: dict[str, dict[str, str | None]] = {
     "groq":         {"name": "⚡ Groq",              "key_env": "GROQ_API_KEY",       "base_url": "https://api.groq.com/openai/v1",                        "type": "openai"},
     "gemini":       {"name": "✨ Gemini",             "key_env": "GEMINI_API_KEY",    "base_url": "https://generativelanguage.googleapis.com/v1beta/models",  "type": "gemini"},
     "openrouter":   {"name": "🌌 OpenRouter",         "key_env": "OPENROUTER_API_KEY","base_url": "https://openrouter.ai/api/v1",                          "type": "openai"},
@@ -256,6 +262,13 @@ PROVIDERS = {
     # горните два, затова е маркиран PAID в /model менюто (виж FREE_PROVIDERS).
     "together":     {"name": "🔗 Together AI",        "key_env": "TOGETHER_API_KEY",  "base_url": "https://api.together.xyz/v1",                           "type": "openai"},
     "llmstudio":    {"name": "🖥️  LLM Studio",        "key_env": None,                "base_url": "http://127.0.0.1:1234/v1",                             "type": "openai"},
+    # Vertex няма статичен ключ и няма фиксиран адрес: и двете зависят от
+    # проекта в Google Cloud, а „ключът" е OAuth токен с живот около час.
+    # Затова `key_env` е None и `base_url` се сглобява при нужда — виж
+    # genesis_agent.vertex_auth. Доставчикът беше в brain.py от 0944032, но
+    # не и в това меню, тоест операторът можеше да го настрои и да не може
+    # да го избере.
+    "vertex":       {"name": "🔷 Vertex AI (Google)",  "key_env": None,                "base_url": None,                                                    "type": "vertex"},
 }
 FALLBACKS = {
     "groq":         ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
@@ -270,6 +283,10 @@ FALLBACKS = {
     # Резерва САМО ако живият GET /v1/models не отговори — реалният списък
     # винаги идва от доставчика (fetch_models). Имената на моделите се менят
     # често, затова тук са само няколко потвърдени за август 2026.
+    # Формата `google/<модел>` е тази, която brain.py и тестовете на този клон
+    # вече ползват за Vertex. Живият списък от `/models` се предпочита; това
+    # се показва само ако заявката не мине (липсва токен, няма мрежа).
+    "vertex":       ["google/gemini-2.5-pro", "google/gemini-2.5-flash"],
     "cerebras":     ["llama-4-scout-17b-16e-instruct", "qwen-3-32b"],
     "sambanova":    ["DeepSeek-V3-0324", "Meta-Llama-3.3-70B-Instruct", "gpt-oss-120b"],
     "together":     ["meta-llama/Llama-3.3-70B-Instruct-Turbo"],
@@ -344,6 +361,27 @@ def model_badge(provider_key: str, model_id: str) -> str:
     return "[green bold]FREE[/]" if is_free_model(provider_key, model_id) else "[yellow dim]PAID[/]"
 
 # ── API Calls ────────────────────────────────────────────────────────────────
+def provider_ready(provider_key: str) -> tuple[bool, str]:
+    """(готов ли е, какво липсва) — ЕДИН източник за менюто и за избора.
+
+    Статусът в таблицата и проверката при избор се смятаха поотделно, а
+    условието `key_env is None` значеше „няма нужда от ключ", тоест зелена
+    отметка. За Vertex това е грешно: той няма ключ, но има три други
+    условия (проект, пакет google-auth, credentials) и без тях изборът води
+    до провал по време на разговор, вместо до ясно съобщение тук.
+    """
+    if provider_key not in PROVIDERS:
+        return False, f"непознат доставчик: {provider_key}"
+    p = PROVIDERS[provider_key]
+    if p["type"] == "vertex":
+        from genesis_agent import vertex_auth
+        return vertex_auth.ready(), vertex_auth.status()
+    key_env = p["key_env"]
+    if key_env is None:
+        return True, ""
+    return bool(KEYS.get(key_env)), f"липсва {key_env}"
+
+
 def fetch_models(provider_key):
     if provider_key in MODELS_CACHE:
         return MODELS_CACHE[provider_key]
@@ -368,6 +406,23 @@ def fetch_models(provider_key):
                 MODELS_CACHE[provider_key] = models
                 return models
         except Exception: pass
+    elif p["type"] == "vertex":
+        # Адресът и токенът се вадят при извикване — и двата зависят от
+        # проекта, а токенът живее около час.
+        try:
+            from genesis_agent import vertex_auth
+            projects = vertex_auth.projects()
+            token = vertex_auth.token(projects[0]) if projects else None
+            if token:
+                r = requests.get(f"{vertex_auth.endpoint(projects[0])}/models",
+                                 headers={"Authorization": f"Bearer {token}"}, timeout=10)
+                if r.status_code == 200:
+                    models = sorted(m.get("id", "") for m in r.json().get("data", []))
+                    if models:
+                        MODELS_CACHE[provider_key] = models
+                        return models
+        except Exception:
+            pass
     elif p["type"] == "ollama":
         # Local Ollama — use /api/tags
         try:
@@ -530,7 +585,29 @@ def _sanitize_for_textmode(messages):
 # останалите са рядко ползвани/неактивни). Достъпни са САМО чрез ръчен избор от
 # `/model` менюто — никога не са били в автоматичната верига (config.yaml).
 # За тях пазим стария директен път като escape hatch.
-_BRAIN_UNKNOWN_PROVIDERS = {"gemini", "github", "openai", "llmstudio", "ollama"}
+# Имена, които съществуват САМО в терминала: Brain не ги знае изобщо (github,
+# llmstudio), или ги знае под друго име с друго поведение (ollama → неговите
+# `ollama_local`/`ollama_cloud`, а локалният мозък и без това му е последна
+# резерва по отделен път).
+#
+# Преди това беше твърд списък, който включваше и `gemini`, и `openai` — а
+# Brain знае и двете. `gemini` влезе в brain.py с този клон (0944032), и от
+# този момент избор на Gemini в `/model` тихо минаваше по стария път, тоест
+# БЕЗ кеширане на промпта, без cooldown при 429/402/503, без деприоритизация
+# на болни доставчици и без общото отчитане. Списък, който описва друг списък,
+# се разминава с него — затова сега се пита самият `_PROVIDERS`.
+_TERMINAL_ONLY_PROVIDERS = {"github", "llmstudio", "ollama"}
+
+
+def _brain_handles(provider: str) -> bool:
+    """Знае ли Brain този доставчик под това име."""
+    if provider in _TERMINAL_ONLY_PROVIDERS:
+        return False
+    try:
+        from genesis_agent.brain import _PROVIDERS
+    except Exception:
+        return False
+    return provider in _PROVIDERS
 
 
 def _ask_via_legacy(messages, tools, prov, model):
@@ -587,7 +664,7 @@ def ask_genesis(messages, tools=None):
     global total_input_tokens, total_output_tokens
 
     # Ръчно избран доставчик, който Brain не познава → стария директен път.
-    if current_provider in _BRAIN_UNKNOWN_PROVIDERS:
+    if not _brain_handles(current_provider):
         return _ask_via_legacy(messages, tools, current_provider, current_model_id)
 
     from genesis_agent.brain import Brain
@@ -685,23 +762,6 @@ def parse_and_execute_tools(response_text):
     except NameError:
         return ["[Грешка: genesis_skills не е зареден]"]
 
-# ── Discord ────────────────────────────────────────────────────────────────────
-def discord_send(text: str) -> bool:
-    """Праща в Discord. Връща True при успех; логва грешките вместо да ги гълта тихо."""
-    webhook = KEYS.get("GENESIS_DISCORD_WEBHOOK","")
-    if not webhook:
-        return False
-    if len(text) > 1990: text = text[:1990] + "…"
-    try:
-        payload = json.dumps({"content": text}).encode("utf-8")
-        req = urllib.request.Request(webhook, data=payload,
-            headers={"Content-Type":"application/json","User-Agent":"Genesis/5.0"}, method="POST")
-        with urllib.request.urlopen(req, timeout=8) as r:
-            return r.status in (200, 204)
-    except Exception as e:
-        console.print(f"[dim red]⚠ Discord грешка: {str(e)[:80]}[/]")
-        return False
-
 # ── Epic GENESIS Banner ───────────────────────────────────────────────────────
 def get_system_info() -> dict:
     """Collect system status info for the banner."""
@@ -757,11 +817,15 @@ def get_system_info() -> dict:
         info["gpu"] = "Няма NVIDIA GPU"
     # Disk
     try:
-        st = os.statvfs(str(Path.home()))
-        total_gb = (st.f_blocks * st.f_frsize) // (1024**3)
-        free_gb  = (st.f_bfree  * st.f_frsize) // (1024**3)
-        info["disk"] = f"{free_gb}GB свободни / {total_gb}GB"
-    except Exception:
+        # `shutil.disk_usage` работи навсякъде, включително на Windows, където
+        # `os.statvfs` изобщо не съществува. По-ранен опит тук хвърляше нарочен
+        # OSError на Windows само за да замълчи mypy — това правеше контролния
+        # поток нечетим И оставяше банера с „N/A" завинаги там, при положение
+        # че `shutil` е внесен три реда по-горе и дава същото число.
+        usage = shutil.disk_usage(Path.home())
+        info["disk"] = (f"{usage.free // (1024**3)}GB свободни "
+                        f"/ {usage.total // (1024**3)}GB")
+    except OSError:
         info["disk"] = "N/A"
     return info
 
@@ -823,7 +887,7 @@ def print_minimal_banner():
         padding=(0, 1)
     ))
     console.print()
-    console.print("[dim]  Команди: [cyan]/model[/] [cyan]/models[/] [cyan]/clear[/] [cyan]/status[/] [cyan]/discord[/] [cyan]/backup[/] [cyan]/tasks[/] [cyan]/help[/]  │  Изход: [cyan]exit[/][/]")
+    console.print("[dim]  Команди: [cyan]/model[/] [cyan]/models[/] [cyan]/clear[/] [cyan]/status[/] [cyan]/backup[/] [cyan]/update[/] [cyan]/tasks[/] [cyan]/help[/]  │  Изход: [cyan]exit[/][/]")
     console.print(f"[dim]  Fallback: [green]{len(FALLBACK_CHAIN)} модела[/] верига | Активен: [cyan]{current_model_id.split('/')[-1][:30]}[/][/]")
     # Без нито един ключ нищо облачно няма да проработи, а "0 / 5 активни" в
     # таблицата отгоре е твърде тихо за фатално условие — първото съобщение
@@ -865,8 +929,8 @@ def show_agent_menu():
     opts = list(PROVIDERS.keys())
     for i, pk in enumerate(opts, 1):
         p = PROVIDERS[pk]
-        key_val = KEYS.get(p["key_env"] or "", "") or (p["key_env"] is None)
-        status = "[green]✅[/]" if key_val else "[red]❌[/]"
+        ready, _hint = provider_ready(pk)
+        status = "[green]✅[/]" if ready else "[red]❌[/]"
         active = " [yellow]◀[/]" if pk == current_provider else ""
         table.add_row(str(i), p["name"] + active, status)
     table.add_row("0", "Назад", "")
@@ -881,8 +945,12 @@ def show_agent_menu():
 
     pk = opts[sel-1]
     p = PROVIDERS[pk]
-    if p["key_env"] and not KEYS.get(p["key_env"]):
-        console.print(f"[red]⚠ Няма ключ за {p['name']}![/]")
+    ready, hint = provider_ready(pk)
+    if not ready:
+        # Казва КАКВО липсва, не само че липсва: за Vertex това са три
+        # различни неща (проект, пакет, credentials) и всяко има различна
+        # поправка.
+        console.print(f"[red]⚠ {p['name']} не е готов: {hint}[/]")
         return
 
     with console.status("[dim]Извличам модели...[/]", spinner="dots"):
@@ -950,6 +1018,19 @@ def main():
 
     print_minimal_banner()
 
+    # ── Резултат от /update, стартирано в ПРЕДИШНА сесия ──────────────────
+    # Обновяването тръгва на заден план чак след като старият процес излезе
+    # (genesis_agent.self_update) — затова отговорът чака точно тук, при
+    # следващото стартиране, а не веднага след `/update`.
+    try:
+        from genesis_agent import self_update
+        pending = self_update.report_pending()
+        if pending:
+            console.print(pending)
+            console.print()
+    except Exception:
+        pass
+
     SYSTEM_PROMPT = config.get("system_prompt", "CRITICAL: You are Genesis, autonomous AI coding agent.")
 
     # Реалните пътища на машината — иначе моделът ги отгатва (жив тест: писа в
@@ -1003,7 +1084,6 @@ def main():
 
             # ── Commands ──
             if user_input.lower() in ["exit", "quit", "изход"]:
-                discord_send("🔴 Genesis изключен.")
                 break
 
             if user_input.lower() == "/agent":
@@ -1037,7 +1117,6 @@ def main():
                         stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
                         start_new_session=True)
                 console.print(f"[green]✓ Работи. Лог: {logf}[/]")
-                discord_send("🔨 **Genesis стартира ковачницата.**")
                 continue
 
             if user_input.lower() == "/backup":
@@ -1060,11 +1139,52 @@ def main():
                     capture_output=True, text=True, check=False)
                 if r.returncode == 0:
                     console.print("[green]✅ Архивирането завърши.[/]")
-                    discord_send(f"💾 **Архив готов** → `{dest}`")
                 else:
                     console.print(f"[red]❌ rsync се провали:[/] {r.stderr.strip()[:200]}")
                 continue
 
+            # ── /update — реално обновяване от GitHub, не само проверка ──
+            # `genesis update` (CLI) нарочно само пита; тук питаме за
+            # потвърждение и, при „да", НАСРОЧВАМЕ обновяването на заден
+            # план (genesis_agent.self_update), защото pipx би подменил
+            # точно този процес, докато чатът чака отговор от нас — а на
+            # Windows заключен .exe не се презаписва. Затова резултатът се
+            # вижда чак при следващото `genesis`, не веднага тук.
+            if user_input.lower() in ("/update", "/ъпдейт"):
+                from genesis_agent import self_update, version_info
+                with console.status("[dim]Питам GitHub...[/]", spinner="dots"):
+                    check = version_info.check_update()
+                if check.src is None:
+                    console.print("[yellow]Това копие не е инсталирано от git (чекаут за "
+                                  "разработка или разархивирано) — няма с какво да се сравни. "
+                                  "В чекаут: `git pull`.[/]")
+                    continue
+                if check.latest is None:
+                    console.print("[red]Не можах да питам GitHub (мрежа или лимит). Ръчно:\n[/]"
+                                  f"  {version_info.install_command(check.src)}")
+                    continue
+                if check.up_to_date:
+                    console.print(f"[green]✅ Вече си на последното "
+                                  f"({check.src.short}, {check.src.ref}).[/]")
+                    continue
+                console.print(f"[cyan]⬆ Има по-ново на {check.src.ref}: "
+                              f"{check.src.short} → {check.latest[:7]}[/]")
+                subjects = version_info.changelog(
+                    check.src.owner_repo, check.src.commit, check.latest)
+                if subjects:
+                    console.print("[dim]  Какво носи:[/]")
+                    for s in subjects:
+                        console.print(f"[dim]    • {s}[/]")
+                confirm = console.input("[bold yellow]Обнови сега? (да/не) > [/]").strip().lower()
+                if confirm not in ("да", "d", "y", "yes", "д"):
+                    console.print("[dim]Пропуснато.[/]")
+                    continue
+                self_update.request_update(pid=os.getpid(), url=check.src.url, ref=check.src.ref)
+                console.print(
+                    "[green]✓ Обновяването е насрочено на заден план.[/]\n"
+                    "[dim]  Приключва СЛЕД като излезеш оттук (`exit`) — pipx не може да "
+                    "презапише файла, докато тече. Следващото `genesis` ще каже дали е минало.[/]")
+                continue
 
             if user_input.lower() == "/model":
                 show_agent_menu()
@@ -1153,9 +1273,9 @@ def main():
                 help_table.add_row("/clear", "Нов разговор (изчиства историята)")
                 help_table.add_row("/status", "Системна информация и статистика")
                 help_table.add_row("/history", "Преглед и зареждане на стари сесии")
-                help_table.add_row("/discord <текст>", "Изпрати съобщение в Discord")
                 help_table.add_row("/autoupgrade", "Пуска ковачницата (нови умения) на заден план")
                 help_table.add_row("/backup", "Архивиране към GENESIS_BACKUP_DIR")
+                help_table.add_row("/update", "Провери и обнови от GitHub (питa за потвърждение)")
                 help_table.add_row("/tasks", "Състояние на работата — отворени нишки, решения")
                 help_table.add_row("/done <id>", "Затвори нишка като готова (/drop <id> = изхвърли)")
                 help_table.add_row("exit / quit", "Изход")
@@ -1190,22 +1310,6 @@ def main():
                         border_style="cyan", padding=(1, 2)))
                 except Exception as e:
                     console.print(f"[red]⚠ {e}[/]")
-                continue
-
-            # ── Discord command ──
-            if user_input.lower().startswith("/discord"):
-                parts = user_input.split(" ", 1)
-                if len(parts) > 1 and parts[1].strip():
-                    msg = parts[1].strip()
-                    if discord_send(f"💬 **Genesis (ръчно):** {msg}"):
-                        console.print("[green]✓ Изпратено в Discord![/]")
-                    else:
-                        console.print("[red]✗ Неуспешно изпращане (провери webhook-а).[/]")
-                else:
-                    webhook = KEYS.get("GENESIS_DISCORD_WEBHOOK", "")
-                    status = "[green]✅ Настроен[/]" if webhook else "[red]❌ Не е настроен (добави в .env)[/]"
-                    console.print(f"[cyan]Discord webhook: {status}[/]")
-                    console.print("[dim]Използване: /discord <твоето съобщение>[/]")
                 continue
 
             # ── Show full fallback chain ──
@@ -1276,9 +1380,19 @@ def main():
             # останалите вместо да ги изпълни (точно репортнатият проблем с
             # многостъпкова инсталация). Сега цикълът продължава рунд по рунд,
             # докато Genesis сам спре да вика тулове или се удари в тавана.
-            _TOOL_ROUND_CAP = 8
             round_i = 0
             _malformed_tag_retries = 0
+            _claim_retries = 0
+            # Какво РЕАЛНО е изпълнено в тази реплика. Терминалът е фронтендът
+            # по подразбиране (`genesis`), а до момента беше ЕДИНСТВЕНИЯТ без
+            # никаква проверка срещу симулирана работа: claim_check влезе само
+            # в agent_core (GUI/Jarvis), а тукашният tool цикъл е отделен код.
+            _executed: list[tuple[str, str]] = []
+            # Въртене на място: същият извик, същият резултат, пореден път.
+            # Таванът го ограничава по цена, но не го разпознава — виж
+            # genesis_agent.repeat_guard.
+            _guard = _RepeatGuard()
+            _spinning = ""
             with console.status("[dim]Genesis мисли...[/]", spinner="dots2"):
                 response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
 
@@ -1303,6 +1417,7 @@ def main():
                     # като regex-tag режима (genesis_skills.dispatch_tool_call),
                     # но без риск от грешно написан таг/синтаксис.
                     asked = ""
+                    _repeat_note = ""
                     for tc in tool_calls:
                         fn = tc.get("function", {}) or {}
                         name = fn.get("name", "")
@@ -1311,9 +1426,19 @@ def main():
                         except (json.JSONDecodeError, TypeError):
                             args = {}
                         result = genesis_skills.dispatch_tool_call(name, args)
+                        _entry = claim_check.counts_as_executed(
+                            name, " ".join(str(v) for v in args.values()), result)
+                        if _entry:
+                            _executed.append(_entry)
                         console.print(Panel(Text(result[:2000]), title=f"🔧 {name}", border_style="green"))
                         messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
-                                          "name": name, "content": result})
+                                          "name": name,
+                                          "content": clip_for_context(result)})
+                        _v = _guard.observe(name, args, result)
+                        if _v.stop:
+                            _spinning = _v.note
+                        elif _v.note:
+                            _repeat_note = _v.note
                         if genesis_skills.ASK_USER_MARKER in result:
                             asked = result
                     if asked:
@@ -1325,6 +1450,14 @@ def main():
                         console.print(Panel(Text(q), title="❓ Genesis пита",
                                             border_style="yellow", padding=(1, 2)))
                         break
+                    if _spinning:
+                        # Нищо ново не може да дойде от още рундове — спираме
+                        # СЕГА и казваме защо, вместо да догорим до тавана.
+                        console.print(Panel(Text(_spinning), title="🔁 Въртене на място",
+                                            border_style="yellow", padding=(1, 2)))
+                        break
+                    if _repeat_note:
+                        messages.append({"role": "system", "content": _repeat_note})
                     round_i += 1
                     if round_i >= _TOOL_ROUND_CAP:
                         console.print(f"[yellow]⚠ Достигнат таван от {_TOOL_ROUND_CAP} инструмент-рунда "
@@ -1337,6 +1470,7 @@ def main():
                 # Стар text-tag режим — моделът не поддържа native tool-calling
                 # (или просто избра да не вика нищо тази реплика).
                 tool_results = parse_and_execute_tools(response)
+                _executed.extend(claim_check.executed_from_text_results(tool_results))
                 if not tool_results:
                     # Празно ≠ непременно "приключи" — може да е объркан tool tag
                     # (виж agent_core.run_tool_loop, същият фикс, design note
@@ -1357,7 +1491,24 @@ def main():
                         with console.status("[dim]Анализирам...[/]", spinner="aesthetic"):
                             response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
                         continue
+                    _unsupported = claim_check.unsupported_claims(response, _executed)
+                    if _unsupported and _claim_retries < 1:
+                        _claim_retries += 1
+                        console.print("[yellow]⚠ Твърди свършена работа, която никой "
+                                       "изпълнен инструмент не доказва — питам пак.[/]")
+                        messages.append({"role": "system",
+                                          "content": claim_check.nudge_text(_unsupported)})
+                        with console.status("[dim]Проверявам…[/]", spinner="aesthetic"):
+                            response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
+                        continue
                     break
+                _text_note = ""
+                for _r in tool_results:
+                    _v = _guard.observe_text_result(_r)
+                    if _v.stop:
+                        _spinning = _v.note
+                    elif _v.note:
+                        _text_note = _v.note
                 asked = next((r for r in tool_results
                               if genesis_skills.ASK_USER_MARKER in r), "")
                 if asked:
@@ -1365,13 +1516,20 @@ def main():
                     console.print(Panel(Text(q), title="❓ Genesis пита",
                                         border_style="yellow", padding=(1, 2)))
                     break
+                if _spinning:
+                    console.print(Panel(Text(_spinning), title="🔁 Въртене на място",
+                                        border_style="yellow", padding=(1, 2)))
+                    break
+                if _text_note:
+                    messages.append({"role": "system", "content": _text_note})
                 round_i += 1
                 if round_i >= _TOOL_ROUND_CAP:
                     console.print(f"[yellow]⚠ Достигнат таван от {_TOOL_ROUND_CAP} инструмент-рунда "
                                    "за това съобщение — спирам тук, продължи с ново съобщение.[/]")
                     break
                 messages.append({"role": "system",
-                                  "content": "[Резултат]:\n" + "\n\n".join(tool_results) +
+                                  "content": "[Резултат]:\n" +
+                                  "\n\n".join(clip_for_context(r) for r in tool_results) +
                                   "\n\nАко тези резултати вече изпълняват заявката на потребителя "
                                   "напълно — дай КРАТКО финално обобщение БЕЗ никакви нови tool тагове. "
                                   "Викай нов tool САМО ако наистина има следваща реална стъпка. "

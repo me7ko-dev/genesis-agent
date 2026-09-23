@@ -280,6 +280,114 @@ def test_tool_tags_inside_a_write_file_body_are_not_separately_executed(_workspa
     assert "[READ_FILE: secrets.txt]" in (_workspace / "doc.txt").read_text(encoding="utf-8")
 
 
+def test_bare_use_skill_tag_without_the_closing_marker_still_runs(_workspace, monkeypatch) -> None:
+    """`[END_USE_SKILL]` closes an OPTIONAL driver block — skill_loader.use_skill
+    documents an empty driver as "load the skill and run its self-test", so
+    `[USE_SKILL: name]` alone is the valid minimal form and the one a model
+    writes most often. It used to match nothing at all: the closed-block regex
+    needs the terminator and the single-line regex doesn't know USE_SKILL, so
+    the reply *looked* like a tool call and executed zero tools — the caller
+    then burned its rounds re-prompting for syntax instead of running anything."""
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(gs, "_tool_use_skill",
+                        lambda name, driver="": seen.append((name, driver)) or "ran")
+    results = gs.parse_and_execute_tools("[USE_SKILL: reverse_a_string]")
+    assert len(results) == 1
+    assert seen == [("reverse_a_string", "")]
+
+
+def test_the_syntax_hint_is_dropped_when_no_skill_was_found(_workspace, monkeypatch) -> None:
+    """If no such skill exists, how to write a driver block is beside the
+    point — the hint is pure noise in a context this branch pays to keep small."""
+    monkeypatch.setattr(gs, "_tool_use_skill",
+                        lambda name, driver="": "[USE_SKILL: x] Няма достатъчно близко умение.")
+    out = gs.parse_and_execute_tools("[USE_SKILL: nothing_like_this]")[0]
+    assert "END_USE_SKILL" not in out
+
+
+def test_the_syntax_hint_is_added_when_the_skill_did_run(_workspace, monkeypatch) -> None:
+    monkeypatch.setattr(gs, "_tool_use_skill",
+                        lambda name, driver="": "[USE_SKILL: x] Достъпни: def f()\nOK")
+    out = gs.parse_and_execute_tools("[USE_SKILL: x]")[0]
+    assert "END_USE_SKILL" in out
+
+
+def test_bare_use_skill_tag_consumes_only_itself_not_the_rest_of_the_reply(
+    _workspace, monkeypatch
+) -> None:
+    """An unterminated USE_SKILL must not swallow the tags that follow it."""
+    monkeypatch.setattr(gs, "_tool_use_skill", lambda name, driver="": "skill ran")
+    (_workspace / "after.txt").write_text("still here", encoding="utf-8")
+    results = gs.parse_and_execute_tools(
+        "[USE_SKILL: some_skill]\nand then\n[READ_FILE: after.txt]"
+    )
+    assert len(results) == 2
+    assert "skill ran" in results[0]
+    assert "still here" in results[1]
+
+
+def test_closed_use_skill_block_still_passes_its_driver_code(_workspace, monkeypatch) -> None:
+    """The bare-tag fallback must not shadow the terminated form."""
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(gs, "_tool_use_skill",
+                        lambda name, driver="": seen.append((name, driver)) or "ran")
+    gs.parse_and_execute_tools("[USE_SKILL: s]\nprint(1)\n[END_USE_SKILL]")
+    assert seen == [("s", "\nprint(1)\n")]
+
+
+def test_use_skill_block_inside_a_write_file_body_is_not_executed(
+    _workspace, monkeypatch
+) -> None:
+    """Same rule the single-line tags already followed, now for block tags:
+    writing documentation that *shows* the USE_SKILL syntax must not also run
+    the skill. The per-type loops used to apply the containment guard only to
+    single-line tags, so a `[USE_SKILL: ...][END_USE_SKILL]` inside a
+    `[WRITE_FILE: ...]` body really did execute."""
+    monkeypatch.setattr(gs, "_tool_use_skill",
+                        lambda name, driver="": pytest.fail("skill must not run"))
+    text = ("[WRITE_FILE: doc.md]How to call one:\n"
+            "[USE_SKILL: demo]\nprint('x')\n[END_USE_SKILL]\n[END_WRITE]")
+    results = gs.parse_and_execute_tools(text)
+    assert len(results) == 1
+    assert "[USE_SKILL: demo]" in (_workspace / "doc.md").read_text(encoding="utf-8")
+
+
+def test_bare_use_skill_tag_inside_a_write_file_body_is_not_executed(
+    _workspace, monkeypatch
+) -> None:
+    monkeypatch.setattr(gs, "_tool_use_skill",
+                        lambda name, driver="": pytest.fail("skill must not run"))
+    results = gs.parse_and_execute_tools("[WRITE_FILE: d.md]eg: [USE_SKILL: demo][END_WRITE]")
+    assert len(results) == 1
+
+
+def test_edit_file_block_inside_a_write_file_body_is_not_executed(
+    _workspace, monkeypatch
+) -> None:
+    monkeypatch.setattr(gs, "_tool_edit_file",
+                        lambda *a, **kw: pytest.fail("edit must not run"))
+    text = ("[WRITE_FILE: doc.md][EDIT_FILE: real.py]old"
+            f"{gs._EDIT_SEPARATOR}new[END_EDIT][END_WRITE]")
+    results = gs.parse_and_execute_tools(text)
+    assert len(results) == 1
+
+
+def test_outermost_block_wins_when_two_block_tags_overlap(_workspace, monkeypatch) -> None:
+    """Containment is resolved across ALL block types at once, so which loop
+    happened to run first no longer decides who wins."""
+    monkeypatch.setattr(gs, "_tool_use_skill",
+                        lambda name, driver="": pytest.fail("inner tag must stay text"))
+    text = ("[USE_SKILL: outer]\n"
+            "[WRITE_FILE: nested.txt]x[END_WRITE]\n"
+            "[END_USE_SKILL]")
+    calls: list[str] = []
+    monkeypatch.setattr(gs, "_tool_use_skill", lambda name, driver="": calls.append(name) or "ok")
+    results = gs.parse_and_execute_tools(text)
+    assert calls == ["outer"]
+    assert len(results) == 1
+    assert not (_workspace / "nested.txt").exists()
+
+
 def test_multiple_tags_execute_in_the_order_they_appear(_workspace) -> None:
     (_workspace / "first.txt").write_text("1st", encoding="utf-8")
     (_workspace / "second.txt").write_text("2nd", encoding="utf-8")
@@ -379,3 +487,257 @@ class TestBothDispatchPathsFailAlike:
 
     def test_safe_tool_passes_a_healthy_result_through_untouched(self) -> None:
         assert gs._safe_tool("X", lambda a: f"ok:{a}", "arg") == "ok:arg"
+
+
+class TestReadingSecretsGoesThroughTheSameGate:
+    """`cat ~/.genesis/.env` е CONFIRM операция от 2026 насам (sandbox
+    _CONFIRM_PATTERNS). `[READ_FILE: ~/.genesis/.env]` не минаваше през нищо —
+    тоест по-лесният път беше отворен, а той е точно този, който моделът
+    ползва.
+
+    Цената не е на машината: прочетеното влиза в историята и се праща на
+    СЛЕДВАЩИЯ доставчик във веригата, който при тази конфигурация е чужда
+    безплатна услуга. SECURITY.md обещава точно обратното („a generated script
+    cannot read them and phone home").
+    """
+
+    def _env_file(self, workspace: Path) -> Path:
+        p = workspace / ".env"
+        p.write_text("OPENROUTER_API_KEY=sk-or-v1-тайно\n", encoding="utf-8")
+        return p
+
+    def test_autonomous_mode_refuses_and_leaks_nothing(self, _workspace, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="deny"))
+        out = gs._tool_read_file(str(self._env_file(_workspace)))
+        assert "SANDBOX DENIED" in out
+        assert "sk-or-v1-тайно" not in out
+
+    def test_allow_mode_still_reads_it(self, _workspace, monkeypatch) -> None:
+        """Гейтът е същият, не по-строг: операторът, който е избрал `allow`,
+        е взел това решение съзнателно — както при `cat`."""
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="allow"))
+        out = gs._tool_read_file(str(self._env_file(_workspace)))
+        assert "sk-or-v1-тайно" in out
+
+    def test_an_example_env_is_not_a_secret(self, _workspace, monkeypatch) -> None:
+        """`.env.example` е в репото, за да се чете. Гейт, който пита и за
+        него, е гейт, който операторът изключва."""
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="deny"))
+        p = _workspace / ".env.example"
+        p.write_text("OPENROUTER_API_KEY=\n", encoding="utf-8")
+        assert "[READ_FILE:" in gs._tool_read_file(str(p))
+
+    def test_an_ordinary_file_is_untouched(self, _workspace, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="deny"))
+        p = _workspace / "notes.md"
+        p.write_text("обикновен текст", encoding="utf-8")
+        assert "обикновен текст" in gs._tool_read_file(str(p))
+
+    def test_a_private_key_path_is_gated_too(self, _workspace, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="deny"))
+        key = _workspace / "id_rsa"
+        key.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n", encoding="utf-8")
+        out = gs._tool_read_file(str(key))
+        assert "SANDBOX DENIED" in out
+        assert "PRIVATE KEY" not in out
+
+
+class TestEditFileIsTheOtherDoorToTheSameSecret:
+    """Намерено от `sibling_paths_missing_the_guard` върху самия този файл,
+    после проверено на живо: `READ_FILE` вече минава през гейта, но
+    `EDIT_FILE` връща unified diff — а диффът носи КОНТЕКСТНИ редове.
+
+    Редакция на `.env` с произволна котва връщаше в отговора реда
+    `OPENROUTER_API_KEY=…`, който никой не е искал да види, и го пращаше на
+    следващия доставчик във веригата. Едната врата беше заключена, съседната
+    водеше към същото съдържание.
+    """
+
+    def _env(self, workspace: Path) -> Path:
+        p = workspace / ".env"
+        p.write_text("OPENROUTER_API_KEY=sk-or-v1-тайно\nHF_TOKEN=hf_x\n", encoding="utf-8")
+        return p
+
+    def test_the_diff_no_longer_carries_the_key(self, _workspace, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="deny"))
+        self._env(_workspace)
+        out = gs._tool_edit_file(".env", "HF_TOKEN", "HF_TOKEN_X")
+        assert "sk-or-v1-тайно" not in out
+        assert "SANDBOX DENIED" in out
+
+    def test_the_file_is_not_modified_when_refused(self, _workspace, monkeypatch) -> None:
+        """Отказът трябва да е ПРЕДИ редакцията — иначе файлът е променен, а
+        отговорът твърди, че операцията не е минала."""
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="deny"))
+        env = self._env(_workspace)
+        before = env.read_text(encoding="utf-8")
+        gs._tool_edit_file(".env", "HF_TOKEN", "HF_TOKEN_X")
+        assert env.read_text(encoding="utf-8") == before
+
+    def test_allow_mode_still_edits_it(self, _workspace, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="allow"))
+        self._env(_workspace)
+        out = gs._tool_edit_file(".env", "HF_TOKEN", "HF_TOKEN_X")
+        assert "✓" in out
+
+    def test_an_ordinary_file_is_edited_without_a_prompt(self, _workspace, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="deny"))
+        f = _workspace / "notes.md"
+        f.write_text("ред едно\nред две\n", encoding="utf-8")
+        out = gs._tool_edit_file("notes.md", "ред две", "ред 2")
+        assert "SANDBOX" not in out
+        assert "ред 2" in f.read_text(encoding="utf-8")
+
+
+class TestListDirIsTheThirdDoor:
+    """Третият път към същия ресурс, намерен от `sibling_paths_missing_the_guard`
+    след като READ_FILE и EDIT_FILE вече бяха затворени.
+
+    Изброяването не дава съдържание — дава ИМЕНАТА. Това е първата стъпка на
+    всяко „кое си струва да прочета", а измерено преди поправката `LIST_DIR
+    ~/.ssh` връщаше `id_rsa` дори в режим `deny`.
+    """
+
+    def _ssh_dir(self, workspace: Path) -> Path:
+        d = workspace / ".ssh"
+        d.mkdir()
+        (d / "id_rsa").write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n", encoding="utf-8")
+        return d
+
+    def test_the_key_names_are_not_listed_under_deny(self, _workspace, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="deny"))
+        out = gs._tool_list_dir(str(self._ssh_dir(_workspace)))
+        assert "SANDBOX DENIED" in out
+        assert "id_rsa" not in out
+
+    def test_an_ordinary_directory_still_lists(self, _workspace, monkeypatch) -> None:
+        """Гейт, който пита за всяка папка, е гейт, който операторът изключва."""
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="deny"))
+        (_workspace / "src").mkdir()
+        (_workspace / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
+        out = gs._tool_list_dir(str(_workspace / "src"))
+        assert "main.py" in out
+        assert "SANDBOX" not in out
+
+    def test_allow_mode_still_lists_it(self, _workspace, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="allow"))
+        out = gs._tool_list_dir(str(self._ssh_dir(_workspace)))
+        assert "id_rsa" in out
+
+
+class TestTheGuardReadsWindowsPathsToo:
+    """Образецът е писан за shell команди, в които пътят носи `/`. Подаден
+    като Windows път, `.ssh\\config` не съвпадаше с `\\.ssh/` — същият файл
+    беше пазен на Linux и отворен на Windows."""
+
+    def test_a_backslash_ssh_path_is_recognised(self) -> None:
+        assert gs.sandbox.sensitive_path_reason(r"C:\Users\x\.ssh\config")
+
+    def test_a_backslash_aws_path_is_recognised(self) -> None:
+        assert gs.sandbox.sensitive_path_reason(r"C:\Users\x\.aws\credentials")
+
+    def test_a_forward_slash_path_still_works(self) -> None:
+        assert gs.sandbox.sensitive_path_reason("/home/x/.ssh/id_ed25519")
+
+    def test_an_ordinary_windows_path_is_not_flagged(self) -> None:
+        assert gs.sandbox.sensitive_path_reason(r"C:\Users\x\project\main.py") is None
+
+    def test_the_example_exemption_survives_backslashes(self) -> None:
+        assert gs.sandbox.sensitive_path_reason(r"C:\repo\.env.example") is None
+
+
+class TestSearchAndGlobAreTheFourthDoor:
+    """Най-лошата от четирите: LIST_DIR даваше имена, а това дава СЪДЪРЖАНИЕ.
+
+    Измерено преди поправката, в режим „deny":
+
+        SEARCH_CODE PRIVATE-KEY-BODY | ~/.ssh
+          → ~/.ssh/id_rsa:1: PRIVATE-KEY-BODY
+
+    Търсене в нормална папка не стига до `.env` (ripgrep пропуска скритите
+    файлове) — но насочено към самата чувствителна папка стига до всичко в нея.
+    """
+
+    def _ssh(self, workspace: Path) -> Path:
+        d = workspace / ".ssh"
+        d.mkdir()
+        (d / "id_rsa").write_text("PRIVATE-KEY-BODY\n", encoding="utf-8")
+        return d
+
+    def _deny(self, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="deny"))
+
+    def test_searching_inside_ssh_no_longer_returns_the_key(self, _workspace, monkeypatch) -> None:
+        self._deny(monkeypatch)
+        out = gs._tool_search_code("PRIVATE-KEY-BODY", path=str(self._ssh(_workspace)))
+        assert "SANDBOX DENIED" in out
+        assert "PRIVATE-KEY-BODY" not in out.split("Причини")[0]
+
+    def test_globbing_inside_ssh_is_refused(self, _workspace, monkeypatch) -> None:
+        self._deny(monkeypatch)
+        out = gs._tool_glob(f"**/* | {self._ssh(_workspace)}")
+        assert "SANDBOX DENIED" in out
+        assert "id_rsa" not in out
+
+    def test_an_ordinary_search_is_untouched(self, _workspace, monkeypatch) -> None:
+        self._deny(monkeypatch)
+        (_workspace / "app.py").write_text("TOKEN = 'намери ме'\n", encoding="utf-8")
+        out = gs._tool_search_code("намери ме", path=str(_workspace))
+        assert "намери ме" in out
+        assert "SANDBOX" not in out
+
+    def test_a_sensitive_hit_is_counted_not_silently_dropped(self, _workspace, monkeypatch) -> None:
+        """Премълчано попадение се чете като „низът го няма" — а е обратното."""
+        self._deny(monkeypatch)
+        (_workspace / "credentials.json").write_text("{\"k\": \"тайна\"}\n", encoding="utf-8")
+        out = gs._tool_search_code("тайна", path=str(_workspace))
+        # Шаблонът се повтаря в заглавието — той идва от модела и не е тайна.
+        # Важното е, че НИТО редът, НИТО файлът се показват.
+        assert "credentials.json" not in out
+        assert '"k"' not in out
+        assert "1 съвпадения" in out, "броят трябва да се каже на глас"
+
+    def test_allow_mode_still_searches_them(self, _workspace, monkeypatch) -> None:
+        """Гейтът пита оператора; не решава вместо него. В „allow" той вече е
+        казал да, и безусловното криене прави инструмента негоден."""
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="allow"))
+        out = gs._tool_search_code("PRIVATE-KEY-BODY", path=str(self._ssh(_workspace)))
+        assert "PRIVATE-KEY-BODY" in out
+
+
+class TestRepoMapIsTheFifthDoor:
+    """Същият клас като LIST_DIR: не съдържание, а имена. `REPO_MAP ~/.ssh`
+    връщаше `id_rsa` в режим „deny". Намерено при последното преминаване с
+    `sibling_paths_missing_the_guard`, след като другите четири бяха затворени
+    — и точно затова одитът се пуска пак, а не веднъж."""
+
+    def test_mapping_ssh_is_refused(self, _workspace, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="deny"))
+        d = _workspace / ".ssh"
+        d.mkdir()
+        (d / "id_rsa").write_text("PRIVATE\n", encoding="utf-8")
+        out = gs._tool_repo_map(str(d))
+        assert "SANDBOX DENIED" in out
+        assert "id_rsa" not in out
+
+    def test_an_ordinary_project_is_still_mapped(self, _workspace, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.sandbox._POLICY",
+                            gs.sandbox.SandboxPolicy(mode="deny"))
+        (_workspace / "main.py").write_text("print(1)\n", encoding="utf-8")
+        out = gs._tool_repo_map(str(_workspace))
+        assert "SANDBOX" not in out

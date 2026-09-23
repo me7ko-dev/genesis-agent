@@ -2,7 +2,7 @@
 """
 Genesis Agent — нативно GTK4/libadwaita приложение за Linux.
 
-Трети фронтенд към СЪЩОТО ядро (след терминалния чат и Discord бота). Не
+Втори фронтенд към СЪЩОТО ядро (след терминалния чат). Не
 дублира логика: provider веригата е genesis_agent.brain.Brain, изпълнението на
 инструменти е genesis_skills (същите backend-и), паметта е споделената
 workspace_memory/conversation_memory. Затова умение, записано от терминала,
@@ -66,7 +66,6 @@ from genesis_agent.agent_core import (
 from genesis_agent.gui import gui_sessions
 
 APP_ID = "org.genesis.Agent"
-TOOL_ROUND_CAP = 8
 
 _HELP_TEXT = (
     "/model — отвори избора на модел\n"
@@ -906,9 +905,14 @@ class Window(Adw.ApplicationWindow):
             from genesis_agent import budget
 
             t = budget.today_totals()
+            cached = t.get("cached_read_tokens", 0)
             txt = (
                 f"Днес: {t.get('calls', 0)} обаждания · "
-                f"{t.get('total_tokens', 0):,} токена\n"
+                f"{t.get('total_tokens', 0):,} токена"
+                # Спестеното се показва само когато има какво: доставчик без
+                # prompt caching иначе получава реда „0 от кеша“ завинаги.
+                + (f" (от които {cached:,} от кеша)" if cached else "")
+                + "\n"
                 + "\n".join(
                     f"  {p}: {d.get('calls',0)} · {d.get('total_tokens',0):,}"
                     for p, d in (t.get("by_provider") or {}).items()

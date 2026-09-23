@@ -1,11 +1,12 @@
 """genesis_agent.thread_worker — the unsupervised 24/7 read-only prep pass
-behind the Discord bot's overnight thread work. Zero coverage before this
+behind the overnight thread work. Zero coverage before this
 file. Two things matter most here, both safety properties rather than
 features:
 
   1. redact_secrets() — the last line of defense before a model's "findings"
      (which may have read a .env or similar while investigating) get posted
-     to Discord. Wrong here means a real credential leaks into a chat log.
+     out over a notification channel. Wrong here means a real credential
+     leaks into a chat log.
   2. prepare_thread() never raises and never goes outside the read-only tool
      boundary the module's docstring promises (no RUN_CMD/WRITE_FILE/browser
      — this whole mode runs unsupervised specifically because it can't touch

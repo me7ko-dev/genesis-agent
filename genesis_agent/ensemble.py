@@ -148,8 +148,11 @@ def _generate_one(goal: str, provider: str, rag_context: str, system_content: st
         # avoid=writer_pair (design note, 2026-08-11, mirrors autonomous_loop.py):
         # без него критикът пада на СЪЩИЯ provider/model, който написа кода.
         writer = getattr(brain, "current", None)
-        writer_pair = ((writer.get("provider"), writer.get("model"))
-                       if isinstance(writer, dict) and writer.get("provider") else None)
+        writer_pair: tuple[str, str] | None = None
+        if isinstance(writer, dict):
+            w_provider, w_model = writer.get("provider"), writer.get("model")
+            if isinstance(w_provider, str) and isinstance(w_model, str):
+                writer_pair = (w_provider, w_model)
         critic_eval = brain.complete(critic_msg, avoid=writer_pair).raw_text.strip()
         cand.critic_ok = critic_eval.upper().startswith("YES")
     except Exception as e:

@@ -180,20 +180,43 @@ def get_lessons(topic: str) -> list[str]:
     return list(matched)
 
 
-def summarize_sessions(last_n: int = 10) -> str:
+# Дължини за РЕЗЮМЕ. Изходът на един инструмент се записва до 2000 символа;
+# ред от 2000 символа не е резюме, а лог — а този текст отива в системния
+# промпт, тоест се плаща на всяка заявка.
+_SUMMARY_GOAL_CHARS = 160
+_SUMMARY_OUTCOME_CHARS = 80
+_SUMMARY_LESSON_CHARS = 160
+
+
+def _short(text: str, limit: int) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def summarize_sessions(last_n: int = 10, *, kinds: tuple[str, ...] = ()) -> str:
     """
     Генерира прост текстов преглед на последните ``last_n`` епизода.
     Използва ASCII стрелка „->“, за да не предизвика UnicodeEncodeError.
+
+    ``kinds`` ограничава до епизоди с някой от тези маркери в ``tags``
+    (напр. ``("mission",)``). Празно = всички, каквото беше поведението.
+    Сравнението е LIKE върху колоната с таговете — те се пазят като текст,
+    не като релация; затова маркерите тук трябва да са отличителни думи.
     """
+    where, params = "", []
+    if kinds:
+        where = "WHERE " + " OR ".join("tags LIKE ?" for _ in kinds)
+        params = [f"%{k}%" for k in kinds]
     with _get_connection() as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT timestamp, goal, outcome, lessons_learned
             FROM episodes
+            {where}
             ORDER BY id DESC
             LIMIT ?;
             """,
-            (last_n,),
+            (*params, last_n),
         ).fetchall()
 
     if not rows:
@@ -202,8 +225,11 @@ def summarize_sessions(last_n: int = 10) -> str:
     lines = ["Последни епизоди:"]
     for i, (ts, goal, outcome, lessons_json) in enumerate(reversed(rows), 1):
         lessons = _json_decode(lessons_json)
-        lesson_part = f" | Урок: {lessons[0]}" if lessons else ""
-        lines.append(f"{i}. [{ts}] Цел: {goal} -> Резултат: {outcome}{lesson_part}")
+        lesson_part = (f" | Урок: {_short(lessons[0], _SUMMARY_LESSON_CHARS)}"
+                       if lessons else "")
+        lines.append(
+            f"{i}. [{ts}] Цел: {_short(goal, _SUMMARY_GOAL_CHARS)} "
+            f"-> Резултат: {_short(outcome, _SUMMARY_OUTCOME_CHARS)}{lesson_part}")
 
     return "\n".join(lines)
 

@@ -91,12 +91,39 @@ def test_skills_prints_verified_count(monkeypatch, capsys) -> None:
     assert "3" in out and "2" in out
 
 
-def test_discord_delegates_to_discord_bot_main(monkeypatch) -> None:
-    pytest.importorskip("discord")  # optional dependency; discord_bot.py SystemExits without it
-    called = []
-    monkeypatch.setattr("genesis_agent.discord_bot.main", lambda: called.append(True))
-    assert cli_mod.main(["discord"]) == 0
-    assert called == [True]
+class TestBudgetCommand:
+    def test_prints_today_and_range_reports(self, monkeypatch, capsys) -> None:
+        monkeypatch.setattr("genesis_agent.budget.today_totals", lambda: {
+            "calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+            "cached_read_tokens": 0, "cached_write_tokens": 0, "by_provider": {}})
+        seen_days = []
+        monkeypatch.setattr("genesis_agent.budget.range_totals", lambda days: (
+            seen_days.append(days) or {
+                "calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+                "cached_read_tokens": 0, "cached_write_tokens": 0, "by_provider": {}}))
+        rc = cli_mod.main(["budget"])
+        assert rc == 0
+        assert seen_days == [7]
+        out = capsys.readouterr().out
+        assert "Днес" in out and "Последните 7 дни" in out
+
+    def test_custom_day_count(self, monkeypatch, capsys) -> None:
+        monkeypatch.setattr("genesis_agent.budget.today_totals", lambda: {
+            "calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+            "cached_read_tokens": 0, "cached_write_tokens": 0, "by_provider": {}})
+        seen_days = []
+        monkeypatch.setattr("genesis_agent.budget.range_totals", lambda days: (
+            seen_days.append(days) or {
+                "calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+                "cached_read_tokens": 0, "cached_write_tokens": 0, "by_provider": {}}))
+        rc = cli_mod.main(["budget", "30"])
+        assert rc == 0
+        assert seen_days == [30]
+
+    def test_non_numeric_day_count_is_rejected(self, capsys) -> None:
+        rc = cli_mod.main(["budget", "abc"])
+        assert rc == 2
+        assert "abc" in capsys.readouterr().out
 
 
 class TestGuiVoiceMissingScript:

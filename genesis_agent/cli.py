@@ -8,15 +8,20 @@ genesis_agent.cli — the `genesis` command.
     genesis fix PATH "..."  fix a bug in an existing project (checkpoint + tests + diff)
     genesis gui             GTK chat window
     genesis voice           voice frontend
-    genesis discord         Discord bot
     genesis skills          library status
+    genesis models          the model chain; `--refresh` re-scans free models
+    genesis update          is there a newer commit on the installed branch
+    genesis budget [N]      token usage today + last N days (default 7)
     genesis --version
 """
 from __future__ import annotations
 
 import sys
 
-__version__ = "0.1.0"
+# Едно място за номера — беше на три (pyproject 0.1.0, __init__ 0.2.0, тук
+# 0.1.0), а `--version` печаташе третото. Версия, която не съвпада със себе
+# си, е по-лоша от липсваща: тя изглежда като отговор.
+from genesis_agent import __version__
 
 USAGE = __doc__.split("    genesis", 1)[0].strip() + "\n\n" + "\n".join(
     line for line in (__doc__ or "").splitlines() if line.startswith("    genesis")
@@ -53,6 +58,57 @@ _FIX_USAGE = """Употреба:
 
 Преди първата промяна се прави снимка на проекта. `--revert` я връща обратно.
 """
+
+
+def _models(args: list[str]) -> int:
+    """`genesis models [--refresh]` — какво реално ще бъде извикано и в какъв ред."""
+    from genesis_agent import free_models
+
+    if "--refresh" in args:
+        count, message = free_models.refresh()
+        print(message)
+        if not count:
+            return 1
+
+    from genesis_agent.agent_core import MIN_SIZE_B
+    from genesis_agent.brain import _load_chain
+    chain = _load_chain()
+
+    # Броят се РЕАЛНИТЕ членове на веригата, не се вади дължината на кеша:
+    # `_load_chain` дедуплицира срещу config.yaml и филтрира по познати
+    # доставчици, така че изваждането подценяваше ръчните записи с всеки
+    # застъпен модел — а при силно застъпване стигаше до отрицателно число,
+    # което `max(..., 0)` показваше като „≈0 ръчно проверени" до верига,
+    # която е почти изцяло ръчна.
+    discovered = {(m.get("provider"), m.get("model")) for m in free_models.cached()}
+    auto = sum(1 for c in chain if (c["provider"], c["model"]) in discovered)
+    print(f"\nВерига: {len(chain)} модела "
+          f"({len(chain) - auto} ръчно проверени + {auto} автоматично открити)\n")
+
+    unsized = 0
+    for i, c in enumerate(chain, 1):
+        size = f"{c['size_b']:g}B" if c["size_b"] else "?"
+        tools = "tools" if c["supports_tools"] else "text-tags"
+        # Модел без размер в името се изхвърля от всеки контекст, който
+        # филтрира по размер (чат: ≥32B). Без този знак `genesis models`
+        # изброява модели, които работещият агент никога не вика.
+        skipped = "" if c["size_b"] >= MIN_SIZE_B else "  ← не и в чат"
+        if not c["size_b"]:
+            unsized += 1
+        print(f"  {i:>2}. {c['provider']:<13} {c['model']:<52} {size:>6}  {tools}{skipped}")
+
+    if unsized:
+        print(f"\n{unsized} модела не обявяват размер в името си и затова не влизат "
+              f"в контекстите с праг (чат иска ≥{MIN_SIZE_B:g}B). Мисиите и "
+              "по-ниските прагове ги ползват.")
+
+    age = free_models.cache_age_days()
+    if age is None:
+        print("\nБезплатните модели не са сканирани още — пусни `genesis models --refresh`.")
+    elif age > 7:
+        print(f"\nСписъкът с безплатни е отпреди {age:.0f} дни — той се мени всеки месец; "
+              "`genesis models --refresh` го обновява.")
+    return 0
 
 
 def _fix(args: list[str]) -> int:
@@ -120,7 +176,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if cmd in ("-V", "--version", "version"):
-        print(f"genesis-agent {__version__}")
+        from genesis_agent.version_info import describe
+        print(describe(__version__))
         return 0
 
     if cmd == "setup":
@@ -139,11 +196,6 @@ def main(argv: list[str] | None = None) -> int:
             print(f"умение: {out.skill_path}")
         return 0 if out.success else 1
 
-    if cmd == "discord":
-        from genesis_agent import discord_bot
-        discord_bot.main()
-        return 0
-
     if cmd == "skills":
         from genesis_agent.skill_loader import load_skills_index
         index = load_skills_index()
@@ -151,6 +203,32 @@ def main(argv: list[str] | None = None) -> int:
         verified = sum(1 for s in index.values() if s.get("verified"))
         print(f"{len(index)} умения, {verified} verified")
         return 0
+
+    if cmd == "update":
+        # Само ПИТА. Обновяването не се пуска оттук нарочно: pipx подменя
+        # точно този изпълним файл, а на Windows работещ .exe не може да бъде
+        # заменен — командата щеше да се проваля най-често там, където е
+        # най-нужна. Затова печатаме реда, който се пуска в чист терминал.
+        from genesis_agent.version_info import update_report
+        print(update_report(version=__version__))
+        return 0
+
+    if cmd == "budget":
+        from genesis_agent import budget
+        days = 7
+        if len(argv) > 1:
+            try:
+                days = max(1, int(argv[1]))
+            except ValueError:
+                print(f"`genesis budget` иска число дни, не {argv[1]!r}")
+                return 2
+        print(budget.format_report(budget.today_totals(), title="Днес"))
+        print()
+        print(budget.format_report(budget.range_totals(days), title=f"Последните {days} дни"))
+        return 0
+
+    if cmd == "models":
+        return _models(argv[1:])
 
     if cmd == "fix":
         return _fix(argv[1:])

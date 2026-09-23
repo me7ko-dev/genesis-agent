@@ -73,9 +73,67 @@ def red_zone_elevation_granted() -> bool:
     return bool(token) and token == secret
 
 
+# Кого се опитва да нарани и с какво. Двете трябва да са ЗАЕДНО, в едно
+# изречение: само по глагола не става разлика между "kill a stuck process" и
+# "kill people", а първото е ежедневна работа за кодинг агент.
+_HUMAN_TARGET = (
+    r"(?:people|persons?|humans?|someone|somebody|anyone|civilians?|"
+    r"children|child|kids?|victims?|famil(?:y|ies)|neighbou?rs?|"
+    r"хора(?:та)?|човек(?:а|ът)?|деца|дете|някого|някой|семейств\w*|съсед\w*)"
+)
+_HARM_ACT = (
+    r"(?:harm|hurt|injure|maim|kill|kills|killing|murder|assassinat\w*|poison|"
+    r"навред\w*|нараня\w*|уби(?:й|ва|ване|ец|я|ем)?|избий|отрови)"
+)
+# Техническият смисъл на "kill" има свой обект. Изречение като "kill the
+# process that people started" съдържа и глагола, и думата "people" на 17
+# знака разстояние — затова техническите двойки се махат ПРЕДИ търсенето,
+# вместо да се залага на разстоянието.
+_TECHNICAL_KILL_RE = re.compile(
+    r"\b(?:kill|kills|killing|уби(?:й|ва|ване)?)\b"
+    r"(?:\s+-\w+)?"                                    # kill -9, kill -SIGTERM
+    r"\s+(?:the|a|an|this|that|my|all|any)?\s*"
+    r"(?:\w+\s+){0,2}"                                 # "stuck", "runaway python"
+    r"(?:process(?:es)?|container\w*|jobs?|tasks?|threads?|servers?|daemons?|"
+    r"services?|sessions?|connections?|quer(?:y|ies)|ports?|pids?|apps?|scripts?|"
+    r"nodes?|workers?|timers?|pods?|vms?|instances?|shells?|tabs?|"
+    r"процес\w*|задач\w*|нишк\w*|сървър\w*|услуг\w*|скрипт\w*)\b",
+    re.IGNORECASE,
+)
+
+# До 30 знака между действието и жертвата и без прескачане на изречение.
+_HARM_RE = re.compile(
+    rf"\b{_HARM_ACT}\b[^.\n]{{0,30}}?\b{_HUMAN_TARGET}\b"
+    rf"|\b{_HUMAN_TARGET}\b[^.\n]{{0,30}}?\b{_HARM_ACT}\b",
+    re.IGNORECASE,
+)
+
+
 def validate_goal_ethics(goal: str) -> None:
-    # Whole words only, so "skill" does not trigger on "kill".
-    if re.search(r'\bharm\b', goal.lower()) or re.search(r'\bkill\b', goal.lower()):
+    """Спъващ кабел за явно заявено намерение за насилие над хора.
+
+    НЕ е защитен механизъм и не се представя за такъв — всяко пренаписване го
+    заобикаля. Истинските механизми са в `sandbox.py` (реални граници при
+    изпълнение) и в отказа на самия модел. Смисълът тук е една проверка ПРЕДИ
+    първото обръщение към модел, на всички входове (autonomous_loop, ensemble,
+    orchestrator, project_builder, save_skill).
+
+    Измерено преди пренаписването, старото правило (`\bharm\b` или `\bkill\b`
+    някъде в целта) се държеше точно обратно на предназначението си:
+
+        ОТКАЗВАШЕ  "kill a stuck process", "kill -9 a runaway container",
+                   "harm reduction report parser"
+        ПУСКАШЕ    "write a tool that kills people"  (kills != kill)
+                   "убий хората"                     (не е на английски)
+
+    Тоест спираше обикновена системна работа на всички входове, а изречението,
+    заради което съществува, минаваше. Сега действието и жертвата се търсят
+    ЗАЕДНО — и на български, защото операторът пише на български.
+    """
+    # Техническото "убий процеса" се маха първо; каквото остане, се проверява.
+    # "kill the process, then kill people" пак се хваща — втората клауза остава.
+    cleaned = _TECHNICAL_KILL_RE.sub(" ", goal or "")
+    if _HARM_RE.search(cleaned):
         raise GenesisDNAError("GENE-ETHICS: Goal violates the humanity shield.")
 
 

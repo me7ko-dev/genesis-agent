@@ -74,6 +74,25 @@ MAX_OUTPUT_TOKENS = int(os.environ.get("GENESIS_MAX_TOKENS", "4096"))
 ANTHROPIC_MAX_TOKENS = 16000
 ANTHROPIC_EFFORT = "xhigh"
 
+# Не всеки модел на Anthropic приема тези два параметъра. `output_config.effort`
+# и adaptive thinking вървят от поколение 4.6 нагоре; на Haiku 4.5 и по-старите
+# (Sonnet 4.5 и назад) `effort` връща 400, а thinking иска `budget_tokens`.
+# Изпращахме и двата безусловно, тоест всеки, който смени модела в config.yaml
+# на по-евтин — точно което прави човек, който пести — получаваше HTTP 400 без
+# следа защо. Списъкът е allowlist по префикс: непознат модел получава заявка
+# без тези параметри, което всеки модел приема.
+_ADAPTIVE_EFFORT_MODELS = (
+    "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
+    "claude-sonnet-5", "claude-sonnet-4-6",
+    "claude-fable-5", "claude-mythos-5",
+)
+
+
+def _supports_adaptive_effort(model: str) -> bool:
+    """Приема ли този модел adaptive thinking + output_config.effort."""
+    name = (model or "").strip().lower()
+    return any(name.startswith(prefix) for prefix in _ADAPTIVE_EFFORT_MODELS)
+
 # OpenAI-съвместими доставчици (base_url + env ключ; None ключ = без auth, локален).
 _PROVIDERS = {
     "ollama_local": ("http://localhost:11434/v1", None),   # СОБСТВЕН локален мозък
@@ -114,6 +133,21 @@ _PROVIDERS = {
     # (system отделно от messages, tool_use/tool_result блокове, adaptive
     # thinking). base_url-ът тук е само маркер за _PROVIDERS проверките.
     "anthropic": ("native://anthropic", "ANTHROPIC_API_KEY"),
+    # ── Google (добавено 2026-09-20) ──────────────────────────────────────────
+    # И двата адреса са проверени срещу живите услуги, не преписани по памет:
+    # заявка с невалиден ключ връща 400 „Please pass a valid API key" от
+    # generativelanguage и 401 „Expected OAuth 2 access token" от Vertex —
+    # тоест пътищата съществуват точно така.
+    #
+    # gemini = Gemini API (AI Studio): статичен ключ, има безплатен слой,
+    # OpenAI-съвместим е, значи влиза като всеки друг доставчик — включително
+    # в ротацията на ключове (GEMINI_API_KEY_2..10).
+    "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY"),
+    # vertex = същите модели през Google Cloud: без статичен ключ, с OAuth
+    # токен и адрес, който зависи от проекта и локацията. Затова има свой клон
+    # в `_call` и свой модул (genesis_agent.vertex_auth), вместо ред тук с
+    # фиксиран base_url. key_env сочи проекта — „конфигуриран" значи „има проект".
+    "vertex": ("dynamic://vertex", "GOOGLE_CLOUD_PROJECT"),
 }
 
 # Кои доставчици се викат през native SDK вместо през OpenAI-съвместим HTTP.
@@ -288,6 +322,20 @@ def _load_chain() -> list[dict]:
         _add(fb.get("provider"), fb.get("model"), fb.get("size_b", 0),
              bool(fb.get("supports_tools", False)))
 
+    # Автоматично откритите безплатни модели вървят НАКРАЯ, като резерва под
+    # ръчно курираните: всеки запис в config.yaml е проверен наживо с реален
+    # ключ, докато тези идват от каталог, който казва само какво твърди
+    # доставчикът. `_add` вече дедуплицира, така че модел, присъстващ и на
+    # двете места, запазва ръчната си позиция и ръчните си метаданни.
+    try:
+        from genesis_agent import free_models
+        for fm in free_models.cached():
+            _add(fm.get("provider"), fm.get("model"), fm.get("size_b", 0),
+                 bool(fm.get("supports_tools", False)))
+    except Exception as e:
+        # Резервен слой — никога не спира старта.
+        log.debug("_load_chain: без автоматично открити модели (%s)", e)
+
     # Само доставчици, които знаем как да викаме.
     return [c for c in chain if c["provider"] in _PROVIDERS]
 
@@ -367,7 +415,7 @@ class Brain:
         self._last_usage: dict | None = None
         self._last_local_error: str | None = None
         # min_size_b (design note, 2026-07-25): филтрира облачната верига по размер —
-        # различни контексти искат различно качество/скорост: Discord чат ≥17B,
+        # различни контексти искат различно качество/скорост:
         # терминален чат ≥32B, умения/самонадграждане ≥120B (виж config.yaml
         # size_b анотациите). Локалният мозък НЕ се филтрира — той си остава
         # последна резерва независимо от размера, по-добре слаб отговор,
@@ -696,11 +744,22 @@ class Brain:
         преди — извикващите БЕЗ tools (orchestrator/project_builder) никога не
         произвеждат role='tool' съобщения, значи условието долу никога не се
         задейства за тях.
+
+        Проверката гледаше само ПОСЛЕДНОТО съобщение в разреза (bug fix,
+        2026-09-20). Така пазеше сирака, когато tool резултатът е последен, но
+        пропускаше точно толкова невалидния случай, в който след него стои още
+        едно съобщение — а autonomous_loop добавя такова при всяка обратна
+        връзка след tool рунд (заповедта "STOP calling tools", резултат от
+        read-only таг, ruff бележка). Разрезът тогава е
+        [system, цел, tool, user] — 'tool' без родителския си assistant, тоест
+        HTTP 400 от всеки OpenAI-съвместим доставчик. Сега условието пита
+        дали в разреза ИЗОБЩО има 'tool' без родител, независимо къде стои.
         """
         if len(messages) <= 4:
             return messages
         tail = messages[-2:]
-        if tail and tail[-1].get("role") == "tool" and not tail[0].get("tool_calls"):
+        if (any(m.get("role") == "tool" for m in tail)
+                and not tail[0].get("tool_calls")):
             for i in range(len(messages) - 1, 1, -1):
                 if messages[i].get("role") == "assistant":
                     tail = messages[i:]
@@ -973,14 +1032,28 @@ class Brain:
             "model": model,
             "max_tokens": ANTHROPIC_MAX_TOKENS,
             "messages": msgs,
+        }
+        if _supports_adaptive_effort(model):
             # Adaptive thinking: моделът сам решава колко да мисли по задачата.
             # Точно това искаме тук — MAX режимът съществува заради трудните
             # случаи, а лесните не бива да плащат за размисъл, който не им трябва.
-            "thinking": {"type": "adaptive"},
-            "output_config": {"effort": effort or ANTHROPIC_EFFORT},
-        }
+            params["thinking"] = {"type": "adaptive"}
+            params["output_config"] = {"effort": effort or ANTHROPIC_EFFORT}
         if system:
-            params["system"] = system
+            # Prompt caching (design note, 2026-09-20). Редът на рендиране е
+            # tools → system → messages, затова една точка на последния
+            # системен блок покрива И схемите на инструментите: при тази
+            # конфигурация това е ~10 100 символа схеми + ~8 500 системен
+            # промпт, които се изпращат наново при ВСЯКО обръщение, а при
+            # 25 рунда инструменти се плащат 25 пъти.
+            #
+            # Нарочно НЯМА точка в `messages`: budget.budget_history свива
+            # по-старите резултати с напредването на рундовете, тоест байтовете
+            # в средата на историята се променят между заявките. Кешът е
+            # съвпадение по префикс — точка там щеше да се разминава почти
+            # винаги и само да харчи запис в кеша.
+            params["system"] = [{"type": "text", "text": system,
+                                 "cache_control": {"type": "ephemeral"}}]
         if tools:
             params["tools"] = self._to_anthropic_tools(tools)
 
@@ -1023,9 +1096,16 @@ class Brain:
                                    "function": {"name": block.name,
                                                 "arguments": json.dumps(block.input)}})
         usage = getattr(resp, "usage", None)
+        # Прочетените от кеша токени се отчитат ОТДЕЛНО, за да е проверимо, че
+        # кеширането работи: ако `cached_read_tokens` стои на нула при
+        # повтарящи се заявки, нещо мълчаливо разваля префикса (променлив
+        # системен промпт, различен набор инструменти) — и това се вижда в
+        # `genesis budget`, вместо да се приема на доверие.
         self._last_usage = {
             "prompt_tokens": getattr(usage, "input_tokens", 0) or 0,
             "completion_tokens": getattr(usage, "output_tokens", 0) or 0,
+            "cached_read_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
+            "cached_write_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
         } if usage else None
 
         text = "".join(text_parts).strip()
@@ -1047,6 +1127,11 @@ class Brain:
              tools: list[dict] | None = None,
              extra: dict[str, Any] | None = None) -> tuple[str, list | None]:
         base_url, key_env = _PROVIDERS[provider]
+        if provider == "vertex":
+            # Адресът и токенът се смятат при извикване (проект + локация +
+            # OAuth), затова Vertex не минава през общия път с фиксиран
+            # base_url и статичен ключ.
+            return self._call_vertex(model, messages, tools, extra)
         if not key_env:  # локален — без ключ
             # reasoning_effort="none" (design note, 2026-07-31, живо измерено):
             # Qwen3 мисли по подразбиране дори за тривиални задачи — >3 минути
@@ -1135,6 +1220,54 @@ class Brain:
         if not tried_any:
             raise RuntimeError(f"HTTP_429: all configured {key_env}* are cooling down")
         raise last_err or RuntimeError(f"HTTP_502: {key_env} key rotation exhausted")
+
+    def _call_vertex(self, model: str, messages: list[dict],
+                      tools: list[dict] | None,
+                      extra: dict[str, Any] | None = None) -> tuple[str, list | None]:
+        """Google Vertex AI през OpenAI-съвместимия му endpoint.
+
+        Ротацията тук е по ПРОЕКТ, не по ключ: всеки проект в Google Cloud има
+        своя квота и своя сметка, тоест това са собствени ресурси на оператора,
+        а не няколко безплатни акаунта при един доставчик (разликата е описана
+        в `_numbered_keys`). Проект, който върне 429/403, влиза в същия
+        cooldown като всеки друг ключ и веригата продължава.
+
+        Липсващ проект, липсващ `google-auth` или липсващи credentials дават
+        `skip:`, което веригата третира като „този доставчик го няма" — без
+        грешка и без прекъсване на мисията.
+        """
+        from genesis_agent import vertex_auth
+
+        project_list = vertex_auth.projects()
+        if not project_list:
+            raise RuntimeError("skip: no GOOGLE_CLOUD_PROJECT configured")
+        if not vertex_auth.auth_available():
+            raise RuntimeError("skip: google-auth not installed (pip install 'genesis-agent[google]')")
+
+        last_err: Exception | None = None
+        tried_any = False
+        for idx, project in enumerate(project_list, start=1):
+            kid = f"key::VERTEX#{idx}"
+            if _is_exhausted(kid):
+                continue
+            access_token = vertex_auth.token(project)
+            if not access_token:
+                continue
+            tried_any = True
+            try:
+                return self._http(vertex_auth.endpoint(project), access_token, model,
+                                  messages, self.timeout, tools=tools, extra=extra)
+            except RuntimeError as e:
+                last = str(e)
+                last_err = e
+                if any(f"HTTP_{c}" in last for c in _EXHAUST_CODES | {401, 403}):
+                    _mark_exhausted(kid)
+                    print(f"  [Brain] 🔑 vertex/{project} unavailable ({last[:60]}) → next")
+                    continue
+                raise
+        if not tried_any:
+            raise RuntimeError("skip: no usable Vertex credentials (ADC not configured or all cooling down)")
+        raise last_err or RuntimeError("HTTP_502: vertex project rotation exhausted")
 
     def _call_local(self, messages: list[dict], attempts: int = 1) -> tuple[str, str] | None:
         """Пробва локалния мозък (текущия tier — 3b/7b/14b, каквото е в self.local).
@@ -1298,6 +1431,14 @@ class Brain:
         if not self.chain and not self.local:
             return self._error_result("Error: няма конфигурирани модели (config.yaml)")
 
+        # Бюджетът на контекста се прилага ТУК, а не във фронтендите: това е
+        # единствената точка, през която минава всичко — терминал, GUI, Jarvis,
+        # мисиите, ensemble, orchestrator. Историята на извикващия
+        # остава пълна (budget_history не мутира входа); свива се само копието,
+        # което тръгва по мрежата.
+        from genesis_agent.budget import budget_history
+        messages = budget_history(messages)
+
         last_error = "неизвестна грешка"
         local_only = os.environ.get("GENESIS_LOCAL_ONLY") == "1"
 
@@ -1305,7 +1446,7 @@ class Brain:
         if local_only:
             if not self.local:
                 return self._error_result("Error: локален режим — няма наличен локален модел")
-            # Бъг, хванат наживо 2026-07-31 (Discord !local_max + реални tools):
+            # Бъг, хванат наживо 2026-07-31 (изричен локален режим + реални tools):
             # този клон връщаше рано БЕЗ да мине през _with_tool_tag_docs/
             # _sanitize_for_textmode по-долу — локалният модел никога не
             # научаваше какъв е синтаксисът на тул-таговете, затова само
@@ -1482,6 +1623,8 @@ class Brain:
                 model=self.current.get("model", "?"),
                 prompt_tokens=int(self._last_usage.get("prompt_tokens", 0) or 0),
                 completion_tokens=int(self._last_usage.get("completion_tokens", 0) or 0),
+                cached_read_tokens=int(self._last_usage.get("cached_read_tokens", 0) or 0),
+                cached_write_tokens=int(self._last_usage.get("cached_write_tokens", 0) or 0),
             )
         except Exception as e:
             log.debug("budget недостъпен, usage не е записан: %s", e)

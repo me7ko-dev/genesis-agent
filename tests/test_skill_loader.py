@@ -243,3 +243,116 @@ class TestFuzzyResolveNeedsRealEvidence:
             "build_a_stdlib_only_an_in_process_event_bus_pub")
         assert resolved == "build_a_stdlib_only_an_in_process_event_bus_pub"
         assert candidates == []
+
+
+class TestSearchSeesTheOperatorsLanguage:
+    """`_keywords` беше `[a-z0-9_]+` — само ASCII. Операторът пише на
+    български, а `search_skills` е механизмът, по който изобщо се стига до
+    преизползване на умение (когато embeddings липсват, а те са незадължителна
+    зависимост, това е ЕДИНСТВЕНИЯТ механизъм).
+
+    Измерено преди поправката: „искам умение за четене на конфигурационен
+    файл“ → празно множество думи → score 0 за всяко умение → нито едно не
+    може да се намери никога. Библиотеката съществува заради преизползването;
+    на езика на оператора то беше изключено.
+    """
+
+    def test_a_cyrillic_query_produces_keywords_at_all(self) -> None:
+        words = sl._keywords("обработка на CSV файлове")
+        assert "обработка" in words
+        assert "файлове" in words
+        assert "csv" in words, "латиницата в смесен текст трябва да оцелее"
+
+    def test_a_fully_cyrillic_query_is_no_longer_empty(self) -> None:
+        assert sl._keywords("четене на конфигурационен файл")
+
+    def test_template_verbs_are_filtered_in_bulgarian_too(self) -> None:
+        """Английските шаблонни глаголи вече се махат („build“, „write“).
+        Без същото за българските две напълно несвързани цели съвпадат само
+        защото и двете започват с „Направи“."""
+        assert sl._keywords("Направи нещо с това") == set()
+
+    def test_a_cyrillic_trigger_can_be_found_by_a_cyrillic_query(
+        self, _isolated_skills, monkeypatch
+    ) -> None:
+        """Целите от goals_from_real_work са на български, тоест уменията,
+        които агентът сам създава, ще имат български тригери."""
+        skills_dir = _isolated_skills
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        (skills_dir / "skills.json").write_text(json.dumps({"skills": [
+            {"name": "obrabotka_na_otcheti", "file_path": "skills/x.md",
+             "description": "Обработка на месечни отчети от CSV",
+             "triggers": ["обработка отчети csv"]},
+            {"name": "retry_backoff", "file_path": "skills/y.md",
+             "description": "Exponential backoff retry helper",
+             "triggers": ["retry backoff"]},
+        ]}, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(sl, "_SKILLS_INDEX_CACHE", None)
+
+        hits = sl.search_skills("обработка на отчети", top_n=3, use_semantic=False)
+        assert hits, "нито едно умение не беше намерено по българска заявка"
+        assert hits[0]["name"] == "obrabotka_na_otcheti"
+
+    def test_english_search_is_unchanged(self, _isolated_skills, monkeypatch) -> None:
+        skills_dir = _isolated_skills
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        (skills_dir / "skills.json").write_text(json.dumps({"skills": [
+            {"name": "retry_backoff", "file_path": "skills/y.md",
+             "description": "Exponential backoff retry helper",
+             "triggers": ["retry backoff"]},
+        ]}, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(sl, "_SKILLS_INDEX_CACHE", None)
+
+        hits = sl.search_skills("exponential backoff retry", top_n=3, use_semantic=False)
+        assert hits and hits[0]["name"] == "retry_backoff"
+        assert hits[0]["_kw_score"] == 3
+
+
+class TestUseSkillResolvesFromBulgarian:
+    """Изискването на оператора, проверено там, където се решава: `USE_SKILL`
+    минава през `resolve_skill`, а тя иска поне 2 съвпадащи думи, преди да
+    изпълни умение. Това е прагът, който пази от увереното грешно умение
+    (реален случай в коментара на функцията: „in-process job queue" резолвна
+    до event bus само по думата „process" и изгори 5 от 8 рунда).
+
+    Тоест българската заявка трябва да прескочи прага ЧЕСТНО — по истински
+    съвпадащи думи, а не с понижен праг.
+    """
+
+    @pytest.fixture
+    def _library(self, _isolated_skills, monkeypatch):
+        from genesis_agent import skills_manager as sm
+        code = ("import os\n\n"
+                "def cleanup_temp_files(root='/tmp'):\n"
+                "    return [p for p in os.listdir(root) if p.endswith('.tmp')]\n\n"
+                "assert isinstance(cleanup_temp_files('/tmp'), list)\nprint('OK')\n")
+        sm.save_skill(slug="Изчисти временните файлове по график", code=code,
+                      goal="Изчисти временните файлове по график")
+        monkeypatch.setattr(sl, "_SKILLS_INDEX_CACHE", None)
+        return _isolated_skills
+
+    def test_a_bulgarian_request_resolves_to_the_english_named_skill(
+        self, _library
+    ) -> None:
+        name, _ = sl.resolve_skill("изчисти временните файлове")
+        assert name == "cleanup_temp_files"
+
+    def test_a_longer_sentence_around_it_still_resolves(self, _library) -> None:
+        name, _ = sl.resolve_skill("искам да изчистя временните файлове по график")
+        assert name == "cleanup_temp_files"
+
+    def test_the_exact_english_name_resolves_directly(self, _library) -> None:
+        name, candidates = sl.resolve_skill("cleanup_temp_files")
+        assert name == "cleanup_temp_files"
+        assert candidates == [], "точното име не минава през търсене"
+
+    def test_an_unrelated_bulgarian_request_resolves_to_nothing(self, _library) -> None:
+        """Прагът важи еднакво за двата езика. Уверено грешно умение е
+        по-скъпо от никакво: изходът му се представя като отговор на
+        заявката."""
+        name, _ = sl.resolve_skill("направи ми справка за продажбите")
+        assert name is None
+
+    def test_one_shared_word_is_not_enough_in_bulgarian_either(self, _library) -> None:
+        name, _ = sl.resolve_skill("файлове")
+        assert name is None

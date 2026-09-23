@@ -82,14 +82,30 @@ def record_mission(goal: str, success: bool, detail: str = "", *, reused_existin
         pass
 
 
+def _recent_missions(last_n: int) -> list[dict]:
+    """Последните `last_n` МИСИИ, не последните `last_n` записа.
+
+    Измерено на реална база (1967 епизода): в последните 60 записа има 7
+    мисии — останалите са единични извиквания на инструменти (`READ_FILE`,
+    `WRITE_FILE`). Прозорец от 60 записа значеше прозорец от шепа мисии, тоест
+    и `distill_lessons`, и `reuse_rate` работеха върху проба, десет пъти
+    по-малка от поисканата, и мълчаливо връщаха „няма уроци“.
+
+    При провал на паметта връща празен списък — рефлексията е допълнение, не
+    може да вали мисия.
+    """
+    try:
+        episodes = _em._fetch_all_episodes()
+    except Exception:
+        return []
+    return [e for e in episodes if "mission" in (e.get("tags") or [])][-last_n:]
+
+
 def reuse_rate(last_n: int = 100) -> float | None:
     """% от УСПЕШНИТЕ мисии в последните last_n епизода, които реално са композирали
     (преизползвали) инжектиран verified код. None ако няма успешни мисии в прозореца —
     компаундинг ефектът трябва да расте с растежа на библиотеката от умения."""
-    try:
-        episodes = _em._fetch_all_episodes()[-last_n:]
-    except Exception:
-        return None
+    episodes = _recent_missions(last_n)
     successes = [e for e in episodes if e.get("outcome") == "success"]
     if not successes:
         return None
@@ -99,10 +115,7 @@ def reuse_rate(last_n: int = 100) -> float | None:
 
 def distill_lessons(last_n: int = 60, top: int = 4) -> list[str]:
     """Категоризира суровите грешки от последните провалени мисии → чести уроци."""
-    try:
-        episodes = _em._fetch_all_episodes()[-last_n:]
-    except Exception:
-        return []
+    episodes = _recent_missions(last_n)
     counter: Counter = Counter()
     for ep in episodes:
         if ep.get("outcome") != "failed":

@@ -185,7 +185,7 @@ def run_skill_isolated(code: str, timeout: int = 30) -> tuple[bool, str]:
            "PYTHONIOENCODING": "utf-8", "PYTHONPATH": str(LIBS)}
     try:
         proc = subprocess.run([sys.executable, str(script)], cwd=str(root),
-                              capture_output=True, text=True, timeout=timeout, env=env, check=False)
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, env=env, check=False)
         ok = proc.returncode == 0
         return ok, (proc.stdout if ok else proc.stderr)[:300]
     except subprocess.TimeoutExpired:

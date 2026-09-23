@@ -187,7 +187,6 @@
         "method": "self_test_passed",
         "detail": "OK"
       },
-      "signature": "248bfdaeedd5c4fb48b3745483a31d1cbe4b32c25a5adbebce40bc2928239e13415e2f6ebf57b3b0077b1f5596959b192fb8d471c38e05e7a30880fea718a3447f817d87a21885d4cb15b3bdbe98ca6b42cb4727a036edc3dad1d1ada6fc493e65ef9bb62b602e3845ff240953fe7045dbfda75513b6272c714579fae63f45a956e8185aa7b2df1a61e6ee7057cacff1295a7fe15ada18feab43323cd537c8a149985602b2c1f4cbdafe58ddf21e67ce1a9666c9f6e13d923635e67df723a57f3637c60c4afdbf27628c97fa20d82b8d28344493e615ae071a2e0f900ca67f268e65523241ebb3cb5b5fc5df321ba6c820f65b7139334816979e6c3a0a73c33a",
       "extra": {
         "rounds": 6,
         "test_gated": true,
@@ -212,7 +211,6 @@
         "method": "self_test_passed",
         "detail": "OK"
       },
-      "signature": "7d5bb3c0518a45a9281dcb56ac08b128818f81385861e45c0ecebe292ad4dee20ad767ff1d5ae5543d4fa22f7069602d987b5b7e3bcaa445540fc05cd843d7f62baf78a9d476f6d953e2147e0b86dd362c3876e0d5a203c5bed83e30262b78dbee090291d4af5f96d91db9069ef733f275ef45e1796b80696dbca89919c0ae2872d73387e729175e4fd0a6a922627bef9588957a268d0d2d7299b89af6cb02bcf685a72b93331a13d79db8c7824b1c33434a92e218eabe3eeaddeab6601ce805c3a56037d5287ed21326a5ff99d19f6de0a493867d97f67d909724fecfb6da00ee0fc41a5f3f39f2f7a75f360bcc3900197782a2845532b4e3ca99d45b9263b3",
       "extra": {
         "rounds": 1,
         "test_gated": true,
@@ -237,7 +235,6 @@
         "method": "self_test_passed",
         "detail": "OK"
       },
-      "signature": "cb2fec521e5eb634f6e131e0018586fdee080ffe8f8be9eed335241433e8d610302d702a82d19751306a849789acf649d3f9c7abcfc2a87b96f097edf926f6dbbc750a5a7e07d42bbbcedb0e6d884fab395d7f92366247943229252ad8ce108f9a57df72ad2550b518ebc0b3bb40e13de1442e71edcb5d26073ec690e3b6265654902aefaaf4b1e85f84f2ea794d1e76977434288385a8db4ef65a9cb2fb62d151962b523d53ecb8ab2d49842ccd792cec59beb9efd2af73134dacde49244ea27523a4c144c7c126907d2fe7da3ad156cd9c0a35478381c7466f844366942ba96fe663dacc2c4377e820ff169c6e2f52a8be628fbf593d3a32e2fca878199657",
       "extra": {
         "rounds": 8,
         "test_gated": true,
@@ -262,13 +259,166 @@
         "method": "self_test_passed",
         "detail": "OK"
       },
-      "signature": "15d6e39022e7619ac2fc0931c834f50b34d7f83007a609b7f18daffd05affd08206f2464e21bd3a38490edd4da2d8100b040c824987d977436829bf833546996177682a3f06906a58c7ff9f44e372a12f8da25ef1ffff8cac5b5950355b9af28a4cf8cb1719c9cf0d1eec691930e0c5bb246d1f447d93b19faed4b09efcdf8be7d81d60236d2dcdfb37335d59d8356c6ed5d82bce7b7c9d6b34d37bcc9099207c611ebc9bfc165b93fdde7d91a7866fea6b69192ed53ceb53d0bd54b43e23266f24a09d67fd786ec5f9b95ed83a9f4cd44d7403d2899d139d809aa2b6461561a65f3d2d658d2a4a5c84cf019be604ce0f9e6bc1ba4d708d0138f527491399c88",
       "extra": {
         "rounds": 7,
         "test_gated": true,
         "operator": null,
         "is_sovereign": false,
         "red_zone_active": false
+      }
+    },
+    {
+      "name": "project_checks_detect_and_run",
+      "category": "autonomous",
+      "file_path": "skills/project_checks_detect_and_run.md",
+      "description": "Detect and run a project's OWN checks (ruff/mypy/pytest/npm/cargo/go), cheapest first, and report exactly what passed, failed or was skipped — so a change can be verified before claiming it is done.",
+      "triggers": [
+        "project checks detect and run",
+        "пусни проверките на проекта",
+        "кои линтери и тестове има проектът"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-09-19T18:50:25.138798+00:00",
+      "verified": false,
+      "verification": {
+        "verified": false,
+        "method": "needs_confirmation",
+        "detail": "[SANDBOX DENIED] Операцията изисква потвърждение, но режимът е неинтерактивен (autonomous). Причини: стартиране на подпроцес"
+      },
+      "extra": {
+        "category": "workflow",
+        "operator": "operator",
+        "verify_method": "self_test_passed"
+      }
+    },
+    {
+      "name": "first_real_failure_not_the_cascade",
+      "category": "autonomous",
+      "file_path": "skills/first_real_failure_not_the_cascade.md",
+      "description": "From pytest/ruff/mypy output, identify the FIRST REAL failure to fix — the root cause — rather than the last red line on screen, which is usually a downstream consequence (a broken import knocks out thirty tests).",
+      "triggers": [
+        "first real failure not the cascade",
+        "коя е първата истинска грешка",
+        "каскада от грешки коя е истинската"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-09-19T23:00:09.199511+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      },
+      "extra": {
+        "category": "workflow",
+        "operator": "operator"
+      }
+    },
+    {
+      "name": "safe_edit_probe_anchor_uniqueness",
+      "category": "autonomous",
+      "file_path": "skills/safe_edit_probe_anchor_uniqueness.md",
+      "description": "Before an anchor-based file edit, check whether the anchor is unique in the file; on ambiguity report every matching line and offer a widened anchor that is verified unique, so the edit never silently lands on the wrong occurrence.",
+      "triggers": [
+        "safe edit probe anchor uniqueness",
+        "как да редактирам файл безопасно",
+        "уникален anchor за редакция"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-09-19T23:01:40.288352+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      },
+      "extra": {
+        "category": "workflow",
+        "operator": "operator"
+      }
+    },
+    {
+      "name": "changed_surface_which_tests_to_run",
+      "category": "autonomous",
+      "file_path": "skills/changed_surface_which_tests_to_run.md",
+      "description": "List what changed (git diff plus untracked files) and which test files cover it, so the fix-and-verify cycle runs the affected tests instead of the whole suite — falling back to the full suite whenever coverage cannot be established.",
+      "triggers": [
+        "changed surface which tests to run",
+        "кои тестове да пусна за промените",
+        "променена повърхност кои тестове"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-09-19T23:02:53.150612+00:00",
+      "verified": false,
+      "verification": {
+        "verified": false,
+        "method": "needs_confirmation",
+        "detail": "[SANDBOX DENIED] Операцията изисква потвърждение, но режимът е неинтерактивен (autonomous). Причини: стартиране на подпроцес"
+      },
+      "extra": {
+        "category": "workflow",
+        "operator": "operator"
+      }
+    },
+    {
+      "name": "regression_proof_against_old_code",
+      "category": "autonomous",
+      "file_path": "skills/regression_proof_against_old_code.md",
+      "description": "Run a new test against the pre-fix code from git to prove it actually catches the bug, restoring the working copy unconditionally.",
+      "triggers": [
+        "regression proof against old code",
+        "Run a new test against the pre-fix code from git to prove it actually catches the bug, restoring the working copy uncond",
+        "докажи че тестът хваща бъга",
+        "пусни теста срещу стария код"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-09-20T14:57:28.860262+00:00",
+      "verified": false,
+      "verification": {
+        "verified": false,
+        "method": "needs_confirmation",
+        "detail": "[SANDBOX DENIED] Операцията изисква потвърждение, но режимът е неинтерактивен (autonomous). Причини: убиване на процеси; стартиране на подпроцес"
+      }
+    },
+    {
+      "name": "sibling_paths_missing_the_guard",
+      "category": "autonomous",
+      "file_path": "skills/sibling_paths_missing_the_guard.md",
+      "description": "Find the sibling code paths that reach the same resource without the guard one path already has — a check added on the hard path leaves the easy one open.",
+      "triggers": [
+        "sibling paths missing the guard",
+        "Find the sibling code paths that reach the same resource without the guard one path already has — a check added on the h",
+        "кои пътища нямат същата проверка",
+        "съседните врати към същия ресурс"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-09-20T15:09:36.409754+00:00",
+      "verified": false,
+      "verification": {
+        "verified": false,
+        "method": "needs_confirmation",
+        "detail": "[SANDBOX DENIED] Операцията изисква потвърждение, но режимът е неинтерактивен (autonomous). Причини: стартиране на подпроцес"
+      }
+    },
+    {
+      "name": "probe_endpoint_before_coding_against_it",
+      "category": "autonomous",
+      "file_path": "skills/probe_endpoint_before_coding_against_it.md",
+      "description": "Probe an endpoint before writing code against it — a 400 or 401 proves the path exists, a 404 proves the address is wrong, and no valid key is needed to tell those apart.",
+      "triggers": [
+        "probe endpoint before coding against it",
+        "Probe an endpoint before writing code against it — a 400 or 401 proves the path exists, a 404 proves the address is wron",
+        "провери адреса преди да пишеш код срещу него",
+        "ударѝ endpoint-а и виж какво връща",
+        "съществува ли този адрес изобщо"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-09-20T15:23:22.415077+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
       }
     }
   ]

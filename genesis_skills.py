@@ -89,6 +89,25 @@ def _resolve(path_str: str) -> Path:
     return p if p.is_absolute() else (_WORKSPACE / p)
 
 
+def _sensitive_root_refusal(tool: str, root: Path) -> str | None:
+    """Отказът, ако този КОРЕН е чувствителен — иначе None.
+
+    Общо за SEARCH_CODE и GLOB, защото са две имена на един и същ въпрос:
+    „покажи ми какво има там". Измерено преди това, в режим „deny":
+    `SEARCH_CODE PRIVATE-KEY-BODY | ~/.ssh` връщаше самия ред от `id_rsa`.
+    Не имена — СЪДЪРЖАНИЕ, тоест същото, което READ_FILE вече отказва.
+
+    Разделителят накрая е нужен, защото образецът пази `.ssh/` и `.aws/` с
+    наклонена черта — виж sandbox.sensitive_path_reason.
+    """
+    sensitive = sandbox.sensitive_path_reason(root.as_posix() + "/")
+    if not sensitive:
+        return None
+    verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM, [sensitive])
+    allowed, reason = sandbox._decide(f"{tool} {root}", verdict, sandbox.get_policy())
+    return None if allowed else f"[{tool}] {reason}"
+
+
 def _strip_one_newline(part: str) -> str:
     """Маха ЕДИН водещ и ЕДИН завършващ нов ред от част на EDIT_FILE блок.
 
@@ -142,6 +161,18 @@ def _tool_read_file(arg: str, offset=None, limit=None) -> str:
         limit_i = None
 
     path = _resolve(path_str)
+    # Четенето на ключове минава през СЪЩОТО решение като `cat ~/.genesis/.env`
+    # (design note, 2026-09-20). Дотук не минаваше през нищо: shell пътят беше
+    # с гейт, а инструментът — не, тоест по-лесният път беше отворен. А
+    # съдържанието не остава на машината: то влиза в историята и се праща на
+    # следващия доставчик във веригата, който при тази конфигурация е чужда,
+    # безплатна услуга. SECURITY.md обещава точно обратното.
+    sensitive = sandbox.sensitive_path_reason(path)
+    if sensitive:
+        verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM, [sensitive])
+        allowed, reason = sandbox._decide(f"READ_FILE {path}", verdict, sandbox.get_policy())
+        if not allowed:
+            return f"[READ_FILE] {reason}"
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
@@ -230,6 +261,17 @@ def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False
     workspace-а — редакцията е по-малка по обхват, но не е по-малко реална.
     """
     path = _resolve(path_arg)
+    # Същата бариера като при READ_FILE, по същата причина — и намерена по
+    # същия начин: `EDIT_FILE` връща unified diff, а диффът носи КОНТЕКСТНИ
+    # редове. Редакция на `.env` с произволна котва връща в отговора реда
+    # `OPENROUTER_API_KEY=...`, който никой не е искал да вижда. Гейтът на
+    # READ_FILE пазеше едната врата; тази водеше към същото съдържание.
+    sensitive = sandbox.sensitive_path_reason(path)
+    if sensitive:
+        verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM, [sensitive])
+        allowed, reason = sandbox._decide(f"EDIT_FILE {path}", verdict, sandbox.get_policy())
+        if not allowed:
+            return f"[EDIT_FILE] {reason}"
     try:
         inside = path.resolve().is_relative_to(_WORKSPACE.resolve())
     except (ValueError, OSError):
@@ -272,15 +314,41 @@ def _tool_search_code(arg: str, path: str = "", glob: str = "") -> str:
         return "[SEARCH_CODE] Празен шаблон."
     from genesis_agent.repo_map import search_code
     root = _resolve(path) if path else _WORKSPACE
+    refusal = _sensitive_root_refusal("SEARCH_CODE", root)
+    if refusal:
+        return refusal
     try:
         hits = search_code(pattern, root, glob or None)
     except (ValueError, FileNotFoundError) as e:
         return f"[SEARCH_CODE: {pattern}] {e}"
+    # Отделен от корена въпрос: единично чувствително попадение в иначе
+    # нормална папка (`credentials.json` до кода). Решението е ЕДНО за всички
+    # такива попадения — не по едно на ред — и е същото, което пази READ_FILE.
+    # В режим „allow" операторът вече е казал да; безусловното криене там
+    # правеше инструмента негоден за работа, която той е одобрил.
+    # Скритото попадение се БРОИ на глас: премълчаното значи „низът го няма",
+    # а е точно обратното, и моделът строи план върху грешен извод.
+    sensitive_hits = [h for h in hits if sandbox.sensitive_path_reason(h.path)]
+    hidden: list = []
+    if sensitive_hits:
+        reasons = sorted({sandbox.sensitive_path_reason(h.path) or "" for h in sensitive_hits})
+        verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM, reasons)
+        allowed, _ = sandbox._decide(f"SEARCH_CODE съвпадения в {len(sensitive_hits)} "
+                                     "чувствителни файла", verdict, sandbox.get_policy())
+        if not allowed:
+            hidden = sensitive_hits
+            hits = [h for h in hits if not sandbox.sensitive_path_reason(h.path)]
+    if not hits and hidden:
+        return (f"[SEARCH_CODE: {pattern}] {len(hidden)} съвпадения, всички в "
+                "чувствителни файлове (ключове/тайни) — съдържанието им не се показва.")
     if not hits:
         return (f"[SEARCH_CODE: {pattern}] Няма съвпадения в {root}. "
                 "Това означава, че низът наистина го няма — не предполагай, че е скрит.")
     lines = [f"[SEARCH_CODE: {pattern}] {len(hits)} съвпадения в {root}"]
     lines += [f"  {h.path}:{h.line}: {h.text.strip()}" for h in hits]
+    if hidden:
+        lines.append(f"  (+{len(hidden)} в чувствителни файлове — съдържанието "
+                     "им не се показва)")
     _log_episode(f"SEARCH_CODE {pattern}", f"{len(hits)} съвпадения", ["tool", "search_code"])
     return "\n".join(lines)
 
@@ -295,6 +363,9 @@ def _tool_glob(arg: str) -> str:
         return "[GLOB] Празен шаблон."
     from genesis_agent.repo_map import find_files
     root = _resolve(path) if path else _WORKSPACE
+    refusal = _sensitive_root_refusal("GLOB", root)
+    if refusal:
+        return refusal
     try:
         hits = find_files(pattern, root)
     except (ValueError, FileNotFoundError) as e:
@@ -309,6 +380,9 @@ def _tool_glob(arg: str) -> str:
 def _tool_repo_map(arg: str = "") -> str:
     from genesis_agent.repo_map import repo_map
     root = _resolve(arg) if arg.strip() else _WORKSPACE
+    refusal = _sensitive_root_refusal("REPO_MAP", root)
+    if refusal:
+        return refusal
     try:
         out = repo_map(root)
     except OSError as e:
@@ -322,7 +396,7 @@ def _tool_run_cmd(arg: str) -> str:
     res = sandbox.run_shell(command, cwd=_WORKSPACE)
     if res.blocked:
         _log_episode(f"RUN_CMD {command}", f"отказан: {res.stderr}", ["tool", "run_cmd", "blocked"])
-        # Security alert в Discord/Telegram — блокирана опасна операция.
+        # Security alert през notifier — блокирана опасна операция.
         try:
             from genesis_agent.notifier import notify
             notify(f"🛡️ **Genesis Sandbox** блокира опасна команда:\n`{command[:300]}`\n{res.stderr[:200]}")
@@ -352,7 +426,7 @@ def _tool_ask_user(question: str, options=None) -> str:
     Нищо не се изпълнява — този инструмент СПИРА цикъла. Реалното "изчакване"
     е връщането на контрола към човека: фронтендът показва въпроса, а
     следващото съобщение на потребителя е отговорът. Затова тук няма input() —
-    той би увиснал в Discord/GUI/systemd, където няма кой да пише в stdin.
+    той би увиснал в GUI/systemd, където няма кой да пише в stdin.
     """
     q = (question or "").strip()
     if not q:
@@ -399,6 +473,21 @@ def _tool_list_dir(arg: str) -> str:
     path = _resolve(arg)
     if not path.is_dir():
         return f"[LIST_DIR] Не е директория: {path}"
+    # Изброяването на `~/.ssh` не дава съдържание, но дава ИМЕНАТА на ключовете
+    # — първата стъпка на всяко "кое има смисъл да прочета". Същият пазач,
+    # който вече стои на READ_FILE и EDIT_FILE (design note, 2026-09-20);
+    # измерено преди това: `LIST_DIR ~/.ssh` изброяваше `id_rsa` дори в
+    # режим "deny".
+    #
+    # Разделителят накрая НЕ е козметика: образецът пази `\.ssh/` и `\.aws/`
+    # със наклонена черта, защото е писан за shell команди, в които пътят до
+    # файл винаги я носи. Директория, подадена без нея, не съвпада с нищо.
+    sensitive = sandbox.sensitive_path_reason(path.as_posix() + "/")
+    if sensitive:
+        verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM, [sensitive])
+        allowed, reason = sandbox._decide(f"LIST_DIR {path}", verdict, sandbox.get_policy())
+        if not allowed:
+            return f"[LIST_DIR] {reason}"
     try:
         entries = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
     except OSError as e:
@@ -566,6 +655,17 @@ _WRITE_RE = re.compile(r"\[WRITE_FILE:\s*(?P<path>[^\]]+)\](?P<body>.*?)\[END_WR
 # USE_SKILL е също двучастен — умение + опционален driver код до [END_USE_SKILL].
 _USE_SKILL_RE = re.compile(r"\[USE_SKILL:\s*(?P<name>[^\]]+)\](?P<body>.*?)\[END_USE_SKILL\]",
                            re.DOTALL)
+# ...но driver кодът е опционален, така че `[USE_SKILL: име]` САМ по себе си е
+# валидната минимална форма (виж skill_loader.use_skill: празен driver = зареди
+# умението и пусни self-test-а). Отделен pattern за нея — той се прилага само
+# върху тагове, които затвореният вариант по-горе НЕ е consume-нал, и хваща
+# точно самия таг, за да не изяде останалата част от отговора.
+_BARE_USE_SKILL_RE = re.compile(r"\[USE_SKILL:\s*(?P<name>[^\]\n]+)\]")
+# Текстове, с които skill_loader.use_skill сигнализира, че НИЩО не е тръгнало
+# (няма достатъчно близко умение, или файлът не се зарежда). Държат се тук,
+# защото само викащият знае дали да добави съвет за синтаксис отгоре.
+_USE_SKILL_FAILURES = ("Няма достатъчно близко умение", "Грешка при зареждане",
+                       "не е наличен")
 # EDIT_FILE е тричастен — файл + anchor + замяна. Разделителят е дълъг и
 # нетипичен нарочно: и двете половини са СУРОВ код, така че всичко по-късо
 # (--- или ===) рано или късно се среща вътре в самия код и реже редакцията
@@ -665,66 +765,110 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
     """
     Извлича и изпълнява всички тул-тагове в реда, в който се появяват.
     Връща списък от резултати (по един низ на тул). Празен списък = няма тулове.
+
+    Блоковите тагове (WRITE_FILE / EDIT_FILE / USE_SKILL) се събират ЗАЕДНО и
+    се решава влагането ПРЕДИ който и да е от тях да се изпълни (bug fix,
+    2026-09-20). Преди това всеки тип се обхождаше в отделен цикъл и пазачът
+    `_inside_write` се прилагаше само върху едноредовите тагове — затова
+    `[USE_SKILL: x]...[END_USE_SKILL]` или `[EDIT_FILE: ...]`, написани ВЪТРЕ в
+    тялото на `[WRITE_FILE: doc.md]`, реално се изпълняваха. Тоест молба от рода
+    на "запиши ми в README как се вика умение" изпълняваше умението вместо (и
+    освен) да запише файла. Сега най-външният блок печели, а всичко вътре в него
+    е текст, какъвто и да е типът му.
     """
     if not response_text:
         return []
 
     # (позиция_в_текста, изход) — сортира се по позиция, после се връщат само изходите.
     results: list[tuple[int, str]] = []
+
+    # ── 1. Блокови тагове: събираме кандидатите, после решаваме влагането ────
+    # (start, end, kind, match) за трите блокови типа, подредени по позиция.
+    block_candidates: list[tuple[int, int, str, re.Match]] = []
+    for kind, rx in (("WRITE_FILE", _WRITE_RE), ("EDIT_FILE", _EDIT_RE),
+                     ("USE_SKILL", _USE_SKILL_RE)):
+        for m in rx.finditer(response_text):
+            block_candidates.append((m.start(), m.end(), kind, m))
+    # По-ранният старт печели; при равен старт — по-дългият блок е външният.
+    block_candidates.sort(key=lambda c: (c[0], -c[1]))
+
     consumed_spans: list[tuple[int, int]] = []
 
-    # 1. WRITE_FILE блокове (с тяло).
-    for m in _WRITE_RE.finditer(response_text):
-        results.append((m.start(), _safe_tool("WRITE_FILE", _tool_write_file,
-                                              m.group("path"), m.group("body"))))
-        consumed_spans.append((m.start(), m.end()))
+    def _inside_block(pos: int) -> bool:
+        return any(s <= pos < e for s, e in consumed_spans)
 
-    # 1a. EDIT_FILE блокове (anchor + замяна, разделени с _EDIT_SEPARATOR).
-    for m in _EDIT_RE.finditer(response_text):
-        body = m.group("body")
-        if _EDIT_SEPARATOR not in body:
-            results.append((m.start(),
-                            (f"[EDIT_FILE: {m.group('path').strip()}] ❌ Липсва разделителят "
-                             f"{_EDIT_SEPARATOR} между стария и новия текст.")))
-        else:
-            old_part, new_part = body.split(_EDIT_SEPARATOR, 1)
-            results.append((m.start(), _safe_tool("EDIT_FILE", _tool_edit_file,
+    for start, end, kind, m in block_candidates:
+        if _inside_block(start):
+            continue  # вложен в вече приет блок → това е текст, не тул
+        consumed_spans.append((start, end))
+        if kind == "WRITE_FILE":
+            results.append((start, _safe_tool("WRITE_FILE", _tool_write_file,
+                                              m.group("path"), m.group("body"))))
+        elif kind == "EDIT_FILE":
+            body = m.group("body")
+            if _EDIT_SEPARATOR not in body:
+                results.append((start,
+                                (f"[EDIT_FILE: {m.group('path').strip()}] ❌ Липсва разделителят "
+                                 f"{_EDIT_SEPARATOR} между стария и новия текст.")))
+            else:
+                old_part, new_part = body.split(_EDIT_SEPARATOR, 1)
+                results.append((start, _safe_tool("EDIT_FILE", _tool_edit_file,
                                                   m.group("path"),
                                                   _strip_one_newline(old_part),
                                                   _strip_one_newline(new_part))))
-        consumed_spans.append((m.start(), m.end()))
-
-    # 1b. USE_SKILL блокове (умение + опционален driver код).
-    for m in _USE_SKILL_RE.finditer(response_text):
-        results.append((m.start(), _safe_tool("USE_SKILL", _tool_use_skill,
+        else:  # USE_SKILL
+            results.append((start, _safe_tool("USE_SKILL", _tool_use_skill,
                                               m.group("name"), m.group("body"))))
+
+    # ── 1b. USE_SKILL БЕЗ затварящ [END_USE_SKILL] ──────────────────────────
+    # Най-скъпият пропуск в целия парсер (bug fix, 2026-09-20). driver кодът е
+    # ИЗРИЧНО опционален — `use_skill()` документира, че при празен driver само
+    # зарежда умението и пуска self-test-а му — така че `[USE_SKILL: име]` сам
+    # по себе си е напълно валидната минимална форма и точно тази форма моделът
+    # пише най-често. Дотук тя не съвпадаше с НИЩО: `_USE_SKILL_RE` изисква
+    # затварящия таг, а `_SIMPLE_RE` не познава USE_SKILL. Резултат: нула
+    # изпълнени тула за реплика, която ВИДИМО вика умение. Викащият цикъл
+    # (agent_core.run_tool_loop / терминалът) тогава хваща само
+    # `looks_like_attempted_tool_tag`, праща "сгрешил си синтаксиса", моделът
+    # пише същото пак — и рундовете изгарят, без нито един скил да е тръгнал.
+    # Тук consume-ваме САМО самия таг (не остатъка от отговора), за да могат
+    # другите тагове след него пак да се изпълнят.
+    for m in _BARE_USE_SKILL_RE.finditer(response_text):
+        if _inside_block(m.start()):
+            continue
         consumed_spans.append((m.start(), m.end()))
+        out = _safe_tool("USE_SKILL", _tool_use_skill, m.group("name"), "")
+        # Изпълнено е — но ако моделът е искал да ВИКА нещо от умението, нека
+        # научи точния синтаксис, вместо да гадае пак следващия рунд. Само при
+        # УСПЕШНО заредено умение: ако такова изобщо няма, синтаксисът на
+        # driver кода е без значение и бележката е чист шум в контекста.
+        if not any(marker in out for marker in _USE_SKILL_FAILURES):
+            out += ("\n(Без driver код — блокът не беше затворен. За да извикаш функция "
+                    "от умението: [USE_SKILL: име]<твоят код>[END_USE_SKILL].)")
+        results.append((m.start(), out))
 
-    # 2. Едноредови тулове — прескачаме тези вътре във WRITE_FILE блок.
-    def _inside_write(pos: int) -> bool:
-        return any(s <= pos < e for s, e in consumed_spans)
-
+    # ── 2. Едноредови тулове — прескачаме тези вътре в блоков таг ───────────
     for m in _SIMPLE_RE.finditer(response_text):
-        if _inside_write(m.start()):
+        if _inside_block(m.start()):
             continue
         fn = _SIMPLE_DISPATCH[m.group("tool")]
         results.append((m.start(), _safe_tool(m.group("tool"), fn, m.group("arg"))))
 
     # 3. BROWSER_READ — без аргумент (като LOOK_AT_SCREEN).
     for m in _BROWSER_READ_RE.finditer(response_text):
-        if _inside_write(m.start()):
+        if _inside_block(m.start()):
             continue
         results.append((m.start(), _safe_tool("BROWSER_READ", _tool_browser_read)))
 
     # 3b. REPO_MAP без аргумент — картира текущия workspace.
     for m in _REPO_MAP_RE.finditer(response_text):
-        if _inside_write(m.start()):
+        if _inside_block(m.start()):
             continue
         results.append((m.start(), _safe_tool("REPO_MAP", _tool_repo_map, "")))
 
     # 4. TASK_LIST без аргумент — [TASK_LIST] показва отворените нишки.
     for m in _TASK_LIST_RE.finditer(response_text):
-        if _inside_write(m.start()):
+        if _inside_block(m.start()):
             continue
         results.append((m.start(), _safe_tool("TASK_LIST", _tool_task_list, "open")))
 
@@ -749,34 +893,6 @@ def looks_like_attempted_tool_tag(response_text: str) -> bool:
     if not response_text:
         return False
     return bool(_ATTEMPTED_TAG_RE.search(response_text))
-
-
-# Правилото "NEVER report an action as done unless a tool result above actually
-# shows it happening" (config.yaml system_prompt) досега съществуваше САМО като
-# промпт текст — нищо в кода не проверяваше дали слаб модел реално го спазва.
-# Списъкът е нарочно тесен (глаголи за завършено действие, минало време/
-# perfect), за да не гърми на легитимни финални резюмета след РЕАЛНО изпълнени
-# tool-ове ("инсталирах пакета" е ОК, ако предният рунд реално е викнал
-# RUN_CMD — проверката по-долу се извиква само в рундове БЕЗ никакъв изпълнен
-# tool в текущия разговор).
-_COMPLETION_CLAIM_RE = re.compile(
-    r"\b(инсталирах|преместих|изтрих|създадох|запазих|качих|конфигурирах|"
-    r"поправих|инсталирано е|готово е|направено е|свършено е|"
-    r"i(?:'ve| have) (?:installed|moved|created|deleted|saved|written|"
-    r"uploaded|configured|fixed|updated)|"
-    r"successfully (?:installed|moved|created|deleted|saved|updated|fixed))\b",
-    re.IGNORECASE,
-)
-
-
-def looks_like_unverified_completion_claim(response_text: str) -> bool:
-    """True ако текстът твърди, че действие е ИЗПЪЛНЕНО (инсталирах/преместих/
-    done/installed...). Извиквай само в рундове без никакъв реален tool
-    резултат зад отговора — иначе легитимни резюмета след истински изпълнени
-    tool-ове ще фалшиво-положат."""
-    if not response_text:
-        return False
-    return bool(_COMPLETION_CLAIM_RE.search(response_text))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

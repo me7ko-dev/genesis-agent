@@ -134,7 +134,7 @@ def _git(root: Path, *args: str) -> str:
     """git output, or "" when this is not a repo / git is unavailable."""
     try:
         proc = subprocess.run(["git", "-C", str(root), *args],
-                              capture_output=True, text=True, timeout=30, check=False)
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, check=False)
     except (OSError, subprocess.TimeoutExpired):
         return ""
     return proc.stdout.strip() if proc.returncode == 0 else ""

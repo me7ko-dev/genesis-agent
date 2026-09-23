@@ -1,5 +1,5 @@
 """
-genesis_agent.agent_core — споделеното ядро зад ВСЕКИ пълноценен фронтенд (design note, 2026-07-27): терминал, Discord, GTK чат, и новия Jarvis гласов агент.
+genesis_agent.agent_core — споделеното ядро зад ВСЕКИ пълноценен фронтенд (design note, 2026-07-27): терминал, GTK чат, и новия Jarvis гласов агент.
 
 Извадено от genesis_agent/gui/genesis_gui.py (по-рано дефинирано САМО там) при строежа на
 Jarvis фронтенда — иначе гласовото приложение трябваше да копира ~150 реда
@@ -20,9 +20,10 @@ from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 
+from genesis_agent.config import TOOL_ROUND_CAP
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-TOOL_ROUND_CAP = 8
 MIN_SIZE_B = 32          # само модели ≥32B за интерактивен чат (като терминала)
 COMPACT_THRESHOLD = 16
 COMPACT_KEEP_RECENT = 10
@@ -377,10 +378,24 @@ def run_tool_loop(
     Хвърля само ако Core.complete() хвърли; извикващият решава как да покаже
     грешка (всеки фронтенд има собствен error-widget/глас).
     """
+    from genesis_agent import claim_check
+    from genesis_agent.budget import clip_for_context
+    from genesis_agent.repeat_guard import RepeatGuard
+
     _status = on_status or (lambda _s: None)
     rounds = 0
+    # Таванът на рундовете ограничава цената на въртенето на място, но не го
+    # разпознава — виж genesis_agent.repeat_guard за защо това стана по-скъпо,
+    # откакто таванът е 25.
+    guard = RepeatGuard()
+    spinning = ""
     malformed_tag_retries = 0
     completion_claim_retries = 0
+    # Какво РЕАЛНО е изпълнено в тази реплика — сверява се срещу това, което
+    # моделът твърди накрая (claim_check). Само броячът на рундове не стига:
+    # един `LIST_DIR` прави rounds=1 и с това "оправдава" твърдение за
+    # инсталация, която никога не е текла.
+    executed: list[tuple[str, str]] = []
 
     _translate_last_user_message_to_en(messages)
     text, tool_calls, prov, model = core.complete(messages)
@@ -398,6 +413,7 @@ def run_tool_loop(
         if tool_calls:
             _status("изпълнява инструменти…")
             asked = ""
+            repeat_note = ""
             for tc in tool_calls:
                 fn = tc.get("function", {}) or {}
                 name = fn.get("name", "")
@@ -407,9 +423,19 @@ def run_tool_loop(
                     args = {}
                 diff = _diff_for_write(core.skills, args) if name == "WRITE_FILE" else None
                 result = core.skills.dispatch_tool_call(name, args)
+                entry = claim_check.counts_as_executed(
+                    name, " ".join(str(v) for v in args.values()), result)
+                if entry:
+                    executed.append(entry)
                 on_tool_result(name, result, diff)
                 messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
-                                 "name": name, "content": result})
+                                 "name": name,
+                                 "content": clip_for_context(result)})
+                verdict = guard.observe(name, args, result)
+                if verdict.stop:
+                    spinning = verdict.note
+                elif verdict.note:
+                    repeat_note = verdict.note
                 if _is_question(result):
                     asked = result
             if asked:
@@ -420,6 +446,15 @@ def run_tool_loop(
                 on_assistant(_to_user_text(_clean_question(asked)), prov, model)
                 _status("чака отговор")
                 break
+            if spinning:
+                # Същият извик, същият резултат, трети пореден път — нищо ново
+                # не може да дойде от още рундове. Спираме СЕГА и казваме защо,
+                # вместо да догорим до тавана и да завършим с "достигнат таван".
+                on_assistant(_to_user_text(spinning), prov, model)
+                _status("спряно — въртене на място")
+                break
+            if repeat_note:
+                messages.append({"role": "system", "content": repeat_note})
             rounds += 1
             if rounds >= round_cap:
                 on_assistant(f"Достигнат таван от {round_cap} инструмент-рунда. "
@@ -431,6 +466,10 @@ def run_tool_loop(
 
         # Текстови тагове — за модели без native tool-calling в тази ротация.
         results = core.skills.parse_and_execute_tools(text)
+        # Името на инструмента стои в самия резултат (`[RUN_CMD: ...]`).
+        # Извличането живее в claim_check, за да не се дублира между
+        # фронтендите — иначе промяна във формата ги обезоръжава наведнъж.
+        executed.extend(claim_check.executed_from_text_results(results))
         if not results:
             # Празен резултат означава две различни неща и трябва да ги
             # различим: моделът реално приключи, ИЛИ моделът се опита да
@@ -462,16 +501,17 @@ def run_tool_loop(
             # текстът твърди завършено действие въпреки това, е неподкрепено
             # твърдение (git история: "Fix Genesis handing work back instead
             # of doing it" — същият клас бъг).
-            if (rounds == 0 and completion_claim_retries < 1
-                    and _gs.looks_like_unverified_completion_claim(text)):
+            #
+            # Проверката е по ВИД на твърдението, не по броя рундове (виж
+            # claim_check.py): `rounds == 0` пропускаше точно интересния случай
+            # — един безобиден LIST_DIR прави rounds=1 и оттам "инсталирах
+            # пакета" минаваше без нито една инсталационна команда.
+            unsupported = claim_check.unsupported_claims(text, executed)
+            if unsupported and completion_claim_retries < 1:
                 completion_claim_retries += 1
                 messages.append({
                     "role": "system",
-                    "content": "[Система]: Твърдиш, че действие е завършено, но никой tool "
-                               "resultat по-горе не го доказва. Ако наистина трябва да "
-                               "изпълниш нещо — извикай съответния инструмент СЕГА, не го "
-                               "описвай. Ако вече е било изпълнено в по-ранен рунд — игнорирай "
-                               "тази бележка и продължи с финалния отговор.",
+                    "content": claim_check.nudge_text(unsupported),
                 })
                 _status("проверява дали действието наистина е изпълнено…")
                 text, tool_calls, prov, model = core.complete(messages)
@@ -479,17 +519,39 @@ def run_tool_loop(
             break
         for r in results:
             on_tool_result("инструмент", r, None)
+        text_note = ""
+        for r in results:
+            v = guard.observe_text_result(r)
+            if v.stop:
+                spinning = v.note
+            elif v.note:
+                text_note = v.note
         asked = next((r for r in results if _is_question(r)), "")
         if asked:
             on_assistant(_to_user_text(_clean_question(asked)), prov, model)
             _status("чака отговор")
             break
+        if spinning:
+            on_assistant(_to_user_text(spinning), prov, model)
+            _status("спряно — въртене на място")
+            break
+        if text_note:
+            messages.append({"role": "system", "content": text_note})
         rounds += 1
         if rounds >= round_cap:
+            # Същото съобщение като в native клона по-горе. Без него текстовият
+            # път спираше НЯМО: последното, което човекът е видял, е репликата
+            # с tool таговете — тоест разказ за започната работа — и нищо след
+            # нея. Прекъсната работа изглеждаше точно като завършена, а този
+            # клон обслужва моделите БЕЗ native tool-calling, тоест по-слабите
+            # и безплатните — там таванът се удря най-често.
+            on_assistant(f"Достигнат таван от {round_cap} инструмент-рунда. "
+                         "Продължи с ново съобщение.", prov, model)
             break
         messages.append({
             "role": "system",
-            "content": "[Резултат]:\n" + "\n\n".join(results) +
+            "content": "[Резултат]:\n" +
+                       "\n\n".join(clip_for_context(r) for r in results) +
                        "\n\nАко това вече изпълнява заявката напълно — дай КРАТКО "
                        "финално обобщение БЕЗ нови tool тагове. Викай нов tool САМО "
                        "ако наистина има следваща реална стъпка. Ако команда е отказана "
