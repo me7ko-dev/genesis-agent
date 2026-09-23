@@ -92,6 +92,86 @@ def next_tier_model(current: str | None) -> str | None:
     return None
 
 
+# ── Чат: лек въпрос → малък модел (design note, 2026-09-23) ──────────────────
+# Операторът: „малките за слабите задачи, силните за по-тежките". Всяко
+# съобщение в чата отиваше на 550B модел — и „здрасти" също. Тук се решава
+# само дали съобщението е ЯВНО леко; всичко съмнително е тежко, защото
+# грешката в двете посоки не струва еднакво: тежък модел на лек въпрос губи
+# секунди, лек модел на тежка задача губи работа. Оператор пише и на кирилица,
+# и на латиница („napravi backup"), затова корените са и в двете.
+_ACTION = re.compile(
+    r"(направ|поправ|оправ|напиш|създа|инсталир|изтри|премахн|махн|премест|пусн|"
+    r"стартир|провер|намер|отвор|запиш|копир|архив|бекъп|редакт|промен|добав|"
+    r"обнов|генерир|изпълн|прочет|покаж|анализ|сравн|свали|качи|слей|комит|"
+    r"napra|popra|opra|napish|napis|sazda|syzda|suzda|instal|iztri|premahn|mahn|"
+    r"premest|pusn|startir|prover|nameri|otvor|zapish|kopir|arhiv|bekap|backup|"
+    r"redakt|promen|dobav|obnov|generir|izpaln|izpyln|prochet|pokaj|pokazh|analiz|"
+    r"sravn|svali|kachi|slei|komit|"
+    r"\b(make|fix|write|create|install|delete|remove|move|run|start|check|find|"
+    r"open|save|copy|edit|change|add|update|generate|execute|read|show|list|"
+    r"analy[sz]e|compare|build|deploy|debug|refactor|test|download|upload|merge|commit)\b)",
+    re.IGNORECASE)
+_WORK_NOUN = re.compile(
+    r"(файл|папк|директор|код|скрипт|проект|десктоп|диск|сървър|репо|"
+    r"fajl|fail|papk|direktor|\bkod|skript|proekt|desktop|disk|server|repo|"
+    r"\b(file|folder|code|script|project|function|class|bug|error)s?\b)",
+    re.IGNORECASE)
+# Потвърждение продължава ПРЕДИШНАТА задача — кратко е, но не е леко.
+_CONFIRM = re.compile(
+    r"^\s*(да|давай|добре|ок|окей|продължи|започни|пробвай|може|"
+    r"da|davai|dobre|ok|okey|okay|prodalji|prodylji|zapochni|probvai|moje|"
+    r"yes|go|sure|continue|proceed|do it)\b", re.IGNORECASE)
+# Актуална информация иска търсене в мрежата, тоест инструмент — наживо малкият
+# модел без инструменти на „какво време е навън?" само попита за града.
+_LIVE_INFO = re.compile(
+    # \b отпред навсякъде: „ре-курс-ия" съдържа „курс" (хванато от тест).
+    r"\b(времето|навън|прогноз|новин|курс|цен[аи]|борс|резултат|днешн|сега\b|"
+    r"vremeto|navan|navun|navyn|prognoz|novin|kurs|cen[ai]\b|bors|rezultat|dneshn|sega\b|"
+    r"weather|forecast|news|prices?\b|stock|latest|today|current|score)",
+    re.IGNORECASE)
+_TECHNICAL = re.compile(r"```|`|https?://|[\\/~]\w|\b\w+\.(py|js|ts|json|ya?ml|md|txt|sh|ps1|exe|zip)\b|[{}<>=;]")
+
+LIGHT_MAX_CHARS = 160
+
+
+def is_light_request(text: str) -> bool:
+    """Явно лек въпрос: кратък, без код/пътища, без действие и без работа."""
+    t = (text or "").strip()
+    if not t or len(t) > LIGHT_MAX_CHARS or t.count("\n") > 1:
+        return False
+    return not (_TECHNICAL.search(t) or _ACTION.search(t) or _WORK_NOUN.search(t)
+                or _LIVE_INFO.search(t) or _CONFIRM.search(t))
+
+
+def is_light_turn(messages: list[dict]) -> bool:
+    """Дали СЛЕДВАЩИЯТ отговор в чата може да е от лек модел.
+
+    Само в началото на ход (последното съобщение е на потребителя — средата
+    на цикъла с инструменти е тежка по дефиниция) и само ако предишният ход
+    не е бил работа с инструменти: „а сега колко са?" след търсене на файлове
+    е продължение, не нов лек въпрос. GENESIS_CHAT_ROUTING=0 изключва."""
+    if os.environ.get("GENESIS_CHAT_ROUTING", "1") == "0":
+        return False
+    msgs = list(messages)
+    if not msgs or msgs[-1].get("role") != "user":
+        return False
+    for m in reversed(msgs[:-1][-6:]):
+        if m.get("role") == "tool" or m.get("tool_calls"):
+            return False
+        if m.get("role") == "user":
+            break
+    return is_light_request(str(msgs[-1].get("content") or ""))
+
+
+_TOOL_TAG = re.compile(r"\[[A-Z][A-Z_]{2,}(?::|\])")
+
+
+def light_reply_needs_escalation(text: str, tool_calls) -> bool:
+    """Лекият модел поиска инструмент → задачата не е била лека. Отговорът
+    му се изхвърля и същият ход отива на силния модел — малкият модел не
+    върти работа по машината на оператора."""
+    return bool(tool_calls) or bool(_TOOL_TAG.search(text or "")) or (text or "").startswith("Error:")
+
 if __name__ == "__main__":
     tests = [
         "Reverse a string",
