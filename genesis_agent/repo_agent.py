@@ -12,10 +12,10 @@ Three mechanisms carry that difference, and they are mechanisms rather than
 prompt instructions on purpose (the model in the free rotation changes call to
 call; a rule only holds if the model happens to cooperate):
 
-1. **A checkpoint before the first edit.** A tar snapshot of the project, taken
-   before the agent is allowed to touch anything, restorable with one command.
-   Git is used as well when present, but not relied on — the projects most
-   likely to need this are exactly the ones not under version control.
+1. **A way back.** With `--checkpoint`, a tar snapshot of the project, taken
+   before the agent touches anything and restorable with one command. Opt-in
+   since 2026-09-23 (the operator wants backups only on request). Without it,
+   git is the way back, and a non-git project is warned that it has none.
 
 2. **The project's own test suite is the verdict.** Tests are run BEFORE any
    change, so a suite that was already red is not later mistaken for damage the
@@ -358,10 +358,15 @@ def _relative(root: Path, path_str: str) -> str:
 
 def repair(project: str | Path, task: str, *, test_command: str | None = None,
            max_rounds: int = 8, quality: str | None = None,
-           on_status=None) -> RepairOutcome:
+           on_status=None, checkpoint: bool = False) -> RepairOutcome:
     """
     Fix `task` in `project`. Returns what actually happened — including, when
     that is the truth, that it did not manage to fix it.
+
+    `checkpoint=True` (`genesis fix --checkpoint`) snapshots the project first.
+    Off by default since 2026-09-23 — the operator wants backups only on
+    request. Git projects lose nothing (diff and undo come from git); a
+    non-git project gets a loud warning that there is no way back.
     """
     import genesis_skills
 
@@ -375,11 +380,18 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
 
     say(f"🔎 {root.name}: {info.language}, тестове: {cmd or 'няма открити'}")
 
-    try:
-        checkpoint = create_checkpoint(root)
-    except (RuntimeError, OSError) as e:
-        return RepairOutcome(False, f"Снимката не успя, нищо не е променено: {e}")
-    say(f"📦 Снимка преди промените: {checkpoint.name}")
+    snapshot: Path | None = None
+    if checkpoint:
+        try:
+            snapshot = create_checkpoint(root)
+        except (RuntimeError, OSError) as e:
+            return RepairOutcome(False, f"Снимката не успя, нищо не е променено: {e}")
+        say(f"📦 Снимка преди промените: {snapshot.name}")
+    elif (root / ".git").exists():
+        say("↩️  Без снимка — връщане с `git checkout .` (или `--checkpoint` за снимка).")
+    else:
+        say("⚠️  Без снимка и без git — промените НЯМА как да се върнат. "
+            "Пусни с `--checkpoint`, ако искаш снимка.")
 
     before = run_tests(root, cmd)
     if before.ran:
@@ -471,7 +483,7 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
                     continue
                 return RepairOutcome(
                     False, raw or "Моделът не направи нито една промяна.",
-                    rounds, checkpoint, [], "", before, before)
+                    rounds, snapshot, [], "", before, before)
 
             after = run_tests(root, cmd)
             if not after.ran or after.passed:
@@ -503,15 +515,14 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
         say("🧪 Рундовете свършиха — пускам тестовете за финална присъда…")
         after = run_tests(root, cmd)
 
-    diff = project_diff(root, checkpoint, touched)
+    diff = project_diff(root, snapshot, touched)
     files = sorted(set(touched))
 
     if after.ran and after.passed and not before.passed:
         ok, summary = True, f"Поправено: тестовете вече минават ({cmd})."
     elif after.ran and not after.passed:
         ok, summary = False, (f"НЕ е поправено — тестовете още падат след {rounds} рунда. "
-                              f"Промените са запазени за преглед; върни ги с "
-                              f"`genesis fix --revert {root}`.")
+                              f"Промените са запазени за преглед; {_undo_hint(root, snapshot)}")
     elif not after.ran:
         ok, summary = False, ("Промените са направени, но НЕ са проверени — този проект няма "
                               "открита тестова команда. Прегледай диффа преди да му вярваш.")
@@ -519,7 +530,16 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
         ok, summary = True, ("Промените са направени. Тестовете минаваха и преди поправката, "
                              "така че те не доказват нищо за нея — прегледай диффа.")
 
-    return RepairOutcome(ok, summary, rounds, checkpoint, files, diff, before, after)
+    return RepairOutcome(ok, summary, rounds, snapshot, files, diff, before, after)
+
+
+def _undo_hint(root: Path, snapshot: Path | None) -> str:
+    """Как се връщат промените — зависи от това какво има, не от надежда."""
+    if snapshot:
+        return f"върни ги с `genesis fix --revert {root}`."
+    if (root / ".git").exists():
+        return "върни ги с `git checkout .` в проекта."
+    return "снимка не е правена и проектът не е в git — връщане няма."
 
 
 def _paths_from_tag_results(root: Path, results: list[str]) -> list[str]:

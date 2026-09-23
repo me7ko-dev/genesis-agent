@@ -5,7 +5,7 @@ genesis_agent.cli — the `genesis` command.
     genesis                 start the terminal chat (default)
     genesis setup           configure API keys
     genesis mission "..."   run one autonomous mission and print the result
-    genesis fix PATH "..."  fix a bug in an existing project (checkpoint + tests + diff)
+    genesis fix PATH "..."  fix a bug in an existing project (tests + diff)
     genesis skills          library status
     genesis models          the model chain; `--refresh` re-scans free models
     genesis update          is there a newer commit on the installed branch
@@ -53,8 +53,9 @@ _FIX_USAGE = """Употреба:
   --test "команда"   как се пускат тестовете (по подразбиране се разпознава сам)
   --rounds N         таван на рундовете (по подразбиране 8)
   --no-diff          не печатай диффа накрая
+  --checkpoint       снимка на проекта преди промените; `--revert` я връща
 
-Преди първата промяна се прави снимка на проекта. `--revert` я връща обратно.
+Снимка се прави само с `--checkpoint`. Проект в git се връща с `git checkout .`.
 """
 
 
@@ -127,11 +128,13 @@ def _fix(args: list[str]) -> int:
     project, rest = args[0], args[1:]
     task_parts: list[str] = []
     test_command: str | None = None
-    max_rounds, quality, show_diff = 8, None, True
+    max_rounds, quality, show_diff, checkpoint = 8, None, True, False
     i = 0
     while i < len(rest):
         a = rest[i]
-        if a == "--max":
+        if a == "--checkpoint":
+            checkpoint = True
+        elif a == "--max":
             quality = "max"
         elif a in ("--maxcoding", "--coding"):
             quality = "coding"
@@ -158,7 +161,7 @@ def _fix(args: list[str]) -> int:
         return 2
 
     out = repair(project, task, test_command=test_command,
-                 max_rounds=max_rounds, quality=quality)
+                 max_rounds=max_rounds, quality=quality, checkpoint=checkpoint)
     print("\n" + format_outcome(out, show_diff=show_diff))
     return 0 if out.success else 1
 

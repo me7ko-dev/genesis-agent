@@ -144,9 +144,10 @@ class TestFixArgParsing:
     command a real repair run uses."""
 
     def _patch_repair(self, monkeypatch, capture: dict):
-        def fake_repair(project, task, *, test_command=None, max_rounds=8, quality=None):
+        def fake_repair(project, task, *, test_command=None, max_rounds=8, quality=None,
+                        checkpoint=False):
             capture.update(project=project, task=task, test_command=test_command,
-                           max_rounds=max_rounds, quality=quality)
+                           max_rounds=max_rounds, quality=quality, checkpoint=checkpoint)
             return SimpleNamespace(success=True)
 
         monkeypatch.setattr("genesis_agent.repo_agent.repair", fake_repair)
@@ -179,6 +180,14 @@ class TestFixArgParsing:
         assert capture["test_command"] is None
         assert capture["max_rounds"] == 8
         assert capture["quality"] is None
+        assert capture["checkpoint"] is False  # бекъп само при поискване
+
+    def test_checkpoint_flag_asks_for_a_snapshot(self, monkeypatch) -> None:
+        capture: dict = {}
+        self._patch_repair(monkeypatch, capture)
+        cli_mod.main(["fix", "/proj", "--checkpoint", "fix", "it"])
+        assert capture["checkpoint"] is True
+        assert capture["task"] == "fix it"
 
     def test_maxcoding_flag_sets_coding_quality(self, monkeypatch) -> None:
         capture: dict = {}
