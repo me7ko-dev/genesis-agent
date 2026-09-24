@@ -43,3 +43,4 @@ htmlcov/
 .idea/
 .vscode/
 model_check.json
+cloud/.wheels/
