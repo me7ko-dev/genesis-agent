@@ -389,6 +389,10 @@ class TestRunToolLoopCompaction:
             "genesis_agent.brain.Brain.compact_chat_history",
             staticmethod(lambda messages, threshold=16, keep_recent=10: messages[-1:]),
         )
+        # Компресията вика и графа на паметта, а той — истински модел; без
+        # ключове всички доставчици падат и Brain.complete() чака 8 s.
+        monkeypatch.setattr("genesis_agent.knowledge_graph.compact_and_graph_memory",
+                            lambda transcript: {})
         core = _FakeCore([("hi", None, "p", "m")])
         core.skills = _FakeToolSkills([])
         captured = []
@@ -413,6 +417,10 @@ class TestRunToolLoopCompaction:
             "genesis_agent.brain.Brain.compact_chat_history",
             staticmethod(lambda messages, threshold=16, keep_recent=10: messages[-1:]),
         )
+        # Компресията вика и графа на паметта, а той — истински модел; без
+        # ключове всички доставчици падат и Brain.complete() чака 8 s.
+        monkeypatch.setattr("genesis_agent.knowledge_graph.compact_and_graph_memory",
+                            lambda transcript: {})
         core = _FakeCore([("hi", None, "p", "m")])
         core.skills = _FakeToolSkills([])
 
