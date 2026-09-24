@@ -74,7 +74,7 @@ jobs:
       # network needed: LLM calls are faked, ruff/sandbox subprocess calls
       # either use a real local binary or mock subprocess directly.
       - name: Unit tests (pytest)
-        run: python -m pytest -q
+        run: python -m pytest -q --durations=15
 
       # The sandbox is the safety boundary — if it regresses, nothing else
       # matters. These checks need no API key and no network.

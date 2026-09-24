@@ -15,6 +15,30 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+_OLLAMA_PORT = 11434
+
+
+@pytest.fixture(autouse=True)
+def _no_real_ollama(monkeypatch):
+    """Връзка към локалния ollama по време на тест се отказва веднага.
+
+    118 теста стигат до проба към localhost:11434 (embeddings, наличност на
+    модели, лекият мозък). На Linux отказът е мигновен, но на Windows всяко
+    свързване към затворен порт чака ~2 s повторни SYN-ове — 165 такива
+    опита държаха Windows CI 13 мин срещу 50 s на Linux (измерено 2026-09-24).
+    Вдигнат ollama на машината на разработчика пък правеше тестовете зависими
+    от него. Отказът тук е същият резултат, който тестовете вече очакват."""
+    import socket
+    real_connect = socket.socket.connect
+
+    def connect(self, address):
+        if isinstance(address, tuple) and len(address) >= 2 and address[1] == _OLLAMA_PORT:
+            raise ConnectionRefusedError("tests: ollama is not reachable")
+        return real_connect(self, address)
+
+    monkeypatch.setattr(socket.socket, "connect", connect)
+
+
 @pytest.fixture(autouse=True)
 def _no_real_notifications(monkeypatch):
     """genesis_agent.autonomous_loop.run_autonomous_loop() calls notifier.notify()
