@@ -541,3 +541,50 @@ class TestSensitivePathReason:
 
     def test_a_path_object_works_too(self, tmp_path) -> None:
         assert sandbox.sensitive_path_reason(tmp_path / ".env")
+
+
+class TestWindowsCommandHygiene:
+    """bench_fix.py (2026-09-24): два RUN_CMD висяха по ~400s (WindowsApps
+    заглушката на python.exe), а `C:\\...\\python.exe` без кавички даваше
+    rc=127, защото bash изяжда обратните черти."""
+
+    def test_windowsapps_goes_to_the_end_of_path(self) -> None:
+        sep = sandbox.os.pathsep
+        path = sep.join([r"C:\Users\x\AppData\Local\Microsoft\WindowsApps",
+                         r"C:\Program Files\Git\bin", r"C:\Users\x\AppData\Local\Python\bin"])
+        out = sandbox._windowsapps_last(path).split(sep)
+        assert out[-1].lower().endswith("windowsapps")
+        assert out[:2] == [r"C:\Program Files\Git\bin", r"C:\Users\x\AppData\Local\Python\bin"]
+
+    def test_path_without_windowsapps_is_unchanged(self) -> None:
+        sep = sandbox.os.pathsep
+        path = sep.join(["/usr/bin", "/bin"])
+        assert sandbox._windowsapps_last(path) == path
+
+    def test_unquoted_leading_windows_path_gets_forward_slashes(self) -> None:
+        cmd = r"C:\Users\x\Python\python.exe -m pytest -q"
+        assert sandbox._unescape_leading_windows_path(cmd) == "C:/Users/x/Python/python.exe -m pytest -q"
+
+    @pytest.mark.parametrize("cmd", [
+        r'"C:\Users\x\python.exe" test_app.py',   # кавичен — bash го пази сам
+        r"python C:\data\file.txt",               # аргументите не се пипат
+        "echo hi",
+    ])
+    def test_everything_else_is_left_alone(self, cmd) -> None:
+        assert sandbox._unescape_leading_windows_path(cmd) == cmd
+
+class TestTimeoutKillsTheWholeTree:
+    """bench_fix.py (2026-09-24): при таймаут от 120s командата висеше
+    11 246s — на Windows proc.kill() убиваше само bash, а внукът python
+    държеше изхода отворен и communicate() чакаше без край."""
+
+    def test_a_hanging_grandchild_does_not_outlive_the_timeout(self) -> None:
+        import sys
+        import time
+        exe = sys.executable.replace("\\", "/")
+        t0 = time.time()
+        res = sandbox.run_shell(f'"{exe}" -c "import time; time.sleep(120)"',
+                                policy=SandboxPolicy(mode="allow"), timeout=3)
+        assert time.time() - t0 < 40, "таймаутът трябва да спре и детето на обвивката"
+        assert res.returncode is None
+        assert "Timeout" in res.stderr

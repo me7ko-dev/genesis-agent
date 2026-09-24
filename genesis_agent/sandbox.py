@@ -979,9 +979,24 @@ def _decide(operation: str, verdict: RiskVerdict, policy: SandboxPolicy) -> tupl
 def _build_env(policy: SandboxPolicy, extra: dict[str, str] | None = None) -> dict[str, str]:
     env = {k: os.environ[k] for k in policy.env_passthrough if k in os.environ}
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    if sys.platform == "win32" and env.get("PATH"):
+        env["PATH"] = _windowsapps_last(env["PATH"])
     if extra:
         env.update(extra)
     return env
+
+
+def _windowsapps_last(path: str) -> str:
+    """WindowsApps отзад в PATH (bug fix, 2026-09-24, хванат от bench_fix.py).
+
+    Там живеят заглушките `python.exe`/`python3.exe` от Microsoft Store. Щом
+    са преди истинския Python, `python test_app.py` не пуска Python, а
+    инсталатора — който виси до таймаута. Наживо: два RUN_CMD по ~400s в
+    бенчмарка, `rc=None`. Отзад, а не махнати: winget и подобни живеят само
+    там и трябва да остават достъпни."""
+    parts = [p for p in path.split(os.pathsep) if p]
+    apps = [p for p in parts if "\\windowsapps" in p.lower()]
+    return os.pathsep.join([p for p in parts if p not in apps] + apps)
 
 
 def _count_user_processes() -> int:
@@ -1067,16 +1082,41 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
             if sys.platform != "win32":
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             else:
+                _kill_tree_win32(proc.pid)
                 proc.kill()
         except (ProcessLookupError, PermissionError, OSError):
             try:
                 proc.kill()
             except OSError:
                 pass
-        out, err = proc.communicate()
+        # С таймаут и тук (bug fix, 2026-09-24, bench_fix.py): на Windows
+        # proc.kill() убиваше само bash.exe, а внукът (заглушката на python от
+        # WindowsApps) държеше pipe-овете — и `communicate()` без таймаут чака
+        # 11 246 секунди при таймаут от 120. Ако нещо ги държи и след убиването
+        # на дървото, изоставяме изхода, не чакаме завинаги.
+        try:
+            out, err = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            for stream in (proc.stdout, proc.stderr):
+                try:
+                    if stream:
+                        stream.close()
+                except OSError:
+                    pass
+            out, err = "", "[sandbox] процесът не пусна изхода си и след убиване"
         return SandboxResult(ok=False, stdout=out or "",
                              stderr=(err or "") + f"\n[sandbox] Timeout след {timeout}s",
                              returncode=None)
+
+
+def _kill_tree_win32(pid: int) -> None:
+    """Убива процеса И децата му. `Popen.kill()` на Windows спира само самия
+    процес — при `bash -c "python ..."` това е bash, а python остава жив."""
+    try:
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)],
+                       capture_output=True, timeout=15, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 # Кеш за избраната Windows обвивка — изборът включва реална проба (виж
@@ -1162,7 +1202,27 @@ def _shell_argv(command: str) -> list[str]:
     """Argv за подадената команда, портативно."""
     if os.name == "posix":
         return ["/bin/sh", "-c", command]
-    return [*_windows_shell_prefix(), command]
+    prefix = _windows_shell_prefix()
+    if prefix and prefix[0].lower().endswith("bash.exe"):
+        command = _unescape_leading_windows_path(command)
+    return [*prefix, command]
+
+
+_LEADING_WIN_PATH = re.compile(r"^(\s*)([A-Za-z]:\\[^\s\"']*)")
+
+
+def _unescape_leading_windows_path(command: str) -> str:
+    r"""`C:\Users\x\python.exe -m pytest` без кавички → `C:/Users/x/python.exe ...`.
+
+    Bash чете `\U`, `\x`… като escape и изяжда наклонените черти, така че
+    командата търси несъществуващ `C:Usersx...` — rc=127 (хванато от
+    bench_fix.py, 2026-09-24: моделите пишат точно така пътя от средата).
+    Пипа се само ПЪРВИЯТ, некавичен токен: той е изпълнимият файл; в
+    аргументите обратната черта може да е нарочна."""
+    m = _LEADING_WIN_PATH.match(command)
+    if not m:
+        return command
+    return m.group(1) + m.group(2).replace("\\", "/") + command[m.end():]
 
 
 def run_shell(command: str, *, cwd: Path | None = None,
