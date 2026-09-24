@@ -974,10 +974,6 @@ def show_status_bar():
         title_align="left"
     ))
 
-def update_status_in_place():
-    """Quick status update (for after responses)."""
-    # Status shown at start, updates on next prompt
-
 # ── Agent Selection Menu ──────────────────────────────────────────────────────
 def show_agent_menu():
     global current_provider, current_model_id

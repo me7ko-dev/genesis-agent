@@ -881,9 +881,6 @@ class Brain:
         summary_msg = {"role": "system", "content": "## Резюме на по-ранния разговор:\n" + summary}
         return _rebuild([system_msg, summary_msg] + recent_part)
 
-    def _check_backend(self) -> bool:
-        return bool(self.chain)
-
     def _provider_key(self, key_env: str) -> str | None:
         """
         The one key for this provider, or None if it is not configured.

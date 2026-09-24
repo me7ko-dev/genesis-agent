@@ -374,7 +374,3 @@ def save_skill(
 
     return md_path
 
-
-def load_skill_code(skill_id: str) -> str:
-    from genesis_agent.skill_loader import skill_view
-    return skill_view(slugify(skill_id))["code"]

@@ -22,7 +22,3 @@ def report_thought(thought: str):
             print(f"[GENESIS]: {thought.encode('ascii', 'ignore').decode('ascii')}")
     except Exception as e:
         print(f"[TELEMETRY-ERR]: {e}")
-
-def clear_status():
-    if os.path.exists(STATUS_FILE):
-        os.remove(STATUS_FILE)
