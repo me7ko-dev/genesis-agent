@@ -1,6 +1,6 @@
 """genesis_agent.orchestrator — the multi-agent (Planner/Coder/Tester/Reviewer)
-loop behind `parallel_forge.py` (the skill-forge documented in README.md) and
-`benchmark.py`. Zero coverage before this file despite being on that real path.
+loop behind `benchmark.py` (and so `scripts/bench_models.py`). Zero coverage
+before this file despite being on that real path.
 
 Brain itself is never exercised here — every test replaces
 `orchestrator.Brain` with a scripted fake that returns canned replies in

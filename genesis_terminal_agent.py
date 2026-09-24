@@ -1143,28 +1143,6 @@ def main():
                 print_minimal_banner()
                 continue
 
-            if user_input.lower() == "/autoupgrade":
-                # Пуска ковачницата на заден план: сама тегли цели от
-                # goal_engine и произвежда verified умения.
-                #
-                # Дотук сочеше `real_evolution_marathon.py` — файл, който
-                # живее само в личния предшественик на проекта и никога не е
-                # бил доставян тук. Командата беше тих no-op за всеки: с
-                # ptyxis (терминал, който повечето хора нямат) прозорецът
-                # мигваше и изчезваше, а без него логът отиваше в `logs/`,
-                # която дори не се създава.
-                from genesis_agent.config import LOGS_DIR
-                LOGS_DIR.mkdir(parents=True, exist_ok=True)
-                logf = LOGS_DIR / "forge.log"
-                console.print("[cyan]🔨 Стартирам ковачницата на заден план…[/]")
-                with open(logf, "ab") as lf:
-                    subprocess.Popen(
-                        [sys.executable, "-m", "genesis_agent.parallel_forge"],
-                        stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
-                        start_new_session=True)
-                console.print(f"[green]✓ Работи. Лог: {logf}[/]")
-                continue
-
             if user_input.lower() == "/backup":
                 # Целта се задава от потребителя — не гадаем устройство и не
                 # монтираме дискове вместо него. Без GENESIS_BACKUP_DIR просто
@@ -1319,7 +1297,6 @@ def main():
                 help_table.add_row("/clear", "Нов разговор (изчиства историята)")
                 help_table.add_row("/status", "Системна информация и статистика")
                 help_table.add_row("/history", "Преглед и зареждане на стари сесии")
-                help_table.add_row("/autoupgrade", "Пуска ковачницата (нови умения) на заден план")
                 help_table.add_row("/backup", "Архивиране към GENESIS_BACKUP_DIR")
                 help_table.add_row("/update", "Провери и обнови от GitHub (питa за потвърждение)")
                 help_table.add_row("/skills", "Списък с уменията (без модел, мигновено)")
