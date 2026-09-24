@@ -9,7 +9,7 @@ Windows това означава заключен за запис (ERROR_SHARIN
 
 Затова обновяването никога не тръгва от процеса, който трябва да бъде
 подменен. `request_update()` пуска ТОЗИ модул като отделен, откачен процес
-(същият модел като `/autoupgrade` — subprocess.Popen(start_new_session=True)),
+(subprocess.Popen(start_new_session=True)),
 който:
 
   1. чака оригиналният PID да излезе напълно (`pid_alive`, полинг — POSIX
