@@ -346,6 +346,35 @@ def _edit_succeeded(result: str) -> bool:
     return "✓" in (result or "")
 
 
+def _verify_after_edit(root: Path, cmd: str | None, before: TestRun,
+                       messages: list[dict], say) -> TestRun | None:
+    """Пуска тестовете веднага след успешна редакция (design note, 2026-09-24).
+
+    Досега тестовете вървяха едва когато моделът сам реши, че е готов — и
+    докато стигне дотам, той четеше и проверяваше на ръка. `bench_fix.py`:
+    всяка поправка на ЕДИН ред изгаряше всичките 6 рунда. Тестовете са
+    присъдата, така че щом минат → край. Ако още падат, изходът им отива при
+    модела наготово, вместо да губи рунд за RUN_CMD.
+
+    Връща TestRun при зелено (цикълът спира), None иначе. Мълчи, ако няма
+    тестова команда или ако тестовете минаваха и ПРЕДИ — зелено тогава не
+    доказва нищо за поправката.
+    """
+    if not cmd or (before.ran and before.passed):
+        return None
+    run = run_tests(root, cmd)
+    if not run.ran:
+        return None
+    if run.passed:
+        say("🧪 Тестовете минават след редакцията — готово.")
+        return run
+    say("🧪 След редакцията тестовете още падат — давам изхода на модела.")
+    messages.append({"role": "user", "content":
+                     "Пуснах тестовете след редакцията ти — ВСЕ ОЩЕ падат:\n"
+                     f"{run.output[:2000]}\n\nПродължи с поправката."})
+    return None
+
+
 def _relative(root: Path, path_str: str) -> str:
     p = Path(path_str)
     if not p.is_absolute():
@@ -419,6 +448,7 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
     rounds = 0
     pushbacks = 0
     after = before
+    edited_now = False
     try:
         for rounds in range(1, max_rounds + 1):
             reply = brain.complete(messages, tools=REPAIR_TOOLS)
@@ -439,8 +469,15 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
                     result = genesis_skills.dispatch_tool_call(name, args)
                     if _edit_succeeded(result):
                         touched += [_relative(root, p) for p in _tool_call_paths(name, args)]
+                        edited_now = True
                     messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                                      "content": result[:_MAX_TOOL_OUTPUT]})
+                if edited_now:
+                    edited_now = False
+                    verdict = _verify_after_edit(root, cmd, before, messages, say)
+                    if verdict is not None:
+                        after = verdict
+                        break
                 messages = _compact_history(messages)
                 if _nudge_if_stalled(messages, touched, rounds):
                     say("  ↯ само четене досега — подсещам модела да действа")
@@ -451,11 +488,17 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
             if tag_results:
                 for r in tag_results:
                     say(f"  ⚙️  {r.splitlines()[0][:90] if r else ''}")
-                touched += _paths_from_tag_results(root, tag_results)
+                edited = _paths_from_tag_results(root, tag_results)
+                touched += edited
                 messages.append({"role": "assistant", "content": raw})
                 messages.append({"role": "user", "content":
                                  "Резултати от инструментите:\n"
                                  + "\n".join(r[:_MAX_TOOL_OUTPUT] for r in tag_results)})
+                if edited:
+                    verdict = _verify_after_edit(root, cmd, before, messages, say)
+                    if verdict is not None:
+                        after = verdict
+                        break
                 messages = _compact_history(messages)
                 if _nudge_if_stalled(messages, touched, rounds):
                     say("  ↯ само четене досега — подсещам модела да действа")
