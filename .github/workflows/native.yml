@@ -1,8 +1,9 @@
-name: Native Windows app
+name: Native apps
 
-# genesis.exe: built and smoke-tested on every PR, published as a GitHub
-# release on every push to main. scripts/install.ps1 (the `irm | iex` one-liner)
-# and /update in the app download the latest release.
+# genesis.exe (Windows) and Genesis Remote (Android APK): built and tested on
+# every PR, published together as one GitHub release on every push to main.
+# scripts/install.ps1 (the `irm | iex` one-liner) and /update in the app
+# download the latest release. iOS is built in mobile.yml (Xcode, macOS).
 
 on:
   push:
@@ -25,6 +26,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      # The phone app's web build goes inside genesis.exe: `genesis serve`
+      # serves it, so an iPhone needs nothing installed.
+      - name: Build the phone web app
+        working-directory: mobile
+        run: |
+          npm ci
+          npm run export:web
 
       - name: Install build dependencies
         run: |
@@ -33,7 +47,7 @@ jobs:
           # skills work without `pipx inject`, which genesis.exe has no
           # equivalent of. Pinned so a PyInstaller release cannot change the
           # app on its own schedule.
-          pip install ".[google,premium,signing]" pyinstaller==6.22.3
+          pip install ".[google,premium,signing,mobile]" pyinstaller==6.22.3
 
       # build.py runs the BUILT genesis.exe: CLI, Python mode, the sandbox
       # running code through it, stdlib and bundled packages.
@@ -82,9 +96,48 @@ jobs:
             dist/genesis-windows-x64.zip.sha256
           if-no-files-found: error
 
+  android:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - run: npm ci
+      # android/ is generated from app.json (Continuous Native Generation),
+      # never committed. The template signs release builds with its fixed
+      # debug keystore, so each new APK installs over the previous one.
+      - name: Generate the Android project
+        run: npx expo prebuild --platform android --no-install
+      - name: Build the APK
+        working-directory: mobile/android
+        run: ./gradlew assembleRelease --no-daemon -Dorg.gradle.jvmargs=-Xmx4g
+      - name: Name and checksum
+        run: |
+          mkdir -p ../dist
+          cp android/app/build/outputs/apk/release/app-release.apk ../dist/genesis-remote-android.apk
+          cd ../dist && sha256sum genesis-remote-android.apk > genesis-remote-android.apk.sha256
+          ls -la
+      - uses: actions/upload-artifact@v4
+        with:
+          name: genesis-remote-android
+          path: |
+            dist/genesis-remote-android.apk
+            dist/genesis-remote-android.apk.sha256
+          if-no-files-found: error
+
   publish:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: windows
+    needs: [windows, android]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -93,6 +146,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: genesis-windows-x64
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: genesis-remote-android
           path: dist
 
       # One immutable release per build. `gh release create` with files
@@ -104,15 +161,21 @@ jobs:
         run: |
           tag="native-build-${GITHUB_RUN_NUMBER}"
           short="${GITHUB_SHA:0:7}"
-          notes="Genesis Agent for Windows, built from ${short} on main.
+          notes="Genesis Agent, built from ${short} on main.
 
-          Install or update (PowerShell):
+          **Windows** — install or update (PowerShell):
 
               irm https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/scripts/install.ps1 | iex
 
-          Inside the app, \`/update\` does the same."
-          gh release create "$tag" dist/genesis-windows-x64.zip dist/genesis-windows-x64.zip.sha256 \
-            --target "$GITHUB_SHA" --title "Genesis for Windows (${short})" --notes "$notes" --latest
+          Inside the app, \`/update\` does the same.
+
+          **Phone** — run \`genesis serve\` on the computer and scan the QR code.
+          Android: install genesis-remote-android.apk below. iPhone: open the QR
+          code with the camera (web app), or build it in Xcode — see docs/MOBILE.md."
+          gh release create "$tag" \
+            dist/genesis-windows-x64.zip dist/genesis-windows-x64.zip.sha256 \
+            dist/genesis-remote-android.apk dist/genesis-remote-android.apk.sha256 \
+            --target "$GITHUB_SHA" --title "Genesis ${short}" --notes "$notes" --latest
 
       # Older builds are noise in the releases list; the last five stay so
       # a bad build can be rolled back with -Tag.

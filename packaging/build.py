@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Build the native app: genesis.exe on Windows (a `genesis` binary elsewhere).
 
-    pip install ".[google,premium,signing]" pyinstaller
+    pip install ".[google,premium,signing,mobile]" pyinstaller
+    (cd mobile && npm ci && npm run export:web)   # optional: the phone web app
     python packaging/build.py            # build + smoke test + zip
     python packaging/build.py --no-zip   # leave dist/genesis/ only
 
@@ -32,6 +33,7 @@ ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build" / "native"
 DIST = ROOT / "dist"
 APP = DIST / "genesis"
+WEB = ROOT / "mobile" / "dist-web"
 DEFAULT_TAG = "latest"  # version_info.LATEST_RELEASE
 DEFAULT_URL = "https://github.com/me7ko-dev/genesis-agent"
 
@@ -151,6 +153,16 @@ assert sys.argv[1:] == ["a", "b"], sys.argv
 print("script-ok")
 """
 
+SERVE_CHECK = """
+from genesis_agent import remote_server as rs
+key = bytes(32)
+env = rs.Cipher(key).seal({"op": "status"}, rs._REQ_AAD)
+assert rs.Cipher(key).open(env, rs._REQ_AAD) == {"op": "status"}
+import qrcode
+qrcode.QRCode().add_data("x")
+print("serve-ok", "web" if rs._web_root() else "no-web")
+"""
+
 SANDBOX_CHECK = """
 from genesis_agent import sandbox
 r = sandbox.run_python("import sqlite3; print('sandbox', 6 * 7)")
@@ -188,6 +200,8 @@ def smoke(exe: Path) -> None:
         run("-c", "raise SystemExit(0)", expect="")
         run("-c", SANDBOX_CHECK, expect="sandbox-ok")
         run("-c", "import genesis_terminal_agent", expect="")
+        run("-c", SERVE_CHECK, expect="serve-ok web" if WEB.joinpath("index.html").is_file() else "serve-ok")
+        run("serve", "--help", expect="genesis serve")
 
 
 def package(version: str) -> Path:
@@ -224,7 +238,13 @@ def main() -> int:
     write_icon(icon)
     write_version_file(version_file, version, commit)
 
+    if WEB.joinpath("index.html").is_file():
+        print(f"phone web app: {WEB}")
+    else:
+        print("phone web app: not built (cd mobile && npm ci && npm run export:web) — "
+              "genesis serve will show a landing page instead")
     env = {**os.environ, "GENESIS_BUILD_INFO": str(info), "GENESIS_ICON": str(icon),
+           "GENESIS_WEB_DIR": str(WEB),
            "GENESIS_VERSION_FILE": str(version_file)}
     subprocess.run([sys.executable, "-m", "PyInstaller", str(ROOT / "packaging" / "genesis.spec"),
                     "--noconfirm", "--clean", "--distpath", str(DIST),

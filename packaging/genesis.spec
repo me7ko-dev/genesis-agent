@@ -23,6 +23,13 @@ datas.append((str(ROOT / "scripts" / "install.ps1"), "."))
 build_info = os.environ.get("GENESIS_BUILD_INFO")
 if build_info:
     datas.append((build_info, "genesis_agent"))
+# The phone app's web build (mobile/, `expo export -p web`): `genesis serve`
+# hands it to a browser, so an iPhone needs no install at all.
+web = os.environ.get("GENESIS_WEB_DIR")
+if web and (Path(web) / "index.html").is_file():
+    for f in sorted(Path(web).rglob("*")):
+        if f.is_file():
+            datas.append((str(f), str(Path("genesis_agent/web") / f.relative_to(web).parent)))
 
 # genesis.exe doubles as the sandbox's Python (packaging/genesis_entry.py), so
 # it carries the whole standard library, not only what Genesis imports itself:
@@ -54,10 +61,10 @@ hiddenimports = (
     + _stdlib()
 )
 # The optional extras are carried when the build environment has them
-# (build.py installs [google,premium,signing]): Vertex, the paid MAX tier and
+# (CI installs [google,premium,signing,mobile]): Vertex, the paid MAX tier and
 # signed skills then work without `pipx inject`, which the native build has
 # no equivalent of.
-for optional in ("google.auth", "anthropic", "cryptography"):
+for optional in ("google.auth", "anthropic", "cryptography", "qrcode"):
     try:
         __import__(optional)
     except ImportError:

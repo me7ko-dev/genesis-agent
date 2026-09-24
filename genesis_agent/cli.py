@@ -10,6 +10,7 @@ genesis_agent.cli — the `genesis` command.
     genesis models          the model chain; `--refresh` re-scans, `--check` probes each
     genesis update          is there a newer commit on the installed branch
     genesis budget [N]      token usage today + last N days (default 7)
+    genesis serve           use Genesis from your phone (Android / iOS app)
     genesis --version
 """
 from __future__ import annotations
@@ -254,6 +255,11 @@ def main(argv: list[str] | None = None) -> int:
         # защото „Непозната команда" би звучало като счупена инсталация.
         print(f"`genesis {cmd}` е махнат — Genesis вече е само терминален. Пусни `genesis`.")
         return 2
+
+    if cmd == "serve":
+        sys.path.insert(0, str(_project_root()))
+        from genesis_agent.remote_server import serve
+        return serve(argv[1:])
 
     if cmd == "chat":
         return _chat()
