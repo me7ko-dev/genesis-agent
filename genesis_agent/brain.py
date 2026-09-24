@@ -178,6 +178,21 @@ _PROVIDERS = {
 # Кои доставчици се викат през native SDK вместо през OpenAI-съвместим HTTP.
 _NATIVE_PROVIDERS = {"anthropic"}
 
+
+def provider_base_url(provider: str) -> str:
+    """Адресът, на който се вика доставчикът.
+
+    Онлайн услугата (cloud/gateway): задачата е в контейнер без изход навън и
+    без истински ключове. `GENESIS_MODEL_GATEWAY` я праща към шлюза на сървъра
+    (`<шлюз>/<доставчик>/chat/completions`), който слага ключа и брои токените.
+    Само отдалечените OpenAI-съвместими — локалният, native и Vertex не минават.
+    """
+    base_url = _PROVIDERS[provider][0]
+    gateway = os.environ.get("GENESIS_MODEL_GATEWAY", "").strip().rstrip("/")
+    if gateway and base_url.startswith("https://") and provider not in _NATIVE_PROVIDERS:
+        return f"{gateway}/{provider}"
+    return base_url
+
 # Локалният модел (собственият мозък на Genesis). Празно → изключен.
 LOCAL_MODEL = os.environ.get("GENESIS_LOCAL_MODEL", "qwen2.5-coder:3b")
 
@@ -1163,7 +1178,8 @@ class Brain:
     def _call(self, provider: str, model: str, messages: list[dict],
              tools: list[dict] | None = None,
              extra: dict[str, Any] | None = None) -> tuple[str, list | None]:
-        base_url, key_env = _PROVIDERS[provider]
+        key_env = _PROVIDERS[provider][1]
+        base_url = provider_base_url(provider)
         if provider == "vertex":
             # Адресът и токенът се смятат при извикване (проект + локация +
             # OAuth), затова Vertex не минава през общия път с фиксиран
