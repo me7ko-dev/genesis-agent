@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import struct
 
@@ -33,7 +34,9 @@ from genesis_agent.config import DATA_DIR
 log = logging.getLogger("genesis.embeddings")
 
 DB_PATH = DATA_DIR / "embeddings.db"
-MODEL = "nomic-embed-text"
+# GENESIS_EMBED_MODEL=bge-m3 сменя модела без редакция на кода. След смяна —
+# reindex_all(): старите вектори са с друга размерност и се пропускат.
+MODEL = os.environ.get("GENESIS_EMBED_MODEL") or "nomic-embed-text"
 _OLLAMA_URL = "http://localhost:11434/api/embeddings"
 
 _SCHEMA = """
@@ -61,26 +64,26 @@ def _unpack(blob: bytes, dim: int) -> list[float]:
     return list(struct.unpack(f"{dim}f", blob))
 
 
-def available() -> bool:
+def available(model: str | None = None) -> bool:
     """Проверява дали Ollama и embedding моделът са налични."""
     try:
         r = requests.get("http://localhost:11434/api/tags", timeout=2)
         if r.status_code != 200:
             return False
         names = [m.get("name", "") for m in r.json().get("models", [])]
-        return any(MODEL in n for n in names)
+        return any((model or MODEL) in n for n in names)
     except Exception:
         return False
 
 
-def embed(text: str, timeout: int = 60) -> list[float] | None:
+def embed(text: str, timeout: int = 60, *, model: str | None = None) -> list[float] | None:
     """Връща embedding вектор за текста, или None ако моделът не е наличен.
 
     timeout=60 по подразбиране — студеният старт на модела на този GPU отнема
     ~20-25с; след първата заявка последващите са бързи (<1с).
     """
     try:
-        r = requests.post(_OLLAMA_URL, json={"model": MODEL, "prompt": text[:4000]}, timeout=timeout)
+        r = requests.post(_OLLAMA_URL, json={"model": model or MODEL, "prompt": text[:4000]}, timeout=timeout)
         if r.status_code != 200:
             return None
         return r.json().get("embedding")
