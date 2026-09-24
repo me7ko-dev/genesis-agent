@@ -83,6 +83,7 @@ _PERSISTED_STATE = (
     ("genesis_agent.model_check", "CHECK_PATH", "model_check.json"),
     ("genesis_agent.telemetry", "STATUS_FILE", "live_status.json"),
     ("genesis_agent.embeddings", "DB_PATH", "embeddings.db"),
+    ("genesis_agent.embeddings", "SKILLS_INDEX", "skills.json"),
     ("genesis_agent.benchmark", "HISTORY", "benchmark_history.json"),
     ("genesis_agent.web_search", "CACHE_DIR", ".search_cache"),
 )

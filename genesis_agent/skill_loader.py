@@ -247,11 +247,11 @@ def search_skills(query: str, top_n: int = 5, *, use_semantic: bool = True) -> l
 
     if use_semantic and len(results) < top_n:
         try:
-            from genesis_agent.embeddings import semantic_search
+            from genesis_agent.embeddings import SEARCH_THRESHOLD, semantic_search
             for name, sim in semantic_search(query, top_k=top_n * 3):
-                if sim < 0.55 or name in seen or name not in index:
+                if sim < SEARCH_THRESHOLD or name in seen or name not in index:
                     continue
-                # Дошло е през embedding прага (≥0.55 cosine), не през keyword
+                # Дошло е през embedding прага (SEARCH_THRESHOLD), не през keyword
                 # overlap — маркираме отделно, _kw_score=0 тук НЕ значи "слабо".
                 results.append({**index[name], "_semantic_hit": True})
                 seen.add(name)
@@ -313,7 +313,7 @@ def resolve_skill(name_or_query: str) -> tuple[str | None, list[dict[str, Any]]]
 
     Чисто семантично попадение (`_semantic_hit`, без keyword overlap) също не
     стига за авто-изпълнение — build_context съзнателно не му се доверява за
-    скъпия път, защото 0.55 cosine прагът е замърсен от шаблонната опашка в
+    скъпия път, защото cosine прагът е замърсен от шаблонната опашка в
     описанията ("...with type hints, docstring and an assert-based self-test").
     То обаче остава в списъка кандидати: точното име винаги резолвва, така че
     ако наистина е това умението, моделът е на едно извикване разстояние.

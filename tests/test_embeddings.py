@@ -140,3 +140,50 @@ class TestSemanticDuplicate:
         monkeypatch.setattr(emb, "embed",
                             lambda text, timeout=10: [1.0] * 384 + [0.01] * 384)
         assert emb.semantic_duplicate("a genuinely new skill") is None
+
+
+class TestIndexMissing:
+    """Индексът се пълнеше само при запис на ново умение — на лаптопа беше
+    празен, тоест търсенето по смисъл никога не намираше нищо."""
+
+    def _skills(self, tmp_path, monkeypatch, names) -> None:
+        import json
+        path = tmp_path / "skills.json"
+        path.write_text(json.dumps({"skills": [{"name": n, "description": n} for n in names]}),
+                        encoding="utf-8")
+        monkeypatch.setattr(emb, "SKILLS_INDEX", path)
+
+    def test_search_indexes_skills_that_have_no_vector_yet(self, tmp_path, monkeypatch) -> None:
+        self._skills(tmp_path, monkeypatch, ["a_skill", "b_skill"])
+        monkeypatch.setattr(emb, "embed", lambda text, timeout=10: _vec(8))
+        names = {n for n, _ in emb.semantic_search("q", top_k=5)}
+        assert names == {"a_skill", "b_skill"}
+
+    def test_vectors_of_the_old_model_are_replaced(self, tmp_path, monkeypatch) -> None:
+        self._skills(tmp_path, monkeypatch, ["kept_name"])
+        monkeypatch.setattr(emb, "embed", lambda text, timeout=10: _vec(4))
+        emb.index_skill("kept_name", "x")
+        monkeypatch.setattr(emb, "embed", lambda text, timeout=10: _vec(8))
+        assert [n for n, _ in emb.semantic_search("q")] == ["kept_name"]
+        assert emb._count_vectors() == 1
+
+    def test_already_indexed_skills_are_not_embedded_again(self, tmp_path, monkeypatch) -> None:
+        self._skills(tmp_path, monkeypatch, ["one", "two"])
+        calls: list[str] = []
+
+        def fake(text, timeout=10):
+            calls.append(text)
+            return _vec(8)
+        monkeypatch.setattr(emb, "embed", fake)
+        emb.semantic_search("first")
+        calls.clear()
+        emb.semantic_search("second")
+        assert calls == ["second"]
+
+    def test_a_missing_or_broken_skills_file_is_not_an_error(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(emb, "SKILLS_INDEX", tmp_path / "nope.json")
+        assert emb._skill_texts() == {}
+        bad = tmp_path / "bad.json"
+        bad.write_text("{not json", encoding="utf-8")
+        monkeypatch.setattr(emb, "SKILLS_INDEX", bad)
+        assert emb._skill_texts() == {}

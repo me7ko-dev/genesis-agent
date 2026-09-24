@@ -8,7 +8,7 @@ genesis_agent.embeddings — семантична памет: локални emb
 преизползване. Тук вместо това всяко умение/цел се представя като вектор
 (embedding), и близостта се мери по смисъл (cosine similarity), не по думи.
 
-Модел: Ollama `nomic-embed-text` (~274MB, локален, безплатен, бърз). Индексът е
+Модел: Ollama `bge-m3` (~1.2GB, локален, безплатен, многоезичен). Индексът е
 обикновен numpy масив в SQLite blob — 2148 умения е малко, brute-force cosine
 е <10ms, не трябват FAISS/vector DB (излишна сложност за този мащаб).
 
@@ -28,12 +28,20 @@ import struct
 
 import requests
 
-from genesis_agent.config import DATA_DIR
+from genesis_agent.config import DATA_DIR, SKILLS_DIR
 
 log = logging.getLogger("genesis.embeddings")
 
 DB_PATH = DATA_DIR / "embeddings.db"
-MODEL = "nomic-embed-text"
+SKILLS_INDEX = SKILLS_DIR / "skills.json"
+# bge-m3 вместо nomic-embed-text (2026-09-24, scripts/bench_embed.py): 21 умения,
+# 42 заявки на български и на латиница, 8 без умение. Верното умение първо:
+# 26% → 79%, в първите три: 45% → 95%. nomic е предимно английски.
+MODEL = "bge-m3"
+# Прагът е на модела: bge-m3 дава по-ниски числа. Там най-високото за заявка
+# без умение е 0.46, верните са с медиана 0.51. При 0.50 минават 57% от верните,
+# фалшиви 0/8. nomic при старите 0.55 пускаше 14%, също с 0 фалшиви.
+SEARCH_THRESHOLD = 0.50
 _OLLAMA_URL = "http://localhost:11434/api/embeddings"
 
 _SCHEMA = """
@@ -146,6 +154,7 @@ def semantic_search(query: str, top_k: int = 5) -> list[tuple[str, float]]:
     # Записи с друга размерност са от друг модел — несравними, не "далечни".
     # Изключват се от класирането, вместо да висят с нула: така броят им е
     # видим и наличието на стар индекс не изглежда като "няма съвпадения".
+    _index_missing(len(qvec))
     usable = [(name, vec) for name, vec in _all_vectors() if len(vec) == len(qvec)]
     skipped = _count_vectors() - len(usable)
     if skipped > 0:
@@ -168,17 +177,39 @@ def semantic_duplicate(text: str, threshold: float = 0.92) -> str | None:
     return None
 
 
+def _skill_texts() -> dict[str, str]:
+    """Име → текстът, по който се индексира умението (от skills.json)."""
+    try:
+        idx = json.loads(SKILLS_INDEX.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {s["name"]: f"{s['name'].replace('_', ' ')}. {s.get('description', '')}"
+            for s in idx.get("skills", []) if s.get("name")}
+
+
+def _index_missing(dim: int) -> int:
+    """Индексира уменията без вектор с размерност `dim`. Връща броя им.
+
+    Индексът се пълнеше само при запис на НОВО умение, а `reindex_all()` не се
+    вика от никъде. Измерено на лаптопа (2026-09-24): embeddings.db липсваше
+    изцяло, тоест семантичното търсене никога не е намирало нищо. Смяна на
+    модела оставя същото: старите вектори са с друга размерност. Тук веднъж
+    се наваксва: 21 умения × ~0.3 s при bge-m3. После вече няма липсващи.
+    """
+    with _conn() as c:
+        have = {name for (name,) in c.execute("SELECT name FROM embeddings WHERE dim = ?", (dim,))}
+    count = 0
+    for name, text in _skill_texts().items():
+        if name not in have and index_skill(name, text):
+            count += 1
+    return count
+
+
 def reindex_all(progress_every: int = 100) -> int:
     """Преиндексира всички умения от skills.json. Връща брой индексирани."""
-    from genesis_agent.config import SKILLS_DIR
-    idx_path = SKILLS_DIR / "skills.json"
-    if not idx_path.exists():
-        return 0
-    idx = json.loads(idx_path.read_text(encoding="utf-8"))
     count = 0
-    for i, s in enumerate(idx.get("skills", [])):
-        text = f"{s['name'].replace('_', ' ')}. {s.get('description', '')}"
-        if index_skill(s["name"], text):
+    for i, (name, text) in enumerate(_skill_texts().items()):
+        if index_skill(name, text):
             count += 1
         if (i + 1) % progress_every == 0:
             print(f"  ... индексирани {i + 1} ({count} успешни)")
