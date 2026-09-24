@@ -236,11 +236,7 @@ container.
 
 Fourteen verified, dependency-free skills ship in `genesis_agent/skills/` — enough to see
 the format and the reuse working. They are not the product; the mechanism is.
-Point the agent at real work, or run the forge, and the library becomes yours:
-
-```bash
-python -m genesis_agent.parallel_forge --n 12
-```
+Point the agent at real work and the library becomes yours.
 
 A skill is one Markdown file: metadata, a description, the code, and a
 self-test. `verified: true` means that self-test really ran in the sandbox —
