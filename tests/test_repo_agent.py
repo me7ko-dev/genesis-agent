@@ -266,3 +266,59 @@ class TestTouchedTracksRealChanges:
         ]
         paths = repo_agent._paths_from_tag_results(project, results)
         assert paths == ["notes.md"]
+
+
+class TestVerifyRightAfterAnEdit:
+    """bench_fix.py (2026-09-24): всяка поправка на един ред изгаряше всичките
+    6 рунда, защото тестовете вървяха едва когато моделът сам спре."""
+
+    def _setup(self, project, monkeypatch, results: list[bool]):
+        runs: list[bool] = []
+
+        def _fake_run_tests(root, command):
+            passed = results[min(len(runs), len(results) - 1)]
+            runs.append(passed)
+            return repo_agent.TestRun(ran=True, passed=passed, output="AssertionError: boom",
+                                      command=command)
+
+        calls: list[list] = []
+
+        class _EditingBrain:
+            def __init__(self, *a, **kw) -> None:
+                pass
+
+            def complete(self, messages, tools=None):
+                calls.append(list(messages))
+                return type("R", (), {"raw_text": "", "tool_calls": [{"id": "1", "function": {
+                    "name": "EDIT_FILE", "arguments": '{"path": "stats.py", "old": "a", "new": "b"}'}}]})()
+
+        monkeypatch.setattr(repo_agent, "run_tests", _fake_run_tests)
+        monkeypatch.setattr(repo_agent, "Brain", _EditingBrain)
+        monkeypatch.setattr("genesis_skills.dispatch_tool_call",
+                            lambda name, args: "[EDIT_FILE: stats.py] ✓ 1 замяна")
+        return runs, calls
+
+    def test_green_after_the_first_edit_stops_at_once(self, project, monkeypatch) -> None:
+        runs, calls = self._setup(project, monkeypatch, [False, True])
+        out = repo_agent.repair(str(project), "fix it", max_rounds=6, test_command="t",
+                                on_status=lambda m: None)
+        assert out.success is True
+        assert out.rounds == 1 and len(calls) == 1, "без изгорени рундове след зеленото"
+        assert runs == [False, True]
+
+    def test_still_red_hands_the_output_to_the_model(self, project, monkeypatch) -> None:
+        _, calls = self._setup(project, monkeypatch, [False, False, True])
+        out = repo_agent.repair(str(project), "fix it", max_rounds=6, test_command="t",
+                                on_status=lambda m: None)
+        assert out.success is True and out.rounds == 2
+        second_turn = calls[1]
+        assert any("ВСЕ ОЩЕ падат" in str(m.get("content")) and "boom" in str(m.get("content"))
+                   for m in second_turn)
+
+    def test_an_already_green_suite_proves_nothing_and_does_not_stop_the_loop(
+        self, project, monkeypatch
+    ) -> None:
+        _, calls = self._setup(project, monkeypatch, [True])
+        repo_agent.repair(str(project), "fix it", max_rounds=3, test_command="t",
+                          on_status=lambda m: None)
+        assert len(calls) == 3
