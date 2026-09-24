@@ -1243,8 +1243,8 @@ def main():
                 self_update.request_update(pid=os.getpid(), url=check.src.url, ref=check.src.ref)
                 console.print(
                     "[green]✓ Обновяването е насрочено на заден план.[/]\n"
-                    "[dim]  Приключва СЛЕД като излезеш оттук (`exit`) — pipx не може да "
-                    "презапише файла, докато тече. Следващото `genesis` ще каже дали е минало.[/]")
+                    "[dim]  Приключва СЛЕД като излезеш оттук (`exit`) — файлът не може да "
+                    "бъде презаписан, докато тече. Следващото `genesis` ще каже дали е минало.[/]")
                 continue
 
             if user_input.lower() == "/model":

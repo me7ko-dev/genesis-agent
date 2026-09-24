@@ -25,6 +25,12 @@ from pathlib import Path
 # The package itself: .../genesis_agent/
 PACKAGE_DIR: Path = Path(__file__).resolve().parent
 
+# True inside the native Windows build (`genesis.exe`, PyInstaller — see
+# packaging/). There the package sits in the install directory, which every
+# update replaces wholesale: nothing may be WRITTEN relative to PACKAGE_DIR,
+# and `sys.executable` is genesis.exe, not a Python interpreter.
+FROZEN: bool = bool(getattr(sys, "frozen", False))
+
 # The directory containing the package. For a git checkout this is the repo
 # root; for an installed copy it is site-packages.
 PROJECT_ROOT: Path = PACKAGE_DIR.parent
@@ -66,13 +72,87 @@ def ensure_utf8_streams() -> None:
                 pass
 
 
+def install_dir() -> Path | None:
+    """The directory holding genesis.exe in the native build, else None."""
+    return Path(sys.executable).resolve().parent if FROZEN else None
+
+
 def workspace_dir() -> Path:
     """
     Where the agent is allowed to work by default. Deliberately NOT the user's
     whole home directory — an agent that starts out pointed at everything is
     one bad command away from a bad day.
     """
-    return Path(os.environ.get("GENESIS_WORKSPACE", PROJECT_ROOT))
+    env = os.environ.get("GENESIS_WORKSPACE")
+    if env:
+        return Path(env)
+    if FROZEN:
+        return _frozen_workspace(Path.cwd())
+    return PROJECT_ROOT
+
+
+def _frozen_workspace(cwd: Path) -> Path:
+    """The native build works where it was started, like `claude` does — the
+    PROJECT_ROOT fallback would be the install directory, erased by the next
+    update. Except where starting there means "started from a shortcut", not
+    "work here": the home directory itself, a drive root, the Windows
+    directory, or the install directory. Those get ~/.genesis/workspace.
+    """
+    try:
+        cwd = cwd.resolve()
+    except OSError:
+        cwd = Path.home()
+    unsafe = {Path.home().resolve(), Path(cwd.anchor)}
+    windir = os.environ.get("SystemRoot") or os.environ.get("windir")
+    inst = install_dir()
+    inside = [Path(d).resolve() for d in (windir, inst) if d]
+    if cwd in unsafe or any(cwd == d or d in cwd.parents for d in inside):
+        fallback = GENESIS_HOME / "workspace"
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+    return cwd
+
+
+_project_python_cache: str | None = None
+
+
+def project_python() -> str:
+    """The interpreter that runs the USER'S project (its tests, its scripts).
+
+    From pip/pipx that is `sys.executable`. In the native build it is not:
+    `sys.executable` is genesis.exe, which can run a plain script (see
+    packaging/genesis_entry.py) but has none of the project's packages —
+    pytest least of all. There the real Python on the machine is asked for
+    its own path. The `python` in WindowsApps is skipped unprobed: when no
+    Python is installed it is the Store stub, which hangs until the timeout
+    instead of failing (measured: ~400 s per command, NEXT_STEPS.md).
+    """
+    global _project_python_cache
+    if not FROZEN:
+        return sys.executable or "python3"
+    if _project_python_cache is None:
+        _project_python_cache = _find_system_python() or "python"
+    return _project_python_cache
+
+
+def _find_system_python() -> str | None:
+    import shutil
+    import subprocess
+
+    code = "import sys; print(sys.executable)"
+    for argv in (["py", "-3"], ["python"], ["python3"]):
+        exe = shutil.which(argv[0])
+        if not exe or "windowsapps" in exe.lower():
+            continue
+        try:
+            r = subprocess.run(argv + ["-c", code], capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=15, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        found = r.stdout.strip().splitlines()[-1:] if r.returncode == 0 else []
+        if found and Path(found[0]).is_file():
+            return found[0]
+    return None
 
 
 def history_dir() -> Path:

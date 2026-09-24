@@ -26,6 +26,11 @@ Windows това означава заключен за запис (ERROR_SHARIN
 Следващото стартиране на `genesis` (`report_pending()`) го чете веднъж и го
 трие — операторът вижда „обновено" или грешката, без да рови в лог файлове.
 
+Родният Windows билд (genesis.exe, без Python и pipx) минава по същия път,
+но откаченият процес е PowerShell с инсталатора scripts/install.ps1 (носен
+в самия билд): той чака PID-а, сваля новия release, проверява SHA256 и
+подменя папката на приложението цяла — `request_native_update`.
+
 Проверено само по логика (subprocess е mock-нат в тестовете): истинско
 заключване на .exe при запис, докато процесът тече, не може да се
 симулира на тази (Linux) машина. Виж docs/WINDOWS.md.
@@ -46,6 +51,7 @@ _WAIT_POLL_SECONDS = 1.0
 _WAIT_TIMEOUT_SECONDS = 120.0
 _PIPX_TIMEOUT_SECONDS = 600
 _PROBE_TIMEOUT_SECONDS = 10
+_NATIVE_WAIT_TIMEOUT_SECONDS = 12 * 3600
 
 
 def _state_path() -> Path:
@@ -159,6 +165,46 @@ def run_updater(pid: int, url: str, ref: str) -> int:
     return 0
 
 
+def native_update_argv(*, pid: int, ref: str, owner_repo: str,
+                       script: Path, install_dir: Path) -> list[str]:
+    """Командата за PowerShell обновяването на родния билд."""
+    return ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-WindowStyle", "Hidden", "-File", str(script),
+            "-WaitPid", str(pid), "-Tag", ref or "latest",
+            "-Repo", owner_repo or "me7ko-dev/genesis-agent",
+            "-InstallDir", str(install_dir), "-StateFile", str(_state_path()),
+            # Чатът може да продължи часове след `/update`; pipx пътят
+            # (_WAIT_TIMEOUT_SECONDS) се отказва след 2 минути.
+            "-WaitTimeout", str(_NATIVE_WAIT_TIMEOUT_SECONDS),
+            "-NoShortcut"]
+
+
+def request_native_update(*, pid: int, url: str, ref: str) -> None:
+    """Като `request_update`, за genesis.exe: инсталаторът се копира в %TEMP%
+    и тече от там — копието в папката на приложението би я държало заето
+    точно докато тя се подменя."""
+    import shutil
+    import tempfile
+
+    from genesis_agent.paths import PROJECT_ROOT, install_dir
+    from genesis_agent.version_info import Source
+
+    target = install_dir()
+    if target is None:
+        raise RuntimeError("request_native_update извън родния билд")
+    script = Path(tempfile.gettempdir()) / f"genesis-update-{pid}.ps1"
+    shutil.copyfile(PROJECT_ROOT / "install.ps1", script)
+    argv = native_update_argv(pid=pid, ref=ref, owner_repo=Source(url=url).owner_repo,
+                              script=script, install_dir=target)
+    # Скрита собствена конзола, не DETACHED_PROCESS: без конзола всяка
+    # конзолна програма, която инсталаторът пуска (пробният genesis.exe
+    # --version), би отворила свой видим прозорец.
+    no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    new_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, creationflags=no_window | new_group)
+
+
 def request_update(*, pid: int, url: str, ref: str) -> None:
     """Пуска обновяването на заден план и се връща веднага — не чака нищо.
 
@@ -168,6 +214,10 @@ def request_update(*, pid: int, url: str, ref: str) -> None:
     `sys.platform`) и на друга платформа, без AttributeError, без да
     променят реалното поведение на Windows.
     """
+    from genesis_agent.paths import FROZEN
+    if FROZEN:
+        request_native_update(pid=pid, url=url, ref=ref)
+        return
     argv = [sys.executable, "-m", "genesis_agent.self_update",
             "--pid", str(pid), "--url", url, "--ref", ref]
     if sys.platform == "win32":

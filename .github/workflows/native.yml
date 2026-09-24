@@ -1,0 +1,127 @@
+name: Native Windows app
+
+# genesis.exe: built and smoke-tested on every PR, published as a GitHub
+# release on every push to main. scripts/install.ps1 (the `irm | iex` one-liner)
+# and /update in the app download the latest release.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: native-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # The extras go INTO the app: Vertex, the paid tier and signed
+          # skills work without `pipx inject`, which genesis.exe has no
+          # equivalent of. Pinned so a PyInstaller release cannot change the
+          # app on its own schedule.
+          pip install ".[google,premium,signing]" pyinstaller==6.22.3
+
+      # build.py runs the BUILT genesis.exe: CLI, Python mode, the sandbox
+      # running code through it, stdlib and bundled packages.
+      - name: Build and smoke-test genesis.exe
+        run: python packaging/build.py
+
+      - name: Installer self-test (Windows PowerShell 5.1)
+        shell: powershell
+        run: .\scripts\install.ps1 -SelfTest
+
+      # The real installer against the zip just built: fresh install, then
+      # the same again over it (the /update path), then uninstall.
+      - name: Install, update over it, uninstall
+        shell: powershell
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "Genesis"
+          $zip = (Resolve-Path dist\genesis-windows-x64.zip).Path
+          $state = Join-Path $env:RUNNER_TEMP "update_state.json"
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install.ps1 -ZipPath $zip -InstallDir $dir -NoPrompt
+          if ($LASTEXITCODE -ne 0) { throw "install failed" }
+          & "$dir\genesis.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "installed genesis.exe does not run" }
+          if (-not (Test-Path "$dir\_internal\install.ps1")) { throw "the app does not carry its updater" }
+
+          # What /update does: the updater runs from a copy in %TEMP% and
+          # waits for a genesis.exe that is still running from $dir.
+          $updater = Join-Path $env:TEMP "genesis-update-ci.ps1"
+          Copy-Item "$dir\_internal\install.ps1" $updater
+          $sleeper = Start-Process -PassThru -FilePath "$dir\genesis.exe" -ArgumentList '-c "import time; time.sleep(5)"'
+          powershell -NoProfile -ExecutionPolicy Bypass -File $updater -ZipPath $zip -InstallDir $dir -WaitPid $sleeper.Id -StateFile $state -NoShortcut
+          if (-not $sleeper.HasExited) { throw "the updater did not wait for genesis.exe to exit" }
+          if ($LASTEXITCODE -ne 0) { Get-Content $state; throw "update failed" }
+          $result = Get-Content -Raw $state | ConvertFrom-Json
+          if (-not $result.ok) { throw "update state says: $($result.error)" }
+          & "$dir\genesis.exe" --version
+
+          powershell -NoProfile -ExecutionPolicy Bypass -File "$dir\_internal\install.ps1" -Uninstall -InstallDir $dir
+          if ($LASTEXITCODE -ne 0) { throw "uninstall failed" }
+          if (Test-Path $dir) { throw "uninstall left $dir behind" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: genesis-windows-x64
+          path: |
+            dist/genesis-windows-x64.zip
+            dist/genesis-windows-x64.zip.sha256
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: genesis-windows-x64
+          path: dist
+
+      # One immutable release per build. `gh release create` with files
+      # uploads them to a draft and publishes after, so /releases/latest
+      # switches to a release only when its zip AND checksum are both there.
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="native-build-${GITHUB_RUN_NUMBER}"
+          short="${GITHUB_SHA:0:7}"
+          notes="Genesis Agent for Windows, built from ${short} on main.
+
+          Install or update (PowerShell):
+
+              irm https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/scripts/install.ps1 | iex
+
+          Inside the app, \`/update\` does the same."
+          gh release create "$tag" dist/genesis-windows-x64.zip dist/genesis-windows-x64.zip.sha256 \
+            --target "$GITHUB_SHA" --title "Genesis for Windows (${short})" --notes "$notes" --latest
+
+      # Older builds are noise in the releases list; the last five stay so
+      # a bad build can be rolled back with -Tag.
+      - name: Prune old builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --limit 100 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | startswith("native-build-"))] | sort_by(.createdAt) | reverse | .[5:] | .[].tagName' |
+          while read -r old; do
+            gh release delete "$old" --yes --cleanup-tag
+          done

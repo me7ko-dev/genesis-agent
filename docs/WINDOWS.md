@@ -11,7 +11,84 @@
 
 ---
 
-## Какво ти трябва преди това
+## Родно приложение — един ред, без Python (препоръчително)
+
+Като Claude Code: в PowerShell
+
+```powershell
+irm https://raw.githubusercontent.com/me7ko-dev/genesis-agent/main/scripts/install.ps1 | iex
+```
+
+и после, в папката, в която искаш да работиш:
+
+```powershell
+genesis setup      # ключовете, веднъж
+genesis
+```
+
+Какво прави редът (`scripts/install.ps1`):
+
+- сваля `genesis-windows-x64.zip` от последния GitHub release и го сверява
+  със SHA256 файла до него;
+- разархивира до `%LOCALAPPDATA%\Programs\Genesis.new`, пуска новия
+  `genesis.exe --version` и **чак тогава** го слага на мястото на стария —
+  счупено сваляне или антивирус, който е махнал файл, не пипат работеща
+  инсталация;
+- слага папката в потребителския PATH (работи веднага в същия прозорец),
+  добавя „Genesis Agent" в Start менюто (в Windows Terminal, ако го има) и в
+  Settings → Apps, откъдето се маха като всяко приложение;
+- проверява Git Bash (предлага `winget install Git.Git`, ако липсва) и казва
+  има ли системен Python за тестовете на твоите проекти.
+
+Не иска администратор, Python или pipx. `genesis.exe` носи собствен Python
+заедно с цялата стандартна библиотека, requests, PyYAML, rich, google-auth,
+anthropic и cryptography — sandbox-ът изпълнява код през него, така че
+агентът работи и на машина без Python. Тестовете на ТВОЯ проект (`genesis
+fix`, pytest) пак минават през истинския Python на машината, защото само той
+има пакетите на проекта — `paths.project_python()` го намира през `py -3`.
+
+**Работна папка.** Като `claude`: там, откъдето е пуснат. Ако е пуснат от
+домашната папка, от корена на диска, от Windows или от Start менюто —
+`~\.genesis\workspace`, за да не получи агентът целия профил. `GENESIS_WORKSPACE`
+го задава изрично.
+
+**Обновяване.** `/update` в чата: проверява последния release, показва какво
+носи и след `exit` сваля и подменя приложението на заден план (същият
+инсталатор, копиран в `%TEMP%`, защото папката на приложението се заменя
+цяла). Следващото `genesis` казва дали е минало. Ръчно — същият ред отгоре.
+
+**Махане.** Settings → Apps → Genesis Agent, или
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\Genesis\_internal\install.ps1" -Uninstall
+```
+
+Ключовете, паметта и уменията в `~\.genesis` остават; `-Purge` маха и тях.
+
+**Откъде идва.** `.github/workflows/native.yml` сглобява `genesis.exe` с
+PyInstaller (`packaging/genesis.spec`) на всеки PR и го публикува като release
+при всеки push в `main`. Преди публикуване CI пуска самия `genesis.exe`
+(`packaging/build.py`: CLI, Python режим, sandbox, стандартна библиотека),
+после инсталира от zip-а, обновява върху инсталацията, докато старият
+`genesis.exe` още тече, и деинсталира. Локален билд:
+
+```powershell
+py -m pip install ".[google,premium,signing]" pyinstaller
+py packaging\build.py
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -ZipPath dist\genesis-windows-x64.zip
+```
+
+**SmartScreen / антивирус.** `genesis.exe` не е подписан. Свален през
+`irm`/`Invoke-WebRequest`, той няма „Mark of the Web" и SmartScreen не пита.
+Билдът е папка, не един .exe, и без UPX — двете най-чести причини за фалшива
+тревога при PyInstaller. Ако антивирусът все пак махне файл, инсталаторът го
+хваща при пробното стартиране и не подменя старата версия.
+
+---
+
+## Чрез pipx (ако искаш Genesis в собствения си Python)
+
+### Какво ти трябва преди това
 
 | | Защо |
 |---|---|
@@ -21,9 +98,9 @@
 
 ---
 
-## Инсталация
+### Инсталация
 
-### Вариант 1 — скриптът (проверява и трите неща отгоре)
+#### Вариант 1 — скриптът (проверява и трите неща отгоре)
 
 ```powershell
 curl.exe -L -o install_windows.ps1 https://raw.githubusercontent.com/me7ko-dev/genesis-agent/claude/token-upgrade-ipe4yg/scripts/install_windows.ps1
@@ -34,7 +111,7 @@ powershell -ExecutionPolicy Bypass -File .\install_windows.ps1
 дали има Git Bash, инсталира през pipx и накрая извиква `genesis --version` по
 пълен път — защото PATH в текущия прозорец още не знае за новата команда.
 
-### Вариант 2 — на ръка, три команди
+#### Вариант 2 — на ръка, три команди
 
 ```powershell
 py -m pip install --user pipx
