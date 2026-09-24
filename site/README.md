@@ -1,4 +1,4 @@
-# genesis.metko.uk — страница за ранен достъп (етап 0)
+# genesis-waitlist.pages.dev — страница за ранен достъп (етап 0)
 
 Цел: да измерим дали има купувачи, преди да строим сървъра и плащанията.
 Мярка: брой записани и какво искат да автоматизират (полето „need").
@@ -22,13 +22,14 @@ KV `genesis-waitlist`, тайна `ADMIN_TOKEN` (копие: `GENESIS_WAITLIST_T
 cd site && npx wrangler pages deploy public --project-name genesis-waitlist --branch main
 ```
 
-Домейнът `genesis.metko.uk` е добавен към проекта; metko.uk е в друг акаунт,
-затова DNS записът се слага там: `CNAME genesis → genesis-waitlist.pages.dev` (Proxied).
+Адресът е `genesis-waitlist.pages.dev` — решение на оператора (2026-09-25): без
+собствен домейн, metko.uk е в друг Cloudflare акаунт. Работи изцяло на
+Cloudflare, лаптопът и homeserver-ът не участват.
 
 ## Колко са записаните
 
 ```bash
-curl -H "Authorization: Bearer <ADMIN_TOKEN>" https://genesis.metko.uk/api/waitlist
+curl -H "Authorization: Bearer <ADMIN_TOKEN>" https://genesis-waitlist.pages.dev/api/waitlist
 ```
 
 Връща `count` и всички записи (имейл, какво искат, дата, държава).
