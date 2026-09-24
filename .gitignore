@@ -44,3 +44,6 @@ htmlcov/
 .vscode/
 model_check.json
 cloud/.wheels/
+
+# wrangler (site/): локален кеш на акаунта
+.wrangler/
