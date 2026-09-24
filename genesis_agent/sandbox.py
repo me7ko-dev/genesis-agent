@@ -1134,6 +1134,18 @@ _GIT_BASH_CANDIDATES = (
 )
 
 
+def _git_bash_candidates() -> list[str]:
+    """Изричният избор на оператора (GENESIS_GIT_BASH), обичайните места, и
+    потребителската инсталация на Git (winget без администратор слага Git в
+    %LOCALAPPDATA%\\Programs\\Git — там го търси и scripts/install.ps1)."""
+    out = [os.environ.get("GENESIS_GIT_BASH", "")]
+    out += _GIT_BASH_CANDIDATES
+    local = os.environ.get("LOCALAPPDATA", "")
+    if local:
+        out.append(os.path.join(local, "Programs", "Git", "bin", "bash.exe"))
+    return [p for p in out if p]
+
+
 def _is_wsl_launcher(path: str) -> bool:
     """`bash.exe` от System32/WindowsApps НЕ е обвивка на тази машина — това е
     стартерът на WSL, тоест друга операционна система с друга файлова система
@@ -1188,7 +1200,7 @@ def _windows_shell_prefix() -> list[str]:
     if _WIN_SHELL_PREFIX is not None:
         return _WIN_SHELL_PREFIX
     import shutil
-    candidates: list[str] = [p for p in _GIT_BASH_CANDIDATES if os.path.exists(p)]
+    candidates: list[str] = [p for p in _git_bash_candidates() if os.path.exists(p)]
     found = shutil.which("bash")
     if found and not _is_wsl_launcher(found) and found not in candidates:
         candidates.append(found)

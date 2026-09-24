@@ -46,7 +46,10 @@ signing = ["cryptography>=42"]           # cryptography_utils.py — RSA skill s
 # API is not OpenAI-compatible, so it needs its own SDK. Everything else in the
 # chain speaks the OpenAI wire format over plain `requests`.
 premium = ["anthropic>=0.40"]
+# `genesis serve` — the phone app (mobile/): encrypted channel + QR pairing.
+mobile = ["cryptography>=42", "qrcode>=7.4"]
 all = [
+    "qrcode>=7.4",
     "playwright>=1.40",
     "ruff>=0.6",
     "cryptography>=42",

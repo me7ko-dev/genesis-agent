@@ -51,7 +51,23 @@ pipx install git+https://github.com/me7ko-dev/genesis-agent
 
 On Debian/Ubuntu, get pipx first with `sudo apt install pipx && pipx ensurepath`.
 
-**On Windows**, `scripts/install_windows.ps1` does the same and first checks
+**On Windows**, there is a native app — one line in PowerShell, no Python or
+pipx needed, like Claude Code's installer:
+
+```powershell
+irm https://raw.githubusercontent.com/me7ko-dev/genesis-agent/main/scripts/install.ps1 | iex
+```
+
+It installs a self-contained `genesis.exe` (built and tested by CI on every
+push to `main`), puts it on PATH, adds a Start menu entry and an uninstall entry,
+and `/update` in the chat keeps it current.
+
+**From your phone** (Android and iPhone): `genesis serve` shows a QR code;
+scan it with the Genesis Remote app and use the same agent from the phone —
+end-to-end encrypted, dangerous commands confirmed on the phone. See
+[docs/MOBILE.md](docs/MOBILE.md).
+
+Prefer your own Python? `scripts/install_windows.ps1` installs through pipx and first checks
 the three things that actually break there — the Microsoft Store Python stub, a
 stale PATH, and `bash.exe` resolving to the WSL launcher instead of Git Bash.
 See [docs/WINDOWS.md](docs/WINDOWS.md), which also lists what differs on that

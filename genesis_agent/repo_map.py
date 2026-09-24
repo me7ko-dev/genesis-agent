@@ -26,7 +26,6 @@ import json
 import re
 import shutil
 import subprocess
-import sys
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -219,20 +218,25 @@ def _python_cmd() -> str:
     Наклонените черти стават прави, защото командата се подава на shell
     (виж sandbox._shell_argv, който на Windows предпочита bash) — там
     обратната наклонена черта е escape знак. Windows приема и двата вида.
+
+    В родния Windows билд `sys.executable` е genesis.exe, не Python — затова
+    пътят идва от paths.project_python(), който там пита истинския Python.
     """
-    exe = sys.executable or "python3"
-    exe = exe.replace("\\", "/")
+    from genesis_agent.paths import project_python
+    exe = project_python().replace("\\", "/")
     return f'"{exe}"' if " " in exe else exe
 
 
 # Ordered: the first match wins, so a Python project that also carries a
-# package.json for its docs site is still tested with pytest.
+# package.json for its docs site is still tested with pytest. `{python}` is
+# filled in at use, not at import: in the native build finding the real Python
+# costs a subprocess, which every start would otherwise pay.
 _TEST_RULES: list[tuple[str, str, str]] = [
     # (marker file, language, test command)
-    ("pytest.ini", "python", f"{_python_cmd()} -m pytest -q"),
-    ("tox.ini", "python", f"{_python_cmd()} -m pytest -q"),
-    ("pyproject.toml", "python", f"{_python_cmd()} -m pytest -q"),
-    ("setup.py", "python", f"{_python_cmd()} -m pytest -q"),
+    ("pytest.ini", "python", "{python} -m pytest -q"),
+    ("tox.ini", "python", "{python} -m pytest -q"),
+    ("pyproject.toml", "python", "{python} -m pytest -q"),
+    ("setup.py", "python", "{python} -m pytest -q"),
     ("Cargo.toml", "rust", "cargo test"),
     ("go.mod", "go", "go test ./..."),
     ("package.json", "javascript", "npm test"),
@@ -329,7 +333,7 @@ def detect_project(path: str | Path) -> ProjectInfo:
             continue
         if marker == "Makefile" and not _makefile_has_test(root):
             continue
-        language, test_cmd = lang, cmd
+        language, test_cmd = lang, cmd.replace("{python}", _python_cmd())
         break
     # Няма маркерен файл, но има тестове по pytest конвенцията — виж
     # _has_pytest_style_tests за защо липсата на маркер не е доказателство.

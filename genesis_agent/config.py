@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import threading
 from pathlib import Path
 
@@ -49,7 +50,10 @@ def _int_env(name: str, default: int, *, minimum: int = 0) -> int:
 # not even permitted, and wiped on the next reinstall/upgrade).
 PACKAGE_DIR: Path = Path(__file__).resolve().parent
 PROJECT_ROOT: Path = PACKAGE_DIR.parent
-_INSTALLED = PROJECT_ROOT.name in ("site-packages", "dist-packages")
+# The native Windows build (genesis.exe) counts as installed: its package
+# directory is inside the install directory, which every update replaces.
+_INSTALLED = (PROJECT_ROOT.name in ("site-packages", "dist-packages")
+              or bool(getattr(sys, "frozen", False)))
 
 
 def seed_user_skills(shipped: Path, user_dir: Path) -> int:
