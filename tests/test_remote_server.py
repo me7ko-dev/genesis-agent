@@ -343,6 +343,27 @@ def test_static_files_never_leave_the_web_root(tmp_path) -> None:
         httpd.server_close()
 
 
+# ── `genesis serve` options ────────────────────────────────────────────────
+
+def test_serve_listens_on_every_interface_by_default() -> None:
+    opts = rs.parse_serve_args([])
+    assert isinstance(opts, rs.ServeOptions)
+    assert (opts.bind, opts.port, opts.host, opts.reset) == ("0.0.0.0", rs.DEFAULT_PORT, "", False)
+
+
+def test_serve_bind_keeps_it_on_this_machine() -> None:
+    # Genesis Desktop: loopback only, a port of its own, no firewall prompt.
+    opts = rs.parse_serve_args(["--bind", "127.0.0.1", "--port", "0"])
+    assert isinstance(opts, rs.ServeOptions)
+    assert (opts.bind, opts.port) == ("127.0.0.1", 0)
+
+
+@pytest.mark.parametrize("args, code", [(["--help"], 0), (["--port", "x"], 2), (["--nope"], 2)])
+def test_serve_bad_or_help_options_exit(args, code, capsys) -> None:
+    assert rs.parse_serve_args(args) == code
+    assert "genesis serve" in capsys.readouterr().out or code == 2
+
+
 # ── the terminal loop honours the phone's stop ─────────────────────────────
 
 def test_run_turn_stops_before_the_next_tool(monkeypatch, tmp_path) -> None:
@@ -374,3 +395,22 @@ def test_run_turn_stops_before_the_next_tool(monkeypatch, tmp_path) -> None:
     assert ran == [], "a tool ran after stop"
     assert ui.warnings == ["Спряно от оператора."]
     assert "tool_calls" not in list(messages)[-1], "history left with unanswered tool_calls"
+
+
+def test_command_op_reaches_the_commands_and_hello_says_so() -> None:
+    session, _ = _session()
+    calls: list[tuple] = []
+    server = rs.RemoteServer(KEY, session, name="x",
+                             commands=lambda n, a: calls.append((n, a)) or {"ok": True, "n": n})
+    assert server.hello()["features"] == ["commands"]
+    assert server._dispatch({"op": "command", "name": "usage", "arg": {"days": 7}}) == {"ok": True, "n": "usage"}
+    assert server._dispatch({"op": "command", "name": "status", "arg": "junk"})["ok"]
+    assert calls == [("usage", {"days": 7}), ("status", {})]
+
+
+def test_command_op_is_unknown_without_commands() -> None:
+    session, _ = _session()
+    server = rs.RemoteServer(KEY, session, name="x")
+    assert server.hello()["features"] == []
+    with pytest.raises(rs.ProtocolError):
+        server._dispatch({"op": "command", "name": "status"})
