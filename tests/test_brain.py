@@ -108,6 +108,19 @@ class TestHttp:
         assert tool_calls is None
         assert b._last_usage == {"prompt_tokens": 5, "completion_tokens": 3}
 
+    def test_cached_tokens_reach_budget(self, monkeypatch) -> None:
+        # Ollama Cloud: prompt_tokens_details.cached_tokens → cached_read_tokens.
+        b = self._brain()
+        resp = _FakeResponse(200, {
+            "choices": [{"message": {"content": "4"}}],
+            "usage": {"prompt_tokens": 4089, "completion_tokens": 64,
+                      "prompt_tokens_details": {"cached_tokens": 4064}},
+        })
+        monkeypatch.setattr("genesis_agent.brain.requests.post", lambda *a, **kw: resp)
+        b._http("https://x", "key", "m", [], 30)
+        assert b._last_usage["cached_read_tokens"] == 4064
+        assert b._last_usage["prompt_tokens"] == 4089
+
     def test_non_200_raises_runtime_error_with_status_code(self, monkeypatch) -> None:
         b = self._brain()
         resp = _FakeResponse(429, text="rate limited")

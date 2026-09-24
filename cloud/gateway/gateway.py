@@ -103,10 +103,23 @@ class Usage:
     completion_tokens: int = 0
     total_tokens: int = 0
     calls: int = 0
+    # Част от prompt_tokens, прочетена от кеша на доставчика (Ollama Cloud я
+    # връща в prompt_tokens_details.cached_tokens). Таванът на задачата не я
+    # вади — тя е вътре в total; стои отделно, защото платените API-та я
+    # таксуват по-евтино и сметката (етап 3) трябва да я знае.
+    cached_tokens: int = 0
+
+    def add(self, e: dict[str, Any]) -> None:
+        self.prompt_tokens += int(e.get("prompt_tokens") or 0)
+        self.completion_tokens += int(e.get("completion_tokens") or 0)
+        self.total_tokens += int(e.get("total_tokens") or 0)
+        self.cached_tokens += int(e.get("cached_tokens") or 0)
+        self.calls += 1
 
     def as_dict(self) -> dict[str, int]:
         return {"prompt_tokens": self.prompt_tokens, "completion_tokens": self.completion_tokens,
-                "total_tokens": self.total_tokens, "calls": self.calls}
+                "total_tokens": self.total_tokens, "cached_tokens": self.cached_tokens,
+                "calls": self.calls}
 
 
 @dataclass
@@ -127,11 +140,7 @@ class Ledger:
                     e = json.loads(line)
                 except ValueError:
                     continue
-                u = self.jobs.setdefault(str(e.get("job")), Usage())
-                u.prompt_tokens += int(e.get("prompt_tokens") or 0)
-                u.completion_tokens += int(e.get("completion_tokens") or 0)
-                u.total_tokens += int(e.get("total_tokens") or 0)
-                u.calls += 1
+                self.jobs.setdefault(str(e.get("job")), Usage()).add(e)
                 n += 1
         return n
 
@@ -143,17 +152,15 @@ class Ledger:
         p = int(usage.get("prompt_tokens") or 0)
         c = int(usage.get("completion_tokens") or 0)
         t = int(usage.get("total_tokens") or 0) or p + c
+        details = usage.get("prompt_tokens_details")
+        cached = int((details.get("cached_tokens") if isinstance(details, dict) else 0) or 0)
+        entry = {"job": job, "provider": provider, "model": model, "prompt_tokens": p,
+                 "completion_tokens": c, "total_tokens": t, "cached_tokens": cached}
         with self.lock:
-            u = self.jobs.setdefault(job, Usage())
-            u.prompt_tokens += p
-            u.completion_tokens += c
-            u.total_tokens += t
-            u.calls += 1
+            self.jobs.setdefault(job, Usage()).add(entry)
             if self.path is not None:
                 with self.path.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps({"job": job, "provider": provider, "model": model,
-                                        "prompt_tokens": p, "completion_tokens": c,
-                                        "total_tokens": t, "at": time.time()}) + "\n")
+                    f.write(json.dumps({**entry, "at": time.time()}) + "\n")
 
 
 def usage_for(path: Path, job: str) -> dict[str, int]:
@@ -168,10 +175,7 @@ def usage_for(path: Path, job: str) -> dict[str, int]:
                     continue
                 if e.get("job") != job:
                     continue
-                u.prompt_tokens += int(e.get("prompt_tokens") or 0)
-                u.completion_tokens += int(e.get("completion_tokens") or 0)
-                u.total_tokens += int(e.get("total_tokens") or 0)
-                u.calls += 1
+                u.add(e)
     except OSError:
         pass
     return u.as_dict()
