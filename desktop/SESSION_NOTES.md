@@ -72,37 +72,31 @@
   - `lib/format.ts` (fmtTokens, niceMax) + тест. `npm test`: 9/9, typecheck: ок, `npm run build`: ок.
   - Стилове: краят на `styles.css` („`/` command sheets“).
 
-### Спряно тук: блокер
-- `python packaging/build.py --no-zip` сглоби `dist/genesis/genesis.exe`
-  (00:48), но smoke тестът падна: **Windows „Application Control policy has blocked
-  this file“** (вероятно Smart App Control спира неподписания нов exe).
-  Инсталираният `%LOCALAPPDATA%\Programs\Genesis\genesis.exe` е стар и няма
-  командите: приложението показва „обнови Genesis“.
-- Възможни пътища (питай потребителя, не заобикаляй защитата сам):
-  1. Потребителят проверява Smart App Control (Windows Security → App & browser control)
-     или разрешава файла.
-  2. Release в GitHub CI (подписан/изтеглен exe) → `install.ps1`.
-  3. Само за проверка: приложението да пуска `python -m genesis_agent serve` от
-     worktree-а (findExe иска .exe; ще трябва опция за dev режим).
+### Инсталирано (2026-09-25, 01:16) ✅
+- Smart App Control е ВКЛЮЧЕН и блокира всичко неподписано, сглобено ЛОКАЛНО
+  (`genesis.exe` от PyInstaller и `Genesis-Setup` от electron-builder; CodeIntegrity 3033/3077).
+  Сглобеното в GitHub CI минава. Не изключвай SAC: после не може да се включи отново.
+- **Правило: сглобявай в CI, не локално.** Клон `feat/desktop-app` (качен в origin):
+  `gh workflow run native.yml -R me7ko-dev/genesis-agent --ref feat/desktop-app`
+  → артефакти `genesis-windows-x64` (zip + sha256) и `genesis-desktop-setup` (инсталатор).
+  Release няма: publish върви само при push в main. Задачата `desktop` е в native.yml,
+  защото ръчно пускане (dispatch) работи само за workflow, който вече е в main.
+- Инсталиране: `gh run download <id> -n ...`; genesis.exe → разархивиране в
+  `%LOCALAPPDATA%\Programs\Genesis` (резервно копие на стария:
+  `Programs\Genesis.bak-native-build-9`); инсталаторът с `/S` СЛЕД като приложението е затворено.
+  Проверка: `app.asar` съдържа `sheet-back`.
+- Проверено със снимки: /usage (горе, графика, доставчици, модели), /status,
+  /model, /models, /help. Реални данни: 2,93M токена, $0, остават 4,78M от
+  седмичната квота на Ollama Cloud.
+- Снимки: `GENESIS_DESKTOP_SHEET=usage` + `GENESIS_DESKTOP_SHOT=out.png,24000[,scrollPx]`
+  (агентът тръгва за ~15–20 s).
 
-### Избран път: сглобяване в GitHub CI
-- Smart App Control е ВКЛЮЧЕН (`HKLM\...\CI\Policy VerifiedAndReputablePolicyState=1`);
-  CodeIntegrity събития 3033/3077 за локалния `dist\genesis\genesis.exe`. Не го изключвай:
-  после не може да се включи отново.
-- Commit 7c26ee1 на `feat/desktop-app` (rebase върху origin/main c80cfa4), качен в origin.
-- `gh workflow run native.yml --ref feat/desktop-app`: сглобява артефакта
-  `genesis-windows-x64` БЕЗ release (publish върви само при push в main).
-  Run: https://github.com/me7ko-dev/genesis-agent/actions/runs/36064219241
-- След това: `gh run download <id> -n genesis-windows-x64`, резервно копие на
-  `%LOCALAPPDATA%\Programs\Genesis`, разархивиране на новия там.
-
-### Остава
-1. Работещ genesis.exe с командите → копиране в `%LOCALAPPDATA%\Programs\Genesis\`
-   (първо резервно копие на стария)
-2. Снимки с `GENESIS_DESKTOP_SHOT` на /usage, /status, /model, /help: проверка на
-   подредбата (подсказката на графиката, тесен прозорец)
-3. `npm run dist` → инсталиране на новия Genesis-Setup
-4. Обнови тези бележки
+### Остава / идеи
+- PR от `feat/desktop-app` към main (само ако потребителят каже) → тогава release
+  ще съдържа и новия genesis.exe; инсталаторът на приложението да влезе в release
+- Не е пробвано на живо: избор на модел с клик, /history зареждане, превключвателите
+  на режимите (сървърната част има тестове)
+- Подписване на инсталатора
 
 ## Зависимости
 - Нужен е CLI-ят Genesis в `%LOCALAPPDATA%\Programs\Genesis\genesis.exe`
