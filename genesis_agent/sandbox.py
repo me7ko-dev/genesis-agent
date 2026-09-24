@@ -994,9 +994,11 @@ def _windowsapps_last(path: str) -> str:
     инсталатора — който виси до таймаута. Наживо: два RUN_CMD по ~400s в
     бенчмарка, `rc=None`. Отзад, а не махнати: winget и подобни живеят само
     там и трябва да остават достъпни."""
-    parts = [p for p in path.split(os.pathsep) if p]
+    # ";" изрично: функцията е само за Windows PATH, а os.pathsep на Linux
+    # (":") би срязал `C:\...` на две — хванато от Linux CI.
+    parts = [p for p in path.split(";") if p]
     apps = [p for p in parts if "\\windowsapps" in p.lower()]
-    return os.pathsep.join([p for p in parts if p not in apps] + apps)
+    return ";".join([p for p in parts if p not in apps] + apps)
 
 
 def _count_user_processes() -> int:

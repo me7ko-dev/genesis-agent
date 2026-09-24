@@ -549,7 +549,7 @@ class TestWindowsCommandHygiene:
     rc=127, защото bash изяжда обратните черти."""
 
     def test_windowsapps_goes_to_the_end_of_path(self) -> None:
-        sep = sandbox.os.pathsep
+        sep = ";"  # Windows PATH — и на Linux CI
         path = sep.join([r"C:\Users\x\AppData\Local\Microsoft\WindowsApps",
                          r"C:\Program Files\Git\bin", r"C:\Users\x\AppData\Local\Python\bin"])
         out = sandbox._windowsapps_last(path).split(sep)
@@ -557,8 +557,7 @@ class TestWindowsCommandHygiene:
         assert out[:2] == [r"C:\Program Files\Git\bin", r"C:\Users\x\AppData\Local\Python\bin"]
 
     def test_path_without_windowsapps_is_unchanged(self) -> None:
-        sep = sandbox.os.pathsep
-        path = sep.join(["/usr/bin", "/bin"])
+        path = r"C:\Windows\system32;C:\Program Files\Git\bin"
         assert sandbox._windowsapps_last(path) == path
 
     def test_unquoted_leading_windows_path_gets_forward_slashes(self) -> None:
