@@ -102,7 +102,7 @@ ignore = [
     # Accepted debt, not a false positive: ~220 call sites across the codebase
     # (mostly best-effort optional-integration fallbacks) blindly catch or
     # swallow exceptions. The security/reliability-critical modules (sandbox,
-    # brain, executor, budget, skills_api) have been triaged —
+    # brain, executor, budget) have been triaged —
     # broad catches there are either narrowed, logged, or annotated with a
     # specific `# noqa` explaining why. The remaining call sites (peripheral
     # modules, terminal frontend) still need per-site review; enabling
