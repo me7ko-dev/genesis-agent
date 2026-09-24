@@ -1151,7 +1151,7 @@ def main():
                             border_style="cyan", padding=(1, 2)))
 
     messages = deque([{"role": "system", "content": SYSTEM_PROMPT}], maxlen=_HISTORY_MAXLEN)
-    from genesis_agent.model_router import command_for_request
+    from genesis_agent.model_router import CONFIRM_COMMANDS, command_for_request
 
     while True:
         try:
@@ -1161,12 +1161,17 @@ def main():
             if not user_input: continue
 
             # Заявка, която е точно вградена команда („направи бекъп"), не
-            # стига до модела: предлагаме командата. „не" → към модела, както досега.
+            # стига до модела. Командите, които променят нещо, питат; „не" →
+            # към модела, както досега. Останалите само показват — тръгват веднага.
             _cmd = command_for_request(user_input)
-            if _cmd:
-                _ans = console.input(f"[yellow]Това е команда {_cmd} (без модел). Пусни я? (да/не) > [/]")
+            if _cmd in CONFIRM_COMMANDS:
+                _ans = console.input(f"[cyan]↪ Това е командата [bold]{_cmd}[/] — без модел. "
+                                     "Пусни я? (Enter = да / не = питай модела) > [/]")
                 if _ans.strip().lower() in ("", "да", "д", "d", "da", "y", "yes"):
                     user_input = _cmd
+            elif _cmd:
+                console.print(f"[dim]↪ {_cmd} (без модел)[/]")
+                user_input = _cmd
 
             # ── Commands ──
             if user_input.lower() in ["exit", "quit", "изход"]:

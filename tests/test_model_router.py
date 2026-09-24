@@ -231,3 +231,49 @@ def test_command_for_request_matches_whole_request(text, cmd):
 ])
 def test_command_for_request_leaves_the_rest_to_the_model(text):
     assert mr.command_for_request(text) is None
+
+
+# ── Команда вместо модел: „napravi backup" → /backup ─────────────────────────
+
+@pytest.mark.parametrize("text,cmd", [
+    ("napravi backup", "/backup"),
+    ("Направи бекъп!", "/backup"),
+    ("моля, направи бекъп", "/backup"),
+    ("архивирай", "/backup"),
+    ("обнови се", "/update"),
+    ("има ли нова версия?", "/update"),
+    ("check for updates", "/update"),
+    ("покажи уменията", "/skills"),
+    ("kakvi umeniq imash", "/skills"),
+    ("покажи ми моделите", "/models"),
+    ("смени модела", "/model"),
+    ("изчисти разговора", "/clear"),
+    ("нов разговор", "/clear"),
+    ("покажи задачите", "/tasks"),
+    ("помощ", "/help"),
+])
+def test_a_message_that_is_just_a_command_maps_to_it(text, cmd) -> None:
+    assert mr.command_for_request(text) == cmd
+
+
+@pytest.mark.parametrize("text", [
+    "nameri i napravi backup genesis v disk D: v zip fail",   # реално — цел и формат
+    "napravi backup na proekta",
+    "направи бекъп на ~/proj",
+    "backup the db to s3",
+    "how do I make a backup?",
+    "обнови",              # без обект — може да е продължение
+    "обнови файла",
+    "update",
+    "clear",
+    "help me fix this bug",
+    "да",
+    "/backup",             # вече е команда
+    "",
+])
+def test_anything_more_than_the_intent_goes_to_the_model(text) -> None:
+    assert mr.command_for_request(text) is None
+
+
+def test_only_commands_that_change_something_ask_first() -> None:
+    assert mr.CONFIRM_COMMANDS == {"/backup", "/clear"}
