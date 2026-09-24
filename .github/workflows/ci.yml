@@ -57,7 +57,7 @@ jobs:
       # checks without anyone noticing). Gate it in CI so that claim can't go
       # stale again.
       - name: Type check (mypy)
-        run: python -m mypy genesis_agent/ genesis_skills.py genesis_terminal_agent.py
+        run: python -m mypy genesis_agent/ genesis_skills.py genesis_terminal_agent.py cloud/
 
       # Was never wired up before: `ruff` only ran INSIDE code_validate.py to
       # vet LLM-generated code, never over the codebase's own source. 620
