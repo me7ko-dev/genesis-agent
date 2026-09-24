@@ -9,10 +9,10 @@
 
 ## Къде се намира
 - Worktree: `C:\Users\roika\Projects\genesis-desktop`, клон `feat/desktop-app`
-  (от `origin/main` @ 9e19c9e; main вече е с 6 commit-а напред)
+  (rebase върху `origin/main` c80cfa4, качен в origin)
 - Основното репо: `C:\Users\roika\Projects\genesis-agent` (GitHub: me7ko-dev/genesis-agent)
 - Кодът на приложението: `desktop/`
-- **Нищо не е commit-нато и няма PR.**
+- Commit-ите са качени в клона. **Няма PR и нищо не е влязло в main.**
 
 ## Направено
 - Backend (`genesis_agent/remote_server.py`): опция `--bind`, за да слуша само на
@@ -42,7 +42,7 @@
   Поправка: `.sidebar { grid-column: 1 }`, `.main { grid-column: 2 }` в
   `src/renderer/styles.css`. Проверено със снимки при отворена и скрита лента.
 
-## В ПРОЦЕС: всички `/` команди + прозорец „Разход“ (2026-09-25)
+## ГОТОВО: всички `/` команди + прозорец „Разход“ (2026-09-25)
 Потребителят поиска всички `/` команди от терминала в приложението и красив
 прозорец за разхода (като usage/cost в Claude Code): колко е похарчено, колко остава.
 
@@ -99,16 +99,17 @@
 - Подписване на инсталатора
 
 ## Зависимости
-- Нужен е CLI-ят Genesis в `%LOCALAPPDATA%\Programs\Genesis\genesis.exe`
-  (от release native-build-9). Той вече е инсталиран. Прекият път „Genesis Agent“ отваря него (терминала).
-- Инсталираният `genesis.exe` е от main и още няма `--bind`. Приложението
-  проверява това (`supportsBind`) и минава и без него.
+- Нужен е CLI-ят Genesis в `%LOCALAPPDATA%\Programs\Genesis\genesis.exe`.
+  Сега там е сглобеният в CI от `feat/desktop-app` (има `--bind` и командите).
+  Прекият път „Genesis Agent“ отваря него (терминала).
+- С по-стар genesis.exe (без `features: ["commands"]`) приложението работи, а
+  `/` командите казват „обнови Genesis“.
 
 ## Следващи стъпки
 1. Потребителят да пробва приложението и да каже какво да се промени
-2. `git rebase origin/main` на `feat/desktop-app`, commit, PR
-3. Сборка на инсталатора в CI (release workflow) до `genesis-windows-x64.zip`
-4. Автоматично обновяване, подписване на инсталатора (сега Windows SmartScreen ще предупреди)
+2. PR към main (само ако потребителят поиска)
+3. Инсталаторът да влезе в release до `genesis-windows-x64.zip`
+4. Автоматично обновяване, подписване на инсталатора
 
 ## Полезни команди (от `desktop/`)
 ```
