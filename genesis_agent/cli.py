@@ -7,7 +7,7 @@ genesis_agent.cli — the `genesis` command.
     genesis mission "..."   run one autonomous mission and print the result
     genesis fix PATH "..."  fix a bug in an existing project (tests + diff)
     genesis skills          library status
-    genesis models          the model chain; `--refresh` re-scans free models
+    genesis models          the model chain; `--refresh` re-scans, `--check` probes each
     genesis update          is there a newer commit on the installed branch
     genesis budget [N]      token usage today + last N days (default 7)
     genesis --version
@@ -60,8 +60,14 @@ _FIX_USAGE = """Употреба:
 
 
 def _models(args: list[str]) -> int:
-    """`genesis models [--refresh]` — какво реално ще бъде извикано и в какъв ред."""
-    from genesis_agent import free_models
+    """`genesis models [--refresh] [--check]` — какво реално ще бъде извикано и в какъв ред."""
+    from genesis_agent import free_models, model_check
+
+    if "--check" in args:
+        models = model_check.configured_models()
+        print(f"Проверявам {len(models)} модела от config.yaml (по една малка заявка)…\n")
+        print(model_check.format_report(model_check.run_check(models)))
+        return 0
 
     if "--refresh" in args:
         count, message = free_models.refresh()
@@ -84,6 +90,7 @@ def _models(args: list[str]) -> int:
     print(f"\nВерига: {len(chain)} модела "
           f"({len(chain) - auto} ръчно проверени + {auto} автоматично открити)\n")
 
+    checked = model_check.last_results()
     unsized = 0
     for i, c in enumerate(chain, 1):
         size = f"{c['size_b']:g}B" if c["size_b"] else "?"
@@ -92,6 +99,9 @@ def _models(args: list[str]) -> int:
         # филтрира по размер (чат: ≥32B). Без този знак `genesis models`
         # изброява модели, които работещият агент никога не вика.
         skipped = "" if c["size_b"] >= MIN_SIZE_B else "  ← не и в чат"
+        seen = checked.get((c["provider"], c["model"]))
+        if seen and seen.get("status") != "ok":
+            skipped += f"  [{model_check.LABELS.get(seen['status'], seen['status'])}]"
         if not c["size_b"]:
             unsized += 1
         print(f"  {i:>2}. {c['provider']:<13} {c['model']:<52} {size:>6}  {tools}{skipped}")
@@ -100,6 +110,14 @@ def _models(args: list[str]) -> int:
         print(f"\n{unsized} модела не обявяват размер в името си и затова не влизат "
               f"в контекстите с праг (чат иска ≥{MIN_SIZE_B:g}B). Мисиите и "
               "по-ниските прагове ги ползват.")
+
+    dead = sorted(model_check.dead_models())
+    if dead:
+        print("\nПрескачат се (мъртви при последната `--check`): "
+              + ", ".join(f"{p}/{m}" for p, m in dead))
+    check_age = model_check.age_days()
+    if check_age is None or check_age > model_check.STALE_DAYS:
+        print("\nМоделите не са проверявани скоро — `genesis models --check` (чатът го прави сам веднъж седмично).")
 
     age = free_models.cache_age_days()
     if age is None:

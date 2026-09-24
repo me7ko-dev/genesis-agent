@@ -1062,6 +1062,17 @@ def main():
         pass
 
     SYSTEM_PROMPT = config.get("system_prompt", "CRITICAL: You are Genesis, autonomous AI coding agent.")
+
+    # Седмична проверка на моделите, на заден план — не бави старта. Мъртвите
+    # (404/410) Brain прескача сам от следващото обръщение (виж model_check).
+    try:
+        from genesis_agent import model_check
+        if model_check.needs_check():
+            import threading
+            threading.Thread(target=model_check.run_check, daemon=True,
+                             name="model-check").start()
+    except Exception:
+        pass
     try:
         from genesis_agent.tool_schemas import fit_system_prompt
         SYSTEM_PROMPT = fit_system_prompt(SYSTEM_PROMPT)

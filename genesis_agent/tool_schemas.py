@@ -20,12 +20,10 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "READ_FILE",
-            "description": "Read a file's contents (absolute or workspace-relative path). "
-                           "Without offset/limit, returns up to the first 8000 characters. For "
-                           "a bigger file, pass offset (1-indexed start line) and limit (max "
-                           "lines) to read a specific range — the only way to see anything past "
-                           "the first ~150 lines, and required before an EDIT_FILE anchor that "
-                           "far into the file. A ranged read is numbered per line (like `cat -n`).",
+            "description": "Read a file (absolute or workspace-relative). Returns the first "
+                           "8000 chars; pass offset (1-indexed line) + limit for a numbered range — "
+                           "needed past ~150 lines and before editing there. Several files → "
+                           "several READ_FILE calls in the same turn.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -41,10 +39,8 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "GLOB",
-            "description": "Find files by NAME pattern across a directory tree (e.g. "
-                           "'**/*.tsx', 'test_*.py') — the filename counterpart to SEARCH_CODE, "
-                           "which greps file CONTENTS. Use this when you know roughly what a "
-                           "file is called but not where it lives.",
+            "description": "Find files by name pattern, e.g. '**/*.py'. "
+                           "For file contents use SEARCH_CODE.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -59,11 +55,9 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "WRITE_FILE",
-            "description": "Write (or overwrite) a file with the given content. If the file "
-                           "already exists, you must have READ_FILE'd (or just EDIT_FILE'd) it "
-                           "in this session first — otherwise the call is refused, so you never "
-                           "blind-overwrite content you haven't actually seen. Prefer EDIT_FILE "
-                           "for a partial change to a file you did not just author.",
+            "description": "Create or overwrite a file. An existing file must have been read "
+                           "in this session first, or the call is refused. For a partial change "
+                           "use EDIT_FILE.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -84,15 +78,11 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "EDIT_FILE",
-            "description": "Replace an exact snippet inside an EXISTING file. Prefer this over "
-                           "WRITE_FILE for any file you did not just author — it changes only "
-                           "what you name and returns a diff of what actually changed. "
-                           "'old' must appear in the file exactly once (whitespace counts); add "
-                           "surrounding lines to make it unique. If the edit would break Python "
-                           "syntax the file is left untouched and you get the parse error back. "
-                           "For .py files, a check-only ruff pass runs after a successful edit "
-                           "and any findings are appended as an advisory note — nothing is "
-                           "auto-fixed, so the file never changes outside what you named.",
+            "description": "Replace an exact snippet in an existing file; returns the diff. "
+                           "'old' must occur exactly once (whitespace counts) — add context lines "
+                           "to make it unique. An edit that would break Python syntax is refused "
+                           "and the file is untouched. Prefer over WRITE_FILE for files you "
+                           "didn't just write.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -110,9 +100,8 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "SEARCH_CODE",
-            "description": "Regex search across a project's file contents (like grep -rn). "
-                           "Use this to LOCATE code before reading files — guessing filenames "
-                           "and reading them whole wastes the context window.",
+            "description": "Regex search in file contents (grep -rn). Locate code with this "
+                           "before reading files.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -128,9 +117,8 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "REPO_MAP",
-            "description": "Summarise a project: language, file counts, layout, entry points, "
-                           "how its tests are run, whether it is under git. Call this FIRST when "
-                           "you are handed an unfamiliar codebase.",
+            "description": "Project summary: language, layout, entry points, test command, "
+                           "git. Call first on an unfamiliar codebase.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -163,13 +151,10 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "ASK_USER",
-            "description": "Stop and ask the user a question, then wait for their answer. Use this "
-                           "BEFORE acting whenever the request is ambiguous in a way that "
-                           "changes which files/systems you would touch: which files exactly, "
-                           "from where, to where, overwrite or keep both. Guessing on a "
-                           "destructive or bulk operation is never acceptable — asking costs "
-                           "one message, guessing wrong can lose data. Asking is not failure "
-                           "and does not count as handing work back.",
+            "description": "Ask the user and wait for the answer. Use BEFORE acting when it is "
+                           "unclear which files, from/to where, or overwrite vs keep — never "
+                           "guess on a bulk or destructive operation. Asking is not handing "
+                           "work back.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -177,7 +162,7 @@ FULL_TOOLS: list[dict] = [
                     "options": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Optional concrete choices, so he can answer with one word.",
+                        "description": "Optional choices, so the user can answer in one word.",
                     },
                 },
                 "required": ["question"],
@@ -200,8 +185,7 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "RESEARCH",
-            "description": "Grounded web research: cross-checks the answer across multiple "
-                           "sources instead of trusting one snippet. Prefer this over "
+            "description": "Web research cross-checked across several sources; prefer over "
                            "WEB_SEARCH when accuracy matters.",
             "parameters": {
                 "type": "object",
@@ -226,14 +210,10 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "USE_SKILL",
-            "description": "Load a REAL verified skill from the skill library and "
-                           "actually run it (not just describe it). You don't need the exact "
-                           "name — describe what you need and it fuzzy-matches. Leave "
-                           "driver_code empty to just discover what functions/classes it "
-                           "exposes; fill it in with a Python expression/statement calling "
-                           "those functions directly by name (no import needed) to get a REAL "
-                           "executed result. Try this BEFORE writing new code for anything "
-                           "that sounds like a common utility.",
+            "description": "Run a verified skill from the library (name or description, "
+                           "fuzzy-matched). Empty driver_code lists its functions; driver_code "
+                           "calls them by name (no import) and returns the real result. Try "
+                           "before writing a common utility yourself.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -248,9 +228,8 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "DELEGATE",
-            "description": "Delegate a self-contained task to an autonomous sub-agent "
-                           "(spins up a full mission — heavier than USE_SKILL, use for tasks "
-                           "that need new code written and verified, not just a lookup).",
+            "description": "Hand a self-contained coding task to a sub-agent mission that "
+                           "writes and verifies new code (heavier than USE_SKILL).",
             "parameters": {
                 "type": "object",
                 "properties": {"goal": {"type": "string"}},
@@ -262,8 +241,8 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "BROWSE",
-            "description": "Load a URL in a real isolated headless browser (no saved logins). "
-                           "Returns page title, text, and a numbered list of clickable/fillable elements.",
+            "description": "Open a URL in an isolated headless browser (no saved logins). "
+                           "Returns title, text and numbered clickable/fillable elements.",
             "parameters": {
                 "type": "object",
                 "properties": {"url": {"type": "string"}},
@@ -316,11 +295,8 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "REMEMBER",
-            "description": "Record something durable about the user or the work: a decision "
-                           "(and why it was made) or a preference (how the user wants things "
-                           "done). Use this the moment something is decided or a preference "
-                           "becomes clear — it survives across sessions and is shown to you "
-                           "at the start of every future session.",
+            "description": "Save a decision (with why) or a user preference. Shown at the "
+                           "start of every future session — record it as soon as it is clear.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -339,16 +315,13 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "TASK_ADD",
-            "description": "Open a work thread that should survive across sessions. Use it "
-                           "for anything that is not finished when this conversation ends, "
-                           "so the next session knows what is pending and what comes next.",
+            "description": "Open a work thread that survives sessions, for anything left "
+                           "unfinished.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "title": {"type": "string"},
-                    "next_step": {"type": "string",
-                                  "description": "The concrete next action, so work can resume "
-                                                 "without re-deriving context."},
+                    "next_step": {"type": "string", "description": "Concrete next action."},
                 },
                 "required": ["title"],
             },
@@ -358,8 +331,8 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "TASK_UPDATE",
-            "description": "Update a work thread: mark it done/blocked, or set the next step. "
-                           "Mark threads done as soon as they are actually finished.",
+            "description": "Update a thread: status or next step. Mark done as soon as "
+                           "it is finished.",
             "parameters": {
                 "type": "object",
                 "properties": {

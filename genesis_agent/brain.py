@@ -345,8 +345,19 @@ def _load_chain() -> list[dict]:
         # Резервен слой — никога не спира старта.
         log.debug("_load_chain: без автоматично открити модели (%s)", e)
 
+    # Мъртвите според последната `genesis models --check` (404/410) се
+    # прескачат, докато следваща проверка не ги види живи — без да се пипа
+    # config.yaml. Зает (429/503) не е мъртъв и остава.
+    try:
+        from genesis_agent.model_check import dead_models
+        dead = dead_models()
+    except Exception as e:
+        log.debug("_load_chain: model_check недостъпен (%s)", e)
+        dead = set()
+
     # Само доставчици, които знаем как да викаме.
-    return [c for c in chain if c["provider"] in _PROVIDERS]
+    return [c for c in chain
+            if c["provider"] in _PROVIDERS and (c["provider"], c["model"]) not in dead]
 
 
 def _load_coding_chain() -> list[dict]:
