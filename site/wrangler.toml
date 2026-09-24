@@ -1,0 +1,10 @@
+# Cloudflare Pages: genesis.metko.uk (етап 0). Качване:
+#   cd site && npx wrangler pages deploy public --project-name genesis-waitlist --branch main
+# Тайната ADMIN_TOKEN е в Cloudflare (wrangler pages secret put), не тук.
+name = "genesis-waitlist"
+pages_build_output_dir = "public"
+compatibility_date = "2026-09-01"
+
+[[kv_namespaces]]
+binding = "WAITLIST"
+id = "fb706434b6574da89584f5eb1e1b4234"
