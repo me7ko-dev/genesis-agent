@@ -118,7 +118,7 @@ and pull a model. Genesis uses it only when every cloud provider has failed:
 
 ```bash
 ollama pull qwen2.5-coder:3b   # last-resort brain
-ollama pull nomic-embed-text   # semantic skill search
+ollama pull bge-m3             # semantic skill search (Bulgarian too)
 ```
 
 ## Supported providers
