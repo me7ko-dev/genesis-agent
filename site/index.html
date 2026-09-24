@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="bg">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Genesis — кажи какво ти трябва</title>
+<meta name="description" content="AI агент, който пише и пуска код вместо теб. Описваш задачата на български и получаваш готов резултат.">
+<style>
+  :root {
+    --bg: #fbfaf7; --fg: #1d1c1a; --muted: #5d5a54; --line: #e4e0d8;
+    --card: #ffffff; --accent: #2f6b4f; --accent-fg: #ffffff; --ok: #2f6b4f; --err: #a33a2a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151514; --fg: #ecebe7; --muted: #a8a49c; --line: #2c2b28;
+      --card: #1d1d1b; --accent: #6fbf93; --accent-fg: #0f1a14; --ok: #6fbf93; --err: #e58a7a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 17px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 48px 16px 64px; }
+  h1 { font-size: clamp(30px, 6vw, 44px); line-height: 1.15; margin: 0 0 16px; letter-spacing: -0.01em; }
+  h2 { font-size: 22px; margin: 48px 0 12px; }
+  p.lead { font-size: 19px; color: var(--muted); margin: 0 0 28px; }
+  .tag { display: inline-block; font-size: 13px; letter-spacing: .04em; text-transform: uppercase;
+         color: var(--accent); margin-bottom: 14px; }
+  ul.examples { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
+  ul.examples li { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  ol.steps { padding-left: 22px; margin: 0; } ol.steps li { margin: 6px 0; }
+  .proof { border-left: 3px solid var(--accent); padding: 4px 0 4px 14px; color: var(--muted); }
+  form { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; display: grid; gap: 12px; }
+  label { font-size: 15px; color: var(--muted); display: grid; gap: 6px; }
+  input, textarea { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line);
+                    border-radius: 8px; padding: 10px 12px; width: 100%; }
+  textarea { min-height: 88px; resize: vertical; }
+  button { font: inherit; font-weight: 600; background: var(--accent); color: var(--accent-fg); border: 0;
+           border-radius: 8px; padding: 12px 16px; cursor: pointer; }
+  button[disabled] { opacity: .6; cursor: wait; }
+  .hp { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+  #msg { min-height: 1.5em; margin: 0; font-size: 15px; }
+  #msg.ok { color: var(--ok); } #msg.err { color: var(--err); }
+  dl dt { font-weight: 600; margin-top: 14px; } dl dd { margin: 4px 0 0; color: var(--muted); }
+  footer { margin-top: 56px; font-size: 14px; color: var(--muted); }
+  footer a, a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <span class="tag">Ранен достъп</span>
+  <h1>Кажи какво ти трябва. Genesis го прави.</h1>
+  <p class="lead">AI агент, който пише и пуска код вместо теб. Описваш задачата на български,
+    той я изпълнява в затворена среда и ти дава готовия резултат. Не е нужно да програмираш.</p>
+
+  <h2>Например</h2>
+  <ul class="examples">
+    <li>„Преименувай 500 снимки по датата, на която са направени.“</li>
+    <li>„Извади сумите от тези PDF фактури в таблица за Excel.“</li>
+    <li>„Тестовете в GitHub проекта ми падат — поправи ги.“</li>
+    <li>„Направи ми скрипт, който всяка сутрин проверява дали сайтът ми работи.“</li>
+  </ul>
+
+  <h2>Как работи</h2>
+  <ol class="steps">
+    <li>Пишеш задачата с обикновени думи.</li>
+    <li>Genesis пише кода, пуска го и проверява резултата — в отделен контейнер на наш сървър, никога на твоя компютър.</li>
+    <li>Получаваш файла, скрипта или поправката.</li>
+  </ol>
+
+  <h2>Измерено, не обещано</h2>
+  <p class="proof">На нашия тест с 12 истински бъга Genesis поправи 12 от 12 — средно за 12 секунди на бъг.
+    Кодът на агента е отворен: <a href="https://github.com/me7ko-dev/genesis-agent">github.com/me7ko-dev/genesis-agent</a>.</p>
+
+  <h2 id="join">Запиши се за ранен достъп</h2>
+  <form id="waitlist" action="/api/waitlist" method="post" novalidate>
+    <label>Имейл
+      <input type="email" name="email" autocomplete="email" required maxlength="254" placeholder="ti@primer.bg">
+    </label>
+    <label>Какво би искал да автоматизираш? (по желание)
+      <textarea name="need" maxlength="1000" placeholder="Напр. всеки месец събирам данни от 3 сайта в една таблица…"></textarea>
+    </label>
+    <div class="hp" aria-hidden="true">
+      <label>Не попълвай<input type="text" name="website" tabindex="-1" autocomplete="off"></label>
+    </div>
+    <button type="submit">Искам достъп</button>
+    <p id="msg" role="status" aria-live="polite"></p>
+  </form>
+
+  <h2>Въпроси</h2>
+  <dl>
+    <dt>Колко ще струва?</dt>
+    <dd>Първите 50 записани получават безплатни кредити. Цената ще обявим преди старта — плащане на месец или на изразходвано.</dd>
+    <dt>Трябва ли да разбирам от програмиране?</dt>
+    <dd>Не. Пишеш какво искаш; ако нещо не е ясно, Genesis пита.</dd>
+    <dt>Какво става с данните ми?</dt>
+    <dd>Всяка задача върви в отделна затворена среда, която се изтрива след това. Имейлът ти ползваме само за да те поканим.</dd>
+  </dl>
+
+  <footer>Genesis · <a href="https://metko.uk">metko.uk</a></footer>
+</main>
+<script>
+  const form = document.getElementById("waitlist");
+  const msg = document.getElementById("msg");
+  if (new URLSearchParams(location.search).has("ok")) {
+    msg.textContent = "Записан си. Ще ти пишем, когато отворим."; msg.className = "ok";
+  }
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const email = form.email.value.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      msg.textContent = "Провери имейла."; msg.className = "err"; return;
+    }
+    const btn = form.querySelector("button"); btn.disabled = true;
+    msg.textContent = ""; msg.className = "";
+    try {
+      const r = await fetch("/api/waitlist", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, need: form.need.value, website: form.website.value }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok && j.ok) {
+        msg.textContent = j.repeat ? "Вече си записан — обновихме отговора ти." : "Записан си. Ще ти пишем, когато отворим.";
+        msg.className = "ok"; form.reset();
+      } else {
+        msg.textContent = j.error || "Нещо се обърка. Опитай пак."; msg.className = "err";
+      }
+    } catch {
+      msg.textContent = "Няма връзка. Опитай пак."; msg.className = "err";
+    } finally { btn.disabled = false; }
+  });
+</script>
+</body>
+</html>
