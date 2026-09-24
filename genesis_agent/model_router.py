@@ -172,6 +172,38 @@ def light_reply_needs_escalation(text: str, tool_calls) -> bool:
     върти работа по машината на оператора."""
     return bool(tool_calls) or bool(_TOOL_TAG.search(text or "")) or (text or "").startswith("Error:")
 
+# Команда вместо модел: кратка заявка, която е точно вградена команда
+# („направи бекъп", „napravi backup"), не стига до модела — чатът предлага
+# командата. Само цялото изречение: „направи бекъп на ~/x" отива при модела.
+_VERB = r"(?:(?:направи|пусни|napravi|pusni|make|run|do|start)\s+(?:ми\s+|mi\s+|a\s+)?)?"
+_SHOW = r"(?:(?:покажи|покажи ми|дай|кои са|какви|pokaji|pokazhi|daj|dai|koi sa|kakvi|show|list|show me)\s+)?"
+_COMMAND_INTENTS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("/backup", re.compile(
+        _VERB + r"(?:бекъп|бекап|бакъп|backup|bekap|bekup|архив|архивирай|архивиране|arhiv|arhiviraj)"
+        r"(?:\s+(?:сега|sega|now))?")),
+    ("/skills", re.compile(
+        _SHOW + r"(?:уменията|умения|umeniqta|umeniya|umenia|skills)"
+        r"(?:\s+(?:имаш|imash|you have))?")),
+    ("/models", re.compile(
+        _SHOW + r"(?:моделите|модели|modelite|modeli|models)"
+        r"(?:\s+(?:имаш|imash|you have))?")),
+    ("/update", re.compile(
+        r"(?:обнови се|обнови genesis|обнови генезис|obnovi se|obnovi genesis|"
+        r"update yourself|update genesis|self[- ]update)")),
+)
+
+
+def command_for_request(text: str) -> str | None:
+    """Вградената команда, която заявката иска изцяло, или None."""
+    t = re.sub(r"\s+", " ", (text or "").strip().lower()).rstrip(" .!?")
+    if not t or len(t) > 40 or t.startswith("/"):
+        return None
+    for cmd, pattern in _COMMAND_INTENTS:
+        if pattern.fullmatch(t):
+            return cmd
+    return None
+
+
 if __name__ == "__main__":
     tests = [
         "Reverse a string",
