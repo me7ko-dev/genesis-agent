@@ -14,6 +14,8 @@
 | `egress/proxy.py` | единственият изход: `CONNECT` само към API на модели, порт 443 |
 | `runner/task-requirements.txt` | библиотеките в образа (Excel, PDF, Word, снимки, pandas, pytest) — PyPI е затворен |
 | `build.sh`, `up.sh` | строене на образите; мрежите и проксито |
+| `web/server.py` | етап 2: вход, уеб чат, сваляне на файловете (само stdlib) |
+| `web/store.py` | SQLite: хора (scrypt), сесии (SHA-256 на жетона), разговори, ходове |
 
 ## Измерено тук (2026-09-24, Docker 29, без API ключове)
 
@@ -49,6 +51,21 @@ python -m cloud.runner.launch --workspace /srv/jobs/1 --env-file /srv/genesis/ke
 ```
 
 По-силна изолация: инсталирай gVisor и добави `--runtime runsc`.
+
+## Етап 2: вход, уеб чат, файлове
+
+```bash
+python -m cloud.web.server add-user ivan@example.com      # бета: хората се добавят ръчно, печата парола
+python -m cloud.web.server serve --data /srv/genesis/web --jobs /srv/jobs   --env-file /srv/genesis/keys.env --trust-proxy           # 127.0.0.1:8080, отпред Caddy/Cloudflare с HTTPS
+```
+
+Разговорът е една папка; всяко съобщение е нов контейнер върху нея, историята
+(само въпроси и крайни отговори, ≤20 съобщения / 12k знака) е в `/work/.genesis`.
+По един ход на човек, общо `--workers` (2) контейнера. Файловете от контейнера
+са недоверени: сваля се само като прикачен файл, без символни връзки, без `..`,
+и само между ходовете. Чуждите разговори и файлове връщат 404. 5 грешни пароли
+за 15 мин → 429. Проверено: 40 теста (`tests/test_cloud_web.py`) и в браузър с
+демо runner (вход, задача, събития, CSV и zip, телефон 375 px).
 
 ## Известно и отложено
 
