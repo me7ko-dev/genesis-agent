@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="bg">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Genesis</title>
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<section id="login" hidden>
+  <form id="login-form" class="card">
+    <h1>Genesis</h1>
+    <p class="muted">Агент, който върши задачата и ти дава файловете.</p>
+    <label>Имейл <input name="email" type="email" autocomplete="username" required></label>
+    <label>Парола <input name="password" type="password" autocomplete="current-password" required></label>
+    <button type="submit">Вход</button>
+    <p id="login-error" class="error" role="alert"></p>
+  </form>
+</section>
+
+<section id="app" hidden>
+  <aside>
+    <button id="new-chat">+ Нов разговор</button>
+    <ul id="chats"></ul>
+    <div class="me"><span id="me"></span> <button id="logout" class="link">Изход</button></div>
+  </aside>
+  <main>
+    <div id="log" aria-live="polite"></div>
+    <div id="files" hidden>
+      <h2>Файлове <a id="zip" href="#">свали всички (zip)</a></h2>
+      <ul id="file-list"></ul>
+    </div>
+    <form id="ask">
+      <textarea id="text" rows="3" maxlength="4000" placeholder="Какво да направя? (Ctrl+Enter праща)" required></textarea>
+      <button type="submit" id="send">Прати</button>
+    </form>
+  </main>
+</section>
+</body>
+</html>

@@ -24,6 +24,37 @@ from pathlib import Path
 from typing import Any
 
 MAX_TOOL_OUTPUT = 4000
+# Уеб чатът (cloud/web): всяко съобщение е нов контейнер в СЪЩАТА папка, затова
+# разговорът се пази тук. Само въпросите и крайните отговори — не изходите на
+# инструментите — и с таван, за да не расте цената на всеки следващ ход.
+HISTORY_FILE = Path(".genesis") / "history.json"
+HISTORY_MAX_MESSAGES = 20
+HISTORY_MAX_CHARS = 12000
+
+
+def load_history(workspace: Path) -> list[dict[str, str]]:
+    """Последните съобщения от разговора, в рамките на таваните."""
+    try:
+        raw = json.loads((workspace / HISTORY_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    msgs = [{"role": m["role"], "content": m["content"]} for m in raw
+            if isinstance(m, dict) and m.get("role") in ("user", "assistant")
+            and isinstance(m.get("content"), str)] if isinstance(raw, list) else []
+    msgs = msgs[-HISTORY_MAX_MESSAGES:]
+    while msgs and sum(len(m["content"]) for m in msgs) > HISTORY_MAX_CHARS:
+        msgs = msgs[1:]
+    return msgs
+
+
+def save_history(workspace: Path, history: list[dict[str, str]]) -> None:
+    path = workspace / HISTORY_FILE
+    try:
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps(history[-HISTORY_MAX_MESSAGES:], ensure_ascii=False),
+                        encoding="utf-8")
+    except OSError:
+        pass  # разговорът губи паметта си, задачата не бива да пада заради това
 
 
 def emit(kind: str, **data: Any) -> None:
@@ -101,8 +132,10 @@ def main(argv: list[str] | None = None) -> int:
         def info(self, text: str) -> None:
             emit("info", text=text)
 
+    workspace = Path(os.environ["GENESIS_WORKSPACE"])
+    history = load_history(workspace)
     system_prompt, _ = gta.build_system_prompt()
-    messages: deque = deque([{"role": "system", "content": system_prompt}],
+    messages: deque = deque([{"role": "system", "content": system_prompt}, *history],
                             maxlen=gta._HISTORY_MAXLEN)
     ok, error = True, ""
     try:
@@ -114,6 +147,9 @@ def main(argv: list[str] | None = None) -> int:
     # платена.
     if ok and last_reply["text"].lstrip().startswith("[Грешка"):
         ok, error = False, last_reply["text"].strip()[:500]
+    if ok:
+        save_history(workspace, [*history, {"role": "user", "content": text},
+                                 {"role": "assistant", "content": last_reply["text"]}])
     emit("done", ok=ok, error=error, seconds=round(time.monotonic() - t0, 1),
          tokens=tokens_since(log_path, skip))
     return 0 if ok else 1
