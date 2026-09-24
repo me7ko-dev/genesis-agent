@@ -105,8 +105,24 @@ def test_the_real_key_is_added_and_usage_is_billed(tmp_path) -> None:
     assert up.seen[0].full_url == "https://api.groq.com/openai/v1/chat/completions"
     assert up.seen[0].get_header("Authorization") == "Bearer gsk_real"
     assert gw.usage_for(tmp_path / "usage.jsonl", "job1") == {
-        "prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120, "calls": 1}
+        "prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
+        "cached_tokens": 0, "calls": 1}
     assert gw.usage_for(tmp_path / "usage.jsonl", "other")["calls"] == 0
+
+
+def test_cached_prompt_tokens_are_billed_separately(tmp_path) -> None:
+    # Ollama Cloud: prompt_tokens_details.cached_tokens. Таванът брои total.
+    up = FakeUpstream([(200, {"prompt_tokens": 4089, "completion_tokens": 64, "total_tokens": 4153,
+                              "prompt_tokens_details": {"cached_tokens": 4064}})])
+    g = _gateway(tmp_path, {"OLLAMA_API_KEY": "k"}, up)
+    assert g.forward("ollama_cloud", b'{"model": "gpt-oss:120b"}', gw.Grant("j", 10 ** 12, 10 ** 6))[0] == 200
+    billed = gw.usage_for(tmp_path / "usage.jsonl", "j")
+    assert billed["cached_tokens"] == 4064
+    assert billed["total_tokens"] == 4153
+    assert g.ledger.used("j") == 4153
+    reloaded = gw.Ledger(tmp_path / "usage.jsonl")
+    reloaded.load()
+    assert reloaded.jobs["j"].cached_tokens == 4064
 
 
 def test_the_next_key_is_tried_on_429(tmp_path) -> None:
@@ -268,7 +284,8 @@ def test_the_bill_comes_from_the_gateway_not_the_container(monkeypatch, tmp_path
     monkeypatch.setattr(launch.subprocess, "Popen", lambda argv, **kw: _Proc(argv, g.usage))
     res = launch.run_task("задача", tmp_path / "ws", gateway=g)
     assert res.ok
-    assert res.tokens == {"prompt_tokens": 90, "completion_tokens": 10, "total_tokens": 100, "calls": 1}
+    assert res.tokens == {"prompt_tokens": 90, "completion_tokens": 10, "total_tokens": 100,
+                          "cached_tokens": 0, "calls": 1}
 
 
 def test_the_token_lives_as_long_as_the_task(monkeypatch, tmp_path) -> None:
