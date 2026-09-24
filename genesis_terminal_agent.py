@@ -743,6 +743,37 @@ def ask_genesis(messages, tools=None):
         return f"[Грешка: {text[6:].strip()}]", None
     return text, getattr(reply, "tool_calls", None)
 
+_BACKUP_EXCLUDE = ("venv", "__pycache__", ".git", ".env")
+
+
+def _rsync() -> str | None:
+    """rsync само извън Windows: там „C:\\..." му изглежда като отдалечен хост."""
+    return None if os.name == "nt" else shutil.which("rsync")
+
+
+def _backup_workspace(src: Path, dest: Path) -> tuple[bool, str]:
+    """`/backup`: src → dest. rsync, ако го има; иначе копие с Python.
+
+    Windows няма rsync — там `/backup` падаше с „[WinError 2]", а операторът
+    работи на Windows. Копието с Python е без --delete: в целта нищо не се
+    трие. Цел вътре в src се отказва — всяко пускане влага архива в себе си."""
+    src, dest = Path(src).resolve(), Path(dest).resolve()
+    if dest == src or src in dest.parents:
+        return False, f"целта {dest} е вътре в {src} — избери друга GENESIS_BACKUP_DIR"
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        if _rsync():
+            excl = [a for x in _BACKUP_EXCLUDE for a in ("--exclude", x)]
+            r = subprocess.run(["rsync", "-a", "--delete", *excl, f"{src}/", f"{dest}/"],
+                               capture_output=True, text=True, check=False)
+            return r.returncode == 0, r.stderr.strip()
+        shutil.copytree(src, dest, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns(*_BACKUP_EXCLUDE))
+        return True, ""
+    except (OSError, shutil.Error) as e:
+        return False, str(e)
+
+
 # ── Компресия на живата история ─────────────────────────────────────────────
 # Досега messages беше deque(maxlen=30) — просто РЕЖЕШЕ най-старото при
 # препълване, без обобщение. Дълъг разговор растеше линейно в token разход
@@ -1128,6 +1159,19 @@ def main():
             user_input = console.input("[bold green]❯[/] ").strip()
             if not user_input: continue
 
+            # „napravi backup" → /backup без модел (model_router.command_for).
+            # Командите, които променят нещо, питат; „не" праща към модела.
+            from genesis_agent.model_router import CONFIRM_COMMANDS, command_for
+            _cmd = command_for(user_input)
+            if _cmd in CONFIRM_COMMANDS:
+                _ans = console.input(f"[cyan]↪ Това е командата [bold]{_cmd}[/] — без модел. "
+                                     "Пусни я? (Enter = да / не = питай модела) > [/]").strip().lower()
+                if _ans in ("", "да", "д", "da", "d", "y", "yes"):
+                    user_input = _cmd
+            elif _cmd:
+                console.print(f"[dim]↪ {_cmd} (без модел)[/]")
+                user_input = _cmd
+
             # ── Commands ──
             if user_input.lower() in ["exit", "quit", "изход"]:
                 break
@@ -1151,20 +1195,16 @@ def main():
                 if not dest:
                     console.print(
                         "[yellow]Задай GENESIS_BACKUP_DIR (къде да пази архива), напр.:[/]\n"
-                        "  export GENESIS_BACKUP_DIR=/mnt/backup/genesis")
+                        + ('  setx GENESIS_BACKUP_DIR "D:\\backup\\genesis"   (после нов терминал)'
+                           if os.name == "nt" else
+                           "  export GENESIS_BACKUP_DIR=/mnt/backup/genesis"))
                     continue
-                Path(dest).mkdir(parents=True, exist_ok=True)
                 console.print(f"[cyan]💾 Архивирам {WORKSPACE} → {dest} …[/]")
-                r = subprocess.run(
-                    ["rsync", "-a", "--delete",
-                     "--exclude", "venv", "--exclude", "__pycache__",
-                     "--exclude", ".git", "--exclude", ".env",
-                     f"{WORKSPACE}/", f"{dest}/"],
-                    capture_output=True, text=True, check=False)
-                if r.returncode == 0:
+                ok, err = _backup_workspace(WORKSPACE, Path(dest).expanduser())
+                if ok:
                     console.print("[green]✅ Архивирането завърши.[/]")
                 else:
-                    console.print(f"[red]❌ rsync се провали:[/] {r.stderr.strip()[:200]}")
+                    console.print(f"[red]❌ Архивирането се провали:[/] {err[:200]}")
                 continue
 
             # ── /update — реално обновяване от GitHub, не само проверка ──
