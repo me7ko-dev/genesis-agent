@@ -92,9 +92,12 @@ def docker_args(name: str, workspace: Path, text: str, *, limits: Limits | None 
 def prepare_workspace(workspace: Path) -> None:
     """Папката на задачата трябва да е записваема от потребител 10001."""
     workspace.mkdir(parents=True, exist_ok=True)
+    chown = getattr(os, "chown", None)  # няма го на Windows (там се тества)
     try:
-        os.chown(workspace, RUNNER_UID, RUNNER_UID)
-    except (PermissionError, AttributeError, OSError):
+        if chown is None:
+            raise OSError("no chown")
+        chown(workspace, RUNNER_UID, RUNNER_UID)
+    except OSError:
         workspace.chmod(0o777)
 
 
