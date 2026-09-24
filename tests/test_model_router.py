@@ -195,3 +195,39 @@ def test_routing_can_be_switched_off(monkeypatch) -> None:
 ])
 def test_escalation_when_the_small_model_reaches_for_a_tool(text, calls, expected) -> None:
     assert mr.light_reply_needs_escalation(text, calls) is expected
+
+# ── Команда вместо модел ──────────────────────────────────────────────────
+
+@pytest.mark.parametrize("text, cmd", [
+    ("направи бекъп", "/backup"),
+    ("Направи ми бекъп!", "/backup"),
+    ("napravi backup", "/backup"),
+    ("backup", "/backup"),
+    ("бекъп сега", "/backup"),
+    ("архивирай", "/backup"),
+    ("make a backup", "/backup"),
+    ("покажи уменията", "/skills"),
+    ("какви умения имаш?", "/skills"),
+    ("list skills", "/skills"),
+    ("покажи моделите", "/models"),
+    ("show models", "/models"),
+    ("обнови се", "/update"),
+    ("update yourself", "/update"),
+])
+def test_command_for_request_matches_whole_request(text, cmd):
+    assert mr.command_for_request(text) == cmd
+
+
+@pytest.mark.parametrize("text", [
+    "направи бекъп на ~/projects",       # цел → моделът решава
+    "как работи бекъпът?",               # въпрос за бекъпа, не заявка
+    "направи бекъп и после деплой",     # повече от командата
+    "покажи уменията за python код",
+    "обнови README",
+    "/backup",                          # вече е команда
+    "",
+    "здрасти",
+    "backup " + "x" * 40,
+])
+def test_command_for_request_leaves_the_rest_to_the_model(text):
+    assert mr.command_for_request(text) is None
