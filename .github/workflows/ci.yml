@@ -76,6 +76,11 @@ jobs:
       - name: Unit tests (pytest)
         run: python -m pytest -q --durations=15
 
+      # The genesis.metko.uk waitlist function (site/). Node is preinstalled
+      # on every GitHub-hosted runner; the test fakes KV, no network.
+      - name: Waitlist function (node)
+        run: node --test site/functions/api/waitlist.test.mjs
+
       # The sandbox is the safety boundary — if it regresses, nothing else
       # matters. These checks need no API key and no network.
       - name: Sandbox classification
