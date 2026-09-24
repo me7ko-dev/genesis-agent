@@ -371,3 +371,57 @@ def test_maxcoding_never_routes_to_the_small_model(_routed, monkeypatch) -> None
     monkeypatch.setattr(gta, "_CODING_MODE", True)
     gta.ask_genesis([{"role": "user", "content": "какво е рекурсия?"}], tools=[{}])
     assert _routed.calls == ["strong"]
+
+# ── /backup: rsync, ако го има; иначе копие с Python (Windows) ───────────────
+
+def _tree(root: Path) -> None:
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "a.py").write_text("print(1)\n", encoding="utf-8")
+    (root / ".env").write_text("KEY=secret\n", encoding="utf-8")
+    for d in ("venv", "__pycache__", ".git"):
+        (root / d).mkdir()
+        (root / d / "x").write_text("x", encoding="utf-8")
+
+
+def test_backup_without_rsync_copies_and_skips_secrets_and_junk(tmp_path, monkeypatch) -> None:
+    src, dest = tmp_path / "ws", tmp_path / "bk"
+    _tree(src)
+    (dest / "old").mkdir(parents=True)          # без --delete: остава
+    monkeypatch.setattr(gta, "_rsync", lambda: None)
+    ok, err = gta._backup_workspace(src, dest)
+    assert ok, err
+    assert (dest / "src" / "a.py").read_text(encoding="utf-8") == "print(1)\n"
+    assert (dest / "old").is_dir()
+    assert not any((dest / n).exists() for n in (".env", "venv", "__pycache__", ".git"))
+
+
+def test_backup_runs_twice_without_rsync(tmp_path, monkeypatch) -> None:
+    src, dest = tmp_path / "ws", tmp_path / "bk"
+    _tree(src)
+    monkeypatch.setattr(gta, "_rsync", lambda: None)
+    assert gta._backup_workspace(src, dest)[0]
+    (src / "src" / "a.py").write_text("print(2)\n", encoding="utf-8")
+    assert gta._backup_workspace(src, dest)[0]
+    assert (dest / "src" / "a.py").read_text(encoding="utf-8") == "print(2)\n"
+
+
+def test_backup_uses_rsync_when_present(tmp_path, monkeypatch) -> None:
+    calls = []
+
+    class _R:
+        returncode, stderr = 0, ""
+
+    monkeypatch.setattr(gta, "_rsync", lambda: "/usr/bin/rsync")
+    monkeypatch.setattr(gta.subprocess, "run", lambda argv, **kw: calls.append(argv) or _R())
+    ok, _ = gta._backup_workspace(tmp_path / "ws", tmp_path / "bk")
+    assert ok and calls[0][:3] == ["rsync", "-a", "--delete"]
+    assert calls[0][calls[0].index(".env") - 1] == "--exclude"
+
+
+@pytest.mark.parametrize("inside", ["", "backup", "a/b"])
+def test_backup_refuses_a_target_inside_the_workspace(tmp_path, inside) -> None:
+    src = tmp_path / "ws"
+    src.mkdir()
+    ok, err = gta._backup_workspace(src, src / inside if inside else src)
+    assert not ok and "GENESIS_BACKUP_DIR" in err
+    assert list(src.iterdir()) == []
