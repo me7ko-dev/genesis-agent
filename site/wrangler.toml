@@ -1,4 +1,4 @@
-# Cloudflare Pages: genesis.metko.uk (етап 0). Качване:
+# Cloudflare Pages: genesis-waitlist.pages.dev (етап 0). Качване:
 #   cd site && npx wrangler pages deploy public --project-name genesis-waitlist --branch main
 # Тайната ADMIN_TOKEN е в Cloudflare (wrangler pages secret put), не тук.
 name = "genesis-waitlist"
