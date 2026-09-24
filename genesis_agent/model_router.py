@@ -172,34 +172,62 @@ def light_reply_needs_escalation(text: str, tool_calls) -> bool:
     върти работа по машината на оператора."""
     return bool(tool_calls) or bool(_TOOL_TAG.search(text or "")) or (text or "").startswith("Error:")
 
-# Команда вместо модел: кратка заявка, която е точно вградена команда
-# („направи бекъп", „napravi backup"), не стига до модела — чатът предлага
-# командата. Само цялото изречение: „направи бекъп на ~/x" отива при модела.
-_VERB = r"(?:(?:направи|пусни|napravi|pusni|make|run|do|start)\s+(?:ми\s+|mi\s+|a\s+)?)?"
-_SHOW = r"(?:(?:покажи|покажи ми|дай|кои са|какви|pokaji|pokazhi|daj|dai|koi sa|kakvi|show|list|show me)\s+)?"
-_COMMAND_INTENTS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("/backup", re.compile(
-        _VERB + r"(?:бекъп|бекап|бакъп|backup|bekap|bekup|архив|архивирай|архивиране|arhiv|arhiviraj)"
-        r"(?:\s+(?:сега|sega|now))?")),
-    ("/skills", re.compile(
-        _SHOW + r"(?:уменията|умения|umeniqta|umeniya|umenia|skills)"
-        r"(?:\s+(?:имаш|imash|you have))?")),
-    ("/models", re.compile(
-        _SHOW + r"(?:моделите|модели|modelite|modeli|models)"
-        r"(?:\s+(?:имаш|imash|you have))?")),
-    ("/update", re.compile(
-        r"(?:обнови се|обнови genesis|обнови генезис|obnovi se|obnovi genesis|"
-        r"update yourself|update genesis|self[- ]update)")),
-)
+# ── Команда вместо модел (design note, 2026-09-24) ───────────────────────────
+# „napravi backup" минаваше през силния модел с инструменти — поне две
+# обръщения по ~2 200 токена основа, за да стигне до това, което `/backup`
+# прави мигновено. Хваща се само ЦЯЛО съобщение, което е самото намерение:
+# „nameri i napravi backup genesis v disk D: v zip fail" (реално съобщение)
+# носи цел и формат и остава за модела. Пропуснато намерение струва колкото
+# досега; погрешно хванато — един отговор „не".
+_FILLER = re.compile(r"\b(моля|molya|molq|please|pls|хайде|haide|ajde)\b")
+_SHOW = r"(покажи|покажи ми|pokaji|pokaji mi|pokazhi|pokazhi mi|show|show me|list)"
+_COMMAND_INTENTS = [(cmd, re.compile(rx)) for cmd, rx in (
+    ("/backup", (
+        r"((направи|пусни|napravi|pusni|make|do|run|take)( ми| mi)?( един| edin| a)? )?"
+        r"(бекъп|бекап|backup|back up|bekap|bekup|архив|arhiv)( сега| sega| now)?"
+        r"|(архивирай|arhiviraj|arhivirai|arhiviray)( сега| sega| now)?")),
+    ("/update", (
+        r"(обнови|ъпдейтни|obnovi|updatni|apdeitni|update) "
+        r"(се|себе си|se|sebe si|yourself|genesis|генезис)"
+        r"|(провери|proveri|check) (за|za|for) (обновления|ъпдейт|ъпдейти|obnovleniq|"
+        r"obnovlenia|update|updates|apdeit)"
+        r"|(има ли|ima li) (нова версия|обновления|ъпдейт|nova versiq|nova versia|obnovleniq|"
+        r"obnovlenia|update|apdeit)")),
+    ("/skills", (
+        _SHOW + r" (уменията|скиловете|umeniqta|umeniyata|umenijata|skilovete|skills|your skills|the skills)"
+        r"|(какви|kakvi) (умения|скилове|umeniq|umenia|skilove) (имаш|imash)"
+        r"|what skills do you have")),
+    ("/models", (
+        _SHOW + r" (моделите|веригата|modelite|verigata|models|the models|the chain)"
+        r"|(кои|koi) (модели|modeli) (имаш|ползваш|imash|polzvash)"
+        r"|which models do you (have|use)")),
+    ("/model",
+        r"(смени|смяна на|smeni|sameni|smqna na|change|switch)( на| na| the)? (модела|модел|modela|model)"),
+    ("/clear", (
+        r"(изчисти|почисти|izchisti|pochisti|clear)( the)? (разговора|чата|историята|razgovora|chata|"
+        r"istoriqta|istoriyata|chat|conversation|history)"
+        r"|(нов разговор|нов чат|nov razgovor|nov chat|new chat|new conversation)")),
+    ("/tasks",
+        _SHOW + r" (задачите|нишките|zadachite|nishkite|tasks|the tasks|open tasks)"),
+    ("/help", (
+        r"помощ|pomosht|pomosh|help"
+        r"|(какви|kakvi) (команди|komandi) (има|имаш|ima|imash)"
+        r"|what commands (are there|do you have)"
+        r"|" + _SHOW + r" (командите|komandite|commands|the commands)")),
+)]
+# Тези променят нещо (архив с --delete в целта; изгубена история) — питат.
+CONFIRM_COMMANDS = frozenset({"/backup", "/clear"})
 
 
 def command_for_request(text: str) -> str | None:
-    """Вградената команда, която заявката иска изцяло, или None."""
-    t = re.sub(r"\s+", " ", (text or "").strip().lower()).rstrip(" .!?")
-    if not t or len(t) > 40 or t.startswith("/"):
+    """Чат команда, която съобщението иска изцяло, или None (→ модела)."""
+    t = (text or "").strip().lower()
+    if not t or t.startswith("/") or len(t) > 60 or "\n" in t:
         return None
-    for cmd, pattern in _COMMAND_INTENTS:
-        if pattern.fullmatch(t):
+    t = _FILLER.sub(" ", t.replace("ё", "е"))
+    t = " ".join(re.sub(r"[?!.,;]+", " ", t).split())
+    for cmd, rx in _COMMAND_INTENTS:
+        if rx.fullmatch(t):
             return cmd
     return None
 
