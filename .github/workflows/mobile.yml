@@ -1,0 +1,83 @@
+name: Phone app
+
+# Genesis Remote (mobile/): the protocol against the real Python server,
+# typecheck, bundles for all three platforms, and the iOS app built by Xcode.
+# The Android APK is built and released in native.yml.
+
+on:
+  push:
+    branches: [main]
+    paths: ["mobile/**", "genesis_agent/remote_server.py", "genesis_terminal_agent.py", ".github/workflows/mobile.yml"]
+  pull_request:
+    paths: ["mobile/**", "genesis_agent/remote_server.py", "genesis_terminal_agent.py", ".github/workflows/mobile.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: mobile-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - run: pip install -e "..[mobile]"
+      - run: npm ci
+      - name: Typecheck (app and tests)
+        run: |
+          npx tsc --noEmit
+          npx tsc -p tests --noEmit
+      # tests/interop.test.ts starts the real genesis_agent.remote_server.
+      - name: Tests (TypeScript client ↔ Python server)
+        run: npm test
+        env:
+          PYTHON: python
+      - name: Bundle for Android, iOS and web
+        run: npx expo export --platform all --output-dir dist-check
+
+  ios:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - run: npm ci
+      # ios/ is generated from app.json, exactly what `npm run xcode` opens.
+      - name: Generate the Xcode project
+        run: npx expo prebuild --platform ios
+      # Simulator, unsigned: proves the Xcode project builds without an
+      # Apple Developer account. On a device, Xcode signs it with your
+      # (free) Apple ID — docs/MOBILE.md.
+      - name: Build with Xcode
+        run: |
+          set -o pipefail
+          xcodebuild -workspace ios/GenesisRemote.xcworkspace -scheme GenesisRemote \
+            -configuration Release -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build CODE_SIGNING_ALLOWED=NO build | tail -40
+      - name: Package the simulator app
+        run: |
+          cd build/Build/Products/Release-iphonesimulator
+          ditto -c -k --keepParent GenesisRemote.app "$GITHUB_WORKSPACE/genesis-remote-ios-simulator.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: genesis-remote-ios-simulator
+          path: genesis-remote-ios-simulator.zip
+          if-no-files-found: error

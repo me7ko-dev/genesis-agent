@@ -27,7 +27,12 @@ import urllib.request
 from dataclasses import dataclass
 
 _DIST = "genesis-agent"
+# Родният билд следи последния GitHub release, не клон: release-ите са
+# неизменни и `releases/latest` превключва наведнъж, когато всичките му
+# файлове са качени (.github/workflows/native.yml).
+LATEST_RELEASE = "latest"
 _API = "https://api.github.com/repos/{owner_repo}/commits/{ref}"
+_RELEASE_API = "https://api.github.com/repos/{owner_repo}/releases/latest"
 _COMPARE_API = "https://api.github.com/repos/{owner_repo}/compare/{base}...{head}"
 _TIMEOUT = 15
 _CHANGELOG_LIMIT = 10
@@ -59,7 +64,14 @@ def installed_source() -> Source | None:
     None значи „не е инсталирано от git" — чекаут за разработка, инсталация
     от архив, копирана папка. Това не е грешка и не бива да се съобщава като
     такава.
+
+    Родният Windows билд (genesis.exe) няма pip метаданни — комитът и
+    release тагът, който следи, са записани при билда в `_build_info.json`
+    (packaging/build.py).
     """
+    from genesis_agent.paths import FROZEN, PACKAGE_DIR
+    if FROZEN:
+        return _build_info_source(PACKAGE_DIR / "_build_info.json")
     try:
         from importlib.metadata import distribution
         raw = distribution(_DIST).read_text("direct_url.json")
@@ -77,6 +89,16 @@ def installed_source() -> Source | None:
         return None
     return Source(url=data.get("url") or "", commit=commit,
                   ref=vcs.get("requested_revision") or "")
+
+
+def _build_info_source(path) -> Source | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not data.get("commit"):
+        return None
+    return Source(url=data.get("url") or "", commit=data["commit"], ref=data.get("ref") or "")
 
 
 def describe(version: str) -> str:
@@ -107,6 +129,25 @@ def latest_commit(owner_repo: str, ref: str, *, timeout: int = _TIMEOUT) -> str 
         return None
     sha = data.get("sha") if isinstance(data, dict) else None
     return sha if isinstance(sha, str) and sha else None
+
+
+def latest_release_commit(owner_repo: str, *, timeout: int = _TIMEOUT) -> str | None:
+    """Комитът, от който е последният release, или None. Никога не хвърля."""
+    if not owner_repo:
+        return None
+    request = urllib.request.Request(
+        _RELEASE_API.format(owner_repo=owner_repo),
+        headers={"Accept": "application/vnd.github+json",
+                 "User-Agent": "genesis-agent"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read(1 << 20).decode("utf-8", "replace"))
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+        return None
+    tag = data.get("tag_name") if isinstance(data, dict) else None
+    if not isinstance(tag, str) or not tag:
+        return None
+    return latest_commit(owner_repo, tag, timeout=timeout)
 
 
 def changelog(owner_repo: str, base: str, head: str, *,
@@ -157,6 +198,11 @@ def changelog(owner_repo: str, base: str, head: str, *,
 
 def install_command(src: Source) -> str:
     """Командата, която обновява точно това копие."""
+    from genesis_agent.paths import FROZEN
+    if FROZEN:
+        # Същият инсталатор, който го е сложил; той заменя папката цяла.
+        repo = src.owner_repo or "me7ko-dev/genesis-agent"
+        return f"irm https://raw.githubusercontent.com/{repo}/main/scripts/install.ps1 | iex"
     ref = f"@{src.ref}" if src.ref else ""
     return f'pipx install --force "git+{src.url}{ref}"'
 
@@ -183,7 +229,12 @@ class UpdateCheck:
 def check_update(*, timeout: int = _TIMEOUT) -> UpdateCheck:
     """Пита веднъж: инсталирано ли е от git, и ако да — има ли по-нов комит."""
     src = installed_source()
-    latest = latest_commit(src.owner_repo, src.ref, timeout=timeout) if src else None
+    if src is None:
+        latest = None
+    elif src.ref == LATEST_RELEASE:
+        latest = latest_release_commit(src.owner_repo, timeout=timeout)
+    else:
+        latest = latest_commit(src.owner_repo, src.ref, timeout=timeout)
     return UpdateCheck(src=src, latest=latest)
 
 
