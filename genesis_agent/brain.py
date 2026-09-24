@@ -178,6 +178,24 @@ _PROVIDERS = {
 # Кои доставчици се викат през native SDK вместо през OpenAI-съвместим HTTP.
 _NATIVE_PROVIDERS = {"anthropic"}
 
+
+def _openai_usage(usage: Any) -> Any:
+    """usage от OpenAI-съвместим отговор + `cached_read_tokens` за budget.py.
+
+    Ollama Cloud кешира префикса сам и връща колко е прочетено от кеша в
+    `prompt_tokens_details.cached_tokens` (измерено 2026-09-25: 4 064 от 4 089
+    на второто обръщение със същия системен промпт). Досега полето не се
+    четеше и `genesis budget` показваше кеш 0 при всички освен Anthropic.
+    Groq (gpt-oss) и NVIDIA не го връщат — тогава usage остава както е.
+    """
+    if not isinstance(usage, dict):
+        return usage
+    details = usage.get("prompt_tokens_details")
+    cached = details.get("cached_tokens") if isinstance(details, dict) else None
+    if not cached:
+        return usage
+    return {**usage, "cached_read_tokens": int(cached)}
+
 # Локалният модел (собственият мозък на Genesis). Празно → изключен.
 LOCAL_MODEL = os.environ.get("GENESIS_LOCAL_MODEL", "qwen2.5-coder:3b")
 
@@ -993,7 +1011,7 @@ class Brain:
                 f"`max_tokens:` за модела в config.yaml, ако доставчикът го позволява."
             )
         # usage липсва при локален Ollama /v1 понякога — None е ОК, budget.py го обработва.
-        self._last_usage = data.get("usage")
+        self._last_usage = _openai_usage(data.get("usage"))
         return (content or "").strip(), tool_calls
 
     # ── Anthropic native (Messages API) ──────────────────────────────────────────
