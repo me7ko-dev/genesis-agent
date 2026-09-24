@@ -285,7 +285,9 @@ function DailyChart({ daily }: { daily: UsageReport['daily'] }) {
           ))}
         </div>
         {h && hover !== null && (
-          <div className="chart-tip" style={{ left: `${((hover + 0.5) / daily.length) * 100}%` }}>
+          // Near an edge the tip hangs inward instead of past the plot.
+          <div className={`chart-tip ${hover < daily.length * 0.15 ? 'from-left' : hover > daily.length * 0.85 ? 'from-right' : ''}`}
+               style={{ left: `${((hover + 0.5) / daily.length) * 100}%` }}>
             <div className="tip-day">{fmtDay(h.day, true)}</div>
             <div><b>{full(h.tokens)}</b> токена</div>
             <div className="muted">{full(h.calls)} обръщения</div>

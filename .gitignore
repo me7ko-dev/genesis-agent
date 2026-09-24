@@ -30,6 +30,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 build/
+!desktop/build/
 dist/
 venv/
 .venv/

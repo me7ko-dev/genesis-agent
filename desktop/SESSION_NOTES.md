@@ -85,6 +85,17 @@
   3. Само за проверка: приложението да пуска `python -m genesis_agent serve` от
      worktree-а (findExe иска .exe; ще трябва опция за dev режим).
 
+### Избран път: сглобяване в GitHub CI
+- Smart App Control е ВКЛЮЧЕН (`HKLM\...\CI\Policy VerifiedAndReputablePolicyState=1`);
+  CodeIntegrity събития 3033/3077 за локалния `dist\genesis\genesis.exe`. Не го изключвай:
+  после не може да се включи отново.
+- Commit 7c26ee1 на `feat/desktop-app` (rebase върху origin/main c80cfa4), качен в origin.
+- `gh workflow run native.yml --ref feat/desktop-app`: сглобява артефакта
+  `genesis-windows-x64` БЕЗ release (publish върви само при push в main).
+  Run: https://github.com/me7ko-dev/genesis-agent/actions/runs/36064219241
+- След това: `gh run download <id> -n genesis-windows-x64`, резервно копие на
+  `%LOCALAPPDATA%\Programs\Genesis`, разархивиране на новия там.
+
 ### Остава
 1. Работещ genesis.exe с командите → копиране в `%LOCALAPPDATA%\Programs\Genesis\`
    (първо резервно копие на стария)

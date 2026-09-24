@@ -456,6 +456,9 @@ button.chip { cursor: pointer; }
   background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 9px; padding: 7px 10px;
   font-size: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, .45); z-index: 2;
 }
+.chart-tip.from-left { transform: translate(-12px, -100%); }
+.chart-tip.from-right { transform: translate(calc(-100% + 12px), -100%); }
+.sheet-body { overflow-x: hidden; }
 .tip-day { color: var(--text-2); margin-bottom: 2px; }
 .split { font-size: 12px; margin-top: 10px; }
 

@@ -57,20 +57,27 @@ function createWindow(): void {
     if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
   });
 
-  // Screenshots for checking the design: GENESIS_DESKTOP_SHOT=out.png[,delayMs]
+  // Screenshots for checking the design: GENESIS_DESKTOP_SHOT=out.png[,delayMs[,scrollPx]]
   const shot = process.env.GENESIS_DESKTOP_SHOT;
   if (shot) {
-    const [out, delay] = shot.split(',');
+    // GENESIS_DESKTOP_SHOT=out.png,delay,scroll — scroll: pixels down inside an open `/` window.
+    const [out, delay, scroll] = shot.split(',');
     win.webContents.once('did-finish-load', () => {
       setTimeout(async () => {
+        if (scroll) {
+          await win?.webContents.executeJavaScript(`document.querySelector('.sheet-body')?.scrollBy(0, ${Number(scroll) || 0})`);
+          await new Promise((r) => setTimeout(r, 300));
+        }
         const img = await win?.webContents.capturePage();
         if (img) writeFileSync(out, img.toPNG());
       }, Number(delay) || 4000);
     });
   }
 
-  if (DEV_URL) void win.loadURL(DEV_URL);
-  else void win.loadFile(join(__dirname, '../renderer/index.html'));
+  // Screenshots of a `/` window: GENESIS_DESKTOP_SHEET=usage opens it once the agent is up.
+  const hash = process.env.GENESIS_DESKTOP_SHEET ? `sheet=${process.env.GENESIS_DESKTOP_SHEET}` : '';
+  if (DEV_URL) void win.loadURL(hash ? `${DEV_URL}#${hash}` : DEV_URL);
+  else void win.loadFile(join(__dirname, '../renderer/index.html'), hash ? { hash } : undefined);
   win.on('closed', () => { win = null; });
 }
 

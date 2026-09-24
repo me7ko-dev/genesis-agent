@@ -121,6 +121,14 @@ export function App() {
     }
   }, [newChat, stop, open, quick, flash, ready, state.commands]);
 
+  // GENESIS_DESKTOP_SHEET (main.ts) → #sheet=usage: open that command once ready.
+  useEffect(() => {
+    const m = /sheet=([\w/]+)/.exec(window.location.hash);
+    if (!m || !ready || !state.commands) return;
+    window.location.hash = '';
+    command(`/${m[1].replace(/^\//, '')}`, '');
+  }, [ready, state.commands, command]);
+
   // Today's tokens in the title bar, fresh after every turn.
   useEffect(() => {
     if (!ready || state.busy || !state.commands) return;
