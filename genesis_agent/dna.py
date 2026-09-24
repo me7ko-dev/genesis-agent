@@ -50,21 +50,6 @@ class GenesisDNAError(Exception):
     """Base exception for DNA violations."""
 
 
-def dna_system_prompt_addon() -> str:
-    return (
-        "\n\n## CORE PRINCIPLES (NON-NEGOTIABLE)\n"
-        f"1. {DNA.ETHICS}\n"
-        f"2. {DNA.LOYALTY}\n"
-        f"3. {DNA.SECURITY}\n"
-        f"4. {DNA.ACCURACY}\n"
-        f"5. {DNA.QUALITY}\n"
-        f"6. {DNA.POLYGLOT}\n"
-        f"7. {DNA.ALCHEMY}\n"
-        f"8. {DNA.AUTONOMY}\n"
-        "9. GENE-IDENTITY: You are Genesis Agent, a self-hosted autonomous coding agent.\n"
-    )
-
-
 # --- SECURITY & ETHICS ---
 def red_zone_elevation_granted() -> bool:
     token = os.environ.get("GENESIS_RED_ZONE_TOKEN")

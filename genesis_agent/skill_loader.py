@@ -127,7 +127,7 @@ def skill_view(name: str, *, file_path: Path | None = None) -> dict[str, Any]:
     # longer matches the code just read from disk means the .md file (or the
     # index entry) was edited after signing — that skill is refused, not
     # silently executed, because everything that calls skill_view() (USE_SKILL,
-    # run_skill, load_skill_code) feeds its "code" straight into sandbox
+    # run_skill) feeds its "code" straight into sandbox
     # execution. Fails OPEN only on the crypto tooling itself being
     # unavailable (ImportError etc.) — an optional integrity check must not
     # turn into an outage for every already-working skill the moment the

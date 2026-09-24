@@ -234,18 +234,6 @@ class Core:
             cur.get("model", ""),
         )
 
-    def available_models(self) -> list[dict]:
-        """Моделите в текущата верига (за model-picker UI). Не мери latency/
-        не вика мрежата — само чете config.yaml през Brain-овия chain builder,
-        филтрирано през същия MIN_SIZE_B праг като реалните обаждания, за да
-        не предлага в picker-а модел, който complete() никога не би избрал."""
-        from genesis_agent.brain import Brain
-
-        brain = Brain(min_size_b=MIN_SIZE_B)
-        return [{"provider": c["provider"], "model": c["model"],
-                 "size_b": c.get("size_b", 0)} for c in brain.chain]
-
-
 def _diff_for_write(skills, args: dict) -> str | None:
     """Unified diff за предстоящ WRITE_FILE (design note, 2026-07-28) — четем
     СТАРОТО съдържание ПРЕДИ dispatch_tool_call презапише файла, за да могат

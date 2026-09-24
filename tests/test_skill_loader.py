@@ -2,7 +2,7 @@
 
 skills_manager.save_skill() now signs NEW skills; skill_view() is the single
 choke point everything that executes a skill's code goes through (USE_SKILL,
-run_skill, load_skill_code) — so this is where a tampered-but-signed skill
+run_skill) — so this is where a tampered-but-signed skill
 must be refused, while every skill saved before signing existed (no
 signature at all) keeps loading exactly as it always has.
 """
