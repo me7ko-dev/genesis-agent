@@ -440,3 +440,37 @@ def test_shipped_domain_skills_pass_their_self_tests(_shipped_skills, tmp_path, 
     r = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
                        encoding="utf-8", timeout=60, check=False)
     assert r.returncode == 0 and r.stdout.strip() == "OK", r.stderr
+
+
+_IBAN_REQUEST = ("Направи в текущата папка Python модул iban.py за български IBAN (банкова сметка "
+                 "в България). Функция validate(iban: str) -> bool — вярно само за валиден "
+                 "български IBAN. Добави тестове с pytest в tests/ и ги пусни, докато минат. "
+                 "pytest е инсталиран.")
+_VAT_REQUEST = ("Направи в текущата папка Python модул vat.py за български ДДС номер "
+                "(идентификационен номер по ДДС): BG + ЕИК на фирмата или BG + ЕГН на физическо "
+                "лице. Функция validate(vat: str) -> bool — вярно само за валиден номер с вярна "
+                "контролна цифра. Добави тестове с pytest в tests/ и ги пусни, докато минат. "
+                "pytest е инсталиран.")
+
+
+@pytest.mark.parametrize("query,skill", [
+    (_IBAN_REQUEST, "bg_iban_validate"),
+    (_VAT_REQUEST, "bg_vat_number_validate"),
+])
+def test_iban_and_vat_requests_get_their_verified_rules(_shipped_skills, query, skill) -> None:
+    """Истинските заявки от 2026-09-25: без знанието IBAN проверяваше само mod 97
+    (без структурата по Наредба № 13), а ДДС номерът приемаше BG + 13-цифрен ЕИК
+    2/2 пъти — ЕИК умението („9 или 13 цифри“) го подвеждаше, затова ДДС
+    умението трябва да го изпревари за същата заявка."""
+    assert f"библиотеката: {skill}" in sl.domain_context(query)
+
+
+@pytest.mark.parametrize("name", ["bg_iban_validate", "bg_vat_number_validate"])
+def test_iban_and_vat_skills_pass_their_self_tests(_shipped_skills, tmp_path, name) -> None:
+    import subprocess
+    import sys
+    script = tmp_path / f"{name}.py"
+    script.write_text(sl.skill_view(name)["code"], encoding="utf-8")
+    r = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
+                       encoding="utf-8", timeout=60, check=False)
+    assert r.returncode == 0 and r.stdout.strip() == "OK", r.stderr

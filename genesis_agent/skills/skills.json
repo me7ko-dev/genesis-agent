@@ -487,6 +487,51 @@
         "method": "self_test_passed",
         "detail": "OK"
       }
+    },
+    {
+      "name": "bg_iban_validate",
+      "category": "domain",
+      "file_path": "skills/bg_iban_validate.md",
+      "description": "Български IBAN (банкова сметка в България, 22 знака) — структура по Наредба № 13 на БНБ (BG, контролно число, BIC код на банката, БАЕ, вид сметка) и проверка по модул 97.",
+      "triggers": [
+        "iban",
+        "български iban",
+        "банкова сметка iban",
+        "валидирай iban",
+        "проверка на iban контролно число",
+        "bulgarian iban bank account"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-09-25T14:00:00+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
+    },
+    {
+      "name": "bg_vat_number_validate",
+      "category": "domain",
+      "file_path": "skills/bg_vat_number_validate.md",
+      "description": "Български ДДС номер (идентификационен номер по ДДС, чл. 94 ЗДДС) — BG + 9-цифрен ЕИК на фирмата или BG + 10-цифрено ЕГН на физическо лице; валиден номер, контролна цифра, 13-цифрен ЕИК на клон не е ДДС номер.",
+      "triggers": [
+        "ддс номер",
+        "идентификационен номер по ддс",
+        "номер по ддс",
+        "валидирай ддс номер",
+        "bg + еик",
+        "bg + егн",
+        "bulgarian vat number"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-09-25T14:00:00+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
     }
   ]
 }
