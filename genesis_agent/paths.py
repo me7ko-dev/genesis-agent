@@ -19,6 +19,7 @@ files are gitignored.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -116,23 +117,52 @@ def _frozen_workspace(cwd: Path) -> Path:
 _project_python_cache: str | None = None
 
 
-def project_python() -> str:
+def project_python(root: Path | str | None = None) -> str:
     """The interpreter that runs the USER'S project (its tests, its scripts).
 
-    From pip/pipx that is `sys.executable`. In the native build it is not:
-    `sys.executable` is genesis.exe, which can run a plain script (see
-    packaging/genesis_entry.py) but has none of the project's packages —
-    pytest least of all. There the real Python on the machine is asked for
-    its own path. The `python` in WindowsApps is skipped unprobed: when no
-    Python is installed it is the Store stub, which hangs until the timeout
-    instead of failing (measured: ~400 s per command, NEXT_STEPS.md).
+    In order: the project's own venv (`.venv`/`venv`/`env` in `root`), an
+    activated venv (`VIRTUAL_ENV`), then `sys.executable` — unless Genesis
+    itself runs from an isolated environment. That is the pipx install (its
+    own venv, measured 2026-09-25: `genesis fix` on a real project ran pytest
+    there, every test died on `No module named 'reportlab'`, and the model
+    spent 8 rounds re-reading files a code edit could never fix) and the
+    native build (`sys.executable` is genesis.exe, see
+    packaging/genesis_entry.py). Both have none of the project's packages, so
+    the real Python on the machine is asked for its own path. The `python` in
+    WindowsApps is skipped unprobed: when no Python is installed it is the
+    Store stub, which hangs until the timeout instead of failing (measured:
+    ~400 s per command, NEXT_STEPS.md).
     """
     global _project_python_cache
-    if not FROZEN:
+    if root is not None:
+        for name in (".venv", "venv", "env"):
+            own = _venv_python(Path(root) / name)
+            if own:
+                return own
+    active = os.environ.get("VIRTUAL_ENV")
+    if active:
+        own = _venv_python(Path(active))
+        if own:
+            return own
+    if not FROZEN and not _genesis_is_isolated():
         return sys.executable or "python3"
     if _project_python_cache is None:
-        _project_python_cache = _find_system_python() or "python"
-    return _project_python_cache
+        _project_python_cache = _find_system_python() or ""
+    if _project_python_cache:
+        return _project_python_cache
+    return "python" if FROZEN else (sys.executable or "python3")
+
+
+def _venv_python(venv: Path) -> str | None:
+    for exe in (venv / "Scripts" / "python.exe", venv / "bin" / "python"):
+        if exe.is_file():
+            return str(exe)
+    return None
+
+
+def _genesis_is_isolated() -> bool:
+    """Genesis runs from a venv of its own (pipx), not the user's Python."""
+    return sys.prefix != getattr(sys, "base_prefix", sys.prefix)
 
 
 def _find_system_python() -> str | None:
@@ -152,6 +182,55 @@ def _find_system_python() -> str | None:
         found = r.stdout.strip().splitlines()[-1:] if r.returncode == 0 else []
         if found and Path(found[0]).is_file():
             return found[0]
+    return _installed_windows_python()
+
+
+_IS_WINDOWS = os.name == "nt"
+
+
+def _installed_windows_python() -> str | None:
+    """A real python.exe where Windows installers put it — without starting
+    any alias. With the Python install manager every `py`/`python`/`python3`
+    on PATH is an alias in WindowsApps (measured 2026-09-25 on the operator's
+    laptop), indistinguishable from the Store stub, so the loop above finds
+    nothing. The PEP 514 registry is checked too, but only a file that exists
+    counts: on the same laptop it pointed into a deleted bench_fix temp dir.
+    """
+    if not _IS_WINDOWS:
+        return None
+    candidates: list[Path] = []
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        def newest_first(pattern: str, *base: str) -> list[Path]:
+            found = Path(local, *base).glob(pattern)
+            return sorted(found, key=lambda p: [int(n) for n in re.findall(r"\d+", p.parent.name)],
+                          reverse=True)
+        candidates += newest_first("pythoncore-3*/python.exe", "Python")
+        candidates += newest_first("Python3*/python.exe", "Programs", "Python")
+    try:
+        import winreg
+        for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                core = winreg.OpenKey(hive, r"Software\Python\PythonCore")
+            except OSError:
+                continue
+            i = 0
+            while True:
+                try:
+                    ver = winreg.EnumKey(core, i)
+                except OSError:
+                    break
+                i += 1
+                try:
+                    with winreg.OpenKey(core, ver + r"\InstallPath") as k:
+                        candidates.append(Path(winreg.QueryValueEx(k, "ExecutablePath")[0]))
+                except OSError:
+                    continue
+    except ImportError:
+        pass
+    for exe in candidates:
+        if exe.is_file():
+            return str(exe)
     return None
 
 

@@ -203,7 +203,7 @@ def search_code(pattern: str, path: str | Path = ".", glob: str | None = None,
 
 # ── Project shape ────────────────────────────────────────────────────────────
 
-def _python_cmd() -> str:
+def _python_cmd(root: Path | None = None) -> str:
     """Как да извикаме СЪЩИЯ интерпретатор, на който върви Genesis.
 
     Не голото "python3" (bug found end-to-end, 2026-08-12). На Windows това име
@@ -219,11 +219,12 @@ def _python_cmd() -> str:
     (виж sandbox._shell_argv, който на Windows предпочита bash) — там
     обратната наклонена черта е escape знак. Windows приема и двата вида.
 
-    В родния Windows билд `sys.executable` е genesis.exe, не Python — затова
-    пътят идва от paths.project_python(), който там пита истинския Python.
+    В родния Windows билд `sys.executable` е genesis.exe, не Python, а в pipx е
+    venv без пакетите на проекта — затова пътят идва от paths.project_python(root),
+    който предпочита venv-а на проекта и иначе пита истинския Python.
     """
     from genesis_agent.paths import project_python
-    exe = project_python().replace("\\", "/")
+    exe = project_python(root).replace("\\", "/")
     return f'"{exe}"' if " " in exe else exe
 
 
@@ -333,12 +334,12 @@ def detect_project(path: str | Path) -> ProjectInfo:
             continue
         if marker == "Makefile" and not _makefile_has_test(root):
             continue
-        language, test_cmd = lang, cmd.replace("{python}", _python_cmd())
+        language, test_cmd = lang, cmd.replace("{python}", _python_cmd(root))
         break
     # Няма маркерен файл, но има тестове по pytest конвенцията — виж
     # _has_pytest_style_tests за защо липсата на маркер не е доказателство.
     if not test_cmd and _has_pytest_style_tests(root):
-        language, test_cmd = "python", f"{_python_cmd()} -m pytest -q"
+        language, test_cmd = "python", f"{_python_cmd(root)} -m pytest -q"
     if language == "unknown" and counts:
         by_lang = {".py": "python", ".js": "javascript", ".ts": "typescript",
                    ".go": "go", ".rs": "rust", ".rb": "ruby", ".java": "java"}
