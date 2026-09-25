@@ -7,7 +7,7 @@ triggers:
 - евро
 - лева в евро
 - левове евро курс
-- 1.95583
+- '1.95583'
 - превърни лв в евро
 - еврото в българия
 - bgn eur conversion bulgaria euro adoption
