@@ -474,3 +474,38 @@ def test_iban_and_vat_skills_pass_their_self_tests(_shipped_skills, tmp_path, na
     r = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
                        encoding="utf-8", timeout=60, check=False)
     assert r.returncode == 0 and r.stdout.strip() == "OK", r.stderr
+
+
+_WORKDAYS_REQUEST = ("Направи в текущата папка Python модул workdays.py за работните дни в България "
+                     "по Кодекса на труда (без еднократните решения на Министерския съвет). Функции "
+                     "is_working_day(d: datetime.date) -> bool и count_working_days(start: "
+                     "datetime.date, end: datetime.date) -> int — броят на работните дни от start "
+                     "до end включително. Добави тестове с pytest в tests/ и ги пусни, докато минат. "
+                     "pytest е инсталиран.")
+
+
+def test_a_workdays_request_gets_the_working_days_rules(_shipped_skills) -> None:
+    """2026-09-25: без знанието празник от уикенда се прехвърляше и на ден,
+    който сам е празник (26.12, Великденски понеделник). Преди мярката по
+    тригерите същата заявка получаваше правилата за IBAN („България“ +
+    „модул“ от описанието му)."""
+    text = sl.domain_context(_WORKDAYS_REQUEST)
+    assert "библиотеката: bg_working_days" in text
+    assert "1 ноември" in text
+
+
+@pytest.mark.parametrize("project", ["sales-report", "fuel-prices", "tasks-api"])
+def test_requests_without_a_domain_get_no_knowledge(_shipped_skills, project) -> None:
+    """Общи думи („знака“, „число“, „България“) не са тема — само тригерите са."""
+    task = sl.Path(__file__).resolve().parent.parent / "bench" / "projects" / project / "task.txt"
+    assert sl.domain_context(task.read_text(encoding="utf-8")) == ""
+
+
+def test_the_working_days_skill_passes_its_self_test(_shipped_skills, tmp_path) -> None:
+    import subprocess
+    import sys
+    script = tmp_path / "bg_working_days.py"
+    script.write_text(sl.skill_view("bg_working_days")["code"], encoding="utf-8")
+    r = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
+                       encoding="utf-8", timeout=60, check=False)
+    assert r.returncode == 0 and r.stdout.strip() == "OK", r.stderr
