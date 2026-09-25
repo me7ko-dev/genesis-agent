@@ -1,0 +1,33 @@
+# Проекти със скрити приемни тестове
+
+Мерят дали Genesis **създава** работещ проект, не дали минава собствените си
+тестове (те са зелени почти винаги — и когато резултатът е грешен).
+
+Всяка папка: `task.txt` — задачата, както я пише операторът; `test_hidden.py` —
+приемните тестове. Genesis никога не вижда `test_hidden.py`.
+
+| Проект | Какво проверява | 2026-09-25 |
+|---|---|---|
+| `egn-check` | ЕГН: контролна цифра, векове, пол | 0/6 → 3/3 с умението `bg_egn_*` |
+| `eik-check` | ЕИК/БУЛСТАТ 9 и 13 цифри, резервни тегла | 0/2 → 2/2 с умение |
+| `euro-convert` | лв → € (1.95583), евро от 2026-01-01 | 0/2 → 2/2 с умение |
+| `sales-report` | CSV от каса: `;`, десетична запетая, развалени редове, BOM | 2/2 |
+| `tasks-api` | Flask + SQLite REST API, статуси, запазване след рестарт | 2/2 |
+| `fuel-prices` | HTML таблица, „2,59 лв.“, „-“, чужда таблица преди нея | 2/2 |
+| `faktura-excel` | реалистична българска PDF фактура (само Windows — шрифт Arial) | ✅ след `genesis fix` |
+
+## Пускане на един проект
+
+Зависимостите на проекта (pytest, flask, beautifulsoup4, pdfplumber, openpyxl,
+reportlab) трябва да са в системния Python — Genesis ги ползва за тестовете.
+
+```bash
+mkdir -p /tmp/trial && cd /tmp/trial
+{ cat <repo>/bench/projects/egn-check/task.txt; printf 'изход\n'; } | genesis > run.log 2>&1
+cp <repo>/bench/projects/egn-check/test_hidden.py /tmp/hidden/
+PYTHONPATH=/tmp/trial python -m pytest -q --rootdir /tmp/hidden /tmp/hidden/test_hidden.py
+```
+
+Един пуск не е присъда — моделите във веригата се сменят. Мери се поне 2–3
+пъти на проект и се гледа и времето (`run.log`: кой модел е отговорил, `✗` —
+защо е отпаднал).
