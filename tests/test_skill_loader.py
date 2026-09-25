@@ -416,3 +416,27 @@ def test_the_shipped_egn_skill_passes_its_own_self_test(_shipped_skills, tmp_pat
     r = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
                        encoding="utf-8", timeout=60, check=False)
     assert r.returncode == 0 and r.stdout.strip() == "OK", r.stderr
+
+
+@pytest.mark.parametrize("query,skill", [
+    (("Направи в текущата папка Python модул eik.py за българския ЕИК (БУЛСТАТ) на фирми. "
+      "Функция validate(eik) — 9 или 13 цифри с вярни контролни цифри."), "bg_eik_bulstat_validate"),
+    (("Функция to_eur(amount_bgn) превръща лева в евро по официалния фиксиран курс. "
+      "official_currency(date) — коя е официалната валута на България на тази дата."),
+     "bg_euro_bgn_conversion"),
+])
+def test_real_requests_get_their_verified_rules(_shipped_skills, query, skill) -> None:
+    """Истинските заявки от 2026-09-25: без знанието ЕИК губеше резервните
+    тегла 2/2 пъти, а еврото — датата (2025-01-01 и 2023-01-01) 2/2 пъти."""
+    assert f"библиотеката: {skill}" in sl.domain_context(query)
+
+
+@pytest.mark.parametrize("name", ["bg_eik_bulstat_validate", "bg_euro_bgn_conversion"])
+def test_shipped_domain_skills_pass_their_self_tests(_shipped_skills, tmp_path, name) -> None:
+    import subprocess
+    import sys
+    script = tmp_path / f"{name}.py"
+    script.write_text(sl.skill_view(name)["code"], encoding="utf-8")
+    r = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
+                       encoding="utf-8", timeout=60, check=False)
+    assert r.returncode == 0 and r.stdout.strip() == "OK", r.stderr
