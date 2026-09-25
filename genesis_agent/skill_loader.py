@@ -276,13 +276,27 @@ def domain_context(query: str) -> str:
     (виж build_context). Празен низ = нищо не се добавя, нула токена.
     """
     try:
-        hits = search_skills(query, top_n=3, use_semantic=False)
+        hits = search_skills(query, top_n=10, use_semantic=False)
     except Exception:
         return ""
+    # Мярката е само по ТРИГЕРИТЕ, не по описанието (2026-09-25): „България“ и
+    # „модул“ от описанието на IBAN умението стигнаха за 2 думи — и задача за
+    # работни дни получи правилата за IBAN; „знака“ + „число“ биха го подали и
+    # на CSV отчет. Тригерите са думите на темата, описанието е проза.
+    query_words = _keywords(query)
+    ranked: list[tuple[int, dict[str, Any]]] = []
     for h in hits:
         verified = h.get("verified") or h.get("verification", {}).get("verified")
         if h.get("category") != "domain" or not verified or h.get("_kw_score", 0) < 2:
             continue
+        triggers = h.get("triggers", [])
+        if isinstance(triggers, str):
+            triggers = [triggers]
+        score = len(query_words & {w for t in triggers for w in _keywords(t)})
+        if score >= 2:
+            ranked.append((score, h))
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    for _, h in ranked:
         try:
             code = skill_view(h["name"])["code"]
         except (OSError, ValueError, KeyError):

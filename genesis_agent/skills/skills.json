@@ -532,6 +532,29 @@
         "method": "self_test_passed",
         "detail": "OK"
       }
+    },
+    {
+      "name": "bg_working_days",
+      "category": "domain",
+      "file_path": "skills/bg_working_days.md",
+      "description": "Работни дни и официални празници в България по чл. 154 КТ — православен Великден, прехвърляне на празник от събота/неделя, 1 ноември е работен ден.",
+      "triggers": [
+        "работни дни",
+        "работен ден",
+        "официални празници",
+        "почивни дни",
+        "неприсъствени дни",
+        "кодекса на труда празници",
+        "bulgarian working days public holidays"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-09-25T17:00:00+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
     }
   ]
 }
