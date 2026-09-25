@@ -442,6 +442,51 @@
         "method": "self_test_passed",
         "detail": "OK"
       }
+    },
+    {
+      "name": "bg_eik_bulstat_validate",
+      "category": "domain",
+      "file_path": "skills/bg_eik_bulstat_validate.md",
+      "description": "Български ЕИК / БУЛСТАТ на фирма (9 или 13 цифри) — проверка на контролните цифри, включително резервните тегла при остатък 10.",
+      "triggers": [
+        "еик",
+        "булстат",
+        "единен идентификационен код",
+        "валидирай еик",
+        "проверка на булстат контролна цифра",
+        "bulgarian eik bulstat company number"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-09-25T12:00:00+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
+    },
+    {
+      "name": "bg_euro_bgn_conversion",
+      "category": "domain",
+      "file_path": "skills/bg_euro_bgn_conversion.md",
+      "description": "Еврото в България — официална валута от 1 януари 2026, фиксиран курс 1 EUR = 1.95583 BGN, превръщане лева↔евро със закръгляне до цент, ключови дати.",
+      "triggers": [
+        "евро",
+        "лева в евро",
+        "левове евро курс",
+        "1.95583",
+        "превърни лв в евро",
+        "еврото в българия",
+        "bgn eur conversion bulgaria euro adoption"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-09-25T12:00:00+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
     }
   ]
 }
