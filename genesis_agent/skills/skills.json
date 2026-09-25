@@ -420,6 +420,28 @@
         "method": "self_test_passed",
         "detail": "OK"
       }
+    },
+    {
+      "name": "bg_egn_validate_and_decode",
+      "category": "domain",
+      "file_path": "skills/bg_egn_validate_and_decode.md",
+      "description": "Българско ЕГН (единен граждански номер) — проверка на контролната цифра, дата на раждане с век по месеца (1800/1900/2000) и пол по деветата цифра (четна = мъж).",
+      "triggers": [
+        "егн",
+        "единен граждански номер",
+        "валидирай егн",
+        "проверка на егн контролна цифра",
+        "дата на раждане и пол от егн",
+        "bulgarian egn personal number"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-09-25T09:00:00+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
     }
   ]
 }

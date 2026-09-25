@@ -370,3 +370,49 @@ def test_format_skill_list_names_every_skill_and_marks_verified(monkeypatch) -> 
     assert out[0] == "2 умения, 1 verified"
     assert out[1].startswith("  ✓ alpha — ") and len(out[1]) < 50
     assert out[2] == "  · zeta — draft"
+
+# ── domain_context: провереното знание в чата ───────────────────────────────
+
+@pytest.fixture
+def _shipped_skills(monkeypatch):
+    shipped = sl.Path(sl.__file__).resolve().parent / "skills"
+    monkeypatch.setattr(sl, "SKILLS_DIR", shipped)
+    monkeypatch.setattr(sl, "SKILLS_ROOT", shipped.parent)
+    monkeypatch.setattr(sl, "_SKILLS_INDEX_CACHE", None)
+    yield
+    sl._SKILLS_INDEX_CACHE = None
+
+
+def test_an_egn_request_gets_the_verified_rules(_shipped_skills) -> None:
+    """Истинската заявка от 2026-09-25, при която моделите обърнаха пола."""
+    text = sl.domain_context(
+        "Направи в текущата папка Python модул egn.py за българско ЕГН. Функция "
+        "validate(egn) — 10 цифри, съществуваща дата, вярна контролна цифра.")
+    assert "bg_egn_validate_and_decode" in text
+    assert "ЧЕТНА → мъж" in text
+
+
+def test_an_unrelated_request_gets_nothing(_shipped_skills) -> None:
+    assert sl.domain_context("напиши rate limiter с asyncio и тестове") == ""
+
+
+def test_a_general_skill_is_never_injected_in_chat(monkeypatch) -> None:
+    hit = {"name": "event_bus", "category": "autonomous", "verified": True, "_kw_score": 9}
+    monkeypatch.setattr(sl, "search_skills", lambda *a, **k: [hit])
+    assert sl.domain_context("event bus pub sub") == ""
+
+
+def test_a_weak_domain_match_is_not_injected(monkeypatch) -> None:
+    hit = {"name": "bg_egn", "category": "domain", "verified": True, "_kw_score": 1}
+    monkeypatch.setattr(sl, "search_skills", lambda *a, **k: [hit])
+    assert sl.domain_context("номер") == ""
+
+
+def test_the_shipped_egn_skill_passes_its_own_self_test(_shipped_skills, tmp_path) -> None:
+    import subprocess
+    import sys
+    script = tmp_path / "bg_egn.py"
+    script.write_text(sl.skill_view("bg_egn_validate_and_decode")["code"], encoding="utf-8")
+    r = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
+                       encoding="utf-8", timeout=60, check=False)
+    assert r.returncode == 0 and r.stdout.strip() == "OK", r.stderr

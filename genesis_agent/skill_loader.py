@@ -261,6 +261,39 @@ def search_skills(query: str, top_n: int = 5, *, use_semantic: bool = True) -> l
     return results[:top_n]
 
 
+def domain_context(query: str) -> str:
+    """Провереното знание по темата на заявката — за чата, само категория `domain`.
+
+    Защо (измерено 2026-09-25, проект за ЕГН): и четирите безплатни модела
+    във веригата твърдяха 3/3 пъти, че четна девета цифра е жена (обратното е
+    вярно). Кодът и тестовете им бяха еднакво грешни, тоест зелени. Ред в
+    промпта „провери правилото“ не помогна (0/3 преди, 0/3 след) — моделът е
+    сигурен и не търси. Затова знанието идва от библиотеката: проверено
+    умение със самотест, подадено на модела наготово.
+
+    Само `category: domain` — общите умения (event bus, rate limiter…) не се
+    подават в чата: там съвпадение по две думи е случайно твърде често
+    (виж build_context). Празен низ = нищо не се добавя, нула токена.
+    """
+    try:
+        hits = search_skills(query, top_n=3, use_semantic=False)
+    except Exception:
+        return ""
+    for h in hits:
+        verified = h.get("verified") or h.get("verification", {}).get("verified")
+        if h.get("category") != "domain" or not verified or h.get("_kw_score", 0) < 2:
+            continue
+        try:
+            code = skill_view(h["name"])["code"]
+        except (OSError, ValueError, KeyError):
+            continue
+        return (f"## Проверено знание от библиотеката: {h['name']}\n"
+                "Правилата в този код са проверени със самотест — ползвай ги като източник "
+                "(и за очакваните стойности в тестовете), не пиши тези правила по памет.\n"
+                f"```python\n{code.strip()}\n```")
+    return ""
+
+
 def _extract_signatures(code: str) -> list[str]:
     """Топ-ниво def/class сигнатури от кода на умение — какво реално може да
     се извика, показано на модела ПРЕДИ да пише driver код по памет/предположение."""
