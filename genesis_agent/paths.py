@@ -87,17 +87,25 @@ def workspace_dir() -> Path:
     env = os.environ.get("GENESIS_WORKSPACE")
     if env:
         return Path(env)
-    if FROZEN:
+    if FROZEN or INSTALLED:
         return _frozen_workspace(Path.cwd())
     return PROJECT_ROOT
 
 
+# pip/pipx copy or the native build — not a git checkout. For those
+# PROJECT_ROOT is site-packages (or the install directory): never a workspace.
+INSTALLED: bool = FROZEN or PROJECT_ROOT.name in ("site-packages", "dist-packages")
+
+
 def _frozen_workspace(cwd: Path) -> Path:
-    """The native build works where it was started, like `claude` does — the
-    PROJECT_ROOT fallback would be the install directory, erased by the next
-    update. Except where starting there means "started from a shortcut", not
-    "work here": the home directory itself, a drive root, the Windows
-    directory, or the install directory. Those get ~/.genesis/workspace.
+    """An installed Genesis works where it was started, like `claude` does —
+    the PROJECT_ROOT fallback would be site-packages or the install directory,
+    erased by the next update. Measured 2026-09-25 with pipx: `genesis` started
+    in a new project asked before every write there ("запис извън workspace")
+    and, without a keyboard, declined them all. Except where starting there
+    means "started from a shortcut", not "work here": the home directory
+    itself, a drive root, the Windows directory, or Genesis's own install
+    (the native build's directory, pipx's venv). Those get ~/.genesis/workspace.
     """
     try:
         cwd = cwd.resolve()
@@ -106,7 +114,8 @@ def _frozen_workspace(cwd: Path) -> Path:
     unsafe = {Path.home().resolve(), Path(cwd.anchor)}
     windir = os.environ.get("SystemRoot") or os.environ.get("windir")
     inst = install_dir()
-    inside = [Path(d).resolve() for d in (windir, inst) if d]
+    own_env = sys.prefix if INSTALLED and not FROZEN else None
+    inside = [Path(d).resolve() for d in (windir, inst, own_env) if d]
     if cwd in unsafe or any(cwd == d or d in cwd.parents for d in inside):
         fallback = GENESIS_HOME / "workspace"
         fallback.mkdir(parents=True, exist_ok=True)
