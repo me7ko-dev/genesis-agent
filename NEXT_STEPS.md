@@ -141,7 +141,15 @@ Microsoft Store, която виси до таймаута (~400 s на кома
    **Блокер (2026-09-25):** на лаптопа е включен Smart App Control (enforce) —
    блокира всеки неподписан `.exe`: и pipx `genesis.exe`, и PyInstaller билда.
    Нужен е подпис (Authenticode, напр. Azure Trusted Signing) или SAC изключен
-   от оператора. Дотогава: `python -m genesis_agent.cli` през venv-а на pipx.
+   от оператора. Дотогава: `python -m genesis_agent.cli` през venv-а на pipx
+   (на лаптопа е функция `genesis` в PowerShell профила).
+   **`genesis fix` на реален проект (2026-09-25):** `faktura-excel` (PDF фактури
+   → Excel, написан от Genesis за 73 s). Реалистична фактура го чупеше; fix
+   провал 8/8 рунда — тестовете вървяха в pipx venv-а (`No module named
+   'reportlab'`), а на лаптопа всички `py/python` са WindowsApps псевдоними.
+   Поправено (project_python: venv на проекта → VIRTUAL_ENV → системен Python,
+   търсен и в %LOCALAPPDATA%): ✅ за 15 s, 7 рунда, тестът непипнат.
+   Остава: `bench_fix` проект с външна зависимост, за да не се върне.
 5. **Телефонът** (`genesis serve`, `mobile/`, docs/MOBILE.md): операторът
    поиска Android и iOS (2026-09-24), избра „дистанционно" (агентът остава на
    компютъра), без Apple Developer акаунт. Тествано тук: протоколът TS↔Python,
