@@ -103,6 +103,36 @@ def test_frozen_workspace_is_never_the_install_directory(tmp_path, monkeypatch) 
     assert paths._frozen_workspace(install / "_internal") == tmp_path / "gh" / "workspace"
 
 
+def test_pipx_genesis_works_where_it_was_started(tmp_path, monkeypatch) -> None:
+    """pipx: PROJECT_ROOT is site-packages. `genesis` started in a project
+    asked before every write there (2026-09-25) — the project is the workspace."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    monkeypatch.delenv("GENESIS_WORKSPACE", raising=False)
+    monkeypatch.setattr(paths, "FROZEN", False)
+    monkeypatch.setattr(paths, "INSTALLED", True)
+    monkeypatch.setattr(paths, "GENESIS_HOME", tmp_path / "gh")
+    monkeypatch.chdir(project)
+    assert paths.workspace_dir() == project.resolve()
+
+
+def test_pipx_genesis_never_works_inside_its_own_venv(tmp_path, monkeypatch) -> None:
+    venv = tmp_path / "pipx" / "venvs" / "genesis-agent"
+    (venv / "Lib").mkdir(parents=True)
+    monkeypatch.setattr(paths, "FROZEN", False)
+    monkeypatch.setattr(paths, "INSTALLED", True)
+    monkeypatch.setattr(paths.sys, "prefix", str(venv))
+    monkeypatch.setattr(paths, "GENESIS_HOME", tmp_path / "gh")
+    assert paths._frozen_workspace(venv / "Lib") == tmp_path / "gh" / "workspace"
+
+
+def test_a_checkout_keeps_the_repo_as_workspace(monkeypatch) -> None:
+    monkeypatch.delenv("GENESIS_WORKSPACE", raising=False)
+    monkeypatch.setattr(paths, "FROZEN", False)
+    monkeypatch.setattr(paths, "INSTALLED", False)
+    assert paths.workspace_dir() == paths.PROJECT_ROOT
+
+
 def test_project_python_outside_the_build_is_this_interpreter(monkeypatch) -> None:
     monkeypatch.setattr(paths, "FROZEN", False)
     monkeypatch.setattr(paths, "_genesis_is_isolated", lambda: False)
