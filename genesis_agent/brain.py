@@ -179,6 +179,19 @@ _PROVIDERS = {
 _NATIVE_PROVIDERS = {"anthropic"}
 
 
+def _print_skip(provider: str, model: str, error: str, seconds: float) -> None:
+    """Един ред, когато модел отпадне и веригата продължи.
+
+    Досега се печаташе само кой е отговорил („↪ модел: …“), не защо горният
+    е отпаднал. 2026-09-25 (ЕГН проект): 24 от 42 обръщения отидоха на
+    nvidia ultra (5–10× по-бавен), 399 s за малка задача, а в лога нямаше
+    нито една причина за ollama. Грешките на ниво ключ (429 на ключ) си имат
+    свой ред в _call и не минават оттук.
+    """
+    reason = " ".join(error.split())[:80]
+    print(f"  [Brain] ✗ {provider}/{model} след {seconds:.1f}s: {reason} → следващ")
+
+
 def _openai_usage(usage: Any) -> Any:
     """usage от OpenAI-съвместим отговор + `cached_read_tokens` за budget.py.
 
@@ -1638,11 +1651,13 @@ class Brain:
                         last_error = f"мрежа: {e}"
                         self._fail_count += 1
                         self._record_stat(prov, time.time() - t0, False)
+                        _print_skip(prov, model, last_error, time.time() - t0)
                         continue
                     except RuntimeError as e:
                         last_error = str(e)
                         self._fail_count += 1
                         self._record_stat(prov, time.time() - t0, False)
+                        _print_skip(prov, model, last_error, time.time() - t0)
                         # При 429/503/402 → маркирай изчерпан за cooldown (спестява безсмислени опити).
                         for c in _EXHAUST_CODES:
                             if f"HTTP_{c}" in last_error:
