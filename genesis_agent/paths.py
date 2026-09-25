@@ -207,31 +207,37 @@ def _installed_windows_python() -> str | None:
                           reverse=True)
         candidates += newest_first("pythoncore-3*/python.exe", "Python")
         candidates += newest_first("Python3*/python.exe", "Programs", "Python")
-    try:
-        import winreg
-        for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
-            try:
-                core = winreg.OpenKey(hive, r"Software\Python\PythonCore")
-            except OSError:
-                continue
-            i = 0
-            while True:
-                try:
-                    ver = winreg.EnumKey(core, i)
-                except OSError:
-                    break
-                i += 1
-                try:
-                    with winreg.OpenKey(core, ver + r"\InstallPath") as k:
-                        candidates.append(Path(winreg.QueryValueEx(k, "ExecutablePath")[0]))
-                except OSError:
-                    continue
-    except ImportError:
-        pass
+    candidates += _registry_pythons()
     for exe in candidates:
         if exe.is_file():
             return str(exe)
     return None
+
+
+def _registry_pythons() -> list[Path]:
+    """ExecutablePath of every PEP 514 PythonCore entry (HKCU, then HKLM)."""
+    if sys.platform != "win32":
+        return []
+    import winreg
+    found: list[Path] = []
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            core = winreg.OpenKey(hive, r"Software\Python\PythonCore")
+        except OSError:
+            continue
+        i = 0
+        while True:
+            try:
+                ver = winreg.EnumKey(core, i)
+            except OSError:
+                break
+            i += 1
+            try:
+                with winreg.OpenKey(core, ver + r"\InstallPath") as k:
+                    found.append(Path(winreg.QueryValueEx(k, "ExecutablePath")[0]))
+            except OSError:
+                continue
+    return found
 
 
 def history_dir() -> Path:
