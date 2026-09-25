@@ -654,3 +654,34 @@ class TestOverloadIsPerModelNotPerKey:
     def test_quota_errors_still_stop_the_whole_key(self) -> None:
         assert {429, 402, 401, 403} <= brain_mod._KEY_DEAD_CODES
         assert 503 not in brain_mod._KEY_DEAD_CODES
+
+class TestTotalDeadline:
+    """2026-09-25: OpenRouter държи връзката жива, докато безплатният модел
+    чака — `timeout` на requests (между пакети) не изтича и пробата висеше
+    40 мин. Общият краен срок я праща към следващия модел."""
+
+    def test_a_hanging_call_ends_with_a_timeout(self, monkeypatch) -> None:
+        import threading
+        import time
+
+        import requests
+
+        release = threading.Event()
+        monkeypatch.setattr("genesis_agent.brain.requests.post",
+                            lambda *a, **kw: release.wait(10))
+        monkeypatch.setattr(brain_mod, "_TOTAL_DEADLINE_FACTOR", 0.2)
+        t0 = time.time()
+        with pytest.raises(requests.exceptions.Timeout):
+            Brain.__new__(Brain)._http("https://x", "k", "m", [], 1)
+        release.set()
+        assert time.time() - t0 < 5
+
+    def test_errors_from_requests_pass_through(self, monkeypatch) -> None:
+        import requests
+
+        def _boom(*a, **kw):
+            raise requests.exceptions.ConnectionError("refused")
+
+        monkeypatch.setattr("genesis_agent.brain.requests.post", _boom)
+        with pytest.raises(requests.exceptions.ConnectionError):
+            Brain.__new__(Brain)._http("https://x", "k", "m", [], 30)
