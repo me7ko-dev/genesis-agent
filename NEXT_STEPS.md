@@ -162,7 +162,7 @@ Microsoft Store, която виси до таймаута (~400 s на кома
    10/10 ×2 и 5/5 ×2. IBAN (само mod 97, без структурата по Наредба № 13) и
    ДДС № (приема BG + 13-цифрен ЕИК) — 0/2 и 0/2 → `bg_iban_validate`,
    `bg_vat_number_validate` 15/15 ×2 и 18/18 ×2. При 2 от 8 пуска RUN_CMD
-   `mkdir C:\...	ests` в Git Bash правеше папка `C:UsersroikaProjects...tests`
+   `mkdir C:\...\tests` в Git Bash правеше папка `C:UsersroikaProjects...tests`
    → поправено: всеки некавичен `X:\` път в командата става с `/`.
    Отворено: едно пускане стоя 1 299 s преди първото обръщение (10:53, успоредно
    с друга сесия и pipx преинсталация) — не USE_SKILL/embeddings, не Defender/SAC.
