@@ -81,6 +81,11 @@ def set_workspace(path) -> None:
     global _WORKSPACE
     _WORKSPACE = Path(path)
     _SEEN_PATHS.clear()
+    try:  # паметта за работата (нишки, решения) е на същата папка
+        from genesis_agent import workspace_memory
+        workspace_memory.set_workspace(path)
+    except Exception:
+        pass
 
 
 def _resolve(path_str: str) -> Path:
