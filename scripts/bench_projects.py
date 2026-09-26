@@ -60,8 +60,12 @@ def parse_pytest(output: str) -> tuple[int, int]:
     """(passed, total) from pytest's summary line. A collection error — the
     module is missing or does not import — counts as one failed test, so a
     project that produced nothing never reads as 0/0 "nothing failed"."""
+    # Only the final summary ("1 failed, 3 passed in 0.12s"): a collection
+    # error also prints "Interrupted: 1 error during collection" above it.
+    summary = next((ln for ln in reversed(output.splitlines())
+                    if _PYTEST_COUNT.search(ln) and re.search(r"\bin [\d.]+s\b", ln)), output)
     counts = {"passed": 0, "failed": 0, "error": 0}
-    for n, kind in _PYTEST_COUNT.findall(output):
+    for n, kind in _PYTEST_COUNT.findall(summary):
         counts["error" if kind.startswith("error") else kind] += int(n)
     total = counts["passed"] + counts["failed"] + counts["error"]
     if total == 0:
@@ -152,6 +156,7 @@ def run_hidden(test_python: str, project: Path, workdir: Path) -> tuple[int, int
                        cwd=hidden, env=env, capture_output=True, text=True,
                        encoding="utf-8", errors="replace", timeout=300, check=False)
     out = r.stdout + r.stderr
+    (hidden / "pytest.txt").write_text(out, encoding="utf-8")  # why a run failed
     passed, total = parse_pytest(out)
     return passed, total, out
 

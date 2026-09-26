@@ -40,6 +40,11 @@ def test_parse_pytest_summary():
 def test_parse_pytest_collection_error_is_a_failure_not_zero_of_zero():
     out = "ERROR test_hidden.py - ModuleNotFoundError: No module named 'egn'\n1 error in 0.1s"
     assert bp.parse_pytest(out) == (0, 1)
+    # the real output: "Interrupted: 1 error during collection" above the summary
+    out = ("E   ModuleNotFoundError: No module named 'money'\n"
+           "!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n"
+           "1 error in 0.17s\n")
+    assert bp.parse_pytest(out) == (0, 1)
     assert bp.parse_pytest("") == (0, 1)
 
 
