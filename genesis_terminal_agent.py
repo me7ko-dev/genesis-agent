@@ -379,6 +379,11 @@ def provider_ready(provider_key: str) -> tuple[bool, str]:
         return vertex_auth.ready(), vertex_auth.status()
     key_env = p["key_env"]
     if key_env is None:
+        # Без ключ = на localhost (Ollama, LM Studio). На телефона такъв
+        # сървър няма — иначе /model в приложението ги показваше „готов“.
+        from genesis_agent.paths import is_android
+        if is_android() and any(h in str(p.get("base_url", "")) for h in ("localhost", "127.0.0.1")):
+            return False, "няма на телефона (иска видеокарта)"
         return True, ""
     return bool(KEYS.get(key_env)), f"липсва {key_env}"
 

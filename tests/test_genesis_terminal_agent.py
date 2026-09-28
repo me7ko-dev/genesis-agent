@@ -523,3 +523,13 @@ def test_the_hard_limit_still_stops_a_runaway_task(monkeypatch, tmp_path) -> Non
     gta.run_turn(deque([{"role": "system", "content": "s"}], maxlen=500), "go", ui)
     assert n["i"] == 30
     assert any("предпазител от 30" in w for w in ui.warnings)
+
+
+def test_local_servers_are_not_offered_on_the_phone(monkeypatch) -> None:
+    # Наживо: /model в приложението на телефона показваше Ollama (Local) „готов“.
+    monkeypatch.setattr("genesis_agent.paths.is_android", lambda: True)
+    ready, hint = gta.provider_ready("ollama")
+    assert not ready and "телефона" in hint
+    assert not gta.provider_ready("llmstudio")[0]
+    monkeypatch.setattr("genesis_agent.paths.is_android", lambda: False)
+    assert gta.provider_ready("ollama") == (True, "")
