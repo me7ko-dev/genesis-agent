@@ -43,6 +43,9 @@ step 2/6 "Genesis (в ~/.genesis/venv)"
 # --system-site-packages: venv-ът вижда cryptography от Termux.
 [ -x "$VENV/bin/python" ] || python -m venv --system-site-packages "$VENV"
 "$VENV/bin/python" -m pip install --upgrade --disable-pip-version-check "$PKG"
+# Номерът на версията не се сменя с всеки commit, а pip пропуска „същата“
+# версия: без това пускането пак НЕ обновяваше (наживо, 2026-09-28).
+"$VENV/bin/python" -m pip install --force-reinstall --no-deps --disable-pip-version-check "$PKG"
 ln -sf "$VENV/bin/genesis" "$PREFIX/bin/genesis"
 genesis --version
 
