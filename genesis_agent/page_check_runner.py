@@ -28,7 +28,6 @@ import re
 import sys
 import threading
 from pathlib import Path
-from typing import ClassVar
 
 # Всичко за един изглед; Python решава кое е находка.
 _MEASURE = r"""
@@ -163,13 +162,18 @@ _THEME_TOGGLE = "button, [role=button], input[type=checkbox]"
 _THEME_WORDS = r"тем|theme|dark|light|тъмн|светл|🌙|☀|☾"
 
 
+_UTF8_TYPES = {".html": "text/html; charset=utf-8", ".htm": "text/html; charset=utf-8",
+               ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+               ".mjs": "text/javascript; charset=utf-8", ".svg": "image/svg+xml"}
+
+
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):
-    # Без charset браузърът чете страница без <meta charset> като windows-1252 —
-    # кирилицата става „Ð”Ð¾Ð±…“. Хостингите (Pages, Vercel) пращат utf-8.
-    extensions_map: ClassVar[dict[str, str]] = {**http.server.SimpleHTTPRequestHandler.extensions_map,
-                      ".html": "text/html; charset=utf-8", ".htm": "text/html; charset=utf-8",
-                      ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8",
-                      ".mjs": "text/javascript; charset=utf-8", ".svg": "image/svg+xml"}
+    def __init__(self, *args, **kwargs) -> None:
+        # Без charset браузърът чете страница без <meta charset> като windows-1252 —
+        # кирилицата става „Ð”Ð¾Ð±…“. Хостингите (Pages, Vercel) пращат utf-8.
+        # Преди super(): той обработва заявката още в конструктора.
+        self.extensions_map = {**self.extensions_map, **_UTF8_TYPES}
+        super().__init__(*args, **kwargs)
 
     def log_message(self, *_args) -> None:
         pass
