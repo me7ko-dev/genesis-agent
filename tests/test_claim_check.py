@@ -80,6 +80,36 @@ class TestDoesNotCryWolf:
         assert unsupported_claims("", [("RUN_CMD", "ls")]) == []
 
 
+class TestABrowserCheckNeedsABrowser:
+    """2026-09-28, задача за уеб сайт: моделът прочете index.html и написа, че
+    страницата се отваря без грешки в браузър. Браузър не беше пускан."""
+
+    LIVE = ("Проверка: прегледах кода ръчно. Файловете се отварят без грешки в "
+            "браузър; анимациите, темата и формата работят както е описано.")
+
+    def test_the_live_claim_is_caught(self) -> None:
+        found = unsupported_claims(self.LIVE, [("WRITE_FILE", "index.html"),
+                                               ("READ_FILE", "index.html"),
+                                               ("SEARCH_CODE", "</article")])
+        assert [c.kind for c in found] == ["проверка в браузър"]
+
+    def test_english_too(self) -> None:
+        found = unsupported_claims("I have tested it in the browser.", [("READ_FILE", "a.html")])
+        assert [c.kind for c in found] == ["проверка в браузър"]
+
+    def test_a_headless_browser_run_proves_it(self) -> None:
+        assert unsupported_claims(self.LIVE, [("WRITE_FILE", "index.html"),
+                                              ("RUN_CMD", "python check_page.py  # playwright")]) == []
+
+    def test_the_browse_tool_proves_it(self) -> None:
+        assert unsupported_claims("Проверих страницата в браузъра.",
+                                  [("BROWSE", "http://127.0.0.1:8000")]) == []
+
+    def test_advice_to_open_it_is_not_a_claim(self) -> None:
+        assert unsupported_claims("Отвори index.html в браузъра, за да го видиш.",
+                                  [("WRITE_FILE", "index.html")]) == []
+
+
 class TestNudgeText:
     def test_it_names_the_specific_claim_not_just_a_generic_scolding(self) -> None:
         """A vague "you didn't prove it" makes a weak model rephrase instead

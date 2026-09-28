@@ -129,6 +129,10 @@ DEFAULT_CONTEXT_WINDOW = config.get("models", {}).get("context_window", 128000)
 session_start_time = time.time()
 total_input_tokens = 0
 total_output_tokens = 0
+# Размерът на ПОСЛЕДНАТА заявка (prompt + отговор) — това е заетият контекст.
+# Сборът за сесията (total_*) е разход, не контекст: статус редът показваше
+# „ctx 135K/131K (100%)“ в сесия, чиито заявки бяха по ~15K.
+last_context_tokens = 0
 
 def estimate_tokens(text: str) -> int:
     """Rough estimate: ~4 chars per token for mixed Bulgarian/English."""
@@ -143,9 +147,33 @@ def get_elapsed_time() -> str:
         return f"{elapsed // 60}m {elapsed % 60}s"
     return f"{elapsed}s"
 
+def count_usage(usage: dict | None, messages, reply_text: str) -> None:
+    """Добавя едно обръщение към разхода за сесията и запомня размера му като
+    заетия контекст. Без usage от доставчика — оценка по целия prompt."""
+    global total_input_tokens, total_output_tokens, last_context_tokens
+    if usage:
+        prompt = usage.get("prompt_tokens", 0) or 0
+        completion = usage.get("completion_tokens", 0) or 0
+    else:
+        prompt = sum(estimate_tokens(str(m.get("content", "") or "")) for m in messages)
+        completion = estimate_tokens(reply_text or "")
+    total_input_tokens += prompt
+    total_output_tokens += completion
+    last_context_tokens = prompt + completion
+
+
+def reset_usage() -> None:
+    global total_input_tokens, total_output_tokens, last_context_tokens
+    total_input_tokens = total_output_tokens = last_context_tokens = 0
+
+
+def _fmt_k(n: int) -> str:
+    return f"{n // 1000}K" if n >= 1000 else str(n)
+
+
 def get_context_stats() -> tuple:
-    """Returns (used_tokens, remaining, percentage)."""
-    used = total_input_tokens + total_output_tokens
+    """Returns (used_tokens, remaining, percentage) of the context window."""
+    used = last_context_tokens
     remaining = max(0, DEFAULT_CONTEXT_WINDOW - used)
     pct = min(100, int((used / DEFAULT_CONTEXT_WINDOW) * 100))
     return used, remaining, pct
@@ -160,9 +188,8 @@ def build_status_bar() -> Text:
     elapsed = get_elapsed_time()
     ctx_used, ctx_remain, ctx_pct = get_context_stats()
 
-    # Format context: K for thousands
-    ctx_used_str = f"{ctx_used // 1000}K" if ctx_used > 1000 else str(ctx_used)
-    ctx_total_str = f"{DEFAULT_CONTEXT_WINDOW // 1000}K"
+    ctx_used_str = _fmt_k(ctx_used)
+    ctx_total_str = _fmt_k(DEFAULT_CONTEXT_WINDOW)
 
     status = Text()
     status.append(" ⚕ ", style="cyan")
@@ -174,6 +201,8 @@ def build_status_bar() -> Text:
     status.append(f" ({ctx_pct}%)", style="dim magenta")
     status.append(" │ ", style="dim")
     status.append(f"~{ctx_remain // 1000}K left", style="green")
+    status.append(" │ ", style="dim")
+    status.append(f"Σ {_fmt_k(total_input_tokens + total_output_tokens)}", style="dim")
 
     return status
 
@@ -612,7 +641,7 @@ def _brain_handles(provider: str) -> bool:
 
 def _ask_via_legacy(messages, tools, prov, model):
     """Стария директен път — само за ръчно избран доставчик извън brain.py."""
-    global total_input_tokens, total_output_tokens, _last_usage
+    global _last_usage
     _last_usage = None
     use_tools = tools if (tools and _SUPPORTS_TOOLS.get((prov, model))) else None
     msgs = list(messages) if use_tools else _sanitize_for_textmode(list(messages))
@@ -620,9 +649,8 @@ def _ask_via_legacy(messages, tools, prov, model):
         response, tool_calls = _call_provider(prov, model, msgs, tools=use_tools)
     except Exception as e:
         return f"[Грешка: {e}]", None
+    count_usage(_last_usage, messages, response)
     if _last_usage:
-        total_input_tokens += _last_usage.get("prompt_tokens", 0)
-        total_output_tokens += _last_usage.get("completion_tokens", 0)
         try:
             from genesis_agent.budget import record_usage
             record_usage(provider=prov, model=model,
@@ -630,11 +658,6 @@ def _ask_via_legacy(messages, tools, prov, model):
                          completion_tokens=_last_usage.get("completion_tokens", 0))
         except Exception:
             pass
-    else:
-        for m in messages:
-            if m.get("role") in ("user", "system"):
-                total_input_tokens += estimate_tokens(m.get("content", "") or "")
-        total_output_tokens += estimate_tokens(response)
     return response, tool_calls
 
 
@@ -661,8 +684,6 @@ def ask_genesis(messages, tools=None):
     (виж SECURITY.md — един ключ на доставчик), а офсетът връщаше отговори от
     различен модел на всяко съобщение и не се качваше обратно нагоре.
     """
-    global total_input_tokens, total_output_tokens
-
     # Ръчно избран доставчик, който Brain не познава → стария директен път.
     if not _brain_handles(current_provider):
         return _ask_via_legacy(messages, tools, current_provider, current_model_id)
@@ -688,9 +709,7 @@ def ask_genesis(messages, tools=None):
                 l_text = lr.raw_text or ""
                 l_calls = getattr(lr, "tool_calls", None)
                 if not light_reply_needs_escalation(l_text, l_calls):
-                    usage = getattr(lr, "usage", None) or {}
-                    total_input_tokens += usage.get("prompt_tokens", 0)
-                    total_output_tokens += usage.get("completion_tokens", 0)
+                    count_usage(getattr(lr, "usage", None), messages, l_text)
                     if lb.current:
                         console.print(f"[dim]⚡ лек въпрос → {lb.current.get('provider')}/"
                                       f"{lb.current.get('model')}[/]")
@@ -710,15 +729,7 @@ def ask_genesis(messages, tools=None):
 
     # Brain вече логва usage в genesis_agent.budget вътрешно — тук САМО обновяваме
     # брояча на status bar-а, за да не се дублира записът в !budget.
-    usage = getattr(reply, "usage", None)
-    if usage:
-        total_input_tokens += usage.get("prompt_tokens", 0)
-        total_output_tokens += usage.get("completion_tokens", 0)
-    else:
-        for m in messages:
-            if m.get("role") in ("user", "system"):
-                total_input_tokens += estimate_tokens(m.get("content", "") or "")
-        total_output_tokens += estimate_tokens(text)
+    count_usage(getattr(reply, "usage", None), messages, text)
 
     # Ако Brain е паднал на друг доставчик ЗА ТОЗИ отговор (cooldown/грешка,
     # включително сгромолясване до локалния модел като последна резерва),
@@ -1393,9 +1404,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
 
 
 def main():
-    global total_input_tokens, total_output_tokens
-    total_input_tokens = 0
-    total_output_tokens = 0
+    reset_usage()
 
     print_minimal_banner()
 
@@ -1436,7 +1445,14 @@ def main():
 
     while True:
         try:
-            show_status_bar()
+            # Статус редът е украса: грешка в него не бива да спира чата. Тук
+            # беше в общия try — изключението прескачаше input(), следващият
+            # кръг гърмеше пак и чатът печаташе грешката безкрайно (bench, 2026-09-26:
+            # 1.2M реда за 5 минути, без нито един прочетен ред вход).
+            try:
+                show_status_bar()
+            except Exception as e:
+                console.print(f"[dim]⚠ статус: {e}[/]")
 
             user_input = console.input("[bold green]❯[/] ").strip()
             if not user_input: continue
@@ -1464,8 +1480,7 @@ def main():
 
             if user_input.lower() == "/clear":
                 messages = deque([{"role": "system", "content": SYSTEM_PROMPT}], maxlen=_HISTORY_MAXLEN)
-                total_input_tokens = 0
-                total_output_tokens = 0
+                reset_usage()
                 print_minimal_banner()
                 continue
 
@@ -1595,7 +1610,7 @@ def main():
                 continue
 
             if user_input.lower() == "/status":
-                _ctx_used, ctx_remain, ctx_pct = get_context_stats()
+                ctx_used, ctx_remain, ctx_pct = get_context_stats()
                 console.print(f"[cyan]Модел:[/] {current_model_id}"
                               + ("  [green](кодинг режим — веригата е друга)[/]" if _CODING_MODE else ""))
                 if _LOCAL_ONLY_MODEL:
@@ -1603,8 +1618,9 @@ def main():
                 else:
                     console.print(f"[cyan]Доставчик:[/] {PROVIDERS[current_provider]['name']}")
                 console.print(f"[cyan]Време:[/] {get_elapsed_time()}")
-                console.print(f"[cyan]Токени:[/] ~{total_input_tokens + total_output_tokens} ({ctx_pct}%)")
-                console.print(f"[cyan]Остава:[/] ~{ctx_remain}")
+                console.print(f"[cyan]Контекст:[/] ~{ctx_used} от {DEFAULT_CONTEXT_WINDOW} ({ctx_pct}%), "
+                              f"остава ~{ctx_remain}")
+                console.print(f"[cyan]Токени за сесията:[/] ~{total_input_tokens + total_output_tokens}")
                 continue
 
             if user_input.lower() == "/help":

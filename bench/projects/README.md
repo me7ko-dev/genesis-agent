@@ -19,7 +19,20 @@
 | `fuel-prices` | HTML таблица, „2,59 лв.“, „-“, чужда таблица преди нея | 2/2 |
 | `faktura-excel` | реалистична българска PDF фактура (само Windows — шрифт Arial) | ✅ след `genesis fix` |
 
-## Пускане на един проект
+## Пускане на всички наведнъж
+
+```powershell
+# python-ът на pipx venv-а има зависимостите на Genesis; кодът е от това репо
+& "$HOME\AppData\Local\pipx\pipx\venvs\genesis-agent\Scripts\python.exe" scripts\bench_projects.py --runs 2
+# само някои / сравнение с предишно пускане
+... scripts\bench_projects.py --only egn-check,workdays --compare $HOME\.genesis\bench\<дата>\results.json
+```
+
+Всеки пуск е в празна папка; `test_hidden.py` се копира извън нея чак след
+края. Таблицата накрая: изцяло верни пускове, дял скрити тестове, секунди,
+токени. Логовете и `results.json` остават в папката от `--out`.
+
+## Пускане на един проект на ръка
 
 Зависимостите на проекта (pytest, flask, beautifulsoup4, pdfplumber, openpyxl,
 reportlab) трябва да са в системния Python — Genesis ги ползва за тестовете.

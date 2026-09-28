@@ -42,6 +42,11 @@ class TestPidAliveDispatch:
 
 
 class TestPidAlivePosix:
+    # На Windows сигнал 0 е signal.CTRL_C_EVENT: истинско os.kill(pid, 0) праща
+    # Ctrl+C на цялата конзолна група и pytest спира с KeyboardInterrupt няколко
+    # теста по-късно (затова изглеждаше „случайно“, NEXT_STEPS). Там pid_alive
+    # и без това ползва _pid_alive_win32.
+    @pytest.mark.skipif(sys.platform == "win32", reason="os.kill(pid, 0) е Ctrl+C на Windows")
     def test_the_current_process_is_alive(self) -> None:
         assert su._pid_alive_posix(os.getpid()) is True
 

@@ -425,3 +425,32 @@ def test_backup_refuses_a_target_inside_the_workspace(tmp_path, inside) -> None:
     ok, err = gta._backup_workspace(src, src / inside if inside else src)
     assert not ok and "GENESIS_BACKUP_DIR" in err
     assert list(src.iterdir()) == []
+
+
+class TestStatusBar:
+    """Статус редът: заетият контекст е последната заявка, не сборът за сесията."""
+
+    def test_it_renders(self) -> None:
+        """Регресия: помощна функция `_k` беше засенчена от модулна променлива
+        `_k` (цикъл по ключове) и всяко показване гърмеше с „'str' object is
+        not callable“."""
+        gta.reset_usage()
+        assert "ctx 0/" in gta.build_status_bar().plain
+
+    def test_context_is_the_last_request_and_the_session_total_is_separate(self) -> None:
+        gta.reset_usage()
+        gta.count_usage({"prompt_tokens": 12_000, "completion_tokens": 500}, [], "")
+        gta.count_usage({"prompt_tokens": 14_000, "completion_tokens": 700}, [], "")
+        used, _remaining, _pct = gta.get_context_stats()
+        assert used == 14_700
+        assert gta.total_input_tokens + gta.total_output_tokens == 27_200
+        bar = gta.build_status_bar().plain
+        assert "ctx 14K/" in bar and "Σ 27K" in bar
+        gta.reset_usage()
+
+    def test_without_usage_the_whole_prompt_is_estimated(self) -> None:
+        gta.reset_usage()
+        msgs = [{"role": "system", "content": "s" * 400}, {"role": "tool", "content": "t" * 400}]
+        gta.count_usage(None, msgs, "o" * 40)
+        assert gta.get_context_stats()[0] == 210
+        gta.reset_usage()
