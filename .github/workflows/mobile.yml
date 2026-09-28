@@ -68,14 +68,14 @@ jobs:
       - name: Build with Xcode
         run: |
           set -o pipefail
-          xcodebuild -workspace ios/GenesisRemote.xcworkspace -scheme GenesisRemote \
+          xcodebuild -workspace ios/Genesis.xcworkspace -scheme Genesis \
             -configuration Release -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath build CODE_SIGNING_ALLOWED=NO build | tail -40
       - name: Package the simulator app
         run: |
           cd build/Build/Products/Release-iphonesimulator
-          ditto -c -k --keepParent GenesisRemote.app "$GITHUB_WORKSPACE/genesis-remote-ios-simulator.zip"
+          ditto -c -k --keepParent Genesis.app "$GITHUB_WORKSPACE/genesis-remote-ios-simulator.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: genesis-remote-ios-simulator

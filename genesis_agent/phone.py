@@ -1,8 +1,8 @@
 """genesis_agent.phone — `genesis phone`: Genesis на самия телефон, без компютър.
 
 Android няма python, git и node. Termux ги дава: истински Linux на телефона,
-в който агентът тече точно както на компютъра. Приложението Genesis Remote
-(mobile/) е прозорецът към него. Устройството е като при Genesis Desktop:
+в който агентът тече точно както на компютъра. Приложението Genesis
+(mobile/, преди „Genesis Remote“) е прозорецът към него. Устройството е като при Genesis Desktop:
 `genesis serve` слуша само на 127.0.0.1, а приложението говори с него по
 криптирания протокол от remote_server.py.
 

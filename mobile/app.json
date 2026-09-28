@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Genesis Remote",
+    "name": "Genesis",
     "slug": "genesis-remote",
     "scheme": "genesisremote",
     "version": "1.0.0",
@@ -16,7 +16,7 @@
       "bundleIdentifier": "dev.me7ko.genesisremote",
       "supportsTablet": true,
       "infoPlist": {
-        "NSLocalNetworkUsageDescription": "Genesis Remote connects to Genesis running on your computer in the same network.",
+        "NSLocalNetworkUsageDescription": "Genesis connects to Genesis running on your computer in the same network.",
         "NSAppTransportSecurity": {
           "NSAllowsLocalNetworking": true,
           "NSAllowsArbitraryLoads": true

@@ -78,6 +78,24 @@
 
 - Ключовете: CI native.yml run 36402553765 (termux ✅ вкл. import_keys в истински Termux, android ✅, windows ✅, desktop ✅), mobile.yml run 36402557778 (test ✅, ios ✅). APK-то е в `Downloads\genesis-remote-android-bez-kompyutar.apk`.
 
+## На живо на телефона на потребителя (2026-09-28)
+- Телефон: Samsung Galaxy S10+ (SM-G975F), Android 12, Termux 0.118.3, aarch64.
+- Достъп от лаптопа: SSH в Termux, `ssh -p 8022 -i ~/.ssh/genesis_phone_ed25519 u0@192.168.0.86`
+  (Wi-Fi `Me7ko_5G`; лаптопът е и на `Tenda_4CED25_5G`, която телефонът не вижда).
+  sshd се пуска в Termux с `sshd`; ключът е само в ~/.ssh/authorized_keys там.
+- Беше Genesis 0.1.0 (pip, юли) → оставен като `~/.local/bin/genesis.old-0.1.0`;
+  новият е в `~/.genesis/venv`, `$PREFIX/bin/genesis`. ~/.genesis (памет, умения) запазени.
+- Ключове: старият OLLAMA_API_KEY на телефона → OLLAMA_API_KEY_2 (различен от
+  тези на лаптопа, работи) + 12-те от лаптопа по SSH. `genesis keys test` на
+  телефона: 13/13 ✅. Копие преди това: `~/.genesis/.env.before-laptop-keys`.
+- **Бъг, хванат само на истинския телефон:** RLIMIT_AS 2 GB убива всеки процес
+  на Android arm64 (rc=-6) → на Android без RLIMIT_AS (d580b49).
+- **Бъг:** повторното пускане на инсталатора не обновяваше (pip пропуска
+  същата версия) → `--force-reinstall --no-deps` (bae892e).
+- Истински ходове през протокола: WRITE_FILE/LIST_DIR (3 s), писане + пускане на
+  python (5 s, верен резултат). Моделът: groq/openai/gpt-oss-120b.
+- APK: копиран в Termux (`~/genesis-remote.apk`), инсталаторът отворен с `termux-open`.
+
 ## Остава
 - Потребителят да пробва на истински телефон (APK от CI артефакта)
 - Не е пробвано на живо: RUN_COMMAND бутонът, deep link сдвояването,
