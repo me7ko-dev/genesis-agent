@@ -53,7 +53,7 @@ class _Collector(HTMLParser):
         self.labels_for: set[str] = set()
         self.inputs: list[tuple[str, bool]] = []  # (id, has aria-label/title)
         self.html_lang: str | None = None
-        self.has_viewport = self.has_title = self.has_description = False
+        self.has_viewport = self.has_title = self.has_description = self.has_charset = False
         self.text: list[str] = []
 
     def handle_starttag(self, tag: str, attrs_list) -> None:
@@ -67,6 +67,7 @@ class _Collector(HTMLParser):
             name = attrs.get("name", "").lower()
             self.has_viewport |= name == "viewport"
             self.has_description |= name == "description"
+            self.has_charset |= "charset" in attrs or attrs.get("http-equiv", "").lower() == "content-type"
             prop = attrs.get("property", "").lower()
             if prop in ("og:image", "og:url") or name == "twitter:image":
                 self.external.append(attrs.get("content", ""))
@@ -114,6 +115,23 @@ def _is_local(ref: str) -> bool:
     return not (parts.scheme or ref.startswith(("//", "#", "{", "$")))
 
 
+# Примерни данни, не сайт: скрейпърът си пише `sample.html` за тестовете. Измерено
+# 2026-09-28 (bench fuel-prices): бележките за viewport/description и браузърната
+# проверка го накараха да „разкраси“ примера от 769 на 6 996 знака, тестовете
+# паднаха — 532 s и 215 хил. токена вместо ~100 s и ~46 хил.
+_DATA_NAME = re.compile(r"sample|fixture|mock|dummy|example|test|data|page_?\d", re.IGNORECASE)
+_DATA_DIRS = {"test", "tests", "fixtures", "fixture", "samples", "data", "testdata", "__snapshots__"}
+_STYLED = re.compile(r"<link[^>]+stylesheet|<style[\s>]|<script[\s>]", re.IGNORECASE)
+
+
+def is_site_page(path: Path, content: str) -> bool:
+    """Страница, която хората ще отворят (стилизирана, не в tests/ и не „sample“),
+    а не HTML като данни за друга програма."""
+    if _DATA_NAME.search(path.stem) or _DATA_DIRS & {p.lower() for p in path.parts[:-1]}:
+        return False
+    return bool(_STYLED.search(content))
+
+
 def check_html(path: Path, content: str) -> list[str]:
     c = _Collector()
     try:
@@ -125,6 +143,8 @@ def check_html(path: Path, content: str) -> list[str]:
     found += c.mismatched[:4]
     found += [f"<{t}> на ред {ln} не е затворен" for t, ln in c.stack
               if t not in _OPTIONAL_END][:3]
+    if not is_site_page(path, content):
+        return found  # данни: само структурата, без SEO/достъпност/цени
     for ref_attr, ref in c.refs:
         if ref.startswith("#"):
             if len(ref) > 1 and unquote(ref[1:]) not in c.ids:
@@ -152,6 +172,8 @@ def check_html(path: Path, content: str) -> list[str]:
     if "<html" in content.lower():  # пълен документ, не фрагмент
         if not c.has_viewport:
             found.append('няма <meta name="viewport"> — на телефон ще е ситно')
+        if not c.has_charset:
+            found.append('няма <meta charset="utf-8"> — без него кирилицата може да излезе като „Ð”Ð¾…“')
         if not c.has_title:
             found.append("няма <title>")
         if not c.has_description:
