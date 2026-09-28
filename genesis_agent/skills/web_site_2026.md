@@ -29,11 +29,15 @@ tests/test_web_skill.py сглобява страница от нея и я пр
   `contrast_ratio()` (Python блока): текст ≥ 4.5:1, едър текст и бутони ≥ 3:1 —
   и в двете теми.
 - Текст върху снимка/SVG/градиент — само в `.hero` (там има тъмен слой).
-- Нито една сива кутия или „placeholder“: илюстрации — SVG със слоеве и
-  градиенти (планини, вълни, форми по темата); галерия — такива SVG сцени с
-  подпис. Карта — iframe на OpenStreetMap с `marker=ширина,дължина`; не знаеш ли
-  координатите — връзка „Отвори в картата“ (openstreetmap.org/search?query=…)
-  и писмени указания как се стига.
+- Нито една празна кутия: не сиви/едноцветни правоъгълници, не „placeholder“,
+  не едно емоджи в голямо поле. Всяка карта и всяка снимка в галерията —
+  SVG сцена с поне 3–4 слоя по темата (като `.card__art` в скелета: небе, слънце,
+  хълмове; огън — пламъци и дърва; храна — чиния и пара), с `role="img"` и
+  `aria-label`. Браузърната проверка брои празните полета.
+- Карта: координати НИКОГА по памет (измерено: селото сложено на ~30 km) —
+  вземи ги с WEB_SEARCH от източник и сложи iframe на OpenStreetMap с
+  `marker=ширина,дължина`; иначе само връзка „Отвори в картата“
+  (openstreetmap.org/search?query=…) и писмени указания как се стига.
 - Цени в € (еврото е валута от 01.01.2026), конкретно съдържание на български —
   имена, часове, адрес, без „Lorem ipsum“.
 - Точно един `<h1>`; `header`/`nav`/`main`/`footer`; `lang="bg"`,
@@ -121,6 +125,8 @@ a { color: var(--accent); }
 .grid { display: grid; gap: 1.25rem; grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
   box-shadow: var(--shadow); overflow: hidden; display: flex; flex-direction: column; }
+.card__art { aspect-ratio: 16 / 10; background: var(--surface-2); }
+.card__art svg { width: 100%; height: 100%; }
 .card__body { padding: 1.25rem 1.25rem 1.5rem; display: grid; gap: .35rem; }
 .card p { color: var(--muted); margin: 0; }
 .price { font-size: 1.35rem; font-weight: 800; color: var(--text); }
@@ -243,7 +249,13 @@ document.querySelectorAll('[data-year]').forEach(el => { el.textContent = new Da
       <div class="container">
         <h2>Предлагаме</h2>
         <div class="grid">
-          <article class="card reveal"><div class="card__body"><h3>Услуга</h3><p>Описание.</p><p class="price">45 € <small>/ час</small></p></div></article>
+          <article class="card reveal">
+            <figure class="card__art"><svg viewBox="0 0 320 200" preserveAspectRatio="xMidYMid slice" role="img" aria-label="Хълмове по залез">
+              <rect width="320" height="200" fill="#fde2c4"/><circle cx="245" cy="60" r="26" fill="#f59e0b"/>
+              <path d="M0 150 L90 85 L160 135 L235 95 L320 150 V200 H0Z" fill="#3f6b5c"/>
+              <path d="M0 178 L120 128 L215 170 L320 138 V200 H0Z" fill="#274a3f"/></svg></figure>
+            <div class="card__body"><h3>Услуга</h3><p>Описание.</p><p class="price">45 € <small>/ час</small></p></div>
+          </article>
         </div>
       </div>
     </section>

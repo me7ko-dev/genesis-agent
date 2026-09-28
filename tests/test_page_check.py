@@ -138,6 +138,7 @@ def test_a_real_browser_measures_a_bad_page(tmp_path) -> None:
 <section class="hero"><div class="hero-bg"></div><h1>Добре дошли</h1></section>
 <p class="wide">Широк ред</p>
 <svg viewBox="0 0 100 20" width="300"><text x="0" y="15">Карта (SVG placeholder)</text></svg>
+<div style="width: 260px; height: 170px; background: #f1ede6">🛏️</div>
 </body></html>""", encoding="utf-8")
     findings, why = pc.run(tmp_path / "index.html")
     assert findings is not None, why
@@ -145,3 +146,4 @@ def test_a_real_browser_measures_a_bad_page(tmp_path) -> None:
     assert "нисък контраст" in text and "Добре дошли" in text
     assert "по-широка от екрана" in text
     assert "placeholder" in text
+    assert "почти без съдържание" in text

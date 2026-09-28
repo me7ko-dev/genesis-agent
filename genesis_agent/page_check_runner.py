@@ -85,10 +85,29 @@ _MEASURE = r"""
     const own = [...el.childNodes].filter(n => n.nodeType === 3).map(n => n.textContent).join(' ');
     if (re.test(own) && visible(el)) placeholders.push(desc(el));
   }
+  // Голяма кутия почти без съдържание: само емоджи или едноцветна SVG (2026-09-28:
+  // стаи и галерия — 🛏️ 🔥 🎵 в бежови полета 260×170 px; преди — сиви правоъгълници).
+  const sparse = [];
+  const painted = s => (parse(s.backgroundColor)?.a || 0) > 0.05 || s.backgroundImage !== 'none'
+    || parseFloat(s.borderTopWidth) > 0 || s.boxShadow !== 'none';
+  for (const el of document.body.querySelectorAll('div, figure, span, a, li, article, picture')) {
+    const s = getComputedStyle(el); const r = el.getBoundingClientRect();
+    if (!visible(el) || r.width < 150 || r.height < 110 || ['absolute', 'fixed'].includes(s.position)) continue;
+    if ((el.innerText || '').replace(/\s+/g, '').length > 3) continue;
+    const area = r.width * r.height, big = m => { const q = m.getBoundingClientRect(); return q.width * q.height > area * 0.2; };
+    if ([...el.querySelectorAll('img, video, canvas, iframe, picture, input, textarea')].some(big)) continue;
+    const svgs = [...el.querySelectorAll('svg')].filter(big);
+    if (svgs.some(v => v.querySelectorAll('path, polygon, circle, ellipse, rect, line, polyline, image, use').length >= 3)) continue;
+    if (!painted(s) && !svgs.length) continue;
+    sparse.push({el, d: desc(el) + ` ${Math.round(r.width)}×${Math.round(r.height)}`});
+  }
+  // Най-вътрешните: „div.gallery-item ×4“ казва какво да се поправи, „div.gallery-grid“ — не.
+  const inner = sparse.filter(o => !sparse.some(q => q !== o && o.el.contains(q.el)));
   const header = document.querySelector('header, [role=banner]');
   return {
     scrollWidth: document.documentElement.scrollWidth, width: W, texts, invisible, overflow,
     small: small.slice(0, 5), smallCount: small.length, placeholders: placeholders.slice(0, 4),
+    sparse: inner.map(o => o.d).slice(0, 4), sparseCount: inner.length,
     h1: document.querySelectorAll('h1').length,
     headerHeight: header ? Math.round(header.getBoundingClientRect().height) : 0,
     bodyBg: getComputedStyle(document.body).backgroundColor,
@@ -319,6 +338,10 @@ def check(html: Path, shots: Path | None, single: bool = False) -> dict:
         if m["placeholders"]:
             bodies.append(f"видим заместител — {', '.join(m['placeholders'][:3])}; направи "
                           "истинско съдържание (SVG, текст)")
+        if m["sparseCount"]:
+            bodies.append(f"{m['sparseCount']} големи полета почти без съдържание (само емоджи или "
+                          f"едноцветна форма) — напр. {', '.join(m['sparse'][:3])}; нарисувай SVG "
+                          "сцена със слоеве/градиенти по темата")
         for b in bodies:
             per_view.setdefault(b, []).append(name)
     findings += [f"{' / '.join(names)}: {body}" for body, names in per_view.items()]
