@@ -53,7 +53,7 @@ class _Collector(HTMLParser):
         self.labels_for: set[str] = set()
         self.inputs: list[tuple[str, bool]] = []  # (id, has aria-label/title)
         self.html_lang: str | None = None
-        self.has_viewport = self.has_title = self.has_description = False
+        self.has_viewport = self.has_title = self.has_description = self.has_charset = False
         self.text: list[str] = []
 
     def handle_starttag(self, tag: str, attrs_list) -> None:
@@ -67,6 +67,7 @@ class _Collector(HTMLParser):
             name = attrs.get("name", "").lower()
             self.has_viewport |= name == "viewport"
             self.has_description |= name == "description"
+            self.has_charset |= "charset" in attrs or attrs.get("http-equiv", "").lower() == "content-type"
             prop = attrs.get("property", "").lower()
             if prop in ("og:image", "og:url") or name == "twitter:image":
                 self.external.append(attrs.get("content", ""))
@@ -152,6 +153,8 @@ def check_html(path: Path, content: str) -> list[str]:
     if "<html" in content.lower():  # пълен документ, не фрагмент
         if not c.has_viewport:
             found.append('няма <meta name="viewport"> — на телефон ще е ситно')
+        if not c.has_charset:
+            found.append('няма <meta charset="utf-8"> — без него кирилицата може да излезе като „Ð”Ð¾…“')
         if not c.has_title:
             found.append("няма <title>")
         if not c.has_description:

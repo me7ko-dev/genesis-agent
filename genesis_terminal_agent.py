@@ -91,6 +91,7 @@ except Exception:
 from genesis_agent import claim_check
 from genesis_agent.budget import clip_for_context
 from genesis_agent.config import TOOL_ROUND_CAP as _TOOL_ROUND_CAP
+from genesis_agent.page_check import FinalCheck as _PageCheck
 from genesis_agent.paths import (
     CONFIG_PATH,
     ENV_FILES,
@@ -1225,6 +1226,9 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     # никаква проверка срещу симулирана работа: claim_check влезе само
     # в agent_core (GUI/Jarvis), а тукашният tool цикъл е отделен код.
     _executed: list[tuple[str, str]] = []
+    # Уеб страниците, писани в хода, се отварят в браузър, когато моделът каже
+    # „готово“ (genesis_agent.page_check, план Г.11).
+    _page_check = _PageCheck()
     # Въртене на място: същият извик, същият резултат, пореден път.
     # Таванът го ограничава по цена, но не го разпознава — виж
     # genesis_agent.repeat_guard.
@@ -1265,6 +1269,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
                 except (json.JSONDecodeError, TypeError):
                     args = {}
                 result = genesis_skills.dispatch_tool_call(name, args)
+                _page_check.observe(result)
                 _entry = claim_check.counts_as_executed(
                     name, " ".join(str(v) for v in args.values()), result)
                 if _entry:
@@ -1308,6 +1313,8 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
         # (или просто избра да не вика нищо тази реплика).
         tool_results = parse_and_execute_tools(response)
         _executed.extend(claim_check.executed_from_text_results(tool_results))
+        for _r in tool_results:
+            _page_check.observe(_r)
         if not tool_results:
             # Празно ≠ непременно "приключи" — може да е объркан tool tag
             # (виж agent_core.run_tool_loop, същият фикс, design note
@@ -1328,6 +1335,18 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
                 with ui.thinking("Анализирам...", "aesthetic"):
                     response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
                 continue
+            if _page_check.due():
+                with ui.thinking("Проверявам страницата в браузър…", "dots2"):
+                    _page_note, _page_line = _page_check.check()
+                if _page_line:
+                    ui.tool("проверка в браузър", _page_line)
+                if _page_check.passed:
+                    _executed.append(("BROWSE", "page_check"))
+                if _page_note:
+                    messages.append({"role": "system", "content": _page_note})
+                    with ui.thinking("Оправям според браузъра…", "aesthetic"):
+                        response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
+                    continue
             _unsupported = claim_check.unsupported_claims(response, _executed)
             if _unsupported and _claim_retries < 1:
                 _claim_retries += 1

@@ -18,6 +18,9 @@ datas = [(str(PKG / "config.yaml"), "genesis_agent")]
 # Same set as [tool.setuptools.package-data]: what pip ships, this ships.
 datas += [(str(p), "genesis_agent/skills") for p in sorted((PKG / "skills").glob("*.md"))]
 datas.append((str(PKG / "skills" / "skills.json"), "genesis_agent/skills"))
+# The browser check runs this file with the system Python (the one with
+# playwright), so it has to exist as a .py file, not only as bytecode.
+datas.append((str(PKG / "page_check_runner.py"), "genesis_agent"))
 # /update in the native build runs the installer, from a copy in %TEMP%.
 datas.append((str(ROOT / "scripts" / "install.ps1"), "."))
 build_info = os.environ.get("GENESIS_BUILD_INFO")
