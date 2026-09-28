@@ -1221,6 +1221,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     round_i = 0
     _malformed_tag_retries = 0
     _claim_retries = 0
+    _promise_retries = 0
     # Какво РЕАЛНО е изпълнено в тази реплика. Терминалът е фронтендът
     # по подразбиране (`genesis`), а до момента беше ЕДИНСТВЕНИЯТ без
     # никаква проверка срещу симулирана работа: claim_check влезе само
@@ -1347,6 +1348,14 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
                     with ui.thinking("Оправям според браузъра…", "aesthetic"):
                         response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
                     continue
+            _promise = claim_check.unfinished_promise(response)
+            if _promise and _promise_retries < 1:
+                _promise_retries += 1
+                ui.warn("Обещава работа и спира — казвам му да я направи.")
+                messages.append({"role": "system", "content": claim_check.promise_nudge(_promise)})
+                with ui.thinking("Продължавам…", "aesthetic"):
+                    response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
+                continue
             _unsupported = claim_check.unsupported_claims(response, _executed)
             if _unsupported and _claim_retries < 1:
                 _claim_retries += 1

@@ -385,6 +385,7 @@ def run_tool_loop(
     spinning = ""
     malformed_tag_retries = 0
     completion_claim_retries = 0
+    promise_retries = 0
     # Какво РЕАЛНО е изпълнено в тази реплика — сверява се срещу това, което
     # моделът твърди накрая (claim_check). Само броячът на рундове не стига:
     # един `LIST_DIR` прави rounds=1 и с това "оправдава" твърдение за
@@ -517,6 +518,13 @@ def run_tool_loop(
                     _status("оправя според браузъра…")
                     text, tool_calls, prov, model = core.complete(messages)
                     continue
+            promise = claim_check.unfinished_promise(text)
+            if promise and promise_retries < 1:
+                promise_retries += 1
+                messages.append({"role": "system", "content": claim_check.promise_nudge(promise)})
+                _status("продължава…")
+                text, tool_calls, prov, model = core.complete(messages)
+                continue
             unsupported = claim_check.unsupported_claims(text, executed)
             if unsupported and completion_claim_retries < 1:
                 completion_claim_retries += 1

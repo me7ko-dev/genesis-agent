@@ -172,3 +172,25 @@ class TestTextResultParsing:
 
     def test_unrecognised_shapes_are_skipped_not_guessed(self) -> None:
         assert claim_check.executed_from_text_results(["просто текст", "", None]) == []
+
+
+class TestAPromiseAtTheEndIsNotWork:
+    """2026-09-28, кодинг веригата: „…и ще продължа със създаването на сайта.“ —
+    ходът свърши с нула файла."""
+
+    def test_the_live_case(self) -> None:
+        text = ("Ще използвам познатите координати за село Широка лъка (приблизително "
+                "41.6767° N, 24.7333° E) и ще продължа с създаването на сайта.")
+        assert "ще продължа" in claim_check.unfinished_promise(text)
+        assert "СЕГА" in claim_check.promise_nudge(claim_check.unfinished_promise(text))
+
+    def test_english_too(self) -> None:
+        assert claim_check.unfinished_promise("Let me now create the files.")
+
+    def test_an_offer_to_the_operator_is_not_a_promise(self) -> None:
+        assert claim_check.unfinished_promise(
+            "Готово! Създадох сайта. Ако искаш, ще създам и страница за резервации.") == ""
+        assert claim_check.unfinished_promise("Искате ли да продължа с галерията?") == ""
+
+    def test_a_finished_answer_is_left_alone(self) -> None:
+        assert claim_check.unfinished_promise("Създадох index.html и styles.css. Сайтът е готов.") == ""
