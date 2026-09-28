@@ -142,6 +142,11 @@
   models, update, history, tasks, skills — всички ok.
 - Ollama (Local)/LM Studio не се предлагат като „готови“ на телефона.
 
+## Частно репо с APK-тата (2026-09-28)
+- https://github.com/me7ko-dev/genesis-phone (PRIVATE), локално `C:\Users\roika\Projects\genesis-phone`.
+  Release v2026.09.28: genesis.apk (run 36418228070, 8836379) + Termux 0.118.3,
+  Termux:API 0.53.0, Termux:Boot 0.8.1 от F-Droid + SHA256SUMS. README: стъпки за нов телефон.
+
 ## Остава
 - Потребителят да пробва на истински телефон (APK от CI артефакта)
 - Не е пробвано на живо: RUN_COMMAND бутонът, deep link сдвояването,
