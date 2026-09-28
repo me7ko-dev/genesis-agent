@@ -320,6 +320,13 @@ def _tool_search_code(arg: str, path: str = "", glob: str = "") -> str:
     if not pattern:
         return "[SEARCH_CODE] Празен шаблон."
     from genesis_agent.repo_map import search_code
+    # Шаблон, подаден като път (`site/**/*.html`): 2026-09-28 моделът получи
+    # два пъти „няма такъв път“ и загуби два рунда. Частта до първия `*`/`?`
+    # е папката, останалото — филтърът по име.
+    if path and not glob and any(ch in path for ch in "*?"):
+        parts = Path(path.strip()).parts
+        cut = next(i for i, p in enumerate(parts) if any(ch in p for ch in "*?"))
+        path, glob = str(Path(*parts[:cut])) if cut else "", parts[-1]
     root = _resolve(path) if path else _WORKSPACE
     refusal = _sensitive_root_refusal("SEARCH_CODE", root)
     if refusal:

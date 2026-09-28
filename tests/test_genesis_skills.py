@@ -665,6 +665,18 @@ class TestAnEmptyFolderSaysSo:
         assert "празна" not in out
 
 
+def test_search_code_takes_a_pattern_given_as_the_path(_workspace) -> None:
+    """2026-09-28, задача за сайт: `SEARCH_CODE лв | site/**/*.html` връщаше
+    „няма такъв път“ два пъти подред."""
+    site = _workspace / "site" / "pages"
+    site.mkdir(parents=True)
+    (site / "index.html").write_text("<p>120 лв</p>\n", encoding="utf-8")
+    (site / "notes.txt").write_text("120 лв\n", encoding="utf-8")
+    out = gs._tool_search_code("лв", path=str(_workspace / "site" / "**" / "*.html"))
+    assert "index.html" in out
+    assert "notes.txt" not in out
+
+
 class TestTheGuardReadsWindowsPathsToo:
     """Образецът е писан за shell команди, в които пътят носи `/`. Подаден
     като Windows път, `.ssh\\config` не съвпадаше с `\\.ssh/` — същият файл

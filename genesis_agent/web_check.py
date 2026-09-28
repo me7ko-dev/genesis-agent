@@ -160,7 +160,8 @@ def check_html(path: Path, content: str) -> list[str]:
     # (2026-09-28: 4 рунда за 4 стаи).
     lev = [m.group(0).strip() for m in _LEV_PRICE.finditer(" ".join(c.text))]
     if lev:
-        found.append(f"{len(lev)} цени в лева ({', '.join(lev[:6])}) — от 1 януари 2026 "
+        found.append(f"{len(lev)} {'цена' if len(lev) == 1 else 'цени'} в лева "
+                     f"({', '.join(lev[:6])}) — от 1 януари 2026 "
                      "валутата в България е еврото; текущите цени са в € (EUR)")
     return found
 
