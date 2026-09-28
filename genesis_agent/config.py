@@ -198,6 +198,11 @@ FRESH_TOOL_RESULTS: int = _int_env("GENESIS_FRESH_TOOL_RESULTS", 2)
 # (виж коментара при цикъла в genesis_terminal_agent.py). Цената на рунд вече
 # е ограничена отделно, през TOOL_RESULT_MAX_CHARS.
 TOOL_ROUND_CAP: int = _int_env("GENESIS_TOOL_ROUNDS", 25, minimum=1)
+# В терминала и на телефона (genesis_terminal_agent.run_turn) TOOL_ROUND_CAP е
+# точка на проверка, не стоп — задачата продължава (компресията по средата
+# пази контекста малък, repeat_guard спира въртенето на място). Това е
+# твърдият предпазител отгоре (2026-09-28: задачата да не спира по средата).
+TOOL_ROUND_MAX: int = max(_int_env("GENESIS_TOOL_ROUNDS_MAX", 100, minimum=1), TOOL_ROUND_CAP)
 
 # Optional: set GENESIS_OPERATOR=<your-name> for an audit trail (CLI --operator).
 # GENESIS_STRICT_AUTHORITY=1 requires sovereign operator to start the autonomous loop.

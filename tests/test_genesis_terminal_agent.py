@@ -425,3 +425,101 @@ def test_backup_refuses_a_target_inside_the_workspace(tmp_path, inside) -> None:
     ok, err = gta._backup_workspace(src, src / inside if inside else src)
     assert not ok and "GENESIS_BACKUP_DIR" in err
     assert list(src.iterdir()) == []
+
+
+# ── Дълга задача: не спира и не губи задачата (наживо, телефонът, 2026-09-28) ──
+
+class _QuietUI:
+    def __init__(self) -> None:
+        self.infos: list[str] = []
+        self.warnings: list[str] = []
+
+    def thinking(self, label, spinner="dots"):
+        import contextlib
+        return contextlib.nullcontext()
+
+    def assistant(self, text): pass
+    def tool(self, name, result): pass
+    def asked(self, q): pass
+    def spinning(self, note): self.warnings.append(note)
+    def cancelled(self): return False
+    def info(self, text): self.infos.append(text)
+    def warn(self, text): self.warnings.append(text)
+
+
+def test_a_long_task_keeps_its_instructions_and_does_not_stop_at_the_cap(monkeypatch, tmp_path) -> None:
+    import json as _json
+    from collections import deque
+
+    from genesis_agent import brain as brain_mod
+
+    monkeypatch.setattr(gta, "HISTORY_DIR", tmp_path)
+    monkeypatch.setattr(gta, "_remember", lambda *a: None)
+    monkeypatch.setattr(gta, "_compact_messages", lambda m: m)   # компресията на разговора — отделно
+
+    class _FakeBrain:
+        def __init__(self, *a, **kw): pass
+
+        def complete(self, messages, **kw):
+            return type("R", (), {"raw_text": "Направени стъпки 1..N, остава още."})
+
+    monkeypatch.setattr(brain_mod, "Brain", type("B", (_FakeBrain,), {
+        "compact_chat_history": staticmethod(brain_mod.Brain.compact_chat_history)}))
+
+    rounds = 40
+    seen: list[list[dict]] = []
+
+    def ask(messages, tools=None):
+        seen.append(list(messages))
+        i = len(seen)
+        if i > rounds:
+            return "Готово.", None
+        call = {"id": f"c{i}", "type": "function",
+                "function": {"name": "RUN_CMD", "arguments": _json.dumps({"command": f"step {i}"})}}
+        return f"стъпка {i}", [call]
+
+    monkeypatch.setattr(gta, "ask_genesis", ask)
+    # Различен резултат всеки път — това е истинска работа, не въртене на място.
+    monkeypatch.setattr(gta.genesis_skills, "dispatch_tool_call",
+                        lambda name, args: f"ok {args.get('command')}")
+    ui = _QuietUI()
+    system = {"role": "system", "content": "SYSTEM PROMPT"}
+    out = gta.run_turn(deque([system], maxlen=gta._HISTORY_MAXLEN), "Направи голямата задача", ui)
+
+    assert len(seen) == rounds + 1, ui.warnings            # не спря на 25-ия рунд
+    assert list(out)[-1]["content"] == "Готово."
+    for msgs in seen:                                       # при ВСЯКО обаждане към модела
+        assert msgs[0]["content"] == "SYSTEM PROMPT"
+        assert any(m.get("content") == "Направи голямата задача" for m in msgs)
+        for i, m in enumerate(msgs):                        # без осиротели tool резултати
+            if m.get("role") == "tool":
+                parent = next((p for p in reversed(msgs[:i]) if p.get("role") == "assistant"), None)
+                assert parent and parent.get("tool_calls")
+    assert any("продължавам задачата" in t for t in ui.infos)
+    assert any("Резюме на свършеното" in str(m.get("content")) for m in seen[-1])
+    assert any("25 стъпки" in t for t in ui.infos)
+
+
+def test_the_hard_limit_still_stops_a_runaway_task(monkeypatch, tmp_path) -> None:
+    import json as _json
+    from collections import deque
+
+    monkeypatch.setattr(gta, "HISTORY_DIR", tmp_path)
+    monkeypatch.setattr(gta, "_remember", lambda *a: None)
+    monkeypatch.setattr(gta, "_compact_messages", lambda m: m)
+    monkeypatch.setattr(gta, "_compact_midtask", lambda m, t, ui: m)
+    monkeypatch.setattr(gta, "_TOOL_ROUND_MAX", 30)
+    n = {"i": 0}
+
+    def ask(messages, tools=None):
+        n["i"] += 1
+        call = {"id": f"c{n['i']}", "type": "function",
+                "function": {"name": "RUN_CMD", "arguments": _json.dumps({"command": f"x {n['i']}"})}}
+        return "още", [call]
+
+    monkeypatch.setattr(gta, "ask_genesis", ask)
+    monkeypatch.setattr(gta.genesis_skills, "dispatch_tool_call", lambda name, args: f"ok {n['i']}")
+    ui = _QuietUI()
+    gta.run_turn(deque([{"role": "system", "content": "s"}], maxlen=500), "go", ui)
+    assert n["i"] == 30
+    assert any("предпазител от 30" in w for w in ui.warnings)

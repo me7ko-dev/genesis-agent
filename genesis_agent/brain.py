@@ -883,7 +883,8 @@ class Brain:
         return messages[:2] + tail
 
     @staticmethod
-    def compact_chat_history(messages, threshold: int = 16, keep_recent: int = 10):
+    def compact_chat_history(messages, threshold: int = 16, keep_recent: int = 10,
+                             pin: list | None = None, purpose: str = "chat"):
         """
         Превантивна компресия на дълъг РАЗГОВОРЕН чат (различно от
         trim_round_history — това е многотемен чат: system + произволен брой
@@ -905,6 +906,17 @@ class Brain:
         Безопасно — при грешка/празно резюме пази последното (fallback без
         резюме), никога не чупи разговора. Приема list или deque; ако входът
         е deque, резултатът пази същия maxlen.
+
+        `pin` — съобщения, които не се обобщават, а остават дословно веднага
+        след резюмето (задачата, по която агентът още работи). `purpose="task"`
+        — компресия ПО СРЕДАТА на задача: резюмето казва какво е свършено и
+        какво остава, за да продължи работата, а не да започне отначало.
+
+        Разрезът никога не започва с `tool` резултат (bug fix, 2026-09-28):
+        последните keep_recent съобщения можеха да започват с резултат, чийто
+        assistant с tool_calls е в обобщената част — сирак, който всеки
+        OpenAI-съвместим доставчик отхвърля с HTTP 400, тоест следващото
+        обаждане след компресията падаше.
         """
         msgs = list(messages)
         if not msgs or msgs[0].get("role") != "system":
@@ -914,8 +926,15 @@ class Brain:
         if len(rest) <= threshold:
             return messages
 
-        old_part = rest[:-keep_recent]
-        recent_part = rest[-keep_recent:]
+        split = max(len(rest) - keep_recent, 0)
+        while 0 < split < len(rest) and rest[split].get("role") == "tool":
+            split -= 1
+        if split <= 0:
+            return messages
+        old_part = rest[:split]
+        recent_part = rest[split:]
+        pinned = [m for m in (pin or []) if any(m is o for o in old_part)]
+        old_part = [m for m in old_part if not any(m is p for p in pinned)]
         transcript = "\n".join(
             f"{m.get('role', '?')}: {str(m.get('content', ''))[:500]}" for m in old_part
         )
@@ -924,13 +943,23 @@ class Brain:
         def _rebuild(parts: list) -> deque | list:
             return deque(parts, maxlen=maxlen) if maxlen else parts
 
+        if purpose == "task":
+            instruction = (
+                "Това е работа по задача, която ПРОДЪЛЖАВА. Обобщи какво е направено "
+                "досега: изпълнени стъпки и резултатите им, създадени или променени "
+                "файлове (с пътищата), грешки и как са решени, и какво още остава. "
+                "Кратко, но с конкретните имена, пътища и числа.")
+            header = "## Резюме на свършеното досега (задачата продължава):\n"
+        else:
+            instruction = (
+                "Обобщи накратко (5-8 изречения) ключовите факти, решения и контекст "
+                "от този разговор. Само същественото за бъдещи реплики, не преразказ.")
+            header = "## Резюме на по-ранния разговор:\n"
+
         try:
             brain = Brain(light=True)  # резюме — второстепенна работа
             summary_reply = brain.complete([
-                {"role": "system", "content": (
-                    "Обобщи накратко (5-8 изречения) ключовите факти, решения и контекст "
-                    "от този разговор. Само същественото за бъдещи реплики, не преразказ."
-                )},
+                {"role": "system", "content": instruction},
                 {"role": "user", "content": transcript[:8000]},
             ])
             summary = (summary_reply.raw_text or "").strip()
@@ -952,10 +981,10 @@ class Brain:
         except Exception:
             # Fallback: просто пази последните, без резюме (губи старото честно,
             # не гърми разговора).
-            return _rebuild([system_msg] + recent_part)
+            return _rebuild([system_msg] + pinned + recent_part)
 
-        summary_msg = {"role": "system", "content": "## Резюме на по-ранния разговор:\n" + summary}
-        return _rebuild([system_msg, summary_msg] + recent_part)
+        summary_msg = {"role": "system", "content": header + summary}
+        return _rebuild([system_msg, summary_msg] + pinned + recent_part)
 
     def _provider_key(self, key_env: str) -> str | None:
         """

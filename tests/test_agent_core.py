@@ -33,14 +33,17 @@ class TestEnvFacts:
     def test_on_android_the_folders_are_the_phones(self, monkeypatch, tmp_path) -> None:
         """Termux: без това моделът пише в ~/Downloads — папка, която никое
         друго приложение на телефона не вижда."""
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path / "termux-home"))
+        monkeypatch.setenv("EXTERNAL_STORAGE", str(tmp_path / "emulated0"))
         monkeypatch.setattr("genesis_agent.paths.is_android", lambda: True)
-        (tmp_path / "storage" / "downloads").mkdir(parents=True)
+        (tmp_path / "emulated0" / "Download").mkdir(parents=True)
         out = ac.env_facts()
         assert "Android" in out and "Termux" in out
         downloads = next(line for line in out.splitlines() if "Изтегляния" in line)
-        assert str(tmp_path / "storage" / "downloads") in downloads
+        # Истинската папка, не връзката ~/storage/downloads — `du` мери връзката.
+        assert str(tmp_path / "emulated0" / "Download") in downloads
         assert "НЕ съществува" not in downloads
+        assert str(tmp_path / "emulated0" / "DCIM") in out
         assert "Десктоп" not in out
 
     def test_on_android_with_termux_api_the_phone_commands_are_listed(self, monkeypatch, tmp_path) -> None:

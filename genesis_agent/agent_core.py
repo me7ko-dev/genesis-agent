@@ -90,12 +90,14 @@ def env_facts(workspace: str = "") -> str:
     from genesis_agent.paths import is_android
     android = is_android()
     if android:
-        # Termux: папките на телефона са под ~/storage (termux-setup-storage),
-        # „Десктоп" няма. Иначе моделът пише в ~/Downloads — папка в Termux,
-        # която никое друго приложение на телефона не вижда.
-        shared = home / "storage"
-        dirs = {"DESKTOP": shared / "shared", "DOWNLOAD": shared / "downloads",
-                "DOCUMENTS": shared / "shared" / "Documents", "PICTURES": shared / "pictures"}
+        # Termux: папките на телефона, „Десктоп" няма. Иначе моделът пише в
+        # ~/Downloads — папка в Termux, която никое друго приложение не вижда.
+        # Истинските пътища, не връзките в ~/storage (bug fix, 2026-09-28,
+        # наживо): `du -sh ~/storage/pictures` мери самата връзка, 4 KB, и
+        # агентът обяви, че „почти няма снимки“ при 13 GB в DCIM.
+        shared = Path(os.environ.get("EXTERNAL_STORAGE") or "/storage/emulated/0")
+        dirs = {"DESKTOP": shared, "DOWNLOAD": shared / "Download",
+                "DOCUMENTS": shared / "Documents", "PICTURES": shared / "DCIM"}
 
     # USERNAME преди USER: на Windows `USER` не е зададен, така че този ред
     # казваше буквално "(потребител: unknown)" на всяка сесия там — точно вида
@@ -122,9 +124,13 @@ def env_facts(workspace: str = "") -> str:
                 "termux-sms-send, termux-contact-list, termux-call-log, termux-telephony-call, "
                 "termux-share (`<команда> -h` за опциите). SMS, обаждания и личните данни "
                 "минават през потвърждение от потребителя.")
+    if android:
+        lines.append("- Файловете на потребителя (снимки, изтегляния, документи) са в паметта "
+                     "на телефона по-долу, НЕ в домашната папка на Termux")
     for label, key in (("Памет на телефона" if android else "Десктоп", "DESKTOP"),
                        ("Изтегляния", "DOWNLOAD"),
-                       ("Документи", "DOCUMENTS"), ("Снимки", "PICTURES")):
+                       ("Документи", "DOCUMENTS"),
+                       ("Снимки от камерата" if android else "Снимки", "PICTURES")):
         p = dirs[key]
         lines.append(f"- {label}: {p}" + ("" if p.is_dir() else "   (НЕ съществува)"))
     if workspace:

@@ -91,6 +91,7 @@ except Exception:
 from genesis_agent import claim_check
 from genesis_agent.budget import clip_for_context
 from genesis_agent.config import TOOL_ROUND_CAP as _TOOL_ROUND_CAP
+from genesis_agent.config import TOOL_ROUND_MAX as _TOOL_ROUND_MAX
 from genesis_agent.paths import (
     CONFIG_PATH,
     ENV_FILES,
@@ -787,6 +788,14 @@ _COMPACT_KEEP_RECENT = 10  # колко последни съобщения ос
 # Твърдият таван на живата история. Компресията по-горе е ПРЕВАНТИВНА и обикновено
 # се задейства далеч преди този таван — той е последната преграда.
 _HISTORY_MAXLEN = 30
+# Компресия ПО СРЕДАТА на задача (bug fix, 2026-09-28, наживо на телефона).
+# Една реплика е много рундове инструменти, всеки добавя 2+ съобщения, а deque
+# с maxlen изхвърля ОТПРЕД: след ~14 рунда падаха системните инструкции и
+# самата задача, моделът губеше какво прави и спираше — а без system отпред
+# и компресията вече не се задействаше. Сега преди да стигне тавана, старите
+# стъпки стават резюме „какво е свършено, какво остава“, задачата остава.
+_MIDTASK_COMPACT_AT = _HISTORY_MAXLEN - 10
+_MIDTASK_KEEP_RECENT = 8
 
 
 def _restore_session(loaded: list, system_prompt: str) -> "deque":
@@ -814,6 +823,65 @@ def _compact_messages(messages: "deque") -> "deque":
     return Brain.compact_chat_history(
         messages, threshold=_COMPACT_THRESHOLD, keep_recent=_COMPACT_KEEP_RECENT
     )
+
+
+def _compact_before_turn(messages: "deque", ui: "TurnUI") -> "deque":
+    """Превантивна компресия на разговора преди новата реплика — преди
+    cutoff-а на deque(maxlen), не при него. Пести токени в дълги разговори и
+    „помни“ повече чрез резюме."""
+    before_len = len(messages)
+    pre_compact = [m for m in messages if m.get("role") in ("user", "assistant")]
+    messages = _compact_messages(messages)
+    if len(messages) < before_len:
+        ui.info(f"🗜 Обобщих по-старата част от разговора ({before_len} → {len(messages)} "
+                "съобщения) — продължавам")
+        # Компресията е моментът, в който старото съдържание се изхвърля —
+        # записваме трайното от НЕкомпресираната история, докато я имаме.
+        # Без това дълга сесия губи ранните решения (auto_capture на изход
+        # вижда само последните ~10 съобщения), а при рязко прекъсване
+        # (kill, затворен прозорец, спрян ток) се губи всичко от сесията.
+        try:
+            from genesis_agent import workspace_memory as _wm
+            saved = _wm.auto_capture(pre_compact)
+            if any(saved.values()):
+                ui.info(f"🧠 Запомнено преди компресията: "
+                        f"{saved['threads']}т/{saved['decisions']}р/{saved['preferences']}п")
+        except Exception:
+            pass
+    return messages
+
+
+def _compact_midtask(messages: "deque", task_msg: dict, ui: "TurnUI") -> "deque":
+    """Компресия, без да се спира работата: задачата (`task_msg`) остава
+    дословно, по-старите стъпки стават резюме на свършеното."""
+    if len(messages) < _MIDTASK_COMPACT_AT:
+        return messages
+    from genesis_agent.brain import Brain
+    before = len(messages)
+    messages = Brain.compact_chat_history(
+        messages, threshold=_MIDTASK_COMPACT_AT - 2, keep_recent=_MIDTASK_KEEP_RECENT,
+        pin=[task_msg], purpose="task")
+    if len(messages) < before:
+        ui.info(f"🗜 Обобщих свършеното досега ({before} → {len(messages)} съобщения) "
+                "— продължавам задачата")
+    return messages
+
+
+def _round_checkpoint(round_i: int, messages: "deque", ui: "TurnUI") -> bool:
+    """True → спри. TOOL_ROUND_CAP е точка на проверка, не стоп: агентът
+    продължава, докато задачата не е готова (пазачът срещу въртене на място
+    хваща зациклянето), до твърдия предпазител TOOL_ROUND_MAX."""
+    if round_i >= _TOOL_ROUND_MAX:
+        ui.warn(f"Достигнат предпазител от {_TOOL_ROUND_MAX} рунда за това съобщение — "
+                "спирам. Напиши „продължи“, за да довърша.")
+        return True
+    if round_i % _TOOL_ROUND_CAP == 0:
+        ui.info(f"⏱ {round_i} стъпки по задачата — продължавам (■ спира)")
+        messages.append({"role": "system", "content": (
+            f"[Система]: Работиш по тази задача вече {round_i} рунда. Ако целта е "
+            "постигната — дай кратко финално обобщение без нови инструменти. Ако не — "
+            "продължи със следващата конкретна стъпка, без да повтаряш свършеното.")})
+    return False
 
 
 # ── Tools ─────────────────────────────────────────────────────────────────────
@@ -1186,6 +1254,11 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     проверка на твърденията, същият пазач срещу въртене на място. Връща
     историята, която може да е НОВ deque след компресия.
     """
+    # Компресията на разговора — В НАЧАЛОТО на новата реплика, не в края на
+    # предишната: иначе „🗜 История компресирана“ беше последното на екрана
+    # след всеки отговор и изглеждаше, че агентът спира заради нея (наживо,
+    # 2026-09-28). Сега: обобщава старото → продължава с новото.
+    messages = _compact_before_turn(messages, ui)
     content = user_input
     try:
         from genesis_agent.skill_loader import domain_context
@@ -1195,8 +1268,15 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     if knowledge:
         content = f"{user_input}\n\n{knowledge}"
         ui.info(f"📚 проверено знание: {knowledge.splitlines()[0].split(': ', 1)[-1]}")
-    messages.append({"role": "user", "content": content})
+    task_msg = {"role": "user", "content": content}
+    messages.append(task_msg)
     _remember("user", user_input)
+
+    def _ask(label: str, spinner: str):
+        nonlocal messages
+        messages = _compact_midtask(messages, task_msg, ui)
+        with ui.thinking(label, spinner):
+            return ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
 
     # Итеративен tool цикъл (design note, 2026-07-25): преди спираше след 1
     # рунд инструменти + 1 "финален" отговор, чиито евентуални НОВИ
@@ -1285,12 +1365,9 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
             if _repeat_note:
                 messages.append({"role": "system", "content": _repeat_note})
             round_i += 1
-            if round_i >= _TOOL_ROUND_CAP:
-                ui.warn(f"Достигнат таван от {_TOOL_ROUND_CAP} инструмент-рунда "
-                        "за това съобщение — спирам тук, продължи с ново съобщение.")
+            if _round_checkpoint(round_i, messages, ui):
                 break
-            with ui.thinking("Анализирам...", "aesthetic"):
-                response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
+            response, tool_calls = _ask("Анализирам...", "aesthetic")
             continue
 
         # Стар text-tag режим — моделът не поддържа native tool-calling
@@ -1314,8 +1391,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
                                "за файлове). Ако вече си приключил — дай кратък финален "
                                "отговор БЕЗ скоби във формàт на таг.",
                 })
-                with ui.thinking("Анализирам...", "aesthetic"):
-                    response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
+                response, tool_calls = _ask("Анализирам...", "aesthetic")
                 continue
             _unsupported = claim_check.unsupported_claims(response, _executed)
             if _unsupported and _claim_retries < 1:
@@ -1324,8 +1400,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
                         "изпълнен инструмент не доказва — питам пак.")
                 messages.append({"role": "system",
                                   "content": claim_check.nudge_text(_unsupported)})
-                with ui.thinking("Проверявам…", "aesthetic"):
-                    response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
+                response, tool_calls = _ask("Проверявам…", "aesthetic")
                 continue
             break
         _text_note = ""
@@ -1347,9 +1422,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
         if _text_note:
             messages.append({"role": "system", "content": _text_note})
         round_i += 1
-        if round_i >= _TOOL_ROUND_CAP:
-            ui.warn(f"Достигнат таван от {_TOOL_ROUND_CAP} инструмент-рунда "
-                    "за това съобщение — спирам тук, продължи с ново съобщение.")
+        if _round_checkpoint(round_i, messages, ui):
             break
         messages.append({"role": "system",
                           "content": "[Резултат]:\n" +
@@ -1361,29 +1434,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
                           "но ДРУГ резултат по-горе вече доказва, че целта е постигната (напр. "
                           "командата вече работи правилно) — не настоявай за отказаната команда, "
                           "просто отчети успех с наличните доказателства."})
-        with ui.thinking("Анализирам...", "aesthetic"):
-            response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
-
-    # Превантивна компресия на историята — преди cutoff-а на deque(maxlen=30),
-    # не при него. Пести токени в дълги разговори, "помни" повече чрез резюме.
-    before_len = len(messages)
-    pre_compact = [m for m in messages if m.get("role") in ("user", "assistant")]
-    messages = _compact_messages(messages)
-    if len(messages) < before_len:
-        ui.info(f"🗜 История компресирана ({before_len} → {len(messages)} съобщения)")
-        # Компресията е моментът, в който старото съдържание се изхвърля —
-        # записваме трайното от НЕкомпресираната история, докато я имаме.
-        # Без това дълга сесия губи ранните решения (auto_capture на изход
-        # вижда само последните ~10 съобщения), а при рязко прекъсване
-        # (kill, затворен прозорец, спрян ток) се губи всичко от сесията.
-        try:
-            from genesis_agent import workspace_memory as _wm
-            saved = _wm.auto_capture(pre_compact)
-            if any(saved.values()):
-                ui.info(f"🧠 Запомнено преди компресията: "
-                        f"{saved['threads']}т/{saved['decisions']}р/{saved['preferences']}п")
-        except Exception:
-            pass
+        response, tool_calls = _ask("Анализирам...", "aesthetic")
 
     # Save session history — convert deque to list for JSON serialization!
     session_file = HISTORY_DIR / f"session_{datetime.fromtimestamp(session_start_time).strftime('%Y%m%d_%H%M%S')}.json"

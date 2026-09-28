@@ -685,3 +685,41 @@ class TestTotalDeadline:
         monkeypatch.setattr("genesis_agent.brain.requests.post", _boom)
         with pytest.raises(requests.exceptions.ConnectionError):
             Brain.__new__(Brain)._http("https://x", "k", "m", [], 30)
+
+
+class TestCompactionKeepsToolPairsAndTheTask:
+    """Наживо, 2026-09-28: разрезът можеше да започне с `tool` резултат без
+    своя assistant (HTTP 400 при следващото обаждане), а задачата по средата
+    на работа се губеше в резюмето."""
+
+    @staticmethod
+    def _task_history() -> tuple[list[dict], dict]:
+        task = {"role": "user", "content": "ЗАДАЧАТА"}
+        msgs = [{"role": "system", "content": "SYSTEM"}, task]
+        for i in range(12):
+            msgs.append({"role": "assistant", "content": f"a{i}",
+                         "tool_calls": [{"id": f"c{i}", "function": {"name": "RUN_CMD"}}]})
+            msgs.append({"role": "tool", "tool_call_id": f"c{i}", "content": f"r{i}"})
+        return msgs, task
+
+    def test_recent_part_never_starts_with_an_orphan_tool_result(self, monkeypatch) -> None:
+        TestCompactChatHistory._fake_brain(monkeypatch, "резюме")
+        msgs, _ = self._task_history()
+        out = list(Brain.compact_chat_history(msgs, threshold=10, keep_recent=5))
+        first_raw = next(m for m in out[1:] if not str(m.get("content", "")).startswith("##"))
+        assert first_raw["role"] != "tool"
+
+    def test_the_pinned_task_stays_verbatim_after_the_summary(self, monkeypatch) -> None:
+        TestCompactChatHistory._fake_brain(monkeypatch, "свършено: a0..a8")
+        msgs, task = self._task_history()
+        out = list(Brain.compact_chat_history(msgs, threshold=10, keep_recent=6, pin=[task], purpose="task"))
+        assert out[0]["content"] == "SYSTEM"
+        assert out[1]["content"].startswith("## Резюме на свършеното досега")
+        assert out[2] is task
+        assert out[3]["role"] == "assistant"
+
+    def test_the_pinned_task_survives_a_failed_summary(self, monkeypatch) -> None:
+        TestCompactChatHistory._fake_brain(monkeypatch, "Error: chain exhausted")
+        msgs, task = self._task_history()
+        out = list(Brain.compact_chat_history(msgs, threshold=10, keep_recent=6, pin=[task], purpose="task"))
+        assert out[:2] == [msgs[0], task]
