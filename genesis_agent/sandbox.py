@@ -1038,7 +1038,7 @@ def _count_user_processes() -> int:
         return 0
 
 
-def _preexec(policy: SandboxPolicy, nproc_cap: int):  # изпълнява се в детето, преди exec
+def _preexec(policy: SandboxPolicy, nproc_cap: int, cap_memory: bool = True):  # в детето, преди exec
     # `sys.platform`, не `os.name`: mypy стеснява типовете по него нативно, така
     # че POSIX-only извикванията отдолу изчезват от проверката при
     # `--platform win32` — точно както CI я пуска на Windows runner-а. С
@@ -1054,9 +1054,10 @@ def _preexec(policy: SandboxPolicy, nproc_cap: int):  # изпълнява се 
     mb = 1024 * 1024
     limits = [
         (resource.RLIMIT_CPU, (policy.cpu_seconds, policy.cpu_seconds + 5)),
-        (resource.RLIMIT_AS, (policy.max_memory_mb * mb, policy.max_memory_mb * mb)),
         (resource.RLIMIT_FSIZE, (policy.max_file_mb * mb, policy.max_file_mb * mb)),
     ]
+    if cap_memory:
+        limits.append((resource.RLIMIT_AS, (policy.max_memory_mb * mb, policy.max_memory_mb * mb)))
     # NPROC се прилага само ако е изрично поискан (nproc_cap > 0) — виж коментара
     # при SandboxPolicy.max_processes защо е изключен по подразбиране.
     if nproc_cap > 0:
@@ -1073,6 +1074,14 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
     env = _build_env(policy, env_extra)
     # Ако NPROC е включен, капът е headroom над текущото натоварване.
     nproc_cap = (_count_user_processes() + policy.max_processes) if policy.max_processes > 0 else 0
+    # Без RLIMIT_AS на Android (bug fix, 2026-09-28, наживо на Galaxy S10+,
+    # Android 12, arm64): там всеки процес още при старта си запазва
+    # гигабайти ВИРТУАЛНА памет (заделящият памет на bionic), тоест таван от
+    # 2 GB убиваше с SIGABRT дори `sh -c 'echo ok'` — всяка RUN_CMD връщаше
+    # rc=-6 и агентът решаваше, че python липсва. Прагът беше между 8 и 16 GB.
+    # В termux-docker (x86_64) не личи. Паметта там пази самият Android (lmkd).
+    from genesis_agent.paths import is_android
+    cap_memory = not is_android()
     try:
         proc = subprocess.Popen(
             argv,
@@ -1095,7 +1104,7 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
             encoding="utf-8",
             errors="replace",
             env=env,
-            preexec_fn=(lambda: _preexec(policy, nproc_cap)) if os.name == "posix" else None,  # noqa: PLW1509 — fork()+exec() is immediate; setrlimit-only preexec, no locks touched
+            preexec_fn=(lambda: _preexec(policy, nproc_cap, cap_memory)) if os.name == "posix" else None,  # noqa: PLW1509 — fork()+exec() is immediate; setrlimit-only preexec, no locks touched
         )
     except Exception as e:
         return SandboxResult(ok=False, stdout="", stderr=f"[sandbox] стартът се провали: {e}",

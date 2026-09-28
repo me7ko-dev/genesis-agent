@@ -5,6 +5,7 @@ resolve_mode/_decide пътищата, които self-check-ът не покр�
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -288,6 +289,30 @@ def test_android_env_loads_termux_exec_when_not_set(monkeypatch, tmp_path) -> No
     monkeypatch.setenv("PREFIX", str(tmp_path))
     env = sandbox._build_env(sandbox.SandboxPolicy())
     assert env["LD_PRELOAD"] == str(tmp_path / "lib" / "libtermux-exec.so")
+
+
+@pytest.mark.skipif(sandbox.resource is None, reason="POSIX resource limits")
+@pytest.mark.parametrize("android", [True, False])
+def test_memory_cap_is_off_on_android(monkeypatch, android) -> None:
+    # Истински Android (arm64): с RLIMIT_AS 2 GB всяка команда умираше с
+    # SIGABRT (rc=-6) — там процесите запазват гигабайти виртуална памет.
+    set_limits: list = []
+    monkeypatch.setattr("genesis_agent.paths.is_android", lambda: android)
+    monkeypatch.setattr(sandbox.os, "setsid", lambda: None)
+    monkeypatch.setattr(sandbox.resource, "setrlimit", lambda res, val: set_limits.append(res))
+
+    class FakePopen:
+        def __init__(self, argv, **kw):
+            kw["preexec_fn"]()
+            self.returncode = 0
+
+        def communicate(self, timeout=None):
+            return "", ""
+
+    monkeypatch.setattr(sandbox.subprocess, "Popen", FakePopen)
+    sandbox._run(["true"], cwd=Path("."), policy=sandbox.SandboxPolicy(), timeout=5)
+    assert (sandbox.resource.RLIMIT_AS in set_limits) is (not android)
+    assert sandbox.resource.RLIMIT_CPU in set_limits
 
 
 def test_android_env_is_empty_elsewhere(monkeypatch) -> None:
