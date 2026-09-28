@@ -3,7 +3,7 @@
 genesis_agent/web_search.py — Browser/Web Interaction за Genesis Agent.
 
 Поддържа:
-  - DuckDuckGo (без API ключ — напълно безплатно)
+  - DuckDuckGo (без API ключ — напълно безплатно); при CAPTCHA — Wikipedia API
   - Scraping на URL съдържание (urllib + html parser)
   - Кеш (избягва дублирани заявки)
 
@@ -160,7 +160,19 @@ def search(
         html = _http_get(url, timeout=8)
     except ConnectionError as e:
         log.error(f"[web_search] Търсачката недостъпна: {e}")
-        return []
+        html = ""
+    if not html or _is_challenge(html):
+        # 2026-09-28: DuckDuckGo (lite и html) и Mojeek връщат само CAPTCHA на
+        # лаптопа. Страницата с „патиците“ се връщаше като резултат И се кешираше —
+        # моделът търси координати три пъти подред и накрая ги измисля. Wikipedia
+        # API отговаря без ключ, а за места дава и координатите.
+        results = _wikipedia_search(query, max_results)
+        if use_cache and results:
+            _cache_set(cache_key, json.dumps(results, ensure_ascii=False))
+        return results or [{"title": f"Търсачката отказа: {query}", "url": url,
+                            "snippet": "DuckDuckGo върна CAPTCHA/не отговори, Wikipedia — нищо. "
+                                       "Не измисляй фактите: вземи ги от конкретен източник "
+                                       "(RUN_CMD curl към API/страница) или кажи, че не са проверени."}]
 
     results = []
     # Парсираме DuckDuckGo Lite — опитваме няколко HTML pattern-а
@@ -208,6 +220,53 @@ def search(
         _cache_set(cache_key, json.dumps(results, ensure_ascii=False))
 
     return results
+
+
+_CHALLENGE_MARKERS = ("bots use duckduckgo", "anomaly-modal", "unusual traffic", "captcha",
+                      "are you a robot", "challenge-form")
+
+
+def _is_challenge(html: str) -> bool:
+    """Страница „докажи, че си човек“ вместо резултати."""
+    low = html[:20000].lower()
+    return any(m in low for m in _CHALLENGE_MARKERS)
+
+
+_WIKI_NOISE = re.compile(r"\b(координати|координатите|gps|coordinates|latitude|longitude|lat|lon|"
+                         r"географски|ширина|дължина|wikipedia|уикипедия)\b", re.IGNORECASE)
+
+
+def _wikipedia_search(query: str, max_results: int = 5) -> list[dict]:
+    """Резервата: Wikipedia API (кирилица → първо bg, после en). Резултатите
+    носят първите изречения на статията и координатите, ако е място."""
+    langs = ("bg", "en") if re.search(r"[а-яА-Я]", query) else ("en", "bg")
+    # Думите за КАКВО се търси (координати, GPS…) не са в статията за мястото —
+    # с тях „Широка лъка координати“ даваше реки и хижи, но не и селото.
+    query = _WIKI_NOISE.sub(" ", query).strip() or query
+    out: list[dict] = []
+    for lang in langs:
+        params = urllib.parse.urlencode({
+            "action": "query", "generator": "search", "gsrsearch": query, "gsrlimit": max_results,
+            "prop": "coordinates|extracts", "exintro": 1, "explaintext": 1, "exsentences": 2,
+            "exlimit": max_results, "format": "json", "formatversion": 2,
+        })
+        try:
+            data = json.loads(_http_get(f"https://{lang}.wikipedia.org/w/api.php?{params}", timeout=8))
+        except (ConnectionError, ValueError, OSError):
+            continue
+        pages = sorted((data.get("query") or {}).get("pages") or [], key=lambda pg: pg.get("index", 99))
+        for pg in pages:
+            title = pg.get("title", "")
+            snippet = " ".join((pg.get("extract") or "").split())[:280]
+            coords = (pg.get("coordinates") or [{}])[0]
+            if "lat" in coords:
+                snippet = f"координати: {coords['lat']:.5f}, {coords['lon']:.5f}. {snippet}"
+            out.append({"title": f"{title} — Wikipedia ({lang})",
+                        "url": f"https://{lang}.wikipedia.org/wiki/{urllib.parse.quote(title.replace(' ', '_'))}",
+                        "snippet": snippet})
+        if out:
+            break
+    return out[:max_results]
 
 
 # ─── Page Fetcher ─────────────────────────────────────────────────────────────
