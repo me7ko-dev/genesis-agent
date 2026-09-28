@@ -396,7 +396,7 @@ class RemoteServer:
         from genesis_agent import __version__
         return {"app": "genesis", "v": PROTOCOL, "key_id": key_id(self.key),
                 "name": self.name, "version": __version__,
-                "features": ["commands"] if self.commands else []}
+                "features": (["commands"] if self.commands else []) + ["keys"]}
 
     def handle(self, envelope: Any) -> tuple[dict, str]:
         """(отговор, rid) за вече декодиран JSON плик. Хвърля ProtocolError."""
@@ -435,6 +435,14 @@ class RemoteServer:
                 self.clear()
             s.emit("cleared")
             return {"ok": True}
+        if op == "import_keys":
+            # Ключовете от компютъра (genesis keys qr → приложението). Сдвоеният
+            # телефон и без това може всичко тук; записват се само ключове на
+            # доставчици на модели (keys_transfer.clean), нищо друго от .env.
+            from genesis_agent import keys_transfer
+            keys = p.get("keys")
+            saved = keys_transfer.save(keys if isinstance(keys, dict) else {})
+            return {"ok": bool(saved), "saved": saved} if saved else {"ok": False, "error": "no_keys"}
         if op == "command" and self.commands is not None:
             arg = p.get("arg")
             return self.commands(str(p.get("name") or ""), arg if isinstance(arg, dict) else {})
@@ -687,8 +695,11 @@ def serve(args: list[str]) -> int:
         gta.total_input_tokens = gta.total_output_tokens = 0
 
     def status() -> dict:
+        from genesis_agent.keys_transfer import from_env
         return {"model": f"{gta.current_provider}/{gta.current_model_id}",
-                "workspace": str(gta.WORKSPACE)}
+                "workspace": str(gta.WORKSPACE),
+                # 0 → приложението предлага ключовете от компютъра (genesis keys qr).
+                "keys": len(from_env())}
 
     def show(event: dict) -> None:
         kind = event["type"]

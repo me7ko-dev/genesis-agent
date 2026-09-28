@@ -364,6 +364,18 @@ def test_serve_bad_or_help_options_exit(args, code, capsys) -> None:
     assert "genesis serve" in capsys.readouterr().out or code == 2
 
 
+def test_import_keys_saves_only_model_keys(live, monkeypatch, tmp_path) -> None:
+    # Ключовете от компютъра (genesis keys qr → приложението → този op).
+    from genesis_agent import keys_transfer
+    monkeypatch.setattr(keys_transfer, "save", lambda keys: list(keys_transfer.clean(keys)))
+    base, _, _ = live
+    reply = _call(base, "import_keys", keys={"GROQ_API_KEY": "gsk_" + "a" * 40,
+                                             "OLLAMA_API_KEY_3": "b" * 40,
+                                             "PATH": "/evil", "GROQ_API_KEY_2": "has space"})
+    assert reply == {"ok": True, "saved": ["GROQ_API_KEY", "OLLAMA_API_KEY_3"]}
+    assert _call(base, "import_keys", keys="nope") == {"ok": False, "error": "no_keys"}
+
+
 def test_serve_link_prints_the_pairing_url_and_exits(monkeypatch, tmp_path, capsys) -> None:
     # `genesis phone pair` и хора без камера: само връзката, сървър не тръгва.
     monkeypatch.setattr(rs, "_config_path", lambda: tmp_path / "remote.json")
@@ -426,7 +438,7 @@ def test_command_op_reaches_the_commands_and_hello_says_so() -> None:
     calls: list[tuple] = []
     server = rs.RemoteServer(KEY, session, name="x",
                              commands=lambda n, a: calls.append((n, a)) or {"ok": True, "n": n})
-    assert server.hello()["features"] == ["commands"]
+    assert server.hello()["features"] == ["commands", "keys"]
     assert server._dispatch({"op": "command", "name": "usage", "arg": {"days": 7}}) == {"ok": True, "n": "usage"}
     assert server._dispatch({"op": "command", "name": "status", "arg": "junk"})["ok"]
     assert calls == [("usage", {"days": 7}), ("status", {})]
@@ -435,6 +447,6 @@ def test_command_op_reaches_the_commands_and_hello_says_so() -> None:
 def test_command_op_is_unknown_without_commands() -> None:
     session, _ = _session()
     server = rs.RemoteServer(KEY, session, name="x")
-    assert server.hello()["features"] == []
+    assert server.hello()["features"] == ["keys"]
     with pytest.raises(rs.ProtocolError):
         server._dispatch({"op": "command", "name": "status"})

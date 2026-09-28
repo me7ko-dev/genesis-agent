@@ -197,6 +197,9 @@ export type StatusReply = {
   busy: boolean;
   model?: string;
   workspace?: string;
+  /** How many model API keys Genesis has (0 → offer the keys from the computer). */
+  keys?: number;
+  features?: string[];
 };
 
 export type FetchLike = (url: string, init: {
@@ -282,6 +285,11 @@ export class GenesisClient {
 
   clear(): Promise<{ ok: boolean; error?: string }> {
     return this.call('clear');
+  }
+
+  /** API keys from the computer (`genesis keys qr`) into this Genesis's ~/.genesis/.env. */
+  importKeys(keys: Record<string, string>): Promise<{ ok: boolean; saved?: string[]; error?: string }> {
+    return this.call('import_keys', { keys });
   }
 }
 

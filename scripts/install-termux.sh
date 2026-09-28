@@ -77,11 +77,19 @@ if [ ! -d "$HOME/storage" ]; then
   # Android пита веднъж: тогава агентът вижда ~/storage/downloads и т.н.
   termux-setup-storage || true
 fi
+KEYS_LATER=""
 if [ -s "$HOME/.genesis/.env" ]; then
   echo "Ключовете вече са тук (~/.genesis/.env). Нови или други: genesis setup"
 else
+  echo "Ключовете за моделите:"
+  echo "  Enter     — пренеси ги от компютъра (там: genesis keys qr, после сканирай от приложението)"
+  echo "  р + Enter — напиши ги сега тук"
   # stdin е тръбата от curl — въпросите четат от терминала.
-  genesis setup < /dev/tty || echo "Ключовете — по-късно: genesis setup"
+  read -r answer < /dev/tty || answer=""
+  case "$answer" in
+    р|Р|p|P) genesis setup < /dev/tty || echo "Ключовете — по-късно: genesis setup" ;;
+    *) KEYS_LATER=1 ;;
+  esac
 fi
 
 step 6/6 "Пускам Genesis и отварям приложението"
@@ -89,3 +97,6 @@ genesis phone stop > /dev/null 2>&1 || true   # старата версия, а�
 genesis phone pair
 printf '\n\033[1;32mГотово.\033[0m Genesis тече на този телефон; чатът е в приложението Genesis.\n'
 echo "Спиране: genesis phone stop   Пускане: genesis phone start   Обновяване: пусни този ред пак."
+if [ -n "$KEYS_LATER" ]; then
+  echo "Ключове: на компютъра пусни  genesis keys qr  → в приложението: меню ⋯ → Ключове от компютъра."
+fi

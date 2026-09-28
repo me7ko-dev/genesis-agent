@@ -129,6 +129,7 @@ function Chat({ pairing }: { pairing: Pairing }) {
             <Text style={[styles.menuInfo, { color: theme.muted }]} numberOfLines={2}>📁 {g.status.workspace}</Text>
           ) : null}
           <MenuItem label="Нов разговор" onPress={() => { setMenuOpen(false); g.clear(); }} />
+          <MenuItem label="Ключове от компютъра" onPress={() => { setMenuOpen(false); router.push('/keys'); }} />
           {local ? <MenuItem label="Спри Genesis на телефона" onPress={stopOnPhone} /> : null}
           <MenuItem label={local ? 'Свържи се с компютър вместо това' : 'Отдвои този телефон'} danger onPress={doUnpair} />
         </View>
@@ -147,6 +148,9 @@ function Chat({ pairing }: { pairing: Pairing }) {
         <Banner tone="warn" text="Часовниците на телефона и компютъра се разминават с над 5 минути — включи автоматичния час." />
       ) : startError && g.connection !== 'online' ? (
         <Banner tone="danger" text={startError} />
+      ) : g.connection === 'online' && g.status?.keys === 0 ? (
+        <Banner tone="warn" text="Genesis няма ключове за моделите. На компютъра: genesis keys qr — и сканирай кода."
+          action="Сканирай" onPress={() => router.push('/keys')} />
       ) : null}
 
       <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>

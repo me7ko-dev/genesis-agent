@@ -7,6 +7,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { isKeysLink } from '../lib/keys';
 import { usePairing } from '../lib/pairing';
 import {
   INSTALL_COMMAND, START_ERROR, TERMUX_DOWNLOAD, isOnThisPhone, openTermux, phoneModeAvailable, runGenesis, termuxInstalled,
@@ -26,6 +27,11 @@ export default function Pair() {
 
   const tryPair = useCallback(async (raw: string) => {
     if (busy.current) return;
+    // The keys QR (`genesis keys qr`) scanned here by mistake: its own screen.
+    if (isKeysLink(raw)) {
+      router.push(`/keys?${raw.trim().slice(raw.trim().indexOf('?') + 1)}`);
+      return;
+    }
     const pairing = parsePairingUrl(raw);
     if (!pairing) {
       setError('Това не е код от „genesis serve".');

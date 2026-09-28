@@ -60,6 +60,17 @@ cmd = call("command", name="status")
 print("command status:", json.dumps(cmd, ensure_ascii=False)[:300])
 assert cmd.get("ok"), cmd
 print("pair link:", app_link(rs.pairing_url("127.0.0.1", 8765, key, rs.machine_name()))[:40] + "…")
+
+# Ключовете от компютъра: приложението ги праща с import_keys.
+assert status["keys"] == 0, status
+fake = {"GROQ_API_KEY": "gsk_" + "t" * 48, "OLLAMA_API_KEY_3": "0" * 32 + ".x" * 10, "PATH": "/evil"}
+reply = call("import_keys", keys=fake)
+print("import_keys:", reply)
+assert reply == {"ok": True, "saved": ["GROQ_API_KEY", "OLLAMA_API_KEY_3"]}, reply
+env_file = Path.home() / ".genesis" / ".env"
+assert "GROQ_API_KEY=gsk_" in env_file.read_text() and "PATH" not in env_file.read_text()
+assert env_file.stat().st_mode & 0o777 == 0o600
+assert call("status")["keys"] == 2
 EOF
 echo "::endgroup::"
 
@@ -94,7 +105,7 @@ echo "::endgroup::"
 echo "::group::pytest (the Android-specific parts)"
 "$PY" -m pip install --quiet pytest
 cd "$HOME/src"
-"$PY" -m pytest -q -p no:cacheprovider tests/test_phone.py tests/test_remote_server.py
+"$PY" -m pytest -q -p no:cacheprovider tests/test_phone.py tests/test_remote_server.py tests/test_keys_transfer.py
 echo "::endgroup::"
 
 genesis phone stop
