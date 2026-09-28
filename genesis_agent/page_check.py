@@ -102,7 +102,14 @@ def pages_for(files: set[Path]) -> list[Path]:
             pages[f] = None
         elif (f.parent / "index.html").is_file():
             pages[f.parent / "index.html"] = None
-    return [p for p in pages if p.is_file()][:3]
+    from genesis_agent.web_check import is_site_page
+
+    def site(p: Path) -> bool:
+        try:
+            return is_site_page(p, p.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            return False
+    return [p for p in pages if p.is_file() and site(p)][:3]
 
 
 class FinalCheck:

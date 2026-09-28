@@ -18,7 +18,8 @@ def _write(path: Path) -> str:
 
 @pytest.fixture
 def site(tmp_path):
-    (tmp_path / "index.html").write_text("<h1>x</h1>", encoding="utf-8")
+    (tmp_path / "index.html").write_text('<link rel="stylesheet" href="styles.css"><h1>x</h1>',
+                                         encoding="utf-8")
     (tmp_path / "styles.css").write_text("h1{}", encoding="utf-8")
     return tmp_path
 
@@ -35,6 +36,16 @@ class TestWhatCountsAsAWebWrite:
 
     def test_css_alone_opens_the_index_next_to_it(self, site) -> None:
         assert pc.pages_for({site / "styles.css"}) == [site / "index.html"]
+
+    def test_html_written_as_data_is_not_opened(self, tmp_path) -> None:
+        """bench fuel-prices 2026-09-28: скрейпърът записа sample.html за тестовете си,
+        проверката го „поправяше“ като сайт — 532 s вместо ~100."""
+        (tmp_path / "sample.html").write_text("<table><tr><td>A95</td><td>2.59 лв</td></tr></table>",
+                                              encoding="utf-8")
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "page.html").write_text('<link rel="stylesheet" href="x.css">',
+                                                      encoding="utf-8")
+        assert pc.pages_for({tmp_path / "sample.html", tmp_path / "tests" / "page.html"}) == []
 
 
 class TestFinalCheck:
@@ -67,7 +78,7 @@ class TestFinalCheck:
         """2026-09-28: след находките моделът отговори „All set.“ и не записа нищо."""
         fc = pc.FinalCheck(runner=lambda p: (["тъмна тема: „Гайда“ 2.04:1"], ""))
         fc.observe(_write(site / "index.html"))
-        note, line = fc.check()
+        _, line = fc.check()
         assert "Гайда" in line  # операторът вижда самите находки
         assert fc.due()
         reminder, _ = fc.check()

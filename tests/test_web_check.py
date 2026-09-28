@@ -135,3 +135,14 @@ def test_write_file_carries_the_note(tmp_path) -> None:
         gs.set_workspace(gs._PROJECT_ROOT)
     assert "✓ записани" in out
     assert "[уеб проверка]" in out and "example.com" in out
+
+
+def test_html_written_as_data_gets_only_the_structure(tmp_path) -> None:
+    """Примерна страница за скрейпър: без бележки за viewport, SEO и лева —
+    само ако самият HTML е счупен."""
+    sample = tmp_path / "sample.html"
+    sample.write_text("<html><body><table><tr><td>A95</td><td>2.59 лв</td></tr></table></body></html>",
+                      encoding="utf-8")
+    assert web_note(sample) == ""
+    sample.write_text("<html><body><table><tr><td>A95</div></body></html>", encoding="utf-8")
+    assert "div" in web_note(sample)

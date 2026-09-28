@@ -115,6 +115,23 @@ def _is_local(ref: str) -> bool:
     return not (parts.scheme or ref.startswith(("//", "#", "{", "$")))
 
 
+# Примерни данни, не сайт: скрейпърът си пише `sample.html` за тестовете. Измерено
+# 2026-09-28 (bench fuel-prices): бележките за viewport/description и браузърната
+# проверка го накараха да „разкраси“ примера от 769 на 6 996 знака, тестовете
+# паднаха — 532 s и 215 хил. токена вместо ~100 s и ~46 хил.
+_DATA_NAME = re.compile(r"sample|fixture|mock|dummy|example|test|data|page_?\d", re.IGNORECASE)
+_DATA_DIRS = {"test", "tests", "fixtures", "fixture", "samples", "data", "testdata", "__snapshots__"}
+_STYLED = re.compile(r"<link[^>]+stylesheet|<style[\s>]|<script[\s>]", re.IGNORECASE)
+
+
+def is_site_page(path: Path, content: str) -> bool:
+    """Страница, която хората ще отворят (стилизирана, не в tests/ и не „sample“),
+    а не HTML като данни за друга програма."""
+    if _DATA_NAME.search(path.stem) or _DATA_DIRS & {p.lower() for p in path.parts[:-1]}:
+        return False
+    return bool(_STYLED.search(content))
+
+
 def check_html(path: Path, content: str) -> list[str]:
     c = _Collector()
     try:
@@ -126,6 +143,8 @@ def check_html(path: Path, content: str) -> list[str]:
     found += c.mismatched[:4]
     found += [f"<{t}> на ред {ln} не е затворен" for t, ln in c.stack
               if t not in _OPTIONAL_END][:3]
+    if not is_site_page(path, content):
+        return found  # данни: само структурата, без SEO/достъпност/цени
     for ref_attr, ref in c.refs:
         if ref.startswith("#"):
             if len(ref) > 1 and unquote(ref[1:]) not in c.ids:
