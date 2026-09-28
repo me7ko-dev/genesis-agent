@@ -56,6 +56,24 @@ def test_what_the_live_run_got_wrong_is_reported(site) -> None:
     assert "лева" in found and "евро" in found
 
 
+def test_every_leva_price_is_listed_at_once(site) -> None:
+    """С една цена в бележката моделът оправяше по една стая на рунд."""
+    page = CLEAN.replace("65 €", "120 лв").replace("Закуска включена", "Суита — 180 лв.")
+    found = " | ".join(check_html(site / "index.html", page))
+    assert "2 цени в лева" in found
+    assert "120 лв" in found and "180 лв" in found
+
+
+def test_fixing_the_findings_is_confirmed_once(site) -> None:
+    """Без изрично „чисто“ моделът продължаваше да проверява до тавана."""
+    page = site / "index.html"
+    page.write_text(CLEAN.replace("65 €", "120 лв"), encoding="utf-8")
+    assert "лева" in web_note(page)
+    page.write_text(CLEAN, encoding="utf-8")
+    assert "вече е чисто" in web_note(page)
+    assert web_note(page) == ""
+
+
 def test_a_missing_local_file_and_a_dead_anchor(site) -> None:
     page = CLEAN.replace('href="styles.css"', 'href="style.css"').replace('href="#main"', 'href="#top"')
     found = " | ".join(check_html(site / "index.html", page))
@@ -99,7 +117,7 @@ def test_a_js_syntax_error_is_reported(tmp_path) -> None:
                    encoding="utf-8")
     assert "JS не се парсва" in web_note(bad)
     bad.write_text("const x = 1;\n", encoding="utf-8")
-    assert web_note(bad) == ""
+    assert "вече е чисто" in web_note(bad)
 
 
 def test_other_files_are_left_alone(tmp_path) -> None:

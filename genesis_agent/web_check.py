@@ -156,10 +156,12 @@ def check_html(path: Path, content: str) -> list[str]:
             found.append("няма <title>")
         if not c.has_description:
             found.append('няма <meta name="description"> (търсачките показват него)')
-    lev = _LEV_PRICE.search(" ".join(c.text))
+    # Всички наведнъж: с една цена в бележката моделът оправяше по една на рунд
+    # (2026-09-28: 4 рунда за 4 стаи).
+    lev = [m.group(0).strip() for m in _LEV_PRICE.finditer(" ".join(c.text))]
     if lev:
-        found.append(f"цена в лева („{lev.group(0).strip()}“) — от 1 януари 2026 валутата "
-                     "в България е еврото; текущите цени са в € (EUR)")
+        found.append(f"{len(lev)} цени в лева ({', '.join(lev[:6])}) — от 1 януари 2026 "
+                     "валутата в България е еврото; текущите цени са в € (EUR)")
     return found
 
 
@@ -187,6 +189,13 @@ def check_js(path: Path) -> list[str]:
     return [f"JS не се парсва ({where.strip()}): {err.strip()}" if where else f"JS не се парсва: {err.strip()}"]
 
 
+# Файловете, за които последната бележка имаше находки. Когато станат чисти,
+# това се казва изрично: 2026-09-28 бележката просто изчезваше, моделът не
+# разбираше, че е оправил всичко, и пусна XML парсер (lxml.etree.parse) върху
+# HTML5 — фалшиви грешки, „поправки“ на здрав код, 9 рунда до тавана.
+_HAD_FINDINGS: set[Path] = set()
+
+
 def web_note(path: Path) -> str:
     """Бележка за резултата на WRITE_FILE/EDIT_FILE; "" ако няма какво да се каже."""
     suffix = path.suffix.lower()
@@ -202,8 +211,15 @@ def web_note(path: Path) -> str:
         found = check_css(content)
     else:
         found = check_js(path)
+    key = path.resolve()
     if not found:
+        if key in _HAD_FINDINGS:
+            _HAD_FINDINGS.discard(key)
+            return (f"\n[уеб проверка] {path.name}: вече е чисто ✓ — бележките са оправени, "
+                    "не е нужна още проверка на файла (XML парсер като lxml.etree.parse дава "
+                    "фалшиви грешки за валиден HTML5).")
         return ""
+    _HAD_FINDINGS.add(key)
     shown = found[:_MAX_FINDINGS]
     more = f"\n  … още {len(found) - len(shown)}" if len(found) > len(shown) else ""
     return ("\n[уеб проверка] " + path.name + ":\n" + "\n".join(f"  • {f}" for f in shown) + more
