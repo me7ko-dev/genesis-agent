@@ -637,6 +637,34 @@ class TestListDirIsTheThirdDoor:
         assert "id_rsa" in out
 
 
+class TestAnEmptyFolderSaysSo:
+    """bench_projects 2026-09-28: върху нова празна папка LIST_DIR връщаше само
+    заглавието; groq gpt-oss-120b питаше още два пъти, пазачът за повторения
+    спираше хода и не беше написан нито ред код — 3 от първите 6 пуска."""
+
+    @staticmethod
+    def _new_folder(workspace: Path) -> Path:
+        # Не самият workspace: conftest държи данните на Genesis в него.
+        d = workspace / "project"
+        d.mkdir()
+        return d
+
+    def test_list_dir_names_the_empty_folder(self, _workspace) -> None:
+        out = gs._tool_list_dir(str(self._new_folder(_workspace)))
+        assert "празна" in out
+        assert "WRITE_FILE" in out
+
+    def test_glob_names_the_empty_folder(self, _workspace) -> None:
+        assert "празна" in gs._tool_glob(f"**/* | {self._new_folder(_workspace)}")
+
+    def test_glob_without_a_match_in_a_full_folder_does_not(self, _workspace) -> None:
+        d = self._new_folder(_workspace)
+        (d / "main.py").write_text("x = 1\n", encoding="utf-8")
+        out = gs._tool_glob(f"*.txt | {d}")
+        assert "Няма файлове" in out
+        assert "празна" not in out
+
+
 class TestTheGuardReadsWindowsPathsToo:
     """Образецът е писан за shell команди, в които пътят носи `/`. Подаден
     като Windows път, `.ssh\\config` не съвпадаше с `\\.ssh/` — същият файл
