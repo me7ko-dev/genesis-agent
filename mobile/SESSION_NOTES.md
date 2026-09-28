@@ -40,6 +40,25 @@
 - Тестове: `tests/test_phone.py` (+ sandbox/remote_server/agent_core).
   CI `termux`: `scripts/termux_smoke.sh` в `termux/termux-docker:x86_64`.
 
+## Ключовете от компютъра (2026-09-28, по молба на потребителя)
+- `genesis_agent/keys_transfer.py`: `genesis keys test|qr|import`. `qr` пробва
+  всеки ключ и слага в QR само работещите (`genesisremote://keys?gq=…&ol3=…`,
+  кратки имена → ~97 модула), страницата се трие след Enter. Пренасят се
+  само ключове на доставчици на модели (+ Telegram); `CLAUDE_CODE_MESSAGING_TOKEN`
+  и `GENESIS_WAITLIST_TOKEN` от средата на лаптопа НЕ.
+- Сървър: op `import_keys` → `keys_transfer.save()` (сливане в .env,
+  резервно копие, 0600, веднага в os.environ и gta.KEYS); `status.keys` = брой.
+- Приложение: екран `src/app/keys.tsx` (камера / deep link), меню „Ключове от
+  компютъра“, банер при `keys === 0`, скенерът за сдвояване разпознава и този код.
+- Инсталаторът: Enter = ключовете от компютъра по-късно, „р“ = `genesis setup`.
+- Лаптопът: ключовете на Genesis са в `~/.genesis/.env` (15), а на десктопа има
+  `апита.txt` (10, всичките вече в .env). `genesis keys test` на 2026-09-28:
+  12 работят (5 Ollama Cloud, 3 Groq, 3 OpenRouter, 1 NVIDIA); 3-те Cerebras
+  връщат 402 (акаунтът иска плащане) и не влизат в QR кода.
+- Пряк път на десктопа „Genesis ключове за телефона“ → `.venv` в worktree-то
+  (`qrcode` го няма в системния Python и в pipx) → `python -m genesis_agent.cli keys qr`.
+  Инсталираният genesis.exe още няма `keys` (ще го има след release от main).
+
 ## Проверено (2026-09-28)
 - Локално (Windows): ruff чист; целият pytest: 1719 passed, 19 skipped;
   `tsc` ок; чат тестовете 6/6. `interop.test.ts` виси на Windows
@@ -57,10 +76,11 @@
   c0ebab9d…ba87) съдържа RUN_COMMAND разрешението, `<queries>` за com.termux,
   схемата genesisremote и командата за клона feat/android-standalone.
 
+- Ключовете: CI native.yml run 36402553765 (termux ✅ вкл. import_keys в истински Termux, android ✅, windows ✅, desktop ✅), mobile.yml run 36402557778 (test ✅, ios ✅). APK-то е в `Downloads\genesis-remote-android-bez-kompyutar.apk`.
+
 ## Остава
 - Потребителят да пробва на истински телефон (APK от CI артефакта)
 - Не е пробвано на живо: RUN_COMMAND бутонът, deep link сдвояването,
   Termux:Boot, работа при изгасен екран
-- Ключовете: сега се пишат на телефона (`genesis setup`). Идея: пренасяне от
-  компютъра (QR / през сдвоения канал)
+- Пренасянето на ключове не е пробвано на живо (камера → Запиши)
 - PR към main само ако потребителят каже → тогава release съдържа APK-то с тази версия
