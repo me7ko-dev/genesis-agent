@@ -58,3 +58,23 @@ def test_normal_results_still_come_from_duckduckgo(monkeypatch) -> None:
     results = ws.search("заявка", use_cache=False)
     assert results[0]["url"] == "https://example.org/a"
     assert not any("wikipedia" in u for u in seen)
+
+
+def test_a_place_query_gets_coordinates_first(monkeypatch) -> None:
+    """„curl“ с кирилица под Windows развали адреса към Nominatim и моделът
+    налучка 41.52, 24.70 — WEB_SEARCH пита геокодера сам, правилно кодиран."""
+    seen: list[str] = []
+    nominatim = json.dumps([{"lat": "41.6794", "lon": "24.58073",
+                             "display_name": "Широка лъка, Смолян, България"}])
+    monkeypatch.setattr(ws, "_http_get", _fake_http({"nominatim": nominatim, "duckduckgo": CAPTCHA,
+                                                     "bg.wikipedia": WIKI}, seen))
+    results = ws.search("Широка лъка координати", use_cache=False)
+    assert "41.67940, 24.58073" in results[0]["snippet"]
+    assert "%D0%A8%D0%B8%D1%80" in next(u for u in seen if "nominatim" in u)  # UTF-8 в адреса
+
+
+def test_an_ordinary_query_does_not_geocode(monkeypatch) -> None:
+    seen: list[str] = []
+    monkeypatch.setattr(ws, "_http_get", _fake_http({"duckduckgo": CAPTCHA, "wikipedia": WIKI}, seen))
+    ws.search("python retry decorator", use_cache=False)
+    assert not any("nominatim" in u for u in seen)

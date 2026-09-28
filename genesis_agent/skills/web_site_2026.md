@@ -35,11 +35,10 @@ tests/test_web_skill.py сглобява страница от нея и я пр
   хълмове; огън — пламъци и дърва; храна — чиния и пара), с `role="img"` и
   `aria-label`. Браузърната проверка брои празните полета.
 - Карта: координати НИКОГА по памет (измерено: селото сложено на ~30 km).
-  Вземи ги от геокодера на OpenStreetMap:
-  `curl -s -A genesis-agent "https://nominatim.openstreetmap.org/search?format=json&limit=1&q=<място>"`
-  (полетата lat/lon) и сложи iframe на OpenStreetMap с `marker=lat,lon`. Не
-  върне ли нищо — само връзка „Отвори в картата“ (openstreetmap.org/search?query=…)
-  и писмени указания как се стига.
+  `WEB_SEARCH <място> координати` — първият резултат са координатите от
+  OpenStreetMap (не `curl` с кирилица: под Windows адресът се разваля). После
+  iframe на OpenStreetMap с `marker=lat,lon`. Няма ли координати — само връзка
+  „Отвори в картата“ (openstreetmap.org/search?query=…) и указания как се стига.
 - Цени в € (еврото е валута от 01.01.2026), конкретно съдържание на български —
   имена, часове, адрес, без „Lorem ipsum“.
 - Точно един `<h1>`; `header`/`nav`/`main`/`footer`; `lang="bg"`,

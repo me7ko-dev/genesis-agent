@@ -149,8 +149,14 @@ def search(
     cache_key = _cache_key(f"search:{query}:{max_results}:{region}")
     if use_cache:
         cached = _cache_get(cache_key)
-        if cached:
+        # Кеш отпреди поправката може да носи самата CAPTCHA страница като резултат.
+        if cached and not _is_challenge(cached):
             return json.loads(cached)
+
+    # Координати/адрес: геокодерът на OpenStreetMap, през urllib (правилно кодиран
+    # UTF-8). `curl` с кирилица под Windows праща адреса в cp1251 и Nominatim
+    # връща страница за грешка — 2026-09-28 моделът после налучка 41.52, 24.70.
+    geo = _geocode(query) if _PLACE_QUERY.search(query) else []
 
     # DuckDuckGo Lite (не изисква JS)
     params = urllib.parse.urlencode({"q": query, "kl": region, "kp": "-1"})
@@ -166,7 +172,7 @@ def search(
         # лаптопа. Страницата с „патиците“ се връщаше като резултат И се кешираше —
         # моделът търси координати три пъти подред и накрая ги измисля. Wikipedia
         # API отговаря без ключ, а за места дава и координатите.
-        results = _wikipedia_search(query, max_results)
+        results = (geo + _wikipedia_search(query, max_results))[:max_results]
         if use_cache and results:
             _cache_set(cache_key, json.dumps(results, ensure_ascii=False))
         return results or [{"title": f"Търсачката отказа: {query}", "url": url,
@@ -216,6 +222,7 @@ def search(
         text = _extract_text(html)
         results = [{"title": f"Резултат за: {query}", "url": url, "snippet": text[:500]}]
 
+    results = (geo + results)[:max_results]
     if use_cache and results:
         _cache_set(cache_key, json.dumps(results, ensure_ascii=False))
 
@@ -234,6 +241,35 @@ def _is_challenge(html: str) -> bool:
 
 _WIKI_NOISE = re.compile(r"\b(координати|координатите|gps|coordinates|latitude|longitude|lat|lon|"
                          r"географски|ширина|дължина|wikipedia|уикипедия)\b", re.IGNORECASE)
+
+
+_PLACE_QUERY = re.compile(r"\b(координат\w*|gps|coordinates|latitude|longitude|адрес|address|"
+                          r"къде се намира|where is|на картата|on the map)\b", re.IGNORECASE)
+
+
+def _geocode(query: str) -> list[dict]:
+    """Координатите на място от Nominatim (OpenStreetMap). Не намери ли пълната
+    заявка — без последната дума („Широка лъка Родопи“ → „Широка лъка“): региони
+    и планини не са част от адреса. Правилата на Nominatim: ≤ 1 заявка/сек."""
+    words = _WIKI_NOISE.sub(" ", query).split()
+    for attempt in range(3):
+        q = " ".join(words[:len(words) - attempt])
+        if not q:
+            break
+        if attempt:
+            time.sleep(1.1)
+        params = urllib.parse.urlencode({"q": q, "format": "json", "limit": 1, "accept-language": "bg"})
+        try:
+            data = json.loads(_http_get(f"https://nominatim.openstreetmap.org/search?{params}", timeout=8))
+        except (ConnectionError, ValueError, OSError):
+            return []
+        if data:
+            hit = data[0]
+            lat, lon = float(hit["lat"]), float(hit["lon"])
+            return [{"title": f"{hit.get('display_name', q)} — OpenStreetMap",
+                     "url": f"https://www.openstreetmap.org/?mlat={lat:.5f}&mlon={lon:.5f}#map=14/{lat:.5f}/{lon:.5f}",
+                     "snippet": f"координати: {lat:.5f}, {lon:.5f} (Nominatim, по заявка „{q}“)"}]
+    return []
 
 
 def _wikipedia_search(query: str, max_results: int = 5) -> list[dict]:
