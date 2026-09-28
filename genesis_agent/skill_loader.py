@@ -287,16 +287,28 @@ def domain_context(query: str) -> str:
     ranked: list[tuple[int, dict[str, Any]]] = []
     for h in hits:
         verified = h.get("verified") or h.get("verification", {}).get("verified")
-        if h.get("category") != "domain" or not verified or h.get("_kw_score", 0) < 2:
+        # `min_score` (по подразбиране 2): уеб ръководството се подава и на „направи
+        # сайт за пекарна“ — една, но недвусмислена дума. Затова тригерите му са
+        # сайт/уебсайт/лендинг, не „html“ и „страница“ (скрейпърът в bench-а ги има).
+        need = int(h.get("min_score", 2))
+        if h.get("category") not in ("domain", "web") or not verified or h.get("_kw_score", 0) < need:
             continue
         triggers = h.get("triggers", [])
         if isinstance(triggers, str):
             triggers = [triggers]
         score = len(query_words & {w for t in triggers for w in _keywords(t)})
-        if score >= 2:
+        if score >= need:
             ranked.append((score, h))
     ranked.sort(key=lambda x: x[0], reverse=True)
     for _, h in ranked:
+        if h.get("category") == "web":
+            body = _guide_body(h)
+            if body:
+                return (f"## Проверено ръководство от библиотеката: {h['name']}\n"
+                        "Основата отдолу минава браузърната проверка без находки — започни от нея "
+                        "и я пригоди към заявката (съдържание, илюстрации, цвят на акцента), "
+                        "вместо да пишеш стиловете от нулата.\n\n" + body)
+            continue
         try:
             code = skill_view(h["name"])["code"]
         except (OSError, ValueError, KeyError):
@@ -311,6 +323,17 @@ def domain_context(query: str) -> str:
                 "интерфейса вземи от заявката на оператора, не от този код.\n"
                 f"```python\n{code.strip()}\n```")
     return ""
+
+
+def _guide_body(meta: dict[str, Any]) -> str:
+    """Тялото на умение-ръководство (category: web) без frontmatter и без
+    „Описание“ — то е за хората (защо, кога е мерено), не за модела."""
+    try:
+        text = (SKILLS_ROOT / meta.get("file_path", f"skills/{meta['name']}.md")).read_text(encoding="utf-8")
+    except (OSError, KeyError):
+        return ""
+    text = re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.DOTALL)
+    return re.sub(r"## Описание\n.*?(?=\n## )", "", text, flags=re.DOTALL).strip()
 
 
 def _extract_signatures(code: str) -> list[str]:

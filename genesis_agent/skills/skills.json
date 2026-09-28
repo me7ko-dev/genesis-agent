@@ -555,6 +555,28 @@
         "method": "self_test_passed",
         "detail": "OK"
       }
+    },
+    {
+      "name": "web_site_2026",
+      "category": "web",
+      "file_path": "skills/web_site_2026.md",
+      "description": "Уеб сайт или лендинг страница по стандарта на 2026 — проверена CSS основа (светла и тъмна тема с контраст AA), hero с тъмен слой, мобилно меню, достъпна форма, SVG илюстрации вместо заместители, цени в евро.",
+      "triggers": [
+        "сайт",
+        "уебсайт",
+        "лендинг",
+        "website",
+        "landing"
+      ],
+      "min_score": 1,
+      "version": "1.0",
+      "last_updated": "2026-09-28T14:00:00+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "page_check_passed",
+        "detail": "tests/test_web_skill.py: страница от скелета + CSS + JS — 0 находки"
+      }
     }
   ]
 }
