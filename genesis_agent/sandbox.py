@@ -126,6 +126,19 @@ _BLOCK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
      "изключване/рестарт на машината"),
 ]
 
+# Файловете с ключове и тайни — ЕДИН образец за shell командите (двата вида
+# наклонени черти) и за инструментите (sensitive_path_reason). Измерено
+# 2026-09-28: `Get-Content ~/.genesis/private_key.pem`, `cat ~/.genesis/remote.json`
+# (ключът за сдвояване с телефона — с него някой управлява агента) и
+# `gh/hosts.yml` (GitHub токенът) минаваха като SAFE, а READ_FILE ги четеше
+# без въпрос.
+_SECRET_PATHS = (
+    r"\.ssh[/\\]|\.aws[/\\]|\.gnupg[/\\]|id_rsa|id_ed25519|\.env\b|credentials\b"
+    r"|\.pem\b|\.p12\b|\.pfx\b|\.genesis[/\\]remote\.json|gh[/\\]hosts\.yml"
+    r"|\.npmrc\b|\.pypirc\b|\.netrc\b|\.docker[/\\]config\.json|\.kube[/\\]config\b"
+    r"|Login Data\b"
+)
+
 # Опасни — изискват потвърждение (interactive) или отказ (autonomous).
 _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # И дългите форми: без `--(recursive|force)` тук `rm --recursive нещо`
@@ -159,8 +172,14 @@ _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
      "глобална npm инсталация"),
     (_c(r"\bgit\s+push\b"),
      "git push (публикуване)"),
-    (_c(r"(\.ssh/|\.aws/|id_rsa|\.env\b|credentials\b)"),
+    (_c(_SECRET_PATHS),
      "достъп до чувствителни файлове (ключове/тайни)"),
+    # Качване на локален файл навън — пътят, по който тайна напуска машината.
+    # localhost е изключен: така агентът тества собственото си API.
+    (_c(r"\bcurl\b(?![^\n]*\b(?:localhost|127\.0\.0\.1)\b)[^\n]*\s(?:-T\s*\S|--upload-file\b"
+        r"|(?:-d|--data|--data-binary|--data-raw)\s*['\"]?@|(?:-F|--form)\s*['\"]?[^\s'\"=]+=[@<])"
+        r"|\bwget\b[^\n]*--post-file\b|\bscp\b"),
+     "качване на локален файл към друга машина"),
     (_c(r"\b(eval|exec)\s"),
      "динамично изпълнение (eval/exec)"),
     (_c(r"/etc/(passwd|shadow|sudoers)"),
@@ -254,8 +273,13 @@ _WIN_CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
      "принудително преместване/копиране (презаписва целта)"),
     (_c(r"System32\\drivers\\etc\\hosts|[A-Za-z]:\\Windows\\System32\\"),
      "запис в системни файлове (System32)"),
-    (_c(r"\.ssh\\|\.aws\\|\bcredentials\b"),
-     "достъп до чувствителни файлове (ключове/тайни)"),
+    (_c(r"\b(Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b[^\n]*\s-InFile\b"),
+     "качване на локален файл към друга машина"),
+    # Вградени в Windows програми, с които се сваля изпълним файл покрай
+    # браузъра и антивирусния филтър.
+    (_c(r"\bcertutil(\.exe)?\b[^\n]*\s[-/](urlcache|decode|decodehex)\b"
+        r"|\bbitsadmin(\.exe)?\b[^\n]*\s/(transfer|addfile)\b|\bStart-BitsTransfer\b"),
+     "изтегляне/декодиране на файл през certutil/BITS"),
 ]
 
 _BLOCK_PATTERNS += _WIN_BLOCK_PATTERNS
@@ -817,7 +841,7 @@ _PATH_LITERAL_FALSE_POSITIVE_REASONS = {
 }
 _FILE_READ_CALL_NAMES = {"open", "read_text", "read_bytes", "read"}
 _SENSITIVE_PATH_RE = re.compile(
-    r"(/etc/(passwd|shadow|sudoers)|\.ssh/|\.aws/|id_rsa|\.env\b|credentials\b)"
+    r"(/etc/(passwd|shadow|sudoers)|" + _SECRET_PATHS + ")", re.IGNORECASE
 )
 
 # Шаблоните, които се РАЗПРОСТРАНЯВАТ нарочно: `.env.example` е в репото, за да

@@ -81,6 +81,22 @@ _CATEGORIES: tuple[tuple[str, re.Pattern[str], frozenset[str], frozenset[str]], 
                    "npm", "cargo", "go", "python", "python3"}),
     ),
     (
+        # Измерено 2026-09-28: задача за уеб сайт, моделът само чете файловете
+        # и пише „Файловете се отварят без грешки в браузър; анимациите, темата
+        # и формата работят“. Браузър не е пускан; в страницата имаше счупен
+        # og:image и нечетим текст върху градиента.
+        "проверка в браузър",
+        re.compile(
+            r"(без грешки в (?:браузъра?|конзолата)|"
+            r"(?:провер|теств)\w* (?:\w+ )?в браузъра?|"
+            r"no (?:console )?errors in the browser|"
+            r"i(?:'ve| have) (?:tested|checked|verified) (?:it |this |the \w+ )?in (?:the |a )?browser)",
+            re.IGNORECASE),
+        frozenset({"RUN_CMD", "BROWSE", "BROWSER_READ", "USE_SKILL", "DELEGATE"}),
+        frozenset({"playwright", "chromium", "chrome", "msedge", "puppeteer", "selenium",
+                   "lighthouse", "curl", "wget", "http.server", "node", "npx"}),
+    ),
+    (
         "конфигурация",
         re.compile(
             r"\b(конфигурирах|настроих|"

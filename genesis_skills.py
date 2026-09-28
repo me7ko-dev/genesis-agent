@@ -256,7 +256,8 @@ def _tool_write_file(arg: str, content: str) -> str:
     _SEEN_PATHS.add(path.resolve())
     _log_episode(f"WRITE_FILE {path}", f"записани {len(content)} символа",
                  ["tool", "write_file"])
-    return f"[WRITE_FILE: {path}] ✓ записани {len(content)} символа{lint_note}"
+    from genesis_agent.web_check import web_note
+    return f"[WRITE_FILE: {path}] ✓ записани {len(content)} символа{lint_note}{web_note(path)}"
 
 
 def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False) -> str:
@@ -310,7 +311,8 @@ def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False
             ruff_note = lint_note(path.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             pass
-    return f"[EDIT_FILE: {path}] {res.detail}\n{diff}{ruff_note}"
+    from genesis_agent.web_check import web_note
+    return f"[EDIT_FILE: {path}] {res.detail}\n{diff}{ruff_note}{web_note(path)}"
 
 
 def _tool_search_code(arg: str, path: str = "", glob: str = "") -> str:
@@ -318,6 +320,13 @@ def _tool_search_code(arg: str, path: str = "", glob: str = "") -> str:
     if not pattern:
         return "[SEARCH_CODE] Празен шаблон."
     from genesis_agent.repo_map import search_code
+    # Шаблон, подаден като път (`site/**/*.html`): 2026-09-28 моделът получи
+    # два пъти „няма такъв път“ и загуби два рунда. Частта до първия `*`/`?`
+    # е папката, останалото — филтърът по име.
+    if path and not glob and any(ch in path for ch in "*?"):
+        parts = Path(path.strip()).parts
+        cut = next(i for i, p in enumerate(parts) if any(ch in p for ch in "*?"))
+        path, glob = str(Path(*parts[:cut])) if cut else "", parts[-1]
     root = _resolve(path) if path else _WORKSPACE
     refusal = _sensitive_root_refusal("SEARCH_CODE", root)
     if refusal:
@@ -376,7 +385,9 @@ def _tool_glob(arg: str) -> str:
     except (ValueError, FileNotFoundError) as e:
         return f"[GLOB: {pattern}] {e}"
     if not hits:
-        return f"[GLOB: {pattern}] Няма файлове по този шаблон в {root}."
+        empty = root.is_dir() and not any(root.iterdir())
+        return (f"[GLOB: {pattern}] Няма файлове по този шаблон в {root}."
+                + (" Папката е празна — създай нужните файлове с WRITE_FILE." if empty else ""))
     _log_episode(f"GLOB {pattern}", f"{len(hits)} файла", ["tool", "glob"])
     lines = [f"[GLOB: {pattern}] {len(hits)} файла в {root}"] + [f"  {h}" for h in hits]
     return "\n".join(lines)
@@ -521,6 +532,14 @@ def _tool_list_dir(arg: str) -> str:
     except OSError as e:
         return f"[LIST_DIR] Грешка: {e}"
     lines = [f"[LIST_DIR: {path}]"]
+    if not entries:
+        # Само заглавието, без нито един ред, моделът чете като „инструментът
+        # не отговори“ и пита отново. Измерено 2026-09-28 (bench_projects):
+        # 3 от първите 6 пуска — groq gpt-oss-120b вика LIST_DIR три пъти върху
+        # новата празна папка, пазачът за повторения спира хода и не е написан
+        # нито ред код (0/1 скрити).
+        lines.append("  (папката е празна — няма файлове за четене; създай нужните с WRITE_FILE)")
+        return "\n".join(lines)
     # Не `e` — точно това име държи изключението по-горе.
     for entry in entries[:200]:
         marker = "📁" if entry.is_dir() else "📄"
