@@ -11,6 +11,7 @@ Android няма python, git и node. Termux ги дава: истински Lin
     genesis phone status   тече ли и къде работи
     genesis phone pair     отваря приложението Genesis, сдвоено с агента тук
     genesis phone log      последните редове от изхода му
+    genesis phone update   обновява Genesis от GitHub и го пуска отново
 
 `start` се вика от бутона „Пусни Genesis" в приложението (Termux RUN_COMMAND),
 от Termux:Boot при включване на телефона и на ръка. Инсталацията е в
@@ -48,6 +49,7 @@ Genesis на този телефон (Android, Termux) — без компютъ
   status   тече ли и къде работи
   pair     отваря приложението Genesis, сдвоено с агента тук
   log      последните редове от изхода му
+  update   обновява Genesis от GitHub и го пуска отново (бутонът в приложението)
 
 Инсталация: scripts/install-termux.sh (виж docs/ANDROID.md)."""
 
@@ -259,6 +261,30 @@ def pair(port: int = DEFAULT_PORT) -> int:
     return 1
 
 
+def update(port: int = DEFAULT_PORT) -> int:
+    """Новата версия от същия клон в GitHub, после рестарт на агента.
+
+    Пуска се от приложението („/update“ → Обнови) през RUN_COMMAND. pip
+    се вика два пъти: първо зависимостите, после самият Genesis с
+    --force-reinstall — номерът на версията не се сменя с всеки commit и
+    иначе pip казва „вече е инсталирано“ (наживо, 2026-09-28)."""
+    from genesis_agent import version_info
+    src = version_info.installed_source()
+    ref = (src.ref if src and src.ref else "main")
+    repo = (src.owner_repo if src and src.owner_repo else "me7ko-dev/genesis-agent")
+    pkg = f"genesis-agent[mobile] @ git+https://github.com/{repo}@{ref}"
+    print(f"Обновявам Genesis от {repo}@{ref}…", flush=True)
+    for extra in (["--upgrade"], ["--force-reinstall", "--no-deps"]):
+        r = subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--disable-pip-version-check",
+                            *extra, pkg], check=False)
+        if r.returncode:
+            print("Обновяването не мина (виж изхода отгоре). Старата версия остава.")
+            return 1
+    print("Готово. Пускам новата версия…", flush=True)
+    stop(port)
+    return start(port)
+
+
 def main(args: list[str]) -> int:
     if not args or args[0] in ("-h", "--help", "help"):
         print(USAGE)
@@ -283,6 +309,8 @@ def main(args: list[str]) -> int:
         return status(port)
     if cmd == "pair":
         return pair(port)
+    if cmd == "update":
+        return update(port)
     if cmd == "log":
         print(tail() or f"Още няма изход ({log_file()}).")
         return 0

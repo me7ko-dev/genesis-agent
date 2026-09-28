@@ -287,6 +287,11 @@ export class GenesisClient {
     return this.call('clear');
   }
 
+  /** A `/` command answered by the agent (genesis_agent/desktop_commands.py). */
+  command<T extends { ok: boolean; error?: string }>(name: string, arg: Record<string, unknown> = {}): Promise<T> {
+    return this.call<T>('command', { name, arg }, 60000);
+  }
+
   /** API keys from the computer (`genesis keys qr`) into this Genesis's ~/.genesis/.env. */
   importKeys(keys: Record<string, string>): Promise<{ ok: boolean; saved?: string[]; error?: string }> {
     return this.call('import_keys', { keys });

@@ -375,6 +375,11 @@ def cmd_update(_arg: dict, _ctx: CommandContext) -> dict:
                            "command": version_info.install_command(src) if src else None}
     if src and check.latest and not check.up_to_date:
         out["changes"] = version_info.changelog(src.owner_repo, src.commit, check.latest)
+    from genesis_agent.paths import is_android
+    if is_android():
+        # На телефона приложението обновява само (RUN_COMMAND → phone.update).
+        out["command"] = "genesis phone update"
+        out["self_update"] = True
     return out
 
 

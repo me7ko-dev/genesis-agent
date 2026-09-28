@@ -62,11 +62,11 @@ async function ensurePermission(): Promise<boolean> {
 }
 
 /**
- * `genesis phone <command>` in Termux. `start` and `stop` run in the
+ * `genesis phone <command>` in Termux. `start`, `stop` and `update` run in the
  * background; `pair` brings Termux to the front, which then opens this app paired
  * (Android lets only the app on screen open another one).
  */
-export async function runGenesis(command: 'start' | 'stop' | 'pair'): Promise<StartResult> {
+export async function runGenesis(command: 'start' | 'stop' | 'pair' | 'update'): Promise<StartResult> {
   if (!TermuxBridge) return 'failed';
   if (!termuxInstalled()) return 'no-termux';
   try {

@@ -113,7 +113,19 @@ export function useGenesis(pairing: Pairing) {
   const items = useMemo(() => toChatItems(events), [events]);
   const label = useMemo(() => thinkingLabel(events), [events]);
 
-  return { connection, status, items, busy, label, error, send, confirm, stop, clear };
+  /** `/` commands: never throws — a network failure comes back as ok:false. */
+  const command = useCallback(async <T extends { ok: boolean; error?: string }>(
+    name: string, arg: Record<string, unknown> = {},
+  ): Promise<T> => {
+    try {
+      return await client.command<T>(name, arg);
+    } catch (e) {
+      const kind = e instanceof ProtocolError ? e.kind : 'network';
+      return { ok: false, error: kind === 'network' ? 'Genesis не отговаря.' : e instanceof Error ? e.message : String(e) } as T;
+    }
+  }, [client]);
+
+  return { connection, status, items, busy, label, error, send, confirm, stop, clear, command };
 }
 
 function sleep(ms: number) {

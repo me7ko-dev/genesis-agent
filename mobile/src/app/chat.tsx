@@ -1,16 +1,21 @@
 import { Redirect, router } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator, FlatList, KeyboardAvoidingView, type NativeScrollEvent, type NativeSyntheticEvent, Platform, Pressable, StyleSheet, Text, TextInput, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AssistantMessage, ConfirmCard, Note, ToolCard, UserBubble } from '../components/Cards';
+import { Sheet } from '../components/Sheets';
 import type { ChatItem } from '../lib/chat';
+import {
+  explain, findCommand, fmtTokens, matchCommands, parseSlash, toggleMessage,
+  type CommandResult, type SheetView, type UsageReport,
+} from '../lib/commands';
 import { usePairing } from '../lib/pairing';
 import { START_ERROR, isOnThisPhone, runGenesis } from '../lib/phone';
 import type { Pairing } from '../lib/protocol';
-import { useTheme } from '../lib/theme';
+import { mono, useTheme } from '../lib/theme';
 import { useGenesis, type Connection } from '../lib/useGenesis';
 
 export default function ChatRoute() {
@@ -48,7 +53,13 @@ function Chat({ pairing }: { pairing: Pairing }) {
 
   const submit = async () => {
     const text = draft.trim();
-    if (!text || g.busy) return;
+    if (!text) return;
+    const slash = parseSlash(text);
+    if (slash && runSlash(slash[0], slash[1])) {
+      setDraft('');
+      return;
+    }
+    if (g.busy) return;
     atBottom.current = true;
     if (await g.send(text)) setDraft('');
   };
@@ -104,12 +115,87 @@ function Chat({ pairing }: { pairing: Pairing }) {
     if (startTimer.current) clearTimeout(startTimer.current);
   }, []);
 
+  // ── `/` commands and their views, as in Genesis Desktop ──────────────────
+  const [sheet, setSheet] = useState<SheetView | null>(null);
+  const [flashText, setFlashText] = useState('');
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flash = useCallback((text: string) => {
+    setFlashText(text);
+    if (flashTimer.current) clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(() => setFlashText(''), 5000);
+  }, []);
+  useEffect(() => () => {
+    if (flashTimer.current) clearTimeout(flashTimer.current);
+  }, []);
+
+  const quick = async (name: string, arg: Record<string, unknown> = {}) => {
+    const r = await g.command<CommandResult & { on?: boolean; model?: string; text?: string; dest?: string }>(name, arg);
+    if (!r.ok) { flash(explain(r.error)); return; }
+    if (name === 'backup') flash(`Архивът е готов: ${r.dest}`);
+    else if (r.text) flash(r.text);
+    else flash(toggleMessage(name, r));
+  };
+
+  // Today's tokens in the header, fresh after every answer (like the desktop title bar).
+  const [today, setToday] = useState<{ tokens: number; free: boolean } | null>(null);
+  useEffect(() => {
+    if (g.connection !== 'online' || g.busy || sheet) return;
+    let alive = true;
+    void g.command<UsageReport>('usage', { days: 7 }).then((r) => {
+      if (alive && r.ok) setToday({ tokens: r.periods.today.tokens, free: r.paid_tokens === 0 });
+    });
+    return () => { alive = false; };
+    // g.command is stable for this pairing; the rest decides when to refresh.
+  }, [g.connection, g.busy, sheet, g.items.length]);
+
+  /** True when `name` is a `/` command handled here (then it is not sent to the agent). */
+  const runSlash = (word: string, arg: string): boolean => {
+    const cmd = findCommand(word, local);
+    if (!cmd) return false;
+    setMenuOpen(false);
+    switch (cmd.name) {
+      case '/clear': void g.clear(); break;
+      case '/stop': void g.stop(); break;
+      case '/keys': router.push('/keys'); break;
+      case '/help': setSheet({ view: 'help' }); break;
+      case '/usage': setSheet({ view: 'usage' }); break;
+      case '/status': setSheet({ view: 'status' }); break;
+      case '/model': setSheet({ view: 'models', tab: 'pick' }); break;
+      case '/models': setSheet({ view: 'models', tab: 'chain' }); break;
+      case '/history': setSheet({ view: 'history' }); break;
+      case '/update': setSheet({ view: 'update' }); break;
+      case '/skills': setSheet({ view: 'text', title: 'Умения', command: 'skills' }); break;
+      case '/tasks': setSheet({ view: 'text', title: 'Работа', command: 'tasks' }); break;
+      case '/maxcoding': void quick('maxcoding'); break;
+      case '/local_model_max': void quick('local_max'); break;
+      case '/local_model_normal': void quick('local_normal'); break;
+      case '/backup': void quick('backup'); break;
+      case '/done':
+      case '/drop':
+        if (!arg) { setDraft(`${cmd.name} `); return true; }
+        void quick(cmd.name.slice(1), { ids: arg });
+        break;
+      default: return false;
+    }
+    return true;
+  };
+
+  const selfUpdate = async () => {
+    setSheet(null);
+    const result = await runGenesis('update');
+    if (result !== 'started') { flash(START_ERROR[result]); return; }
+    autoStarted.current = true;   // it restarts itself; no second start from here
+    flash('Обновявам Genesis… (1–3 минути, после се свързва само)');
+  };
+
+  const suggestions = matchCommands(draft, local);
   const dot = g.connection === 'online' ? theme.ok : g.connection === 'connecting' ? theme.muted : theme.danger;
 
   return (
     <SafeAreaView style={[styles.flex, { backgroundColor: theme.bg }]} edges={['top', 'left', 'right', 'bottom']}>
       <View style={[styles.header, { borderColor: theme.border }]}>
-        <View style={styles.flex}>
+        <Pressable style={styles.flex} onPress={() => g.connection === 'online' && setSheet({ view: 'models', tab: 'pick' })}
+          accessibilityRole="button" accessibilityLabel="Смени модела">
           <Text style={[styles.hTitle, { color: theme.text }]} numberOfLines={1}>{pairing.name}</Text>
           <View style={styles.hSub}>
             <View style={[styles.dot, { backgroundColor: dot }]} />
@@ -117,7 +203,13 @@ function Chat({ pairing }: { pairing: Pairing }) {
               {CONNECTION_TEXT[g.connection]}{g.status?.model ? ` · ${g.status.model}` : ''}
             </Text>
           </View>
-        </View>
+        </Pressable>
+        {today && g.connection === 'online' ? (
+          <Pressable accessibilityRole="button" accessibilityLabel="Разход" onPress={() => setSheet({ view: 'usage' })}
+            style={[styles.chip, { borderColor: theme.border, backgroundColor: theme.surface }]}>
+            <Text style={[styles.chipText, { color: theme.text }]}>⚡ {fmtTokens(today.tokens)} днес{today.free ? ' · $0' : ''}</Text>
+          </Pressable>
+        ) : null}
         <Pressable accessibilityRole="button" accessibilityLabel="Меню" onPress={() => setMenuOpen((o) => !o)} hitSlop={12} style={styles.menuBtn}>
           <Text style={[styles.menuText, { color: theme.text }]}>⋯</Text>
         </Pressable>
@@ -129,6 +221,12 @@ function Chat({ pairing }: { pairing: Pairing }) {
             <Text style={[styles.menuInfo, { color: theme.muted }]} numberOfLines={2}>📁 {g.status.workspace}</Text>
           ) : null}
           <MenuItem label="Нов разговор" onPress={() => { setMenuOpen(false); g.clear(); }} />
+          <MenuItem label="⚡ Разход и токени" onPress={() => runSlash('/usage', '')} />
+          <MenuItem label="Модел" onPress={() => runSlash('/model', '')} />
+          <MenuItem label="Състояние" onPress={() => runSlash('/status', '')} />
+          <MenuItem label="История на разговорите" onPress={() => runSlash('/history', '')} />
+          <MenuItem label="Обновяване" onPress={() => runSlash('/update', '')} />
+          <MenuItem label="Всички команди ( / )" onPress={() => runSlash('/help', '')} />
           <MenuItem label="Ключове от компютъра" onPress={() => { setMenuOpen(false); router.push('/keys'); }} />
           {local ? <MenuItem label="Спри Genesis на телефона" onPress={stopOnPhone} /> : null}
           <MenuItem label={local ? 'Свържи се с компютър вместо това' : 'Отдвои този телефон'} danger onPress={doUnpair} />
@@ -194,12 +292,36 @@ function Chat({ pairing }: { pairing: Pairing }) {
         />
 
         {g.error ? <Text style={[styles.error, { color: theme.danger }]}>{g.error}</Text> : null}
+        {flashText ? (
+          <Pressable onPress={() => setFlashText('')} style={[styles.flash, { backgroundColor: theme.surface, borderColor: theme.accent }]}>
+            <Text style={{ color: theme.text, lineHeight: 19 }}>{flashText}</Text>
+          </Pressable>
+        ) : null}
+
+        {suggestions.length ? (
+          <View style={[styles.slash, { backgroundColor: theme.surface, borderColor: theme.border }]}>
+            <FlatList
+              data={suggestions}
+              keyExtractor={(c) => c.name}
+              keyboardShouldPersistTaps="always"
+              renderItem={({ item: c }) => (
+                <Pressable style={styles.slashRow} onPress={() => {
+                  if (c.args) setDraft(`${c.name} `);
+                  else { runSlash(c.name, ''); setDraft(''); }
+                }}>
+                  <Text style={[mono, styles.slashName, { color: theme.accent }]}>{c.name}{c.args ? ` ${c.args}` : ''}</Text>
+                  <Text style={[styles.slashHint, { color: theme.muted }]} numberOfLines={1}>{c.hint}</Text>
+                </Pressable>
+              )}
+            />
+          </View>
+        ) : null}
 
         <View style={[styles.composer, { borderColor: theme.border, backgroundColor: theme.surface }]}>
           <TextInput
             value={draft}
             onChangeText={setDraft}
-            placeholder={g.busy ? 'Genesis работи…' : 'Съобщение към Genesis'}
+            placeholder={g.busy ? 'Genesis работи… ( / за команди)' : 'Съобщение към Genesis ( / за команди)'}
             placeholderTextColor={theme.muted}
             multiline
             style={[styles.input, { color: theme.text }]}
@@ -207,7 +329,7 @@ function Chat({ pairing }: { pairing: Pairing }) {
             blurOnSubmit={false}
             accessibilityLabel="Съобщение"
           />
-          {g.busy ? (
+          {g.busy && !draft.trim().startsWith('/') ? (
             <Pressable accessibilityRole="button" accessibilityLabel="Спри" onPress={() => g.stop()}
               style={[styles.send, { backgroundColor: theme.danger }]}>
               <Text style={styles.sendText}>■</Text>
@@ -221,6 +343,9 @@ function Chat({ pairing }: { pairing: Pairing }) {
           )}
         </View>
       </KeyboardAvoidingView>
+
+      <Sheet sheet={sheet} run={g.command} onFlash={flash} onOpen={setSheet} onClose={() => setSheet(null)}
+        onPhone={local} onSelfUpdate={selfUpdate} />
     </SafeAreaView>
   );
 }
@@ -276,4 +401,11 @@ const styles = StyleSheet.create({
   banner: { margin: 12, marginBottom: 0, padding: 12, borderRadius: 12, borderWidth: 1, gap: 8 },
   bannerText: { fontSize: 14, lineHeight: 19 },
   bannerAction: { fontWeight: '700' },
+  chip: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 14, paddingHorizontal: 10, paddingVertical: 5, marginLeft: 6 },
+  chipText: { fontSize: 12, fontWeight: '700' },
+  flash: { marginHorizontal: 10, marginBottom: 6, padding: 10, borderRadius: 10, borderWidth: 1 },
+  slash: { marginHorizontal: 10, marginBottom: 6, maxHeight: 260, borderRadius: 12, borderWidth: StyleSheet.hairlineWidth },
+  slashRow: { paddingHorizontal: 12, paddingVertical: 9, gap: 1 },
+  slashName: { fontSize: 14, fontWeight: '700' },
+  slashHint: { fontSize: 12 },
 });

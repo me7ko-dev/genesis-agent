@@ -145,3 +145,27 @@ def test_pair_starts_genesis_and_opens_the_app(home, fake_serve, monkeypatch) ->
     pairing = parse_qs(urlparse(link).query)["u"][0]
     assert pairing.startswith(f"http://127.0.0.1:{port}/#k=")
     assert pairing.endswith("&n=Pixel%208")
+
+
+def test_update_reinstalls_from_the_same_branch_then_restarts(monkeypatch) -> None:
+    from genesis_agent import version_info
+    src = version_info.Source(url="https://github.com/me7ko-dev/genesis-agent", commit="abc", ref="feat/x")
+    monkeypatch.setattr(version_info, "installed_source", lambda: src)
+    runs: list[list[str]] = []
+    monkeypatch.setattr(phone.subprocess, "run",
+                        lambda argv, **kw: runs.append(argv) or phone.subprocess.CompletedProcess(argv, 0))
+    order: list[str] = []
+    monkeypatch.setattr(phone, "stop", lambda port: order.append("stop") or 0)
+    monkeypatch.setattr(phone, "start", lambda port: order.append("start") or 0)
+    assert phone.update(8765) == 0
+    assert all(r[-1] == "genesis-agent[mobile] @ git+https://github.com/me7ko-dev/genesis-agent@feat/x"
+               for r in runs)
+    assert "--force-reinstall" in runs[1]      # същата версия 0.2.0 — без това pip не обновява
+    assert order == ["stop", "start"]
+
+
+def test_a_failed_update_keeps_the_running_genesis(monkeypatch) -> None:
+    monkeypatch.setattr(phone.subprocess, "run",
+                        lambda argv, **kw: phone.subprocess.CompletedProcess(argv, 1))
+    monkeypatch.setattr(phone, "stop", lambda port: pytest.fail("stopped a working Genesis"))
+    assert phone.update(8765) == 1
