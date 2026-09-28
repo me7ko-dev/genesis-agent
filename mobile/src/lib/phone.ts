@@ -84,6 +84,6 @@ export async function runGenesis(command: 'start' | 'stop' | 'pair'): Promise<St
 
 export const START_ERROR: Record<Exclude<StartResult, 'started'>, string> = {
   'no-termux': 'Termux не е инсталиран. Инсталирай го от F-Droid и постави командата за Genesis в него.',
-  'no-permission': 'Без разрешението „Изпълнение на команди в Termux“ приложението не може да пусне Genesis. Настройки → Приложения → Genesis Remote → Разрешения.',
+  'no-permission': 'Без разрешението „Изпълнение на команди в Termux“ приложението не може да пусне Genesis. Настройки → Приложения → Genesis Remote → Разрешения → Допълнителни разрешения.',
   failed: 'Termux не прие командата. Отвори Termux и постави командата за инсталиране още веднъж (тя разрешава на приложението да пуска Genesis).',
 };

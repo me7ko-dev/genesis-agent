@@ -12,6 +12,11 @@ set -euo pipefail
 # /src е само за четене и чужд потребител: pip сглобява в самото копие.
 rm -rf "$HOME/src" && cp -r /src "$HOME/src" && rm -rf "$HOME/src/build" "$HOME/src"/*.egg-info
 
+echo "::group::environment"
+env | grep -E '^(LD_PRELOAD|PREFIX|TERMUX|ANDROID_)' | sort || true
+ls "$PREFIX/lib" | grep -i termux-exec || true
+echo "::endgroup::"
+
 echo "::group::install-termux.sh"
 GENESIS_SRC="$HOME/src" GENESIS_CI=1 bash "$HOME/src/scripts/install-termux.sh"
 echo "::endgroup::"

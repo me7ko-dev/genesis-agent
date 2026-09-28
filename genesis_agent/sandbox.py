@@ -153,7 +153,8 @@ _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
      "промяна на cron таблицата"),
     (_c(r"\b(nc|ncat|netcat)\b[^\n]*-e\b"),
      "reverse/bind shell през netcat"),
-    (_c(r"\b(pip3?|apt|apt-get|dnf|yum|pacman)\s+(install|add)\b"),
+    # pkg: Termux (Genesis на телефона, docs/ANDROID.md).
+    (_c(r"\b(pip3?|apt|apt-get|dnf|yum|pacman|pkg)\s+(install|add)\b"),
      "инсталиране на пакети"),
     (_c(r"\bnpm\s+(install|i)\b[^\n]*-g\b"),
      "глобална npm инсталация"),
@@ -1001,7 +1002,17 @@ def _android_env() -> dict[str, str]:
     from genesis_agent.paths import is_android
     if not is_android():
         return {}
-    return {k: v for k, v in os.environ.items() if k.startswith(_ANDROID_ENV_PREFIXES)}
+    env = {k: v for k, v in os.environ.items() if k.startswith(_ANDROID_ENV_PREFIXES)}
+    if "LD_PRELOAD" not in env:
+        # Пуснат без средата на приложението Termux (Termux:Boot, cron,
+        # docker образът в CI) — termux-exec е там, само не е зареден.
+        prefix = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
+        for name in ("libtermux-exec-ld-preload.so", "libtermux-exec.so"):
+            lib = os.path.join(prefix, "lib", name)
+            if os.path.exists(lib):
+                env["LD_PRELOAD"] = lib
+                break
+    return env
 
 
 def _windowsapps_last(path: str) -> str:

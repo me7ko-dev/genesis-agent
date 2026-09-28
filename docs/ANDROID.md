@@ -21,11 +21,11 @@ Linux за телефона, безплатен, с отворен код. Genes
 
 ## Инсталиране (веднъж, 5–10 минути)
 
-1. **Приложението Genesis Remote.** Свали `genesis-remote-android.apk` от
+1. **Termux от F-Droid:** <https://f-droid.org/packages/com.termux/>.
+   Версията от Google Play също става; старата (от 2020) не става.
+2. **Приложението Genesis Remote.** Свали `genesis-remote-android.apk` от
    [последния release](https://github.com/me7ko-dev/genesis-agent/releases/latest)
    и го инсталирай (разреши „инсталиране от този източник“).
-2. **Termux от F-Droid:** <https://f-droid.org/packages/com.termux/>.
-   Версията от Google Play също става; старата (от 2020) не става.
 3. Отвори Genesis Remote → **„Без компютър — на този телефон“** →
    **Копирай**. Отвори Termux, постави реда и натисни Enter:
 
@@ -39,6 +39,8 @@ Linux за телефона, безплатен, с отворен код. Genes
 
 Първия път Android може да поиска още едно разрешение: **„Изпълнение на
 команди в Termux“**. Разреши го — с него приложението пуска Genesis само.
+Ако не пита: Настройки → Приложения → Genesis Remote → Разрешения →
+Допълнителни разрешения.
 
 ### Автоматично при включване на телефона (по желание)
 
