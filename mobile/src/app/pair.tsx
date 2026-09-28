@@ -82,7 +82,10 @@ export default function Pair() {
 
   return (
     <SafeAreaView style={[styles.flex, { backgroundColor: theme.bg }]}>
-      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      {/* 'padding' on Android too: the app is edge-to-edge, so Android does not
+          shrink the window for the keyboard (adjustResize has no effect) and the
+          composer stayed under it — seen live on a Galaxy S10+, 2026-09-28. */}
+      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'web' ? undefined : 'padding'}>
         <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
           <Text style={[styles.title, { color: theme.text }]}>Genesis</Text>
           {phoneModeAvailable ? <OnThisPhone onError={setError} /> : null}

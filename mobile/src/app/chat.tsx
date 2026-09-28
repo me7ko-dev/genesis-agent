@@ -153,7 +153,10 @@ function Chat({ pairing }: { pairing: Pairing }) {
           action="Сканирай" onPress={() => router.push('/keys')} />
       ) : null}
 
-      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      {/* 'padding' on Android too: the app is edge-to-edge, so Android does not
+          shrink the window for the keyboard (adjustResize has no effect) and the
+          composer stayed under it — seen live on a Galaxy S10+, 2026-09-28. */}
+      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'web' ? undefined : 'padding'}>
         <FlatList
           ref={list}
           data={g.items}
