@@ -90,7 +90,7 @@ genesis_agent = [
 ]
 
 [tool.pytest.ini_options]
-addopts = "--ignore=scripts"
+addopts = "--ignore=scripts --ignore=bench"
 
 [tool.ruff]
 target-version = "py310"

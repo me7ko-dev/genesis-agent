@@ -1186,7 +1186,16 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     проверка на твърденията, същият пазач срещу въртене на място. Връща
     историята, която може да е НОВ deque след компресия.
     """
-    messages.append({"role": "user", "content": user_input})
+    content = user_input
+    try:
+        from genesis_agent.skill_loader import domain_context
+        knowledge = domain_context(user_input)
+    except Exception:
+        knowledge = ""
+    if knowledge:
+        content = f"{user_input}\n\n{knowledge}"
+        ui.info(f"📚 проверено знание: {knowledge.splitlines()[0].split(': ', 1)[-1]}")
+    messages.append({"role": "user", "content": content})
     _remember("user", user_input)
 
     # Итеративен tool цикъл (design note, 2026-07-25): преди спираше след 1

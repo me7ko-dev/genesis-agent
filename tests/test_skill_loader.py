@@ -370,3 +370,142 @@ def test_format_skill_list_names_every_skill_and_marks_verified(monkeypatch) -> 
     assert out[0] == "2 умения, 1 verified"
     assert out[1].startswith("  ✓ alpha — ") and len(out[1]) < 50
     assert out[2] == "  · zeta — draft"
+
+# ── domain_context: провереното знание в чата ───────────────────────────────
+
+@pytest.fixture
+def _shipped_skills(monkeypatch):
+    shipped = sl.Path(sl.__file__).resolve().parent / "skills"
+    monkeypatch.setattr(sl, "SKILLS_DIR", shipped)
+    monkeypatch.setattr(sl, "SKILLS_ROOT", shipped.parent)
+    monkeypatch.setattr(sl, "_SKILLS_INDEX_CACHE", None)
+    yield
+    sl._SKILLS_INDEX_CACHE = None
+
+
+def test_an_egn_request_gets_the_verified_rules(_shipped_skills) -> None:
+    """Истинската заявка от 2026-09-25, при която моделите обърнаха пола."""
+    text = sl.domain_context(
+        "Направи в текущата папка Python модул egn.py за българско ЕГН. Функция "
+        "validate(egn) — 10 цифри, съществуваща дата, вярна контролна цифра.")
+    assert "bg_egn_validate_and_decode" in text
+    assert "ЧЕТНА → мъж" in text
+
+
+def test_an_unrelated_request_gets_nothing(_shipped_skills) -> None:
+    assert sl.domain_context("напиши rate limiter с asyncio и тестове") == ""
+
+
+def test_a_general_skill_is_never_injected_in_chat(monkeypatch) -> None:
+    hit = {"name": "event_bus", "category": "autonomous", "verified": True, "_kw_score": 9}
+    monkeypatch.setattr(sl, "search_skills", lambda *a, **k: [hit])
+    assert sl.domain_context("event bus pub sub") == ""
+
+
+def test_a_weak_domain_match_is_not_injected(monkeypatch) -> None:
+    hit = {"name": "bg_egn", "category": "domain", "verified": True, "_kw_score": 1}
+    monkeypatch.setattr(sl, "search_skills", lambda *a, **k: [hit])
+    assert sl.domain_context("номер") == ""
+
+
+def test_the_shipped_egn_skill_passes_its_own_self_test(_shipped_skills, tmp_path) -> None:
+    import subprocess
+    import sys
+    script = tmp_path / "bg_egn.py"
+    script.write_text(sl.skill_view("bg_egn_validate_and_decode")["code"], encoding="utf-8")
+    r = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
+                       encoding="utf-8", timeout=60, check=False)
+    assert r.returncode == 0 and r.stdout.strip() == "OK", r.stderr
+
+
+@pytest.mark.parametrize("query,skill", [
+    (("Направи в текущата папка Python модул eik.py за българския ЕИК (БУЛСТАТ) на фирми. "
+      "Функция validate(eik) — 9 или 13 цифри с вярни контролни цифри."), "bg_eik_bulstat_validate"),
+    (("Функция to_eur(amount_bgn) превръща лева в евро по официалния фиксиран курс. "
+      "official_currency(date) — коя е официалната валута на България на тази дата."),
+     "bg_euro_bgn_conversion"),
+])
+def test_real_requests_get_their_verified_rules(_shipped_skills, query, skill) -> None:
+    """Истинските заявки от 2026-09-25: без знанието ЕИК губеше резервните
+    тегла 2/2 пъти, а еврото — датата (2025-01-01 и 2023-01-01) 2/2 пъти."""
+    assert f"библиотеката: {skill}" in sl.domain_context(query)
+
+
+@pytest.mark.parametrize("name", ["bg_eik_bulstat_validate", "bg_euro_bgn_conversion"])
+def test_shipped_domain_skills_pass_their_self_tests(_shipped_skills, tmp_path, name) -> None:
+    import subprocess
+    import sys
+    script = tmp_path / f"{name}.py"
+    script.write_text(sl.skill_view(name)["code"], encoding="utf-8")
+    r = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
+                       encoding="utf-8", timeout=60, check=False)
+    assert r.returncode == 0 and r.stdout.strip() == "OK", r.stderr
+
+
+_IBAN_REQUEST = ("Направи в текущата папка Python модул iban.py за български IBAN (банкова сметка "
+                 "в България). Функция validate(iban: str) -> bool — вярно само за валиден "
+                 "български IBAN. Добави тестове с pytest в tests/ и ги пусни, докато минат. "
+                 "pytest е инсталиран.")
+_VAT_REQUEST = ("Направи в текущата папка Python модул vat.py за български ДДС номер "
+                "(идентификационен номер по ДДС): BG + ЕИК на фирмата или BG + ЕГН на физическо "
+                "лице. Функция validate(vat: str) -> bool — вярно само за валиден номер с вярна "
+                "контролна цифра. Добави тестове с pytest в tests/ и ги пусни, докато минат. "
+                "pytest е инсталиран.")
+
+
+@pytest.mark.parametrize("query,skill", [
+    (_IBAN_REQUEST, "bg_iban_validate"),
+    (_VAT_REQUEST, "bg_vat_number_validate"),
+])
+def test_iban_and_vat_requests_get_their_verified_rules(_shipped_skills, query, skill) -> None:
+    """Истинските заявки от 2026-09-25: без знанието IBAN проверяваше само mod 97
+    (без структурата по Наредба № 13), а ДДС номерът приемаше BG + 13-цифрен ЕИК
+    2/2 пъти — ЕИК умението („9 или 13 цифри“) го подвеждаше, затова ДДС
+    умението трябва да го изпревари за същата заявка."""
+    assert f"библиотеката: {skill}" in sl.domain_context(query)
+
+
+@pytest.mark.parametrize("name", ["bg_iban_validate", "bg_vat_number_validate"])
+def test_iban_and_vat_skills_pass_their_self_tests(_shipped_skills, tmp_path, name) -> None:
+    import subprocess
+    import sys
+    script = tmp_path / f"{name}.py"
+    script.write_text(sl.skill_view(name)["code"], encoding="utf-8")
+    r = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
+                       encoding="utf-8", timeout=60, check=False)
+    assert r.returncode == 0 and r.stdout.strip() == "OK", r.stderr
+
+
+_WORKDAYS_REQUEST = ("Направи в текущата папка Python модул workdays.py за работните дни в България "
+                     "по Кодекса на труда (без еднократните решения на Министерския съвет). Функции "
+                     "is_working_day(d: datetime.date) -> bool и count_working_days(start: "
+                     "datetime.date, end: datetime.date) -> int — броят на работните дни от start "
+                     "до end включително. Добави тестове с pytest в tests/ и ги пусни, докато минат. "
+                     "pytest е инсталиран.")
+
+
+def test_a_workdays_request_gets_the_working_days_rules(_shipped_skills) -> None:
+    """2026-09-25: без знанието празник от уикенда се прехвърляше и на ден,
+    който сам е празник (26.12, Великденски понеделник). Преди мярката по
+    тригерите същата заявка получаваше правилата за IBAN („България“ +
+    „модул“ от описанието му)."""
+    text = sl.domain_context(_WORKDAYS_REQUEST)
+    assert "библиотеката: bg_working_days" in text
+    assert "1 ноември" in text
+
+
+@pytest.mark.parametrize("project", ["sales-report", "fuel-prices", "tasks-api"])
+def test_requests_without_a_domain_get_no_knowledge(_shipped_skills, project) -> None:
+    """Общи думи („знака“, „число“, „България“) не са тема — само тригерите са."""
+    task = sl.Path(__file__).resolve().parent.parent / "bench" / "projects" / project / "task.txt"
+    assert sl.domain_context(task.read_text(encoding="utf-8")) == ""
+
+
+def test_the_working_days_skill_passes_its_self_test(_shipped_skills, tmp_path) -> None:
+    import subprocess
+    import sys
+    script = tmp_path / "bg_working_days.py"
+    script.write_text(sl.skill_view("bg_working_days")["code"], encoding="utf-8")
+    r = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
+                       encoding="utf-8", timeout=60, check=False)
+    assert r.returncode == 0 and r.stdout.strip() == "OK", r.stderr

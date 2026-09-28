@@ -410,9 +410,32 @@ def _tool_run_cmd(arg: str) -> str:
         parts.append(out[:6000])
     if err:
         parts.append("stderr:\n" + err[:2000])
+    hint = _import_path_hint(out + "\n" + err, Path(_WORKSPACE))
+    if hint:
+        parts.append(hint)
     _log_episode(f"RUN_CMD {command}", "ok" if res.ok else f"rc={res.returncode}",
                  ["tool", "run_cmd"])
     return "\n".join(parts)
+
+
+def _import_path_hint(output: str, root: Path) -> str:
+    """Подсказка, когато pytest не вижда модул, който си стои в корена.
+
+    Измерено 2026-09-25 (проект за ЕГН): тестовете в tests/ не намираха egn.py
+    от корена, моделът опита четири пъти по различен начин (~4 рунда) и накрая
+    сложи sys.path хак в самия тест. Стандартното решение е един празен
+    conftest.py — механизъм тук, а не ред в промпта, защото кой модел ще се
+    падне във веригата не се знае.
+    """
+    m = re.search(r"No module named '([\w.]+)'", output)
+    if not m or (root / "conftest.py").exists():
+        return ""
+    name = m.group(1).split(".")[0]
+    if not ((root / f"{name}.py").is_file() or (root / name / "__init__.py").is_file()):
+        return ""
+    return (f"[подсказка] `{name}` е в корена на проекта, но pytest не го вижда от tests/. "
+            "Решение: празен conftest.py в корена (или `pythonpath = .` в pytest.ini) — "
+            "не sys.path хакове в тестовете.")
 
 
 # Маркер, по който агентният цикъл разпознава "агентът чака отговор" и спира,

@@ -81,12 +81,13 @@ def _classify(code: int) -> str:
 def probe(provider: str, model: str, keys: Any) -> dict[str, Any]:
     """Една минимална заявка. `keys` е Brain (за _provider_key) — ключовете
     се четат по същия път като при истинските обаждания."""
-    from genesis_agent.brain import _NATIVE_PROVIDERS, _PROVIDERS
+    from genesis_agent.brain import _NATIVE_PROVIDERS, _PROVIDERS, provider_base_url
 
     row: dict[str, Any] = {"provider": provider, "model": model}
     if provider not in _PROVIDERS or provider in _NATIVE_PROVIDERS or provider == "vertex":
         return {**row, "status": "skip", "detail": "платен/локален/Vertex"}
-    base_url, key_env = _PROVIDERS[provider]
+    key_env = _PROVIDERS[provider][1]
+    base_url = provider_base_url(provider)
     key = keys._provider_key(key_env) if key_env else None
     if key_env and not key:
         return {**row, "status": "nokey", "detail": key_env}

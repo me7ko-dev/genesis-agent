@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -57,6 +58,35 @@ log = logging.getLogger("genesis.brain")
 CLOUD_TIMEOUT = 90
 LOCAL_TIMEOUT = 240  # локалният 3B модел на слаб GPU е бавен — даваме му време
 RETRY_ROUNDS = 2  # колко пъти да обходим цялата верига при пълен провал
+# Общ краен срок на едно обръщение = timeout × това. `timeout` на requests е
+# между два пакета, не общ: OpenRouter държи връзката жива с празни редове,
+# докато безплатният модел чака, и обръщението висеше без край (2026-09-25:
+# проба спря 40 мин след 429-ци, 0 CPU, отворена HTTPS връзка; сутринта —
+# 1 299 s). ×4 оставя място за дълъг легитимен отговор (16k токена).
+_TOTAL_DEADLINE_FACTOR = 4
+
+
+def _post_with_deadline(url: str, *, headers: dict, json: dict, timeout: int) -> Any:
+    """requests.post с общ краен срок: след него → requests Timeout (→ следващ
+    модел във веригата). Нишката се изоставя (daemon) — сокетът се затваря,
+    когато сървърът приключи; процесът не я чака при изход."""
+    box: dict[str, Any] = {}
+
+    def _run() -> None:
+        try:
+            box["r"] = requests.post(url, headers=headers, json=json, timeout=timeout)
+        except BaseException as e:  # предава се на викащия
+            box["e"] = e
+
+    worker = threading.Thread(target=_run, daemon=True, name="genesis-http")
+    worker.start()
+    deadline = timeout * _TOTAL_DEADLINE_FACTOR
+    worker.join(deadline)
+    if worker.is_alive():
+        raise requests.exceptions.Timeout(f"няма отговор за {deadline} s (общ краен срок)")
+    if "e" in box:
+        raise box["e"]
+    return box["r"]
 
 # Таван на изходните токени за OpenAI-съвместимите доставчици. 4096 е стойността,
 # с която проектът работи от началото — оставена е като подразбиране нарочно
@@ -177,6 +207,52 @@ _PROVIDERS = {
 
 # Кои доставчици се викат през native SDK вместо през OpenAI-съвместим HTTP.
 _NATIVE_PROVIDERS = {"anthropic"}
+
+
+def _print_skip(provider: str, model: str, error: str, seconds: float) -> None:
+    """Един ред, когато модел отпадне и веригата продължи.
+
+    Досега се печаташе само кой е отговорил („↪ модел: …“), не защо горният
+    е отпаднал. 2026-09-25 (ЕГН проект): 24 от 42 обръщения отидоха на
+    nvidia ultra (5–10× по-бавен), 399 s за малка задача, а в лога нямаше
+    нито една причина за ollama. Грешките на ниво ключ (429 на ключ) си имат
+    свой ред в _call и не минават оттук.
+    """
+    reason = " ".join(error.split())[:80]
+    print(f"  [Brain] ✗ {provider}/{model} след {seconds:.1f}s: {reason} → следващ")
+
+
+def _openai_usage(usage: Any) -> Any:
+    """usage от OpenAI-съвместим отговор + `cached_read_tokens` за budget.py.
+
+    Ollama Cloud кешира префикса сам и връща колко е прочетено от кеша в
+    `prompt_tokens_details.cached_tokens` (измерено 2026-09-25: 4 064 от 4 089
+    на второто обръщение със същия системен промпт). Досега полето не се
+    четеше и `genesis budget` показваше кеш 0 при всички освен Anthropic.
+    Groq (gpt-oss) и NVIDIA не го връщат — тогава usage остава както е.
+    """
+    if not isinstance(usage, dict):
+        return usage
+    details = usage.get("prompt_tokens_details")
+    cached = details.get("cached_tokens") if isinstance(details, dict) else None
+    if not cached:
+        return usage
+    return {**usage, "cached_read_tokens": int(cached)}
+
+
+def provider_base_url(provider: str) -> str:
+    """Адресът, на който се вика доставчикът.
+
+    Онлайн услугата (cloud/gateway): задачата е в контейнер без изход навън и
+    без истински ключове. `GENESIS_MODEL_GATEWAY` я праща към шлюза на сървъра
+    (`<шлюз>/<доставчик>/chat/completions`), който слага ключа и брои токените.
+    Само отдалечените OpenAI-съвместими — локалният, native и Vertex не минават.
+    """
+    base_url = _PROVIDERS[provider][0]
+    gateway = os.environ.get("GENESIS_MODEL_GATEWAY", "").strip().rstrip("/")
+    if gateway and base_url.startswith("https://") and provider not in _NATIVE_PROVIDERS:
+        return f"{gateway}/{provider}"
+    return base_url
 
 # Локалният модел (собственият мозък на Genesis). Празно → изключен.
 LOCAL_MODEL = os.environ.get("GENESIS_LOCAL_MODEL", "qwen2.5-coder:3b")
@@ -951,12 +1027,8 @@ class Brain:
             payload["tool_choice"] = "auto"
         if extra:
             payload.update(extra)
-        r = requests.post(
-            f"{base_url}/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=timeout,
-        )
+        r = _post_with_deadline(f"{base_url}/chat/completions", headers=headers,
+                                json=payload, timeout=timeout)
         if r.status_code != 200:
             raise RuntimeError(f"HTTP_{r.status_code}: {r.text[:150]}")
         # Открито живо (design note, 2026-07-25, forge тест): някои доставчици връщат
@@ -993,7 +1065,7 @@ class Brain:
                 f"`max_tokens:` за модела в config.yaml, ако доставчикът го позволява."
             )
         # usage липсва при локален Ollama /v1 понякога — None е ОК, budget.py го обработва.
-        self._last_usage = data.get("usage")
+        self._last_usage = _openai_usage(data.get("usage"))
         return (content or "").strip(), tool_calls
 
     # ── Anthropic native (Messages API) ──────────────────────────────────────────
@@ -1163,7 +1235,8 @@ class Brain:
     def _call(self, provider: str, model: str, messages: list[dict],
              tools: list[dict] | None = None,
              extra: dict[str, Any] | None = None) -> tuple[str, list | None]:
-        base_url, key_env = _PROVIDERS[provider]
+        key_env = _PROVIDERS[provider][1]
+        base_url = provider_base_url(provider)
         if provider == "vertex":
             # Адресът и токенът се смятат при извикване (проект + локация +
             # OAuth), затова Vertex не минава през общия път с фиксиран
@@ -1604,11 +1677,13 @@ class Brain:
                         last_error = f"мрежа: {e}"
                         self._fail_count += 1
                         self._record_stat(prov, time.time() - t0, False)
+                        _print_skip(prov, model, last_error, time.time() - t0)
                         continue
                     except RuntimeError as e:
                         last_error = str(e)
                         self._fail_count += 1
                         self._record_stat(prov, time.time() - t0, False)
+                        _print_skip(prov, model, last_error, time.time() - t0)
                         # При 429/503/402 → маркирай изчерпан за cooldown (спестява безсмислени опити).
                         for c in _EXHAUST_CODES:
                             if f"HTTP_{c}" in last_error:

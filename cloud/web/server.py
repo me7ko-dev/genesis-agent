@@ -74,7 +74,8 @@ class App:
     def __init__(self, store: Store, jobs_dir: Path, *, runner: Runner = launch.run_task,
                  workers: int = 2, limits: launch.Limits | None = None,
                  env_file: str | None = None, runtime: str | None = None,
-                 secure_cookie: bool = True, trust_proxy: bool = False) -> None:
+                 secure_cookie: bool = True, trust_proxy: bool = False,
+                 gateway: launch.Gateway | None = None) -> None:
         self.store = store
         self.jobs_dir = jobs_dir
         self.runner = runner
@@ -83,6 +84,7 @@ class App:
         self.runtime = runtime
         self.secure_cookie = secure_cookie
         self.trust_proxy = trust_proxy
+        self.gateway = gateway
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="turn")
         self._failures: dict[str, list[float]] = {}
         self._lock = threading.Lock()
@@ -129,7 +131,8 @@ class App:
         try:
             res = self.runner(text, workspace, limits=self.limits,
                               on_event=lambda e: self.store.add_event(turn_id, e),
-                              env_file=self.env_file, runtime=self.runtime)
+                              env_file=self.env_file, runtime=self.runtime,
+                              gateway=self.gateway)
             self.store.finish_turn(turn_id, ok=res.ok, error=res.error,
                                    tokens=res.tokens, seconds=res.seconds)
         except Exception as e:
@@ -440,6 +443,8 @@ def main(argv: list[str] | None = None) -> int:
     srv.add_argument("--seconds", type=int, default=launch.Limits.seconds)
     srv.add_argument("--env-file", help="API ключовете (KEY=value на ред)")
     srv.add_argument("--runtime", help="напр. runsc (gVisor)")
+    srv.add_argument("--gateway-usage", type=Path,
+                     help="шлюз за моделите: JSONL на шлюза (ключовете не влизат в контейнера)")
     srv.add_argument("--insecure-cookie", action="store_true",
                      help="само за локален тест по http://")
     srv.add_argument("--trust-proxy", action="store_true",
@@ -455,9 +460,15 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"{a.email.strip().lower()}  парола: {password}")
         return 0
+    gateway = None
+    if a.gateway_usage:
+        if not a.env_file:
+            print("--gateway-usage иска --env-file с GATEWAY_SECRET", file=sys.stderr)
+            return 2
+        gateway = launch.Gateway.from_keys_file(Path(a.env_file), a.gateway_usage)
     app = App(store, a.jobs, workers=a.workers, limits=launch.Limits(seconds=a.seconds),
               env_file=a.env_file, runtime=a.runtime, secure_cookie=not a.insecure_cookie,
-              trust_proxy=a.trust_proxy)
+              trust_proxy=a.trust_proxy, gateway=gateway)
     server = make_server(app, a.host, a.port)
     print(f"genesis web: http://{a.host}:{server.server_address[1]}", flush=True)
     with contextlib.suppress(KeyboardInterrupt):

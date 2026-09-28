@@ -76,3 +76,25 @@ def test_avg_latency_only_counts_successful_calls(tmp_path, monkeypatch) -> None
     provider_stats.record_call("p", 2.0, True)
     provider_stats.record_call("p", 4.0, True)
     assert provider_stats.avg_latency("p") == 3.0
+
+
+def test_old_failures_expire_and_the_provider_gets_its_place_back(tmp_path, monkeypatch) -> None:
+    """2026-09-25: 16 провала на ollama за 2 минути го пратиха зад nvidia —
+    и понеже nvidia отговаряше първа, ollama не получи нов шанс часове наред."""
+    _isolate(monkeypatch, tmp_path)
+    real_time = provider_stats.time.time
+    monkeypatch.setattr(provider_stats.time, "time", lambda: real_time() - 3600)
+    for _ in range(16):
+        provider_stats.record_call("ollama_cloud", 0.3, False)
+    monkeypatch.setattr(provider_stats.time, "time", real_time)
+    chain = [{"provider": "ollama_cloud", "model": "a"}, {"provider": "nvidia", "model": "b"}]
+    assert [c["provider"] for c in provider_stats.deprioritize_flaky(chain)] == ["ollama_cloud", "nvidia"]
+    assert provider_stats.success_rate("ollama_cloud") is None
+
+
+def test_fresh_failures_still_demote(tmp_path, monkeypatch) -> None:
+    _isolate(monkeypatch, tmp_path)
+    for _ in range(6):
+        provider_stats.record_call("ollama_cloud", 0.3, False)
+    chain = [{"provider": "ollama_cloud", "model": "a"}, {"provider": "nvidia", "model": "b"}]
+    assert [c["provider"] for c in provider_stats.deprioritize_flaky(chain)] == ["nvidia", "ollama_cloud"]

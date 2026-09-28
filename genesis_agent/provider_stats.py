@@ -19,6 +19,14 @@ _STATS_PATH = DATA_DIR / "provider_stats.json"
 _MAX_SAMPLES = 30          # rolling прозорец на извикване по доставчик
 _MIN_SAMPLES_TO_JUDGE = 5  # под това не съдим — недостатъчно данни
 _BAD_SUCCESS_RATE = 0.5    # под 50% успех (при ≥5 извадки) → деприоритизирай
+# Съдим само по пресните извадки. Без прозорец деприоритизацията беше за
+# постоянно (измерено 2026-09-25): 16 провала на ollama за 2 минути (09:50) го
+# пратиха зад nvidia; оттам нататък nvidia отговаряше винаги първа, ollama не
+# получи нито едно обръщение, статистиката му не се обнови — и всички следващи
+# пускания часове наред вървяха през 5–10× по-бавния модел, при напълно
+# здрав ollama. С прозореца старите провали изтичат, доставчикът се връща на
+# мястото си от config.yaml и получава нов шанс.
+_JUDGE_WINDOW_S = 15 * 60
 
 _lock = Lock()
 
@@ -47,9 +55,14 @@ def record_call(provider: str, latency_s: float, success: bool) -> None:
         _save(data)
 
 
+def _recent(samples: list[dict], now: float | None = None) -> list[dict]:
+    cutoff = (time.time() if now is None else now) - _JUDGE_WINDOW_S
+    return [s for s in samples if s.get("t", 0) >= cutoff]
+
+
 def success_rate(provider: str) -> float | None:
-    """None = недостатъчно данни (<5 извадки) — не съди все още."""
-    samples = _load().get(provider, {}).get("samples", [])
+    """None = недостатъчно пресни данни (<5 извадки в прозореца) — не съди."""
+    samples = _recent(_load().get(provider, {}).get("samples", []))
     if len(samples) < _MIN_SAMPLES_TO_JUDGE:
         return None
     return sum(1 for s in samples if s["ok"]) / len(samples)
@@ -77,9 +90,10 @@ def deprioritize_flaky(chain: list[dict]) -> list[dict]:
     обръщение към модел.
     """
     data = _load()
+    now = time.time()
 
     def _is_flaky(provider: str) -> bool:
-        samples = data.get(provider, {}).get("samples", [])
+        samples = _recent(data.get(provider, {}).get("samples", []), now)
         if len(samples) < _MIN_SAMPLES_TO_JUDGE:
             return False  # недостатъчно данни — не съдим
         return sum(1 for s in samples if s["ok"]) / len(samples) < _BAD_SUCCESS_RATE

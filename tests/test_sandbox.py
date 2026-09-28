@@ -4,6 +4,8 @@
 resolve_mode/_decide пътищата, които self-check-ът не покрива."""
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from genesis_agent import sandbox
@@ -560,17 +562,39 @@ class TestWindowsCommandHygiene:
         path = r"C:\Windows\system32;C:\Program Files\Git\bin"
         assert sandbox._windowsapps_last(path) == path
 
-    def test_unquoted_leading_windows_path_gets_forward_slashes(self) -> None:
-        cmd = r"C:\Users\x\Python\python.exe -m pytest -q"
-        assert sandbox._unescape_leading_windows_path(cmd) == "C:/Users/x/Python/python.exe -m pytest -q"
+    @pytest.mark.parametrize("cmd,expected", [
+        (r"C:\Users\x\Python\python.exe -m pytest -q", "C:/Users/x/Python/python.exe -m pytest -q"),
+        # 2026-09-25: папка `C:UsersroikaProjects...tests` до истинската tests/
+        (r"mkdir C:\Users\roika\Projects\trial\tests", "mkdir C:/Users/roika/Projects/trial/tests"),
+        (r"cd C:\Users\x\proj && python -m pytest", "cd C:/Users/x/proj && python -m pytest"),
+        (r"cd C:\x&&dir", "cd C:/x&&dir"),
+        (r"python app.py > D:\logs\out.txt", "python app.py > D:/logs/out.txt"),
+        (r"tool --out=C:\x\y.csv", "tool --out=C:/x/y.csv"),
+        (r"""python C:\a\b.py "C:\keep\me" 'C:\and\me'""", r"""python C:/a/b.py "C:\keep\me" 'C:\and\me'"""),
+    ])
+    def test_unquoted_windows_paths_get_forward_slashes(self, cmd, expected) -> None:
+        assert sandbox._unescape_windows_paths(cmd) == expected
 
     @pytest.mark.parametrize("cmd", [
         r'"C:\Users\x\python.exe" test_app.py',   # кавичен — bash го пази сам
-        r"python C:\data\file.txt",               # аргументите не се пипат
+        r"grep foo\|bar file.txt",                 # нарочен escape
+        r'echo "a \"C:\x\" b"',                    # път в кавички с escape-ната кавичка
+        r"echo abc:\x",                            # не е буква на устройство
         "echo hi",
     ])
     def test_everything_else_is_left_alone(self, cmd) -> None:
-        assert sandbox._unescape_leading_windows_path(cmd) == cmd
+        assert sandbox._unescape_windows_paths(cmd) == cmd
+
+    @pytest.mark.skipif(os.name != "nt", reason="Git Bash е само на Windows")
+    def test_bash_creates_the_real_folder(self, tmp_path) -> None:
+        if not sandbox._windows_shell_prefix()[0].lower().endswith("bash.exe"):
+            pytest.skip("няма Git Bash")
+        target = tmp_path / "tests"
+        res = sandbox.run_shell(f"mkdir {target}", cwd=tmp_path,
+                                policy=SandboxPolicy(mode="allow"))
+        assert res.ok, res.stderr
+        assert target.is_dir()
+        assert not [p.name for p in tmp_path.iterdir() if ":" in p.name]
 
 class TestTimeoutKillsTheWholeTree:
     """bench_fix.py (2026-09-24): при таймаут от 120s командата висеше

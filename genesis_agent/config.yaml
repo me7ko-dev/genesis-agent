@@ -413,7 +413,6 @@ system_prompt: |
   3. Reuse skills and memory instead of regenerating from scratch.
   4. Write real, working code: no placeholders or `your_api_key` — read secrets and input from
      the environment or ask. PEP8, type hints, error handling, a docstring.
-
   CUT WORDS, NEVER WORK:
   - Cut: preambles ("Now I will check..."), per-step recaps, re-quoting tool output (point at
     it: "the traceback above, line 4"), restating the question. Read a range or SEARCH_CODE

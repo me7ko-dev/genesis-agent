@@ -1218,25 +1218,62 @@ def _shell_argv(command: str) -> list[str]:
         return ["/bin/sh", "-c", command]
     prefix = _windows_shell_prefix()
     if prefix and prefix[0].lower().endswith("bash.exe"):
-        command = _unescape_leading_windows_path(command)
+        command = _unescape_windows_paths(command)
     return [*prefix, command]
 
 
-_LEADING_WIN_PATH = re.compile(r"^(\s*)([A-Za-z]:\\[^\s\"']*)")
+# Непосредствено преди некавичен Windows път: начало, празно място, `=` или
+# оператор на обвивката (`cd C:\x&&python`, `>C:\x.log`, `--out=C:\x`).
+_WIN_PATH_BOUNDARY = frozenset(" \t\n=;&|()<>")
+_WIN_PATH_END = frozenset(" \t\n;&|()<>\"'`")
 
 
-def _unescape_leading_windows_path(command: str) -> str:
-    r"""`C:\Users\x\python.exe -m pytest` без кавички → `C:/Users/x/python.exe ...`.
+def _unescape_windows_paths(command: str) -> str:
+    r"""Некавичените Windows пътища → с `/`: `mkdir C:\x\tests` → `mkdir C:/x/tests`.
 
-    Bash чете `\U`, `\x`… като escape и изяжда наклонените черти, така че
-    командата търси несъществуващ `C:Usersx...` — rc=127 (хванато от
-    bench_fix.py, 2026-09-24: моделите пишат точно така пътя от средата).
-    Пипа се само ПЪРВИЯТ, некавичен токен: той е изпълнимият файл; в
-    аргументите обратната черта може да е нарочна."""
-    m = _LEADING_WIN_PATH.match(command)
-    if not m:
-        return command
-    return m.group(1) + m.group(2).replace("\\", "/") + command[m.end():]
+    Bash чете `\U`, `\x`… като escape и изяжда наклонените черти: изпълнимият
+    файл става несъществуващ `C:Usersx...` — rc=127 (bench_fix.py,
+    2026-09-24), а аргументът — папка `C:UsersroikaProjects...tests` до
+    истинската `tests/` (2 от 8 проби с IBAN/ДДС, 2026-09-25). Команда,
+    писана с `C:\`, иска Windows път — `\` след `X:` в bash никога не е
+    нарочен escape. Кавичените пътища не се пипат: в '...' bash пази `\`, а в
+    "..." `\U` също остава."""
+    out: list[str] = []
+    quote = ""
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                out.append(command[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            out.append(command[i:i + 2])
+            i += 2
+            continue
+        if (ch.isascii() and ch.isalpha() and i + 2 < n
+                and command[i + 1] == ":" and command[i + 2] == "\\"
+                and (i == 0 or command[i - 1] in _WIN_PATH_BOUNDARY)):
+            j = i
+            while j < n and command[j] not in _WIN_PATH_END:
+                j += 1
+            out.append(command[i:j].replace("\\", "/"))
+            i = j
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def run_shell(command: str, *, cwd: Path | None = None,

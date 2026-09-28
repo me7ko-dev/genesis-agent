@@ -27,7 +27,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from cloud.gateway import gateway as gw
+
 IMAGE = os.environ.get("GENESIS_RUNNER_IMAGE", "genesis-runner:latest")
+GATEWAY_URL = os.environ.get("GENESIS_GATEWAY_URL", "http://genesis-gateway:8090")
+TASK_BUDGET = int(os.environ.get("GENESIS_TASK_BUDGET", "300000"))  # токена на задача
 JOBS_NETWORK = os.environ.get("GENESIS_JOBS_NETWORK", "genesis-jobs")
 EGRESS_URL = os.environ.get("GENESIS_EGRESS_URL", "http://genesis-egress:3128")
 RUNNER_UID = 10001
@@ -40,6 +44,30 @@ class Limits:
     pids: int = 256
     seconds: int = 600
     tmp_mb: int = 256
+
+
+@dataclass(frozen=True)
+class Gateway:
+    """Режим с шлюз (cloud/gateway): ключовете не влизат в контейнера.
+
+    Контейнерът получава жетон за задачата вместо всеки ключ, който шлюзът
+    има, и адреса на шлюза; изход навън няма (нито прокси). Токените за
+    сметката се четат от `usage` на шлюза, не от събитията на контейнера.
+    """
+    secret: str
+    usage: Path
+    key_envs: tuple[str, ...]
+    url: str = GATEWAY_URL
+    budget: int = TASK_BUDGET
+
+    @classmethod
+    def from_keys_file(cls, keys: Path, usage: Path, **kw: Any) -> Gateway:
+        k = gw.read_keys(keys)
+        secret = k.pop("GATEWAY_SECRET", "")
+        if len(secret) < 32:
+            raise ValueError(f"{keys}: липсва GATEWAY_SECRET (поне 32 знака)")
+        envs = tuple(gw.UPSTREAMS[p][1] for p in gw.served_providers(k))
+        return cls(secret, usage, envs, **kw)
 
 
 @dataclass
@@ -56,7 +84,8 @@ class Result:
 def docker_args(name: str, workspace: Path, text: str, *, limits: Limits | None = None,
                 image: str = IMAGE, network: str = JOBS_NETWORK,
                 egress_url: str = EGRESS_URL, env_file: str | None = None,
-                runtime: str | None = None) -> list[str]:
+                runtime: str | None = None, gateway: Gateway | None = None,
+                token: str = "") -> list[str]:
     """Целият `docker run` за една задача. Отделна функция, за да се тества
     без Docker: всяко ограничение тук е обещание към клиента."""
     limits = limits or Limits()
@@ -75,15 +104,23 @@ def docker_args(name: str, workspace: Path, text: str, *, limits: Limits | None 
         "-v", f"{workspace.resolve()}:/work:rw",
         "-e", "HOME=/home/agent",
         "-e", "GENESIS_WORKSPACE=/work",
-        "-e", f"HTTPS_PROXY={egress_url}", "-e", f"HTTP_PROXY={egress_url}",
-        "-e", f"https_proxy={egress_url}", "-e", f"http_proxy={egress_url}",
-        # localhost направо: в контейнера няма ollama, пробата трябва да падне
-        # веднага, не да минава през проксито.
-        "-e", "NO_PROXY=localhost,127.0.0.1", "-e", "no_proxy=localhost,127.0.0.1",
         "-e", "PYTHONIOENCODING=utf-8",
     ]
-    if env_file:
-        args += ["--env-file", env_file]
+    if gateway is not None:
+        # Без прокси и без ключове: единственият адрес е шлюзът.
+        args += ["-e", f"GENESIS_MODEL_GATEWAY={gateway.url}"]
+        for env in gateway.key_envs:
+            args += ["-e", f"{env}={token}"]
+    else:
+        args += [
+            "-e", f"HTTPS_PROXY={egress_url}", "-e", f"HTTP_PROXY={egress_url}",
+            "-e", f"https_proxy={egress_url}", "-e", f"http_proxy={egress_url}",
+            # localhost направо: в контейнера няма ollama, пробата трябва да падне
+            # веднага, не да минава през проксито.
+            "-e", "NO_PROXY=localhost,127.0.0.1", "-e", "no_proxy=localhost,127.0.0.1",
+        ]
+        if env_file:
+            args += ["--env-file", env_file]
     if runtime:  # напр. "runsc" (gVisor) — препоръчително на истинския сървър
         args += ["--runtime", runtime]
     return [*args, image, text]
@@ -104,12 +141,17 @@ def prepare_workspace(workspace: Path) -> None:
 def run_task(text: str, workspace: Path, *, limits: Limits | None = None,
              on_event: Callable[[dict[str, Any]], None] | None = None,
              env_file: str | None = None, runtime: str | None = None,
-             image: str = IMAGE) -> Result:
+             image: str = IMAGE, gateway: Gateway | None = None) -> Result:
     limits = limits or Limits()
     name = f"genesis-task-{uuid.uuid4().hex[:12]}"
     prepare_workspace(workspace)
+    token = ""
+    if gateway is not None:
+        # Жетонът живее колкото задачата (+1 мин за последния отговор).
+        token = gw.make_token(gateway.secret, name, budget=gateway.budget,
+                              ttl=limits.seconds + 60)
     argv = docker_args(name, workspace, text, limits=limits, env_file=env_file,
-                       runtime=runtime, image=image)
+                       runtime=runtime, image=image, gateway=gateway, token=token)
     t0 = time.monotonic()
     timed_out = threading.Event()
 
@@ -140,16 +182,18 @@ def run_task(text: str, workspace: Path, *, limits: Limits | None = None,
 
     done = next((e for e in reversed(events) if e.get("kind") == "done"), None)
     seconds = round(time.monotonic() - t0, 1)
+    # С шлюз сметката е от шлюза — контейнерът може да каже каквото си иска.
+    billed = gw.usage_for(gateway.usage, name) if gateway is not None else None
     if timed_out.is_set():
         return Result(False, True, code, seconds, error=f"прекъснато след {limits.seconds} s",
-                      events=events)
+                      tokens=billed or {}, events=events)
     if done is None:
         return Result(False, False, code, seconds,
                       error=(stderr.strip().splitlines() or ["контейнерът спря без резултат"])[-1][:500],
-                      events=events)
+                      tokens=billed or {}, events=events)
     return Result(bool(done.get("ok")) and code == 0, False, code, seconds,
-                  tokens=dict(done.get("tokens") or {}), error=str(done.get("error") or ""),
-                  events=events)
+                  tokens=billed if billed is not None else dict(done.get("tokens") or {}),
+                  error=str(done.get("error") or ""), events=events)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -159,10 +203,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--seconds", type=int, default=Limits.seconds)
     p.add_argument("--env-file", help="API ключовете за моделите (KEY=value на ред)")
     p.add_argument("--runtime", help="напр. runsc (gVisor)")
+    p.add_argument("--gateway-usage", type=Path,
+                   help="режим с шлюз: JSONL на шлюза; --env-file държи GATEWAY_SECRET")
     a = p.parse_args(argv)
+    gateway = (Gateway.from_keys_file(Path(a.env_file), a.gateway_usage)
+               if a.gateway_usage and a.env_file else None)
     res = run_task(a.text, a.workspace, limits=Limits(seconds=a.seconds),
                    on_event=lambda e: print(json.dumps(e, ensure_ascii=False), flush=True),
-                   env_file=a.env_file, runtime=a.runtime)
+                   env_file=a.env_file, runtime=a.runtime, gateway=gateway)
     print(json.dumps({"kind": "result", "ok": res.ok, "timed_out": res.timed_out,
                       "exit_code": res.exit_code, "seconds": res.seconds,
                       "tokens": res.tokens, "error": res.error}, ensure_ascii=False))

@@ -741,3 +741,30 @@ class TestRepoMapIsTheFifthDoor:
         (_workspace / "main.py").write_text("print(1)\n", encoding="utf-8")
         out = gs._tool_repo_map(str(_workspace))
         assert "SANDBOX" not in out
+
+
+# ── pytest не вижда модул от корена ─────────────────────────────────────────
+
+_MISSING = "E   ModuleNotFoundError: No module named 'egn'"
+
+
+def test_import_hint_when_the_module_sits_in_the_root(tmp_path) -> None:
+    (tmp_path / "egn.py").write_text("")
+    assert "conftest.py" in gs._import_path_hint(_MISSING, tmp_path)
+
+
+def test_import_hint_for_a_package_in_the_root(tmp_path) -> None:
+    (tmp_path / "faktura").mkdir()
+    (tmp_path / "faktura" / "__init__.py").write_text("")
+    out = "ModuleNotFoundError: No module named 'faktura.extract'"
+    assert "`faktura`" in gs._import_path_hint(out, tmp_path)
+
+
+def test_no_import_hint_for_a_missing_third_party_package(tmp_path) -> None:
+    assert gs._import_path_hint("No module named 'reportlab'", tmp_path) == ""
+
+
+def test_no_import_hint_once_conftest_exists(tmp_path) -> None:
+    (tmp_path / "egn.py").write_text("")
+    (tmp_path / "conftest.py").write_text("")
+    assert gs._import_path_hint(_MISSING, tmp_path) == ""
