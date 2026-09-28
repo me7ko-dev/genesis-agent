@@ -156,6 +156,16 @@ _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # pkg: Termux (Genesis на телефона, docs/ANDROID.md).
     (_c(r"\b(pip3?|apt|apt-get|dnf|yum|pacman|pkg)\s+(install|add)\b"),
      "инсталиране на пакети"),
+    # Termux:API — телефонът от името на потребителя (Genesis на телефона).
+    # Изпращане и обаждане имат последствия навън; личните данни (SMS,
+    # контакти, обаждания, местоположение, камера, микрофон) отиват при
+    # облачния модел. Известия, клипборд, говор, фенерче, батерия — без питане.
+    (_c(r"\btermux-(sms-send|telephony-call)\b"),
+     "изпращане на SMS / обаждане от телефона"),
+    (_c(r"\btermux-(sms-list|sms-inbox|contact-list|call-log|location|camera-photo|microphone-record)\b"),
+     "лични данни от телефона (SMS, контакти, обаждания, местоположение, камера, микрофон)"),
+    (_c(r"\btermux-share\b"),
+     "споделяне към друго приложение"),
     (_c(r"\bnpm\s+(install|i)\b[^\n]*-g\b"),
      "глобална npm инсталация"),
     (_c(r"\bgit\s+push\b"),

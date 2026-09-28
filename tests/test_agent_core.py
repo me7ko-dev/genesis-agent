@@ -43,6 +43,19 @@ class TestEnvFacts:
         assert "НЕ съществува" not in downloads
         assert "Десктоп" not in out
 
+    def test_on_android_with_termux_api_the_phone_commands_are_listed(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("genesis_agent.paths.is_android", lambda: True)
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/" + name if name.startswith("termux-") else None)
+        out = ac.env_facts()
+        assert "termux-sms-send" in out and "termux-notification" in out and "потвърждение" in out
+
+    def test_without_termux_api_nothing_is_promised(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("genesis_agent.paths.is_android", lambda: True)
+        monkeypatch.setattr("shutil.which", lambda name: None)
+        assert "termux-sms-send" not in ac.env_facts()
+
     def test_todays_date_is_a_fact_not_a_guess(self, monkeypatch, tmp_path) -> None:
         """На живо моделът кръсти архив с измислена дата отпреди месец."""
         from datetime import date

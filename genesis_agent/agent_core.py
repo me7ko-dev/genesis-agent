@@ -109,6 +109,19 @@ def env_facts(workspace: str = "") -> str:
     if android:
         lines.append("- Устройство: телефон с Android, Genesis тече в Termux (pkg install … за "
                      "програми; няма sudo, няма /usr — пътищата са под $PREFIX)")
+        import shutil
+        if shutil.which("termux-battery-status"):
+            # Termux:API: ръцете на агента върху телефона. Без този ред моделът
+            # отговаря „нямам достъп до телефона ти“, докато командите са там.
+            lines.append(
+                "- Телефонът чрез RUN_CMD (Termux:API): termux-notification, termux-toast, "
+                "termux-tts-speak, termux-clipboard-get/-set, termux-battery-status, termux-torch, "
+                "termux-vibrate, termux-volume, termux-brightness, termux-wifi-connectioninfo, "
+                "termux-open-url, termux-open <файл>, termux-download, termux-media-player, "
+                "termux-location, termux-camera-photo, termux-microphone-record, termux-sms-list, "
+                "termux-sms-send, termux-contact-list, termux-call-log, termux-telephony-call, "
+                "termux-share (`<команда> -h` за опциите). SMS, обаждания и личните данни "
+                "минават през потвърждение от потребителя.")
     for label, key in (("Памет на телефона" if android else "Десктоп", "DESKTOP"),
                        ("Изтегляния", "DOWNLOAD"),
                        ("Документи", "DOCUMENTS"), ("Снимки", "PICTURES")):
