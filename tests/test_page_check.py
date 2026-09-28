@@ -57,12 +57,32 @@ class TestFinalCheck:
         fc = pc.FinalCheck(runner=lambda p: next(answers))
         fc.observe(_write(site / "index.html"))
         assert fc.check()[0]
-        assert not fc.due()  # моделът още не е поправил нищо
-        fc.observe(_write(site / "styles.css"))
+        fc.observe(_write(site / "styles.css"))  # поправка
         note, _ = fc.check()
         assert "финалния отговор" in note  # последният опит казва да приключи
         fc.observe(_write(site / "styles.css"))
         assert not fc.due()  # MAX_RUNS
+
+    def test_ignored_findings_get_one_reminder(self, site) -> None:
+        """2026-09-28: след находките моделът отговори „All set.“ и не записа нищо."""
+        fc = pc.FinalCheck(runner=lambda p: (["тъмна тема: „Гайда“ 2.04:1"], ""))
+        fc.observe(_write(site / "index.html"))
+        note, line = fc.check()
+        assert "Гайда" in line  # операторът вижда самите находки
+        assert fc.due()
+        reminder, _ = fc.check()
+        assert "не са поправени" in reminder
+        assert not fc.due()  # само веднъж
+
+    def test_a_fix_after_findings_needs_no_reminder(self, site) -> None:
+        answers = iter([(["h1 1.6:1"], ""), ([], "")])
+        fc = pc.FinalCheck(runner=lambda p: next(answers))
+        fc.observe(_write(site / "index.html"))
+        fc.check()
+        fc.observe(_write(site / "styles.css"))
+        note, line = fc.check()
+        assert note == "" and "чисто" in line
+        assert not fc.due()
 
     def test_a_clean_page_proves_the_browser_check(self, site) -> None:
         fc = pc.FinalCheck(runner=lambda p: ([], ""))

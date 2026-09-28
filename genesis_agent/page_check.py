@@ -114,18 +114,32 @@ class FinalCheck:
         self._dirty: set[Path] = set()
         self.runs = 0
         self.passed = False  # последната проверка е чиста — доказва „проверено в браузър“
+        # Находки, върнати на модела, а той не е записал нищо след тях. Измерено
+        # 2026-09-28: отговори „All set.“ и ходът свърши с нечетим текст в тъмната
+        # тема. Напомня се веднъж — може и да има причина, но да я каже.
+        self._unanswered = False
+        self._reminded = False
 
     def observe(self, result: str) -> None:
-        self._dirty.update(written_web_files(result))
+        written = written_web_files(result)
+        if written:
+            self._dirty.update(written)
+            self._unanswered = False
 
     def due(self) -> bool:
-        return bool(self._dirty) and self.runs < MAX_RUNS
+        return ((bool(self._dirty) and self.runs < MAX_RUNS)
+                or (self._unanswered and not self._reminded))
 
     def check(self) -> tuple[str, str]:
         """(бележка за модела, ред за оператора). Празна бележка = няма какво
         да се поправя (чисто, пропуснато или нищо уеб в хода)."""
         if not self.due():
             return "", ""
+        if not self._dirty:
+            self._reminded = True
+            return ("[проверка в браузър] Находките от браузъра по-горе не са поправени — след "
+                    "тях не е записан нито един файл. Поправи ги с EDIT_FILE или кажи изрично "
+                    "защо не са проблем; финалният отговор — на български."), ""
         pages = pages_for(self._dirty)
         self._dirty.clear()
         if not pages:
@@ -141,13 +155,17 @@ class FinalCheck:
         names = ", ".join(p.name for p in pages)
         if not notes:
             self.passed = True
+            self._unanswered = False
             return "", (f"[проверка в браузър] {names}: чисто ✓ "
                         "(Chromium: 1440 px светла и тъмна тема, 390 px телефон)")
         self.passed = False
+        self._unanswered = True
         last = self.runs >= MAX_RUNS
+        body = "\n".join(notes)
         note = ("[проверка в браузър] Отворих страницата в Chromium (1440 px светла и тъмна "
-                "тема, 390 px телефон) и измерих:\n" + "\n".join(notes)
+                "тема, 390 px телефон) и измерих:\n" + body
                 + "\nОправи ги в CSS/HTML"
                 + (", после дай финалния отговор и кажи кое остава." if last
                    else " — после ще проверя пак."))
-        return note, f"[проверка в браузър] {names}: {sum(n.count('•') for n in notes)} находки"
+        # Операторът вижда същите находки, не само броя им.
+        return note, f"[проверка в браузър] {sum(n.count('•') for n in notes)} находки\n{body}"

@@ -121,6 +121,8 @@ _MEASURE = r"""
 # (2026-09-28: бутон „Изпрати“ отчетен 1.17:1, реално 5.5:1).
 _NO_SCROLLBAR = "html{scrollbar-width:none}::-webkit-scrollbar{display:none}"
 
+_NO_ANIMATION = "*,*::before,*::after{animation:none!important}"
+
 # Текстът прозрачен — на снимката остава само това, което е ЗАД него.
 _HIDE_TEXT = ("*,*::before,*::after{color:transparent!important;-webkit-text-fill-color:transparent!important;"
               "text-shadow:none!important;transition:none!important}svg text{fill:transparent!important}")
@@ -296,9 +298,14 @@ def check(html: Path, shots: Path | None, single: bool = False) -> dict:
                 m = _measure(page)
                 measured[name] = m
                 if shots:
+                    # Снимката е за хора: анимациите, вързани за скрола, иначе оставят
+                    # всичко под първия екран празно (елементите още „не са влезли“).
+                    frozen = page.add_style_tag(content=_NO_ANIMATION)
+                    page.wait_for_timeout(150)
                     shot = shots / f"{'mobile' if w < 500 else 'desktop'}-{scheme}.png"
                     page.screenshot(path=str(shot), full_page=True)
                     saved.append(str(shot))
+                    frozen.evaluate("el => el.remove()")
                 if name == "компютър":
                     for e in dict.fromkeys(errors):
                         findings.append(f"грешка в конзолата: {e[:160]}")
