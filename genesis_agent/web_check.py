@@ -52,7 +52,7 @@ class _Collector(HTMLParser):
         self.img_no_alt = 0
         self.labels_for: set[str] = set()
         self.inputs: list[tuple[str, bool]] = []  # (id, has aria-label/title)
-        self.html_lang = None
+        self.html_lang: str | None = None
         self.has_viewport = self.has_title = self.has_description = False
         self.text: list[str] = []
 
