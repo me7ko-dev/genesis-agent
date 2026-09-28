@@ -4,7 +4,8 @@
 телефонът (mobile/, Android и iOS) е само прозорец към него — както Claude
 Code на телефона управлява сесия, която тече другаде. iOS и без това не
 позволява на приложение да пуска процеси, тоест агент на самия телефон не
-би могъл да прави нищо полезно.
+би могъл да прави нищо полезно. Изключение е Android с Termux: там агентът
+тече на самия телефон и слуша само на 127.0.0.1 (`genesis phone`, phone.py).
 
 Сигурност. Това е отдалечено изпълнение на команди на машината — затова:
 
@@ -134,6 +135,23 @@ def pairing_url(host: str, port: int, key: bytes, name: str) -> str:
     не го праща към сървъра, а приложението го чете само от кода."""
     from urllib.parse import quote
     return f"http://{host}:{port}/#k={_b64e(key)}&n={quote(name)}"
+
+
+def machine_name() -> str:
+    """Името, което телефонът показва в заглавието.
+
+    На Android (Genesis в Termux, `genesis phone`) hostname-ът е просто
+    „localhost" — там е моделът на устройството, напр. „Pixel 8"."""
+    from genesis_agent.paths import is_android
+    if not is_android():
+        return socket.gethostname()
+    import subprocess
+    try:
+        model = subprocess.run(["getprop", "ro.product.model"], capture_output=True, text=True,
+                               timeout=5, check=False).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        model = ""
+    return model or "Android"
 
 
 # ── криптиране ─────────────────────────────────────────────────────────────
@@ -587,6 +605,7 @@ class ServeOptions:
     host: str = ""          # адресът в QR кода; празно — първият LAN адрес
     bind: str = "0.0.0.0"   # къде слуша сървърът
     reset: bool = False
+    link: bool = False      # само отпечатва връзката за сдвояване (`genesis phone pair`)
 
 
 def parse_serve_args(args: list[str]) -> ServeOptions | int:
@@ -610,6 +629,8 @@ def parse_serve_args(args: list[str]) -> ServeOptions | int:
             opts.bind = args[i]
         elif a == "--reset":
             opts.reset = True
+        elif a == "--link":
+            opts.link = True
         elif a in ("-h", "--help"):
             print(SERVE_USAGE)
             return 0
@@ -621,7 +642,7 @@ def parse_serve_args(args: list[str]) -> ServeOptions | int:
 
 
 def serve(args: list[str]) -> int:
-    """`genesis serve [--port N] [--host IP] [--bind IP] [--reset]`."""
+    """`genesis serve [--port N] [--host IP] [--bind IP] [--reset] [--link]`."""
     try:
         import cryptography  # noqa: F401
     except ImportError:
@@ -637,6 +658,13 @@ def serve(args: list[str]) -> int:
         host_override = bind
 
     key = load_or_create_key(reset=reset)
+    name = machine_name()
+    if opts.link:
+        # Само връзката, без сървър и без тежкия внос на агента по-долу.
+        host = host_override or (lan_addresses() or ["127.0.0.1"])[0]
+        print(pairing_url(host, port, key, name))
+        return 0
+
     from rich.panel import Panel
     from rich.text import Text
 
@@ -684,7 +712,6 @@ def serve(args: list[str]) -> int:
         mode="interactive",
         confirm_fn=lambda op, verdict: session.confirm(op, list(verdict.reasons))))
 
-    name = socket.gethostname()
     from genesis_agent import desktop_commands
 
     def set_messages(messages: Any) -> None:
@@ -741,7 +768,7 @@ def serve(args: list[str]) -> int:
     return 0
 
 
-SERVE_USAGE = """Употреба: genesis serve [--port N] [--host IP] [--bind IP] [--reset]
+SERVE_USAGE = """Употреба: genesis serve [--port N] [--host IP] [--bind IP] [--reset] [--link]
 
 Пуска Genesis за телефона (приложението Genesis Remote за Android и iOS):
 показва QR код, който сдвоява телефона с тази машина.
@@ -750,4 +777,5 @@ SERVE_USAGE = """Употреба: genesis serve [--port N] [--host IP] [--bind 
   --host IP   адрес в QR кода — напр. Tailscale адрес за достъп извън дома
   --bind IP   на кой адрес да слуша (по подразбиране 0.0.0.0; 127.0.0.1 —
               само тази машина, както го пуска Genesis Desktop)
-  --reset     нов ключ; всички сдвоени телефони губят достъп"""
+  --reset     нов ключ; всички сдвоени телефони губят достъп
+  --link      само отпечатва връзката за сдвояване и излиза (без сървър)"""

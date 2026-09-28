@@ -364,6 +364,30 @@ def test_serve_bad_or_help_options_exit(args, code, capsys) -> None:
     assert "genesis serve" in capsys.readouterr().out or code == 2
 
 
+def test_serve_link_prints_the_pairing_url_and_exits(monkeypatch, tmp_path, capsys) -> None:
+    # `genesis phone pair` и хора без камера: само връзката, сървър не тръгва.
+    monkeypatch.setattr(rs, "_config_path", lambda: tmp_path / "remote.json")
+    monkeypatch.setattr(rs, "machine_name", lambda: "Pixel 8")
+    assert rs.serve(["--bind", "127.0.0.1", "--port", "9999", "--link"]) == 0
+    url = capsys.readouterr().out.strip()
+    assert url == rs.pairing_url("127.0.0.1", 9999, rs.load_or_create_key(), "Pixel 8")
+
+
+def test_machine_name_on_android_is_the_device_model(monkeypatch) -> None:
+    # hostname на Android е „localhost" — в заглавието на приложението стои моделът.
+    import subprocess
+    monkeypatch.setattr("genesis_agent.paths.is_android", lambda: True)
+    monkeypatch.setattr(subprocess, "run",
+                        lambda argv, **kw: subprocess.CompletedProcess(argv, 0, stdout="Pixel 8\n"))
+    assert rs.machine_name() == "Pixel 8"
+
+
+def test_machine_name_elsewhere_is_the_hostname(monkeypatch) -> None:
+    import socket
+    monkeypatch.setattr("genesis_agent.paths.is_android", lambda: False)
+    assert rs.machine_name() == socket.gethostname()
+
+
 # ── the terminal loop honours the phone's stop ─────────────────────────────
 
 def test_run_turn_stops_before_the_next_tool(monkeypatch, tmp_path) -> None:

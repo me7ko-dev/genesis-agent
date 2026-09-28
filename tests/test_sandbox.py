@@ -249,7 +249,38 @@ def test_run_python_executes_and_returns_stdout(tmp_path) -> None:
 
 def test_shell_argv_uses_posix_sh_on_posix(monkeypatch) -> None:
     monkeypatch.setattr(sandbox.os, "name", "posix")
+    # На Windows машината, на която върви тестът, /bin/sh наистина го няма.
+    monkeypatch.setattr(sandbox.os.path, "exists", lambda p: p == "/bin/sh")
     assert sandbox._shell_argv("echo hi") == ["/bin/sh", "-c", "echo hi"]
+
+
+def test_shell_argv_without_bin_sh_takes_sh_from_path(monkeypatch) -> None:
+    # Termux на Android: /bin няма, обвивката е $PREFIX/bin/sh.
+    termux_sh = "/data/data/com.termux/files/usr/bin/sh"
+    monkeypatch.setattr(sandbox.os, "name", "posix")
+    monkeypatch.setattr(sandbox.os.path, "exists", lambda p: False)
+    monkeypatch.setattr("shutil.which", lambda name: termux_sh if name == "sh" else None)
+    assert sandbox._shell_argv("echo hi") == [termux_sh, "-c", "echo hi"]
+
+
+def test_android_env_passes_termux_variables(monkeypatch) -> None:
+    # Без LD_PRELOAD (termux-exec) `#!/usr/bin/env node` не тръгва на Android.
+    monkeypatch.setattr("genesis_agent.paths.is_android", lambda: True)
+    monkeypatch.setenv("LD_PRELOAD", "/data/data/com.termux/files/usr/lib/libtermux-exec.so")
+    monkeypatch.setenv("PREFIX", "/data/data/com.termux/files/usr")
+    monkeypatch.setenv("TERMUX_VERSION", "0.118.3")
+    monkeypatch.setenv("GENESIS_SECRET_TEST", "x")
+    env = sandbox._build_env(sandbox.SandboxPolicy())
+    assert env["LD_PRELOAD"].endswith("libtermux-exec.so")
+    assert env["PREFIX"] == "/data/data/com.termux/files/usr"
+    assert env["TERMUX_VERSION"] == "0.118.3"
+    assert "GENESIS_SECRET_TEST" not in env
+
+
+def test_android_env_is_empty_elsewhere(monkeypatch) -> None:
+    monkeypatch.setattr("genesis_agent.paths.is_android", lambda: False)
+    monkeypatch.setenv("LD_PRELOAD", "/tmp/evil.so")
+    assert "LD_PRELOAD" not in sandbox._build_env(sandbox.SandboxPolicy())
 
 
 def test_shell_argv_prefers_bash_on_windows_when_available(monkeypatch) -> None:
@@ -442,6 +473,7 @@ class TestWindowsShellSelection:
 
     def test_posix_is_untouched(self, monkeypatch) -> None:
         monkeypatch.setattr(sandbox.os, "name", "posix")
+        monkeypatch.setattr(sandbox.os.path, "exists", lambda p: p == "/bin/sh")
         assert sandbox._shell_argv("echo hi") == ["/bin/sh", "-c", "echo hi"]
 
     def test_windows_argv_is_prefix_plus_command(self, monkeypatch) -> None:

@@ -30,6 +30,19 @@ class TestEnvFacts:
         desktop_line = next(line for line in out.splitlines() if "Десктоп" in line)
         assert "НЕ съществува" not in desktop_line
 
+    def test_on_android_the_folders_are_the_phones(self, monkeypatch, tmp_path) -> None:
+        """Termux: без това моделът пише в ~/Downloads — папка, която никое
+        друго приложение на телефона не вижда."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("genesis_agent.paths.is_android", lambda: True)
+        (tmp_path / "storage" / "downloads").mkdir(parents=True)
+        out = ac.env_facts()
+        assert "Android" in out and "Termux" in out
+        downloads = next(line for line in out.splitlines() if "Изтегляния" in line)
+        assert str(tmp_path / "storage" / "downloads") in downloads
+        assert "НЕ съществува" not in downloads
+        assert "Десктоп" not in out
+
     def test_todays_date_is_a_fact_not_a_guess(self, monkeypatch, tmp_path) -> None:
         """На живо моделът кръсти архив с измислена дата отпреди месец."""
         from datetime import date

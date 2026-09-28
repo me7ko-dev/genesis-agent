@@ -1,12 +1,16 @@
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import { router } from 'expo-router';
+import * as Clipboard from 'expo-clipboard';
+import { router, useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View,
+  ActivityIndicator, KeyboardAvoidingView, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { usePairing } from '../lib/pairing';
+import {
+  INSTALL_COMMAND, START_ERROR, TERMUX_DOWNLOAD, isOnThisPhone, openTermux, phoneModeAvailable, runGenesis, termuxInstalled,
+} from '../lib/phone';
 import { GenesisClient, ProtocolError, parsePairingUrl } from '../lib/protocol';
 import { random } from '../lib/random';
 import { mono, useTheme } from '../lib/theme';
@@ -42,7 +46,9 @@ export default function Pair() {
     } catch (e) {
       const kind = e instanceof ProtocolError ? e.kind : 'network';
       setError(
-        kind === 'network'
+        kind === 'network' && isOnThisPhone(pairing)
+          ? 'Genesis на телефона не отговаря. Отвори Termux и напиши: genesis phone start'
+          : kind === 'network'
           ? `Не стигам до ${pairing.base}. Телефонът и компютърът в една Wi-Fi мрежа ли са? На Windows защитната стена трябва да пуска „genesis".`
           : kind === 'clock'
             ? 'Часовникът на телефона или компютъра е разминат с повече от 5 минути.'
@@ -59,6 +65,13 @@ export default function Pair() {
     if (Platform.OS === 'web' && window.location.hash.includes('k=')) tryPair(window.location.href);
   }, [tryPair]);
 
+  // genesisremote://pair?u=<pairing url>: `genesis phone pair` in Termux
+  // opens the app with the pairing of the agent on this phone.
+  const { u } = useLocalSearchParams<{ u?: string }>();
+  useEffect(() => {
+    if (typeof u === 'string' && u) tryPair(u);
+  }, [u, tryPair]);
+
   const cameraOk = Platform.OS !== 'web' && permission?.granted;
 
   return (
@@ -66,8 +79,11 @@ export default function Pair() {
       <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
           <Text style={[styles.title, { color: theme.text }]}>Genesis</Text>
+          {phoneModeAvailable ? <OnThisPhone onError={setError} /> : null}
           <Text style={[styles.lead, { color: theme.muted }]}>
-            Агентът работи на компютъра ти; телефонът е прозорец към него.
+            {phoneModeAvailable
+              ? '…или с компютър: агентът работи на него, телефонът е прозорец към него.'
+              : 'Агентът работи на компютъра ти; телефонът е прозорец към него.'}
           </Text>
 
           <View style={[styles.step, { backgroundColor: theme.surface, borderColor: theme.border }]}>
@@ -129,6 +145,68 @@ export default function Pair() {
   );
 }
 
+/** Genesis without a computer: the agent in Termux on this phone. */
+function OnThisPhone({ onError }: { onError: (text: string) => void }) {
+  const theme = useTheme();
+  const [copied, setCopied] = useState(false);
+  const [hasTermux, setHasTermux] = useState(termuxInstalled);
+
+  // Back from F-Droid with Termux installed: the first step turns into a tick.
+  useEffect(() => {
+    const id = setInterval(() => setHasTermux(termuxInstalled()), 2000);
+    return () => clearInterval(id);
+  }, []);
+
+  const copy = async () => {
+    await Clipboard.setStringAsync(INSTALL_COMMAND);
+    setCopied(true);
+  };
+  const connect = async () => {
+    onError('');
+    const result = await runGenesis('pair');
+    if (result !== 'started') onError(START_ERROR[result]);
+  };
+
+  return (
+    <View style={[styles.step, { backgroundColor: theme.surface, borderColor: theme.accent }]}>
+      <Text style={[styles.stepTitle, { color: theme.text }]}>Без компютър — на този телефон</Text>
+      <Text style={{ color: theme.muted, lineHeight: 20 }}>
+        Агентът работи на самия телефон в Termux (Linux за Android с python, git и node) — като на компютъра.
+      </Text>
+
+      <Text style={[styles.sub, { color: theme.text }]}>{hasTermux ? '✓ Termux е инсталиран' : '1. Инсталирай Termux от F-Droid'}</Text>
+      {hasTermux ? null : (
+        <Pressable accessibilityRole="link" onPress={() => Linking.openURL(TERMUX_DOWNLOAD)}
+          style={[styles.secondary, { borderColor: theme.accent }]}>
+          <Text style={[styles.secondaryText, { color: theme.accent }]}>Отвори F-Droid</Text>
+        </Pressable>
+      )}
+
+      <Text style={[styles.sub, { color: theme.text }]}>{hasTermux ? '1.' : '2.'} Постави този ред в Termux и натисни Enter</Text>
+      <Text selectable style={[mono, styles.cmdSmall, { backgroundColor: theme.code, color: theme.text }]}>{INSTALL_COMMAND}</Text>
+      <View style={styles.row}>
+        <Pressable accessibilityRole="button" onPress={copy} style={[styles.primary, styles.grow, { backgroundColor: theme.accent }]}>
+          <Text style={[styles.primaryText, { color: theme.accentText }]}>{copied ? '✓ Копирано' : 'Копирай'}</Text>
+        </Pressable>
+        {hasTermux ? (
+          <Pressable accessibilityRole="button" onPress={openTermux} style={[styles.secondary, styles.grow, { borderColor: theme.accent }]}>
+            <Text style={[styles.secondaryText, { color: theme.accent }]}>Отвори Termux</Text>
+          </Pressable>
+        ) : null}
+      </View>
+      <Text style={{ color: theme.muted, fontSize: 13, lineHeight: 18 }}>
+        Първия път отнема 5–10 минути и пита за ключовете на моделите. Накрая Termux сам отваря това приложение, свързано с Genesis.
+      </Text>
+
+      {hasTermux ? (
+        <Pressable accessibilityRole="button" onPress={connect}>
+          <Text style={[styles.link, { color: theme.accent }]}>Genesis вече е инсталиран в Termux? Свържи се с него</Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   flex: { flex: 1 },
   body: { padding: 20, gap: 16, maxWidth: 560, width: '100%', alignSelf: 'center' },
@@ -141,6 +219,13 @@ const styles = StyleSheet.create({
   input: { borderWidth: 1, borderRadius: 10, padding: 10, fontSize: 13 },
   primary: { borderRadius: 12, paddingVertical: 13, alignItems: 'center' },
   primaryText: { fontWeight: '700', fontSize: 16 },
+  secondary: { borderRadius: 12, paddingVertical: 12, alignItems: 'center', borderWidth: 1.5 },
+  secondaryText: { fontWeight: '700', fontSize: 15 },
+  sub: { fontSize: 15, fontWeight: '600', marginTop: 4 },
+  cmdSmall: { fontSize: 12, lineHeight: 17, padding: 10, borderRadius: 8, overflow: 'hidden' },
+  row: { flexDirection: 'row', gap: 10 },
+  grow: { flex: 1 },
+  link: { fontSize: 14, fontWeight: '600', paddingVertical: 4 },
   error: { fontSize: 14, lineHeight: 20 },
   foot: { fontSize: 12, lineHeight: 17 },
 });

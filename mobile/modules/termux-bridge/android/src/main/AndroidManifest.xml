@@ -1,0 +1,12 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!-- Termux runs a command for another app only with this permission, which
+       the user grants at runtime, and only with allow-external-apps = true in
+       ~/.termux/termux.properties (scripts/install-termux.sh sets it). -->
+  <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
+
+  <!-- Android 11+ hides other apps unless they are named here: without it
+       Termux looks "not installed" and its service cannot be started. -->
+  <queries>
+    <package android:name="com.termux" />
+  </queries>
+</manifest>

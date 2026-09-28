@@ -55,6 +55,14 @@ ENV_FILES: tuple[str, ...] = (
 )
 
 
+def is_android() -> bool:
+    """Genesis на самия телефон: Termux на Android (scripts/install-termux.sh).
+
+    Python-ът на Termux е сглобен за Android и има `sys.getandroidapilevel`;
+    TERMUX_VERSION е за всеки случай (задава го самият Termux)."""
+    return hasattr(sys, "getandroidapilevel") or "TERMUX_VERSION" in os.environ
+
+
 def ensure_utf8_streams() -> None:
     """
     A default Windows console is cp1251/cp866, not UTF-8, so the first

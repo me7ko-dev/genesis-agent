@@ -120,6 +120,10 @@ jobs:
         run: npx expo prebuild --platform android --no-install
       - name: Build the APK
         working-directory: mobile/android
+        # The branch goes into the app's Termux install command
+        # (mobile/src/lib/phone.ts): a test APK installs the matching agent.
+        env:
+          EXPO_PUBLIC_GENESIS_REF: ${{ github.head_ref || github.ref_name }}
         run: ./gradlew assembleRelease --no-daemon -Dorg.gradle.jvmargs=-Xmx4g
       - name: Name and checksum
         run: |
@@ -134,6 +138,17 @@ jobs:
             dist/genesis-remote-android.apk
             dist/genesis-remote-android.apk.sha256
           if-no-files-found: error
+
+  # Genesis on the phone without a computer (docs/ANDROID.md): the Termux
+  # install and `genesis phone` in real Termux — Android's libc and Termux's
+  # packages, no /bin/sh — on x86_64 (termux/termux-docker).
+  termux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install and run Genesis in Termux
+        run: docker run --rm -v "$PWD:/src:ro" termux/termux-docker:x86_64 bash /src/scripts/termux_smoke.sh
 
   # Genesis Desktop (desktop/): the Electron window around `genesis serve`.
   # Built here, not on the operator's machine: Smart App Control blocks a

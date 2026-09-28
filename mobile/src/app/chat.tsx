@@ -1,5 +1,5 @@
 import { Redirect, router } from 'expo-router';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator, FlatList, KeyboardAvoidingView, type NativeScrollEvent, type NativeSyntheticEvent, Platform, Pressable, StyleSheet, Text, TextInput, View,
 } from 'react-native';
@@ -8,6 +8,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { AssistantMessage, ConfirmCard, Note, ToolCard, UserBubble } from '../components/Cards';
 import type { ChatItem } from '../lib/chat';
 import { usePairing } from '../lib/pairing';
+import { START_ERROR, isOnThisPhone, runGenesis } from '../lib/phone';
 import type { Pairing } from '../lib/protocol';
 import { useTheme } from '../lib/theme';
 import { useGenesis, type Connection } from '../lib/useGenesis';
@@ -59,6 +60,50 @@ function Chat({ pairing }: { pairing: Pairing }) {
     router.replace('/pair');
   };
 
+  // Genesis on this phone (Termux): like Genesis Desktop, the app starts the
+  // agent itself when it is not running — once per visit, then by the button.
+  const local = isOnThisPhone(pairing);
+  const where = local ? 'телефона' : 'компютъра';
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState('');
+  const autoStarted = useRef(false);
+  const startTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const startOnPhone = async () => {
+    autoStarted.current = true;
+    setStartError('');
+    setStarting(true);
+    const result = await runGenesis('start');
+    if (result !== 'started') {
+      setStarting(false);
+      setStartError(START_ERROR[result]);
+      return;
+    }
+    if (startTimer.current) clearTimeout(startTimer.current);
+    startTimer.current = setTimeout(() => {
+      setStarting(false);
+      setStartError('Genesis не тръгна за 2 минути. В Termux: genesis phone log показва защо.');
+    }, 120_000);
+  };
+  const stopOnPhone = async () => {
+    setMenuOpen(false);
+    autoStarted.current = true;
+    const result = await runGenesis('stop');
+    if (result !== 'started') setStartError(START_ERROR[result]);
+  };
+  useEffect(() => {
+    if (g.connection === 'online') {
+      if (startTimer.current) clearTimeout(startTimer.current);
+      setStarting(false);
+      setStartError('');
+    } else if (local && g.connection === 'offline' && !autoStarted.current) {
+      startOnPhone();
+    }
+    // startOnPhone reads only refs and state setters: no other dependency.
+  }, [g.connection, local]);
+  useEffect(() => () => {
+    if (startTimer.current) clearTimeout(startTimer.current);
+  }, []);
+
   const dot = g.connection === 'online' ? theme.ok : g.connection === 'connecting' ? theme.muted : theme.danger;
 
   return (
@@ -84,15 +129,24 @@ function Chat({ pairing }: { pairing: Pairing }) {
             <Text style={[styles.menuInfo, { color: theme.muted }]} numberOfLines={2}>📁 {g.status.workspace}</Text>
           ) : null}
           <MenuItem label="Нов разговор" onPress={() => { setMenuOpen(false); g.clear(); }} />
-          <MenuItem label="Отдвои този телефон" danger onPress={doUnpair} />
+          {local ? <MenuItem label="Спри Genesis на телефона" onPress={stopOnPhone} /> : null}
+          <MenuItem label={local ? 'Свържи се с компютър вместо това' : 'Отдвои този телефон'} danger onPress={doUnpair} />
         </View>
       ) : null}
 
-      {g.connection === 'unauthorized' ? (
-        <Banner tone="danger" text="Компютърът вече не приема този телефон (нов ключ или друг компютър на адреса). Сдвои отново."
+      {local && g.connection === 'offline' ? (
+        <Banner tone="warn"
+          text={starting ? 'Пускам Genesis на телефона… (до минута)' : startError || 'Genesis на телефона е спрян.'}
+          action={starting ? undefined : 'Пусни Genesis'} onPress={startOnPhone} />
+      ) : g.connection === 'unauthorized' ? (
+        <Banner tone="danger" text={local
+          ? 'Genesis на телефона има нов ключ (genesis serve --reset). Сдвои отново.'
+          : 'Компютърът вече не приема този телефон (нов ключ или друг компютър на адреса). Сдвои отново.'}
           action="Сдвои" onPress={async () => { await unpair(); router.replace('/pair'); }} />
       ) : g.connection === 'clock' ? (
         <Banner tone="warn" text="Часовниците на телефона и компютъра се разминават с над 5 минути — включи автоматичния час." />
+      ) : startError && g.connection !== 'online' ? (
+        <Banner tone="danger" text={startError} />
       ) : null}
 
       <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -109,7 +163,7 @@ function Chat({ pairing }: { pairing: Pairing }) {
             <View style={styles.empty}>
               <Text style={[styles.emptyTitle, { color: theme.text }]}>С какво да помогна?</Text>
               <Text style={[styles.emptyText, { color: theme.muted }]}>
-                {g.status?.workspace ? `Работя в ${g.status.workspace}` : 'Пиши като в терминала — командите се изпълняват на компютъра.'}
+                {g.status?.workspace ? `Работя в ${g.status.workspace}` : `Пиши като в терминала — командите се изпълняват на ${where}.`}
               </Text>
             </View>
           }

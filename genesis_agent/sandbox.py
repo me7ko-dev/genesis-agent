@@ -978,12 +978,30 @@ def _decide(operation: str, verdict: RiskVerdict, policy: SandboxPolicy) -> tupl
 
 def _build_env(policy: SandboxPolicy, extra: dict[str, str] | None = None) -> dict[str, str]:
     env = {k: os.environ[k] for k in policy.env_passthrough if k in os.environ}
+    env.update(_android_env())
     env.setdefault("PYTHONIOENCODING", "utf-8")
     if sys.platform == "win32" and env.get("PATH"):
         env["PATH"] = _windowsapps_last(env["PATH"])
     if extra:
         env.update(extra)
     return env
+
+
+# Termux (Genesis на телефона). Без тях програмите на Termux не тръгват в
+# изчистената среда: LD_PRELOAD (termux-exec) прави `#!/usr/bin/env node` и
+# подобните shebang-ове изпълними — /usr/bin на Android няма; PREFIX и
+# TERMUX_* четат pkg, pip и самият termux-exec; ANDROID_* и *CLASSPATH иска
+# `am` (termux-open и подобните).
+_ANDROID_ENV_PREFIXES = ("TERMUX", "ANDROID_", "PREFIX", "LD_PRELOAD", "LD_LIBRARY_PATH",
+                         "BOOTCLASSPATH", "DEX2OATBOOTCLASSPATH", "SYSTEMSERVERCLASSPATH",
+                         "EXTERNAL_STORAGE")
+
+
+def _android_env() -> dict[str, str]:
+    from genesis_agent.paths import is_android
+    if not is_android():
+        return {}
+    return {k: v for k, v in os.environ.items() if k.startswith(_ANDROID_ENV_PREFIXES)}
 
 
 def _windowsapps_last(path: str) -> str:
@@ -1212,10 +1230,22 @@ def _windows_shell_prefix() -> list[str]:
     return _WIN_SHELL_PREFIX
 
 
+def _posix_shell() -> str:
+    """`/bin/sh` — а където го няма, първият `sh` в PATH.
+
+    На Android (Genesis в Termux, scripts/install-termux.sh) `/bin` не съществува:
+    обвивката е `$PREFIX/bin/sh`. С твърдо `/bin/sh` всяка RUN_CMD там
+    щеше да пада с FileNotFoundError."""
+    if os.path.exists("/bin/sh"):
+        return "/bin/sh"
+    import shutil
+    return shutil.which("sh") or "/system/bin/sh"
+
+
 def _shell_argv(command: str) -> list[str]:
     """Argv за подадената команда, портативно."""
     if os.name == "posix":
-        return ["/bin/sh", "-c", command]
+        return [_posix_shell(), "-c", command]
     prefix = _windows_shell_prefix()
     if prefix and prefix[0].lower().endswith("bash.exe"):
         command = _unescape_windows_paths(command)

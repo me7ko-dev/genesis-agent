@@ -11,6 +11,7 @@ genesis_agent.cli — the `genesis` command.
     genesis update          is there a newer commit on the installed branch
     genesis budget [N]      token usage today + last N days (default 7)
     genesis serve           use Genesis from your phone (Android / iOS app)
+    genesis phone start     Genesis on the phone itself, no computer (Android, Termux)
     genesis --version
 """
 from __future__ import annotations
@@ -260,6 +261,11 @@ def main(argv: list[str] | None = None) -> int:
         sys.path.insert(0, str(_project_root()))
         from genesis_agent.remote_server import serve
         return serve(argv[1:])
+
+    if cmd == "phone":
+        sys.path.insert(0, str(_project_root()))
+        from genesis_agent.phone import main as phone_main
+        return phone_main(argv[1:])
 
     if cmd == "chat":
         return _chat()

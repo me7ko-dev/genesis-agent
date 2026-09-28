@@ -67,6 +67,16 @@ scan it with the Genesis Remote app and use the same agent from the phone —
 end-to-end encrypted, dangerous commands confirmed on the phone. See
 [docs/MOBILE.md](docs/MOBILE.md).
 
+**On the phone itself, no computer** (Android): Genesis runs in
+[Termux](https://f-droid.org/packages/com.termux/) and the same app is its
+window. One line in Termux installs it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/me7ko-dev/genesis-agent/main/scripts/install-termux.sh | bash
+```
+
+See [docs/ANDROID.md](docs/ANDROID.md) (Bulgarian).
+
 Prefer your own Python? `scripts/install_windows.ps1` installs through pipx and first checks
 the three things that actually break there — the Microsoft Store Python stub, a
 stale PATH, and `bash.exe` resolving to the WSL launcher instead of Git Bash.

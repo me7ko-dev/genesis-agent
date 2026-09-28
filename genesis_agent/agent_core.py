@@ -87,6 +87,15 @@ def env_facts(workspace: str = "") -> str:
                 dirs[m.group(1)] = Path(m.group(2).replace("$HOME", str(home)))
     except OSError:
         pass  # без XDG конфигурация остават разумните подразбирания
+    from genesis_agent.paths import is_android
+    android = is_android()
+    if android:
+        # Termux: папките на телефона са под ~/storage (termux-setup-storage),
+        # „Десктоп" няма. Иначе моделът пише в ~/Downloads — папка в Termux,
+        # която никое друго приложение на телефона не вижда.
+        shared = home / "storage"
+        dirs = {"DESKTOP": shared / "shared", "DOWNLOAD": shared / "downloads",
+                "DOCUMENTS": shared / "shared" / "Documents", "PICTURES": shared / "pictures"}
 
     # USERNAME преди USER: на Windows `USER` не е зададен, така че този ред
     # казваше буквално "(потребител: unknown)" на всяка сесия там — точно вида
@@ -97,7 +106,11 @@ def env_facts(workspace: str = "") -> str:
     # началото на сесия, така че денят не се сменя под краката на кеша.
     lines = [f"- Днес: {date.today().isoformat()}",
              f"- Домашна директория: {home}   (потребител: {user})"]
-    for label, key in (("Десктоп", "DESKTOP"), ("Изтегляния", "DOWNLOAD"),
+    if android:
+        lines.append("- Устройство: телефон с Android, Genesis тече в Termux (pkg install … за "
+                     "програми; няма sudo, няма /usr — пътищата са под $PREFIX)")
+    for label, key in (("Памет на телефона" if android else "Десктоп", "DESKTOP"),
+                       ("Изтегляния", "DOWNLOAD"),
                        ("Документи", "DOCUMENTS"), ("Снимки", "PICTURES")):
         p = dirs[key]
         lines.append(f"- {label}: {p}" + ("" if p.is_dir() else "   (НЕ съществува)"))
