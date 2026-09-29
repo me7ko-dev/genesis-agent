@@ -296,8 +296,9 @@ def main(argv: list[str] | None = None) -> int:
             workdir = out_dir / f"c{ch['num']:03d}-{i}"
             workdir.mkdir()
             offset = LOG_PATH.stat().st_size if LOG_PATH.exists() else 0
-            log, seconds, stopped = bp.run_genesis(genesis_cmd, task_text(ch, args.examples),
-                                                   workdir, args.timeout)
+            # a """ block: through a pipe, each line of the task would be a message
+            task = f'"""\n{task_text(ch, args.examples)}\n"""'
+            log, seconds, stopped = bp.run_genesis(genesis_cmd, task, workdir, args.timeout)
             res = run_tests(python, workdir / "solution.py", ch["tests"])
             tokens, models = bp.usage_since(bp._log_lines_since(LOG_PATH, offset))
             failed = [{"label": t["label"], "error": r["error"]}

@@ -350,6 +350,22 @@ _CAPTURE_PROMPT = """Ти си извличащ модул. От разгово�
 """
 
 
+# Preferences go into EVERY later session, so the extractor's word is not
+# enough: on 2026-09-28 one site task became 11 "preferences" in one pass
+# (index.html/styles.css, SVG, SEO, "premium modern"), and a Python task the
+# next day opened with them. A preference is kept only when the operator said
+# something general, and a pass that yields this many is a project's spec.
+_GENERAL_MARKERS = ("винаги", "никога", "всеки път", "от сега", "отсега", "занапред",
+                    "предпочитам", "не обичам", "не искам", "always", "never",
+                    "from now on", "every time", "i prefer")
+_MAX_PREFS_PER_CAPTURE = 2
+
+
+def _operator_spoke_generally(convo: list[dict]) -> bool:
+    said = " ".join(str(m["content"]).lower() for m in convo if m.get("role") == "user")
+    return any(marker in said for marker in _GENERAL_MARKERS)
+
+
 def auto_capture(messages: list[dict], max_chars: int = 6000) -> dict:
     """Извлича трайното от един разговор и го записва — БЕЗ да разчита моделът
     сам да е викал REMEMBER/TASK_ADD по време на чата.
@@ -418,10 +434,16 @@ def auto_capture(messages: list[dict], max_chars: int = 6000) -> dict:
             if isinstance(d, dict) and d.get("what"):
                 add_decision(d["what"], d.get("why", ""))
                 written["decisions"] += 1
-        for p in (data.get("preferences") or [])[:10]:
-            if isinstance(p, dict) and p.get("topic") and p.get("value"):
-                set_preference(p["topic"], p["value"])
-                written["preferences"] += 1
+        new_prefs = [p for p in (data.get("preferences") or [])
+                     if isinstance(p, dict) and p.get("topic") and p.get("value")]
+        if len(new_prefs) > _MAX_PREFS_PER_CAPTURE or not _operator_spoke_generally(convo):
+            if new_prefs:
+                log.info("auto_capture: %d preference(s) not kept — a task's requirements, "
+                         "not something the operator said in general", len(new_prefs))
+            new_prefs = []
+        for p in new_prefs:
+            set_preference(p["topic"], p["value"])
+            written["preferences"] += 1
         for t in (data.get("threads") or [])[:10]:
             if isinstance(t, dict) and t.get("title"):
                 add_thread(t["title"], t.get("next_step", ""))

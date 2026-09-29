@@ -1469,6 +1469,7 @@ def main():
                             border_style="cyan", padding=(1, 2)))
 
     messages = deque([{"role": "system", "content": SYSTEM_PROMPT}], maxlen=_HISTORY_MAXLEN)
+    from genesis_agent.chat_input import read_message
     from genesis_agent.model_router import CONFIRM_COMMANDS, command_for_request
 
     while True:
@@ -1482,7 +1483,7 @@ def main():
             except Exception as e:
                 console.print(f"[dim]⚠ статус: {e}[/]")
 
-            user_input = console.input("[bold green]❯[/] ").strip()
+            user_input = read_message(lambda: console.input("[bold green]❯[/] "))
             if not user_input: continue
 
             # Заявка, която е точно вградена команда („направи бекъп"), не
@@ -1668,6 +1669,7 @@ def main():
                 help_table.add_row("/skills", "Списък с уменията (без модел, мигновено)")
                 help_table.add_row("/tasks", "Състояние на работата — отворени нишки, решения")
                 help_table.add_row("/done <id>", "Затвори нишка като готова (/drop <id> = изхвърли)")
+                help_table.add_row('"""', "Съобщение на много редове: \"\"\" … \"\"\" (поставеният текст е едно съобщение и без това)")
                 help_table.add_row("exit / quit", "Изход")
                 console.print(Panel(help_table, title="[bold cyan]◈ GENESIS КОМАНДИ ◈[/]", border_style="cyan"))
                 continue
