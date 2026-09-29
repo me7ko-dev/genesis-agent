@@ -90,6 +90,7 @@ except Exception:
 # installed package and the user's own home — nothing machine-specific here.
 from genesis_agent import claim_check
 from genesis_agent.budget import clip_for_context
+from genesis_agent.code_check import RunCheck as _RunCheck
 from genesis_agent.config import TOOL_ROUND_CAP as _TOOL_ROUND_CAP
 from genesis_agent.page_check import FinalCheck as _PageCheck
 from genesis_agent.paths import (
@@ -1230,6 +1231,8 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     # Уеб страниците, писани в хода, се отварят в браузър, когато моделът каже
     # „готово“ (genesis_agent.page_check, план Г.11).
     _page_check = _PageCheck()
+    # .py, записан и непуснат след последната промяна (genesis_agent.code_check).
+    _run_check = _RunCheck()
     # Въртене на място: същият извик, същият резултат, пореден път.
     # Таванът го ограничава по цена, но не го разпознава — виж
     # genesis_agent.repeat_guard.
@@ -1271,6 +1274,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
                     args = {}
                 result = genesis_skills.dispatch_tool_call(name, args)
                 _page_check.observe(result)
+                _run_check.observe(result)
                 _entry = claim_check.counts_as_executed(
                     name, " ".join(str(v) for v in args.values()), result)
                 if _entry:
@@ -1316,6 +1320,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
         _executed.extend(claim_check.executed_from_text_results(tool_results))
         for _r in tool_results:
             _page_check.observe(_r)
+            _run_check.observe(_r)
         if not tool_results:
             # Празно ≠ непременно "приключи" — може да е объркан tool tag
             # (виж agent_core.run_tool_loop, същият фикс, design note
@@ -1348,6 +1353,12 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
                     with ui.thinking("Оправям според браузъра…", "aesthetic"):
                         response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
                     continue
+            if _run_check.due():
+                ui.warn("Написа код — казвам му да го пробва и извън примерите.")
+                messages.append({"role": "system", "content": _run_check.note()})
+                with ui.thinking("Пробвам кода…", "aesthetic"):
+                    response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
+                continue
             _promise = claim_check.unfinished_promise(response)
             if _promise and _promise_retries < 1:
                 _promise_retries += 1

@@ -373,6 +373,7 @@ def run_tool_loop(
     """
     from genesis_agent import claim_check
     from genesis_agent.budget import clip_for_context
+    from genesis_agent.code_check import RunCheck
     from genesis_agent.page_check import FinalCheck
     from genesis_agent.repeat_guard import RepeatGuard
 
@@ -393,6 +394,8 @@ def run_tool_loop(
     executed: list[tuple[str, str]] = []
     # Уеб страниците от хода — в браузър, когато моделът каже „готово“ (page_check).
     page_check = FinalCheck()
+    # .py, записан и непуснат след последната промяна (code_check).
+    run_check = RunCheck()
 
     _translate_last_user_message_to_en(messages)
     text, tool_calls, prov, model = core.complete(messages)
@@ -421,6 +424,7 @@ def run_tool_loop(
                 diff = _diff_for_write(core.skills, args) if name == "WRITE_FILE" else None
                 result = core.skills.dispatch_tool_call(name, args)
                 page_check.observe(result)
+                run_check.observe(result)
                 entry = claim_check.counts_as_executed(
                     name, " ".join(str(v) for v in args.values()), result)
                 if entry:
@@ -466,6 +470,7 @@ def run_tool_loop(
         results = core.skills.parse_and_execute_tools(text)
         for r in results:
             page_check.observe(r)
+            run_check.observe(r)
         # Името на инструмента стои в самия резултат (`[RUN_CMD: ...]`).
         # Извличането живее в claim_check, за да не се дублира между
         # фронтендите — иначе промяна във формата ги обезоръжава наведнъж.
@@ -518,6 +523,11 @@ def run_tool_loop(
                     _status("оправя според браузъра…")
                     text, tool_calls, prov, model = core.complete(messages)
                     continue
+            if run_check.due():
+                messages.append({"role": "system", "content": run_check.note()})
+                _status("пробва кода…")
+                text, tool_calls, prov, model = core.complete(messages)
+                continue
             promise = claim_check.unfinished_promise(text)
             if promise and promise_retries < 1:
                 promise_retries += 1
