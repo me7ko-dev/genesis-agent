@@ -113,14 +113,14 @@ def test_run_tests_judges_each_test_on_its_own(tmp_path):
     ch = bf.parse(CHALLENGE)
     sol = tmp_path / "solution.py"
     sol.write_text("def double(n):\n    return n * 2 if n else 1\n", encoding="utf-8")
-    res = bf.run_tests(sys.executable, sol, ch["tests"], tmp_path / "t")
+    res = bf.run_tests(sys.executable, sol, ch["tests"])
     assert [r["ok"] for r in res] == [True, True, False]
     assert res[2]["error"].startswith("AssertionError")
 
 
 def test_missing_solution_fails_every_test(tmp_path):
     ch = bf.parse(CHALLENGE)
-    res = bf.run_tests(sys.executable, tmp_path / "solution.py", ch["tests"], tmp_path / "t")
+    res = bf.run_tests(sys.executable, tmp_path / "solution.py", ch["tests"])
     assert [r["error"] for r in res] == ["няма solution.py"] * 3
 
 
@@ -128,5 +128,24 @@ def test_solution_that_reads_input_on_import_does_not_hang(tmp_path):
     ch = bf.parse(CHALLENGE)
     sol = tmp_path / "solution.py"
     sol.write_text("def double(n):\n    return n * 2\nprint(double(int(input())))\n", encoding="utf-8")
-    res = bf.run_tests(sys.executable, sol, ch["tests"][:1], tmp_path / "t")
+    res = bf.run_tests(sys.executable, sol, ch["tests"][:1])
     assert not res[0]["ok"] and "EOFError" in res[0]["error"]
+
+
+def test_task_does_not_name_the_source():
+    # "freeCodeCamp, Challenge 7" in the task sent the agent to search the web
+    task = bf.task_text(bf.parse(CHALLENGE))
+    assert "freeCodeCamp" not in task and "Challenge 7" not in task
+
+
+def test_no_hidden_test_is_left_on_disk(tmp_path):
+    ch = bf.parse(CHALLENGE)
+    sol = tmp_path / "solution.py"
+    sol.write_text("def double(n):\n    return n * 2\n", encoding="utf-8")
+    bf.run_tests(sys.executable, sol, ch["tests"])
+    assert not [p for p in tmp_path.rglob("*") if p.name.startswith(("test_", "runner"))]
+
+
+def test_tool_counts():
+    log = "┌── 🔧 WEB_SEARCH ──┐\n...\n┌── 🔧 WRITE_FILE ──┐\n┌── 🔧 WEB_SEARCH ──┐\n"
+    assert bf.tool_counts(log) == {"WEB_SEARCH": 2, "WRITE_FILE": 1}

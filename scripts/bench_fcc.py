@@ -29,6 +29,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -148,9 +149,11 @@ def pick(challenges: list[dict], sample: int) -> list[dict]:
 
 
 def task_text(ch: dict, examples: int = 2) -> str:
+    """No source and no title: with "freeCodeCamp, Challenge 10" in the task the
+    first baseline run searched the web for the answer (and took the JS name)."""
     shown = "\n".join(f"- {t['label']}" for t in ch["tests"][:examples])
-    return (f"Задача от freeCodeCamp ({ch['title']}). Напиши решението на Python във файл "
-            f"`solution.py` в текущата папка, със същото име и параметри като тук:\n\n"
+    return (f"Напиши решението на Python във файл `solution.py` в текущата папка, "
+            f"със същото име и параметри като тук:\n\n"
             f"```python\n{ch['seed']}```\n\n"
             f"Условието (на английски):\n\n{ch['description']}\n\n"
             f"Примери:\n{shown}\n")
@@ -171,31 +174,40 @@ print("\n@@RESULT@@" + json.dumps(r))
 '''
 
 
-def run_tests(python: str, solution: Path, tests: list[dict], scratch: Path) -> list[dict]:
+def run_tests(python: str, solution: Path, tests: list[dict]) -> list[dict]:
     """Each test in its own process: an endless loop or sys.exit in one does
-    not take the others down."""
-    scratch.mkdir(parents=True, exist_ok=True)
-    runner = scratch / "runner.py"
-    runner.write_text(_RUNNER, encoding="utf-8")
-    results = []
-    for i, t in enumerate(tests):
-        if not solution.is_file():
-            results.append({"ok": False, "error": "няма solution.py"})
-            continue
-        test_file = scratch / f"test_{i}.py"
-        test_file.write_text(t["code"], encoding="utf-8")
-        try:
-            r = subprocess.run([python, str(runner), str(solution), str(test_file)],
-                               cwd=solution.parent, stdin=subprocess.DEVNULL, capture_output=True,
-                               text=True, encoding="utf-8", errors="replace",
-                               timeout=TEST_TIMEOUT, check=False)
-            tail = r.stdout.rsplit("@@RESULT@@", 1)
-            res = json.loads(tail[1]) if len(tail) == 2 else {
-                "ok": False, "error": (r.stderr.strip().splitlines() or ["без изход"])[-1][:300]}
-        except subprocess.TimeoutExpired:
-            res = {"ok": False, "error": f"таймаут {TEST_TIMEOUT} s"}
-        results.append(res)
+    not take the others down. The test files are gone afterwards — the next
+    run's agent can list sibling folders (it did), so nothing hidden stays."""
+    if not solution.is_file():
+        return [{"ok": False, "error": "няма solution.py"} for _ in tests]
+    with tempfile.TemporaryDirectory() as tmp:
+        runner = Path(tmp) / "runner.py"
+        runner.write_text(_RUNNER, encoding="utf-8")
+        results = []
+        for i, t in enumerate(tests):
+            test_file = Path(tmp) / f"test_{i}.py"
+            test_file.write_text(t["code"], encoding="utf-8")
+            try:
+                r = subprocess.run([python, str(runner), str(solution), str(test_file)],
+                                   cwd=solution.parent, stdin=subprocess.DEVNULL, capture_output=True,
+                                   text=True, encoding="utf-8", errors="replace",
+                                   timeout=TEST_TIMEOUT, check=False)
+                tail = r.stdout.rsplit("@@RESULT@@", 1)
+                res = json.loads(tail[1]) if len(tail) == 2 else {
+                    "ok": False, "error": (r.stderr.strip().splitlines() or ["без изход"])[-1][:300]}
+            except subprocess.TimeoutExpired:
+                res = {"ok": False, "error": f"таймаут {TEST_TIMEOUT} s"}
+            results.append(res)
     return results
+
+
+_TOOL = re.compile(r"🔧 ([A-Z_]+) ")
+_ROUND_CAP = "Достигнат таван"
+
+
+def tool_counts(log: str) -> dict[str, int]:
+    """Which tools a run used — WEB_SEARCH on a five-line function is a finding."""
+    return dict(Counter(_TOOL.findall(log)))
 
 
 def selfcheck(python: str, challenges: list[dict]) -> int:
@@ -207,7 +219,7 @@ def selfcheck(python: str, challenges: list[dict]) -> int:
             sol = Path(tmp) / f"c{ch['num']}" / "solution.py"
             sol.parent.mkdir()
             sol.write_text(ch["solution"], encoding="utf-8")
-            res = run_tests(python, sol, ch["tests"], sol.parent / "t")
+            res = run_tests(python, sol, ch["tests"])
             failed = [(t["label"], r["error"]) for t, r in zip(ch["tests"], res) if not r["ok"]]
             if failed:
                 bad += 1
@@ -223,8 +235,11 @@ def weak_spots(runs: list[dict]) -> str:
             continue
         why = r["failed"][0] if r["failed"] else {"label": "?", "error": "?"}
         extra = {"timeout": ", таймаут", "runaway": ", зацикли"}.get(r["stopped"], "")
+        extra += ", таван на рундовете" if r.get("round_cap") else ""
         files = ", ".join(r["files"]) or "нищо"
+        tools = " ".join(f"{t}×{n}" for t, n in sorted(r.get("tools", {}).items(), key=lambda x: -x[1]))
         lines.append(f"- {r['title']} #{r['run']}: {r['passed']}/{r['total']}{extra}; файлове: {files}\n"
+                     f"    инструменти: {tools or 'няма'}\n"
                      f"    {why['label'][:110]}\n    → {why['error'][:160]}")
     return "\n".join(lines) or "няма — всичко минава"
 
@@ -283,7 +298,7 @@ def main(argv: list[str] | None = None) -> int:
             offset = LOG_PATH.stat().st_size if LOG_PATH.exists() else 0
             log, seconds, stopped = bp.run_genesis(genesis_cmd, task_text(ch, args.examples),
                                                    workdir, args.timeout)
-            res = run_tests(python, workdir / "solution.py", ch["tests"], out_dir / f"{workdir.name}.hidden")
+            res = run_tests(python, workdir / "solution.py", ch["tests"])
             tokens, models = bp.usage_since(bp._log_lines_since(LOG_PATH, offset))
             failed = [{"label": t["label"], "error": r["error"]}
                       for t, r in zip(ch["tests"], res) if not r["ok"]]
@@ -291,18 +306,20 @@ def main(argv: list[str] | None = None) -> int:
                    "passed": len(res) - len(failed), "total": len(res), "failed": failed,
                    "files": sorted(p.name for p in workdir.iterdir() if p.is_file()),
                    "seconds": round(seconds, 1), "stopped": stopped, "tokens": tokens,
-                   "models": models, "dropped": bp.parse_log(log)}
+                   "models": models, "dropped": bp.parse_log(log), "tools": tool_counts(log),
+                   "round_cap": _ROUND_CAP in log}
             runs.append(run)
             mark = "✅" if not failed else "❌"
-            models_s = ", ".join(f"{m} ×{n}" for m, n in models.items()) or "няма отговор"
+            tools_s = " ".join(f"{t}×{n}" for t, n in sorted(run["tools"].items(), key=lambda x: -x[1]))
             print(f"{mark} {ch['title']} #{i}: {run['passed']}/{run['total']} скрити, {seconds:.0f} s, "
-                  f"{tokens} токена — {models_s}", flush=True)
+                  f"{tokens} токена; {tools_s or 'без инструменти'}", flush=True)
+            # after every run: a stopped bench keeps what it measured
+            (out_dir / "results.json").write_text(
+                json.dumps({"date": datetime.now().isoformat(timespec="seconds"), "fcc": commit,
+                            "examples": args.examples, "summary": bp.summarize(runs), "runs": runs},
+                           ensure_ascii=False, indent=1), encoding="utf-8")
 
     summary = bp.summarize(runs)
-    (out_dir / "results.json").write_text(
-        json.dumps({"date": datetime.now().isoformat(timespec="seconds"), "fcc": commit,
-                    "examples": args.examples, "summary": summary, "runs": runs},
-                   ensure_ascii=False, indent=1), encoding="utf-8")
     before = json.loads(args.compare.read_text("utf-8")).get("summary") if args.compare else None
     print("\n" + bp.format_table(summary, before))
     print("\nСлаби места:\n" + weak_spots(runs))
