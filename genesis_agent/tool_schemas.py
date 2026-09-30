@@ -15,6 +15,9 @@ genesis_agent/tool_schemas.py — OpenAI-формат tool schemas за native f
 """
 from __future__ import annotations
 
+import json
+import re
+
 FULL_TOOLS: list[dict] = [
     {
         "type": "function",
@@ -417,3 +420,30 @@ REPAIR_TOOLS: list[dict] = [
         "EDIT_FILE", "WRITE_FILE", "RUN_CMD",
     }
 ]
+
+
+_JSON_ESCAPE = re.compile(r"\\(.)", re.DOTALL)
+
+
+def load_tool_arguments(raw) -> dict:
+    """Аргументите на native tool_call като dict.
+
+    Модел, който пише код с регекси, праща `"\\d{4}"` в JSON низ — невалиден
+    escape. json.loads пада и callers-ите тихо даваха `{}`: WRITE_FILE без път
+    пишеше в самата папка → „[Errno 13] Permission denied“ и моделът питаше
+    дали папката е защитена (bench faktura-excel 2026-09-26 и 2026-09-29).
+    Невалидният escape става буквална наклонена черта — това е, което моделът
+    иска във файла. Иначе поправим → хвърля оригиналната грешка."""
+    if isinstance(raw, dict):
+        return raw
+    text = raw or "{}"
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as first:
+        fixed = _JSON_ESCAPE.sub(
+            lambda m: m.group(0) if m.group(1) in '"\\/bfnrtu' else "\\\\" + m.group(1), text)
+        try:
+            value = json.loads(fixed)
+        except json.JSONDecodeError:
+            raise first from None
+    return value if isinstance(value, dict) else {}

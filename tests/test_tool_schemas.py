@@ -90,3 +90,31 @@ def test_mission_tools_excludes_side_effecting_tools() -> None:
     forbidden = {"RUN_CMD", "WRITE_FILE", "DELEGATE", "BROWSE",
                  "BROWSER_CLICK", "BROWSER_TYPE", "BROWSER_READ"}
     assert _names(tool_schemas.MISSION_TOOLS).isdisjoint(forbidden)
+
+
+# ── load_tool_arguments ─────────────────────────────────────────────────────
+
+def test_valid_arguments_are_parsed_as_they_are() -> None:
+    raw = r'{"path": "a.py", "content": "x = \"\\d\"\n"}'
+    assert tool_schemas.load_tool_arguments(raw) == {"path": "a.py", "content": 'x = "\\d"\n'}
+
+
+def test_invalid_regex_escapes_become_literal_backslashes() -> None:
+    r"""bench faktura-excel: `\d`, `\s`, `\.` в код с регекси — json.loads пада,
+    а callers-ите даваха `{}` и WRITE_FILE оставаше без път."""
+    got = tool_schemas.load_tool_arguments(r'{"path": "e.py", "content": "r\"\d+\s*\.\"\n"}')
+    assert got == {"path": "e.py", "content": 'r"\\d+\\s*\\."\n'}
+
+
+def test_unrepairable_arguments_still_raise() -> None:
+    import json
+
+    import pytest
+    with pytest.raises(json.JSONDecodeError):
+        tool_schemas.load_tool_arguments('{"path": "a.py", "content": ')
+
+
+def test_empty_or_non_object_arguments_are_an_empty_dict() -> None:
+    assert tool_schemas.load_tool_arguments(None) == {}
+    assert tool_schemas.load_tool_arguments("[1, 2]") == {}
+    assert tool_schemas.load_tool_arguments({"path": "x"}) == {"path": "x"}

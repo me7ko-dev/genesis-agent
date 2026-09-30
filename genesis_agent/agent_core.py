@@ -22,6 +22,7 @@ from datetime import date
 from pathlib import Path
 
 from genesis_agent.config import TOOL_ROUND_CAP
+from genesis_agent.tool_schemas import load_tool_arguments
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -418,7 +419,7 @@ def run_tool_loop(
                 fn = tc.get("function", {}) or {}
                 name = fn.get("name", "")
                 try:
-                    args = json.loads(fn.get("arguments") or "{}")
+                    args = load_tool_arguments(fn.get("arguments"))
                 except (json.JSONDecodeError, TypeError):
                     args = {}
                 diff = _diff_for_write(core.skills, args) if name == "WRITE_FILE" else None

@@ -101,6 +101,7 @@ from genesis_agent.paths import (
     workspace_dir,
 )
 from genesis_agent.repeat_guard import RepeatGuard as _RepeatGuard
+from genesis_agent.tool_schemas import load_tool_arguments
 
 try:
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -1269,7 +1270,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
                 fn = tc.get("function", {}) or {}
                 name = fn.get("name", "")
                 try:
-                    args = json.loads(fn.get("arguments") or "{}")
+                    args = load_tool_arguments(fn.get("arguments"))
                 except (json.JSONDecodeError, TypeError):
                     args = {}
                 result = genesis_skills.dispatch_tool_call(name, args)

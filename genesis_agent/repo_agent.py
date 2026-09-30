@@ -42,7 +42,7 @@ from pathlib import Path
 
 from genesis_agent.brain import Brain
 from genesis_agent.repo_map import detect_project, repo_map
-from genesis_agent.tool_schemas import REPAIR_TOOLS
+from genesis_agent.tool_schemas import REPAIR_TOOLS, load_tool_arguments
 
 # Нарочно в HOME, а НЕ в DATA_DIR: при git checkout DATA_DIR сочи вътре в самото
 # repo, а тук се пазят tar архиви на ЧУЖДИ проекти — те нямат работа в дървото на
@@ -462,7 +462,7 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
                     fn = tc.get("function", {})
                     name = fn.get("name", "")
                     try:
-                        args = json.loads(fn.get("arguments") or "{}")
+                        args = load_tool_arguments(fn.get("arguments"))
                     except (ValueError, TypeError):
                         args = {}
                     say(f"  ⚙️  {name} {str(args.get('path') or args.get('pattern') or args.get('command') or '')[:70]}")

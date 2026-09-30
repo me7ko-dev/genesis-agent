@@ -509,3 +509,22 @@ def test_the_working_days_skill_passes_its_self_test(_shipped_skills, tmp_path) 
     r = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
                        encoding="utf-8", timeout=60, check=False)
     assert r.returncode == 0 and r.stdout.strip() == "OK", r.stderr
+
+
+def test_an_invoice_request_gets_the_invoice_rules_not_the_eik_check(_shipped_skills) -> None:
+    """bench faktura-excel 2026-09-26…29: 0/7 — заявката съдържа „ЕИК“ и получаваше
+    ЕИК валидатора; извличането отхвърляше фактурата по контролната цифра."""
+    task = sl.Path(__file__).resolve().parent.parent / "bench" / "projects" / "faktura-excel" / "task.txt"
+    text = sl.domain_context(task.read_text(encoding="utf-8"))
+    assert "библиотеката: bg_invoice_fields" in text
+    assert "не се отхвърля по" in text
+
+
+def test_the_invoice_skill_passes_its_self_test(_shipped_skills, tmp_path) -> None:
+    import subprocess
+    import sys
+    script = tmp_path / "bg_invoice_fields.py"
+    script.write_text(sl.skill_view("bg_invoice_fields")["code"], encoding="utf-8")
+    r = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
+                       encoding="utf-8", timeout=60, check=False)
+    assert r.returncode == 0 and r.stdout.strip() == "OK", r.stderr

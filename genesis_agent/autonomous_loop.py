@@ -15,7 +15,7 @@ from genesis_agent.repeat_guard import RepeatGuard
 from genesis_agent.skill_loader import SKILLS_ROOT
 from genesis_agent.skills_manager import save_skill, slugify
 from genesis_agent.storage_monitor import check_storage, human_gb
-from genesis_agent.tool_schemas import MISSION_TOOLS
+from genesis_agent.tool_schemas import MISSION_TOOLS, load_tool_arguments
 
 # Колко ДОПЪЛНИТЕЛНИ кандидата (отвъд първия опит) да генерираме от локалния
 # tier, когато той не излезе перфектен от първия път (design note, 2026-08-11).
@@ -395,7 +395,7 @@ def _run_autonomous_loop_impl(
                     fn = tc.get("function", {}) or {}
                     name = fn.get("name", "")
                     try:
-                        args = _json.loads(fn.get("arguments") or "{}")
+                        args = load_tool_arguments(fn.get("arguments"))
                     except (_json.JSONDecodeError, TypeError):
                         args = {}
                     tool_out = genesis_skills.dispatch_tool_call(name, args)

@@ -38,6 +38,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from genesis_agent import sandbox
+from genesis_agent.tool_schemas import load_tool_arguments
 
 # Паметта/уеб търсенето са meko-опционални — ако липсва зависимост (напр.
 # scikit-learn), мостът пак работи, само без логване/търсене.
@@ -213,6 +214,11 @@ def _tool_read_file(arg: str, offset=None, limit=None) -> str:
 
 def _tool_write_file(arg: str, content: str) -> str:
     path = _resolve(arg)
+    if not arg.strip() or path.is_dir():
+        # Иначе write_text върху папка → „Permission denied“, а моделът го
+        # чете като защитена папка и спира да пита (виж load_tool_arguments).
+        return (f"[WRITE_FILE] ❌ Няма име на файл: path е „{arg}“ ({path} е папка). "
+                "Дай пълния път до файла, напр. faktura/extract.py.")
     resolved = path.resolve() if path.exists() else None
     # WRITE_FILE презаписва ЦЕЛИЯ файл. Върху нещо, което моделът никога не е
     # видяло в тази сесия, това е сляпо унищожаване на неизвестно съдържание —
@@ -946,9 +952,8 @@ def dispatch_tool_call(name: str, arguments) -> str:
     връща — всички текущи callers правят json.loads() сами, но подаването на
     низ иначе гърми с неясното "'str' object has no attribute 'get'"."""
     if isinstance(arguments, str):
-        import json as _json
         try:
-            arguments = _json.loads(arguments or "{}")
+            arguments = load_tool_arguments(arguments)
         except (ValueError, TypeError):
             return f"[{name}] Невалидни аргументи (не са валиден JSON): {arguments[:200]}"
     if not isinstance(arguments, dict):
