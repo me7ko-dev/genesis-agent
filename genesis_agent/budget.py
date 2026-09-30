@@ -94,6 +94,45 @@ def _is_tool_result(msg: dict) -> bool:
             and str(msg.get("content", "")).startswith(_TEXT_RESULT_PREFIX))
 
 
+# Колко съобщения тръгват към модела — колкото беше deque(maxlen=30) на
+# фронтендите. Досега таванът беше самият deque и режеше отпред посред хода:
+# системния промпт, после заявката (виж request_window).
+MAX_SENT_MESSAGES = 30
+
+
+def request_window(messages, limit: int = MAX_SENT_MESSAGES) -> list[dict]:
+    """Най-много `limit` съобщения към модела — без да се губи задачата.
+
+    Водещите system съобщения и последното user съобщение (заявката, по която
+    се работи) остават винаги; от останалото — най-новото, от цял рунд (без
+    tool резултат, чието извикване е отрязано). 2026-09-30: без user
+    съобщение ollama само „зарежда“ модела (done_reason=load, prompt=0) и
+    отговаря празно — 13 от 210 bench разговора минаха на 8× по-бавния
+    NVIDIA до края си, а той продължаваше без задачата."""
+    msgs = list(messages)
+    if limit <= 0 or len(msgs) <= limit:
+        return msgs
+    lead = 0
+    while lead < len(msgs) and msgs[lead].get("role") == "system":
+        lead += 1
+    users = [i for i in range(lead, len(msgs)) if msgs[i].get("role") == "user"]
+    task = users[-1] if users else None
+    pinned = msgs[:lead] + ([msgs[task]] if task is not None else [])
+    before = msgs[lead:task] if task is not None else []
+    after = msgs[task + 1:] if task is not None else msgs[lead:]
+    room = max(limit - len(pinned), 0)
+    after = _whole_rounds(after[-room:] if room else [])
+    room -= len(after)
+    before = _whole_rounds(before[-room:] if room > 0 else [])
+    return msgs[:lead] + before + ([msgs[task]] if task is not None else []) + after
+
+
+def _whole_rounds(tail: list[dict]) -> list[dict]:
+    while tail and tail[0].get("role") == "tool":
+        tail = tail[1:]
+    return tail
+
+
 def budget_history(messages, *, fresh: int | None = None,
                    stale_limit: int | None = None) -> list[dict]:
     """Свива СТАРИТЕ tool резултати точно преди заявката тръгне към модела.
@@ -120,7 +159,7 @@ def budget_history(messages, *, fresh: int | None = None,
     stale_limit = STALE_TOOL_RESULT_MAX_CHARS if stale_limit is None else stale_limit
     msgs = list(messages)
     if stale_limit <= 0:
-        return msgs
+        return request_window(msgs)
 
     result_idx = [i for i, m in enumerate(msgs) if isinstance(m, dict) and _is_tool_result(m)]
     stale = set(result_idx[:-fresh] if fresh > 0 else result_idx)
@@ -140,7 +179,7 @@ def budget_history(messages, *, fresh: int | None = None,
     duplicates = {i for i in result_idx
                   if latest_of.get(str(msgs[i].get("content", ""))) not in (None, i)}
     if not stale and not duplicates:
-        return msgs
+        return request_window(msgs)
 
     out = []
     for i, m in enumerate(msgs):
@@ -151,7 +190,7 @@ def budget_history(messages, *, fresh: int | None = None,
             if len(content) > stale_limit:
                 m = {**m, "content": clip_for_context(content, limit=stale_limit)}
         out.append(m)
-    return out
+    return request_window(out)
 
 
 def record_usage(*, provider: str, model: str, prompt_tokens: int,

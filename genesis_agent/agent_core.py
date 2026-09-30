@@ -58,6 +58,27 @@ def restored_history(saved: list[dict], system_prompt: str,
                  maxlen=maxlen)
 
 
+def bounded_history(messages, maxlen: int | None) -> deque:
+    """Живата история обратно под тавана си — след хода, не по време на него.
+
+    По време на хода историята е без таван (run_turn, run_tool_loop): deque с
+    maxlen изхвърляше отпред посред задачата — първо системния промпт, после
+    самата заявка на оператора. Измерено 2026-09-30: в 13 от 210 bench
+    разговора ollama оттам нататък отговаряше празно за 0.3 s (без нито едно
+    user съобщение той само „зарежда“ модела — done_reason=load, prompt=0),
+    всичко отиваше на 8× по-бавния NVIDIA, а той работеше без задачата.
+    Тук: системният промпт остава, после най-новото; без tool резултат,
+    чието извикване е отрязано."""
+    msgs = list(messages)
+    if not maxlen or len(msgs) <= maxlen:
+        return deque(msgs, maxlen=maxlen)
+    head = msgs[:1] if msgs[0].get("role") == "system" else []
+    tail = msgs[len(head):][-(maxlen - len(head)):]
+    while tail and tail[0].get("role") == "tool":
+        tail = tail[1:]
+    return deque(head + tail, maxlen=maxlen)
+
+
 def env_facts(workspace: str = "") -> str:
     """Реалните пътища на машината, инжектирани в системния промпт (design note, 2026-07-27).
 
@@ -379,6 +400,9 @@ def run_tool_loop(
     from genesis_agent.repeat_guard import RepeatGuard
 
     _status = on_status or (lambda _s: None)
+    limit = getattr(messages, "maxlen", None)
+    if limit:
+        messages = deque(messages)  # без таван до края на хода — виж bounded_history
     rounds = 0
     # Таванът на рундовете ограничава цената на въртенето на място, но не го
     # разпознава — виж genesis_agent.repeat_guard за защо това стана по-скъпо,
@@ -614,4 +638,4 @@ def run_tool_loop(
             pass
         _status(f"история компресирана ({before_len} → {len(messages)})")
 
-    return messages
+    return bounded_history(messages, limit) if limit else messages

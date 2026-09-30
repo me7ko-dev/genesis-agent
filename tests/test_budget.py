@@ -375,3 +375,33 @@ class TestFormatReport:
                   "by_provider": {}}
         out = budget.format_report(totals, title="Днес")
         assert "900" in out and "90%" in out and "50" in out
+
+
+def _long_turn(rounds: int) -> list[dict]:
+    msgs = [{"role": "system", "content": "SYS"}, {"role": "user", "content": "ЗАДАЧАТА"}]
+    for i in range(rounds):
+        msgs += [{"role": "assistant", "content": "", "tool_calls": [{"id": f"c{i}"}]},
+                 {"role": "tool", "tool_call_id": f"c{i}", "content": f"резултат {i}"}]
+    return msgs
+
+
+def test_request_window_keeps_the_system_prompt_the_task_and_whole_rounds() -> None:
+    """2026-09-30: без user съобщение ollama отговаря празно (done_reason=load)."""
+    from genesis_agent.budget import request_window
+    out = request_window(_long_turn(20), limit=30)
+    assert len(out) <= 30
+    assert out[0]["content"] == "SYS" and out[1]["content"] == "ЗАДАЧАТА"
+    assert out[2]["role"] == "assistant"
+    assert out[-1]["content"] == "резултат 19"
+
+
+def test_request_window_leaves_a_short_history_alone() -> None:
+    from genesis_agent.budget import request_window
+    msgs = _long_turn(3)
+    assert request_window(msgs, limit=30) == msgs
+
+
+def test_budget_history_sends_the_task_in_a_long_turn() -> None:
+    from genesis_agent.budget import budget_history
+    out = budget_history(_long_turn(40))
+    assert out[1]["content"] == "ЗАДАЧАТА" and len(out) <= 30

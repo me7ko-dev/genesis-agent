@@ -1209,6 +1209,10 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     if knowledge:
         content = f"{user_input}\n\n{knowledge}"
         ui.info(f"📚 проверено знание: {knowledge.splitlines()[0].split(': ', 1)[-1]}")
+    # Без таван до края на хода: deque(maxlen) изхвърляше посред задачата
+    # системния промпт и самата заявка (виж agent_core.bounded_history).
+    limit = getattr(messages, "maxlen", None)
+    messages = deque(messages)
     messages.append({"role": "user", "content": content})
     _remember("user", user_input)
 
@@ -1440,7 +1444,8 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     session_file = HISTORY_DIR / f"session_{datetime.fromtimestamp(session_start_time).strftime('%Y%m%d_%H%M%S')}.json"
     with open(session_file, "w", encoding="utf-8") as f:
         json.dump(list(messages), f, ensure_ascii=False, indent=None, separators=(',', ':'))
-    return messages
+    from genesis_agent.agent_core import bounded_history
+    return bounded_history(messages, limit)
 
 
 def main():
