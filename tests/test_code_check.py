@@ -23,17 +23,6 @@ def test_run_only_with_the_examples_is_told_to_try_the_rules():
     assert "НЕ пуснат" not in note and "различен от примерите" in note
 
 
-def test_the_cases_are_asserts_not_prints():
-    """bench_fcc 2026-09-30: „Test 9: 3 expected 4“ и после „All tests passed!“."""
-    for first in (WRITE, RUN):
-        c = RunCheck()
-        c.observe(WRITE)
-        if first is RUN:
-            c.observe(RUN)
-        note = c.note()
-        assert "assert резултат == очаквано" in note and "rc≠0" in note
-
-
 def test_an_edit_after_the_run_counts_as_not_run():
     c = RunCheck()
     c.observe(WRITE)

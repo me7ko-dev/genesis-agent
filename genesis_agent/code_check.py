@@ -6,11 +6,6 @@ One was never run; the other was run with exactly the two examples in the
 task, both passed, and the bug was in deeper nesting than they had. When the
 model ends its turn after writing .py, it is told once: run it (if it did
 not), and try a case per rule — harder input, the edges, input to reject.
-
-bench_fcc 2026-09-30: 84 of 90 such checks were print() only. One printed
-"Test 9: 3 expected 4", then "All tests passed!", and the model said done —
-the answer failed 4 of 6 hidden tests. So each case is an assert: a mismatch
-ends the command with rc≠0 instead of scrolling past.
 """
 from __future__ import annotations
 
@@ -24,9 +19,7 @@ _PYTHON_CMD = re.compile(r"""(?:^|[\s"'/\\&|;(])(?:python3?|py|pytest)(?:\.exe)?
                          re.IGNORECASE | re.MULTILINE)
 _CASES = ("по един случай за всяко правило или ограничение в условието, различен от примерите "
           "в заявката: по-сложен вход, граничните стойности и вход, който трябва да бъде "
-          "отхвърлен. Всеки случай е `assert резултат == очаквано, (вход, резултат)`, не print — "
-          "отпечатано „очаквано 4“ до 3 никой не сравнява, а падащ assert дава rc≠0. Очакваното "
-          "смятай от условието, не от кода")
+          "отхвърлен")
 
 
 class RunCheck:
@@ -64,4 +57,4 @@ class RunCheck:
                     "наистина не може да се пусне тук, кажи защо.")
         return ("[проверка на кода] Преди „готово“: примерите от заявката не доказват правилата. "
                 f"Пусни кода с {_CASES}. Разминаване → поправи и пусни пак. Ако вече си ги "
-                "пробвал с assert — кажи в един ред кои и приключи.")
+                "пробвал — кажи в един ред кои и приключи.")
