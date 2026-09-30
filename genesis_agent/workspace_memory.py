@@ -36,11 +36,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from genesis_agent.config import DATA_DIR
+from genesis_agent.config import MEMORY_DIR
 
 log = logging.getLogger("genesis.workspace_memory")
 
-DB_PATH = DATA_DIR / "workspace_memory.db"
+DB_PATH = MEMORY_DIR / "workspace_memory.db"
 
 STATUSES = ("open", "blocked", "done")
 _MAX_TEXT = 2000  # рязък таван — LLM понякога праща цял абзац за "заглавие"
