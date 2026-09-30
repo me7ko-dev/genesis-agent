@@ -685,3 +685,60 @@ class TestTotalDeadline:
         monkeypatch.setattr("genesis_agent.brain.requests.post", _boom)
         with pytest.raises(requests.exceptions.ConnectionError):
             Brain.__new__(Brain)._http("https://x", "k", "m", [], 30)
+
+
+class TestTransientServerErrorIsRetriedOnce:
+    """bench 26–30.09: 131 от 286 бавни отговора (NVIDIA ~29 s) дойдоха след
+    HTTP 500 на ollama (~3.5 s), а следващият му опит минаваше в 104 от 139."""
+
+    def _brain(self, monkeypatch, outcomes: dict[str, list]):
+        calls: list[str] = []
+        sleeps: list[float] = []
+
+        def _fake_call(self, provider, model, messages, tools=None, extra=None):
+            calls.append(model)
+            result = outcomes[model].pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result, None
+
+        monkeypatch.setattr(Brain, "_call", _fake_call)
+        monkeypatch.setattr(brain_mod.time, "sleep", sleeps.append)
+        b = Brain()
+        real = b.chain[0]
+        b.chain = [dict(real, model=m) for m in outcomes]
+        b.local = None
+        b._pinned = None
+        return b, calls, sleeps
+
+    def test_a_500_is_retried_on_the_same_model(self, monkeypatch) -> None:
+        b, calls, sleeps = self._brain(monkeypatch, {
+            "t500-a": [RuntimeError("HTTP_500: Internal Server Error"), "ok from a"],
+            "t500-b": ["ok from b"]})
+        assert b.complete([{"role": "user", "content": "hi"}]).raw_text == "ok from a"
+        assert calls == ["t500-a", "t500-a"] and sleeps == [brain_mod._TRANSIENT_PAUSE_S]
+
+    def test_a_second_500_moves_on(self, monkeypatch) -> None:
+        b, calls, _ = self._brain(monkeypatch, {
+            "t500x-a": [RuntimeError("HTTP_500: x"), RuntimeError("HTTP_502: y")],
+            "t500x-b": ["ok from b"]})
+        assert b.complete([{"role": "user", "content": "hi"}]).raw_text == "ok from b"
+        assert calls == ["t500x-a", "t500x-a", "t500x-b"]
+
+    @pytest.mark.parametrize("error", ["HTTP_429: rate", "празен отговор (finish_reason=stop)",
+                                       "HTTP_413: too large"])
+    def test_other_errors_are_not_retried(self, monkeypatch, error) -> None:
+        a = f"once-{error[:8]}"
+        b, calls, sleeps = self._brain(monkeypatch, {a: [RuntimeError(error)], "once-b": ["ok"]})
+        assert b.complete([{"role": "user", "content": "hi"}]).raw_text == "ok"
+        assert calls == [a, "once-b"] and sleeps == []
+
+
+def test_an_empty_reply_says_why(monkeypatch) -> None:
+    def _post(url, headers=None, json=None, timeout=None):
+        return _FakeResponse(200, {"choices": [{"message": {"content": ""}, "finish_reason": "stop"}],
+                                   "usage": {"prompt_tokens": 9801, "completion_tokens": 0}})
+
+    monkeypatch.setattr("genesis_agent.brain.requests.post", _post)
+    with pytest.raises(RuntimeError, match=r"празен отговор \(finish_reason=stop, prompt=9801, out=0"):
+        Brain.__new__(Brain)._http("https://x", "k", "gpt-oss:120b-cloud", [], 30)
