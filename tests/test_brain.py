@@ -742,3 +742,37 @@ def test_an_empty_reply_says_why(monkeypatch) -> None:
     monkeypatch.setattr("genesis_agent.brain.requests.post", _post)
     with pytest.raises(RuntimeError, match=r"празен отговор \(finish_reason=stop, prompt=9801, out=0"):
         Brain.__new__(Brain)._http("https://x", "k", "gpt-oss:120b-cloud", [], 30)
+
+
+def test_a_retried_call_counts_once_in_the_provider_stats(monkeypatch) -> None:
+    """500 + провал на повторния опит = ЕДИН провал: два сваляха ollama в края
+    на веригата за 15 минути (bench 2026-09-30)."""
+    recorded: list[tuple[str, bool]] = []
+    outcomes = {"stat-a": [RuntimeError("HTTP_500: x"), RuntimeError("HTTP_500: y")],
+                "stat-b": ["ok"]}
+
+    def _fake_call(self, provider, model, messages, tools=None, extra=None):
+        result = outcomes[model].pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result, None
+
+    monkeypatch.setattr(Brain, "_call", _fake_call)
+    monkeypatch.setattr(brain_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(Brain, "_record_stat",
+                        lambda self, prov, lat, ok: recorded.append((self._last_model, ok)))
+    b = Brain()
+    real = b.chain[0]
+    b.chain = [dict(real, model="stat-a"), dict(real, model="stat-b")]
+    b.local = None
+    b._pinned = None
+    b._last_model = None
+    orig = b._call
+
+    def _track(prov, model, *a, **k):
+        b._last_model = model
+        return orig(prov, model, *a, **k)
+
+    monkeypatch.setattr(b, "_call", _track)
+    assert b.complete([{"role": "user", "content": "hi"}]).raw_text == "ok"
+    assert recorded == [("stat-a", False), ("stat-b", True)]

@@ -1681,7 +1681,11 @@ class Brain:
                         except RuntimeError as e:
                             if not _is_transient(str(e)):
                                 raise
-                            self._record_stat(prov, time.time() - t0, False)
+                            # В статистиката влиза само крайният изход на
+                            # обръщението: 500 + провал на повторния опит се
+                            # броеше за два провала и сваляше ollama в края на
+                            # веригата за 15 мин (bench 2026-09-30: 78 отговора
+                            # на NVIDIA без нито един опит на ollama срещу 25).
                             reason = " ".join(str(e).split())[:80]
                             print(f"  [Brain] ↻ {prov}/{model} след {time.time() - t0:.1f}s: "
                                   f"{reason} → същият пак след {_TRANSIENT_PAUSE_S:.0f}s")
