@@ -15,7 +15,7 @@ LINES = [
     "Фактура № 0000004217",
     "Дата: 03.09.2026 г.",
     "Доставчик: „Стройинвест България“ ЕООД",
-    "ЕИК: 204512378",
+    "ЕИК: 204512377",
     "Получател: Иван Петров",
     "",
     "Наименование            Кол.   Ед. цена     Стойност",
@@ -90,7 +90,7 @@ def test_real_bulgarian_invoice(real_pdf: Path) -> None:
     assert got["nomer"] == "0000004217"
     assert got["data"] == "2026-09-03"
     assert got["dostavchik"] == "„Стройинвест България“ ЕООД"
-    assert got["eik"] == "204512378"
+    assert got["eik"] == "204512377"
     assert got["suma_bez_dds"] == 12440.0
     assert got["dds"] == 2488.0
     assert got["obshto"] == 14928.0
