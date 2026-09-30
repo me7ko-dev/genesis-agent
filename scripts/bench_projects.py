@@ -117,8 +117,21 @@ def run_genesis(genesis_cmd: list[str], task: str, workdir: Path, timeout: int) 
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
     env["COLUMNS"] = "200"  # fewer wrapped lines for parse_log
+    # Every trial starts with an empty memory, outside the trial's folder
+    # (siblings are listable): the shared one carried a site task's
+    # "preferences" into every later trial (2026-09-28 → 2026-09-30).
+    memory = Path(tempfile.mkdtemp(prefix="genesis-bench-memory-"))
+    env["GENESIS_MEMORY_DIR"] = str(memory)
     log_path = workdir.parent / f"{workdir.name}.log"
     t0 = time.time()
+    try:
+        return _chat(genesis_cmd, task, workdir, timeout, env, log_path, t0)
+    finally:
+        shutil.rmtree(memory, ignore_errors=True)
+
+
+def _chat(genesis_cmd: list[str], task: str, workdir: Path, timeout: int, env: dict,
+          log_path: Path, t0: float) -> tuple[str, float, str | None]:
     with log_path.open("wb") as log:
         proc = subprocess.Popen(genesis_cmd, cwd=workdir, env=env, stdin=subprocess.PIPE,
                                 stdout=log, stderr=subprocess.STDOUT,

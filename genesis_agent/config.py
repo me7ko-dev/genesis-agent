@@ -153,6 +153,16 @@ DATA_DIR: Path = (Path.home() / ".genesis" / "data") if _INSTALLED else (PROJECT
 if _INSTALLED:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+# What Genesis remembers — conversations, episodes, work threads, decisions,
+# preferences, the knowledge graph — apart from the state of the model chain
+# (provider_stats, model_check, budget_log). bench runs every trial with an
+# empty one: on 2026-09-28 a site task's "preferences" (SEO, dark theme,
+# index.html) were injected into every later trial, even a Python function.
+# Without the variable it is DATA_DIR, as before.
+MEMORY_DIR: Path = Path(os.environ.get("GENESIS_MEMORY_DIR") or DATA_DIR)
+if MEMORY_DIR != DATA_DIR:
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+
 # Removed here: ENGINE_EXE / MODEL_PATH / ENGINE_PORT / LLM_BASE_URL /
 # LLM_API_KEY / LLM_MODEL / GENESIS_MODE. They described a llama-server and
 # LM Studio setup that no longer exists — nothing in the codebase read any of

@@ -30,9 +30,9 @@ import json
 import sqlite3
 
 # ---------- SQLite setup ----------
-from genesis_agent.config import DATA_DIR
+from genesis_agent.config import MEMORY_DIR
 
-DB_PATH = DATA_DIR / "episodes.db"
+DB_PATH = MEMORY_DIR / "episodes.db"
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS episodes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

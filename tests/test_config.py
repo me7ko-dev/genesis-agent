@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import importlib
+from pathlib import Path
 
 import pytest
 
@@ -98,3 +99,21 @@ class TestTheModuleStillImportsWithABrokenEnvironment:
         assert reloaded.FRESH_TOOL_RESULTS == 2
         assert reloaded.TOOL_ROUND_CAP == 25
         assert reloaded.STORAGE_THRESHOLD_BYTES == 100 * (1024**3)
+
+
+def test_memory_moves_with_genesis_memory_dir_and_the_chain_state_does_not(tmp_path):
+    import os
+    import subprocess
+    import sys
+    code = ("from genesis_agent import workspace_memory, episodic_memory, memory, "
+            "conversation_memory, knowledge_graph, provider_stats; "
+            "print(workspace_memory.DB_PATH); print(episodic_memory.DB_PATH); "
+            "print(memory.DB_PATH); print(conversation_memory.DB_PATH); "
+            "print(knowledge_graph.GRAPH_PATH); print(provider_stats._STATS_PATH)")
+    env = dict(os.environ, GENESIS_MEMORY_DIR=str(tmp_path / "mem"), PYTHONIOENCODING="utf-8")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         encoding="utf-8", env=env, timeout=120, check=True).stdout.splitlines()
+    memory_paths, chain = out[:5], out[5]
+    assert all(Path(p).parent == tmp_path / "mem" for p in memory_paths), out
+    assert Path(chain).parent != tmp_path / "mem"
+    assert (tmp_path / "mem").is_dir()
