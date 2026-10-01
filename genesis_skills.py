@@ -275,6 +275,14 @@ def _tool_write_file(arg: str, content: str) -> str:
             content = detail
         elif not ok:
             lint_note = f"\n{detail}"
+        if not lint_note:
+            # Без ruff (не е задължителен — на лаптопа го няма) счупеният файл
+            # се записваше с „✓“ и грешката излизаше чак при pytest като
+            # срив при събирането (bench booking-form, 2026-10-01).
+            from genesis_agent.code_edit import syntax_error
+            err = syntax_error(path, content)
+            if err:
+                lint_note = f"\n⚠ Файлът е записан, но не се компилира: {err}"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
