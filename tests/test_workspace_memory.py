@@ -5,6 +5,7 @@ every test (module-level constant bound at import time, same convention as
 gui_sessions.py)."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -202,7 +203,7 @@ class TestAutoCapture:
 
         monkeypatch.setattr("genesis_agent.brain.Brain.complete", lambda self, messages: _Reply())
         messages = [
-            {"role": "user", "content": "let's use pytest, be direct with me, and I still need to write docs"},
+            {"role": "user", "content": "let's use pytest, always be direct with me, and I still need to write docs"},
             {"role": "assistant", "content": "got it"},
         ]
         result = wm.auto_capture(messages)
@@ -210,6 +211,42 @@ class TestAutoCapture:
         assert wm.list_decisions()[0]["what"] == "use pytest"
         assert wm.list_preferences() == {"tone": "direct"}
         assert wm.list_threads("open")[0]["title"] == "write docs"
+
+    def test_a_tasks_requirements_are_not_preferences(self, monkeypatch) -> None:
+        """2026-09-28: one site task → 11 "preferences" (index.html, SVG, SEO…),
+        injected into every later session, a Python task included."""
+        spec = [{"topic": t, "value": v} for t, v in [
+            ("file_structure", "index.html, styles.css, script.js"), ("SEO", "meta tags"),
+            ("design_style", "premium modern"), ("theme_toggle", "light/dark")]]
+
+        class _Reply:
+            raw_text = json.dumps({"decisions": [], "preferences": spec, "threads": []})
+
+        monkeypatch.setattr("genesis_agent.brain.Brain.complete", lambda self, messages: _Reply())
+        messages = [{"role": "user", "content": "Направи сайт: index.html, styles.css, script.js, "
+                                                "SEO, премиум дизайн, светла/тъмна тема. Винаги с alt."},
+                    {"role": "assistant", "content": "готово"}]
+        assert wm.auto_capture(messages)["preferences"] == 0
+        assert wm.list_preferences() == {}
+
+    def test_no_general_words_no_preference(self, monkeypatch) -> None:
+        class _Reply:
+            raw_text = '{"decisions": [], "preferences": [{"topic": "testing", "value": "run pytest"}], "threads": []}'
+
+        monkeypatch.setattr("genesis_agent.brain.Brain.complete", lambda self, messages: _Reply())
+        messages = [{"role": "user", "content": "Напиши модул и пусни pytest, докато минат."},
+                    {"role": "assistant", "content": "готово"}]
+        assert wm.auto_capture(messages)["preferences"] == 0
+
+    def test_a_general_wish_in_bulgarian_is_kept(self, monkeypatch) -> None:
+        class _Reply:
+            raw_text = '{"decisions": [], "preferences": [{"topic": "език", "value": "само български"}], "threads": []}'
+
+        monkeypatch.setattr("genesis_agent.brain.Brain.complete", lambda self, messages: _Reply())
+        messages = [{"role": "user", "content": "Отсега нататък ми отговаряй само на български."},
+                    {"role": "assistant", "content": "добре"}]
+        assert wm.auto_capture(messages)["preferences"] == 1
+        assert wm.list_preferences() == {"език": "само български"}
 
     def test_strips_markdown_code_fence_around_json(self, monkeypatch) -> None:
         class _Reply:

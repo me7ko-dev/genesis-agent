@@ -22,6 +22,7 @@ from datetime import date
 from pathlib import Path
 
 from genesis_agent.config import TOOL_ROUND_CAP
+from genesis_agent.tool_schemas import load_tool_arguments
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -55,6 +56,27 @@ def restored_history(saved: list[dict], system_prompt: str,
     body = [m for m in saved if m.get("role") != "system"]
     return deque([{"role": "system", "content": system_prompt}] + body[-(maxlen - 1):],
                  maxlen=maxlen)
+
+
+def bounded_history(messages, maxlen: int | None) -> deque:
+    """Живата история обратно под тавана си — след хода, не по време на него.
+
+    По време на хода историята е без таван (run_turn, run_tool_loop): deque с
+    maxlen изхвърляше отпред посред задачата — първо системния промпт, после
+    самата заявка на оператора. Измерено 2026-09-30: в 13 от 210 bench
+    разговора ollama оттам нататък отговаряше празно за 0.3 s (без нито едно
+    user съобщение той само „зарежда“ модела — done_reason=load, prompt=0),
+    всичко отиваше на 8× по-бавния NVIDIA, а той работеше без задачата.
+    Тук: системният промпт остава, после най-новото; без tool резултат,
+    чието извикване е отрязано."""
+    msgs = list(messages)
+    if not maxlen or len(msgs) <= maxlen:
+        return deque(msgs, maxlen=maxlen)
+    head = msgs[:1] if msgs[0].get("role") == "system" else []
+    tail = msgs[len(head):][-(maxlen - len(head)):]
+    while tail and tail[0].get("role") == "tool":
+        tail = tail[1:]
+    return deque(head + tail, maxlen=maxlen)
 
 
 def env_facts(workspace: str = "") -> str:
@@ -353,7 +375,7 @@ def run_tool_loop(
     on_tool_result: Callable[[str, str, str | None], None],
     on_status: Callable[[str], None] | None = None,
     round_cap: int = TOOL_ROUND_CAP,
-) -> list:
+) -> list | deque:
     """Пълният агентен цикъл: complete → (native tool_calls | текстови тагове)
     → изпълни → повтори, докато моделът спре да вика инструменти или се удари
     в тавана. После компресия (Brain.compact_chat_history) + auto_capture на
@@ -373,10 +395,14 @@ def run_tool_loop(
     """
     from genesis_agent import claim_check
     from genesis_agent.budget import clip_for_context
+    from genesis_agent.code_check import RunCheck
     from genesis_agent.page_check import FinalCheck
     from genesis_agent.repeat_guard import RepeatGuard
 
     _status = on_status or (lambda _s: None)
+    limit = getattr(messages, "maxlen", None)
+    if limit:
+        messages = list(messages)  # без таван до края на хода — виж bounded_history
     rounds = 0
     # Таванът на рундовете ограничава цената на въртенето на място, но не го
     # разпознава — виж genesis_agent.repeat_guard за защо това стана по-скъпо,
@@ -393,6 +419,8 @@ def run_tool_loop(
     executed: list[tuple[str, str]] = []
     # Уеб страниците от хода — в браузър, когато моделът каже „готово“ (page_check).
     page_check = FinalCheck()
+    # .py, записан и непуснат след последната промяна (code_check).
+    run_check = RunCheck()
 
     _translate_last_user_message_to_en(messages)
     text, tool_calls, prov, model = core.complete(messages)
@@ -415,12 +443,13 @@ def run_tool_loop(
                 fn = tc.get("function", {}) or {}
                 name = fn.get("name", "")
                 try:
-                    args = json.loads(fn.get("arguments") or "{}")
+                    args = load_tool_arguments(fn.get("arguments"))
                 except (json.JSONDecodeError, TypeError):
                     args = {}
                 diff = _diff_for_write(core.skills, args) if name == "WRITE_FILE" else None
                 result = core.skills.dispatch_tool_call(name, args)
                 page_check.observe(result)
+                run_check.observe(result)
                 entry = claim_check.counts_as_executed(
                     name, " ".join(str(v) for v in args.values()), result)
                 if entry:
@@ -466,6 +495,7 @@ def run_tool_loop(
         results = core.skills.parse_and_execute_tools(text)
         for r in results:
             page_check.observe(r)
+            run_check.observe(r)
         # Името на инструмента стои в самия резултат (`[RUN_CMD: ...]`).
         # Извличането живее в claim_check, за да не се дублира между
         # фронтендите — иначе промяна във формата ги обезоръжава наведнъж.
@@ -518,6 +548,11 @@ def run_tool_loop(
                     _status("оправя според браузъра…")
                     text, tool_calls, prov, model = core.complete(messages)
                     continue
+            if run_check.due():
+                messages.append({"role": "system", "content": run_check.note()})
+                _status("пробва кода…")
+                text, tool_calls, prov, model = core.complete(messages)
+                continue
             promise = claim_check.unfinished_promise(text)
             if promise and promise_retries < 1:
                 promise_retries += 1
@@ -603,4 +638,4 @@ def run_tool_loop(
             pass
         _status(f"история компресирана ({before_len} → {len(messages)})")
 
-    return messages
+    return bounded_history(messages, limit) if limit else messages

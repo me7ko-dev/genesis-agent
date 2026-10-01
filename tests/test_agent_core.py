@@ -709,3 +709,44 @@ class TestSimulatedWorkIsCaughtMidLoop:
         nudges = [m for m in messages if m.get("role") == "system"
                   and "нито един изпълнен инструмент" in str(m.get("content", ""))]
         assert not nudges, "истинската инсталация не бива да се оспорва"
+
+
+class TestALongTurnKeepsItsTask:
+    """2026-09-30: deque(maxlen=30) изхвърляше посред хода системния промпт и
+    заявката; ollama после отговаряше празно (done_reason=load) до края."""
+
+    def test_every_request_of_a_20_round_turn_has_the_system_prompt_and_the_task(self) -> None:
+        from collections import deque
+        rounds = 20
+        replies = [("", [{"id": f"c{i}", "function": {"name": "READ_FILE",
+                                                      "arguments": f'{{"path": "f{i}.py"}}'}}],
+                    "ollama", "gpt-oss") for i in range(rounds)] + [("готово", None, "ollama", "gpt-oss")]
+        seen: list[list[dict]] = []
+
+        class _Core(_FakeCore):
+            def complete(self, messages):
+                seen.append(list(messages))
+                return super().complete(messages)
+
+        core = _Core(replies)
+        core.skills = _FakeToolSkills([f"[READ_FILE: f{i}.py]\nx = {i}" for i in range(rounds)])
+        history = deque([{"role": "system", "content": "SYS"}], maxlen=30)
+        history.append({"role": "user", "content": "ЗАДАЧАТА"})
+        out = ac.run_tool_loop(core, history, on_assistant=lambda *a: None,
+                               on_tool_result=lambda *a: None)
+        assert len(seen) == rounds + 1
+        for sent in seen:
+            assert sent[0] == {"role": "system", "content": "SYS"}
+            assert any(m.get("content") == "ЗАДАЧАТА" for m in sent)
+        assert out.maxlen == 30 and out[0]["role"] == "system"
+        assert out[1]["role"] != "tool"
+
+
+def test_bounded_history_keeps_the_system_prompt_and_whole_rounds() -> None:
+    msgs = [{"role": "system", "content": "SYS"}, {"role": "user", "content": "go"}]
+    for i in range(20):
+        msgs += [{"role": "assistant", "content": "", "tool_calls": [{"id": f"c{i}"}]},
+                 {"role": "tool", "tool_call_id": f"c{i}", "content": str(i)}]
+    out = ac.bounded_history(msgs, 8)  # the newest 7 start with a tool result → it goes
+    assert out.maxlen == 8 and out[0]["content"] == "SYS"
+    assert out[1]["role"] == "assistant" and len(out) == 7

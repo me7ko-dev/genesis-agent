@@ -37,13 +37,13 @@ import sqlite3
 from typing import Any
 
 import genesis_agent.episodic_memory as episodic
-from genesis_agent.config import DATA_DIR
+from genesis_agent.config import MEMORY_DIR
 
 log = logging.getLogger("genesis.memory")
 
 # ─── SQLite Setup (Key/Value store) ──────────────────────────────────────────
 
-DB_PATH = DATA_DIR / "persistent_memory.db"
+DB_PATH = MEMORY_DIR / "persistent_memory.db"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS kv_store (

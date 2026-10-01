@@ -67,3 +67,19 @@ def test_every_project_has_a_task_and_hidden_tests():
     for p in projects:
         assert (p / "task.txt").is_file(), p.name
         assert (p / "test_hidden.py").is_file(), p.name
+
+
+def test_every_trial_gets_an_empty_memory_outside_its_folder(tmp_path):
+    """2026-09-28 → 30: a site task's „preferences“ reached every later trial."""
+    import sys
+    workdir = tmp_path / "trial-1"
+    workdir.mkdir()
+    probe = ("import os, pathlib; m = pathlib.Path(os.environ['GENESIS_MEMORY_DIR']); "
+             "print('MEM', m, sorted(p.name for p in m.iterdir())); (m / 'x.db').write_text('1')")
+    log, _, stopped = bp.run_genesis([sys.executable, "-c", probe], "task", workdir, 60)
+    assert stopped is None
+    line = next(ln for ln in log.splitlines() if ln.startswith("MEM "))
+    memory = Path(line.split(" ", 2)[1])
+    assert line.endswith("[]")
+    assert workdir not in memory.parents and tmp_path not in memory.parents
+    assert not memory.exists()

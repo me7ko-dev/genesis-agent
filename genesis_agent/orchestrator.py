@@ -26,7 +26,7 @@ from genesis_agent.config import MAX_LLM_RETRIES, PROJECT_ROOT
 from genesis_agent.executor import run_python_subprocess
 from genesis_agent.skill_loader import SKILLS_ROOT
 from genesis_agent.skills_manager import save_skill, slugify
-from genesis_agent.tool_schemas import MISSION_TOOLS
+from genesis_agent.tool_schemas import MISSION_TOOLS, load_tool_arguments
 from genesis_agent.verifier import verify_skill
 
 
@@ -152,7 +152,7 @@ def run_orchestrated(goal: str, *, max_rounds: int | None = None,
                     fn = tc.get("function", {}) or {}
                     name = fn.get("name", "")
                     try:
-                        args = _json.loads(fn.get("arguments") or "{}")
+                        args = load_tool_arguments(fn.get("arguments"))
                     except (_json.JSONDecodeError, TypeError):
                         args = {}
                     tool_out = genesis_skills.dispatch_tool_call(name, args)

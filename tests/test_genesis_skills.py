@@ -138,6 +138,23 @@ def test_write_file_outside_workspace_is_denied_non_interactively(_workspace, tm
     assert "SANDBOX DENIED" in out or "[WRITE_FILE]" in out
 
 
+def test_write_file_without_a_file_name_says_so(_workspace) -> None:
+    """bench faktura-excel 2026-09-29: празен path → write_text върху папката →
+    „Permission denied“, и моделът питаше дали папката е защитена."""
+    for arg in ("", str(_workspace)):
+        out = gs._tool_write_file(arg, "x = 1\n")
+        assert "Няма име на файл" in out and "Permission" not in out
+
+
+def test_dispatch_repairs_regex_escapes_in_raw_arguments(_workspace) -> None:
+    """Моделът праща `\\d` в JSON низ (невалиден escape): пътят и кодът
+    трябва да стигнат, а `\\n` да си остане нов ред."""
+    raw = r'{"path": "rx.txt", "content": "D = r\"\d{2}\s*\"\nE = 1\n"}'
+    out = gs.dispatch_tool_call("WRITE_FILE", raw)
+    assert "✓" in out, out
+    assert (_workspace / "rx.txt").read_text(encoding="utf-8") == 'D = r"\\d{2}\\s*"\nE = 1\n'
+
+
 def test_write_file_refuses_to_clobber_an_unread_existing_file(_workspace) -> None:
     f = _workspace / "important.py"
     f.write_text("original content that matters", encoding="utf-8")

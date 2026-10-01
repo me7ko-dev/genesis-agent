@@ -577,6 +577,30 @@
         "method": "page_check_passed",
         "detail": "tests/test_web_skill.py: страница от скелета + CSS + JS — 0 находки"
       }
+    },
+    {
+      "name": "bg_invoice_fields",
+      "category": "domain",
+      "file_path": "skills/bg_invoice_fields.md",
+      "description": "Полета от текста на българска фактура (след pdfplumber) — номер с водещи нули, дата „ДД.ММ.ГГГГ г.“, суми „12 440,00 лв.“, доставчик в кавички, ЕИК както е отпечатан; етикетът и стойността са на един ред.",
+      "triggers": [
+        "фактура",
+        "фактури",
+        "фактура №",
+        "данъчна основа",
+        "сума за плащане",
+        "доставчик",
+        "pdfplumber фактура",
+        "bulgarian invoice pdf fields"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-09-30T00:00:00+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
     }
   ]
 }

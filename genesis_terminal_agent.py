@@ -90,6 +90,7 @@ except Exception:
 # installed package and the user's own home — nothing machine-specific here.
 from genesis_agent import claim_check
 from genesis_agent.budget import clip_for_context
+from genesis_agent.code_check import RunCheck as _RunCheck
 from genesis_agent.config import TOOL_ROUND_CAP as _TOOL_ROUND_CAP
 from genesis_agent.page_check import FinalCheck as _PageCheck
 from genesis_agent.paths import (
@@ -100,6 +101,7 @@ from genesis_agent.paths import (
     workspace_dir,
 )
 from genesis_agent.repeat_guard import RepeatGuard as _RepeatGuard
+from genesis_agent.tool_schemas import load_tool_arguments
 
 try:
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -1207,6 +1209,10 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     if knowledge:
         content = f"{user_input}\n\n{knowledge}"
         ui.info(f"📚 проверено знание: {knowledge.splitlines()[0].split(': ', 1)[-1]}")
+    # Без таван до края на хода: deque(maxlen) изхвърляше посред задачата
+    # системния промпт и самата заявка (виж agent_core.bounded_history).
+    limit = getattr(messages, "maxlen", None)
+    messages = deque(messages)
     messages.append({"role": "user", "content": content})
     _remember("user", user_input)
 
@@ -1230,6 +1236,8 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     # Уеб страниците, писани в хода, се отварят в браузър, когато моделът каже
     # „готово“ (genesis_agent.page_check, план Г.11).
     _page_check = _PageCheck()
+    # .py, записан и непуснат след последната промяна (genesis_agent.code_check).
+    _run_check = _RunCheck()
     # Въртене на място: същият извик, същият резултат, пореден път.
     # Таванът го ограничава по цена, но не го разпознава — виж
     # genesis_agent.repeat_guard.
@@ -1266,11 +1274,12 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
                 fn = tc.get("function", {}) or {}
                 name = fn.get("name", "")
                 try:
-                    args = json.loads(fn.get("arguments") or "{}")
+                    args = load_tool_arguments(fn.get("arguments"))
                 except (json.JSONDecodeError, TypeError):
                     args = {}
                 result = genesis_skills.dispatch_tool_call(name, args)
                 _page_check.observe(result)
+                _run_check.observe(result)
                 _entry = claim_check.counts_as_executed(
                     name, " ".join(str(v) for v in args.values()), result)
                 if _entry:
@@ -1316,6 +1325,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
         _executed.extend(claim_check.executed_from_text_results(tool_results))
         for _r in tool_results:
             _page_check.observe(_r)
+            _run_check.observe(_r)
         if not tool_results:
             # Празно ≠ непременно "приключи" — може да е объркан tool tag
             # (виж agent_core.run_tool_loop, същият фикс, design note
@@ -1348,6 +1358,12 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
                     with ui.thinking("Оправям според браузъра…", "aesthetic"):
                         response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
                     continue
+            if _run_check.due():
+                ui.warn("Написа код — казвам му да го пробва и извън примерите.")
+                messages.append({"role": "system", "content": _run_check.note()})
+                with ui.thinking("Пробвам кода…", "aesthetic"):
+                    response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
+                continue
             _promise = claim_check.unfinished_promise(response)
             if _promise and _promise_retries < 1:
                 _promise_retries += 1
@@ -1428,7 +1444,8 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     session_file = HISTORY_DIR / f"session_{datetime.fromtimestamp(session_start_time).strftime('%Y%m%d_%H%M%S')}.json"
     with open(session_file, "w", encoding="utf-8") as f:
         json.dump(list(messages), f, ensure_ascii=False, indent=None, separators=(',', ':'))
-    return messages
+    from genesis_agent.agent_core import bounded_history
+    return bounded_history(messages, limit)
 
 
 def main():
@@ -1469,6 +1486,7 @@ def main():
                             border_style="cyan", padding=(1, 2)))
 
     messages = deque([{"role": "system", "content": SYSTEM_PROMPT}], maxlen=_HISTORY_MAXLEN)
+    from genesis_agent.chat_input import read_message
     from genesis_agent.model_router import CONFIRM_COMMANDS, command_for_request
 
     while True:
@@ -1482,7 +1500,7 @@ def main():
             except Exception as e:
                 console.print(f"[dim]⚠ статус: {e}[/]")
 
-            user_input = console.input("[bold green]❯[/] ").strip()
+            user_input = read_message(lambda: console.input("[bold green]❯[/] "))
             if not user_input: continue
 
             # Заявка, която е точно вградена команда („направи бекъп"), не
@@ -1668,6 +1686,7 @@ def main():
                 help_table.add_row("/skills", "Списък с уменията (без модел, мигновено)")
                 help_table.add_row("/tasks", "Състояние на работата — отворени нишки, решения")
                 help_table.add_row("/done <id>", "Затвори нишка като готова (/drop <id> = изхвърли)")
+                help_table.add_row('"""', "Съобщение на много редове: \"\"\" … \"\"\" (поставеният текст е едно съобщение и без това)")
                 help_table.add_row("exit / quit", "Изход")
                 console.print(Panel(help_table, title="[bold cyan]◈ GENESIS КОМАНДИ ◈[/]", border_style="cyan"))
                 continue

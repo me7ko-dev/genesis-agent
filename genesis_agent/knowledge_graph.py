@@ -21,9 +21,9 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from genesis_agent.config import DATA_DIR
+from genesis_agent.config import MEMORY_DIR
 
-GRAPH_PATH = DATA_DIR / "knowledge_graph.json"
+GRAPH_PATH = MEMORY_DIR / "knowledge_graph.json"
 
 _MAX_RELATIONS_STORED = 200
 _MAX_LOG_CHARS = 6000

@@ -222,6 +222,10 @@ def _print_skip(provider: str, model: str, error: str, seconds: float) -> None:
     print(f"  [Brain] ✗ {provider}/{model} след {seconds:.1f}s: {reason} → следващ")
 
 
+def _is_transient(error: str) -> bool:
+    return any(error.startswith(f"HTTP_{c}") for c in _TRANSIENT_CODES)
+
+
 def _openai_usage(usage: Any) -> Any:
     """usage от OpenAI-съвместим отговор + `cached_read_tokens` за budget.py.
 
@@ -311,6 +315,13 @@ _EXHAUST_COOLDOWN = 300  # секунди (5 мин) — колкото типи
 # openai/gpt-oss-120b). Пет минути cooldown само го отлагат — пропуска се до
 # края на процеса.
 _GONE_COOLDOWN = 24 * 3600
+# Сървърна грешка, която обикновено минава за секунди → същият модел още веднъж,
+# след кратка пауза, преди следващия във веригата. Измерено в bench-а 26–30.09:
+# 131 от 286 отговора на NVIDIA/OpenRouter (медиана 29 s / 17.6 s) дойдоха след
+# HTTP 500 на ollama (медиана 3.5 s), а следващият опит на ollama мина в 104 от
+# 139 случая. „празен отговор“ НЕ е тук: повторен е празен и 70 от 70 пъти.
+_TRANSIENT_CODES = {500, 502, 504}
+_TRANSIENT_PAUSE_S = 2.0
 
 # Модул-ниво: изчерпани модели (survive-ва между мисии в един процес, напр. маратона).
 _EXHAUSTED: dict[str, float] = {}
@@ -1047,7 +1058,13 @@ class Brain:
         except (ValueError, KeyError, IndexError, TypeError) as e:
             raise RuntimeError(f"HTTP_200_MALFORMED: {type(e).__name__}: {r.text[:150]}")
         if not content and not tool_calls:
-            raise RuntimeError("празен отговор")
+            # Причината в лога (2026-09-30): ollama връщаше празно след 0.3 s в 13
+            # от 210 bench разговора, до края им — а редът не казваше защо.
+            usage = data.get("usage") or {}
+            raise RuntimeError(f"празен отговор (finish_reason={finish_reason or '—'}, "
+                               f"prompt={usage.get('prompt_tokens', '?')}, "
+                               f"out={usage.get('completion_tokens', '?')}, "
+                               f"reasoning={len(message.get('reasoning') or '')} знака)")
         # Ударен таван на изходните токени (design note, 2026-08-12): досега
         # `finish_reason` не се четеше НИКЪДЕ и отрязан отговор се връщаше като
         # нормален. Ако при това код-оградата е останала незатворена, счупен
@@ -1659,7 +1676,22 @@ class Brain:
                     msgs = messages if use_tools else messages_notools
                     t0 = time.time()
                     try:
-                        raw_text, tool_calls = self._call(prov, model, msgs, tools=use_tools)
+                        try:
+                            raw_text, tool_calls = self._call(prov, model, msgs, tools=use_tools)
+                        except RuntimeError as e:
+                            if not _is_transient(str(e)):
+                                raise
+                            # В статистиката влиза само крайният изход на
+                            # обръщението: 500 + провал на повторния опит се
+                            # броеше за два провала и сваляше ollama в края на
+                            # веригата за 15 мин (bench 2026-09-30: 78 отговора
+                            # на NVIDIA без нито един опит на ollama срещу 25).
+                            reason = " ".join(str(e).split())[:80]
+                            print(f"  [Brain] ↻ {prov}/{model} след {time.time() - t0:.1f}s: "
+                                  f"{reason} → същият пак след {_TRANSIENT_PAUSE_S:.0f}s")
+                            time.sleep(_TRANSIENT_PAUSE_S)
+                            t0 = time.time()
+                            raw_text, tool_calls = self._call(prov, model, msgs, tools=use_tools)
                         self._record_stat(prov, time.time() - t0, True)
                         self._fail_count = 0
                         self.current = attempt
