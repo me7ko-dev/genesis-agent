@@ -6,7 +6,7 @@ Benchmark for `genesis fix`: real bugs in small projects, judged by their tests.
     python scripts/bench_fix.py --only median,cache  # a subset
     python scripts/bench_fix.py --model groq/openai/gpt-oss-120b   # one model pinned
 
-Why this exists (NEXT_STEPS.md, 2026-09-23): `benchmark.py` measures writing a
+Why this exists (docs/history/NEXT_STEPS-2026-09-30.md, 2026-09-23): `benchmark.py` measures writing a
 small function from scratch. `genesis fix` does something else — it reads code
 somebody else wrote, finds the bug and changes only that — and nothing measured
 it. Without a number, "more accurate" is a guess.

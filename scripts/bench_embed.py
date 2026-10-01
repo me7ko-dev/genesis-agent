@@ -5,7 +5,7 @@ Benchmark for the skill-search embedding model on the operator's own phrasing.
     python scripts/bench_embed.py                          # nomic-embed-text vs bge-m3
     python scripts/bench_embed.py --models bge-m3
 
-Why (NEXT_STEPS.md item 14): `nomic-embed-text` is mostly English, while the
+Why (docs/history/NEXT_STEPS-2026-09-30.md item 14): `nomic-embed-text` is mostly English, while the
 operator writes Bulgarian, often transliterated. Each installed skill gets two
 queries phrased the way the operator would ask for it, and some queries match
 no skill at all. Every model indexes the same text `reindex_all()` uses

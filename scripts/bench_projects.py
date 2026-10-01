@@ -8,7 +8,7 @@ by hidden acceptance tests the agent never sees.
     python scripts/bench_projects.py --only egn-check,workdays
     python scripts/bench_projects.py --compare old/results.json   # before → after
 
-Why this exists (NEXT_STEPS.md, plan A.1, 2026-09-25): Genesis's own tests are
+Why this exists (docs/history/NEXT_STEPS-2026-09-30.md, plan A.1, 2026-09-25): Genesis's own tests are
 not a measure — they were green while ЕГН, ЕИК and the euro were wrong. Until
 now each trial was run by hand (bench/projects/README.md). One command makes
 "did this change help?" a number instead of a guess.
