@@ -15,6 +15,8 @@ Three properties matter most, and are what these tests are built around:
 """
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -166,6 +168,32 @@ def test_edit_outside_workspace_with_a_typo_points_into_the_workspace(tmp_path_f
 def test_write_unrelated_path_outside_workspace_names_the_workspace(_workspace, tmp_path_factory) -> None:
     out = gs._tool_write_file(str(tmp_path_factory.mktemp("outside") / "a.txt"), "x")
     assert f"Workspace: {_workspace.resolve()}" in out and "Може би" not in out
+
+
+def test_first_test_in_tests_dir_gets_a_root_conftest_and_pytest_imports_the_module(_workspace) -> None:
+    """NEXT_STEPS Г.10: при ЕГН 4 рунда отидоха, докато tests/ видят egn.py от
+    корена. С празен conftest.py в корена pytest го вижда от първия път."""
+    gs._tool_write_file("egn.py", "def ok():\n    return True\n")
+    out = gs._tool_write_file("tests/test_egn.py", "from egn import ok\n\n\ndef test_ok():\n    assert ok()\n")
+    assert (_workspace / "conftest.py").is_file() and "+ conftest.py" in out
+    run = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"],
+                         cwd=_workspace, capture_output=True, text=True, timeout=60, check=False)
+    assert run.returncode == 0, run.stdout[-500:]
+
+
+def test_existing_root_conftest_is_left_alone(_workspace) -> None:
+    (_workspace / "conftest.py").write_text("import x  # own\n", encoding="utf-8")
+    out = gs._tool_write_file("tests/test_a.py", "def test_a():\n    pass\n")
+    assert (_workspace / "conftest.py").read_text(encoding="utf-8") == "import x  # own\n"
+    assert "+ conftest.py" not in out
+
+
+def test_workspace_named_tests_gets_no_conftest_above_it(tmp_path_factory) -> None:
+    ws = tmp_path_factory.mktemp("parent") / "tests"
+    ws.mkdir()
+    gs.set_workspace(ws)
+    gs._tool_write_file(str(ws / "test_a.py"), "def test_a():\n    pass\n")
+    assert not (ws.parent / "conftest.py").exists()
 
 
 def test_write_file_without_a_file_name_says_so(_workspace) -> None:

@@ -284,7 +284,30 @@ def _tool_write_file(arg: str, content: str) -> str:
     _log_episode(f"WRITE_FILE {path}", f"записани {len(content)} символа",
                  ["tool", "write_file"])
     from genesis_agent.web_check import web_note
-    return f"[WRITE_FILE: {path}] ✓ записани {len(content)} символа{lint_note}{web_note(path)}"
+    return (f"[WRITE_FILE: {path}] ✓ записани {len(content)} символа{lint_note}"
+            f"{_root_conftest_note(path)}{web_note(path)}")
+
+
+def _root_conftest_note(path: Path) -> str:
+    """Празен conftest.py в корена при първия тест в tests/ (NEXT_STEPS Г.10).
+
+    `_import_path_hint` казва решението СЛЕД провала; при ЕГН (2026-09-25)
+    дотам отидоха 4 рунда. Празният conftest.py кара pytest да сложи корена в
+    sys.path — тестовете виждат модулите от първото пускане. Само в
+    workspace-а и само ако там още няма conftest.py.
+    """
+    if path.suffix != ".py" or path.parent.name != "tests" or not path.name.startswith("test_"):
+        return ""
+    root = path.parent.parent
+    conftest = root / "conftest.py"
+    try:
+        if conftest.exists() or not root.resolve().is_relative_to(_WORKSPACE.resolve()):
+            return ""
+        conftest.write_text("", encoding="utf-8")
+    except OSError:
+        return ""
+    _SEEN_PATHS.add(conftest.resolve())
+    return f"\n+ conftest.py (празен) в {root} — pytest вижда модулите в корена от tests/."
 
 
 def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False) -> str:
