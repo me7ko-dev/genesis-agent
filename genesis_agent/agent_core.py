@@ -375,7 +375,7 @@ def run_tool_loop(
     on_tool_result: Callable[[str, str, str | None], None],
     on_status: Callable[[str], None] | None = None,
     round_cap: int = TOOL_ROUND_CAP,
-) -> list:
+) -> list | deque:
     """Пълният агентен цикъл: complete → (native tool_calls | текстови тагове)
     → изпълни → повтори, докато моделът спре да вика инструменти или се удари
     в тавана. После компресия (Brain.compact_chat_history) + auto_capture на
@@ -402,7 +402,7 @@ def run_tool_loop(
     _status = on_status or (lambda _s: None)
     limit = getattr(messages, "maxlen", None)
     if limit:
-        messages = deque(messages)  # без таван до края на хода — виж bounded_history
+        messages = list(messages)  # без таван до края на хода — виж bounded_history
     rounds = 0
     # Таванът на рундовете ограничава цената на въртенето на място, но не го
     # разпознава — виж genesis_agent.repeat_guard за защо това стана по-скъпо,

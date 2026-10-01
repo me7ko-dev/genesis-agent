@@ -12,7 +12,6 @@ search the web for it. Two ways a message now spans lines:
 """
 from __future__ import annotations
 
-import os
 import sys
 from collections.abc import Callable
 
@@ -24,7 +23,7 @@ def pending_console_input() -> bool:
     try:
         if not sys.stdin.isatty():
             return False
-        if os.name == "nt":
+        if sys.platform == "win32":
             import msvcrt
             return bool(msvcrt.kbhit())
         import select
