@@ -27,6 +27,7 @@ CONFIRM/BLOCKED бариерата) и се записва в genesis_agent.memo
 
 from __future__ import annotations
 
+import difflib
 import re
 import sys
 from collections.abc import Callable
@@ -93,6 +94,26 @@ def _resolve(path_str: str) -> Path:
     """Разрешава път — относителните са спрямо workspace-а."""
     p = Path(path_str.strip()).expanduser()
     return p if p.is_absolute() else (_WORKSPACE / p)
+
+
+def _outside_hint(path: Path) -> str:
+    """Посоката към отказа за запис извън workspace-а (NEXT_STEPS Б.9).
+
+    Моделът пише абсолютен път с правописна грешка (`...\\Projects\\genittest`
+    при workspace `genitest`) — отказът е правилен, но без посока рундът се
+    губеше. Папка по пътя, която прилича на името на workspace-а → същият път
+    в него; иначе поне кой е workspace-ът.
+    """
+    ws = _WORKSPACE.resolve()
+    try:
+        path = path.resolve()
+    except OSError:
+        pass
+    parts = path.parts
+    for i in range(len(parts) - 2, 0, -1):
+        if difflib.SequenceMatcher(None, parts[i].casefold(), ws.name.casefold()).ratio() >= 0.8:
+            return f"\nWorkspace: {ws}. Може би: {ws.joinpath(*parts[i + 1:])}"
+    return f"\nWorkspace: {ws} — пиши с относителен път."
 
 
 def _sensitive_root_refusal(tool: str, root: Path) -> str | None:
@@ -240,7 +261,7 @@ def _tool_write_file(arg: str, content: str) -> str:
                                       [f"запис извън workspace: {path}"])
         allowed, reason = sandbox._decide(f"WRITE_FILE {path}", verdict, sandbox.get_policy())
         if not allowed:
-            return f"[WRITE_FILE] {reason}"
+            return f"[WRITE_FILE] {reason}{_outside_hint(path)}"
     # Ruff pre-check преди диска, само за .py (design note, 2026-07-29): не
     # блокираме записа при unfixable проблеми (моделът изрично поиска точно
     # това съдържание) — но ако ruff го оправи автоматично, пишем ФИКСНАТАТА
@@ -293,7 +314,7 @@ def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False
                                       [f"редакция извън workspace: {path}"])
         allowed, reason = sandbox._decide(f"EDIT_FILE {path}", verdict, sandbox.get_policy())
         if not allowed:
-            return f"[EDIT_FILE] {reason}"
+            return f"[EDIT_FILE] {reason}{_outside_hint(path)}"
 
     from genesis_agent.code_edit import edit_file
     res = edit_file(path, old, new, replace_all=replace_all)

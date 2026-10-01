@@ -138,6 +138,36 @@ def test_write_file_outside_workspace_is_denied_non_interactively(_workspace, tm
     assert "SANDBOX DENIED" in out or "[WRITE_FILE]" in out
 
 
+def _typo_workspace(tmp_path_factory):
+    """Workspace `Projects/genitest`, моделът пише в `Projects/genittest`."""
+    parent = tmp_path_factory.mktemp("Projects")
+    ws = parent / "genitest"
+    (ws / "src").mkdir(parents=True)
+    gs.set_workspace(ws)
+    return ws, parent / "genittest"
+
+
+def test_write_outside_workspace_with_a_typo_points_into_the_workspace(tmp_path_factory) -> None:
+    """NEXT_STEPS Б.9: абсолютен път с правописна грешка → отказът е правилен,
+    но рундът се губеше. Отказът вече сочи същия път в workspace-а."""
+    ws, typo = _typo_workspace(tmp_path_factory)
+    out = gs._tool_write_file(str(typo / "src" / "egn.py"), "x = 1\n")
+    assert not typo.exists()
+    assert f"Може би: {ws / 'src' / 'egn.py'}" in out
+
+
+def test_edit_outside_workspace_with_a_typo_points_into_the_workspace(tmp_path_factory) -> None:
+    ws, typo = _typo_workspace(tmp_path_factory)
+    (ws / "src" / "egn.py").write_text("x = 1\n", encoding="utf-8")
+    out = gs._tool_edit_file(str(typo / "src" / "egn.py"), "x = 1", "x = 2")
+    assert f"Може би: {ws / 'src' / 'egn.py'}" in out
+
+
+def test_write_unrelated_path_outside_workspace_names_the_workspace(_workspace, tmp_path_factory) -> None:
+    out = gs._tool_write_file(str(tmp_path_factory.mktemp("outside") / "a.txt"), "x")
+    assert f"Workspace: {_workspace.resolve()}" in out and "Може би" not in out
+
+
 def test_write_file_without_a_file_name_says_so(_workspace) -> None:
     """bench faktura-excel 2026-09-29: празен path → write_text върху папката →
     „Permission denied“, и моделът питаше дали папката е защитена."""
