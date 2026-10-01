@@ -18,6 +18,9 @@ and it refuses rather than guesses:
   * `old` found more than once     → error listing every line, asking for more
                                      context (or an explicit replace_all)
   * the result stops parsing (.py) → NOT written; the file on disk is untouched
+                                     (unless it did not parse before the edit
+                                     either — then it is written, with the
+                                     error that is still there)
 
 That last one is the point of doing this in code instead of in the prompt. A
 model that produces a syntactically broken edit gets the parse error back and
@@ -33,6 +36,7 @@ from __future__ import annotations
 
 import ast
 import difflib
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -140,14 +144,27 @@ def _near_misses(text: str, needle: str) -> str:
     return "\nНай-близките редове във файла:\n" + "\n".join(shown) + more
 
 
-def _syntax_error(path: Path, text: str) -> str:
-    """Empty string when the result is fine to write."""
+# b'…' с кирилица вътре — ast.parse казва само първия ред, а тестове за
+# български текст го пишат на всеки assert (`assert b'Мария' in resp.data`).
+_NON_ASCII_BYTES = re.compile(r"""(?<![\w'"])[bB][rR]?(['"])(?:(?!\1).)*?[^\x00-\x7f]""")
+
+
+def syntax_error(path: Path, text: str) -> str:
+    """Empty string when `text` parses (or `path` is not Python)."""
     if path.suffix != ".py":
         return ""
     try:
         ast.parse(text)
     except SyntaxError as e:
-        return f"{e.msg} (ред {e.lineno})"
+        msg = f"{e.msg} (ред {e.lineno})"
+        if "bytes can only contain ASCII" in e.msg:
+            lines = [i for i, ln in enumerate(text.splitlines(), 1)
+                     if _NON_ASCII_BYTES.search(ln)]
+            where = ", ".join(f"L{n}" for n in lines[:_MAX_HINTS * 4])
+            msg += (f". Такива b'…' с кирилица има на редове: {where}. "
+                    "За текст ползвай str: 'Мария' in resp.get_data(as_text=True) "
+                    "или 'Мария'.encode() in resp.data")
+        return msg
     return ""
 
 
@@ -203,11 +220,18 @@ def edit_file(path: str | Path, old: str, new: str, *,
 
     after = before.replace(old, new) if replace_all else before.replace(old, new, 1)
 
-    err = _syntax_error(p, after)
+    err = syntax_error(p, after)
+    still = ""
     if err:
-        return EditResult(False,
-                          f"Промяната чупи синтаксиса на {p.name}: {err}. "
-                          "ФАЙЛЪТ НЕ Е ПРОМЕНЕН — поправи редакцията и опитай пак.")
+        if not syntax_error(p, before):
+            return EditResult(False,
+                              f"Промяната чупи синтаксиса на {p.name}: {err}. "
+                              "ФАЙЛЪТ НЕ Е ПРОМЕНЕН — поправи редакцията и опитай пак.")
+        # Файлът беше счупен ОЩЕ ПРЕДИ редакцията. Отказът тук нищо не пази, а
+        # заключва поправката: с две грешки всяка редакция, която оправя едната,
+        # „чупи синтаксиса“ заради другата (bench booking-form, 2026-10-01: шест
+        # отказа подред, ходът изгоря на тавана от 25 рунда).
+        still = f"\n⚠ {p.name} още не се компилира: {err}"
 
     diff = _unified_diff(before, after, p.name)
     try:
@@ -222,6 +246,6 @@ def edit_file(path: str | Path, old: str, new: str, *,
     n = len(hits) if replace_all else 1
     return EditResult(
         True,
-        f"✓ {p} — {n} замяна(и), +{added}/-{removed} реда",
+        f"✓ {p} — {n} замяна(и), +{added}/-{removed} реда{still}",
         diff=diff, replacements=n, lines_changed=(added, removed),
     )

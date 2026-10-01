@@ -146,6 +146,17 @@ def test_write_file_without_a_file_name_says_so(_workspace) -> None:
         assert "Няма име на файл" in out and "Permission" not in out
 
 
+def test_write_file_reports_a_syntax_error_without_ruff(_workspace, monkeypatch) -> None:
+    """bench booking-form 2026-10-01: b'кирилица' в теста се записа с „✓“ и
+    грешката излезе чак при pytest. Записът остава — моделът поиска точно това."""
+    monkeypatch.setattr("genesis_agent.code_validate._ruff_available", lambda: False)
+    out = gs._tool_write_file("test_app.py", "def test_x(r):\n    assert b'Мария' in r\n")
+    assert "✓" in out and "не се компилира" in out and "L2" in out, out
+    assert (_workspace / "test_app.py").exists()
+    out = gs._tool_write_file("ok.py", "x = 1\n")
+    assert "не се компилира" not in out
+
+
 def test_dispatch_repairs_regex_escapes_in_raw_arguments(_workspace) -> None:
     """Моделът праща `\\d` в JSON низ (невалиден escape): пътят и кодът
     трябва да стигнат, а `\\n` да си остане нов ред."""

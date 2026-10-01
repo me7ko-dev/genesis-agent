@@ -72,6 +72,30 @@ def test_syntax_breaking_edit_is_not_written(tmp_path) -> None:
     assert p.read_text(encoding="utf-8") == SRC
 
 
+BROKEN = ("def test_a(r):\n    assert b'Мария' in r\n\n\n"
+          "def test_b(r):\n    assert b'Иван' in r\n")
+
+
+def test_an_already_broken_file_can_be_fixed_one_error_at_a_time(tmp_path) -> None:
+    """bench booking-form 2026-10-01: два реда с b'кирилица'; всяка поправка на
+    единия „чупеше синтаксиса“ заради другия — шест отказа, ходът изгоря."""
+    p = _write(tmp_path, BROKEN)
+    res = edit_file(p, "b'Мария' in r", "'Мария' in r")
+    assert res.ok is True
+    assert "още не се компилира" in res.detail and "L6" in res.detail
+    res = edit_file(p, "b'Иван' in r", "'Иван' in r")
+    assert res.ok is True and "компилира" not in res.detail
+    assert "b'" not in p.read_text(encoding="utf-8")
+
+
+def test_the_bytes_error_names_every_line_and_the_fix(tmp_path) -> None:
+    p = _write(tmp_path, SRC)
+    res = edit_file(p, "    return a - b\n\n\ndef sub", "    return b'я'\n\n\ndef sub")
+    assert res.ok is False
+    assert "L2" in res.detail and "as_text=True" in res.detail
+    assert p.read_text(encoding="utf-8") == SRC
+
+
 def test_syntax_check_only_applies_to_python(tmp_path) -> None:
     p = tmp_path / "notes.txt"
     p.write_text("def sub(a, b):\n", encoding="utf-8")
