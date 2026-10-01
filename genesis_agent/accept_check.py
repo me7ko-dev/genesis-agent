@@ -28,6 +28,7 @@ _WRITTEN = re.compile(r"^\[(?:WRITE_FILE|EDIT_FILE): ([^\]\n]+)\] ✓", re.MULTI
 _SIGNATURE = re.compile(r"^\s*(?:async\s+)?(?:def|class)\s+\w+")
 _CODE_BLOCK = re.compile(r"```(?:python|py)?[ \t]*\n(.*?)```", re.DOTALL)
 _COUNT = re.compile(r"(\d+) (passed|failed|errors?)\b")
+_FAILED = re.compile(r"^FAILED \S*::(\w+)", re.MULTILINE)
 # Кратка заявка („скрипт, който печата часа“) не носи правила за проверка.
 _MIN_TASK = 200
 _MAX_SIGNATURES = 80
@@ -151,7 +152,8 @@ class AcceptCheck:
                 "пусни. Проверяващият е тълкувал заявката грешно или е предположил нещо, което тя "
                 "не казва → НЕ пипай кода заради него, кажи в един ред защо. Тестовете му не са "
                 "в проекта — не ги копирай там.")
-        return note, f"{failed} от {total} теста само по заявката паднаха"
+        names = ", ".join(_FAILED.findall(output)[:6])
+        return note, f"{failed} от {total} теста само по заявката паднаха: {names}"
 
     @staticmethod
     def _run(code: str, root: Path) -> tuple[str, int]:

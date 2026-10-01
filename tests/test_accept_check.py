@@ -41,7 +41,7 @@ def test_a_failure_goes_back_with_the_request_as_judge(tmp_path) -> None:
     note, line = check.check(_tester(
         "def test_bgn():\n    assert to_eur('24,90 €') == 24.90\n\n"
         "def test_nbsp():\n    assert to_eur('1\\u00a0299,00 лв.') == 664.17\n"))
-    assert line == "1 от 2 теста само по заявката паднаха"
+    assert line == "1 от 2 теста само по заявката паднаха: test_nbsp"
     assert "test_nbsp" in note and "ТЕКСТА НА ЗАЯВКАТА" in note and "НЕ пипай" in note
     assert not check.due()                                   # веднъж на ход
 
