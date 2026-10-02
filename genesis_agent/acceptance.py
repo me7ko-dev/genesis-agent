@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -84,14 +83,12 @@ class AcceptanceCheck:
         from genesis_agent.paths import project_python
         with tempfile.TemporaryDirectory(prefix="genesis_acceptance_") as tmp:
             (Path(tmp) / "test_acceptance.py").write_text(code, encoding="utf-8")
-            # Същата среда като RUN_CMD на модела — без ключовете на Genesis.
-            env = sandbox._build_env(sandbox.get_policy(), {"PYTHONPATH": str(self._root)})
-            try:
-                run = subprocess.run([project_python(self._root), "-m", "pytest", "-q", "-p",
-                                      "no:cacheprovider", "--rootdir", tmp, tmp], cwd=tmp, env=env,
-                                     capture_output=True, text=True, timeout=120, check=False)
-            except (OSError, subprocess.TimeoutExpired):
-                return ""
+            # Като RUN_CMD на модела: същата среда (без ключовете на Genesis),
+            # същите лимити за CPU/памет/процеси, убиване на цялото дърво при таймаут.
+            run = sandbox._run([project_python(self._root), "-m", "pytest", "-q", "-p",
+                                "no:cacheprovider", "--rootdir", tmp, tmp], cwd=Path(tmp),
+                               policy=sandbox.get_policy(), timeout=120,
+                               env_extra={"PYTHONPATH": str(self._root)})
         out = (run.stdout or "") + (run.stderr or "")
         passed, total = _counts(out)
         if total == 0 or passed == total:

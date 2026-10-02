@@ -112,3 +112,13 @@ def test_the_loop_is_unchanged_when_off(tmp_path, monkeypatch):
     notes, shown = _loop(tmp_path, monkeypatch)
     assert not any("[приемни тестове]" in n for n in notes)
     assert not any(name == "приемни тестове" for name, _ in shown)
+
+
+def test_the_tests_run_through_the_sandbox_limits(tmp_path, monkeypatch):
+    """Същият път като RUN_CMD: лимити, таймаут на цялото дърво, чиста среда."""
+    from genesis_agent import sandbox
+    real, seen = sandbox._run, []
+    monkeypatch.setattr(sandbox, "_run", lambda argv, **kw: seen.append(kw) or real(argv, **kw))
+    c, _ = _check(tmp_path, monkeypatch)
+    assert "1/2" in c.check()
+    assert seen and seen[0]["timeout"] == 120 and seen[0]["env_extra"] == {"PYTHONPATH": str(tmp_path)}
