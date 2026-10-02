@@ -66,3 +66,49 @@ def test_model_written_tests_never_see_the_api_keys(tmp_path, monkeypatch):
              "    assert vat(100) == 20\n    assert 'OPENROUTER_API_KEY' not in os.environ\n```")
     c, _ = _check(tmp_path, monkeypatch, reply=reply)
     assert c.check() == ""
+
+
+def _loop(tmp_path, monkeypatch):
+    from genesis_agent import agent_core as ac
+    monkeypatch.setattr("genesis_agent.brain.Brain.compact_chat_history",
+                        staticmethod(lambda messages, threshold=16, keep_recent=10: messages))
+    monkeypatch.setattr(acc, "_brain_complete", lambda messages: TESTS)
+    (tmp_path / "money.py").write_text(MODULE, encoding="utf-8")
+    tc = [{"id": "1", "function": {"name": "WRITE_FILE", "arguments": "{}"}}]
+    replies = [("", tc, "p", "m"), ("Готово.", None, "p", "m"), ("Пробвах го.", None, "p", "m")]
+
+    class Core:
+        def complete(self, messages):
+            return replies.pop(0) if replies else ("Край.", None, "p", "m")
+
+        def remember(self, *a):
+            pass
+
+    class Skills:
+        def dispatch_tool_call(self, name, args):
+            return f"[WRITE_FILE: {tmp_path / 'money.py'}] ✓ записани 40 символа"
+
+        def parse_and_execute_tools(self, text):
+            return []
+
+    core = Core()
+    core.skills = Skills()
+    shown = []
+    messages = ac.run_tool_loop(core, [{"role": "user", "content": "money.py с vat(net) и total(net)"}],
+                                on_assistant=lambda *a: None,
+                                on_tool_result=lambda name, res, extra: shown.append((name, res)))
+    return [m["content"] for m in messages if m["role"] == "system"], shown
+
+
+def test_the_loop_sends_failures_back_when_on(tmp_path, monkeypatch):
+    monkeypatch.setenv("GENESIS_ACCEPTANCE", "1")
+    notes, shown = _loop(tmp_path, monkeypatch)
+    assert any("[приемни тестове]" in n and "1/2" in n for n in notes)
+    assert any(name == "приемни тестове" for name, _ in shown)
+
+
+def test_the_loop_is_unchanged_when_off(tmp_path, monkeypatch):
+    monkeypatch.delenv("GENESIS_ACCEPTANCE", raising=False)
+    notes, shown = _loop(tmp_path, monkeypatch)
+    assert not any("[приемни тестове]" in n for n in notes)
+    assert not any(name == "приемни тестове" for name, _ in shown)

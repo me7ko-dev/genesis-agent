@@ -394,6 +394,7 @@ def run_tool_loop(
     грешка (всеки фронтенд има собствен error-widget/глас).
     """
     from genesis_agent import claim_check
+    from genesis_agent.acceptance import AcceptanceCheck
     from genesis_agent.budget import clip_for_context
     from genesis_agent.code_check import RunCheck
     from genesis_agent.page_check import FinalCheck
@@ -423,6 +424,9 @@ def run_tool_loop(
     run_check = RunCheck()
 
     _translate_last_user_message_to_en(messages)
+    # Тестове само от заявката, без кода (acceptance.py, GENESIS_ACCEPTANCE=1).
+    acceptance = AcceptanceCheck(next((str(m.get("content") or "") for m in reversed(messages)
+                                       if m.get("role") == "user"), ""))
     text, tool_calls, prov, model = core.complete(messages)
     while True:
         if prov:
@@ -450,6 +454,7 @@ def run_tool_loop(
                 result = core.skills.dispatch_tool_call(name, args)
                 page_check.observe(result)
                 run_check.observe(result)
+                acceptance.observe(result)
                 entry = claim_check.counts_as_executed(
                     name, " ".join(str(v) for v in args.values()), result)
                 if entry:
@@ -496,6 +501,7 @@ def run_tool_loop(
         for r in results:
             page_check.observe(r)
             run_check.observe(r)
+            acceptance.observe(r)
         # Името на инструмента стои в самия резултат (`[RUN_CMD: ...]`).
         # Извличането живее в claim_check, за да не се дублира между
         # фронтендите — иначе промяна във формата ги обезоръжава наведнъж.
@@ -553,6 +559,14 @@ def run_tool_loop(
                 _status("пробва кода…")
                 text, tool_calls, prov, model = core.complete(messages)
                 continue
+            if acceptance.due():
+                _status("независими приемни тестове…")
+                acc_note = acceptance.check()
+                if acc_note:
+                    on_tool_result("приемни тестове", acc_note.splitlines()[0], None)
+                    messages.append({"role": "system", "content": acc_note})
+                    text, tool_calls, prov, model = core.complete(messages)
+                    continue
             promise = claim_check.unfinished_promise(text)
             if promise and promise_retries < 1:
                 promise_retries += 1
