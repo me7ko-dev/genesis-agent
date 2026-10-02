@@ -12,6 +12,7 @@ triggers:
 - bg + еик
 - bg + егн
 - bulgarian vat number
+min_score: 3
 version: '1.0'
 author: Genesis
 last_updated: '2026-09-25T14:00:00+00:00'

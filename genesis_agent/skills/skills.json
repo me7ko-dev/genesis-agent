@@ -524,6 +524,7 @@
         "bg + егн",
         "bulgarian vat number"
       ],
+      "min_score": 3,
       "version": "1.0",
       "last_updated": "2026-09-25T14:00:00+00:00",
       "verified": true,
