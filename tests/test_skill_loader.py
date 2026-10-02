@@ -494,9 +494,11 @@ def test_a_workdays_request_gets_the_working_days_rules(_shipped_skills) -> None
     assert "1 ноември" in text
 
 
-@pytest.mark.parametrize("project", ["sales-report", "fuel-prices", "tasks-api"])
+@pytest.mark.parametrize("project", ["sales-report", "fuel-prices", "tasks-api", "cli-config"])
 def test_requests_without_a_domain_get_no_knowledge(_shipped_skills, project) -> None:
-    """Общи думи („знака“, „число“, „България“) не са тема — само тригерите са."""
+    """Общи думи („знака“, „число“, „България“) не са тема — само тригерите са.
+    cli-config (2026-10-02): ставката „ДДС“ + `"vat": 20` в config-а подаваха
+    правилата за ДДС НОМЕР — тема без думата „номер“ не е тази тема."""
     task = sl.Path(__file__).resolve().parent.parent / "bench" / "projects" / project / "task.txt"
     assert sl.domain_context(task.read_text(encoding="utf-8")) == ""
 
