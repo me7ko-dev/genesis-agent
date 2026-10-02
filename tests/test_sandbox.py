@@ -5,6 +5,8 @@ resolve_mode/_decide пътищата, които self-check-ът не покр�
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -193,6 +195,24 @@ def test_build_env_extra_overrides(monkeypatch) -> None:
     monkeypatch.setenv("PATH", "/usr/bin")
     env = sandbox._build_env(SandboxPolicy(), extra={"PATH": "/custom/bin"})
     assert env["PATH"] == "/custom/bin"
+
+
+def test_build_env_keeps_what_a_windows_process_needs_to_start(monkeypatch) -> None:
+    """Без SYSTEMROOT Winsock не тръгва: `import asyncio` → WinError 10106 (лаптоп, 2026-10-02)."""
+    monkeypatch.setattr(sandbox.sys, "platform", "win32")
+    monkeypatch.setenv("SYSTEMROOT", r"C:\Windows")
+    monkeypatch.setenv("COMSPEC", r"C:\Windows\system32\cmd.exe")
+    monkeypatch.setenv("SOME_SECRET_API_KEY", "sk-should-not-leak")
+    env = sandbox._build_env(SandboxPolicy(env_passthrough=("PATH",)))
+    assert env["SYSTEMROOT"] == r"C:\Windows" and env["COMSPEC"].endswith("cmd.exe")
+    assert "SOME_SECRET_API_KEY" not in env
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Winsock is Windows-only")
+def test_sandboxed_python_can_import_asyncio_on_windows() -> None:
+    res = sandbox._run([sys.executable, "-c", "import asyncio, socket; socket.socket().close()"],
+                       cwd=Path.cwd(), policy=SandboxPolicy(), timeout=60)
+    assert res.returncode == 0, res.stderr
 
 
 # ── run_shell / run_python: the actual execution boundary ──────────────────

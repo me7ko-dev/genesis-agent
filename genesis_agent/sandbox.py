@@ -1000,11 +1000,20 @@ def _decide(operation: str, verdict: RiskVerdict, policy: SandboxPolicy) -> tupl
 # Изпълнение с реални граници
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Без тях Windows процес не тръгва цял: без SYSTEMROOT Winsock дава WinError 10106
+# на `import asyncio` (pytest с anyio, приемните тестове, всеки asyncio проект) —
+# лаптоп, 2026-10-02. Git Bash ги добавя сам, затова RUN_CMD не го усещаше.
+# Не са тайни.
+_WINDOWS_ESSENTIALS = ("SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP")
+
+
 def _build_env(policy: SandboxPolicy, extra: dict[str, str] | None = None) -> dict[str, str]:
     env = {k: os.environ[k] for k in policy.env_passthrough if k in os.environ}
     env.setdefault("PYTHONIOENCODING", "utf-8")
-    if sys.platform == "win32" and env.get("PATH"):
-        env["PATH"] = _windowsapps_last(env["PATH"])
+    if sys.platform == "win32":
+        env.update({k: os.environ[k] for k in _WINDOWS_ESSENTIALS if k in os.environ and k not in env})
+        if env.get("PATH"):
+            env["PATH"] = _windowsapps_last(env["PATH"])
     if extra:
         env.update(extra)
     return env
