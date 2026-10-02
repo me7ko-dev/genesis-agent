@@ -84,8 +84,8 @@ def probe(provider: str, model: str, keys: Any) -> dict[str, Any]:
     from genesis_agent.brain import _NATIVE_PROVIDERS, _PROVIDERS, provider_base_url
 
     row: dict[str, Any] = {"provider": provider, "model": model}
-    if provider not in _PROVIDERS or provider in _NATIVE_PROVIDERS or provider == "vertex":
-        return {**row, "status": "skip", "detail": "платен/локален/Vertex"}
+    if provider not in _PROVIDERS or provider in _NATIVE_PROVIDERS or provider in ("vertex", "claude_code"):
+        return {**row, "status": "skip", "detail": "платен/локален/Vertex/Claude Code"}
     key_env = _PROVIDERS[provider][1]
     base_url = provider_base_url(provider)
     key = keys._provider_key(key_env) if key_env else None

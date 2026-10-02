@@ -32,6 +32,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 from collections import deque
@@ -203,10 +207,47 @@ _PROVIDERS = {
     # в `_call` и свой модул (genesis_agent.vertex_auth), вместо ред тук с
     # фиксиран base_url. key_env сочи проекта — „конфигуриран" значи „има проект".
     "vertex": ("dynamic://vertex", "GOOGLE_CLOUD_PROJECT"),
+    # Claude Code CLI (2026-10-02, по искане на оператора): абонаментът му за
+    # Claude през `claude -p`. Само за лична употреба на неговия компютър — не
+    # за клиенти и не през облачния шлюз (там е API ключ, `anthropic`). Има
+    # свой клон в `_call`; без ключ, но не е локален.
+    "claude_code": ("cli://claude-code", None),
 }
 
 # Кои доставчици се викат през native SDK вместо през OpenAI-съвместим HTTP.
 _NATIVE_PROVIDERS = {"anthropic"}
+
+
+def _claude_exe() -> str | None:
+    """Истинският claude.exe: npm слага до него claude.cmd обвивка, през която
+    празен аргумент (`--tools ""`) и кирилица минават през cmd.exe."""
+    if os.environ.get("GENESIS_CLAUDE_BIN"):
+        return os.environ["GENESIS_CLAUDE_BIN"]
+    found = shutil.which("claude")
+    if found and sys.platform == "win32" and not found.lower().endswith(".exe"):
+        exe = Path(found).parent / "node_modules" / "@anthropic-ai" / "claude-code" / "bin" / "claude.exe"
+        if exe.is_file():
+            return str(exe)
+    return found
+
+
+def _claude_transcript(messages: list[dict]) -> tuple[str, str]:
+    """(system prompt, разговорът като текст) за `claude -p`. Само водещите
+    system съобщения са system prompt; по-късните (бележки на code_check,
+    пазача) остават на мястото си в разговора."""
+    lead = 0
+    while lead < len(messages) and messages[lead].get("role") == "system":
+        lead += 1
+    system = "\n\n".join(str(m.get("content") or "") for m in messages[:lead])
+    parts = []
+    for m in messages[lead:]:
+        content = m.get("content") or ""
+        if isinstance(content, list):
+            content = "\n".join(str(c.get("text", "")) for c in content if isinstance(c, dict))
+        label = str(m.get("role") or "user").upper()
+        parts.append(f"<{label}>\n{content}\n</{label}>")
+    parts.append("Продължи разговора: напиши САМО следващото съобщение на ASSISTANT.")
+    return system, "\n\n".join(parts)
 
 
 def _print_skip(provider: str, model: str, error: str, seconds: float) -> None:
@@ -639,6 +680,19 @@ class Brain:
                 self._pinned = existing or {"provider": p_prov, "model": p_model,
                                             "size_b": 0, "supports_tools": False}
                 self.chain = [self._pinned] + rest
+
+        # GENESIS_ONLY_MODEL=provider/model (опит, bench): отговаря ТОЗИ модел или
+        # никой — тиха резерва прави сравнението лъжа. `light` (памет, резюмета)
+        # остава на бързите: второстепенна работа, не мярката.
+        only = os.environ.get("GENESIS_ONLY_MODEL", "").strip()
+        o_prov, _, o_model = only.partition("/")
+        if only and not light and o_prov in _PROVIDERS and o_model:
+            entry = next((c for c in self.chain
+                          if (c["provider"], c["model"]) == (o_prov, o_model)), None)
+            self.chain = [entry or {"provider": o_prov, "model": o_model, "size_b": 0,
+                                    "supports_tools": False}]
+            self._pinned = None
+            self.local = None
 
         self.current = (self.chain[0] if self.chain else None) or self.local
 
@@ -1259,6 +1313,8 @@ class Brain:
             # OAuth), затова Vertex не минава през общия път с фиксиран
             # base_url и статичен ключ.
             return self._call_vertex(model, messages, tools, extra)
+        if provider == "claude_code":
+            return self._call_claude_code(model, messages)
         if not key_env:  # локален — без ключ
             # reasoning_effort="none" (design note, 2026-07-31, живо измерено):
             # Qwen3 мисли по подразбиране дори за тривиални задачи — >3 минути
@@ -1395,6 +1451,58 @@ class Brain:
         if not tried_any:
             raise RuntimeError("skip: no usable Vertex credentials (ADC not configured or all cooling down)")
         raise last_err or RuntimeError("HTTP_502: vertex project rotation exhausted")
+
+    def _call_claude_code(self, model: str, messages: list[dict]) -> tuple[str, list | None]:
+        """Абонаментът на оператора за Claude през `claude -p` (Claude Code CLI).
+
+        Само модел: `--tools ""` маха инструментите на Claude Code, действията са
+        таговете на Genesis в текстов режим (supports_tools: false), изпълнени от
+        sandbox-а като при всеки друг модел. Средата е без CLAUDE*/ANTHROPIC*:
+        вложен в сесия на Claude Code CLI-ят тръгва през нейния прокси, а
+        ANTHROPIC_API_KEY би го прехвърлил на платения API. `--strict-mcp-config
+        --setting-sources project` от празна папка — без MCP сървъри, plugin-и и
+        CLAUDE.md: 28 659 → ~800 токена на обаждане (измерено 2026-10-02).
+        """
+        exe = _claude_exe()
+        if not exe:
+            raise RuntimeError("skip: claude (Claude Code CLI) не е инсталиран")
+        system, convo = _claude_transcript(messages)
+        env = {k: v for k, v in os.environ.items()
+               if not k.upper().startswith(("CLAUDE", "ANTHROPIC"))}
+        with tempfile.TemporaryDirectory(prefix="genesis_cc_") as tmp:
+            sp = Path(tmp) / "system.txt"
+            sp.write_text(system or "You are a helpful assistant.", encoding="utf-8")
+            argv = [exe, "-p", "--output-format", "json", "--model", model, "--tools", "",
+                    "--no-session-persistence", "--strict-mcp-config",
+                    "--setting-sources", "project", "--system-prompt-file", str(sp)]
+            try:
+                r = subprocess.run(argv, input=convo, capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace", cwd=tmp, env=env,
+                                   timeout=max(self.timeout, 300), check=False)
+            except subprocess.TimeoutExpired:
+                raise RuntimeError("HTTP_504: claude -p не отговори навреме") from None
+        # stdout е един JSON ред; преди него може да има предупреждения на CLI-я.
+        line = next((ln for ln in reversed((r.stdout or "").splitlines())
+                     if ln.lstrip().startswith("{")), "")
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            raise RuntimeError(f"HTTP_502: claude -p rc={r.returncode}: "
+                               f"{(r.stderr or r.stdout or '').strip()[:200]}") from None
+        result = str(data.get("result") or "")
+        if data.get("is_error"):
+            code = "HTTP_429" if "limit" in result.lower() else "HTTP_502"
+            raise RuntimeError(f"{code}: claude -p: {result[:200]}")
+        usage = data.get("usage") or {}
+        self._last_usage = {
+            "prompt_tokens": usage.get("input_tokens", 0) or 0,
+            "completion_tokens": usage.get("output_tokens", 0) or 0,
+            "cached_read_tokens": usage.get("cache_read_input_tokens", 0) or 0,
+            "cached_write_tokens": usage.get("cache_creation_input_tokens", 0) or 0,
+        }
+        if not result.strip():
+            raise RuntimeError("празен отговор")
+        return result.strip(), None
 
     def _call_local(self, messages: list[dict], attempts: int = 1) -> tuple[str, str] | None:
         """Пробва локалния мозък (текущия tier — 3b/7b/14b, каквото е в self.local).
