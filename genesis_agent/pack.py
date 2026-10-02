@@ -45,11 +45,19 @@ def _client_command(command: str) -> str:
     return re.sub(r'^(?:"[^"]+"|\S+) -m pytest', "python -m pytest", command)
 
 
+def _run_command(entry: str) -> str:
+    """`pkg/__main__.py` върви само като модул: пуснат като файл, гърми на `from .x import …`."""
+    p = Path(entry)
+    if p.name == "__main__.py" and len(p.parts) > 1:
+        return "python -m " + ".".join(p.parts[:-1])
+    return f"python {entry}" if entry.endswith(".py") else entry
+
+
 def _how_to_run(root: Path, info: repo_map.ProjectInfo) -> list[str]:
     steps = []
     if (root / "requirements.txt").is_file():
         steps.append("`pip install -r requirements.txt`")
-    steps += [f"`python {e}`" if e.endswith(".py") else f"`{e}`" for e in info.entry_points]
+    steps += [f"`{_run_command(e)}`" for e in info.entry_points]
     if info.test_command:
         steps.append(f"тестове: `{_client_command(info.test_command)}`")
     return steps or ["виж README.md"]

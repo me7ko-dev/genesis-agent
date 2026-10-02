@@ -79,6 +79,17 @@ def test_own_file_named_like_the_report_is_not_packed_twice(tmp_path):
     assert names.count(f"guesthouse/{pack.REPORT}") == 1
 
 
+def test_a_package_main_is_run_as_a_module(tmp_path):
+    """`python faktura/__main__.py` гърми на `from .extract import …` (2026-10-02, faktura-excel)."""
+    root = _project(tmp_path)
+    (root / "app.py").unlink()
+    for rel in ("faktura/__init__.py", "faktura/__main__.py"):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("", encoding="utf-8")
+    report = _report(pack.pack(root, run_tests=False))
+    assert "`python -m faktura`" in report and "__main__.py`" not in report
+
+
 def test_client_command_drops_a_quoted_windows_path():
     assert pack._client_command('"C:/Program Files/Py/python.exe" -m pytest -q') == "python -m pytest -q"
     assert pack._client_command("/home/u/p/.venv/bin/python -m pytest -q") == "python -m pytest -q"
