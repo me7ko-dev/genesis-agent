@@ -86,3 +86,11 @@ def pack(root: Path | str, out: Path | str | None = None, *, run_tests: bool = T
             z.write(root / rel, f"{root.name}/{rel}")
         z.writestr(f"{root.name}/{REPORT}", _report(root, files, secrets, info, tests))
     return PackResult(zip_path, files, secrets, tests)
+
+
+def summary(res: PackResult) -> str:
+    """Редовете за терминала — общи за `genesis pack` и `/pack` в чата."""
+    lines = [f"📦 {res.zip_path}  ({len(res.files)} файл(а) + {REPORT})", f"Тестове: {res.tests}"]
+    if res.secrets:
+        lines.append("Не са включени (ключове/тайни): " + ", ".join(res.secrets))
+    return "\n".join(lines)

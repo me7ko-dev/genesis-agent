@@ -134,7 +134,7 @@ def _pack(args: list[str]) -> int:
     """`genesis pack` — проектът за клиента (genesis_agent/pack.py)."""
     from pathlib import Path
 
-    from genesis_agent.pack import pack
+    from genesis_agent.pack import pack, summary
     run_tests, out, paths = "--no-tests" not in args, None, []
     rest = [a for a in args if a != "--no-tests"]
     while rest:
@@ -148,10 +148,7 @@ def _pack(args: list[str]) -> int:
         print(f"Няма такава папка: {root}")
         return 2
     res = pack(root, out, run_tests=run_tests)
-    print(f"📦 {res.zip_path}  ({len(res.files)} файл(а) + ОТЧЕТ.md)")
-    print(f"Тестове: {res.tests}")
-    if res.secrets:
-        print("Не са включени (ключове/тайни): " + ", ".join(res.secrets))
+    print(summary(res))
     return 1 if res.tests.startswith("❌") else 0
 
 

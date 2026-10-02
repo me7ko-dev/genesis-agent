@@ -1682,6 +1682,7 @@ def main():
                 help_table.add_row("/status", "Системна информация и статистика")
                 help_table.add_row("/history", "Преглед и зареждане на стари сесии")
                 help_table.add_row("/backup", "Архивиране към GENESIS_BACKUP_DIR")
+                help_table.add_row("/pack [папка]", "Zip за клиента + ОТЧЕТ.md, без ключове (пуска тестовете)")
                 help_table.add_row("/update", "Провери и обнови от GitHub (питa за потвърждение)")
                 help_table.add_row("/skills", "Списък с уменията (без модел, мигновено)")
                 help_table.add_row("/tasks", "Състояние на работата — отворени нишки, решения")
@@ -1689,6 +1690,20 @@ def main():
                 help_table.add_row('"""', "Съобщение на много редове: \"\"\" … \"\"\" (поставеният текст е едно съобщение и без това)")
                 help_table.add_row("exit / quit", "Изход")
                 console.print(Panel(help_table, title="[bold cyan]◈ GENESIS КОМАНДИ ◈[/]", border_style="cyan"))
+                continue
+
+            if user_input.lower() == "/pack" or user_input.lower().startswith("/pack "):
+                from genesis_agent.pack import pack, summary
+                _arg = user_input[len("/pack"):].strip()
+                _target = WORKSPACE / Path(_arg).expanduser() if _arg else WORKSPACE
+                if not _target.is_dir():
+                    console.print(f"[yellow]Няма такава папка: {_target}[/]")
+                    continue
+                console.print(f"[cyan]📦 Опаковам {_target} …[/]")
+                try:
+                    console.print(summary(pack(_target)), markup=False, highlight=False)
+                except OSError as e:
+                    console.print(f"[red]❌ {e}[/]")
                 continue
 
             if user_input.lower() in ("/skills", "/умения"):

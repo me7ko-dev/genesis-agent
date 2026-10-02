@@ -277,3 +277,18 @@ def test_anything_more_than_the_intent_goes_to_the_model(text) -> None:
 
 def test_only_commands_that_change_something_ask_first() -> None:
     assert mr.CONFIRM_COMMANDS == {"/backup", "/clear"}
+
+
+@pytest.mark.parametrize("text", [
+    "опаковай проекта", "опаковай проекта за клиента", "пакетирай проекта", "opakovai proekta",
+    "направи zip на проекта", "napravi zip za klienta", "zip на проекта", "pack the project",
+])
+def test_packing_for_the_client_is_the_pack_command(text) -> None:
+    assert mr.command_for_request(text) == "/pack"
+
+
+@pytest.mark.parametrize("text", [
+    "направи zip на снимките", "pack", "zip", "как да направя zip?", "опаковай проекта и го качи",
+])
+def test_packing_something_else_goes_to_the_model(text) -> None:
+    assert mr.command_for_request(text) is None

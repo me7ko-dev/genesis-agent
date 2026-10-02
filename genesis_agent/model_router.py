@@ -207,6 +207,11 @@ _COMMAND_INTENTS = [(cmd, re.compile(rx)) for cmd, rx in (
         r"(изчисти|почисти|izchisti|pochisti|clear)( the)? (разговора|чата|историята|razgovora|chata|"
         r"istoriqta|istoriyata|chat|conversation|history)"
         r"|(нов разговор|нов чат|nov razgovor|nov chat|new chat|new conversation)")),
+    ("/pack", (
+        r"(опаковай|пакетирай|opakovai|opakovaj|paketirai|paketiraj|pack) (проекта|proekta|the project)"
+        r"( (за клиента|za klienta|for the client))?"
+        r"|((направи|napravi|make)( ми| mi)? )?(zip|зип) (на проекта|na proekta|of the project|"
+        r"за клиента|za klienta|for the client)")),
     ("/tasks",
         _SHOW + r" (задачите|нишките|zadachite|nishkite|tasks|the tasks|open tasks)"),
     ("/help", (
