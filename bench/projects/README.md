@@ -18,6 +18,7 @@
 | `tasks-api` | Flask + SQLite REST API, статуси, запазване след рестарт | 2/2 |
 | `fuel-prices` | HTML таблица, „2,59 лв.“, „-“, чужда таблица преди нея | 2/2 |
 | `csv-sqlite` | CSV от Excel → SQLite: BOM, `;` в кавички, „1 234,50“ с NBSP, ЕИК с водеща нула, месечно обновяване | не е пускан |
+| `cli-config` | CLI с JSON config: config.json от папката, `--markup` над общата, не над категориите; закръгляне нагоре без float шум; код 2 без traceback | не е пускан |
 | `faktura-excel` | реалистична българска PDF фактура (само Windows — шрифт Arial) | ✅ след `genesis fix` |
 
 ## Пускане на всички наведнъж
