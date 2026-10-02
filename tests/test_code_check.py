@@ -66,3 +66,14 @@ def test_a_mismatch_is_checked_against_the_task_before_the_code_is_touched():
             c.observe(r)
         note = c.note()
         assert "срещу условието" in note and "само ако условието" in note, note
+
+
+def test_assumptions_go_to_the_readme_and_the_answer():
+    """NEXT_STEPS Б.6: „ОБЩО със сумата“ — число или речник? Допускането се
+    записва, не се крие. В същата подкана — без ново обръщение."""
+    for observed in ([WRITE], [WRITE, RUN]):
+        c = RunCheck()
+        for r in observed:
+            c.observe(r)
+        note = c.note()
+        assert "допускане" in note and "README.md" in note and "отговора" in note, note
