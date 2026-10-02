@@ -6,6 +6,7 @@ genesis_agent.cli — the `genesis` command.
     genesis setup           configure API keys
     genesis mission "..."   run one autonomous mission and print the result
     genesis fix PATH "..."  fix a bug in an existing project (tests + diff)
+    genesis pack [PATH]     zip for the client + ОТЧЕТ.md, no keys (`--no-tests`, `-o FILE`)
     genesis skills          library status
     genesis models          the model chain; `--refresh` re-scans, `--check` probes each
     genesis update          is there a newer commit on the installed branch
@@ -129,6 +130,31 @@ def _models(args: list[str]) -> int:
     return 0
 
 
+def _pack(args: list[str]) -> int:
+    """`genesis pack` — проектът за клиента (genesis_agent/pack.py)."""
+    from pathlib import Path
+
+    from genesis_agent.pack import pack
+    run_tests, out, paths = "--no-tests" not in args, None, []
+    rest = [a for a in args if a != "--no-tests"]
+    while rest:
+        a = rest.pop(0)
+        if a in ("-o", "--out") and rest:
+            out = rest.pop(0)
+        else:
+            paths.append(a)
+    root = Path(paths[0] if paths else ".").expanduser()
+    if not root.is_dir():
+        print(f"Няма такава папка: {root}")
+        return 2
+    res = pack(root, out, run_tests=run_tests)
+    print(f"📦 {res.zip_path}  ({len(res.files)} файл(а) + ОТЧЕТ.md)")
+    print(f"Тестове: {res.tests}")
+    if res.secrets:
+        print("Не са включени (ключове/тайни): " + ", ".join(res.secrets))
+    return 1 if res.tests.startswith("❌") else 0
+
+
 def _fix(args: list[str]) -> int:
     """`genesis fix` — поправка на бъг в съществуващ проект."""
     if not args or args[0] in ("-h", "--help"):
@@ -249,6 +275,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if cmd == "fix":
         return _fix(argv[1:])
+
+    if cmd == "pack":
+        return _pack(argv[1:])
 
     if cmd in ("gui", "voice"):
         # Махнати на 2026-09-23 — Genesis е само терминален. Изрично съобщение,

@@ -241,3 +241,28 @@ class TestFixArgParsing:
         rc = cli_mod.main(["fix", "--revert", "/proj"])
         assert rc == 0
         assert called == ["/proj"]
+
+
+def test_pack_zips_the_project_and_prints_the_report_lines(tmp_path, capsys) -> None:
+    proj = tmp_path / "site"
+    proj.mkdir()
+    (proj / "app.py").write_text("print(1)\n", encoding="utf-8")
+    (proj / ".env").write_text("KEY=x\n", encoding="utf-8")
+    assert cli_mod.main(["pack", str(proj), "--no-tests"]) == 0
+    out = capsys.readouterr().out
+    zips = list(tmp_path.glob("site-*.zip"))
+    assert len(zips) == 1 and str(zips[0]) in out
+    assert "1 файл" in out and ".env" in out
+
+
+def test_pack_returns_1_when_the_projects_tests_fail(tmp_path, capsys) -> None:
+    proj = tmp_path / "p"
+    (proj / "tests").mkdir(parents=True)
+    (proj / "tests" / "test_a.py").write_text("def test_a():\n    assert False\n", encoding="utf-8")
+    assert cli_mod.main(["pack", str(proj), "-o", str(tmp_path / "out.zip")]) == 1
+    assert (tmp_path / "out.zip").is_file() and "❌" in capsys.readouterr().out
+
+
+def test_pack_of_a_missing_folder_says_so(tmp_path, capsys) -> None:
+    assert cli_mod.main(["pack", str(tmp_path / "nope")]) == 2
+    assert "Няма такава папка" in capsys.readouterr().out
