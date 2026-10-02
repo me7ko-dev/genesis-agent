@@ -90,6 +90,24 @@ def test_a_package_main_is_run_as_a_module(tmp_path):
     assert "`python -m faktura`" in report and "__main__.py`" not in report
 
 
+def test_what_the_projects_gitignore_leaves_out_the_client_does_not_get(tmp_path):
+    """Логове и изходи от пусканията (genesis_run.log с пътищата на тази машина)."""
+    root = _project(tmp_path)
+    (root / ".gitignore").write_text(
+        "# ours\n*.log\n!keep.log\noutput.xlsx\nbuild/\n/docs/draft.md\n/notes.txt\n.env\n", encoding="utf-8")
+    for rel in ("genesis_run.log", "keep.log", "output.xlsx", "build/x.txt", "sub/build",
+                "docs/draft.md", "src/docs/draft.md", "notes.txt", "sub/notes.txt"):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("x", encoding="utf-8")
+    res = pack.pack(root, run_tests=False)
+    names = set(zipfile.ZipFile(res.zip_path).namelist())
+    assert {"guesthouse/keep.log", "guesthouse/sub/build", "guesthouse/src/docs/draft.md",
+            "guesthouse/sub/notes.txt", "guesthouse/.gitignore", "guesthouse/app.py"} <= names
+    assert not {"guesthouse/genesis_run.log", "guesthouse/output.xlsx", "guesthouse/build/x.txt",
+                "guesthouse/docs/draft.md", "guesthouse/notes.txt"} & names
+    assert ".env" in res.secrets  # a key the author ignores is still named for the client
+
+
 def test_client_command_drops_a_quoted_windows_path():
     assert pack._client_command('"C:/Program Files/Py/python.exe" -m pytest -q') == "python -m pytest -q"
     assert pack._client_command("/home/u/p/.venv/bin/python -m pytest -q") == "python -m pytest -q"

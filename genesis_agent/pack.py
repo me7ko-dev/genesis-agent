@@ -9,6 +9,7 @@ NEXT_STEPS Д.13: zip на проекта + кратък отчет (какво 
 from __future__ import annotations
 
 import datetime
+import fnmatch
 import re
 import zipfile
 from dataclasses import dataclass, field
@@ -27,8 +28,44 @@ class PackResult:
     tests: str = "не са пускани"
 
 
+_Rule = tuple[bool, str, bool, bool]  # отрицание, шаблон, само папка, от корена
+
+
+def _gitignore(root: Path) -> list[_Rule]:
+    """Правилата от `.gitignore` в корена на проекта."""
+    gi = root / ".gitignore"
+    rules = []
+    for line in (gi.read_text(encoding="utf-8", errors="replace").splitlines() if gi.is_file() else []):
+        line = line.strip()
+        if line and not line.startswith("#"):
+            pat = line.lstrip("!")
+            rules.append((line.startswith("!"), pat.strip("/"), pat.endswith("/"),
+                          "/" in pat.rstrip("/")))
+    return rules
+
+
+def _ignored(rel: Path, rules: list[_Rule]) -> bool:
+    """Опростен gitignore: шаблон с `/` е от корена, без `/` — за всяка част; последният печели."""
+    hit = False
+    for neg, pat, dir_only, anchored in rules:
+        n = len(rel.parts) - 1 if dir_only else len(rel.parts)
+        if anchored:
+            match = any(fnmatch.fnmatch("/".join(rel.parts[:k]), pat) for k in range(1, n + 1))
+        else:
+            match = any(fnmatch.fnmatch(part, pat) for part in rel.parts[:n])
+        if match:
+            hit = not neg
+    return hit
+
+
 def collect(root: Path, exclude: Path | None = None) -> tuple[list[str], list[str]]:
-    """(файловете за клиента, прескочените тайни) — относителни, с `/`."""
+    """(файловете за клиента, прескочените тайни) — относителни, с `/`.
+
+    Каквото авторът е сложил в `.gitignore` (логове, изходи от пусканията), не е
+    и за клиента; ключовете обаче се изброяват и тогава — клиентът трябва да
+    знае, че си слага свой `.env`.
+    """
+    rules = _gitignore(root)
     files: list[str] = []
     secrets: list[str] = []
     for p in sorted(root.rglob("*")):
@@ -36,7 +73,10 @@ def collect(root: Path, exclude: Path | None = None) -> tuple[list[str], list[st
         if (not p.is_file() or p == exclude or p.suffix == ".pyc" or rel.as_posix() == REPORT
                 or any(part in repo_map._SKIP_DIRS for part in rel.parts[:-1])):
             continue
-        (secrets if sandbox.sensitive_path_reason(p) else files).append(rel.as_posix())
+        if sandbox.sensitive_path_reason(p):
+            secrets.append(rel.as_posix())
+        elif not _ignored(rel, rules):
+            files.append(rel.as_posix())
     return files, secrets
 
 
