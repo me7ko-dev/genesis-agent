@@ -114,6 +114,56 @@ def test_the_loop_is_unchanged_when_off(tmp_path, monkeypatch):
     assert not any(name == "приемни тестове" for name, _ in shown)
 
 
+def _terminal_turn(tmp_path, monkeypatch):
+    from collections import deque
+
+    import genesis_terminal_agent as gta
+    monkeypatch.setattr(gta, "HISTORY_DIR", tmp_path)
+    monkeypatch.setattr(gta, "_remember", lambda *a: None)
+    monkeypatch.setattr("genesis_agent.skill_loader.domain_context", lambda q: "")
+    monkeypatch.setattr(acc, "_brain_complete", lambda messages: TESTS)
+    (tmp_path / "money.py").write_text(MODULE, encoding="utf-8")
+    call = {"id": "1", "type": "function", "function": {"name": "WRITE_FILE", "arguments": "{}"}}
+    replies = [("", [call]), ("Готово.", [])]
+    monkeypatch.setattr(gta, "ask_genesis", lambda *a, **k: replies.pop(0) if replies else ("Край.", []))
+    monkeypatch.setattr(gta.genesis_skills, "dispatch_tool_call",
+                        lambda name, args: f"[WRITE_FILE: {tmp_path / 'money.py'}] ✓ записани 40 символа")
+    monkeypatch.setattr(gta, "parse_and_execute_tools", lambda text: [])
+
+    class NoRunCheck:
+        def observe(self, result):
+            pass
+
+        def due(self):
+            return False
+
+    monkeypatch.setattr(gta, "_RunCheck", NoRunCheck)
+    shown: list[str] = []
+
+    class UI(gta.TurnUI):
+        def tool(self, name, result):
+            shown.append(name)
+
+    messages = gta.run_turn(deque([{"role": "system", "content": "s"}], maxlen=50),
+                            "money.py с vat(net) и total(net)", UI())
+    return [m["content"] for m in messages if m["role"] == "system"], shown
+
+
+def test_the_terminal_turn_runs_them_too(tmp_path, monkeypatch):
+    """bench_projects пуска терминала (cli → run_turn), а проверката живееше само в
+    agent_core.run_tool_loop — с GENESIS_ACCEPTANCE=1 bench-ът мереше същото (2026-10-02)."""
+    monkeypatch.setenv("GENESIS_ACCEPTANCE", "1")
+    notes, shown = _terminal_turn(tmp_path, monkeypatch)
+    assert any("[приемни тестове]" in n and "1/2" in n for n in notes)
+    assert "приемни тестове" in shown
+
+
+def test_the_terminal_turn_is_unchanged_when_off(tmp_path, monkeypatch):
+    monkeypatch.delenv("GENESIS_ACCEPTANCE", raising=False)
+    notes, shown = _terminal_turn(tmp_path, monkeypatch)
+    assert not any("[приемни тестове]" in n for n in notes) and "приемни тестове" not in shown
+
+
 def test_the_tests_run_through_the_sandbox_limits(tmp_path, monkeypatch):
     """Същият път като RUN_CMD: лимити, таймаут на цялото дърво, чиста среда."""
     from genesis_agent import sandbox
