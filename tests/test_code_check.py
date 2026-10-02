@@ -54,3 +54,15 @@ def test_no_python_written_no_nudge():
     c.observe("[WRITE_FILE: C:\\work\\x.py] ✗ пътят е извън работната папка")
     c.observe(RUN)
     assert not c.due() and c.note() == ""
+
+
+def test_a_mismatch_is_checked_against_the_task_before_the_code_is_touched():
+    """bench_fcc 2026-09-30: c333 — собствен грешен assert, верен код, моделът
+    „поправи“ кода по assert-а; c125 — обратното. И двете подкани казват:
+    очакваното първо срещу условието, кодът се пипа само по условието."""
+    for observed in ([WRITE], [WRITE, RUN]):
+        c = RunCheck()
+        for r in observed:
+            c.observe(r)
+        note = c.note()
+        assert "срещу условието" in note and "само ако условието" in note, note
