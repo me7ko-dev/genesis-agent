@@ -431,7 +431,18 @@ def test_real_requests_get_their_verified_rules(_shipped_skills, query, skill) -
     assert f"библиотеката: {skill}" in sl.domain_context(query)
 
 
-@pytest.mark.parametrize("name", ["bg_eik_bulstat_validate", "bg_euro_bgn_conversion"])
+def test_an_excel_csv_request_gets_the_csv_rules_not_the_eik_check(_shipped_skills) -> None:
+    """bench csv-sqlite 2026-10-02: 1/3 и 0/3 — `encoding="utf-8"` срещу BOM-а на Excel
+    („\\ufeffЕИК“ → всеки ред прескочен). Заявката получаваше ЕИК валидатора само
+    заради „eik“ + „ЕИК“, а 000123456 от теста не минава контролната цифра."""
+    task = sl.Path(__file__).resolve().parent.parent / "bench" / "projects" / "csv-sqlite" / "task.txt"
+    text = sl.domain_context(task.read_text(encoding="utf-8"))
+    assert "библиотеката: bg_excel_csv_import" in text and "utf-8-sig" in text
+    assert "bg_eik_bulstat_validate" not in text
+
+
+@pytest.mark.parametrize("name", ["bg_eik_bulstat_validate", "bg_euro_bgn_conversion",
+                                  "bg_excel_csv_import"])
 def test_shipped_domain_skills_pass_their_self_tests(_shipped_skills, tmp_path, name) -> None:
     import subprocess
     import sys

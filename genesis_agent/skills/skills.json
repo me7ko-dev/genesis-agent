@@ -558,6 +558,27 @@
       }
     },
     {
+      "name": "bg_excel_csv_import",
+      "category": "domain",
+      "file_path": "skills/bg_excel_csv_import.md",
+      "description": "CSV, изтеглен от Excel с български настройки — BOM в началото (utf-8-sig), разделител ;, десетична запетая, неразделим интервал за хилядите, полета с ; в кавички, дати дд.мм.гггг, кодове с водещи нули като текст.",
+      "triggers": [
+        "csv от excel",
+        "изтеглен от excel csv",
+        "експорт от excel в csv",
+        "свален от excel",
+        "excel csv export bom"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-10-02T18:00:00+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
+    },
+    {
       "name": "web_site_2026",
       "category": "web",
       "file_path": "skills/web_site_2026.md",
