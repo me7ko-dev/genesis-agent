@@ -1,0 +1,85 @@
+"""genesis_agent.pack — the project as the client gets it (NEXT_STEPS Д.13)."""
+import zipfile
+
+from genesis_agent import pack
+
+
+def _project(tmp_path):
+    root = tmp_path / "guesthouse"
+    for rel, data in {
+        "app.py": "print('hi')\n",
+        "README.md": "# Къща за гости\n",
+        "static/logo.png": "PNG",
+        "tests/test_app.py": "def test_ok():\n    pass\n",
+        ".env": "OPENROUTER_API_KEY=sk-secret\n",
+        "keys/id_rsa": "-----BEGIN OPENSSH PRIVATE KEY-----\n",
+        ".venv/pyvenv.cfg": "home = /usr/bin\n",
+        ".git/config": "",
+        "__pycache__/app.cpython-312.pyc": "",
+        "tests/__pycache__/t.pyc": "",
+    }.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(data, encoding="utf-8")
+    return root
+
+
+def test_zip_has_the_work_and_never_the_keys_or_the_tooling(tmp_path):
+    root = _project(tmp_path)
+    res = pack.pack(root, run_tests=False)
+    assert res.zip_path.parent == tmp_path and res.zip_path.suffix == ".zip"
+    names = set(zipfile.ZipFile(res.zip_path).namelist())
+    assert {"guesthouse/app.py", "guesthouse/README.md", "guesthouse/static/logo.png",
+            "guesthouse/tests/test_app.py"} <= names
+    assert not any(".env" in n or "id_rsa" in n or ".venv" in n or ".git/" in n
+                   or "__pycache__" in n for n in names), names
+    assert sorted(res.secrets) == [".env", "keys/id_rsa"]
+
+
+def test_a_project_inside_a_skipped_name_is_still_packed(tmp_path):
+    """Само частите ПОД проекта решават: проект в …/build/site не е празен."""
+    root = _project(tmp_path / "build")
+    names = zipfile.ZipFile(pack.pack(root, run_tests=False).zip_path).namelist()
+    assert "guesthouse/app.py" in names
+
+
+def test_the_zip_never_packs_itself(tmp_path):
+    root = _project(tmp_path)
+    res = pack.pack(root, out=root / "dist.zip", run_tests=False)
+    assert not any(n.endswith("dist.zip") for n in zipfile.ZipFile(res.zip_path).namelist())
+
+
+def _report(res):
+    return zipfile.ZipFile(res.zip_path).read(f"guesthouse/{pack.REPORT}").decode("utf-8")
+
+
+def test_report_runs_the_tests_and_says_how_to_run_without_this_machines_paths(tmp_path):
+    root = _project(tmp_path)
+    (root / "requirements.txt").write_text("flask\n", encoding="utf-8")
+    res = pack.pack(root)
+    report = _report(res)
+    assert res.tests.startswith("✅") and "1 passed" in res.tests
+    assert "`pip install -r requirements.txt`" in report and "`python app.py`" in report
+    assert "тестове: `python -m pytest -q`" in report
+    assert "- .env" in report and "- keys/id_rsa" in report and "README.md" in report
+
+
+def test_report_says_when_tests_fail(tmp_path):
+    root = _project(tmp_path)
+    (root / "tests/test_app.py").write_text("def test_bad():\n    assert 1 == 2\n", encoding="utf-8")
+    res = pack.pack(root)
+    assert res.tests.startswith("❌") and "1 failed" in res.tests
+    assert res.tests in _report(res)
+
+
+def test_own_file_named_like_the_report_is_not_packed_twice(tmp_path):
+    root = _project(tmp_path)
+    (root / pack.REPORT).write_text("old\n", encoding="utf-8")
+    names = zipfile.ZipFile(pack.pack(root, run_tests=False).zip_path).namelist()
+    assert names.count(f"guesthouse/{pack.REPORT}") == 1
+
+
+def test_client_command_drops_a_quoted_windows_path():
+    assert pack._client_command('"C:/Program Files/Py/python.exe" -m pytest -q') == "python -m pytest -q"
+    assert pack._client_command("/home/u/p/.venv/bin/python -m pytest -q") == "python -m pytest -q"
+    assert pack._client_command("npm test") == "npm test"
