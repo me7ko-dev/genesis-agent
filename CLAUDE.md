@@ -16,7 +16,9 @@
 - Намиране: `Grep` за символа → `Read` само нужните редове (`offset`/`limit`).
   Никога цял голям файл. Без агенти/Explore за нещо, което 1–2 grep-а намират.
 - Независимите извиквания — в един рунд.
-- Изходът на Bash винаги ограничен: `-q`, `-x`, `| tail -20`.
+- Изходът на Bash винаги ограничен: `-q`, `-x`, `| tail -20`. С `| tail` във
+  верига `&&` — винаги `set -o pipefail;` отпред, иначе червен pytest минава
+  (2026-10-02: комит и push с 1 паднал тест).
 - Без планове, обяснения и преразказ между стъпките — само действие.
 
 ## „Перфектно“ = доказано
@@ -27,8 +29,8 @@
   `python -m pytest -q -x <тестови файлове> | tail -5` ·
   `python -m mypy <пипнатите модули>`.
 - Преди push — пълният пакет като в CI:
-  `python -m ruff check . && python -m mypy genesis_agent/ genesis_skills.py
-  genesis_terminal_agent.py cloud/ && python -m pytest -q -x | tail -5`.
+  `set -o pipefail; python -m ruff check . && python -m mypy genesis_agent/
+  genesis_skills.py genesis_terminal_agent.py cloud/ && python -m pytest -q -x | tail -5`.
 - Нищо не се твърди без изпълнение. Неизмереното се казва като такова.
 
 ## Край на стъпка
