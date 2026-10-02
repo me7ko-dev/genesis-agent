@@ -19,7 +19,7 @@ bench_projects 20/20, 134 s / 80K токена на пуск; fcc hard 29/30 (c3
 `fcc-2026-09-30-hard-history/results.json`.
 
 ## Без лаптоп (прави се тук, по ред)
-1. **Още bench проекти (А.2)**, всеки със скрит тест: уеб + форма, бот,
+1. **Още bench проекти (А.2)**, всеки със скрит тест: бот (само логиката),
    проект от 5+ файла.
 2. При merge на `feat/desktop-app`: `remote_server.clear()` да вика
    `gta.reset_usage()`, не да нулира `total_*` на ръка.
@@ -27,7 +27,8 @@ bench_projects 20/20, 134 s / 80K токена на пуск; fcc hard 29/30 (c3
 ## С лаптопа (ключове, ollama, Windows)
 - `bench_fix.py` (всички 13): новият `venv_dep` (А.3) — зависимостта е само в
   `.venv` на проекта, тестовата команда е откритата. Тук е проверен само харнесът.
-- `bench_projects.py --runs 2 --only csv-sqlite,cli-config,shop-scraper` (А.2). Скритият тест е
+- `bench_projects.py --runs 2 --only csv-sqlite,cli-config,shop-scraper,contact-form`
+  (А.2). Скритият тест е
   проверен тук: еталонът минава, всяко наивно решение пада.
 - fcc hard + bench_projects `--runs 2`: подканата на code_check вече казва
   „разминаване → първо очакваното срещу условието“ (c333, c125) и „допускането
