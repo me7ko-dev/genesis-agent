@@ -44,11 +44,14 @@
    `gta.reset_usage()`, не да нулира `total_*` на ръка.
 
 ## С лаптопа (ключове, ollama, Windows)
-- **Измери 2026-10-04** (`01d405d..0aebb4c`, само unit тестове): sklad-package,
-  contact-form, shop-scraper, по 2 пуска, `--compare 2026-10-02-fixes`. Очаквано:
-  `ОБЩО` (code_check сверява буквалните думи), `+359…` и Flask 3 escape
-  (bg_contact_form_phone), `&nbsp;`/windows-1251 (bg_shop_scrape_prices). Повторено
-  върху изходите от 10-02: и двата sklad пуска получават бележката за „ОБЩО“.
+- **Измери 2026-10-04** (`01d405d..7bf3712`, само unit тестове): sklad-package,
+  contact-form, shop-scraper, cli-config, sales-report — по 2 пуска,
+  `--compare 2026-10-02-fixes`. Повторено върху изходите от 10-02 (без модел):
+  sklad 1/2 и 2/2 получават бележката за „ОБЩО“; sales-report 1/2 и 2/2 минават новия
+  тест; `pricer.py` на cli-config #2 — F821 `eprint` (ruff от pipx venv-а, `7bf3712`;
+  преди това WRITE_FILE на лаптопа не пускаше ruff изобщо). Нови умения:
+  bg_contact_form_phone, bg_shop_scrape_prices, money_round_up_step (+ второ строго
+  знание на заявка). Сравнявай и времената: ruff --fix вече пипа всеки WRITE_FILE.
 - d29b866 (счупен .py по една грешка; WRITE_FILE с `ast`) е мерен на 10-01
   (booking-form 0/2 → 2/2); на 10-02 капанът не се случи в нито един пуск.
 - Б.5: проверено знание само за измерено сгрешеното. Кандидати: ставки ДДС,
