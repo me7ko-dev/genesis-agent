@@ -455,7 +455,9 @@ def run_tool_loop(
     # Уеб страниците от хода — в браузър, когато моделът каже „готово“ (page_check).
     page_check = FinalCheck()
     # .py, записан и непуснат след последната промяна (code_check).
-    run_check = RunCheck()
+    # Заявката преди превода: буквалните думи от нея („ред ОБЩО“) се сверяват с кода.
+    run_check = RunCheck(next((str(m.get("content") or "") for m in reversed(messages)
+                               if m.get("role") == "user"), ""))
 
     _translate_last_user_message_to_en(messages)
     text, tool_calls, prov, model = core.complete(messages)

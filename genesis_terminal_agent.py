@@ -1528,7 +1528,8 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
     # „готово“ (genesis_agent.page_check, план Г.11).
     _page_check = _PageCheck()
     # .py, записан и непуснат след последната промяна (genesis_agent.code_check).
-    _run_check = _RunCheck()
+    # Със заявката: буквалните думи от нея („ред ОБЩО“) се сверяват с кода.
+    _run_check = _RunCheck(user_input)
     # Приемни тестове само от заявката (GENESIS_ACCEPTANCE=1, genesis_agent.acceptance).
     _accept = _AcceptanceCheck(user_input, Path(genesis_skills._WORKSPACE), rules=knowledge)
     # Въртене на място: същият извик, същият резултат, пореден път.
