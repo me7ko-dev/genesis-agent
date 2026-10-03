@@ -131,3 +131,14 @@ def test_the_terminal_turn_gives_the_check_its_task(tmp_path, monkeypatch):
     messages = gta.run_turn(deque([{"role": "system", "content": "s"}], maxlen=50),
                             "report.py печата всеки продукт и ред ОБЩО", gta.TurnUI())
     assert any("„ОБЩО“" in str(m["content"]) for m in messages)
+
+
+def test_a_test_file_with_the_word_does_not_count(tmp_path):
+    (tmp_path / "tests").mkdir()
+    report, test = tmp_path / "report.py", tmp_path / "tests" / "test_report.py"
+    report.write_text('print("TOTAL", total)\n', encoding="utf-8")
+    test.write_text('assert "ОБЩО" in out\n', encoding="utf-8")
+    c = RunCheck(SKLAD)
+    for f in (report, test):
+        c.observe(f"[WRITE_FILE: {f}] ✓ записани 20 символа")
+    assert "„ОБЩО“" in c.note()
