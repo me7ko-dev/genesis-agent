@@ -55,6 +55,9 @@ class RunCheck:
     def _missing_literals(self) -> str:
         texts = []
         for path in self._written.values():
+            # Думата трябва да е в програмата: тест с „ОБЩО“ не доказва, че отчетът го печата.
+            if path.name.startswith("test_") or path.stem.endswith("_test") or "tests" in path.parts:
+                continue
             try:
                 texts.append(path.read_text(encoding="utf-8", errors="replace"))
             except OSError:
