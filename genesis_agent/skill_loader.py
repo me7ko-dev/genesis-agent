@@ -300,7 +300,12 @@ def domain_context(query: str) -> str:
         if score >= need:
             ranked.append((score, h))
     ranked.sort(key=lambda x: x[0], reverse=True)
+    parts: list[str] = []
     for _, h in ranked:
+        # Второ знание — само строго (min_score ≥ 3). bench clients-migrate 2026-10-01: CSV от
+        # Excel + телефон, стигаше само CSV-то → +3590359…; а ЕИК (min 2) не идва с всяко CSV.
+        if parts and (h.get("category") == "web" or int(h.get("min_score", 2)) < 3):
+            continue
         if h.get("category") == "web":
             body = _guide_body(h)
             if body:
@@ -317,12 +322,14 @@ def domain_context(query: str) -> str:
         # „ползвай кода“ и моделът го копира дословно — с validate_egn/parse_egn
         # вместо поисканите validate/parse; правилни правила, счупен интерфейс
         # (скритите тестове не можаха да го импортират, 2026-09-25).
-        return (f"## Проверено знание от библиотеката: {h['name']}\n"
-                "ПРАВИЛАТА в този код са проверени със самотест — вземи ги оттук (и "
-                "очакваните стойности в тестовете), не по памет. ИМЕНАТА, файловете и "
-                "интерфейса вземи от заявката на оператора, не от този код.\n"
-                f"```python\n{code.strip()}\n```")
-    return ""
+        parts.append(f"## Проверено знание от библиотеката: {h['name']}\n"
+                     "ПРАВИЛАТА в този код са проверени със самотест — вземи ги оттук (и "
+                     "очакваните стойности в тестовете), не по памет. ИМЕНАТА, файловете и "
+                     "интерфейса вземи от заявката на оператора, не от този код.\n"
+                     f"```python\n{code.strip()}\n```")
+        if len(parts) == 2:
+            break
+    return "\n\n".join(parts)
 
 
 def _guide_body(meta: dict[str, Any]) -> str:

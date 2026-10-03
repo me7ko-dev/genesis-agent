@@ -469,6 +469,23 @@ def test_the_shop_scraper_gets_the_price_rules_and_nothing_else_does(_shipped_sk
             assert "НЕРАЗДЕЛИМ" in text and "r.content" in text
 
 
+def test_a_csv_with_phones_gets_both_and_a_loose_second_match_stays_out(_shipped_skills) -> None:
+    """bench clients-migrate 2026-10-01: Excel CSV + телефон → +3590359888123456. Само едно
+    знание стигаше до модела (CSV-то). Второ — само строго (min_score ≥ 3): ЕИК
+    проверката (min 2) пак не идва с CSV-то на csv-sqlite."""
+    task = ("Имам стар списък с клиенти в CSV (експорт от Excel: UTF-8 с BOM, разделител ;). "
+            "Колони: Име;Имейл;Телефон. Телефонът се пази в международен вид, +359 и цифрите "
+            "без интервали и тирета (водещата 0 или 00359 стават +359).")
+    text = sl.domain_context(task)
+    assert "библиотеката: bg_excel_csv_import" in text
+    assert "библиотеката: bg_contact_form_phone" in text
+    assert text.index("bg_excel_csv_import") < text.index("bg_contact_form_phone")
+    projects = sl.Path(__file__).resolve().parent.parent / "bench" / "projects"
+    for task_file in sorted(projects.glob("*/task.txt")):
+        got = sl.domain_context(task_file.read_text(encoding="utf-8"))
+        assert got.count("## Проверено знание от библиотеката:") <= 1, task_file.parent.name
+
+
 @pytest.mark.parametrize("name", ["bg_eik_bulstat_validate", "bg_euro_bgn_conversion",
                                   "bg_excel_csv_import", "bg_contact_form_phone",
                                   "bg_shop_scrape_prices"])
