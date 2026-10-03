@@ -600,6 +600,26 @@
       }
     },
     {
+      "name": "bg_shop_scrape_prices",
+      "category": "domain",
+      "file_path": "skills/bg_shop_scrape_prices.md",
+      "description": "Цени и страници от български онлайн магазин — „1 299,00 лв.“ с неразделим интервал (U+00A0), старата цена в <s>, windows-1251 само в <meta charset>, относителни връзки „Следваща“ и каталог, който сочи пак към началото.",
+      "triggers": [
+        "scraper онлайн магазин каталог",
+        "windows-1251 meta charset",
+        "scrape продуктите от магазин"
+      ],
+      "min_score": 3,
+      "version": "1.0",
+      "last_updated": "2026-10-04T02:40:00+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
+    },
+    {
       "name": "web_site_2026",
       "category": "web",
       "file_path": "skills/web_site_2026.md",

@@ -457,8 +457,21 @@ def test_the_contact_form_gets_the_phone_rules_and_nothing_else_does(_shipped_sk
     assert "bg_contact_form_phone" in sl.domain_context("валидирай български мобилен номер")
 
 
+def test_the_shop_scraper_gets_the_price_rules_and_nothing_else_does(_shipped_skills) -> None:
+    """bench shop-scraper 2026-10-01/02: „1 299,00 лв.“ — replace(" ", "") не маха
+    неразделимия интервал; страницата е windows-1251 само в <meta charset>."""
+    projects = sl.Path(__file__).resolve().parent.parent / "bench" / "projects"
+    for task in sorted(projects.glob("*/task.txt")):
+        text = sl.domain_context(task.read_text(encoding="utf-8"))
+        hit = "библиотеката: bg_shop_scrape_prices" in text
+        assert hit == (task.parent.name == "shop-scraper"), task.parent.name
+        if hit:
+            assert "НЕРАЗДЕЛИМ" in text and "r.content" in text
+
+
 @pytest.mark.parametrize("name", ["bg_eik_bulstat_validate", "bg_euro_bgn_conversion",
-                                  "bg_excel_csv_import", "bg_contact_form_phone"])
+                                  "bg_excel_csv_import", "bg_contact_form_phone",
+                                  "bg_shop_scrape_prices"])
 def test_shipped_domain_skills_pass_their_self_tests(_shipped_skills, tmp_path, name) -> None:
     import subprocess
     import sys
