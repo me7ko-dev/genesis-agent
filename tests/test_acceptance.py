@@ -131,6 +131,9 @@ def _terminal_turn(tmp_path, monkeypatch):
     monkeypatch.setattr(gta, "parse_and_execute_tools", lambda text: [])
 
     class NoRunCheck:
+        def __init__(self, task=""):
+            pass
+
         def observe(self, result):
             pass
 

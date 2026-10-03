@@ -1238,7 +1238,8 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     # „готово“ (genesis_agent.page_check, план Г.11).
     _page_check = _PageCheck()
     # .py, записан и непуснат след последната промяна (genesis_agent.code_check).
-    _run_check = _RunCheck()
+    # Със заявката: буквалните думи от нея („ред ОБЩО“) се сверяват с кода.
+    _run_check = _RunCheck(user_input)
     # Тестове само от заявката, без кода (genesis_agent.acceptance, GENESIS_ACCEPTANCE=1).
     # Беше само в agent_core — а bench_projects и операторът минават оттук.
     _acceptance = _AcceptanceCheck(user_input)

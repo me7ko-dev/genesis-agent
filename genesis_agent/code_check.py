@@ -28,16 +28,43 @@ _MISMATCH = ("Разминаване → първо провери очаква�
 # NEXT_STEPS Б.6: „ОБЩО със сумата“ — число или речник? Тълкуването не се крие.
 _ASSUMPTIONS = ("Ако условието допуска две тълкувания, избери едното и запиши допускането в "
                 "README.md и в отговора.")
+# bench sklad-package 2026-10-02: „ред ОБЩО“, а отчетът печата TOTAL 4/5 пъти (Claude —
+# ОБЩО 2/2 със същата подкана). Само думата след ред/ключ/колона/надпис и текстът в
+# кавички след →/печата/показва — не всяка главна дума (НАГОРЕ, ПАПКА, БУЛСТАТ).
+_NAMED = re.compile(r"(?:\bред|\bключ|\bколона|\bнадпис|\bзаглавие)\s+[„\"«]?([А-ЯA-Z]{3,})\b")
+_SHOWN = re.compile(r"(?:→|\bпечата|\bпоказва|\bизвежда|\bсъобщение)\s*[„\"«]([^“\"»\n]{2,60})[“\"»]")
+
+
+def literals(task: str) -> list[str]:
+    """The strings the task wants shown verbatim, in their order."""
+    found = sorted((m.start(1), m.group(1)) for rx in (_NAMED, _SHOWN)
+                    for m in rx.finditer(task or ""))
+    return list(dict.fromkeys(s for _, s in found))
 
 
 class RunCheck:
     """The agent loop calls `observe` for every tool result and `note()` when
     the model stops calling tools; a non-empty note goes back to the model."""
 
-    def __init__(self) -> None:
+    def __init__(self, task: str = "") -> None:
         self._written: dict[str, Path] = {}
         self._unrun: set[str] = set()
         self._nudged = False
+        self._literals = literals(task)
+
+    def _missing_literals(self) -> str:
+        texts = []
+        for path in self._written.values():
+            try:
+                texts.append(path.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                pass
+        missing = [s for s in self._literals if texts and not any(s in t for t in texts)]
+        if not missing:
+            return ""
+        quoted = ", ".join(f"„{s}“" for s in missing)
+        return (f" Заявката иска буквално {quoted}, а в записания код го няма: текстът, който "
+                f"програмата показва или връща, е точно този — не превод (ОБЩО ≠ TOTAL).")
 
     def observe(self, result: str) -> None:
         result = result or ""
@@ -57,12 +84,13 @@ class RunCheck:
         if not self.due():
             return ""
         self._nudged = True
+        words = self._missing_literals()
         if self._unrun:
             names = ", ".join(sorted(self._unrun))
             return (f"[проверка на кода] {names}: записан(и), но НЕ пуснат(и) след последната "
                     f"промяна. Преди да кажеш „готово“ — пусни кода (RUN_CMD) с примерите от "
                     f"заявката и с {_CASES}. {_MISMATCH} Ако кодът "
-                    f"наистина не може да се пусне тук, кажи защо. {_ASSUMPTIONS}")
+                    f"наистина не може да се пусне тук, кажи защо. {_ASSUMPTIONS}{words}")
         return ("[проверка на кода] Преди „готово“: примерите от заявката не доказват правилата. "
                 f"Пусни кода с {_CASES}. {_MISMATCH} Ако вече си ги "
-                f"пробвал — кажи в един ред кои и приключи. {_ASSUMPTIONS}")
+                f"пробвал — кажи в един ред кои и приключи. {_ASSUMPTIONS}{words}")
