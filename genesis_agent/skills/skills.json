@@ -579,6 +579,27 @@
       }
     },
     {
+      "name": "bg_contact_form_phone",
+      "category": "domain",
+      "file_path": "skills/bg_contact_form_phone.md",
+      "description": "Български мобилен номер във форма — 0888 123 456, +359 888 123 456 и 00359888123456 → +359888123456 (00359 преди 0), кодове 87/88/89/98/99 и 9 цифри; Flask 3 — escape от markupsafe, POST → 303 точно към поискания път.",
+      "triggers": [
+        "български мобилен номер",
+        "телефон +359 00359",
+        "мобилен телефон номер",
+        "форма за запитване flask"
+      ],
+      "min_score": 3,
+      "version": "1.0",
+      "last_updated": "2026-10-04T02:30:00+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
+    },
+    {
       "name": "web_site_2026",
       "category": "web",
       "file_path": "skills/web_site_2026.md",

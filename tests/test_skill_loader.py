@@ -441,8 +441,24 @@ def test_an_excel_csv_request_gets_the_csv_rules_not_the_eik_check(_shipped_skil
     assert "bg_eik_bulstat_validate" not in text
 
 
+def test_the_contact_form_gets_the_phone_rules_and_nothing_else_does(_shipped_skills) -> None:
+    """bench contact-form 2026-10-02: 1/2 — 00359888123456 → +3590359888123456 и
+    `from flask import escape` (Flask 3 го няма). Само заявката с мобилен номер го получава —
+    не сайтът с контактна форма (уеб ръководството) и не другите bench задачи."""
+    projects = sl.Path(__file__).resolve().parent.parent / "bench" / "projects"
+    for task in sorted(projects.glob("*/task.txt")):
+        text = sl.domain_context(task.read_text(encoding="utf-8"))
+        hit = "библиотеката: bg_contact_form_phone" in text
+        assert hit == (task.parent.name == "contact-form"), task.parent.name
+        if hit:
+            assert '"00359", ЧАК ТОГАВА "0"' in text and "markupsafe" in text
+    site = sl.domain_context("Направи сайт за пекарна с контактна форма и телефон")
+    assert "bg_contact_form_phone" not in site and "web_site_2026" in site
+    assert "bg_contact_form_phone" in sl.domain_context("валидирай български мобилен номер")
+
+
 @pytest.mark.parametrize("name", ["bg_eik_bulstat_validate", "bg_euro_bgn_conversion",
-                                  "bg_excel_csv_import"])
+                                  "bg_excel_csv_import", "bg_contact_form_phone"])
 def test_shipped_domain_skills_pass_their_self_tests(_shipped_skills, tmp_path, name) -> None:
     import subprocess
     import sys
