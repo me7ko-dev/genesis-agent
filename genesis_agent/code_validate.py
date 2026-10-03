@@ -18,13 +18,32 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
+from pathlib import Path
 
 _RUFF_TIMEOUT = 10
 _MAX_ERRORS_SHOWN = 15
 
 
+def _ruff_exe() -> str | None:
+    """`ruff` от PATH, иначе инсталираният до този Python (Scripts/ или bin/ на venv-а).
+
+    bench cli-config 2026-10-02: Genesis върви като python.exe на pipx venv-а без
+    activate — папката с ruff.exe не е в PATH, всеки WRITE_FILE пропускаше ruff и
+    недефинирано `eprint` (F821) излезе с ✓; скритият тест получи NameError вместо код 2.
+    """
+    found = shutil.which("ruff")
+    if found:
+        return found
+    for name in ("ruff.exe", "ruff"):
+        candidate = Path(sys.executable).with_name(name)
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
 def _ruff_available() -> bool:
-    return shutil.which("ruff") is not None
+    return _ruff_exe() is not None
 
 
 def validate_code_with_ruff(code: str) -> tuple[bool, str]:
@@ -40,13 +59,13 @@ def validate_code_with_ruff(code: str) -> tuple[bool, str]:
 
     try:
         fixed = subprocess.run(
-            ["ruff", "check", "--fix", "--exit-zero",
+            [_ruff_exe() or "ruff", "check", "--fix", "--exit-zero",
              "--stdin-filename", "generated.py", "-"],
             input=code, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=_RUFF_TIMEOUT,
             check=False,
         )
         checked = subprocess.run(
-            ["ruff", "check", "--output-format", "json",
+            [_ruff_exe() or "ruff", "check", "--output-format", "json",
              "--stdin-filename", "generated.py", "-"],
             input=fixed.stdout or code, capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=_RUFF_TIMEOUT, check=False,
@@ -90,7 +109,7 @@ def lint_note(code: str) -> str:
         return ""
     try:
         checked = subprocess.run(
-            ["ruff", "check", "--output-format", "json",
+            [_ruff_exe() or "ruff", "check", "--output-format", "json",
              "--stdin-filename", "generated.py", "-"],
             input=code, capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=_RUFF_TIMEOUT, check=False,
