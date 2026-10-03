@@ -620,6 +620,26 @@
       }
     },
     {
+      "name": "money_round_up_step",
+      "category": "domain",
+      "file_path": "skills/money_round_up_step.md",
+      "description": "Цена, закръглена НАГОРЕ до стъпка (0,05 / 0,10 / 1) — с Decimal от самия текст, не с math.ceil върху float: 26,25 × 1,1 × 1,2 = 34,65 точно, а float дава 34.650000000000006 → 34,70.",
+      "triggers": [
+        "закръглена нагоре до стъпката",
+        "закръгляне нагоре цена стъпка",
+        "round up price to step"
+      ],
+      "min_score": 3,
+      "version": "1.0",
+      "last_updated": "2026-10-04T02:50:00+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
+    },
+    {
       "name": "web_site_2026",
       "category": "web",
       "file_path": "skills/web_site_2026.md",

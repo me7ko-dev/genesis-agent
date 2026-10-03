@@ -488,7 +488,7 @@ def test_a_csv_with_phones_gets_both_and_a_loose_second_match_stays_out(_shipped
 
 @pytest.mark.parametrize("name", ["bg_eik_bulstat_validate", "bg_euro_bgn_conversion",
                                   "bg_excel_csv_import", "bg_contact_form_phone",
-                                  "bg_shop_scrape_prices"])
+                                  "bg_shop_scrape_prices", "money_round_up_step"])
 def test_shipped_domain_skills_pass_their_self_tests(_shipped_skills, tmp_path, name) -> None:
     import subprocess
     import sys
@@ -551,7 +551,18 @@ def test_a_workdays_request_gets_the_working_days_rules(_shipped_skills) -> None
     assert "1 ноември" in text
 
 
-@pytest.mark.parametrize("project", ["sales-report", "fuel-prices", "tasks-api", "cli-config"])
+def test_a_price_rounded_up_to_a_step_gets_the_decimal_rules(_shipped_skills) -> None:
+    """bench cli-config 2026-10-02 пуск 1: math.ceil(34.650000000000006 / 0.05) → 34,70.
+    Само това знание — не правилата за ДДС НОМЕР (ставката „ДДС“ не е номер)."""
+    projects = sl.Path(__file__).resolve().parent.parent / "bench" / "projects"
+    for task in sorted(projects.glob("*/task.txt")):
+        text = sl.domain_context(task.read_text(encoding="utf-8"))
+        assert ("библиотеката: money_round_up_step" in text) == (task.parent.name == "cli-config")
+        if task.parent.name == "cli-config":
+            assert "ROUND_CEILING" in text and "bg_vat_number_validate" not in text
+
+
+@pytest.mark.parametrize("project", ["sales-report", "fuel-prices", "tasks-api"])
 def test_requests_without_a_domain_get_no_knowledge(_shipped_skills, project) -> None:
     """Общи думи („знака“, „число“, „България“) не са тема — само тригерите са.
     cli-config (2026-10-02): ставката „ДДС“ + `"vat": 20` в config-а подаваха
