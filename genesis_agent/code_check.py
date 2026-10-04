@@ -33,12 +33,16 @@ _ASSUMPTIONS = ("Ако условието допуска две тълкува�
 # кавички след →/печата/показва — не всяка главна дума (НАГОРЕ, ПАПКА, БУЛСТАТ).
 _NAMED = re.compile(r"(?:\bред|\bключ|\bколона|\bнадпис|\bзаглавие)\s+[„\"«]?([А-ЯA-Z]{3,})\b")
 _SHOWN = re.compile(r"(?:→|\bпечата|\bпоказва|\bизвежда|\bсъобщение)\s*[„\"«]([^“\"»\n]{2,60})[“\"»]")
+# bench cli-config 2026-10-04: „още една колона продажна“ → sale_price. С малки букви само
+# след „колона“ („командния ред сменя“ не е име) и без служебните думи след нея.
+_COLUMN = re.compile(r"\bколона\s+[„\"«]?([а-яa-z][а-яa-z_]{2,})\b")
+_NOT_NAMES = {"със", "във", "към", "без", "при", "след", "преди", "която", "като", "или"}
 
 
 def literals(task: str) -> list[str]:
     """The strings the task wants shown verbatim, in their order."""
-    found = sorted((m.start(1), m.group(1)) for rx in (_NAMED, _SHOWN)
-                    for m in rx.finditer(task or ""))
+    found = sorted((m.start(1), m.group(1)) for rx in (_NAMED, _SHOWN, _COLUMN)
+                    for m in rx.finditer(task or "") if m.group(1) not in _NOT_NAMES)
     return list(dict.fromkeys(s for _, s in found))
 
 

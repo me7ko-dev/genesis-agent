@@ -111,6 +111,16 @@ def test_only_named_or_shown_words_count_as_literal():
     assert literals('ключ "ОБЩО" със сумата; накрая ред ОБЩО') == ["ОБЩО"]
 
 
+def test_a_lowercase_column_name_is_literal_too():
+    """bench cli-config 2026-10-04 #2: „още една колона продажна“, а изходът е sale_price
+    (4/5 скрити теста). „командния ред сменя“ и „колона със сумата“ не са имена."""
+    from genesis_agent.code_check import literals
+    cli = ("Изходът е същият CSV с още една колона продажна, с десетична запетая. "
+           "--markup от командния ред сменя общата надценка")
+    assert literals(cli) == ["продажна"]
+    assert literals("колони дата;продукт; добави колона със сумата и колона която е празна") == []
+
+
 def test_the_terminal_turn_gives_the_check_its_task(tmp_path, monkeypatch):
     """bench_projects минава през терминала (cli → run_turn) — там заявката трябва да стигне."""
     from collections import deque
