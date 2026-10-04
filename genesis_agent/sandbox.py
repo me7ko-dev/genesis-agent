@@ -28,6 +28,7 @@ genesis_agent.sandbox — единна защитна бариера за изп
 from __future__ import annotations
 
 import ast
+import logging
 import os
 import re
 import shlex
@@ -39,6 +40,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
+
+log = logging.getLogger("genesis.sandbox")
 
 try:  # POSIX-only; resource limits са best-effort на не-Linux платформи.
     import resource  # type: ignore
@@ -817,6 +820,7 @@ def assess_command(command: str, cwd: Path | None = None) -> RiskVerdict:
     try:
         return verdict.merge(_assess_file_ops(command, cwd))
     except Exception as e:
+        log.debug("прегледът на файловите операции падна — остава присъдата без него", exc_info=True)
         verdict.reasons.append(f"(преглед на файловите операции неуспешен: {e})")
         return verdict
 
@@ -1098,6 +1102,7 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
             preexec_fn=(lambda: _preexec(policy, nproc_cap)) if os.name == "posix" else None,  # noqa: PLW1509 — fork()+exec() is immediate; setrlimit-only preexec, no locks touched
         )
     except Exception as e:
+        log.debug("процесът не тръгна", exc_info=True)
         return SandboxResult(ok=False, stdout="", stderr=f"[sandbox] стартът се провали: {e}",
                              returncode=None)
     try:

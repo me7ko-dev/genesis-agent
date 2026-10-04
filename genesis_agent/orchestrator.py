@@ -18,6 +18,7 @@ genesis_agent.orchestrator — мулти-агентна оркестрация 
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from genesis_agent import dna
@@ -28,6 +29,8 @@ from genesis_agent.skill_loader import SKILLS_ROOT
 from genesis_agent.skills_manager import save_skill, slugify
 from genesis_agent.tool_schemas import MISSION_TOOLS, load_tool_arguments
 from genesis_agent.verifier import verify_skill
+
+log = logging.getLogger("genesis.orchestrator")
 
 
 @dataclass
@@ -113,6 +116,7 @@ def run_orchestrated(goal: str, *, max_rounds: int | None = None,
         from genesis_agent.reflection import lessons_for_prompt
         lessons = lessons_for_prompt()
     except Exception:
+        log.debug("уроците от минали мисии не влязоха в промпта", exc_info=True)
         lessons = ""
 
     coder_sys = brain.system_prompt_base()
@@ -159,6 +163,7 @@ def run_orchestrated(goal: str, *, max_rounds: int | None = None,
                     messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                                       "name": name, "content": tool_out[:4000]})
             except Exception as _e:
+                log.debug("инструментът падна — грешката отива при модела", exc_info=True)
                 messages.append({"role": "tool", "tool_call_id": "error",
                                   "name": "error", "content": f"[tool грешка: {_e}]"})
             continue

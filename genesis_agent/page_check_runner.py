@@ -265,6 +265,7 @@ def _theme_and_form(page, before: dict) -> tuple[list[str], bool]:
 
 
 def check(html: Path, shots: Path | None, single: bool = False) -> dict:
+    from playwright.sync_api import TimeoutError as PlaywrightTimeout
     from playwright.sync_api import sync_playwright
 
     srv, port = _serve(html.parent)
@@ -299,7 +300,7 @@ def check(html: Path, shots: Path | None, single: bool = False) -> dict:
                 page.goto(url, wait_until="load", timeout=20000)
                 try:
                     page.wait_for_load_state("networkidle", timeout=2000)
-                except Exception:
+                except PlaywrightTimeout:
                     pass
                 _scroll_through(page, h)
                 m = _measure(page)
@@ -383,7 +384,8 @@ def main() -> int:
             if sys.platform != "win32":
                 raise
             res = check(a.html.resolve(), a.shots)  # без --single-process
-    except Exception as e:  # браузърът не тръгна и т.н. — извикващият решава
+    # Браузърът не тръгна и т.н.: отговорът пак е JSON, с грешката в него.
+    except Exception as e:  # noqa: BLE001 — извикващият (page_check.run) решава
         res = {"error": f"{type(e).__name__}: {str(e)[:300]}"}
     sys.stdout.write(json.dumps(res, ensure_ascii=False))
     return 0

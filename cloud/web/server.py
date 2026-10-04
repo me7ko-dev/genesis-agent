@@ -26,6 +26,7 @@ import argparse
 import contextlib
 import io
 import json
+import logging
 import os
 import re
 import secrets
@@ -36,7 +37,7 @@ import time
 import zipfile
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from http.cookies import SimpleCookie
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -44,6 +45,8 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from cloud.runner import launch
 from cloud.web.store import SESSION_SECONDS, Store
+
+log = logging.getLogger("genesis.web")
 
 STATIC = Path(__file__).with_name("static")
 COOKIE = "genesis_session"
@@ -136,6 +139,7 @@ class App:
             self.store.finish_turn(turn_id, ok=res.ok, error=res.error,
                                    tokens=res.tokens, seconds=res.seconds)
         except Exception as e:
+            log.debug("ходът в облака падна — записан като неуспешен", exc_info=True)
             self.store.finish_turn(turn_id, ok=False, error=f"{type(e).__name__}: {e}",
                                    tokens={}, seconds=0.0)
 
@@ -253,7 +257,7 @@ class Handler(BaseHTTPRequestHandler):
         cookie = SimpleCookie()
         try:
             cookie.load(self.headers.get("Cookie", ""))
-        except Exception:
+        except CookieError:
             return ""
         morsel = cookie.get(COOKIE)
         return morsel.value if morsel else ""

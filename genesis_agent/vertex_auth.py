@@ -36,8 +36,11 @@ Cloud има СВОЯ квота и се таксува отделно — то�
 """
 from __future__ import annotations
 
+import logging
 import os
 import time
+
+log = logging.getLogger("genesis.vertex")
 
 # Токенът живее ~60 минути. Подновяваме 5 минути по-рано, за да не се случи
 # изтичане между проверката и самата заявка.
@@ -105,6 +108,7 @@ def token(project: str) -> str | None:
         credentials, _ = google.auth.default(scopes=[_SCOPE])
         credentials.refresh(google.auth.transport.requests.Request())
     except Exception:
+        log.debug("токен за Vertex не се получи", exc_info=True)
         return None
     value = getattr(credentials, "token", None)
     if not value:
@@ -116,7 +120,7 @@ def token(project: str) -> str | None:
         try:
             import calendar
             expires_at = calendar.timegm(expiry.timetuple())
-        except Exception:
+        except (AttributeError, TypeError, ValueError, OverflowError):
             pass
     _TOKEN_CACHE[project] = (value, expires_at)
     return value

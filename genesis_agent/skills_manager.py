@@ -330,7 +330,7 @@ def save_skill(
                 # writing skills_api tests, 2026-09-18).
                 signature = sign_code(code.strip())
             except Exception:
-                pass
+                log.debug("умението не се подписа — записва се неподписано", exc_info=True)
 
         rel = str(md_path.relative_to(SKILLS_ROOT)).replace("\\", "/")
         entry: dict[str, Any] = {
@@ -366,7 +366,7 @@ def save_skill(
         from genesis_agent.embeddings import index_skill
         index_skill(slug, f"{slug.replace('_', ' ')}. {goal}")
     except Exception:
-        pass
+        log.debug("умението не влезе в индекса за семантично търсене", exc_info=True)
 
     return md_path
 

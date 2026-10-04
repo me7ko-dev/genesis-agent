@@ -34,14 +34,14 @@ _lock = Lock()
 def _load() -> dict:
     try:
         return json.loads(_STATS_PATH.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
         return {}
 
 
 def _save(data: dict) -> None:
     try:
         _STATS_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    except Exception:
+    except OSError:
         pass  # статистиката е "nice to have" — никога не бива да чупи мисия
 
 
