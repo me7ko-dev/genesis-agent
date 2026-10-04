@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -249,500 +251,490 @@ def _run_autonomous_loop_impl(
         )
 
     from genesis_agent.telemetry import report_thought
-    
     report_thought(f"🚀 Инициирам мисия: {goal}")
-    
-    # min_size_b=120 (design note, 2026-07-25): умения се пазят в библиотеката трайно
-    # — качеството тежи повече от скоростта тук. Локалният мозък остава последна
-    # резерва независимо от размера (виж Brain.__init__).
-    brain = Brain(min_size_b=120)
-    brain.route_for_goal(goal)  # адаптивен избор на модел според сложността
-    max_rounds = max_rounds or MAX_LLM_RETRIES
-    _escalate_after = max(2, max_rounds // 3)  # след 1/3 неуспешни рундове → по-голям модел
-    _escalated = False  # виж проверката на дъното на цикъла защо е флаг, а не `==`
-    # Провал на КАЧЕСТВОТО (verifier/критик отхвърлят) е различен сигнал от HTTP/
-    # execution грешка — свободен модел може да връща HTTP 200 с боклук код
-    # безкрайно, без това някога да го деприоритизира или да качи веригата
-    # (design note, 2026-08-11). Броим го отделно и ескалираме към по-силната
-    # безплатна кодинг верига, вместо да чакаме операторът ръчно да сложи
-    # GENESIS_QUALITY=coding.
-    _quality_escalate_after = max(2, max_rounds // 3)
-    _quality_failures = 0
-    # Живо хванат бъг (2026-08-11, реален 10/10-рунда провал на мини-DB
-    # мисия): native tool_calls клонът по-долу прави `continue` БЕЗУСЛОВНО —
-    # нищо не пречи на модела да вика USE_SKILL/RESEARCH рунд след рунд, без
-    # НИКОГА да стигне до писане на код, изгаряйки целия max_rounds бюджет
-    # на чисто търсене. Полезно (RAG-preамбюл), но само до определен праг —
-    # след него моделът трябва изрично да спре и да пише.
-    _tool_only_rounds = 0
-    _force_code_after = max(3, (max_rounds * 2) // 3)
-    # Заповедта се издава веднъж — но в system съобщението, не само като
-    # пореден user ред (bug fix, 2026-09-20). Trim_round_history пази само
-    # messages[:2] + последния разменен чифт, така че user заповед оцелява
-    # РОВНО един рунд: подчини ли се моделът веднага, добре; не се ли подчини,
-    # натискът изчезва точно когато е най-нужен. Повтарянето на всеки следващ
-    # рунд (както беше) го компенсираше, но по начин, който не си личи от
-    # кода и плаща наново на всеки рунд. system частта оцелява до края на
-    # мисията; user редът остава за непосредствената сила.
-    _forced_code = False
-    # Същият извик, същият изход, пореден път — виж genesis_agent.repeat_guard.
-    # Тук е по-остро, отколкото в чата: рундовете на мисия са 8, не 25, така че
-    # три изгорени в кръг са над една трета от целия бюджет за задачата.
-    _spin_guard = RepeatGuard()
+    return _Mission(goal, max_rounds or MAX_LLM_RETRIES, skill_slug=skill_slug,
+                    operator_id=operator_id, audit=audit, storage_note=storage_note).run()
 
-    red_note = ""
-    if dna.red_zone_elevation_granted():
-        red_note = (
-            "\n\n[SYSTEM] GENE-SECURITY: Red Zone elevation token is ACTIVE for this session. "
-            "Registry/system code is still discouraged unless strictly necessary for the goal.\n"
-        )
 
-    # RAG: инжектираме релевантен контекст (подобни умения + минали уроци).
-    rag_context = brain.build_context(goal)
-    rag_block = f"\n\n## КОНТЕКСТ ОТ ПАМЕТТА\n{rag_context}\n" if rag_context else ""
-
-    # Мета-обучение: дестилирани уроци от минали грешки → в system prompt-а.
-    system_content = brain.system_prompt_base()
-    try:
-        from genesis_agent.reflection import lessons_for_prompt
-        lessons = lessons_for_prompt()
-        if lessons:
-            system_content += "\n\n" + lessons
-    except Exception:
-        pass
-
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": system_content},
-        {
-            "role": "user",
-            "content": f"High-level goal:\n{goal}{rag_block}\n\nIf you need external info FIRST, you may reply with ONLY a read-only tool tag ([WEB_SEARCH: query] for raw results, [RESEARCH: question] for a cross-verified grounded answer across multiple sources when accuracy matters, [READ_FILE: /path], or [LIST_DIR: /path]) and I will return the result before you write code. A USE_SKILL tool is also available (native function-calling) — prefer calling an existing verified skill directly over reimplementing it from scratch when one already covers part of the goal. Otherwise implement as a single Python script. CRITICAL: You MUST include verification code at the bottom of the script (e.g. asserts or checks) that explicitly verifies the goal was achieved. If verification fails, raise an Exception.{red_note}",
-        },
-    ]
-
-    # Задължително проучване за СЛАБИЯ (локален) tier (design note, 2026-08-11):
-    # ако мисията ще тръгне директно от локалния 3B/7B/14B модел — офлайн
-    # режим (GENESIS_LOCAL_ONLY=1) или изобщо няма конфигурирана облачна верига
-    # — инжектираме grounded web research по целта ПРЕДИ първия рунд, вместо да
-    # чакаме слабия модел сам да се сети да го поиска (обичайно не се сеща).
-    # За нормални мисии (облакът пробва пръв) същото се случва РЕАКТИВНО долу,
-    # в момента на реален fallback към локалния модел — тук не можем да знаем
-    # предварително дали облакът ще откаже.
-    _local_research_injected = False
-    if brain.local and (os.environ.get("GENESIS_LOCAL_ONLY") == "1" or not brain.chain):
-        boost = _context_boost_for_weak_model(brain, goal)
-        if boost:
-            report_thought("🔎 Локален tier от старта — проучвам, търся пример, планирам...")
-            messages.append({"role": "system", "content": boost})
-        _local_research_injected = True
-
-    # ─── АВАРИЕН РЕМОНТ: задейства ако имаме код от последен рунд но е бракувал ───
-    last_generated_code = ""
-    last_stdout = ""
-    last_stderr = ""
-    for round_i in range(max_rounds):
-        try:
-            from genesis_agent.config import stop_event
-            if stop_event.is_set():
-                print("\n[!] Изпълнението е ПРЕКЪСНАТО от потребителя (ПАУЗА)!")
-                last_stderr = "Изпълнението е прекъснато от потребителя."
-                break
-        except ImportError:
-            pass
-
-        messages = Brain.trim_round_history(messages)
-        reply = brain.complete(messages, tools=MISSION_TOOLS)
-
-        # ─── ПАДНАХМЕ НА ЛОКАЛНИЯ TIER — проучи преди да продължиш (design note,
-        # 2026-08-11): облакът се пробва пръв за всяка нормална мисия, така че
-        # горе (преди рунд 0) не можехме да знаем предварително дали ще стигнем
-        # дотук. Веднага щом brain.current реално сочи локалния модел за първи
-        # път тази мисия — това round-и отговор е писан "на сляпо" от слаб
-        # модел без реален контекст; изхвърляме го и force-ваме нов опит,
-        # информиран от grounded research, вместо да продължим с код от нищото.
-        if (not _local_research_injected and brain.local
-                and brain.current == brain.local
-                and not str(reply.raw_text or "").startswith("Error:")):
-            _local_research_injected = True
-            boost = _context_boost_for_weak_model(brain, goal)
-            if boost:
-                report_thought("🔎 Паднахме на локален модел — проучвам, търся пример, планирам...")
-                messages.append({"role": "assistant", "content": reply.raw_text or ""})
-                messages.append({"role": "user", "content": boost +
-                                 "\n\nИзползвай горното (ако е relevantно за целта) и напиши "
-                                 "финалния Python скрипт със self-test, който печата OK."})
-                continue
-
-        # ─── NATIVE TOOL USE (design note, 2026-07-25, "мисии с реални умения") ───
-        # Ако моделът поддържа function-calling (config.yaml supports_tools),
-        # tool_calls е структуриран — извикваме СЪЩИЯ backend като терминалния
-        # чат (genesis_skills.dispatch_tool_call), най-важно USE_SKILL: Brain-ът
-        # вече може РЕАЛНО да изпълни съществуващо умение, не само да получи
-        # кода му инжектиран в промпта (build_context композицията по-горе).
-        # Verifier-ът/критикът никога не виждат тези рундове — continue-ваме
-        # обратно към върха на цикъла ПРЕДИ да стигнем до код-екстракция.
-        if reply.tool_calls:
-            report_thought("🔧 Brain вика инструмент (native)...")
-            _spin_now = False
-            messages.append({"role": "assistant", "content": reply.raw_text or "",
-                              "tool_calls": reply.tool_calls})
-            try:
-                import sys as _sys
-                _sys.path.insert(0, str(PROJECT_ROOT))
-                import json as _json
-
-                import genesis_skills
-                for tc in reply.tool_calls:
-                    fn = tc.get("function", {}) or {}
-                    name = fn.get("name", "")
-                    try:
-                        args = load_tool_arguments(fn.get("arguments"))
-                    except (_json.JSONDecodeError, TypeError):
-                        args = {}
-                    tool_out = genesis_skills.dispatch_tool_call(name, args)
-                    messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
-                                      "name": name, "content": tool_out[:4000]})
-                    if _spin_guard.observe(name, args, tool_out).stop:
-                        _spin_now = True
-            except Exception as _e:
-                messages.append({"role": "tool", "tool_call_id": "error",
-                                  "name": "error", "content": f"[tool грешка: {_e}]"})
-
-            _tool_only_rounds += 1
-            if not _forced_code and (_tool_only_rounds >= _force_code_after or _spin_now):
-                _forced_code = True
-                if _spin_now:
-                    report_thought("🔁 Същият инструмент, същият резултат, трети пореден път — "
-                                   "търсенето не води доникъде; принуждавам писане сега.")
-                else:
-                    report_thought(f"⏱️ {_tool_only_rounds} рунда само tool calls, без код — "
-                                   "принуждавам писане сега.")
-                _stop_order = (
-                    "STOP calling tools. You have used most of the round budget "
-                    "searching/looking things up without writing any code. Whatever "
-                    "you have found so far is enough — write the final Python script "
-                    "NOW, in a single ```python``` fence, with the required self-test. "
-                    "Do not call USE_SKILL or any other tool in your next reply."
-                )
-                messages.append({"role": "user", "content": _stop_order})
-                # ...и в system-а, който trim_round_history никога не реже.
-                if messages and messages[0].get("role") == "system":
-                    messages[0] = {**messages[0],
-                                   "content": f"{messages[0].get('content', '')}\n\n{_stop_order}"}
-            continue
-
-        # ─── TOOL USE ПО ВРЕМЕ НА МИСИЯ (стар text-tag режим, само read-only) ───
-        # За модели БЕЗ native function-calling (fallback опашката в Brain) —
-        # ако поискат информация (WEB_SEARCH/READ_FILE/LIST_DIR) вместо код,
-        # изпълняваме я и я връщаме, за да напише кода информирано. Не е провал.
-        if not reply.code and any(t in reply.raw_text for t in ("[WEB_SEARCH:", "[RESEARCH:", "[READ_FILE:", "[LIST_DIR:")):
-            try:
-                import sys as _sys
-                _sys.path.insert(0, str(PROJECT_ROOT))
-                import genesis_skills
-                tool_results = genesis_skills.parse_and_execute_readonly_tools(reply.raw_text)
-            except Exception as _e:
-                tool_results = [f"[tool грешка: {_e}]"]
-            if tool_results:
-                report_thought("🔎 Brain ползва инструмент за информация...")
-                messages.append({"role": "assistant", "content": reply.raw_text})
-                messages.append({"role": "user", "content":
-                    "Резултат от инструментите:\n" + "\n\n".join(tool_results)[:4000] +
-                    "\n\nСега напиши финалния Python скрипт със self-test, който печата OK."})
-                continue
-
-        if reply.code:
-            last_generated_code = reply.code  # Запазва последния генериран код
-
-            # ─── LOCAL BEST-OF-N + ансамбъл от модели (design note, 2026-08-11) ───
-            # Локалният inference е безплатен (собствен GPU) — вместо да приемем
-            # сляпо първия отговор на слаб 3B/7B/14B модел, ако той не излезе
-            # перфектен, вземаме LOCAL_EXTRA_CANDIDATES още опита (различен
-            # инсталиран tier и/или temperature, виж Brain.generate_local_
-            # candidates) и избираме най-добре верифицирания. Само когато вече
-            # знаем, че сме на локалния tier тази мисия — облачните рундове са
-            # достатъчно силни без това.
-            if brain.local and brain.current == brain.local and _local_research_injected:
-                best_score, best_code = _score_local_candidate(reply.code)
-                best_raw = reply.raw_text
-                if best_score < 2:
-                    report_thought("🎲 Първият локален опит не е перфектен — пробвам още кандидати...")
-                    for raw, code, _model in brain.generate_local_candidates(
-                        messages, n=LOCAL_EXTRA_CANDIDATES
-                    ):
-                        if not code or best_score == 2:
-                            continue
-                        score, scored_code = _score_local_candidate(code)
-                        if score > best_score:
-                            best_score, best_code, best_raw = score, scored_code, raw
-                reply.code, reply.raw_text = best_code, best_raw
-                last_generated_code = reply.code
-
-            # Ruff pre-check ПРЕДИ sandbox-а (design note, 2026-07-29): явен
-            # синтактичен/lint проблем не се нуждае от истинско subprocess
-            # изпълнение, за да се хване — same fail-open convention навсякъде
-            # другаде (ако ruff липсва, validate_code_with_ruff връща (True,"")
-            # и нищо не се променя). Auto-fix-натата версия минава напред към
-            # sandbox-а вместо оригинала; unfixable проблем спестява целия
-            # sandbox рунд — обратно към модела веднага, без subprocess такса.
-            from genesis_agent.code_validate import validate_code_with_ruff
-            lint_ok, lint_detail = validate_code_with_ruff(reply.code)
-            if lint_ok and lint_detail:
-                reply.code = lint_detail
-                last_generated_code = reply.code
-            elif not lint_ok:
-                messages.append({"role": "assistant", "content": reply.raw_text})
-                messages.append({"role": "user", "content":
-                    f"{lint_detail}\n\nПоправи и върни ЦЕЛИЯ коригиран скрипт "
-                    "в един ```python``` fence, преди да го пробваме."})
-                continue
-
-        if not reply.code:
-            raw = str(reply.raw_text)
-            if raw.startswith("Error:"):
-                print(f"\n[КРИТИЧНА ГРЕШКА] Сървърът върна: {raw}")
-                # Спира веднага - няма смисъл да въртим 8 рунда при грешка на връзка
-                print("[!] Прекратявам опитите. Провери модела и повтори (/модел)")
-                break
-
-            messages.append({"role": "assistant", "content": reply.raw_text})
-            messages.append(
-                {
-                    "role": "user",
-                    "content": "No ```python``` block found. Respond with exactly one ```python ... ``` fence containing the full script.",
-                }
-            )
-            continue
-
-        
-        result = run_python_subprocess(reply.code)
-        last_stdout = result.stdout
-        last_stderr = result.stderr
-
-        if result.ok:
-            # ─── ТЕСТ-ГЕЙТ (реална проверка, не само мнение на LLM) ───
-            from genesis_agent.verifier import verify_skill
-            vres = verify_skill(reply.code)
-            if vres.method != "self_test_passed":
-                _quality_failures = _note_quality_failure(brain, _quality_failures, _quality_escalate_after)
-                # Обратната връзка трябва да описва ИСТИНСКАТА причина. Когато
-                # проверката е отказана заради нужното потвърждение, кодът има
-                # преминаващ self-test — просто не е бил пуснат. Общото
-                # съобщение („няма self-test, добави assert-и“) остави на
-                # модела един-единствен начин да се подчини: да махне
-                # подпроцеса, тоест да обезсмисли умението, или да си измисли
-                # тест. Гейтът е същият — умението пак не се приема — сменя се
-                # само какво се иска да се поправи.
-                if vres.method == "needs_confirmation":
-                    report_thought(
-                        "🧪 Тест-гейт: self-testът не може да се пусне без надзор "
-                        f"({vres.detail[:120]})")
-                    messages.append({"role": "assistant", "content": reply.raw_text})
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            "The self-test could NOT be run: verification runs unattended and "
-                            "the code performs an operation that requires confirmation "
-                            f"({vres.detail[:200]}). Do NOT remove that capability — it is the "
-                            "point of the skill. Restructure instead: keep the privileged call "
-                            "inside a function, and make the `__main__` self-test verify the "
-                            "logic around it without performing it (assert on argument "
-                            "assembly, parsing of a sample output, a dry-run flag). Print 'OK' "
-                            "on success and return the FULL corrected script."
-                        ),
-                    })
-                    continue
-                report_thought(f"🧪 Тест-гейт отхвърли: няма преминаващ self-test ({vres.method})")
-                messages.append({"role": "assistant", "content": reply.raw_text})
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "The code ran but has NO passing self-test. Add assert-based checks at "
-                        "the bottom that verify the goal was actually achieved and print 'OK' on "
-                        f"success, then return the FULL corrected script. (verifier: {vres.method})"
-                    ),
-                })
-                continue
-
-            # ─── КРИТИК (семантично второ мнение) ───
-            critic_prompt = (
-                f"Goal: {goal}\n\n"
-                f"Code Output:\n{last_stdout}\n\n"
-                f"Code:\n{reply.code}\n\n"
-                "Did the code FULLY accomplish the specific goal? For example, if it was asked to save to a file, does the code actually write to a file?\n"
-                "If YES, reply exactly 'YES'.\n"
-                "If NO (it missed a requirement or just printed instead of saving), reply 'NO: <reason>'. Do not write code."
-            )
-            critic_msg = [
-                {"role": "system", "content": "You are a strict code reviewer. You ONLY reply with YES or NO: <reason>."},
-                {"role": "user", "content": critic_prompt}
-            ]
-            # avoid=writer_pair (design note, 2026-08-11): без това критикът много
-            # често пада на СЪЩИЯ provider/model, който написа кода (chain-ът винаги
-            # обхожда отгоре-надолу) — "второто мнение" тогава просто повтаря
-            # слепите петна на първото. brain.current още сочи towards писателя тук
-            # (нищо не го е сменило между генерирането на кода и този ред).
-            writer = getattr(brain, "current", None)
-            writer_pair: tuple[str, str] | None = None
-            if isinstance(writer, dict):
-                w_provider, w_model = writer.get("provider"), writer.get("model")
-                if isinstance(w_provider, str) and isinstance(w_model, str):
-                    writer_pair = (w_provider, w_model)
-            critic_eval = brain.complete(critic_msg, avoid=writer_pair).raw_text.strip()
-
-            if critic_eval.upper().startswith("NO"):
-                _quality_failures = _note_quality_failure(brain, _quality_failures, _quality_escalate_after)
-                report_thought(f"🔍 Критикът отхвърли резултата: {critic_eval}")
-                messages.append({"role": "assistant", "content": reply.raw_text})
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        f"Code ran and self-test passed, but a reviewer says it does not meet the "
-                        f"goal: {critic_eval}. Fix and return the FULL corrected script."
-                    ),
-                })
-                continue
-
-            report_thought("✅ Тест-гейт + критик одобриха резултата.")
-            slug = skill_slug or slugify(goal)
-            ex: dict[str, Any] = {"rounds": round_i + 1, "test_gated": True}
-            ex.update(audit)
-            try:
-                path = save_skill(
-                    slug=slug,
-                    code=reply.code,
-                    goal=goal,
-                    verification_stdout=result.stdout,
-                    extra=ex,
-                )
-            except dna.GenesisDNAError as e:
-                last_stderr = str(e)
-                messages.append({"role": "assistant", "content": reply.raw_text})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": "Skills Library rejected the script under GENESIS DNA (ethics/red zone). "
-                        "Rewrite to comply: no harm to humans, no registry/system Red Zone without approval token, "
-                        "single ```python``` block.\n\n"
-                        + str(e),
-                    }
-                )
-                continue
-            rel = str(path.relative_to(SKILLS_ROOT)).replace("\\", "/")
-            try:
-                from genesis_agent.reflection import detect_reuse
-                reused = detect_reuse(rag_context, reply.code)
-            except Exception:
-                reused = False
-            return LoopOutcome(
-                success=True,
-                rounds=round_i + 1,
-                skill_path=rel,
-                last_stdout=last_stdout,
-                last_stderr=last_stderr,
-                storage_note=storage_note,
-                dna_audit=audit,
-                reused_existing=reused,
-            )
-
-        # ЕСКАЛАЦИЯ: ако малкият модел се мъчи, качи на по-голям (3b→7b→14b).
-        # `>=` + флаг, НЕ `== _escalate_after` (bug fix, 2026-08-12): този ред
-        # стои на дъното на цикъла, а над него има шест `continue` пътя (native
-        # tool calls, read-only tool tags, lint провал, липсващ код блок,
-        # verifier отказ, критик отказ). При проверка за точно равенство беше
-        # достатъчно ТОЧНО този рунд да мине по някой от тях, за да се пропусне
-        # ескалацията завинаги — номерът на рунда не се връща обратно. При
-        # подразбиращите се max_rounds=8 прагът е рунд 2, тоест един-единствен
-        # tool-call рунд там изключваше ескалацията за цялата мисия.
-        # Флагът се вдига при ОПИТ, не при успех: escalate() връща False, ако
-        # няма по-голям инсталиран локален tier, а това не се променя по средата
-        # на мисията — повтарянето му всеки следващ рунд би било само излишен
-        # HTTP poll към Ollama на всеки кръг.
-        if not _escalated and round_i + 1 >= _escalate_after:
-            brain.escalate()
-            _escalated = True
-
-        # BROADCAST THOUGHT: FAILURE / SELF-CORRECT
-        report_thought("❌ Грешка при изпълнението. Анализирам проблема и започвам самокорекция...")
-        
-        messages.append({"role": "assistant", "content": reply.raw_text})
-        messages.append(
-            {
-                "role": "user",
-                "content": "The code failed when executed. Fix ALL issues and return the complete corrected script in one ```python``` block.\n\n"
-                + format_failure_for_brain(result),
-            }
-        )
-
+def _stop_requested() -> bool:
     try:
         from genesis_agent.config import stop_event
-        is_stopped = stop_event.is_set()
     except ImportError:
-        is_stopped = False
+        return False
+    return stop_event.is_set()
 
-    if last_generated_code and last_stderr and not is_stopped:
-        print("\n" + "\u2550" * 55)
-        print("  [\u26a0\ufe0f  \u0410\u0412\u0410\u0420\u0418\u0415\u041d \u0420\u0415\u041c\u041e\u041d\u0422] Brain \u0435 \u043d\u0435\u0434\u043e\u0441\u0442\u044a\u043f\u0435\u043d. \u0410\u043a\u0442\u0438\u0432\u0438\u0440\u0430\u043c LocalRepairAgent...")
-        print("  [\u041c\u0410\u041b\u042a\u041a \u041c\u041e\u0414\u0415\u041b] \u041f\u0430\u0442\u0435\u0440\u043d \u0430\u043d\u0430\u043b\u0438\u0437 + 1-3B \u043c\u043e\u0434\u0435\u043b")
-        print("\u2550" * 55)
 
-        repair = emergency_repair(last_generated_code, last_stderr, last_stdout)
+def _genesis_skills():
+    """genesis_skills живее в корена на проекта, не в пакета."""
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+    import genesis_skills
+    return genesis_skills
 
-        # Верифицирай ремонта преди да го запишеш трайно (design note, 2026-08-11):
-        # emergency_repair.fixed досега значеше само "_test_code излезе с код 0" -
-        # pattern фиксовете (fix_key_error: d["k"] -> d.get("k"); fix_undefined_name
-        # -> None) могат тихо да МАСКИРАТ грешката вместо да я поправят ("не гърми"
-        # != "прави правилното нещо"). Такъв код се записваше с verification_stdout=""
-        # - т.е. НУЛЕВА верификация - и после се преизползва от бъдещи мисии през
-        # RAG (Brain.build_context), пренасяйки бъга нататък. Минава през СЪЩИЯ
-        # sandbox verify_skill гейт като нормалния успешен path по-горе.
-        from genesis_agent.verifier import verify_skill
-        repair_verified = False
-        repair_vres = None
-        if repair.fixed:
-            repair_vres = verify_skill(repair.code)
-            repair_verified = repair_vres.verified
-            if not repair_verified:
-                print(f"  [РЕМОНТ ОТХВЪРЛЕН] Поправеният код не мина verify_skill "
-                      f"({repair_vres.method}) - вероятно маскира грешката вместо да я "
-                      "поправя; НЕ се записва в библиотеката непроверен.")
 
-        if repair_verified and repair_vres is not None:
-            print(f"\n  [\u2705 \u0410\u0412\u0410\u0420\u0418\u0415\u041d \u0420\u0415\u041c\u041e\u041d\u0422 \u0423\u0421\u041f\u0415\u0428\u0415\u041d] {repair.fix_desc}")
-            print(f"  Метод: {repair.method} | Рундове: {repair.rounds} | verify: {repair_vres.method}")
+_READONLY_TAGS = ("[WEB_SEARCH:", "[RESEARCH:", "[READ_FILE:", "[LIST_DIR:")
 
-            slug = (skill_slug or slugify(goal)) + "_repaired"
-            try:
-                path = save_skill(
-                    slug=slug,
-                    code=repair.code,
-                    goal=goal + " [repaired by LocalRepairAgent]",
-                    verification_stdout=repair_vres.detail,
-                    extra={"repair_method": repair.method,
-                           "repair_rounds": repair.rounds,
-                           "verify_method": repair_vres.method,
-                           "operator": operator_id or "operator"}
-                )
-                rel = str(path.relative_to(SKILLS_ROOT)).replace("\\", "/")
-                return LoopOutcome(
-                    success=True,
-                    rounds=max_rounds + repair.rounds,
-                    skill_path=rel,
-                    last_stdout=last_stdout,
-                    last_stderr=last_stderr,
-                    storage_note=storage_note,
-                    dna_audit=audit,
-                )
-            except Exception as save_err:
-                print(f"  [\u0420\u0415\u041c\u041e\u041d\u0422] \u0413\u0440\u0435\u0448\u043a\u0430 \u043f\u0440\u0438 \u0437\u0430\u043f\u0430\u0437\u0432\u0430\u043d\u0435: {save_err}")
+_FIRST_TASK = (
+    "If you need external info FIRST, you may reply with ONLY a read-only tool tag "
+    "([WEB_SEARCH: query] for raw results, [RESEARCH: question] for a cross-verified grounded "
+    "answer across multiple sources when accuracy matters, [READ_FILE: /path], or "
+    "[LIST_DIR: /path]) and I will return the result before you write code. A USE_SKILL tool "
+    "is also available (native function-calling) — prefer calling an existing verified skill "
+    "directly over reimplementing it from scratch when one already covers part of the goal. "
+    "Otherwise implement as a single Python script. CRITICAL: You MUST include verification "
+    "code at the bottom of the script (e.g. asserts or checks) that explicitly verifies the "
+    "goal was achieved. If verification fails, raise an Exception.")
+
+_STOP_CALLING_TOOLS = (
+    "STOP calling tools. You have used most of the round budget "
+    "searching/looking things up without writing any code. Whatever "
+    "you have found so far is enough — write the final Python script "
+    "NOW, in a single ```python``` fence, with the required self-test. "
+    "Do not call USE_SKILL or any other tool in your next reply.")
+
+
+class _Mission:
+    """Една мисия: състоянието между рундовете и стъпките на един рунд.
+
+    Всеки рунд: модел → (инструменти | код) → изпълнение → тест-гейт → критик
+    → запис в библиотеката. Стъпка, която връща модела за още работа,
+    добавя бележката си към историята и рундът свършва; следващият пита пак.
+    """
+
+    def __init__(self, goal: str, max_rounds: int, *, skill_slug: str | None,
+                 operator_id: str | None, audit: dict[str, object], storage_note: str) -> None:
+        from genesis_agent.telemetry import report_thought
+        self.think = report_thought
+        self.goal = goal
+        self.max_rounds = max_rounds
+        self.skill_slug = skill_slug
+        self.operator_id = operator_id
+        self.audit = audit
+        self.storage_note = storage_note
+        # min_size_b=120 (design note, 2026-07-25): умения се пазят в библиотеката трайно
+        # — качеството тежи повече от скоростта тук. Локалният мозък остава последна
+        # резерва независимо от размера (виж Brain.__init__).
+        self.brain = Brain(min_size_b=120)
+        self.brain.route_for_goal(goal)  # адаптивен избор на модел според сложността
+        self.escalate_after = max(2, max_rounds // 3)  # 1/3 неуспешни рунда → по-голям модел
+        self.escalated = False  # виж _escalate_if_due защо е флаг, а не `==`
+        # Провал на КАЧЕСТВОТО (verifier/критик отхвърлят) е различен сигнал от HTTP/
+        # execution грешка — свободен модел може да връща HTTP 200 с боклук код
+        # безкрайно, без това някога да го деприоритизира или да качи веригата
+        # (design note, 2026-08-11). Броим го отделно и ескалираме към по-силната
+        # безплатна кодинг верига, вместо да чакаме операторът ръчно да сложи
+        # GENESIS_QUALITY=coding.
+        self.quality_escalate_after = max(2, max_rounds // 3)
+        self.quality_failures = 0
+        # Живо хванат бъг (2026-08-11, реален 10/10-рунда провал на мини-DB
+        # мисия): моделът може да вика USE_SKILL/RESEARCH рунд след рунд, без
+        # НИКОГА да стигне до писане на код. Полезно, но само до определен праг.
+        self.tool_only_rounds = 0
+        self.force_code_after = max(3, (max_rounds * 2) // 3)
+        # Заповедта „пиши код“ се издава веднъж — и в system съобщението, което
+        # trim_round_history пази, не само като пореден user ред (bug fix,
+        # 2026-09-20): user редът оцелява ровно един рунд.
+        self.forced_code = False
+        # Същият извик, същият изход, пореден път — виж genesis_agent.repeat_guard.
+        # Тук е по-остро, отколкото в чата: рундовете на мисия са 8, не 25, така че
+        # три изгорени в кръг са над една трета от целия бюджет за задачата.
+        self.spin_guard = RepeatGuard()
+        self.halted = False
+        self.last_generated_code = ""
+        self.last_stdout = ""
+        self.last_stderr = ""
+        # RAG: релевантен контекст (подобни умения + минали уроци).
+        self.rag_context = self.brain.build_context(goal)
+        self.messages: list[dict[str, Any]] = self._first_messages()
+        self.local_research_injected = self._boost_a_local_start()
+
+    def _first_messages(self) -> list[dict[str, Any]]:
+        red_note = ""
+        if dna.red_zone_elevation_granted():
+            red_note = (
+                "\n\n[SYSTEM] GENE-SECURITY: Red Zone elevation token is ACTIVE for this session. "
+                "Registry/system code is still discouraged unless strictly necessary for the goal.\n"
+            )
+        rag_block = (f"\n\n## КОНТЕКСТ ОТ ПАМЕТТА\n{self.rag_context}\n"
+                     if self.rag_context else "")
+        # Мета-обучение: дестилирани уроци от минали грешки → в system prompt-а.
+        system_content = self.brain.system_prompt_base()
+        try:
+            from genesis_agent.reflection import lessons_for_prompt
+            lessons = lessons_for_prompt()
+            if lessons:
+                system_content += "\n\n" + lessons
+        except Exception:
+            pass
+        return [
+            {"role": "system", "content": system_content},
+            {"role": "user",
+             "content": f"High-level goal:\n{self.goal}{rag_block}\n\n{_FIRST_TASK}{red_note}"},
+        ]
+
+    def _boost_a_local_start(self) -> bool:
+        """Задължително проучване за СЛАБИЯ (локален) tier (design note,
+        2026-08-11): тръгне ли мисията директно от локалния модел — офлайн режим
+        (GENESIS_LOCAL_ONLY=1) или няма облачна верига — grounded web research
+        по целта влиза ПРЕДИ първия рунд. За нормални мисии същото става
+        реактивно, в _fell_to_local, при реален fallback. True = вече е сторено."""
+        b = self.brain
+        if not (b.local and (os.environ.get("GENESIS_LOCAL_ONLY") == "1" or not b.chain)):
+            return False
+        boost = _context_boost_for_weak_model(b, self.goal)
+        if boost:
+            self.think("🔎 Локален tier от старта — проучвам, търся пример, планирам...")
+            self.messages.append({"role": "system", "content": boost})
+        return True
+
+    # ── Рундовете ───────────────────────────────────────────────────────────
+
+    def run(self) -> LoopOutcome:
+        for round_i in range(self.max_rounds):
+            if _stop_requested():
+                print("\n[!] Изпълнението е ПРЕКЪСНАТО от потребителя (ПАУЗА)!")
+                self.last_stderr = "Изпълнението е прекъснато от потребителя."
+                break
+            outcome = self._round(round_i)
+            if outcome is not None:
+                return outcome
+            if self.halted:
+                break
+        if self.last_generated_code and self.last_stderr and not _stop_requested():
+            repaired = self._emergency_repair()
+            if repaired is not None:
+                return repaired
+        return self._outcome(success=False, rounds=self.max_rounds)
+
+    def _round(self, round_i: int) -> LoopOutcome | None:
+        """Един рунд. LoopOutcome — мисията е готова; None — следващ рунд
+        (или край, ако self.halted)."""
+        self.messages = Brain.trim_round_history(self.messages)
+        reply = self.brain.complete(self.messages, tools=MISSION_TOOLS)
+        if self._fell_to_local(reply):
+            return None
+        if reply.tool_calls:
+            self._native_tools(reply)
+            return None
+        if self._readonly_tags(reply):
+            return None
+        if reply.code and not self._prepare_code(reply):
+            return None
+        if not reply.code:
+            self._no_code(reply)
+            return None
+        result = run_python_subprocess(reply.code)
+        self.last_stdout, self.last_stderr = result.stdout, result.stderr
+        if result.ok:
+            return self._judge(reply, result, round_i)
+        self._escalate_if_due(round_i)
+        # BROADCAST THOUGHT: FAILURE / SELF-CORRECT
+        self.think("❌ Грешка при изпълнението. Анализирам проблема и започвам самокорекция...")
+        self._reply_and_ask(reply.raw_text,
+                            "The code failed when executed. Fix ALL issues and return the "
+                            "complete corrected script in one ```python``` block.\n\n"
+                            + format_failure_for_brain(result))
+        return None
+
+    def _reply_and_ask(self, reply_text: str, request: str) -> None:
+        self.messages.append({"role": "assistant", "content": reply_text})
+        self.messages.append({"role": "user", "content": request})
+
+    def _fell_to_local(self, reply: Any) -> bool:
+        """Паднахме на локалния tier — проучи преди да продължиш (design note,
+        2026-08-11). Облакът се пробва пръв, така че преди рунд 0 не можехме да
+        знаем дали ще стигнем дотук. Щом brain.current за първи път сочи
+        локалния модел, отговорът е писан „на сляпо“ от слаб модел — изхвърля се
+        и следва нов опит, информиран от grounded research. True = рундът свършва."""
+        b = self.brain
+        if (self.local_research_injected or not b.local or b.current != b.local
+                or str(reply.raw_text or "").startswith("Error:")):
+            return False
+        self.local_research_injected = True
+        boost = _context_boost_for_weak_model(b, self.goal)
+        if not boost:
+            return False
+        self.think("🔎 Паднахме на локален модел — проучвам, търся пример, планирам...")
+        self._reply_and_ask(reply.raw_text or "", boost +
+                            "\n\nИзползвай горното (ако е relevantно за целта) и напиши "
+                            "финалния Python скрипт със self-test, който печата OK.")
+        return True
+
+    def _native_tools(self, reply: Any) -> None:
+        """Native tool use (design note, 2026-07-25, „мисии с реални умения“): същият
+        backend като чата (genesis_skills.dispatch_tool_call), най-важно USE_SKILL —
+        Brain-ът може РЕАЛНО да изпълни съществуващо умение. Verifier-ът и
+        критикът не виждат тези рундове."""
+        self.think("🔧 Brain вика инструмент (native)...")
+        self.messages.append({"role": "assistant", "content": reply.raw_text or "",
+                              "tool_calls": reply.tool_calls})
+        spinning = self._dispatch(reply.tool_calls)
+        self.tool_only_rounds += 1
+        if not self.forced_code and (self.tool_only_rounds >= self.force_code_after or spinning):
+            self._force_code(spinning)
+
+    def _dispatch(self, tool_calls: list[dict]) -> bool:
+        """Изпълнява извикванията; True — същият извик върна същото пореден път."""
+        spinning = False
+        try:
+            skills = _genesis_skills()
+            for tc in tool_calls:
+                fn = tc.get("function", {}) or {}
+                name = fn.get("name", "")
+                try:
+                    args = load_tool_arguments(fn.get("arguments"))
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+                tool_out = skills.dispatch_tool_call(name, args)
+                self.messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
+                                      "name": name, "content": tool_out[:4000]})
+                if self.spin_guard.observe(name, args, tool_out).stop:
+                    spinning = True
+        except Exception as e:
+            self.messages.append({"role": "tool", "tool_call_id": "error",
+                                  "name": "error", "content": f"[tool грешка: {e}]"})
+        return spinning
+
+    def _force_code(self, spinning: bool) -> None:
+        self.forced_code = True
+        if spinning:
+            self.think("🔁 Същият инструмент, същият резултат, трети пореден път — "
+                       "търсенето не води доникъде; принуждавам писане сега.")
         else:
-            print("  [\u0420\u0415\u041c\u041e\u041d\u0422 \u041d\u0415\u0423\u0421\u041f\u0415\u0428\u0415\u041d] \u041d\u0438\u0442\u043e pattern fixes, \u043d\u0438\u0442\u043e LLM \u043d\u0435 \u043f\u043e\u043c\u043e\u0433\u043d\u0430\u0445а.")
+            self.think(f"⏱️ {self.tool_only_rounds} рунда само tool calls, без код — "
+                       "принуждавам писане сега.")
+        self.messages.append({"role": "user", "content": _STOP_CALLING_TOOLS})
+        # ...и в system-а, който trim_round_history никога не реже.
+        first = self.messages[0] if self.messages else {}
+        if first.get("role") == "system":
+            self.messages[0] = {**first,
+                                "content": f"{first.get('content', '')}\n\n{_STOP_CALLING_TOOLS}"}
 
-    return LoopOutcome(
-        success=False,
-        rounds=max_rounds,
-        skill_path=None,
-        last_stdout=last_stdout,
-        last_stderr=last_stderr,
-        storage_note=storage_note,
-        dna_audit=audit,
-    )
+    def _readonly_tags(self, reply: Any) -> bool:
+        """Модели БЕЗ native function-calling (fallback опашката в Brain): ако
+        поискат информация (WEB_SEARCH/READ_FILE/LIST_DIR) вместо код, тя се
+        изпълнява и връща, за да напишат кода информирано. Не е провал."""
+        if reply.code or not any(t in reply.raw_text for t in _READONLY_TAGS):
+            return False
+        try:
+            results = _genesis_skills().parse_and_execute_readonly_tools(reply.raw_text)
+        except Exception as e:
+            results = [f"[tool грешка: {e}]"]
+        if not results:
+            return False
+        self.think("🔎 Brain ползва инструмент за информация...")
+        self._reply_and_ask(reply.raw_text,
+                            "Резултат от инструментите:\n" + "\n\n".join(results)[:4000] +
+                            "\n\nСега напиши финалния Python скрипт със self-test, който печата OK.")
+        return True
+
+    def _no_code(self, reply: Any) -> None:
+        raw = str(reply.raw_text)
+        if raw.startswith("Error:"):
+            print(f"\n[КРИТИЧНА ГРЕШКА] Сървърът върна: {raw}")
+            # Спира веднага — няма смисъл да въртим 8 рунда при грешка на връзка.
+            print("[!] Прекратявам опитите. Провери модела и повтори (/модел)")
+            self.halted = True
+            return
+        self._reply_and_ask(reply.raw_text, "No ```python``` block found. Respond with exactly "
+                                            "one ```python ... ``` fence containing the full script.")
+
+    # ── Кодът преди и след изпълнението ─────────────────────────────────────
+
+    def _prepare_code(self, reply: Any) -> bool:
+        """Best-of-N на локалния tier и ruff. False — върнат е на модела."""
+        self.last_generated_code = reply.code
+        b = self.brain
+        if b.local and b.current == b.local and self.local_research_injected:
+            self._best_local_candidate(reply)
+        # Ruff ПРЕДИ sandbox-а (design note, 2026-07-29): явен синтактичен/lint
+        # проблем не се нуждае от истинско изпълнение, за да се хване. Без ruff
+        # validate_code_with_ruff връща (True, "") и нищо не се променя;
+        # auto-fix-натата версия минава напред вместо оригинала.
+        from genesis_agent.code_validate import validate_code_with_ruff
+        lint_ok, lint_detail = validate_code_with_ruff(reply.code)
+        if not lint_ok:
+            self._reply_and_ask(reply.raw_text, f"{lint_detail}\n\nПоправи и върни ЦЕЛИЯ "
+                                                "коригиран скрипт в един ```python``` fence, "
+                                                "преди да го пробваме.")
+            return False
+        if lint_detail:
+            reply.code = lint_detail
+            self.last_generated_code = reply.code
+        return True
+
+    def _best_local_candidate(self, reply: Any) -> None:
+        """Локалният inference е безплатен (design note, 2026-08-11): вместо да
+        приемем първия отговор на слаб модел, ако не е перфектен, пробваме още
+        LOCAL_EXTRA_CANDIDATES и вземаме най-добре верифицирания."""
+        best_score, best_code = _score_local_candidate(reply.code)
+        best_raw = reply.raw_text
+        if best_score < 2:
+            self.think("🎲 Първият локален опит не е перфектен — пробвам още кандидати...")
+            for raw, code, _model in self.brain.generate_local_candidates(
+                self.messages, n=LOCAL_EXTRA_CANDIDATES
+            ):
+                if not code or best_score == 2:
+                    continue
+                score, scored_code = _score_local_candidate(code)
+                if score > best_score:
+                    best_score, best_code, best_raw = score, scored_code, raw
+        reply.code, reply.raw_text = best_code, best_raw
+        self.last_generated_code = reply.code
+
+    def _judge(self, reply: Any, result: Any, round_i: int) -> LoopOutcome | None:
+        """Тест-гейт (реална проверка, не мнение на LLM), после критик, после запис."""
+        from genesis_agent.verifier import verify_skill
+        vres = verify_skill(reply.code)
+        if vres.method != "self_test_passed":
+            self._quality_failed()
+            self._ask_for_a_self_test(reply, vres)
+            return None
+        verdict = self._critic(reply)
+        if verdict.upper().startswith("NO"):
+            self._quality_failed()
+            self.think(f"🔍 Критикът отхвърли резултата: {verdict}")
+            self._reply_and_ask(reply.raw_text,
+                                "Code ran and self-test passed, but a reviewer says it does not "
+                                f"meet the goal: {verdict}. Fix and return the FULL corrected script.")
+            return None
+        self.think("✅ Тест-гейт + критик одобриха резултата.")
+        return self._save(reply, result, round_i)
+
+    def _quality_failed(self) -> None:
+        self.quality_failures = _note_quality_failure(
+            self.brain, self.quality_failures, self.quality_escalate_after)
+
+    def _ask_for_a_self_test(self, reply: Any, vres: Any) -> None:
+        # Обратната връзка описва ИСТИНСКАТА причина. Когато проверката е отказана
+        # заради нужното потвърждение, кодът има преминаващ self-test — просто не е
+        # бил пуснат. Общото съобщение („няма self-test, добави assert-и“) оставяше
+        # на модела един начин да се подчини: да махне подпроцеса, тоест да
+        # обезсмисли умението. Гейтът е същият — сменя се само какво се иска.
+        if vres.method == "needs_confirmation":
+            self.think("🧪 Тест-гейт: self-testът не може да се пусне без надзор "
+                       f"({vres.detail[:120]})")
+            self._reply_and_ask(reply.raw_text, (
+                "The self-test could NOT be run: verification runs unattended and "
+                "the code performs an operation that requires confirmation "
+                f"({vres.detail[:200]}). Do NOT remove that capability — it is the "
+                "point of the skill. Restructure instead: keep the privileged call "
+                "inside a function, and make the `__main__` self-test verify the "
+                "logic around it without performing it (assert on argument "
+                "assembly, parsing of a sample output, a dry-run flag). Print 'OK' "
+                "on success and return the FULL corrected script."))
+            return
+        self.think(f"🧪 Тест-гейт отхвърли: няма преминаващ self-test ({vres.method})")
+        self._reply_and_ask(reply.raw_text, (
+            "The code ran but has NO passing self-test. Add assert-based checks at "
+            "the bottom that verify the goal was actually achieved and print 'OK' on "
+            f"success, then return the FULL corrected script. (verifier: {vres.method})"))
+
+    def _critic(self, reply: Any) -> str:
+        """Семантично второ мнение. avoid=авторът (design note, 2026-08-11): без
+        това критикът често пада на СЪЩИЯ модел, който написа кода, и „второто
+        мнение“ повтаря слепите петна на първото."""
+        critic_prompt = (
+            f"Goal: {self.goal}\n\n"
+            f"Code Output:\n{self.last_stdout}\n\n"
+            f"Code:\n{reply.code}\n\n"
+            "Did the code FULLY accomplish the specific goal? For example, if it was asked to save to a file, does the code actually write to a file?\n"
+            "If YES, reply exactly 'YES'.\n"
+            "If NO (it missed a requirement or just printed instead of saving), reply 'NO: <reason>'. Do not write code."
+        )
+        critic_msg = [
+            {"role": "system", "content": "You are a strict code reviewer. You ONLY reply with YES or NO: <reason>."},
+            {"role": "user", "content": critic_prompt},
+        ]
+        writer = getattr(self.brain, "current", None)
+        writer_pair: tuple[str, str] | None = None
+        if isinstance(writer, dict):
+            w_provider, w_model = writer.get("provider"), writer.get("model")
+            if isinstance(w_provider, str) and isinstance(w_model, str):
+                writer_pair = (w_provider, w_model)
+        return self.brain.complete(critic_msg, avoid=writer_pair).raw_text.strip()
+
+    def _save(self, reply: Any, result: Any, round_i: int) -> LoopOutcome | None:
+        extra: dict[str, Any] = {"rounds": round_i + 1, "test_gated": True}
+        extra.update(self.audit)
+        try:
+            path = save_skill(slug=self.skill_slug or slugify(self.goal), code=reply.code,
+                              goal=self.goal, verification_stdout=result.stdout, extra=extra)
+        except dna.GenesisDNAError as e:
+            self.last_stderr = str(e)
+            self._reply_and_ask(reply.raw_text,
+                                "Skills Library rejected the script under GENESIS DNA (ethics/red zone). "
+                                "Rewrite to comply: no harm to humans, no registry/system Red Zone without "
+                                "approval token, single ```python``` block.\n\n" + str(e))
+            return None
+        try:
+            from genesis_agent.reflection import detect_reuse
+            reused = detect_reuse(self.rag_context, reply.code)
+        except Exception:
+            reused = False
+        return self._outcome(success=True, rounds=round_i + 1,
+                             skill_path=_library_path(path), reused_existing=reused)
+
+    def _escalate_if_due(self, round_i: int) -> None:
+        """Малкият модел се мъчи → по-голям (3b→7b→14b). `>=` + флаг, НЕ `==`
+        (bug fix, 2026-08-12): провалите стигат дотук само при неуспешно
+        изпълнение, а над него има шест пътя, които прескачат рунда (tool calls,
+        тагове, ruff, без код, verifier, критик) — при `==` един такъв рунд на
+        прага изключваше ескалацията за цялата мисия. Флагът се вдига при ОПИТ:
+        escalate() връща False, ако няма по-голям локален tier, а това не се
+        променя по средата на мисията."""
+        if not self.escalated and round_i + 1 >= self.escalate_after:
+            self.brain.escalate()
+            self.escalated = True
+
+    # ── Краят ───────────────────────────────────────────────────────────────
+
+    def _emergency_repair(self) -> LoopOutcome | None:
+        """Рундовете свършиха с код и грешка: LocalRepairAgent (шаблони + малък
+        модел). Ремонтът минава през СЪЩИЯ verify_skill гейт (design note,
+        2026-08-11): „не гърми“ ≠ „прави правилното“ — шаблонен фикс може да
+        маскира грешката, а непроверено умение после се преизползва през RAG."""
+        print("\n" + "═" * 55)
+        print("  [⚠️  АВАРИЕН РЕМОНТ] Brain е недостъпен. Активирам LocalRepairAgent...")
+        print("  [МАЛЪК МОДЕЛ] Патерн анализ + 1-3B модел")
+        print("═" * 55)
+        repair = emergency_repair(self.last_generated_code, self.last_stderr, self.last_stdout)
+        if not repair.fixed:
+            print("  [РЕМОНТ НЕУСПЕШЕН] Нито pattern fixes, нито LLM не помогнаха.")
+            return None
+        from genesis_agent.verifier import verify_skill
+        vres = verify_skill(repair.code)
+        if not vres.verified:
+            print(f"  [РЕМОНТ ОТХВЪРЛЕН] Поправеният код не мина verify_skill "
+                  f"({vres.method}) - вероятно маскира грешката вместо да я "
+                  "поправя; НЕ се записва в библиотеката непроверен.")
+            print("  [РЕМОНТ НЕУСПЕШЕН] Нито pattern fixes, нито LLM не помогнаха.")
+            return None
+        print(f"\n  [✅ АВАРИЕН РЕМОНТ УСПЕШЕН] {repair.fix_desc}")
+        print(f"  Метод: {repair.method} | Рундове: {repair.rounds} | verify: {vres.method}")
+        try:
+            path = save_skill(
+                slug=(self.skill_slug or slugify(self.goal)) + "_repaired",
+                code=repair.code,
+                goal=self.goal + " [repaired by LocalRepairAgent]",
+                verification_stdout=vres.detail,
+                extra={"repair_method": repair.method,
+                       "repair_rounds": repair.rounds,
+                       "verify_method": vres.method,
+                       "operator": self.operator_id or "operator"})
+        except Exception as save_err:
+            print(f"  [РЕМОНТ] Грешка при запазване: {save_err}")
+            return None
+        return self._outcome(success=True, rounds=self.max_rounds + repair.rounds,
+                             skill_path=_library_path(path))
+
+    def _outcome(self, *, success: bool, rounds: int, skill_path: str | None = None,
+                 reused_existing: bool = False) -> LoopOutcome:
+        return LoopOutcome(success=success, rounds=rounds, skill_path=skill_path,
+                           last_stdout=self.last_stdout, last_stderr=self.last_stderr,
+                           storage_note=self.storage_note, dna_audit=self.audit,
+                           reused_existing=reused_existing)
+
+
+def _library_path(path) -> str:
+    return str(path.relative_to(SKILLS_ROOT)).replace("\\", "/")
