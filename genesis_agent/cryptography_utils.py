@@ -115,7 +115,7 @@ def verify_signature(code_text: str, signature_hex: str) -> bool:
             hashes.SHA256()
         )
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001 — всяка грешка при проверката = невалиден подпис (fail closed)
         return False
 
 if __name__ == "__main__":

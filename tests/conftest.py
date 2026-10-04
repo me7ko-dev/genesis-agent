@@ -104,7 +104,7 @@ def _isolated_persisted_state(monkeypatch, tmp_path):
     for module_name, attr, filename in _PERSISTED_STATE:
         try:
             module = importlib.import_module(module_name)
-        except Exception:  # noqa: S112 — липсващ GTK/незадължителна зависимост:
+        except Exception:  # noqa: BLE001, S112 — липсващ GTK/незадължителна зависимост:
             continue       # щом модулът не се зарежда, няма какво да се изолира
         current = getattr(module, attr, None)
         if current is None:

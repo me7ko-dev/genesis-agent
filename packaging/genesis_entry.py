@@ -73,7 +73,7 @@ def run_python(kind: str, target: str, rest: list[str]) -> int:
             runpy.run_path(target, run_name="__main__")
     except SystemExit:
         raise
-    except BaseException:  # same contract as python.exe: traceback, exit 1
+    except BaseException:  # noqa: BLE001 — same contract as python.exe: traceback, exit 1
         traceback.print_exc()
         return 1
     finally:

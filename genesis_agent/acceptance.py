@@ -9,11 +9,14 @@ bench_projects покаже повече верни; иначе се маха.
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
+
+log = logging.getLogger("genesis.acceptance")
 
 _WRITTEN = re.compile(r"^\[(?:WRITE_FILE|EDIT_FILE): ([^\]\n]+\.py)\] ✓", re.MULTILINE)
 _CODE = re.compile(r"```(?:python|py)?\s*\n(.*?)```", re.DOTALL)
@@ -75,6 +78,7 @@ class AcceptanceCheck:
             reply = self._complete([{"role": "system", "content": _PROMPT},
                                     {"role": "user", "content": self._request[:6000]}])
         except Exception:  # обръщението е допълнително — провалът му не спира хода
+            log.debug("приемните тестове не се написаха — ходът продължава без тях", exc_info=True)
             return ""
         code = "" if reply.startswith("Error:") else extract_tests(reply)
         if not code:

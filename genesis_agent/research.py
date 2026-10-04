@@ -18,6 +18,10 @@ genesis_agent.research — grounded web research с cross-verification.
 """
 from __future__ import annotations
 
+import logging
+
+log = logging.getLogger("genesis.research")
+
 _EXTRACT_SYS = (
     "Ти извличаш факти САМО от дадения ти текст. Никога не ползвай знание извън "
     "него. Ако отговорът го няма в текста, кажи точно 'НЕ Е ОТКРИТО В ТОЗИ ИЗТОЧНИК' "
@@ -43,6 +47,7 @@ def grounded_research(question: str, *, top_n: int = 3) -> str:
         from genesis_agent.web_search import search
         results = search(question, max_results=top_n)
     except Exception as e:
+        log.debug("търсенето за RESEARCH падна — грешката отива при модела", exc_info=True)
         return f"[RESEARCH] Грешка при търсене: {e}"
 
     if not results:

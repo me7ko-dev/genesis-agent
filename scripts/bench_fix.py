@@ -239,7 +239,7 @@ def bench_one(name: str, task: str, files: dict[str, str], rounds: int) -> dict:
         out = repo_agent.repair(root, task, test_command=test_command,
                                 max_rounds=rounds, on_status=lambda msg: None)
         reported, used_rounds = out.success, out.rounds
-    except Exception as e:  # a crash is a failed fix, recorded as such
+    except Exception as e:  # noqa: BLE001 — a crash is a failed fix, recorded as such
         reported, used_rounds = False, 0
         print(f"    ! {type(e).__name__}: {e}"[:120])
     elapsed = time.time() - t0

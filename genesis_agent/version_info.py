@@ -22,9 +22,12 @@ pip вече знае отговора и го записва: инсталац�
 from __future__ import annotations
 
 import json
+import logging
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+
+log = logging.getLogger("genesis.version_info")
 
 _DIST = "genesis-agent"
 # Родният билд следи последния GitHub release, не клон: release-ите са
@@ -76,6 +79,7 @@ def installed_source() -> Source | None:
         from importlib.metadata import distribution
         raw = distribution(_DIST).read_text("direct_url.json")
     except Exception:
+        log.debug("метаданните на инсталацията не се прочетоха — без източник", exc_info=True)
         return None
     if not raw:
         return None

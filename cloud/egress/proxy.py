@@ -74,7 +74,8 @@ async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> N
         try:
             writer.close()
         except Exception:
-            pass  # затваряне на вече счупена връзка
+            # затваряне на вече счупена връзка
+            log.debug("затварянето на връзката падна", exc_info=True)
 
 
 async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,

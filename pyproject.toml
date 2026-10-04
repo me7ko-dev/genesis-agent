@@ -102,30 +102,12 @@ ignore = [
     # no aware/naive mixing bug) or formats a filename/display string for the
     # user's local clock, where UTC would be the wrong, more confusing choice.
     "DTZ005", "DTZ006", "DTZ011",
+    # BLE001/S110 (сляпо `except Exception`, `except: pass`) НЕ са тук: от
+    # 2026-10-04 са включени за цялото репо. Всяко прихващане или е стеснено
+    # до грешките, които наистина идват, или е граница, която нарочно не спира
+    # работата — тогава записва грешката със следата (log.debug(...,
+    # exc_info=True), вижда се с GENESIS_DEBUG=1), или носи `noqa` с причина.
 ]
-
-# BLE001/S110 (сляпо `except Exception`, `except: pass`) са включени. Всяко
-# прихващане или е стеснено до грешките, които наистина могат да дойдат,
-# или е граница, която нарочно не спира работата — тогава записва грешката
-# със следата (log.debug(..., exc_info=True); вижда се с GENESIS_DEBUG=1).
-# Файловете отдолу още не са минати; списъкът само намалява (2026-10-04).
-[tool.ruff.lint.per-file-ignores]
-"cloud/egress/proxy.py" = ["BLE001", "S110"]
-"cloud/runner/task.py" = ["BLE001", "S110"]
-"genesis_agent/acceptance.py" = ["BLE001", "S110"]
-"genesis_agent/benchmark.py" = ["BLE001", "S110"]
-"genesis_agent/cryptography_utils.py" = ["BLE001", "S110"]
-"genesis_agent/model_router.py" = ["BLE001", "S110"]
-"genesis_agent/research.py" = ["BLE001", "S110"]
-"genesis_agent/telemetry.py" = ["BLE001", "S110"]
-"genesis_agent/version_info.py" = ["BLE001", "S110"]
-"genesis_agent/web_check.py" = ["BLE001", "S110"]
-"packaging/genesis_entry.py" = ["BLE001", "S110"]
-"scripts/bench_fix.py" = ["BLE001", "S110"]
-"scripts/bench_models.py" = ["BLE001", "S110"]
-"scripts/capability_report.py" = ["BLE001", "S110"]
-"tests/conftest.py" = ["BLE001", "S110"]
-"tests/test_state_isolation.py" = ["BLE001", "S110"]
 
 [tool.mypy]
 # Optional third-party libs (playwright, google-auth, anthropic) may be

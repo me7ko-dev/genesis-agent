@@ -145,7 +145,7 @@ def _run_one(task: Task, workspace: Path) -> TaskResult:
     try:
         run_tool_loop([{"role": "user", "content": task.prompt}], task.prompt,
                       _Recorder(), _brain_ask(answered_by))
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — грешката влиза в отчета за задачата
         res.error = f"{type(e).__name__}: {e}"[:300]
     res.provider = answered_by.get("provider", "")
     res.model = answered_by.get("model", "")

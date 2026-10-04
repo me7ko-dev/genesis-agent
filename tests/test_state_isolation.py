@@ -29,7 +29,7 @@ def _real_data_dir_parts() -> set[str]:
 def test_no_module_points_at_the_real_data_dir(module_name, attr, _filename) -> None:
     try:
         module = importlib.import_module(module_name)
-    except Exception:
+    except Exception:  # noqa: BLE001 — модул, който не се внася тук (GTK и пр.), се пропуска
         pytest.skip(f"{module_name} не се внася в тази среда")
     current = getattr(module, attr, None)
     if current is None:

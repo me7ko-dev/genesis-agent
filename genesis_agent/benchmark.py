@@ -163,7 +163,7 @@ def run_benchmark(quick: bool = False, orchestrated: bool = False) -> dict:
     if HISTORY.exists():
         try:
             hist = json.loads(HISTORY.read_text(encoding="utf-8"))
-        except Exception:
+        except (OSError, ValueError):
             pass
     hist["runs"].append(summary)
     HISTORY.write_text(json.dumps(hist, indent=2, ensure_ascii=False), encoding="utf-8")

@@ -14,12 +14,15 @@ example.com, aria-label върху div без роля, цени в лева д�
 """
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import subprocess
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
+
+log = logging.getLogger("genesis.web_check")
 
 WEB_SUFFIXES = {".html", ".htm", ".css", ".js", ".mjs"}
 _MAX_FINDINGS = 12
@@ -138,6 +141,7 @@ def check_html(path: Path, content: str) -> list[str]:
         c.feed(content)
         c.close()
     except Exception as e:  # HTMLParser почти не хвърля; ако все пак — казваме го
+        log.debug("HTMLParser хвърли — казва се като находка", exc_info=True)
         return [f"HTML не се парсва: {e}"]
     found: list[str] = []
     found += c.mismatched[:4]

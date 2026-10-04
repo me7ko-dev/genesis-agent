@@ -12,10 +12,13 @@ Genesis сам преценя колко трудна е задачата и и�
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 
 import requests
+
+log = logging.getLogger("genesis.model_router")
 
 # Нивата (env-конфигурируеми). От бърз към мощен.
 LOCAL_TIERS = [
@@ -58,6 +61,7 @@ def available_tiers() -> list[bool]:
         r = requests.get("http://localhost:11434/api/tags", timeout=2)
         names = [m.get("name", "") for m in r.json().get("models", [])] if r.status_code == 200 else []
     except Exception:
+        log.debug("локалният Ollama не отговори — няма локални нива", exc_info=True)
         names = []
     return [any(t.split(":")[0] in n and t.split(":")[-1] in n for n in names) for t in LOCAL_TIERS]
 
