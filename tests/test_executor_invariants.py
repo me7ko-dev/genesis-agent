@@ -87,16 +87,6 @@ class TestExecutionNeverRaises:
     def test_empty_code_does_not_raise(self) -> None:
         assert isinstance(executor.run_python_subprocess(""), ExecResult)
 
-    def test_inprocess_path_catches_exceptions(self) -> None:
-        res = executor.run_python_inprocess("raise ValueError('взрив')")
-        assert not res.ok
-        assert "взрив" in res.stderr
-
-    def test_inprocess_captures_stdout(self) -> None:
-        res = executor.run_python_inprocess("print('здрасти')")
-        assert res.ok
-        assert "здрасти" in res.stdout
-
 
 class TestFeedbackToTheModel:
     """format_failure_for_brain е единственото, върху което самокорекцията

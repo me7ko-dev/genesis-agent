@@ -8,7 +8,7 @@ Sub-agent delegation:
   - Може да се делегира към: autonomous_loop, external skill, shell команда
 
 Употреба:
-    from genesis_agent.delegate import delegate_task, wait_all, get_status
+    from genesis_agent.delegate import delegate_task, wait_all
 
     # Паралелно изпълнение на 3 задачи
     t1 = delegate_task("напиши функция за сортиране", agent="autonomous")
@@ -64,21 +64,6 @@ class DelegatedTask:
     def summary(self) -> str:
         icon = {"pending": "⏳", "running": "🔄", "done": "✅", "failed": "❌", "timeout": "⏰"}.get(self.status, "?")
         return f"{icon} [{self.id[:8]}] {self.agent}:{self.goal[:60]}  ({self.elapsed}s)"
-
-
-# ─── Глобален регистър ────────────────────────────────────────────────────────
-
-_TASKS: dict[str, DelegatedTask] = {}
-_LOCK = threading.Lock()
-
-
-def get_status(task_id: str) -> DelegatedTask | None:
-    return _TASKS.get(task_id)
-
-
-def list_tasks() -> list[DelegatedTask]:
-    with _LOCK:
-        return list(_TASKS.values())
 
 
 # ─── Изпълнители (agent backends) ─────────────────────────────────────────────
@@ -169,9 +154,6 @@ def delegate_task(
     """
     task_id = uuid.uuid4().hex
     task = DelegatedTask(id=task_id, goal=goal, agent=agent)
-
-    with _LOCK:
-        _TASKS[task_id] = task
 
     t = threading.Thread(
         target=_worker,

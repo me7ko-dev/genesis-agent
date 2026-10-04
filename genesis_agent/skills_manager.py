@@ -196,10 +196,6 @@ def _save_index(data: dict[str, Any]) -> None:
         raise
 
 
-def list_skills() -> list[dict[str, Any]]:
-    return list(_load_index().get("skills", []))
-
-
 def _build_md(*, slug: str, description: str, triggers: list[str], code: str,
               last_updated: str, note: str) -> str:
     # Сглобяваше се на ръка с единични кавички: цел, съдържаща апостроф

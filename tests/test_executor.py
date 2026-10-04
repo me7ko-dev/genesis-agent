@@ -4,8 +4,8 @@ the codebase's own ruff-ignore comment names as reliability-critical
 (alongside sandbox/brain/skills_api/budget): every autonomous
 mission round and every `genesis fix` repair round goes through this.
 
-What matters here: the DNA gate actually blocks before anything runs (both
-execution paths), success/failure are reported correctly with the real
+What matters here: the DNA gate actually blocks before anything runs,
+success/failure are reported correctly with the real
 stdout/stderr/returncode, and format_failure_for_brain's truncation keeps the
 tail of the output (where the real exception lives), not the head.
 """
@@ -65,33 +65,8 @@ class TestRunPythonSubprocess:
         assert result.returncode is None
 
 
-class TestRunPythonInprocess:
-    def test_successful_code_reports_ok_with_captured_stdout(self) -> None:
-        result = executor.run_python_inprocess("print('hello from in-process')")
-        assert result.ok is True
-        assert result.stdout.strip() == "hello from in-process"
-        assert result.returncode == 0
-
-    def test_raising_code_reports_failure_with_traceback_in_stderr(self) -> None:
-        result = executor.run_python_inprocess("raise ValueError('boom')")
-        assert result.ok is False
-        assert result.returncode == 1
-        assert "ValueError" in result.stderr
-        assert "boom" in result.stderr
-
-    def test_dna_gate_blocks_before_anything_executes(self) -> None:
-        # If the gate failed to short-circuit, `sentinel` (undefined) would
-        # raise NameError inside exec() and get caught as a normal runtime
-        # failure — ok=False either way, so the real proof is that stdout
-        # stays empty and the message is the DNA one, not a traceback.
-        result = executor.run_python_inprocess("x = 'HKEY_LOCAL_MACHINE'\nsentinel")
-        assert result.ok is False
-        assert "[GENESIS DNA]" in result.stderr
-        assert "NameError" not in result.stderr
-        assert result.stdout == ""
-
 class TestValidateCodeBeforeExecution:
-    """Both of executor.py's callers convert a truthy return into a graceful
+    """executor.run_python_subprocess converts a truthy return into a graceful
     ExecResult — this function must return a message string, never raise,
     or the mission/repair loop calling into executor sees an uncaught
     exception instead (bug found 2026-09-18, see dna.py's docstring)."""

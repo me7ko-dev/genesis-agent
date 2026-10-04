@@ -43,13 +43,6 @@ class TestStoreAndRecall:
         assert mem.memory_recall("k") == "second"
         assert mem.memory_list_keys() == ["k"]
 
-    def test_delete_reports_whether_it_found_anything(self) -> None:
-        mem.memory_store("k", "v")
-        assert mem.memory_delete("k") is True
-        assert mem.memory_delete("k") is False
-        assert mem.memory_recall("k") is None
-
-
 class TestListKeysPrefixIsLiteral:
     """The bug: a prefix is a literal string, not a LIKE pattern."""
 

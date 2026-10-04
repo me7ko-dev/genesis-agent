@@ -109,13 +109,6 @@ def memory_recall(key: str, default: Any = None) -> Any:
         return row[0]
 
 
-def memory_delete(key: str) -> bool:
-    """Изтрива ключ от persistent memory. Връща True ако е намерен."""
-    with _get_conn() as conn:
-        cursor = conn.execute("DELETE FROM kv_store WHERE key = ?;", (key,))
-        return cursor.rowcount > 0
-
-
 def memory_list_keys(prefix: str = "") -> list[str]:
     """Връща всички ключове (с опционален prefix филтър).
 

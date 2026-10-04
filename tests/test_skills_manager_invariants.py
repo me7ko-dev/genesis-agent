@@ -216,7 +216,7 @@ class TestIndexRecoveryIsNarrow:
         """`[]` минава през json.loads, после `.get("skills")` гърми при всяко
         следващо извикване — същият провал, просто по друг път дотам."""
         (_isolated_library / "skills.json").write_text(payload, encoding="utf-8")
-        assert sm.list_skills() == []
+        assert sm._load_index().get("skills", []) == []
         sm.save_skill(slug="след грешна форма", code=_CODE, goal="цел")
         assert len(_index(_isolated_library)) == 1
 
@@ -239,7 +239,7 @@ class TestIndexRecoveryIsNarrow:
 
         monkeypatch.setattr(Path, "read_text", _locked)
         with pytest.raises(PermissionError):
-            sm.list_skills()
+            sm._load_index()
 
         monkeypatch.undo()
         assert not (_isolated_library / "skills.json.corrupt").exists(), (

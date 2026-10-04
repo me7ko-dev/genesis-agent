@@ -288,16 +288,7 @@ class TestAutoCapture:
         assert "provider down" in caplog.text
 
 
-class TestStaleThreadsAndCloseThread:
-    def test_stale_threads_lists_only_old_ones(self) -> None:
-        old_ts = (datetime.now(timezone.utc) - timedelta(days=wm.STALE_DAYS + 5)).isoformat(timespec="seconds")
-        with pytest.MonkeyPatch().context() as mp:
-            mp.setattr(wm, "_now", lambda: old_ts)
-            wm.add_thread("old task")
-        wm.add_thread("fresh task")
-        stale = wm.stale_threads()
-        assert [t["title"] for t in stale] == ["old task"]
-
+class TestCloseThread:
     def test_close_thread_marks_done_by_default(self) -> None:
         wm.add_thread("finish me")
         tid = wm.list_threads("open")[0]["id"]

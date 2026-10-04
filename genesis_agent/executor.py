@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import io
-import traceback
-from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -47,27 +44,6 @@ def run_python_subprocess(code: str, *, cwd: Path | None = None) -> ExecResult:
         stderr=res.stderr,
         returncode=res.returncode,
     )
-
-
-def run_python_inprocess(code: str) -> ExecResult:
-    """
-    Run code in the current process (NOT recommended for untrusted LLM output).
-    Reserved for tiny trusted snippets; default path is subprocess.
-    """
-    gate = dna.validate_code_before_execution(code)
-    if gate:
-        return ExecResult(ok=False, stdout="", stderr=f"[GENESIS DNA] {gate}", returncode=None)
-    buf_out = io.StringIO()
-    buf_err = io.StringIO()
-    rc = 0
-    try:
-        with redirect_stdout(buf_out), redirect_stderr(buf_err):
-            ns: dict[str, object] = {"__name__": "__genesis_exec__"}
-            exec(compile(code, "<genesis_exec>", "exec"), ns, ns)  # noqa: S102 — trusted-snippet escape hatch, see docstring
-    except Exception:
-        rc = 1
-        print(traceback.format_exc(), file=buf_err)
-    return ExecResult(ok=rc == 0, stdout=buf_out.getvalue(), stderr=buf_err.getvalue(), returncode=rc)
 
 
 _MAX_FEEDBACK_CHARS = 1500  # виж бележката по-долу
