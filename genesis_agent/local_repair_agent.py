@@ -305,7 +305,6 @@ class LocalRepairAgent:
 
     def __init__(self):
         self.llm = TinyLLM()
-        self._pattern = PatternFixer()
 
     def repair(self, code: str, error: str, stdout: str = "") -> RepairResult:
         """

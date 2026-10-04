@@ -282,11 +282,11 @@ class TestOllamaCloudKeys:
 
     def test_empty_when_no_keys_set(self) -> None:
         b = self._brain_with_keys({})
-        assert b._ollama_cloud_keys() == []
+        assert b._numbered_keys("OLLAMA_API_KEY") == []
 
     def test_single_bare_key_returns_one_item_list(self) -> None:
         b = self._brain_with_keys({"OLLAMA_API_KEY": "k1"})
-        assert b._ollama_cloud_keys() == ["k1"]
+        assert b._numbered_keys("OLLAMA_API_KEY") == ["k1"]
 
     def test_numbered_keys_collected_in_order(self) -> None:
         b = self._brain_with_keys({
@@ -294,13 +294,13 @@ class TestOllamaCloudKeys:
             "OLLAMA_API_KEY_3": "k3",
             "OLLAMA_API_KEY_2": "k2",
         })
-        # Order follows _OLLAMA_CLOUD_KEY_ENVS (bare, then _2, _3, ...), not
+        # Order follows _numbered_keys (bare, then _2, _3, ...), not
         # insertion order into the dict.
-        assert b._ollama_cloud_keys() == ["k1", "k2", "k3"]
+        assert b._numbered_keys("OLLAMA_API_KEY") == ["k1", "k2", "k3"]
 
     def test_blank_numbered_key_is_skipped(self) -> None:
         b = self._brain_with_keys({"OLLAMA_API_KEY": "k1", "OLLAMA_API_KEY_2": "   "})
-        assert b._ollama_cloud_keys() == ["k1"]
+        assert b._numbered_keys("OLLAMA_API_KEY") == ["k1"]
 
 
 class TestOllamaCloudRotation:

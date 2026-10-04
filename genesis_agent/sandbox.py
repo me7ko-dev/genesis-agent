@@ -61,10 +61,6 @@ class RiskVerdict:
     level: RiskLevel
     reasons: list[str] = field(default_factory=list)
 
-    @property
-    def is_safe(self) -> bool:
-        return self.level == RiskLevel.SAFE
-
     def merge(self, other: RiskVerdict) -> RiskVerdict:
         return RiskVerdict(
             level=RiskLevel(max(self.level, other.level)),

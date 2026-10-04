@@ -239,13 +239,12 @@ for k in KEYS:
         KEYS[k] = os.environ[k]
 
 # Opt-in ollama_cloud multi-key rotation lives in genesis_agent.brain (the
-# actual chat completions go through Brain — see the two `from
-# genesis_agent.brain import Brain` calls below), so it already works even
+# actual chat completions go through Brain), so it already works even
 # though KEYS/load_env above only ever recognize the bare OLLAMA_API_KEY.
-# This flag exists ONLY so the status panel's "0/9 активни" line and the
-# "no key configured" warning do not lie to the operator when the real key
-# lives at OLLAMA_API_KEY_2.._10 instead of the bare name — it changes no
-# request-routing behavior, only what gets printed.
+# This dict exists ONLY so the status panel's "N/M активни" line does not
+# lie to the operator when the real key lives at OLLAMA_API_KEY_2.._10
+# instead of the bare name — it changes no request-routing behavior, only
+# what gets printed.
 _OLLAMA_CLOUD_EXTRA_KEYS = [f"OLLAMA_API_KEY_{i}" for i in range(2, 11)]
 _ollama_cloud_multi: dict[str, bool] = {}
 for _p in ENV_FILES:
@@ -262,7 +261,6 @@ for _p in ENV_FILES:
 for _k in _OLLAMA_CLOUD_EXTRA_KEYS:
     if os.environ.get(_k):
         _ollama_cloud_multi[_k] = True
-HAS_OLLAMA_CLOUD_KEY = bool(KEYS.get("OLLAMA_API_KEY") or _ollama_cloud_multi)
 
 # ── Providers & Models ────────────────────────────────────────────────────────
 class ProviderInfo(TypedDict):

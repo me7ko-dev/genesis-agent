@@ -576,7 +576,6 @@ class Brain:
         self.keys = _load_keys()
         self.chain = _load_chain()
         self.timeout = CLOUD_TIMEOUT
-        self._fail_count = 0
         self._last_usage: dict | None = None
         self._last_local_error: str | None = None
         # min_size_b (design note, 2026-07-25): филтрира облачната верига по размер —
@@ -1030,7 +1029,7 @@ class Brain:
         to multiply a quota is against most providers' terms of service, so it
         is not something this project ships by default. Resilience comes from
         breadth instead — many providers in the chain, each used within its
-        own limits. `_ollama_cloud_keys` below is the one opt-in exception,
+        own limits. `_numbered_keys` below is the one opt-in exception,
         gated on the operator's own env vars — see the module docstring.
         """
         val = self.keys.get(key_env)
@@ -1039,22 +1038,13 @@ class Brain:
         val = str(val).strip()
         return val or None
 
-    def _ollama_cloud_keys(self) -> list[str]:
-        """
-        Every OLLAMA_API_KEY[_2.._5] the operator has actually set, in order.
-
-        Empty unless they added the extra numbered vars themselves — a bare
-        OLLAMA_API_KEY still returns exactly the one-item list it always did,
-        so nothing changes for anyone who never touches this."""
-        return self._numbered_keys("OLLAMA_API_KEY")
-
     def _numbered_keys(self, base_env: str) -> list[str]:
         """
         Every `<BASE>` / `<BASE>_2` .. `<BASE>_10` the operator has actually
         set in their OWN gitignored ~/.genesis/.env, in order.
 
-        Generalised from `_ollama_cloud_keys` (2026-08-11) at the operator's
-        request, so the same opt-in mechanism covers any provider they hold
+        Generalised from an OLLAMA_API_KEY-only helper (2026-08-11) at the
+        operator's request, so the same opt-in mechanism covers any provider they hold
         several keys for — the numbered vars are read, never written, by this
         code. The caveat in the module docstring applies unchanged and is
         worth restating here, because this generalisation makes it easy to
@@ -1517,7 +1507,6 @@ class Brain:
         for _try in range(attempts):
             try:
                 raw_text, _tc = self._call(loc["provider"], loc["model"], trimmed)
-                self._fail_count = 0
                 self.current = self.local
                 code = ""
                 if "```python" in raw_text:
@@ -1801,7 +1790,6 @@ class Brain:
                             t0 = time.time()
                             raw_text, tool_calls = self._call(prov, model, msgs, tools=use_tools)
                         self._record_stat(prov, time.time() - t0, True)
-                        self._fail_count = 0
                         self.current = attempt
                         if step > 0 or round_i > 0:
                             print(f"  [Brain] ↪ модел: {prov}/{model}")
@@ -1815,13 +1803,11 @@ class Brain:
                                                        "usage": self._last_usage, "tool_calls": tool_calls})
                     except requests.exceptions.RequestException as e:
                         last_error = f"мрежа: {e}"
-                        self._fail_count += 1
                         self._record_stat(prov, time.time() - t0, False)
                         _print_skip(prov, model, last_error, time.time() - t0)
                         continue
                     except RuntimeError as e:
                         last_error = str(e)
-                        self._fail_count += 1
                         self._record_stat(prov, time.time() - t0, False)
                         _print_skip(prov, model, last_error, time.time() - t0)
                         # При 429/503/402 → маркирай изчерпан за cooldown (спестява безсмислени опити).
