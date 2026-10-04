@@ -140,7 +140,6 @@ ignore = [
 "genesis_agent/web_check.py" = ["BLE001", "S110"]
 "genesis_agent/web_search.py" = ["BLE001", "S110"]
 "genesis_agent/workspace_memory.py" = ["BLE001", "S110"]
-"genesis_skills.py" = ["BLE001", "S110"]
 "packaging/genesis_entry.py" = ["BLE001", "S110"]
 "scripts/bench_fix.py" = ["BLE001", "S110"]
 "scripts/bench_models.py" = ["BLE001", "S110"]

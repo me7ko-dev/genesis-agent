@@ -28,10 +28,14 @@ CONFIRM/BLOCKED бариерата) и се записва в genesis_agent.memo
 from __future__ import annotations
 
 import difflib
+import logging
 import re
 import sys
 from collections.abc import Callable
 from pathlib import Path
+
+# Прихванатите грешки на инструментите (вижда се с GENESIS_DEBUG=1).
+log = logging.getLogger("genesis.skills")
 
 # Уверяваме се, че genesis_agent/ пакетът е импортируем (мостът стои в root-а).
 _PROJECT_ROOT = Path(__file__).resolve().parent
@@ -46,16 +50,19 @@ from genesis_agent.tool_schemas import load_tool_arguments
 try:
     from genesis_agent.memory import memory_record_episode
 except Exception:  # pragma: no cover
+    log.debug("паметта за епизоди не се зареди — без логване", exc_info=True)
     memory_record_episode = None  # type: ignore
 
 try:
     from genesis_agent import web_search
 except Exception:  # pragma: no cover
+    log.debug("уеб търсенето не се зареди — WEB_SEARCH е изключен", exc_info=True)
     web_search = None  # type: ignore
 
 try:
     from genesis_agent import browser as _browser_mod
 except Exception:  # pragma: no cover
+    log.debug("браузърът не се зареди — BROWSER_* са изключени", exc_info=True)
     _browser_mod = None  # type: ignore
 
 
@@ -87,7 +94,7 @@ def set_workspace(path) -> None:
         from genesis_agent import workspace_memory
         workspace_memory.set_workspace(path)
     except Exception:
-        pass
+        log.debug("паметта за работата не смени папката", exc_info=True)
 
 
 def _resolve(path_str: str) -> Path:
@@ -154,7 +161,8 @@ def _log_episode(goal: str, outcome: str, tags: list[str]) -> None:
         memory_record_episode(goal=goal, outcome=outcome[:2000],
                               skill_path="genesis_skills.bridge", tags=tags)
     except Exception:
-        pass  # логването никога не бива да чупи изпълнението
+        # логването никога не бива да чупи изпълнението
+        log.debug("епизодът не се записа", exc_info=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -475,7 +483,7 @@ def _tool_run_cmd(arg: str) -> str:
             from genesis_agent.notifier import notify
             notify(f"🛡️ **Genesis Sandbox** блокира опасна команда:\n`{command[:300]}`\n{res.stderr[:200]}")
         except Exception:
-            pass
+            log.debug("известието за блокирана команда не тръгна", exc_info=True)
         return f"[RUN_CMD: {command}]\n{res.stderr}"
     out = res.stdout.strip()
     err = res.stderr.strip()
@@ -545,6 +553,7 @@ def _tool_web_search(arg: str) -> str:
     try:
         results = web_search.search(query, max_results=5)
     except Exception as e:
+        log.debug("WEB_SEARCH падна — грешката отива при модела", exc_info=True)
         return f"[WEB_SEARCH: {query}] Грешка: {e}"
     if not results:
         return f"[WEB_SEARCH: {query}] Няма резултати."
@@ -561,7 +570,7 @@ def _tool_research(arg: str) -> str:
     вместо моделът просто да "повярва" на първия snippet."""
     try:
         from genesis_agent.research import grounded_research
-    except Exception as e:
+    except ImportError as e:
         return f"[RESEARCH] research модулът не е наличен: {e}"
     return grounded_research(arg.strip())
 
@@ -659,7 +668,7 @@ def _tool_use_skill(name_arg: str, driver: str) -> str:
     """Реално изпълнение на съществуващо умение (не просто регенерация от нула)."""
     try:
         from genesis_agent.skill_loader import use_skill
-    except Exception as e:
+    except ImportError as e:
         return f"[USE_SKILL] skill_loader модулът не е наличен: {e}"
     result = use_skill(name_arg, driver)
     _log_episode(f"USE_SKILL {name_arg.strip()}", result[:300], ["tool", "use_skill"])
@@ -674,7 +683,7 @@ def _tool_remember(arg: str) -> str:
     да чете инжектираното при старт."""
     try:
         from genesis_agent import workspace_memory as wm
-    except Exception as e:
+    except ImportError as e:
         return f"[REMEMBER] workspace_memory не е наличен: {e}"
     parts = [p.strip() for p in arg.split("|")]
     kind = parts[0].lower() if parts else ""
@@ -694,7 +703,7 @@ def _tool_task_add(arg: str) -> str:
     """[TASK_ADD: заглавие | следваща стъпка]"""
     try:
         from genesis_agent import workspace_memory as wm
-    except Exception as e:
+    except ImportError as e:
         return f"[TASK_ADD] workspace_memory не е наличен: {e}"
     parts = [p.strip() for p in arg.split("|")]
     return wm.add_thread(parts[0], parts[1] if len(parts) > 1 else "")
@@ -704,7 +713,7 @@ def _tool_task_update(arg: str) -> str:
     """[TASK_UPDATE: id | статус | следваща стъпка]  (статус: open/blocked/done)"""
     try:
         from genesis_agent import workspace_memory as wm
-    except Exception as e:
+    except ImportError as e:
         return f"[TASK_UPDATE] workspace_memory не е наличен: {e}"
     parts = [p.strip() for p in arg.split("|")]
     return wm.update_thread(parts[0],
@@ -716,7 +725,7 @@ def _tool_task_list(arg: str = "") -> str:
     """[TASK_LIST] или [TASK_LIST: all|open|blocked|done]"""
     try:
         from genesis_agent import workspace_memory as wm
-    except Exception as e:
+    except ImportError as e:
         return f"[TASK_LIST] workspace_memory не е наличен: {e}"
     status = (arg or "open").strip().lower() or "open"
     rows = wm.list_threads(status, 30)
@@ -733,7 +742,7 @@ def _tool_delegate(arg: str) -> str:
     goal = arg.strip()
     try:
         from genesis_agent.delegate import delegate_task, wait_all
-    except Exception as e:
+    except ImportError as e:
         return f"[DELEGATE: {goal}] delegate модулът не е наличен: {e}"
     task = delegate_task(goal, agent="autonomous", timeout=600)
     wait_all([task], timeout=600)
@@ -833,6 +842,7 @@ def _safe_tool(name: str, fn: Callable[..., str], *args) -> str:
     try:
         return fn(*args)
     except Exception as e:
+        log.debug("инструментът падна — грешката отива при модела", exc_info=True)
         return f"[{name}] Грешка при изпълнение: {e}"
 
 
@@ -1077,6 +1087,7 @@ def dispatch_tool_call(name: str, arguments) -> str:
             return _tool_task_list(arguments.get("status", "open"))
         return f"[{name}] Непознат tool."
     except Exception as e:
+        log.debug("инструментът падна — грешката отива при модела", exc_info=True)
         return f"[{name}] Грешка при изпълнение: {e}"
 
 
