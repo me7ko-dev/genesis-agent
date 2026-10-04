@@ -11,7 +11,7 @@ triggers:
 - scrape продуктите от магазин
 version: '1.0'
 author: Genesis
-last_updated: '2026-10-04T02:40:00+00:00'
+last_updated: '2026-10-04T09:55:00+00:00'
 ---
 
 ## Описание
@@ -20,6 +20,8 @@ shop-scraper): цената „1 299,00 лв.“ идва с НЕРАЗДЕЛИ�
 U+00A0) — `replace(" ", "")` не го маха и `float()` гърми или продуктът
 се губи. `requests` при `Content-Type: text/html` без charset приема
 ISO-8859-1, а страницата е windows-1251 (казано само в `<meta charset>`).
+2026-10-04 (bench shop-scraper #1): `decode_html(r.content, r.encoding)` →
+ISO-8859-1 пред meta → „лв.“ счупено, всяка цена ValueError, резултат `[]`.
 
 ## Python Код
 ```python
@@ -56,7 +58,10 @@ def parse_bg_price(text: str) -> float:
 
 
 def decode_html(raw: bytes, header_charset: str | None = None) -> str:
-    """Байтовете на страницата → текст: charset от заглавката, иначе от <meta>, иначе utf-8."""
+    """Байтовете на страницата → текст: charset от заглавката, иначе от <meta>, иначе utf-8.
+    ISO-8859-1 не се брои: requests го слага сам в r.encoding, когато заглавката няма charset."""
+    if header_charset and header_charset.lower().replace("_", "-") in ("iso-8859-1", "latin-1"):
+        header_charset = None
     match = _META.search(raw[:4096])
     charset = header_charset or (match.group(1).decode("ascii") if match else "utf-8")
     try:
@@ -88,6 +93,8 @@ if __name__ == "__main__":
     raw = page.encode("cp1251")
     assert raw.decode("latin-1") != page                 # какво дава r.text без charset
     assert decode_html(raw) == page
+    assert decode_html(raw, "ISO-8859-1") == page        # r.encoding на requests не е заглавка
+    assert decode_html("Чаша".encode("cp1251"), "windows-1251") == "Чаша"
     assert decode_html("Чаша".encode()) == "Чаша"
     assert decode_html(b"<meta charset='nope'>x") == "<meta charset='nope'>x"
     assert urljoin("http://shop.bg/catalog?page=2", "?page=3") == "http://shop.bg/catalog?page=3"
