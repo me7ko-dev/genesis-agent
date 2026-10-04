@@ -114,7 +114,6 @@ ignore = [
 "cloud/runner/task.py" = ["BLE001", "S110"]
 "cloud/web/server.py" = ["BLE001", "S110"]
 "genesis_agent/acceptance.py" = ["BLE001", "S110"]
-"genesis_agent/autonomous_loop.py" = ["BLE001", "S110"]
 "genesis_agent/benchmark.py" = ["BLE001", "S110"]
 "genesis_agent/browser.py" = ["BLE001", "S110"]
 "genesis_agent/budget.py" = ["BLE001", "S110"]
