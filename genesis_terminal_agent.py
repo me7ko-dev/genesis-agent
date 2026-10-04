@@ -15,6 +15,7 @@ rich rendering, and the interactive sandbox confirmation prompt.
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -837,6 +838,15 @@ def _compact_messages(messages: "deque") -> "deque":
 
 
 # ── Tools ─────────────────────────────────────────────────────────────────────
+_TAG_NAME = re.compile(r"\[([A-Z_]+)[:\]]")
+
+
+def _text_tool_name(result: str) -> str:
+    """`[RUN_CMD: ls]…` → RUN_CMD; резултат без таг → „инструмент“."""
+    m = _TAG_NAME.match(result or "")
+    return m.group(1) if m else "инструмент"
+
+
 def parse_and_execute_tools(response_text):
     try:
         return genesis_skills.parse_and_execute_tools(response_text)
@@ -1299,7 +1309,8 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
                     name, " ".join(str(v) for v in args.values()), result)
                 if _entry:
                     _executed.append(_entry)
-                ui.tool(name, result)
+                if genesis_skills.ASK_USER_MARKER not in result:
+                    ui.tool(name, result)  # въпросът се показва веднъж, от ui.asked
                 messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                                   "name": name,
                                   "content": clip_for_context(result)})
@@ -1342,6 +1353,9 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
             _page_check.observe(_r)
             _run_check.observe(_r)
             _acceptance.observe(_r)
+            # Като в native пътя: човекът вижда изпълненото, не само тага.
+            if genesis_skills.ASK_USER_MARKER not in _r:
+                ui.tool(_text_tool_name(_r), _r)
         if not tool_results:
             # Празно ≠ непременно "приключи" — може да е объркан tool tag
             # (виж agent_core.run_tool_loop, същият фикс, design note

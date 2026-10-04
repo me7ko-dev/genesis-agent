@@ -250,6 +250,15 @@ class TestTheTurnStops:
         assert len(turn.requests) == 1, "след въпрос моделът не се пита пак"
         assert out[-1]["role"] == "tool"
 
+    def test_the_question_is_shown_once_without_the_internal_marker(self, turn) -> None:
+        """Беше показван два пъти: суровият резултат с `__GENESIS_ASK_USER__`
+        в панел 🔧, после самият въпрос."""
+        turn.replies = [("", [call("LIST_DIR"), call("ASK_USER", {"question": "кой порт?"}, cid="c2")])]
+        turn.tool_result = lambda name, args: f"{ASK}❓ Кой порт?" if name == "ASK_USER" else "a.py"
+        turn.run()
+        assert turn.ui.of("tool") == [("LIST_DIR", "a.py")]
+        assert turn.ui.of("asked") == ["❓ Кой порт?"]
+
     def test_when_the_same_call_returns_the_same_thing_three_times(self, turn) -> None:
         same = ("", [call("RUN_CMD", {"command": "curl localhost"})])
         turn.replies = [same, same, same, same]
@@ -296,6 +305,29 @@ class TestTextTags:
         turn.run()
         assert turn.ui.of("asked") == ["Кой порт?"]
         assert len(turn.requests) == 1
+
+    def test_the_operator_sees_every_result_here_too(self, turn) -> None:
+        """Моделите без native tool calling са по-слабите — точно там човекът
+        трябва да вижда какво реално е изпълнено, не само тага в отговора."""
+        turn.replies = [("[LIST_DIR: .]\n[READ_FILE: a.py]", None), ("Готово.", None)]
+        turn.text_results = lambda text: (["[LIST_DIR: .]\na.py", "[READ_FILE: a.py]\nprint(1)"]
+                                          if "[LIST_DIR" in text else [])
+        turn.run()
+        assert turn.ui.of("tool") == [("LIST_DIR", "[LIST_DIR: .]\na.py"),
+                                      ("READ_FILE", "[READ_FILE: a.py]\nprint(1)")]
+
+    def test_a_result_without_a_tag_name_is_still_shown(self, turn) -> None:
+        turn.replies = [("[RUN_CMD: x]", None)]
+        turn.text_results = lambda text: ["[Грешка: genesis_skills не е зареден]"] if "RUN" in text else []
+        turn.run()
+        assert turn.ui.of("tool")[0] == ("инструмент", "[Грешка: genesis_skills не е зареден]")
+
+    def test_a_question_is_shown_once_without_the_internal_marker(self, turn) -> None:
+        turn.replies = [("[ASK_USER: кой порт?]", None)]
+        turn.text_results = lambda text: [f"{ASK}❓ Кой порт?"] if "ASK_USER" in text else []
+        turn.run()
+        assert turn.ui.of("tool") == []
+        assert turn.ui.of("asked") == ["❓ Кой порт?"]
 
     def test_spinning_stops_the_turn(self, turn) -> None:
         turn.replies = [("[RUN_CMD: curl x]", None)] * 4
