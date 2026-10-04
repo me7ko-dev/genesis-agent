@@ -36,6 +36,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 import secrets
 import socket
@@ -47,6 +48,8 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger("genesis.remote")
 
 PROTOCOL = 1
 DEFAULT_PORT = 8765
@@ -234,7 +237,7 @@ class RemoteSession:
             try:
                 self._on_event(event)
             except Exception:
-                pass
+                log.debug("показването на събитие в терминала падна", exc_info=True)
         return event
 
     def events_after(self, after: int, wait: float = 0.0) -> dict:
@@ -276,6 +279,7 @@ class RemoteSession:
         try:
             self._runner(text, RemoteTurnUI(self))
         except Exception as e:
+            log.debug("ходът от телефона падна — грешката отива при телефона", exc_info=True)
             self.emit("error", text=f"{type(e).__name__}: {e}")
         finally:
             with self._cond:
@@ -693,7 +697,7 @@ def serve(args: list[str]) -> int:
             if len(convo) >= 2:
                 _wm.auto_capture(list(convo))
         except Exception:
-            pass
+            log.debug("запомнянето при спиране на сървъра падна", exc_info=True)
     console.print("\n[dim]Сървърът за телефона е спрян.[/]")
     return 0
 

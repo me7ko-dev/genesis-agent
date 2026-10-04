@@ -119,6 +119,7 @@ def _worker(task: DelegatedTask, timeout: int, on_done: Callable | None):
         log.info(f"[delegate] ✅ Task {task.id[:8]} завършен ({task.elapsed}s)")
 
     except Exception as e:
+        log.debug("делегираната задача падна", exc_info=True)
         task.error = str(e)
         task.status = TaskStatus.FAILED
         log.error(f"[delegate] ❌ Task {task.id[:8]} провален: {e}")
@@ -128,6 +129,7 @@ def _worker(task: DelegatedTask, timeout: int, on_done: Callable | None):
             try:
                 on_done(task)
             except Exception as cb_err:
+                log.debug("on_done на делегираната задача падна", exc_info=True)
                 log.error(f"[delegate] Callback грешка: {cb_err}")
 
 
