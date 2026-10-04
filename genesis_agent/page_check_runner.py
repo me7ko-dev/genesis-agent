@@ -28,6 +28,7 @@ import re
 import sys
 import threading
 from pathlib import Path
+from typing import Literal
 
 # Всичко за един изглед; Python решава кое е находка.
 _MEASURE = r"""
@@ -270,8 +271,10 @@ def check(html: Path, shots: Path | None, single: bool = False) -> dict:
     url = f"http://127.0.0.1:{port}/{html.name}"
     findings: list[str] = []
     saved: list[str] = []
-    views = [("компютър", (1440, 900), "light"), ("компютър, тъмна тема", (1440, 900), "dark"),
-             ("телефон", (390, 844), "light")]
+    # Literal, не str: emulate_media приема само тези имена на тема.
+    views: list[tuple[str, tuple[int, int], Literal["light", "dark"]]] = [
+        ("компютър", (1440, 900), "light"), ("компютър, тъмна тема", (1440, 900), "dark"),
+        ("телефон", (390, 844), "light")]
     measured: dict[str, dict] = {}
     has_toggle = False
     try:

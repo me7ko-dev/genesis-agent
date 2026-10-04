@@ -120,3 +120,7 @@ ignore = [
 # missing or ship no type stubs. Without this, mypy
 # on those files is 100% import-resolution noise, not real findings.
 ignore_missing_imports = true
+# Телата на функциите без анотации също се проверяват. Без това mypy
+# прескачаше точно стария код (терминалът, менютата), а там бяха и трите
+# грешки, които излязоха при включването (2026-10-04).
+check_untyped_defs = true

@@ -22,7 +22,7 @@ import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 import requests
 import yaml
@@ -265,12 +265,17 @@ for _k in _OLLAMA_CLOUD_EXTRA_KEYS:
 HAS_OLLAMA_CLOUD_KEY = bool(KEYS.get("OLLAMA_API_KEY") or _ollama_cloud_multi)
 
 # ── Providers & Models ────────────────────────────────────────────────────────
-# Анотацията не е козметика: без нея mypy чете стойностите като `object` и
-# всяка ПРОВЕРЕНА функция, която ги индексира, гърми — докато съседните,
-# неанотирани функции минават, защото телата им не се проверяват изобщо.
-# Проверено: всички стойности са str или None и ключовете са едни и същи
-# във всички записи.
-PROVIDERS: dict[str, dict[str, str | None]] = {
+class ProviderInfo(TypedDict):
+    """Един ред от таблицата. Само `key_env` и `base_url` може да липсват:
+    Ollama и LLM Studio са без ключ, а Vertex сглобява адреса при нужда.
+    `name` и `type` винаги ги има — затова `p["name"] + …` е str, не догадка."""
+    name: str
+    key_env: str | None
+    base_url: str | None
+    type: str
+
+
+PROVIDERS: dict[str, ProviderInfo] = {
     "groq":         {"name": "⚡ Groq",              "key_env": "GROQ_API_KEY",       "base_url": "https://api.groq.com/openai/v1",                        "type": "openai"},
     "gemini":       {"name": "✨ Gemini",             "key_env": "GEMINI_API_KEY",    "base_url": "https://generativelanguage.googleapis.com/v1beta/models",  "type": "gemini"},
     "openrouter":   {"name": "🌌 OpenRouter",         "key_env": "OPENROUTER_API_KEY","base_url": "https://openrouter.ai/api/v1",                          "type": "openai"},
@@ -539,7 +544,7 @@ def call_gemini(messages, model_id):
         if m["role"] == "system": sys_p += m["content"] + "\n"
         elif m["role"] == "user": g_msgs.append({"role":"user","parts":[{"text":m["content"]}]})
         elif m["role"] == "assistant": g_msgs.append({"role":"model","parts":[{"text":m["content"]}]})
-    payload = {"contents": g_msgs}
+    payload: dict[str, Any] = {"contents": g_msgs}
     if sys_p: payload["systemInstruction"] = {"parts":[{"text":sys_p}]}
     r = requests.post(url, json=payload, timeout=60,
                       headers={"Content-Type": "application/json", "x-goog-api-key": key})
@@ -585,8 +590,7 @@ def _call_provider(provider_key, model_id, messages, tools=None):
     """Route to correct API function. Raises RuntimeError on failure.
     Връща (content, tool_calls) — tool_calls е None за gemini/ollama (никога
     не получават native tools, виж _SUPPORTS_TOOLS)."""
-    p = PROVIDERS.get(provider_key, {})
-    ptype = p.get("type", "openai")
+    ptype = PROVIDERS[provider_key]["type"] if provider_key in PROVIDERS else "openai"
     if ptype == "gemini":
         return call_gemini(messages, model_id), None
     elif ptype == "ollama" and provider_key == "ollama":
@@ -1777,7 +1781,7 @@ def main():
                 for idx, fb in enumerate(FALLBACK_CHAIN, 1):
                     prov_key = fb['provider']
                     mod = fb['model']
-                    pname = PROVIDERS.get(prov_key, {}).get('name', prov_key)
+                    pname = PROVIDERS[prov_key]["name"] if prov_key in PROVIDERS else prov_key
                     badge = model_badge(prov_key, mod)
                     active = " [yellow bold]◀ ACTIVE[/]" if prov_key == current_provider and mod == current_model_id else ""
                     fb_table.add_row(str(idx), pname, f"{mod}{active}", badge)
