@@ -208,9 +208,27 @@ def _fix(args: list[str]) -> int:
     return 0 if out.success else 1
 
 
+def _debug_log() -> None:
+    """GENESIS_DEBUG=1 → ~/.genesis/debug.log. Местата, които нарочно не спират
+    работата при грешка (памет, известия, менюта), я записват с
+    log.debug(exc_info=True); без този файл тя не се вижда никъде."""
+    import os
+    if os.environ.get("GENESIS_DEBUG") != "1":
+        return
+    import logging
+
+    from genesis_agent import paths
+    handler = logging.FileHandler(paths.ensure_genesis_home() / "debug.log", encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+    logger = logging.getLogger("genesis")
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+
+
 def main(argv: list[str] | None = None) -> int:
     from genesis_agent.paths import ensure_utf8_streams
     ensure_utf8_streams()
+    _debug_log()
     argv = list(sys.argv[1:] if argv is None else argv)
     cmd = argv[0] if argv else "chat"
 

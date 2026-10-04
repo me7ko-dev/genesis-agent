@@ -31,6 +31,44 @@ def test_version_flag_returns_0(capsys) -> None:
         assert cli_mod.__version__ in capsys.readouterr().out
 
 
+class TestDebugLog:
+    """Местата, които нарочно не спират работата при грешка, я записват с
+    log.debug(exc_info=True). GENESIS_DEBUG=1 е начинът тя да се види."""
+
+    @pytest.fixture
+    def genesis_logger(self):
+        import logging
+        logger = logging.getLogger("genesis")
+        before = (list(logger.handlers), logger.level)
+        yield logger
+        for h in logger.handlers[:]:
+            if h not in before[0]:
+                logger.removeHandler(h)
+                h.close()
+        logger.setLevel(before[1])
+
+    def test_on_it_writes_swallowed_errors_to_a_file(self, monkeypatch, tmp_path, genesis_logger) -> None:
+        import logging
+        monkeypatch.setenv("GENESIS_DEBUG", "1")
+        monkeypatch.setattr("genesis_agent.paths.GENESIS_HOME", tmp_path)
+        assert cli_mod.main(["--version"]) == 0
+        try:
+            raise ValueError("нарочно")
+        except ValueError:
+            logging.getLogger("genesis.terminal").debug("паметта не записа", exc_info=True)
+        for h in genesis_logger.handlers:
+            h.flush()
+        text = (tmp_path / "debug.log").read_text(encoding="utf-8")
+        assert "genesis.terminal" in text and "паметта не записа" in text
+        assert "ValueError: нарочно" in text
+
+    def test_off_by_default(self, monkeypatch, tmp_path, genesis_logger) -> None:
+        monkeypatch.delenv("GENESIS_DEBUG", raising=False)
+        monkeypatch.setattr("genesis_agent.paths.GENESIS_HOME", tmp_path)
+        cli_mod.main(["--version"])
+        assert not (tmp_path / "debug.log").exists()
+
+
 def test_no_args_defaults_to_chat(monkeypatch) -> None:
     called = []
     monkeypatch.setattr(cli_mod, "_chat", lambda: called.append(True) or 0)
