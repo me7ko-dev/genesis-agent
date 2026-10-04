@@ -23,6 +23,10 @@ from pathlib import Path
 
 _RUFF_TIMEOUT = 10
 _MAX_ERRORS_SHOWN = 15
+# Само това, което чупи при пускане: синтаксис и недефинирани имена. Без --select ruff 0.16
+# вади стотици стилови правила (bench contact-form 2026-10-04 #2: DTZ003/I001/UP035/F401 →
+# 14 от 25 рунда козметика и счупен `datetime.timezone`); --isolated — чужд pyproject не важи.
+_RULES = ("--isolated", "--select", "E9,F63,F7,F82")
 
 
 def _ruff_exe() -> str | None:
@@ -59,13 +63,13 @@ def validate_code_with_ruff(code: str) -> tuple[bool, str]:
 
     try:
         fixed = subprocess.run(
-            [_ruff_exe() or "ruff", "check", "--fix", "--exit-zero",
+            [_ruff_exe() or "ruff", "check", *_RULES, "--fix", "--exit-zero",
              "--stdin-filename", "generated.py", "-"],
             input=code, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=_RUFF_TIMEOUT,
             check=False,
         )
         checked = subprocess.run(
-            [_ruff_exe() or "ruff", "check", "--output-format", "json",
+            [_ruff_exe() or "ruff", "check", *_RULES, "--output-format", "json",
              "--stdin-filename", "generated.py", "-"],
             input=fixed.stdout or code, capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=_RUFF_TIMEOUT, check=False,
@@ -109,7 +113,7 @@ def lint_note(code: str) -> str:
         return ""
     try:
         checked = subprocess.run(
-            [_ruff_exe() or "ruff", "check", "--output-format", "json",
+            [_ruff_exe() or "ruff", "check", *_RULES, "--output-format", "json",
              "--stdin-filename", "generated.py", "-"],
             input=code, capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=_RUFF_TIMEOUT, check=False,
