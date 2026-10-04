@@ -1,9 +1,10 @@
 """genesis_terminal_agent.call_openai_compatible — truncation guard (2026-08-12).
 
 This is the "legacy" direct HTTP path (_ask_via_legacy), reached only when the
-operator manually picks a provider Brain doesn't know about (gemini/github/
-openai/llmstudio via the `/model` menu) — a narrow escape hatch, but a real,
-reachable one, and it duplicated genesis_agent.brain._http's exact same gap:
+operator manually picks a provider Brain doesn't know about (github/llmstudio/
+ollama via the `/model` menu, see _TERMINAL_ONLY_PROVIDERS) or when brain.py
+fails to import — a narrow escape hatch, but a real, reachable one, and it
+duplicated genesis_agent.brain._http's exact same gap:
 finish_reason was never read, so a response cut off mid code-fence at the
 max_tokens ceiling came back looking like a normal, complete answer.
 """
@@ -454,3 +455,39 @@ class TestStatusBar:
         gta.count_usage(None, msgs, "o" * 40)
         assert gta.get_context_stats()[0] == 210
         gta.reset_usage()
+
+
+class TestTheGeminiKeyStaysOutOfTheUrl:
+    """Адресът влиза в текста на всяка грешка на requests („Max retries
+    exceeded with url: …?key=…“), а оттам — в лога и на екрана. Ключът е в
+    заглавката `x-goog-api-key`, която Google приема на същите адреси."""
+
+    def _capture(self, monkeypatch, method: str, resp) -> list:
+        seen: list = []
+
+        def _call(url, **kw):
+            seen.append((url, kw.get("headers") or {}))
+            return resp
+
+        monkeypatch.setattr(gta.requests, method, _call)
+        monkeypatch.setitem(gta.KEYS, "GEMINI_API_KEY", "g-secret-123")
+        return seen
+
+    def test_a_chat_request(self, monkeypatch) -> None:
+        resp = _FakeResponse(200, {"candidates": [{"content": {"parts": [{"text": "здрасти"}]}}]})
+        seen = self._capture(monkeypatch, "post", resp)
+        assert gta.call_gemini([{"role": "user", "content": "hi"}], "gemini-2.5-flash") == "здрасти"
+        url, headers = seen[0]
+        assert "g-secret-123" not in url
+        assert headers.get("x-goog-api-key") == "g-secret-123"
+
+    def test_the_model_list(self, monkeypatch) -> None:
+        resp = _FakeResponse(200, {"models": [
+            {"name": "models/gemini-2.5-flash", "supportedGenerationMethods": ["generateContent"]}]})
+        seen = self._capture(monkeypatch, "get", resp)
+        monkeypatch.delitem(gta.MODELS_CACHE, "gemini", raising=False)
+        assert gta.fetch_models("gemini") == ["gemini-2.5-flash"]
+        gta.MODELS_CACHE.pop("gemini", None)
+        url, headers = seen[0]
+        assert "g-secret-123" not in url
+        assert headers.get("x-goog-api-key") == "g-secret-123"

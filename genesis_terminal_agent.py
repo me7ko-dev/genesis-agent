@@ -432,7 +432,9 @@ def fetch_models(provider_key):
         except Exception: pass
     elif p["type"] == "gemini":
         try:
-            r = requests.get(f"{p['base_url']}?key={key}", timeout=10)
+            # Ключът в заглавка, не в адреса: адресът влиза в текста на всяка
+            # грешка на requests, а оттам в лога и на екрана.
+            r = requests.get(str(p["base_url"]), headers={"x-goog-api-key": key}, timeout=10)
             if r.status_code == 200:
                 models = [m["name"].replace("models/","") for m in r.json().get("models",[])
                           if "generateContent" in m.get("supportedGenerationMethods",[])]
@@ -531,7 +533,7 @@ def call_openai_compatible(messages, provider_key, model_id, tools=None):
 def call_gemini(messages, model_id):
     global _last_usage
     key = KEYS["GEMINI_API_KEY"]
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent"
     g_msgs, sys_p = [], ""
     for m in messages:
         if m["role"] == "system": sys_p += m["content"] + "\n"
@@ -539,7 +541,8 @@ def call_gemini(messages, model_id):
         elif m["role"] == "assistant": g_msgs.append({"role":"model","parts":[{"text":m["content"]}]})
     payload = {"contents": g_msgs}
     if sys_p: payload["systemInstruction"] = {"parts":[{"text":sys_p}]}
-    r = requests.post(url, json=payload, headers={"Content-Type":"application/json"}, timeout=60)
+    r = requests.post(url, json=payload, timeout=60,
+                      headers={"Content-Type": "application/json", "x-goog-api-key": key})
     if r.status_code == 200:
         data = r.json()
         usage = data.get("usageMetadata")
