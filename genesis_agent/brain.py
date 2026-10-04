@@ -79,7 +79,7 @@ def _post_with_deadline(url: str, *, headers: dict, json: dict, timeout: int) ->
     def _run() -> None:
         try:
             box["r"] = requests.post(url, headers=headers, json=json, timeout=timeout)
-        except BaseException as e:  # предава се на викащия
+        except BaseException as e:  # noqa: BLE001 — предава се на викащия, който я хвърля отново
             box["e"] = e
 
     worker = threading.Thread(target=_run, daemon=True, name="genesis-http")
@@ -122,7 +122,7 @@ def _output_cap(model: str) -> int:
                     if entry.get("model") and entry.get("max_tokens"):
                         caps[entry["model"]] = int(entry["max_tokens"])
         except Exception as e:
-            log.debug("_output_cap: config.yaml не се чете (%s), таванът остава общ", e)
+            log.debug("_output_cap: config.yaml не се чете (%s), таванът остава общ", e, exc_info=True)
         _OUTPUT_CAPS = caps
     return _OUTPUT_CAPS.get(model, MAX_OUTPUT_TOKENS)
 
@@ -340,6 +340,7 @@ def _local_available(model: str) -> bool:
             names = [m.get("name", "") for m in r.json().get("models", [])]
             return any(model.split(":")[0] in n for n in names)
     except Exception:
+        log.debug("локалният Ollama не отговори за списъка с модели", exc_info=True)
         return False
     return False
 # Грешки, при които минаваме към следващия модел (вкл. остарял/невалиден модел).
@@ -434,7 +435,7 @@ def _load_chain() -> list[dict]:
     филтрира по него за различни контексти (чат/терминал/умения)."""
     try:
         cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
-    except Exception:
+    except (OSError, yaml.YAMLError):
         cfg = {}
     models = cfg.get("models", {})
     fallback_list = models.get("fallback_models", [])
@@ -471,7 +472,7 @@ def _load_chain() -> list[dict]:
                  bool(fm.get("supports_tools", False)))
     except Exception as e:
         # Резервен слой — никога не спира старта.
-        log.debug("_load_chain: без автоматично открити модели (%s)", e)
+        log.debug("_load_chain: без автоматично открити модели (%s)", e, exc_info=True)
 
     # Мъртвите според последната `genesis models --check` (404/410) се
     # прескачат, докато следваща проверка не ги види живи — без да се пипа
@@ -480,7 +481,7 @@ def _load_chain() -> list[dict]:
         from genesis_agent.model_check import dead_models
         dead = dead_models()
     except Exception as e:
-        log.debug("_load_chain: model_check недостъпен (%s)", e)
+        log.debug("_load_chain: model_check недостъпен (%s)", e, exc_info=True)
         dead = set()
 
     # Само доставчици, които знаем как да викаме.
@@ -504,7 +505,7 @@ def _load_coding_chain() -> list[dict]:
     """
     try:
         cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
-    except Exception:
+    except (OSError, yaml.YAMLError):
         return []
     out: list[dict] = []
     for entry in (cfg.get("models", {}) or {}).get("coding_models", []) or []:
@@ -523,7 +524,7 @@ def _load_light_chain() -> list[dict]:
     (извличане на памет, резюмета). Виж коментара в config.yaml за мерките."""
     try:
         cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
-    except Exception:
+    except (OSError, yaml.YAMLError):
         return []
     out: list[dict] = []
     for entry in (cfg.get("models", {}) or {}).get("light_models", []) or []:
@@ -553,7 +554,7 @@ def _load_premium_chain() -> list[dict]:
     """
     try:
         cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
-    except Exception:
+    except (OSError, yaml.YAMLError):
         return []
     out: list[dict] = []
     for entry in (cfg.get("models", {}) or {}).get("premium_models", []) or []:
@@ -719,7 +720,7 @@ class Brain:
             if m:
                 self._set_local(m)
         except Exception as e:
-            log.debug("route_for_goal: model_router недостъпен, местният модел остава по подразбиране: %s", e)
+            log.debug("route_for_goal: model_router недостъпен, местният модел остава по подразбиране: %s", e, exc_info=True)
 
     def escalate(self) -> bool:
         """Качва ЛОКАЛНИЯ мозък на следващия по-голям НАЛИЧЕН модел. True ако е сменен.
@@ -764,7 +765,7 @@ class Brain:
                               nxt, self.current)
                 return True
         except Exception as e:
-            log.debug("escalate: model_router недостъпен, оставам на текущия модел: %s", e)
+            log.debug("escalate: model_router недостъпен, оставам на текущия модел: %s", e, exc_info=True)
         return False
 
     def escalate_to_coding_chain(self) -> bool:
@@ -847,6 +848,7 @@ class Brain:
                             f"# от умение: {h['name']}\n" + "\n".join(lines_code)
                         )
                     except Exception:
+                        log.debug("build_context: кодът на умение не се зареди", exc_info=True)
                         code_names.discard(h["name"])  # неуспешно зареждане → трети в списъка
                 if code_blocks:
                     parts.append(
@@ -860,7 +862,7 @@ class Brain:
                     lines = [f"- {h['name']}: {h.get('description', '')[:80]}" for h in rest]
                     parts.append("Други подобни умения (само за идея):\n" + "\n".join(lines))
         except Exception as e:
-            log.debug("build_context: skill_loader недостъпен, без инжектирани умения: %s", e)
+            log.debug("build_context: skill_loader недостъпен, без инжектирани умения: %s", e, exc_info=True)
         try:
             from genesis_agent.memory import memory_search
             eps = memory_search(goal, top_k=3)
@@ -871,7 +873,7 @@ class Brain:
             if lessons:
                 parts.append("Уроци от минали мисии:\n" + "\n".join(lessons))
         except Exception as e:
-            log.debug("build_context: memory_search недостъпен, без инжектирани уроци: %s", e)
+            log.debug("build_context: memory_search недостъпен, без инжектирани уроци: %s", e, exc_info=True)
         return "\n\n".join(parts)
 
     def _trim_messages(self, messages: list[dict], max_chars: int = 6000) -> list[dict]:
@@ -1014,6 +1016,7 @@ class Brain:
             if not summary or summary.startswith("Error:"):
                 raise ValueError(f"неизползваемо резюме: {summary[:80] or 'празно'}")
         except Exception:
+            log.debug("compact_chat_history: без резюме — пазят се последните", exc_info=True)
             # Fallback: просто пази последните, без резюме (губи старото честно,
             # не гърми разговора).
             return _rebuild([system_msg] + recent_part)
@@ -1517,6 +1520,7 @@ class Brain:
                     self._log_usage()
                     return raw_text, code
             except Exception as e:
+                log.debug("локалният модел не отговори", exc_info=True)
                 last_error = f"локален: {e}"
         self._last_local_error = last_error
         return None
@@ -1545,6 +1549,7 @@ class Brain:
             avail = available_tiers()
             installed = [t for t, ok in zip(LOCAL_TIERS, avail) if ok]
         except Exception:
+            log.debug("generate_local_candidates: инсталираните локални модели не се прочетоха", exc_info=True)
             installed = []
         base_model = self.local["model"]
         others = [m for m in installed if m != base_model]
@@ -1584,7 +1589,7 @@ class Brain:
             try:
                 cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
                 Brain._TAG_PROMPT_CACHE = (cfg.get("tool_tag_prompt") or "").strip()
-            except Exception:
+            except (OSError, yaml.YAMLError, AttributeError):
                 Brain._TAG_PROMPT_CACHE = ""
         return Brain._TAG_PROMPT_CACHE
 
@@ -1709,7 +1714,7 @@ class Brain:
             from genesis_agent.provider_stats import deprioritize_flaky
             chain = deprioritize_flaky(chain)
         except Exception as e:
-            log.debug("provider_stats недостъпен, реда на веригата остава непроменен: %s", e)
+            log.debug("provider_stats недостъпен, реда на веригата остава непроменен: %s", e, exc_info=True)
 
         # tools заявен → tools-способните (config.yaml supports_tools) вървят
         # ПРЪВ (native, реален tool_calls), останалите — след тях, в стария
@@ -1849,7 +1854,7 @@ class Brain:
             from genesis_agent.provider_stats import record_call
             record_call(provider, latency_s, success)
         except Exception as e:
-            log.debug("provider_stats недостъпен, повикването не е записано: %s", e)
+            log.debug("provider_stats недостъпен, повикването не е записано: %s", e, exc_info=True)
 
     def _log_usage(self) -> None:
         """Безопасно логва token usage за последното успешно извикване (ако има).
@@ -1867,4 +1872,4 @@ class Brain:
                 cached_write_tokens=int(self._last_usage.get("cached_write_tokens", 0) or 0),
             )
         except Exception as e:
-            log.debug("budget недостъпен, usage не е записан: %s", e)
+            log.debug("budget недостъпен, usage не е записан: %s", e, exc_info=True)

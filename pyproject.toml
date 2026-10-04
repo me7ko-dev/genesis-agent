@@ -102,18 +102,51 @@ ignore = [
     # no aware/naive mixing bug) or formats a filename/display string for the
     # user's local clock, where UTC would be the wrong, more confusing choice.
     "DTZ005", "DTZ006", "DTZ011",
-    # Accepted debt, not a false positive: ~220 call sites across the codebase
-    # (mostly best-effort optional-integration fallbacks) blindly catch or
-    # swallow exceptions. The security/reliability-critical modules (sandbox,
-    # brain, executor, budget) have been triaged —
-    # broad catches there are either narrowed, logged, or annotated with a
-    # specific `# noqa` explaining why. The remaining call sites (peripheral
-    # modules, terminal frontend) still need per-site review; enabling
-    # these two rules repo-wide now would make the CI gate fail on pre-existing
-    # code instead of catching new regressions. Tighten file-by-file as those
-    # modules get touched, then drop the corresponding ignore.
-    "BLE001", "S110",
 ]
+
+# BLE001/S110 (сляпо `except Exception`, `except: pass`) са включени. Всяко
+# прихващане или е стеснено до грешките, които наистина могат да дойдат,
+# или е граница, която нарочно не спира работата — тогава записва грешката
+# със следата (log.debug(..., exc_info=True); вижда се с GENESIS_DEBUG=1).
+# Файловете отдолу още не са минати; списъкът само намалява (2026-10-04).
+[tool.ruff.lint.per-file-ignores]
+"cloud/egress/proxy.py" = ["BLE001", "S110"]
+"cloud/runner/task.py" = ["BLE001", "S110"]
+"cloud/web/server.py" = ["BLE001", "S110"]
+"genesis_agent/acceptance.py" = ["BLE001", "S110"]
+"genesis_agent/autonomous_loop.py" = ["BLE001", "S110"]
+"genesis_agent/benchmark.py" = ["BLE001", "S110"]
+"genesis_agent/browser.py" = ["BLE001", "S110"]
+"genesis_agent/budget.py" = ["BLE001", "S110"]
+"genesis_agent/cryptography_utils.py" = ["BLE001", "S110"]
+"genesis_agent/delegate.py" = ["BLE001", "S110"]
+"genesis_agent/embeddings.py" = ["BLE001", "S110"]
+"genesis_agent/local_repair_agent.py" = ["BLE001", "S110"]
+"genesis_agent/memory.py" = ["BLE001", "S110"]
+"genesis_agent/model_router.py" = ["BLE001", "S110"]
+"genesis_agent/notifier.py" = ["BLE001", "S110"]
+"genesis_agent/orchestrator.py" = ["BLE001", "S110"]
+"genesis_agent/page_check_runner.py" = ["BLE001", "S110"]
+"genesis_agent/provider_stats.py" = ["BLE001", "S110"]
+"genesis_agent/reflection.py" = ["BLE001", "S110"]
+"genesis_agent/remote_server.py" = ["BLE001", "S110"]
+"genesis_agent/research.py" = ["BLE001", "S110"]
+"genesis_agent/sandbox.py" = ["BLE001", "S110"]
+"genesis_agent/skill_loader.py" = ["BLE001", "S110"]
+"genesis_agent/skills_manager.py" = ["BLE001", "S110"]
+"genesis_agent/telemetry.py" = ["BLE001", "S110"]
+"genesis_agent/version_info.py" = ["BLE001", "S110"]
+"genesis_agent/vertex_auth.py" = ["BLE001", "S110"]
+"genesis_agent/web_check.py" = ["BLE001", "S110"]
+"genesis_agent/web_search.py" = ["BLE001", "S110"]
+"genesis_agent/workspace_memory.py" = ["BLE001", "S110"]
+"genesis_skills.py" = ["BLE001", "S110"]
+"packaging/genesis_entry.py" = ["BLE001", "S110"]
+"scripts/bench_fix.py" = ["BLE001", "S110"]
+"scripts/bench_models.py" = ["BLE001", "S110"]
+"scripts/capability_report.py" = ["BLE001", "S110"]
+"tests/conftest.py" = ["BLE001", "S110"]
+"tests/test_state_isolation.py" = ["BLE001", "S110"]
 
 [tool.mypy]
 # Optional third-party libs (playwright, google-auth, anthropic) may be
