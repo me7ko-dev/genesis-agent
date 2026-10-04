@@ -137,7 +137,7 @@ def test_the_terminal_turn_gives_the_check_its_task(tmp_path, monkeypatch):
     monkeypatch.setattr(gta, "ask_genesis", lambda *a, **k: replies.pop(0) if replies else ("Край.", []))
     monkeypatch.setattr(gta.genesis_skills, "dispatch_tool_call",
                         lambda name, args: f"[WRITE_FILE: {report}] ✓ записани 19 символа")
-    monkeypatch.setattr(gta, "parse_and_execute_tools", lambda text: [])
+    monkeypatch.setattr(gta.genesis_skills, "parse_and_execute_tools", lambda text: [])
     messages = gta.run_turn(deque([{"role": "system", "content": "s"}], maxlen=50),
                             "report.py печата всеки продукт и ред ОБЩО", gta.TurnUI())
     assert any("„ОБЩО“" in str(m["content"]) for m in messages)

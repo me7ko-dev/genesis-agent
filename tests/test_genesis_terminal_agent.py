@@ -141,27 +141,27 @@ class TestRestoreSession:
         assert sum(1 for m in restored if m.get("role") == "system") == 1
 
 
-class TestTerminalHasTheSameIntegrityCheckAsTheSharedCore:
-    """The terminal is the DEFAULT frontend (`genesis`) but runs its own tool
-    loop, separate from agent_core.run_tool_loop. claim_check was wired into
-    the shared core only, which left the most-used entry point with no check
-    against simulated work at all. These pin the two together so they cannot
-    drift apart again silently.
-    """
+class TestThereIsOneLoop:
+    """Терминалът (`genesis`) имаше собствен цикъл до agent_core.run_tool_loop.
+    Всяка поправка се правеше два пъти и двата се разминаха — claim_check,
+    проверката на кода и приемните тестове влизаха първо в единия. Сега
+    ходът е само в agent_core; тези тестове пазят да не се роди втори."""
 
-    def test_the_terminal_module_wires_in_claim_check(self) -> None:
+    def test_the_terminal_turn_is_the_core_loop(self) -> None:
+        import genesis_terminal_agent as gta
+        from genesis_agent import agent_core
+        assert gta.run_tool_loop is agent_core.run_tool_loop
+        assert gta.TurnUI is agent_core.TurnUI
+
+    def test_the_terminal_does_not_dispatch_tools_itself(self) -> None:
         import genesis_terminal_agent as gta
         src = Path(gta.__file__).read_text(encoding="utf-8")
-        assert "claim_check.unsupported_claims" in src, (
-            "терминалният цикъл трябва да проверява твърденията, както ядрото")
-        assert "claim_check.nudge_text" in src
+        for name in ("dispatch_tool_call", "parse_and_execute_tools", "unsupported_claims"):
+            assert name not in src, f"{name} в терминала = втори цикъл"
 
-    def test_both_frontends_share_one_text_result_parser(self) -> None:
+    def test_text_results_prove_execution_through_claim_check(self) -> None:
         """Доказателството за claim_check се вади от формата на резултата
-        (`[RUN_CMD: ...]`). Този разбор живее в claim_check и се ползва и от
-        двата цикъла — по-рано беше копиран дословно и на двете места, което
-        значи, че промяна във формата ги обезоръжава едновременно и мълчаливо.
-        Затова тук се проверява самата функция, а не текстът на модула."""
+        (`[RUN_CMD: ...]`) на едно място — claim_check.executed_from_text_results."""
         from genesis_agent import claim_check
         results = [
             "[RUN_CMD: pip install ruff]\nSuccessfully installed",
@@ -174,16 +174,6 @@ class TestTerminalHasTheSameIntegrityCheckAsTheSharedCore:
             "блокирана команда не е изпълнение"
         )
         assert len(executed) == 1
-
-        for module in ("genesis_terminal_agent", "genesis_agent.agent_core"):
-            src = Path(__import__(module, fromlist=["x"]).__file__).read_text(
-                encoding="utf-8")
-            assert "executed_from_text_results" in src, f"{module} не ползва общия разбор"
-
-    def test_the_shared_core_still_has_it_too(self) -> None:
-        from genesis_agent import agent_core
-        src = Path(agent_core.__file__).read_text(encoding="utf-8")
-        assert "claim_check.unsupported_claims" in src
 
 
 class TestTheTerminalRoutesThroughBrainWhenItCan:

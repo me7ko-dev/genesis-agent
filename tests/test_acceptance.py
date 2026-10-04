@@ -69,34 +69,25 @@ def test_model_written_tests_never_see_the_api_keys(tmp_path, monkeypatch):
 
 
 def _loop(tmp_path, monkeypatch):
+    import genesis_skills
     from genesis_agent import agent_core as ac
-    monkeypatch.setattr("genesis_agent.brain.Brain.compact_chat_history",
-                        staticmethod(lambda messages, threshold=16, keep_recent=10: messages))
     monkeypatch.setattr(acc, "_brain_complete", lambda messages: TESTS)
     (tmp_path / "money.py").write_text(MODULE, encoding="utf-8")
     tc = [{"id": "1", "function": {"name": "WRITE_FILE", "arguments": "{}"}}]
-    replies = [("", tc, "p", "m"), ("Готово.", None, "p", "m"), ("Пробвах го.", None, "p", "m")]
-
-    class Core:
-        def complete(self, messages):
-            return replies.pop(0) if replies else ("Край.", None, "p", "m")
-
-        def remember(self, *a):
-            pass
-
-    class Skills:
-        def dispatch_tool_call(self, name, args):
-            return f"[WRITE_FILE: {tmp_path / 'money.py'}] ✓ записани 40 символа"
-
-        def parse_and_execute_tools(self, text):
-            return []
-
-    core = Core()
-    core.skills = Skills()
+    replies = [("", tc), ("Готово.", None), ("Пробвах го.", None)]
+    monkeypatch.setattr(genesis_skills, "dispatch_tool_call", lambda name, args:
+                        f"[WRITE_FILE: {tmp_path / 'money.py'}] ✓ записани 40 символа")
+    monkeypatch.setattr(genesis_skills, "parse_and_execute_tools", lambda text: [])
     shown = []
-    messages = ac.run_tool_loop(core, [{"role": "user", "content": "money.py с vat(net) и total(net)"}],
-                                on_assistant=lambda *a: None,
-                                on_tool_result=lambda name, res, extra: shown.append((name, res)))
+
+    class UI(ac.TurnUI):
+        def tool(self, name, result):
+            shown.append((name, result))
+
+    request = "money.py с vat(net) и total(net)"
+    messages = [{"role": "user", "content": request}]
+    ac.run_tool_loop(messages, request, UI(),
+                     lambda msgs: replies.pop(0) if replies else ("Край.", None))
     return [m["content"] for m in messages if m["role"] == "system"], shown
 
 
@@ -128,19 +119,8 @@ def _terminal_turn(tmp_path, monkeypatch):
     monkeypatch.setattr(gta, "ask_genesis", lambda *a, **k: replies.pop(0) if replies else ("Край.", []))
     monkeypatch.setattr(gta.genesis_skills, "dispatch_tool_call",
                         lambda name, args: f"[WRITE_FILE: {tmp_path / 'money.py'}] ✓ записани 40 символа")
-    monkeypatch.setattr(gta, "parse_and_execute_tools", lambda text: [])
-
-    class NoRunCheck:
-        def __init__(self, task=""):
-            pass
-
-        def observe(self, result):
-            pass
-
-        def due(self):
-            return False
-
-    monkeypatch.setattr(gta, "_RunCheck", NoRunCheck)
+    monkeypatch.setattr(gta.genesis_skills, "parse_and_execute_tools", lambda text: [])
+    monkeypatch.setattr("genesis_agent.code_check.RunCheck.due", lambda self: False)
     shown: list[str] = []
 
     class UI(gta.TurnUI):

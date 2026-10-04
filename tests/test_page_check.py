@@ -116,36 +116,24 @@ class TestAgentLoop:
     и той продължава, вместо ходът да свърши."""
 
     def test_the_loop_sends_findings_back_and_continues(self, site, monkeypatch) -> None:
+        import genesis_skills
         from genesis_agent import agent_core as ac
 
-        monkeypatch.setattr("genesis_agent.brain.Brain.compact_chat_history",
-                            staticmethod(lambda messages, threshold=16, keep_recent=10: messages))
         answers = iter([(["компютър: h1 1.6:1"], ""), ([], "")])
         monkeypatch.setattr(pc, "run", lambda page, shots=None: next(answers))
         tc = [{"id": "1", "function": {"name": "WRITE_FILE", "arguments": "{}"}}]
-        replies = [("", tc, "p", "m"), ("Готово.", None, "p", "m"),
-                   ("", tc, "p", "m"), ("Оправих контраста.", None, "p", "m")]
-
-        class Core:
-            def complete(self, messages):
-                return replies.pop(0)
-
-            def remember(self, *a):
-                pass
-
-        class Skills:
-            def dispatch_tool_call(self, name, args):
-                return _write(site / "index.html")
-
-            def parse_and_execute_tools(self, text):
-                return []
-
-        core = Core()
-        core.skills = Skills()
+        replies = [("", tc), ("Готово.", None), ("", tc), ("Оправих контраста.", None)]
+        monkeypatch.setattr(genesis_skills, "dispatch_tool_call",
+                            lambda name, args: _write(site / "index.html"))
+        monkeypatch.setattr(genesis_skills, "parse_and_execute_tools", lambda text: [])
         shown = []
-        messages = ac.run_tool_loop(core, [{"role": "user", "content": "направи сайт"}],
-                                    on_assistant=lambda *a: None,
-                                    on_tool_result=lambda name, res, extra: shown.append((name, res)))
+
+        class UI(ac.TurnUI):
+            def tool(self, name, result):
+                shown.append((name, result))
+
+        messages = [{"role": "user", "content": "направи сайт"}]
+        ac.run_tool_loop(messages, "направи сайт", UI(), lambda msgs: replies.pop(0))
         notes = [m["content"] for m in messages if m["role"] == "system"]
         assert any("h1 1.6:1" in n for n in notes)
         assert messages[-1]["content"] == "Оправих контраста."

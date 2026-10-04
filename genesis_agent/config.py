@@ -154,7 +154,7 @@ if _INSTALLED:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # What Genesis remembers — conversations, episodes, work threads, decisions,
-# preferences, the knowledge graph — apart from the state of the model chain
+# preferences — apart from the state of the model chain
 # (provider_stats, model_check, budget_log). bench runs every trial with an
 # empty one: on 2026-09-28 a site task's "preferences" (SEO, dark theme,
 # index.html) were injected into every later trial, even a Python function.
