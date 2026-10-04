@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 from collections import deque
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any, TypedDict
@@ -1232,13 +1233,27 @@ def _save_session(messages: "deque") -> None:
 
 def main():
     reset_usage()
-
     print_minimal_banner()
+    _report_pending_update()
+    _start_weekly_model_check()
+    system_prompt, briefing_text = build_system_prompt()
+    # Проактивно отваряне: потребителят вижда веднага какво е отворено и кое е
+    # следващото, вместо да се сеща сам или да пита.
+    if briefing_text:
+        console.print(Panel(Text(briefing_text[:1800]),
+                            title="[bold cyan]📋 Оттук продължаваме[/]",
+                            border_style="cyan", padding=(1, 2)))
+    chat = _Chat(system_prompt)
+    chat.loop()
+    _close_browser()
+    _remember_the_session(chat.messages)
+    console.print("\n[dim]Довиждане![/]")
 
-    # ── Резултат от /update, стартирано в ПРЕДИШНА сесия ──────────────────
-    # Обновяването тръгва на заден план чак след като старият процес излезе
-    # (genesis_agent.self_update) — затова отговорът чака точно тук, при
-    # следващото стартиране, а не веднага след `/update`.
+
+def _report_pending_update() -> None:
+    """Резултатът от /update, стартирано в ПРЕДИШНА сесия. Обновяването тръгва
+    на заден план чак след като старият процес излезе (genesis_agent.self_update)
+    — затова отговорът чака точно тук, при следващото стартиране."""
     try:
         from genesis_agent import self_update
         pending = self_update.report_pending()
@@ -1248,8 +1263,10 @@ def main():
     except Exception:
         pass
 
-    # Седмична проверка на моделите, на заден план — не бави старта. Мъртвите
-    # (404/410) Brain прескача сам от следващото обръщение (виж model_check).
+
+def _start_weekly_model_check() -> None:
+    """Седмична проверка на моделите, на заден план — не бави старта. Мъртвите
+    (404/410) Brain прескача сам от следващото обръщение (виж model_check)."""
     try:
         from genesis_agent import model_check
         if model_check.needs_check():
@@ -1258,352 +1275,22 @@ def main():
                              name="model-check").start()
     except Exception:
         pass
-    SYSTEM_PROMPT, briefing_text = build_system_prompt()
-
-    # Проактивно отваряне: потребителят вижда веднага какво е отворено и кое е
-    # следващото, вместо да се сеща сам или да пита.
-    if briefing_text:
-        console.print(Panel(Text(briefing_text[:1800]),
-                            title="[bold cyan]📋 Оттук продължаваме[/]",
-                            border_style="cyan", padding=(1, 2)))
-
-    messages = deque([{"role": "system", "content": SYSTEM_PROMPT}], maxlen=_HISTORY_MAXLEN)
-    from genesis_agent.chat_input import read_message
-    from genesis_agent.model_router import CONFIRM_COMMANDS, command_for_request
-
-    while True:
-        try:
-            # Статус редът е украса: грешка в него не бива да спира чата. Тук
-            # беше в общия try — изключението прескачаше input(), следващият
-            # кръг гърмеше пак и чатът печаташе грешката безкрайно (bench, 2026-09-26:
-            # 1.2M реда за 5 минути, без нито един прочетен ред вход).
-            try:
-                show_status_bar()
-            except Exception as e:
-                console.print(f"[dim]⚠ статус: {e}[/]")
-
-            user_input = read_message(lambda: console.input("[bold green]❯[/] "))
-            if not user_input: continue
-
-            # Заявка, която е точно вградена команда („направи бекъп"), не
-            # стига до модела. Командите, които променят нещо, питат; „не" →
-            # към модела, както досега. Останалите само показват — тръгват веднага.
-            _cmd = command_for_request(user_input)
-            if _cmd in CONFIRM_COMMANDS:
-                _ans = console.input(f"[cyan]↪ Това е командата [bold]{_cmd}[/] — без модел. "
-                                     "Пусни я? (Enter = да / не = питай модела) > [/]")
-                if _ans.strip().lower() in ("", "да", "д", "d", "da", "y", "yes"):
-                    user_input = _cmd
-            elif _cmd:
-                console.print(f"[dim]↪ {_cmd} (без модел)[/]")
-                user_input = _cmd
-
-            # ── Commands ──
-            if user_input.lower() in ["exit", "quit", "изход"]:
-                break
-
-            if user_input.lower() == "/agent":
-                show_agent_menu()
-                continue
-
-            if user_input.lower() == "/clear":
-                messages = deque([{"role": "system", "content": SYSTEM_PROMPT}], maxlen=_HISTORY_MAXLEN)
-                reset_usage()
-                print_minimal_banner()
-                continue
-
-            if user_input.lower() == "/backup":
-                # Целта се задава от потребителя — не гадаем устройство и не
-                # монтираме дискове вместо него. Без GENESIS_BACKUP_DIR просто
-                # обясняваме какво липсва, вместо да пишем някъде наслуки.
-                dest = os.environ.get("GENESIS_BACKUP_DIR", "").strip()
-                if not dest:
-                    console.print(
-                        "[yellow]Задай GENESIS_BACKUP_DIR (къде да пази архива), напр.:[/]\n"
-                        + ('  setx GENESIS_BACKUP_DIR "D:\\backup\\genesis"   (после нов терминал)'
-                           if os.name == "nt" else
-                           "  export GENESIS_BACKUP_DIR=/mnt/backup/genesis"))
-                    continue
-                console.print(f"[cyan]💾 Архивирам {WORKSPACE} → {dest} …[/]")
-                ok, err = _backup_workspace(WORKSPACE, Path(dest).expanduser())
-                if ok:
-                    console.print("[green]✅ Архивирането завърши.[/]")
-                else:
-                    console.print(f"[red]❌ Архивирането се провали:[/] {err[:200]}")
-                continue
-
-            # ── /update — реално обновяване от GitHub, не само проверка ──
-            # `genesis update` (CLI) нарочно само пита; тук питаме за
-            # потвърждение и, при „да", НАСРОЧВАМЕ обновяването на заден
-            # план (genesis_agent.self_update), защото pipx би подменил
-            # точно този процес, докато чатът чака отговор от нас — а на
-            # Windows заключен .exe не се презаписва. Затова резултатът се
-            # вижда чак при следващото `genesis`, не веднага тук.
-            if user_input.lower() in ("/update", "/ъпдейт"):
-                from genesis_agent import self_update, version_info
-                with console.status("[dim]Питам GitHub...[/]", spinner="dots"):
-                    check = version_info.check_update()
-                if check.src is None:
-                    console.print("[yellow]Това копие не е инсталирано от git (чекаут за "
-                                  "разработка или разархивирано) — няма с какво да се сравни. "
-                                  "В чекаут: `git pull`.[/]")
-                    continue
-                if check.latest is None:
-                    console.print("[red]Не можах да питам GitHub (мрежа или лимит). Ръчно:\n[/]"
-                                  f"  {version_info.install_command(check.src)}")
-                    continue
-                if check.up_to_date:
-                    console.print(f"[green]✅ Вече си на последното "
-                                  f"({check.src.short}, {check.src.ref}).[/]")
-                    continue
-                console.print(f"[cyan]⬆ Има по-ново на {check.src.ref}: "
-                              f"{check.src.short} → {check.latest[:7]}[/]")
-                subjects = version_info.changelog(
-                    check.src.owner_repo, check.src.commit, check.latest)
-                if subjects:
-                    console.print("[dim]  Какво носи:[/]")
-                    for s in subjects:
-                        console.print(f"[dim]    • {s}[/]")
-                confirm = console.input("[bold yellow]Обнови сега? (да/не) > [/]").strip().lower()
-                if confirm not in ("да", "d", "y", "yes", "д"):
-                    console.print("[dim]Пропуснато.[/]")
-                    continue
-                self_update.request_update(pid=os.getpid(), url=check.src.url, ref=check.src.ref)
-                console.print(
-                    "[green]✓ Обновяването е насрочено на заден план.[/]\n"
-                    "[dim]  Приключва СЛЕД като излезеш оттук (`exit`) — файлът не може да "
-                    "бъде презаписан, докато тече. Следващото `genesis` ще каже дали е минало.[/]")
-                continue
-
-            if user_input.lower() == "/model":
-                show_agent_menu()
-                continue
-
-            # ── /maxcoding — най-силните БЕЗПЛАТНИ модели за работа по код ──
-            # Нужен е като отделен режим, защото обикновеният ред на веригата е
-            # компромис между качество, скорост и квота: за чат това е правилно,
-            # за редакция на чужд код — не. Тук изборът е изричен и се плаща в
-            # скорост и квота, не в пари.
-            if user_input.lower() in ("/maxcoding", "/макскод"):
-                globals()["_CODING_MODE"] = not _CODING_MODE
-                if _CODING_MODE:
-                    from genesis_agent.brain import _load_coding_chain
-                    chain = _load_coding_chain()
-                    console.print("[bold green]🛠️  Кодинг режим ВКЛЮЧЕН[/] — "
-                                  "най-силните безплатни модели за код:")
-                    for i, c in enumerate(chain, 1):
-                        console.print(f"   [cyan]{i}.[/] {c['provider']}/{c['model']}")
-                    console.print("[dim]   По-бавно и харчи повече квота — затова не е по подразбиране.[/]")
-                    if current_provider or current_model_id:
-                        # Ръчният пин би държал избрания модел пръв и би обезсмислил
-                        # режима — казваме го, вместо да го оставим да мълчи.
-                        console.print("[dim]   Ръчно избраният модел (/model) се игнорира, докато режимът е включен.[/]")
-                else:
-                    console.print("[yellow]🛠️  Кодинг режим ИЗКЛЮЧЕН[/] — обичайната верига.")
-                continue
-
-            # ── /local_model_max, /local_model_normal — изричен офлайн режим ──
-            # Форсира Brain да ползва САМО локален Ollama модел (GENESIS_LOCAL_ONLY),
-            # без изобщо да пипа облака. Две фиксирани нива, каквото е реално
-            # инсталирано на машината: 14B (най-мощен, бавен) и 7B (по-лек, бърз).
-            # Повторно извикване на същата команда изключва режима обратно към
-            # облак-пръв ред; извикване на другата команда, докато режимът вече
-            # е включен, само сменя нивото.
-            if user_input.lower() in ("/local_model_max", "/локален_макс"):
-                from genesis_agent.brain import LOCAL_TIER_MAX, set_local_only
-                globals()["_LOCAL_ONLY_MODEL"] = (
-                    None if _LOCAL_ONLY_MODEL == LOCAL_TIER_MAX else LOCAL_TIER_MAX
-                )
-                set_local_only(_LOCAL_ONLY_MODEL)
-                if _LOCAL_ONLY_MODEL:
-                    console.print(f"[bold green]🏠 Локален режим ВКЛЮЧЕН (MAX)[/] — {LOCAL_TIER_MAX} "
-                                  "(14B, най-мощният локален модел, бавен)")
-                    console.print("[dim]   Само локално — облакът не се пипа, докато режимът е включен.[/]")
-                else:
-                    console.print("[yellow]🏠 Локален режим ИЗКЛЮЧЕН[/] — обратно към облачната верига.")
-                continue
-
-            if user_input.lower() in ("/local_model_normal", "/локален_нормал"):
-                from genesis_agent.brain import LOCAL_TIER_NORMAL, set_local_only
-                globals()["_LOCAL_ONLY_MODEL"] = (
-                    None if _LOCAL_ONLY_MODEL == LOCAL_TIER_NORMAL else LOCAL_TIER_NORMAL
-                )
-                set_local_only(_LOCAL_ONLY_MODEL)
-                if _LOCAL_ONLY_MODEL:
-                    console.print(f"[bold green]🏠 Локален режим ВКЛЮЧЕН (NORMAL)[/] — {LOCAL_TIER_NORMAL} "
-                                  "(7B, по-лек и по-бърз)")
-                    console.print("[dim]   Само локално — облакът не се пипа, докато режимът е включен.[/]")
-                else:
-                    console.print("[yellow]🏠 Локален режим ИЗКЛЮЧЕН[/] — обратно към облачната верига.")
-                continue
-
-            if user_input.lower() == "/status":
-                ctx_used, ctx_remain, ctx_pct = get_context_stats()
-                console.print(f"[cyan]Модел:[/] {current_model_id}"
-                              + ("  [green](кодинг режим — веригата е друга)[/]" if _CODING_MODE else ""))
-                if _LOCAL_ONLY_MODEL:
-                    console.print(f"[cyan]Доставчик:[/] 🏠 Локален режим — {_LOCAL_ONLY_MODEL} (облакът е спрян)")
-                else:
-                    console.print(f"[cyan]Доставчик:[/] {PROVIDERS[current_provider]['name']}")
-                console.print(f"[cyan]Време:[/] {get_elapsed_time()}")
-                console.print(f"[cyan]Контекст:[/] ~{ctx_used} от {DEFAULT_CONTEXT_WINDOW} ({ctx_pct}%), "
-                              f"остава ~{ctx_remain}")
-                console.print(f"[cyan]Токени за сесията:[/] ~{total_input_tokens + total_output_tokens}")
-                continue
-
-            if user_input.lower() == "/help":
-                help_table = Table(box=box.ROUNDED, border_style="cyan", show_header=False, padding=(0, 2))
-                help_table.add_column("Команда", style="bold cyan", width=20)
-                help_table.add_column("Описание", style="white")
-                help_table.add_row("/model или /agent", "Смяна на AI модел/доставчик")
-                help_table.add_row("/models", f"Покажи целия fallback chain ({len(FALLBACK_CHAIN)} модела)")
-                help_table.add_row("/maxcoding", "Вкл./изкл. най-силните БЕЗПЛАТНИ модели за код")
-                help_table.add_row("/local_model_max", "Вкл./изкл. офлайн режим — само qwen3:14b (мощен, бавен)")
-                help_table.add_row("/local_model_normal", "Вкл./изкл. офлайн режим — само qwen2.5-coder:7b (лек, бърз)")
-                help_table.add_row("/clear", "Нов разговор (изчиства историята)")
-                help_table.add_row("/status", "Системна информация и статистика")
-                help_table.add_row("/history", "Преглед и зареждане на стари сесии")
-                help_table.add_row("/backup", "Архивиране към GENESIS_BACKUP_DIR")
-                help_table.add_row("/pack [папка]", "Zip за клиента + ОТЧЕТ.md, без ключове (пуска тестовете)")
-                help_table.add_row("/update", "Провери и обнови от GitHub (питa за потвърждение)")
-                help_table.add_row("/skills", "Списък с уменията (без модел, мигновено)")
-                help_table.add_row("/tasks", "Състояние на работата — отворени нишки, решения")
-                help_table.add_row("/done <id>", "Затвори нишка като готова (/drop <id> = изхвърли)")
-                help_table.add_row('"""', "Съобщение на много редове: \"\"\" … \"\"\" (поставеният текст е едно съобщение и без това)")
-                help_table.add_row("exit / quit", "Изход")
-                console.print(Panel(help_table, title="[bold cyan]◈ GENESIS КОМАНДИ ◈[/]", border_style="cyan"))
-                continue
-
-            if user_input.lower() == "/pack" or user_input.lower().startswith("/pack "):
-                from genesis_agent.pack import pack, summary
-                _arg = user_input[len("/pack"):].strip()
-                _target = WORKSPACE / Path(_arg).expanduser() if _arg else WORKSPACE
-                if not _target.is_dir():
-                    console.print(f"[yellow]Няма такава папка: {_target}[/]")
-                    continue
-                console.print(f"[cyan]📦 Опаковам {_target} …[/]")
-                try:
-                    console.print(summary(pack(_target)), markup=False, highlight=False)
-                except OSError as e:
-                    console.print(f"[red]❌ {e}[/]")
-                continue
-
-            if user_input.lower() in ("/skills", "/умения"):
-                try:
-                    from genesis_agent.skill_loader import format_skill_list
-                    console.print(format_skill_list(), markup=False, highlight=False)
-                except Exception as e:
-                    console.print(f"[red]⚠ {e}[/]")
-                continue
-
-            # ── Затваряне/изхвърляне на нишка (хигиена) ──
-            if user_input.lower().startswith(("/done", "/drop", "/готово")):
-                parts_cmd = user_input.split()
-                if len(parts_cmd) < 2:
-                    console.print("[yellow]Дай номер: `/done 3` (готово) или `/drop 3` (изхвърли)[/]")
-                    continue
-                try:
-                    from genesis_agent import workspace_memory as _wm
-                    drop = user_input.lower().startswith("/drop")
-                    for ident in parts_cmd[1:]:
-                        console.print(f"[dim]{_wm.close_thread(ident, drop=drop)}[/]")
-                except Exception as e:
-                    console.print(f"[red]⚠ {e}[/]")
-                continue
-
-            # ── Състояние на работата (workspace памет) ──
-            if user_input.lower() in ("/tasks", "/задачи", "/state"):
-                try:
-                    from genesis_agent import workspace_memory as _wm
-                    b = _wm.briefing(max_threads=20, max_decisions=10)
-                    st = _wm.stats()
-                    console.print(Panel(
-                        Text(b if b else "Още нищо не е записано."),
-                        title=f"[bold cyan]📋 Работа — {st['open']} отворени, "
-                              f"{st['blocked']} блокирани, {st['done']} готови[/]",
-                        border_style="cyan", padding=(1, 2)))
-                except Exception as e:
-                    console.print(f"[red]⚠ {e}[/]")
-                continue
-
-            # ── Show full fallback chain ──
-            if user_input.lower() == "/models":
-                console.print()
-                fb_table = Table(
-                    title=f"[bold cyan]◈ FALLBACK CHAIN — {len(FALLBACK_CHAIN)} модела ◈[/]",
-                    box=box.ROUNDED, border_style="cyan", show_lines=True
-                )
-                fb_table.add_column("#",       style="bold white",  width=4)
-                fb_table.add_column("Доставчик", style="bold",       width=18)
-                fb_table.add_column("Модел",    style="cyan")
-                fb_table.add_column("Тип",      width=10)
-                for idx, fb in enumerate(FALLBACK_CHAIN, 1):
-                    prov_key = fb['provider']
-                    mod = fb['model']
-                    pname = PROVIDERS[prov_key]["name"] if prov_key in PROVIDERS else prov_key
-                    badge = model_badge(prov_key, mod)
-                    active = " [yellow bold]◀ ACTIVE[/]" if prov_key == current_provider and mod == current_model_id else ""
-                    fb_table.add_row(str(idx), pname, f"{mod}{active}", badge)
-                console.print(fb_table)
-                console.print(f"[dim]Текущ: [cyan]{current_provider}[/] / [bold]{current_model_id}[/][/]")
-                continue
-
-            if user_input.lower() == "/history":
-                history_files = sorted(glob.glob(str(HISTORY_DIR / "session_*.json")), reverse=True)
-                if not history_files:
-                    console.print("[yellow]Няма намерена история.[/]")
-                    continue
-
-                # Само показаните са избираеми (bug fix, 2026-08-12): таблицата
-                # реже на 10, а валидацията долу приемаше номер до дължината на
-                # ЦЕЛИЯ списък — с 25 запазени сесии "15" зареждаше файл, който
-                # операторът никога не е виждал на екрана.
-                shown = history_files[:10]
-                table = Table(title="[bold cyan]История на сесиите[/]", box=box.ROUNDED, border_style="cyan")
-                table.add_column("#", style="bold white")
-                table.add_column("Файл")
-                table.add_column("Дата")
-                for i, hf in enumerate(shown, 1):
-                    dt = datetime.fromtimestamp(os.path.getmtime(hf)).strftime("%Y-%m-%d %H:%M:%S")
-                    table.add_row(str(i), Path(hf).name, dt)
-                table.add_row("0", "Назад", "")
-                console.print(table)
-
-                try:
-                    hsel = int(console.input("\n[bold cyan]Избери сесия за зареждане > [/]").strip())
-                    if 0 < hsel <= len(shown):
-                        with open(shown[hsel - 1], "r", encoding="utf-8") as f:
-                            loaded = json.load(f)
-                        messages = _restore_session(loaded, SYSTEM_PROMPT)
-                        console.print(f"[green]✓ Сесията е заредена! ({len(messages)} съобщения)[/]")
-                    elif hsel != 0:
-                        console.print("[red]Невалиден избор.[/]")
-                except (ValueError, OSError, json.JSONDecodeError):
-                    console.print("[red]Невалиден избор.[/]")
-                continue
 
 
-            messages = run_turn(messages, user_input, RICH_UI)
-
-        except (KeyboardInterrupt, EOFError):
-            # EOF (Ctrl-D, or stdin closed when piped) used to fall through to
-            # the generic handler below, which printed the error and looped —
-            # forever, since the next read hit EOF again immediately.
-            break
-        except Exception as e:
-            console.print(f"[red]⚠ {e}[/]")
-
+def _close_browser() -> None:
     try:
         from genesis_agent import browser as _browser_mod
         _browser_mod.close()  # затваря headless Chromium, ако е бил отворен
     except Exception:
         pass
 
-    # ── Автоматично запомняне на трайното от сесията ────────────────────────
-    # Не разчитаме моделът да е викал REMEMBER/TASK_ADD по време на чата —
-    # тестове на живо показаха, че често НЕ го прави (тръгва да решава
-    # задачата и забравя да запише). Тук един евтин извличащ пас гарантира,
-    # че решенията, предпочитанията и недовършеното оцеляват за следващия път.
+
+def _remember_the_session(messages: "deque") -> None:
+    """Автоматично запомняне на трайното от сесията. Не разчитаме моделът да е
+    викал REMEMBER/TASK_ADD по време на чата — тестове на живо показаха, че
+    често НЕ го прави (тръгва да решава задачата и забравя да запише). Тук един
+    евтин извличащ пас гарантира, че решенията, предпочитанията и
+    недовършеното оцеляват за следващия път."""
     try:
         from genesis_agent import workspace_memory as _wm
         convo = [m for m in messages if m.get("role") in ("user", "assistant")]
@@ -1618,7 +1305,372 @@ def main():
     except Exception:
         pass
 
-    console.print("\n[dim]Довиждане![/]")
+
+_EXIT_WORDS = ("exit", "quit", "изход")
+
+
+class _Chat:
+    """Сесията в терминала: историята и командите, които я пипат."""
+
+    def __init__(self, system_prompt: str) -> None:
+        self.system_prompt = system_prompt
+        self.messages = self.fresh()
+
+    def fresh(self) -> "deque":
+        return deque([{"role": "system", "content": self.system_prompt}], maxlen=_HISTORY_MAXLEN)
+
+    def loop(self) -> None:
+        from genesis_agent.chat_input import read_message
+        while True:
+            try:
+                _draw_status_line()
+                user_input = read_message(lambda: console.input("[bold green]❯[/] "))
+                if not user_input:
+                    continue
+                user_input = _route_request(user_input)
+                if user_input.lower() in _EXIT_WORDS:
+                    break
+                found = _find_command(user_input)
+                if found:
+                    handler, arg = found
+                    handler(self, arg)
+                    continue
+                self.messages = run_turn(self.messages, user_input, RICH_UI)
+            except (KeyboardInterrupt, EOFError):
+                # EOF (Ctrl-D, or stdin closed when piped) used to fall through to
+                # the generic handler below, which printed the error and looped —
+                # forever, since the next read hit EOF again immediately.
+                break
+            except Exception as e:
+                console.print(f"[red]⚠ {e}[/]")
+
+
+def _draw_status_line() -> None:
+    # Статус редът е украса: грешка в него не бива да спира чата. Беше в общия
+    # try — изключението прескачаше input(), следващият кръг гърмеше пак и
+    # чатът печаташе грешката безкрайно (bench, 2026-09-26: 1.2M реда за 5
+    # минути, без нито един прочетен ред вход).
+    try:
+        show_status_bar()
+    except Exception as e:
+        console.print(f"[dim]⚠ статус: {e}[/]")
+
+
+def _route_request(user_input: str) -> str:
+    """Заявка, която е точно вградена команда („направи бекъп“), не стига до
+    модела. Командите, които променят нещо, питат; „не“ → към модела, както
+    досега. Останалите само показват — тръгват веднага."""
+    from genesis_agent.model_router import CONFIRM_COMMANDS, command_for_request
+    cmd = command_for_request(user_input)
+    if cmd in CONFIRM_COMMANDS:
+        ans = console.input(f"[cyan]↪ Това е командата [bold]{cmd}[/] — без модел. "
+                            "Пусни я? (Enter = да / не = питай модела) > [/]")
+        if ans.strip().lower() in ("", "да", "д", "d", "da", "y", "yes"):
+            return cmd
+    elif cmd:
+        console.print(f"[dim]↪ {cmd} (без модел)[/]")
+        return cmd
+    return user_input
+
+
+# ── Командите ────────────────────────────────────────────────────────────────
+
+def _cmd_model(chat: _Chat, arg: str) -> None:
+    show_agent_menu()
+
+
+def _cmd_clear(chat: _Chat, arg: str) -> None:
+    chat.messages = chat.fresh()
+    reset_usage()
+    print_minimal_banner()
+
+
+def _cmd_backup(chat: _Chat, arg: str) -> None:
+    # Целта се задава от потребителя — не гадаем устройство и не монтираме
+    # дискове вместо него. Без GENESIS_BACKUP_DIR просто обясняваме какво
+    # липсва, вместо да пишем някъде наслуки.
+    dest = os.environ.get("GENESIS_BACKUP_DIR", "").strip()
+    if not dest:
+        console.print(
+            "[yellow]Задай GENESIS_BACKUP_DIR (къде да пази архива), напр.:[/]\n"
+            + ('  setx GENESIS_BACKUP_DIR "D:\\backup\\genesis"   (после нов терминал)'
+               if os.name == "nt" else
+               "  export GENESIS_BACKUP_DIR=/mnt/backup/genesis"))
+        return
+    console.print(f"[cyan]💾 Архивирам {WORKSPACE} → {dest} …[/]")
+    ok, err = _backup_workspace(WORKSPACE, Path(dest).expanduser())
+    if ok:
+        console.print("[green]✅ Архивирането завърши.[/]")
+    else:
+        console.print(f"[red]❌ Архивирането се провали:[/] {err[:200]}")
+
+
+def _cmd_update(chat: _Chat, arg: str) -> None:
+    """/update — реално обновяване от GitHub, не само проверка. `genesis update`
+    (CLI) нарочно само пита; тук питаме за потвърждение и, при „да“,
+    НАСРОЧВАМЕ обновяването на заден план (genesis_agent.self_update), защото
+    pipx би подменил точно този процес, докато чатът чака отговор от нас — а
+    на Windows заключен .exe не се презаписва. Затова резултатът се вижда чак
+    при следващото `genesis`, не веднага тук."""
+    from genesis_agent import self_update, version_info
+    with console.status("[dim]Питам GitHub...[/]", spinner="dots"):
+        check = version_info.check_update()
+    if check.src is None:
+        console.print("[yellow]Това копие не е инсталирано от git (чекаут за "
+                      "разработка или разархивирано) — няма с какво да се сравни. "
+                      "В чекаут: `git pull`.[/]")
+        return
+    if check.latest is None:
+        console.print("[red]Не можах да питам GitHub (мрежа или лимит). Ръчно:\n[/]"
+                      f"  {version_info.install_command(check.src)}")
+        return
+    if check.up_to_date:
+        console.print(f"[green]✅ Вече си на последното "
+                      f"({check.src.short}, {check.src.ref}).[/]")
+        return
+    console.print(f"[cyan]⬆ Има по-ново на {check.src.ref}: "
+                  f"{check.src.short} → {check.latest[:7]}[/]")
+    subjects = version_info.changelog(check.src.owner_repo, check.src.commit, check.latest)
+    if subjects:
+        console.print("[dim]  Какво носи:[/]")
+        for s in subjects:
+            console.print(f"[dim]    • {s}[/]")
+    confirm = console.input("[bold yellow]Обнови сега? (да/не) > [/]").strip().lower()
+    if confirm not in ("да", "d", "y", "yes", "д"):
+        console.print("[dim]Пропуснато.[/]")
+        return
+    self_update.request_update(pid=os.getpid(), url=check.src.url, ref=check.src.ref)
+    console.print(
+        "[green]✓ Обновяването е насрочено на заден план.[/]\n"
+        "[dim]  Приключва СЛЕД като излезеш оттук (`exit`) — файлът не може да "
+        "бъде презаписан, докато тече. Следващото `genesis` ще каже дали е минало.[/]")
+
+
+def _cmd_maxcoding(chat: _Chat, arg: str) -> None:
+    """/maxcoding — най-силните БЕЗПЛАТНИ модели за работа по код. Отделен
+    режим, защото обикновеният ред на веригата е компромис между качество,
+    скорост и квота: за чат това е правилно, за редакция на чужд код — не.
+    Изборът е изричен и се плаща в скорост и квота, не в пари."""
+    global _CODING_MODE
+    _CODING_MODE = not _CODING_MODE
+    if not _CODING_MODE:
+        console.print("[yellow]🛠️  Кодинг режим ИЗКЛЮЧЕН[/] — обичайната верига.")
+        return
+    from genesis_agent.brain import _load_coding_chain
+    console.print("[bold green]🛠️  Кодинг режим ВКЛЮЧЕН[/] — "
+                  "най-силните безплатни модели за код:")
+    for i, c in enumerate(_load_coding_chain(), 1):
+        console.print(f"   [cyan]{i}.[/] {c['provider']}/{c['model']}")
+    console.print("[dim]   По-бавно и харчи повече квота — затова не е по подразбиране.[/]")
+    if current_provider or current_model_id:
+        # Ръчният пин би държал избрания модел пръв и би обезсмислил режима —
+        # казваме го, вместо да го оставим да мълчи.
+        console.print("[dim]   Ръчно избраният модел (/model) се игнорира, докато режимът е включен.[/]")
+
+
+def _toggle_local(tier: str, label: str, note: str) -> None:
+    """/local_model_max, /local_model_normal — изричен офлайн режим. Форсира
+    Brain да ползва САМО локален Ollama модел (GENESIS_LOCAL_ONLY), без изобщо
+    да пипа облака. Същата команда пак → обратно към облака; другата, докато
+    режимът е включен → само сменя нивото."""
+    global _LOCAL_ONLY_MODEL
+    from genesis_agent.brain import set_local_only
+    _LOCAL_ONLY_MODEL = None if _LOCAL_ONLY_MODEL == tier else tier
+    set_local_only(_LOCAL_ONLY_MODEL)
+    if _LOCAL_ONLY_MODEL:
+        console.print(f"[bold green]🏠 Локален режим ВКЛЮЧЕН ({label})[/] — {tier} {note}")
+        console.print("[dim]   Само локално — облакът не се пипа, докато режимът е включен.[/]")
+    else:
+        console.print("[yellow]🏠 Локален режим ИЗКЛЮЧЕН[/] — обратно към облачната верига.")
+
+
+def _cmd_local_max(chat: _Chat, arg: str) -> None:
+    from genesis_agent.brain import LOCAL_TIER_MAX
+    _toggle_local(LOCAL_TIER_MAX, "MAX", "(14B, най-мощният локален модел, бавен)")
+
+
+def _cmd_local_normal(chat: _Chat, arg: str) -> None:
+    from genesis_agent.brain import LOCAL_TIER_NORMAL
+    _toggle_local(LOCAL_TIER_NORMAL, "NORMAL", "(7B, по-лек и по-бърз)")
+
+
+def _cmd_status(chat: _Chat, arg: str) -> None:
+    ctx_used, ctx_remain, ctx_pct = get_context_stats()
+    console.print(f"[cyan]Модел:[/] {current_model_id}"
+                  + ("  [green](кодинг режим — веригата е друга)[/]" if _CODING_MODE else ""))
+    if _LOCAL_ONLY_MODEL:
+        console.print(f"[cyan]Доставчик:[/] 🏠 Локален режим — {_LOCAL_ONLY_MODEL} (облакът е спрян)")
+    else:
+        console.print(f"[cyan]Доставчик:[/] {PROVIDERS[current_provider]['name']}")
+    console.print(f"[cyan]Време:[/] {get_elapsed_time()}")
+    console.print(f"[cyan]Контекст:[/] ~{ctx_used} от {DEFAULT_CONTEXT_WINDOW} ({ctx_pct}%), "
+                  f"остава ~{ctx_remain}")
+    console.print(f"[cyan]Токени за сесията:[/] ~{total_input_tokens + total_output_tokens}")
+
+
+_HELP = (
+    ("/model или /agent", "Смяна на AI модел/доставчик"),
+    ("/models", "Покажи целия fallback chain ({chain} модела)"),
+    ("/maxcoding", "Вкл./изкл. най-силните БЕЗПЛАТНИ модели за код"),
+    ("/local_model_max", "Вкл./изкл. офлайн режим — само qwen3:14b (мощен, бавен)"),
+    ("/local_model_normal", "Вкл./изкл. офлайн режим — само qwen2.5-coder:7b (лек, бърз)"),
+    ("/clear", "Нов разговор (изчиства историята)"),
+    ("/status", "Системна информация и статистика"),
+    ("/history", "Преглед и зареждане на стари сесии"),
+    ("/backup", "Архивиране към GENESIS_BACKUP_DIR"),
+    ("/pack [папка]", "Zip за клиента + ОТЧЕТ.md, без ключове (пуска тестовете)"),
+    ("/update", "Провери и обнови от GitHub (питa за потвърждение)"),
+    ("/skills", "Списък с уменията (без модел, мигновено)"),
+    ("/tasks", "Състояние на работата — отворени нишки, решения"),
+    ("/done <id>", "Затвори нишка като готова (/drop <id> = изхвърли)"),
+    ('"""', "Съобщение на много редове: \"\"\" … \"\"\" (поставеният текст е едно съобщение и без това)"),
+    ("exit / quit", "Изход"),
+)
+
+
+def _cmd_help(chat: _Chat, arg: str) -> None:
+    help_table = Table(box=box.ROUNDED, border_style="cyan", show_header=False, padding=(0, 2))
+    help_table.add_column("Команда", style="bold cyan", width=20)
+    help_table.add_column("Описание", style="white")
+    for cmd, text in _HELP:
+        help_table.add_row(cmd, text.replace("{chain}", str(len(FALLBACK_CHAIN))))
+    console.print(Panel(help_table, title="[bold cyan]◈ GENESIS КОМАНДИ ◈[/]", border_style="cyan"))
+
+
+def _cmd_pack(chat: _Chat, arg: str) -> None:
+    from genesis_agent.pack import pack, summary
+    target = WORKSPACE / Path(arg).expanduser() if arg else WORKSPACE
+    if not target.is_dir():
+        console.print(f"[yellow]Няма такава папка: {target}[/]")
+        return
+    console.print(f"[cyan]📦 Опаковам {target} …[/]")
+    try:
+        console.print(summary(pack(target)), markup=False, highlight=False)
+    except OSError as e:
+        console.print(f"[red]❌ {e}[/]")
+
+
+def _cmd_skills(chat: _Chat, arg: str) -> None:
+    try:
+        from genesis_agent.skill_loader import format_skill_list
+        console.print(format_skill_list(), markup=False, highlight=False)
+    except Exception as e:
+        console.print(f"[red]⚠ {e}[/]")
+
+
+def _cmd_threads(chat: _Chat, user_input: str) -> None:
+    """/done, /drop — затваряне/изхвърляне на нишка (хигиена)."""
+    parts = user_input.split()
+    if len(parts) < 2:
+        console.print("[yellow]Дай номер: `/done 3` (готово) или `/drop 3` (изхвърли)[/]")
+        return
+    try:
+        from genesis_agent import workspace_memory as _wm
+        drop = user_input.lower().startswith("/drop")
+        for ident in parts[1:]:
+            console.print(f"[dim]{_wm.close_thread(ident, drop=drop)}[/]")
+    except Exception as e:
+        console.print(f"[red]⚠ {e}[/]")
+
+
+def _cmd_tasks(chat: _Chat, arg: str) -> None:
+    """Състояние на работата (workspace памет)."""
+    try:
+        from genesis_agent import workspace_memory as _wm
+        b = _wm.briefing(max_threads=20, max_decisions=10)
+        st = _wm.stats()
+        console.print(Panel(
+            Text(b if b else "Още нищо не е записано."),
+            title=f"[bold cyan]📋 Работа — {st['open']} отворени, "
+                  f"{st['blocked']} блокирани, {st['done']} готови[/]",
+            border_style="cyan", padding=(1, 2)))
+    except Exception as e:
+        console.print(f"[red]⚠ {e}[/]")
+
+
+def _cmd_models(chat: _Chat, arg: str) -> None:
+    """Целият fallback chain."""
+    console.print()
+    fb_table = Table(
+        title=f"[bold cyan]◈ FALLBACK CHAIN — {len(FALLBACK_CHAIN)} модела ◈[/]",
+        box=box.ROUNDED, border_style="cyan", show_lines=True
+    )
+    fb_table.add_column("#",       style="bold white",  width=4)
+    fb_table.add_column("Доставчик", style="bold",       width=18)
+    fb_table.add_column("Модел",    style="cyan")
+    fb_table.add_column("Тип",      width=10)
+    for idx, fb in enumerate(FALLBACK_CHAIN, 1):
+        prov_key = fb['provider']
+        mod = fb['model']
+        pname = PROVIDERS[prov_key]["name"] if prov_key in PROVIDERS else prov_key
+        badge = model_badge(prov_key, mod)
+        active = " [yellow bold]◀ ACTIVE[/]" if prov_key == current_provider and mod == current_model_id else ""
+        fb_table.add_row(str(idx), pname, f"{mod}{active}", badge)
+    console.print(fb_table)
+    console.print(f"[dim]Текущ: [cyan]{current_provider}[/] / [bold]{current_model_id}[/][/]")
+
+
+def _cmd_history(chat: _Chat, arg: str) -> None:
+    history_files = sorted(glob.glob(str(HISTORY_DIR / "session_*.json")), reverse=True)
+    if not history_files:
+        console.print("[yellow]Няма намерена история.[/]")
+        return
+    # Само показаните са избираеми (bug fix, 2026-08-12): таблицата реже на 10,
+    # а валидацията долу приемаше номер до дължината на ЦЕЛИЯ списък — с 25
+    # запазени сесии "15" зареждаше файл, който операторът не е виждал.
+    shown = history_files[:10]
+    table = Table(title="[bold cyan]История на сесиите[/]", box=box.ROUNDED, border_style="cyan")
+    table.add_column("#", style="bold white")
+    table.add_column("Файл")
+    table.add_column("Дата")
+    for i, hf in enumerate(shown, 1):
+        dt = datetime.fromtimestamp(os.path.getmtime(hf)).strftime("%Y-%m-%d %H:%M:%S")
+        table.add_row(str(i), Path(hf).name, dt)
+    table.add_row("0", "Назад", "")
+    console.print(table)
+    try:
+        hsel = int(console.input("\n[bold cyan]Избери сесия за зареждане > [/]").strip())
+        if 0 < hsel <= len(shown):
+            with open(shown[hsel - 1], "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            chat.messages = _restore_session(loaded, chat.system_prompt)
+            console.print(f"[green]✓ Сесията е заредена! ({len(chat.messages)} съобщения)[/]")
+        elif hsel != 0:
+            console.print("[red]Невалиден избор.[/]")
+    except (ValueError, OSError, json.JSONDecodeError):
+        console.print("[red]Невалиден избор.[/]")
+
+
+# Цялото съобщение е командата (малки/главни букви без значение).
+_COMMANDS: dict[str, Callable[[_Chat, str], None]] = {
+    "/agent": _cmd_model, "/model": _cmd_model,
+    "/clear": _cmd_clear,
+    "/backup": _cmd_backup,
+    "/update": _cmd_update, "/ъпдейт": _cmd_update,
+    "/maxcoding": _cmd_maxcoding, "/макскод": _cmd_maxcoding,
+    "/local_model_max": _cmd_local_max, "/локален_макс": _cmd_local_max,
+    "/local_model_normal": _cmd_local_normal, "/локален_нормал": _cmd_local_normal,
+    "/status": _cmd_status,
+    "/help": _cmd_help,
+    "/skills": _cmd_skills, "/умения": _cmd_skills,
+    "/tasks": _cmd_tasks, "/задачи": _cmd_tasks, "/state": _cmd_tasks,
+    "/models": _cmd_models,
+    "/history": _cmd_history,
+}
+
+
+def _find_command(user_input: str) -> "tuple[Callable[[_Chat, str], None], str] | None":
+    """(функция, аргумент) за вградена команда, или None — тогава е за модела."""
+    low = user_input.lower()
+    if low in _COMMANDS:
+        return _COMMANDS[low], ""
+    if low == "/pack" or low.startswith("/pack "):
+        return _cmd_pack, user_input[len("/pack"):].strip()
+    # По начало, не по цяла дума: „/done3“ пак получава подсказката за номера.
+    if low.startswith(("/done", "/drop", "/готово")):
+        return _cmd_threads, user_input
+    return None
+
 
 if __name__ == "__main__":
     main()
