@@ -88,7 +88,15 @@ except Exception:
 # --- Load Config ---
 # All paths come from genesis_agent.paths, which derives them from the
 # installed package and the user's own home — nothing machine-specific here.
-from genesis_agent.agent_core import TurnUI, bounded_history, run_tool_loop
+from genesis_agent.agent_core import (
+    COMPACT_KEEP_RECENT,
+    COMPACT_THRESHOLD,
+    HISTORY_MAXLEN,
+    MIN_SIZE_B,
+    TurnUI,
+    bounded_history,
+    run_tool_loop,
+)
 from genesis_agent.paths import (
     CONFIG_PATH,
     ENV_FILES,
@@ -330,7 +338,8 @@ current_model_id = config.get("models", {}).get("default_model_id", "openai/gpt-
 # min 32B (design note, 2026-07-25): терминалният чат е основният coding assistant —
 # по-малките модели мислят забележимо по-слабо. config.yaml's size_b анотира
 # всеки запис; default_model_id (Qwen2.5-Coder-32B, 32B) вече го покрива.
-_TERMINAL_MIN_SIZE_B = 32
+# Стойността е една за всички — agent_core.MIN_SIZE_B (и `genesis models` я ползва).
+_TERMINAL_MIN_SIZE_B = MIN_SIZE_B
 
 # `/maxcoding` — за сесията, не за постоянно. Обичайната верига е компромис
 # между качество, скорост и квота, което е правилният компромис за разговор;
@@ -795,11 +804,11 @@ def _backup_workspace(src: Path, dest: Path) -> tuple[bool, str]:
 # периодично, ПРЕВАНТИВНО (не при твърд cutoff), най-старите съобщения се
 # заменят с едно кратко резюме — по-евтино на токени И реално помни повече
 # (резюмето носи информация от целия разговор, не само последните N реда).
-_COMPACT_THRESHOLD = 16  # съобщения (без system) преди компресия
-_COMPACT_KEEP_RECENT = 10  # колко последни съобщения остават сурови
-# Твърдият таван на живата история. Компресията по-горе е ПРЕВАНТИВНА и обикновено
-# се задейства далеч преди този таван — той е последната преграда.
-_HISTORY_MAXLEN = 30
+# Стойностите са в agent_core (едно място); тези имена ги четат remote_server,
+# cloud/runner и отворените клонове.
+_COMPACT_THRESHOLD = COMPACT_THRESHOLD  # съобщения (без system) преди компресия
+_COMPACT_KEEP_RECENT = COMPACT_KEEP_RECENT  # колко последни остават сурови
+_HISTORY_MAXLEN = HISTORY_MAXLEN  # твърдият таван; компресията е преди него
 
 
 def _restore_session(loaded: list, system_prompt: str) -> "deque":
