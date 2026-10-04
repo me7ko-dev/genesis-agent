@@ -160,6 +160,15 @@ class TestAPlainAnswer:
     def test_an_uncapped_history_stays_uncapped(self, turn) -> None:
         assert turn.run(maxlen=None).maxlen is None
 
+    def test_an_empty_reply_ends_the_turn_instead_of_crashing_it(self, turn) -> None:
+        """Празен отговор без инструменти (Brain го връща, когато доставчикът
+        отговори с празно съдържание) пускаше `len(None)` при записа в паметта —
+        TypeError, и целият ход се губеше."""
+        turn.replies = [("", None)]
+        out = turn.run("здрасти")
+        assert out[-1] == {"role": "assistant", "content": ""}
+        assert turn.remembered == [("user", "здрасти")], "празното не се помни"
+
     def test_the_callers_deque_is_not_mutated(self, turn) -> None:
         history = deque([SYSTEM], maxlen=30)
         gta.run_turn(history, "задача", RecordingUI())

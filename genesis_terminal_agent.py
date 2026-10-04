@@ -1262,8 +1262,12 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
         if tool_calls:
             assistant_msg["tool_calls"] = tool_calls
         messages.append(assistant_msg)
-        _remember("assistant", response if response.strip() else
-                  f"[повикани {len(tool_calls)} tool(-а)]")
+        # Празен отговор без инструменти е възможен (празно съдържание от
+        # доставчика); `len(None)` тук губеше целия ход. Празното не се помни.
+        if response.strip():
+            _remember("assistant", response)
+        elif tool_calls:
+            _remember("assistant", f"[повикани {len(tool_calls)} tool(-а)]")
         if ui.cancelled():
             # Преди следващия инструмент, не по средата му. Недовършените
             # tool_calls остават без резултат — затова се махат, иначе
