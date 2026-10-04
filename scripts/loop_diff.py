@@ -4,8 +4,9 @@ Does a change to the turn loop change anything the model sees?
 
     python scripts/loop_diff.py OLD_CHECKOUT [NEW_CHECKOUT] [--turns N] [--seed S]
 
-The bench answers "does it work better?" with real models, and its noise is
-larger than any refactor: the same code scored 4/10 and 8/11 on one day.
+The bench answers "does it work better?" with real models, and on 5 x 2
+trials its noise hides any refactor: 8/11 before vs 5/10 after the loop
+merge (2026-10-04) is Fisher p = 0.39.
 This answers the other question deterministically. It generates N random
 turns (seeded): native tool calls, text tags, ASK_USER, repeated results,
 blocked commands, written .py and .html files, Stop, verified knowledge,
