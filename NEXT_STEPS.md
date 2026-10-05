@@ -49,8 +49,9 @@
   безплатните са от модела, не от цикъла.
 
 ## Без лаптоп (прави се тук, по ред)
-1. **Още bench проекти (А.2):** бот (само логиката). Има готови в `feat/bench-harder`
-   (expense-bot, clients-migrate, todo-cli — `bench/projects/`, качен 2026-10-02).
+1. **Още bench проекти (А.2):** от `feat/bench-harder` остават clients-migrate,
+   todo-cli, booking-form — по един на комит, скритите тестове пускани срещу
+   еталонно решение (в scratchpad, не в репото). expense-bot е пренесен.
 2. При merge на `feat/desktop-app`: `remote_server.clear()` да вика
    `gta.reset_usage()`, не да нулира `total_*` на ръка.
 3. При merge на `feat/android-standalone`: той пипа `run_turn`
