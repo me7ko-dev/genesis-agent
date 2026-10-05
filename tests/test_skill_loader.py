@@ -503,6 +503,20 @@ def test_shipped_domain_skills_pass_their_self_tests(_shipped_skills, tmp_path, 
     assert r.returncode == 0 and r.stdout.strip() == "OK", r.stderr
 
 
+def test_the_phone_skill_keeps_landlines_when_the_task_is_not_mobile_only(_shipped_skills) -> None:
+    """bench clients-migrate 2026-10-05: 0/2 — и двата пуска копираха normalize_bg_mobile
+    от умението и записаха „02 981 23 45“ като NULL, а задачата иска всяка водеща 0 → +359."""
+    code = sl.skill_view("bg_contact_form_phone")["code"]
+    ns: dict = {}
+    exec(compile(code.split('if __name__ == "__main__":')[0], "skill", "exec"), ns)  # noqa: S102 — кодът на умението от репото, само дефинициите
+    phone = ns["normalize_bg_phone"]
+    assert phone("02 981 23 45") == "+35929812345"
+    assert phone("032 123 456") == "+35932123456"
+    assert phone("00359888123456") == phone("0888 123 456") == "+359888123456"
+    assert phone("") == "" and phone("12345") is None and phone("+44 7700 900123") is None
+    assert "normalize_bg_phone" in code.split("Факти:")[1].split('"""')[0]
+
+
 _IBAN_REQUEST = ("Направи в текущата папка Python модул iban.py за български IBAN (банкова сметка "
                  "в България). Функция validate(iban: str) -> bool — вярно само за валиден "
                  "български IBAN. Добави тестове с pytest в tests/ и ги пусни, докато минат. "
