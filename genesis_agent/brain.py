@@ -383,6 +383,17 @@ def _mark_exhausted(key: str) -> None:
     _EXHAUSTED[key] = time.time() + _EXHAUST_COOLDOWN
 
 
+def _cool_down(prov: str, model: str, key: str, error: str) -> None:
+    """При 429/503/402 → изчерпан за cooldown (спестява безсмислени опити);
+    410 → спрян от доставчика, не се пробва цяло денонощие."""
+    if any(f"HTTP_{c}" in error for c in _EXHAUST_CODES):
+        _mark_exhausted(key)
+    if "HTTP_410" in error:
+        _EXHAUSTED[key] = time.time() + _GONE_COOLDOWN
+        print(f"  [Brain] ⛔ {prov}/{model} е спрян от доставчика (410) — "
+              "пропускам го; махни го от config.yaml")
+
+
 def _is_truncated(text: str) -> bool:
     """True ако `text` свършва посред код-ограда (нечетен брой ``` маркери).
 
@@ -1667,31 +1678,9 @@ class Brain:
         from genesis_agent.budget import budget_history
         messages = budget_history(messages)
 
-        last_error = "неизвестна грешка"
-        local_only = os.environ.get("GENESIS_LOCAL_ONLY") == "1"
-
         # LOCAL-ONLY: изричен офлайн режим — никога не пипа облака.
-        if local_only:
-            if not self.local:
-                return self._error_result("Error: локален режим — няма наличен локален модел")
-            # Бъг, хванат наживо 2026-07-31 (изричен локален режим + реални tools):
-            # този клон връщаше рано БЕЗ да мине през _with_tool_tag_docs/
-            # _sanitize_for_textmode по-долу — локалният модел никога не
-            # научаваше какъв е синтаксисът на тул-таговете, затова само
-            # разказваше намерение ("Използвам браузър...") без да върне нищо
-            # парсваемо. Локалният модел НИКОГА не връща native tool_calls
-            # (виж _call_local) — единственият му път е text-tag режимът, а той
-            # изисква точно тази документация в system съобщението.
-            local_messages = (
-                self._with_tool_tag_docs(self._sanitize_for_textmode(messages))
-                if tools else messages
-            )
-            hit = self._call_local(local_messages, attempts=2)
-            if hit:
-                raw_text, code = hit
-                return type("Obj", (object,), {"raw_text": raw_text, "code": code,
-                                               "usage": self._last_usage, "tool_calls": None})
-            return self._error_result(f"Error: локален режим — {self._last_local_error}")
+        if os.environ.get("GENESIS_LOCAL_ONLY") == "1":
+            return self._complete_local_only(messages, tools)
 
         # ОБЛАКЪТ Е ВИНАГИ ПЪРВИ (design note, 2026-07-25): локалният мозък — малък,
         # среден или голям tier, без значение — е ПОСЛЕДНА резерва. Пробва се
@@ -1699,6 +1688,59 @@ class Brain:
         # RETRY_ROUNDS обхождания) е изчерпана. Облакът е безплатен и по-силен
         # от локалния 3B/7B/14B — няма смисъл да предпочитаме по-слабия модел,
         # докато има свободна облачна квота.
+        ordered_chain, messages_notools = self._ordered_chain(messages, tools, avoid)
+        reply, last_error = self._walk_chain(ordered_chain, messages, messages_notools, tools)
+        if reply is not None:
+            return reply
+
+        # ПОСЛЕДНА РЕЗЕРВА: локалният собствен мозък — само ако облакът напълно
+        # отказа (или изобщо няма конфигурирани облачни модели).
+        local_avoided = bool(avoid and self.local
+                             and (self.local["provider"], self.local["model"]) == avoid)
+        if self.local and not local_avoided:
+            print("  [Brain] ☁️ Облакът е изчерпан/недостъпен → 🏠 локален мозък като резерва...")
+            hit = self._call_local(messages_notools, attempts=1)
+            if hit:
+                return self._reply(*hit, None)
+            last_error = self._last_local_error or last_error
+
+        return self._error_result(f"Error: цялата верига е изчерпана | последна: {last_error}")
+
+    def _reply(self, raw_text: str, code: str, tool_calls: list | None):
+        return type("Obj", (object,), {"raw_text": raw_text, "code": code,
+                                       "usage": self._last_usage, "tool_calls": tool_calls})
+
+    @staticmethod
+    def _code_in(raw_text: str) -> str:
+        if "```python" in raw_text:
+            return raw_text.split("```python")[1].split("```")[0].strip()
+        if raw_text.lstrip().startswith(("def ", "import ", "from ", "class ")):
+            return raw_text
+        return ""
+
+    def _complete_local_only(self, messages: list[dict], tools: list[dict] | None):
+        if not self.local:
+            return self._error_result("Error: локален режим — няма наличен локален модел")
+        # Бъг, хванат наживо 2026-07-31 (изричен локален режим + реални tools):
+        # този клон връщаше рано БЕЗ да мине през _with_tool_tag_docs/
+        # _sanitize_for_textmode по-долу — локалният модел никога не
+        # научаваше какъв е синтаксисът на тул-таговете, затова само
+        # разказваше намерение ("Използвам браузър...") без да върне нищо
+        # парсваемо. Локалният модел НИКОГА не връща native tool_calls
+        # (виж _call_local) — единственият му път е text-tag режимът, а той
+        # изисква точно тази документация в system съобщението.
+        local_messages = (
+            self._with_tool_tag_docs(self._sanitize_for_textmode(messages))
+            if tools else messages
+        )
+        hit = self._call_local(local_messages, attempts=2)
+        if hit:
+            return self._reply(*hit, None)
+        return self._error_result(f"Error: локален режим — {self._last_local_error}")
+
+    def _ordered_chain(self, messages: list[dict], tools: list[dict] | None,
+                       avoid: tuple[str, str] | None) -> tuple[list[dict], list[dict]]:
+        """Веригата за ТАЗИ заявка и историята за моделите без native tools."""
         # Data-driven деприоритизация (design note, 2026-07-25): доставчик с
         # ПОТВЪРДЕН (≥5 извадки) rolling success rate <50% минава на края на
         # веригата ТОЗИ рунд — не се маркира изчерпан, не се трие, просто не
@@ -1750,99 +1792,71 @@ class Brain:
         if avoid:
             ordered_chain = [c for c in ordered_chain
                              if (c["provider"], c["model"]) != avoid]
+        return ordered_chain, messages_notools
 
-        n = len(ordered_chain)
-        if n > 0:
-            # ВИНАГИ отгоре надолу, прескачайки временно изчерпаните.
-            #
-            # По-рано тук имаше ротиращ офсет, който се местеше след всеки
-            # УСПЕХ, за да разпределя товара. Три неща не работеха:
-            #   • всяко съобщение идваше от друг модел, с видимо различно
-            #     качество — потребителят го усеща като нестабилност;
-            #   • веригата стигаше до дъното си, докато горните модели са
-            #     напълно свободни;
-            #   • и най-лошото: щом веднъж слезеше долу, оставаше там —
-            #     офсетът не се връщаше нагоре, когато горните излязат от
-            #     cooldown.
-            # Обхождане отгоре дава и залепване (докато моделът работи, той
-            # отговаря), и самолечение (щом cooldown-ът мине, се връщаме на
-            # най-добрия наличен), без нищо да се помни между извикванията.
-            for round_i in range(RETRY_ROUNDS):
-                for step in range(n):
-                    attempt = ordered_chain[step]
-                    prov, model = attempt["provider"], attempt["model"]
-                    key = f"{prov}::{model}"
-                    if _is_exhausted(key):
-                        continue  # временно изчерпан → пропускаме
-                    use_tools = tools if (tools and attempt.get("supports_tools")) else None
-                    msgs = messages if use_tools else messages_notools
-                    t0 = time.time()
+    def _walk_chain(self, ordered_chain: list[dict], messages: list[dict],
+                    messages_notools: list[dict], tools: list[dict] | None):
+        """(отговор, последна грешка); отговорът е None, ако никой не отговори."""
+        # ВИНАГИ отгоре надолу, прескачайки временно изчерпаните.
+        #
+        # По-рано тук имаше ротиращ офсет, който се местеше след всеки
+        # УСПЕХ, за да разпределя товара. Три неща не работеха:
+        #   • всяко съобщение идваше от друг модел, с видимо различно
+        #     качество — потребителят го усеща като нестабилност;
+        #   • веригата стигаше до дъното си, докато горните модели са
+        #     напълно свободни;
+        #   • и най-лошото: щом веднъж слезеше долу, оставаше там —
+        #     офсетът не се връщаше нагоре, когато горните излязат от
+        #     cooldown.
+        # Обхождане отгоре дава и залепване (докато моделът работи, той
+        # отговаря), и самолечение (щом cooldown-ът мине, се връщаме на
+        # най-добрия наличен), без нищо да се помни между извикванията.
+        last_error = "неизвестна грешка"
+        for round_i in range(RETRY_ROUNDS):
+            for step, attempt in enumerate(ordered_chain):
+                prov, model = attempt["provider"], attempt["model"]
+                key = f"{prov}::{model}"
+                if _is_exhausted(key):
+                    continue  # временно изчерпан → пропускаме
+                use_tools = tools if (tools and attempt.get("supports_tools")) else None
+                msgs = messages if use_tools else messages_notools
+                t0 = time.time()
+                try:
                     try:
-                        try:
-                            raw_text, tool_calls = self._call(prov, model, msgs, tools=use_tools)
-                        except RuntimeError as e:
-                            if not _is_transient(str(e)):
-                                raise
-                            # В статистиката влиза само крайният изход на
-                            # обръщението: 500 + провал на повторния опит се
-                            # броеше за два провала и сваляше ollama в края на
-                            # веригата за 15 мин (bench 2026-09-30: 78 отговора
-                            # на NVIDIA без нито един опит на ollama срещу 25).
-                            reason = " ".join(str(e).split())[:80]
-                            print(f"  [Brain] ↻ {prov}/{model} след {time.time() - t0:.1f}s: "
-                                  f"{reason} → същият пак след {_TRANSIENT_PAUSE_S:.0f}s")
-                            time.sleep(_TRANSIENT_PAUSE_S)
-                            t0 = time.time()
-                            raw_text, tool_calls = self._call(prov, model, msgs, tools=use_tools)
-                        self._record_stat(prov, time.time() - t0, True)
-                        self.current = attempt
-                        if step > 0 or round_i > 0:
-                            print(f"  [Brain] ↪ модел: {prov}/{model}")
-                        code = ""
-                        if "```python" in raw_text:
-                            code = raw_text.split("```python")[1].split("```")[0].strip()
-                        elif raw_text.lstrip().startswith(("def ", "import ", "from ", "class ")):
-                            code = raw_text
-                        self._log_usage()
-                        return type("Obj", (object,), {"raw_text": raw_text, "code": code,
-                                                       "usage": self._last_usage, "tool_calls": tool_calls})
-                    except requests.exceptions.RequestException as e:
-                        last_error = f"мрежа: {e}"
-                        self._record_stat(prov, time.time() - t0, False)
-                        _print_skip(prov, model, last_error, time.time() - t0)
-                        continue
+                        raw_text, tool_calls = self._call(prov, model, msgs, tools=use_tools)
                     except RuntimeError as e:
-                        last_error = str(e)
-                        self._record_stat(prov, time.time() - t0, False)
-                        _print_skip(prov, model, last_error, time.time() - t0)
-                        # При 429/503/402 → маркирай изчерпан за cooldown (спестява безсмислени опити).
-                        for c in _EXHAUST_CODES:
-                            if f"HTTP_{c}" in last_error:
-                                _mark_exhausted(key)
-                                break
-                        if "HTTP_410" in last_error:
-                            _EXHAUSTED[key] = time.time() + _GONE_COOLDOWN
-                            print(f"  [Brain] ⛔ {prov}/{model} е спрян от доставчика (410) — "
-                                  "пропускам го; махни го от config.yaml")
-                        continue
-                if round_i + 1 < RETRY_ROUNDS:
-                    print("  [Brain] Всички облачни модели заети/изчерпани, кратка пауза и нов кръг...")
-                    time.sleep(8)
-
-        # ПОСЛЕДНА РЕЗЕРВА: локалният собствен мозък — само ако облакът напълно
-        # отказа (или изобщо няма конфигурирани облачни модели).
-        local_avoided = bool(avoid and self.local
-                             and (self.local["provider"], self.local["model"]) == avoid)
-        if self.local and not local_avoided:
-            print("  [Brain] ☁️ Облакът е изчерпан/недостъпен → 🏠 локален мозък като резерва...")
-            hit = self._call_local(messages_notools, attempts=1)
-            if hit:
-                raw_text, code = hit
-                return type("Obj", (object,), {"raw_text": raw_text, "code": code,
-                                               "usage": self._last_usage, "tool_calls": None})
-            last_error = self._last_local_error or last_error
-
-        return self._error_result(f"Error: цялата верига е изчерпана | последна: {last_error}")
+                        if not _is_transient(str(e)):
+                            raise
+                        # В статистиката влиза само крайният изход на
+                        # обръщението: 500 + провал на повторния опит се
+                        # броеше за два провала и сваляше ollama в края на
+                        # веригата за 15 мин (bench 2026-09-30: 78 отговора
+                        # на NVIDIA без нито един опит на ollama срещу 25).
+                        reason = " ".join(str(e).split())[:80]
+                        print(f"  [Brain] ↻ {prov}/{model} след {time.time() - t0:.1f}s: "
+                              f"{reason} → същият пак след {_TRANSIENT_PAUSE_S:.0f}s")
+                        time.sleep(_TRANSIENT_PAUSE_S)
+                        t0 = time.time()
+                        raw_text, tool_calls = self._call(prov, model, msgs, tools=use_tools)
+                    self._record_stat(prov, time.time() - t0, True)
+                    self.current = attempt
+                    if step > 0 or round_i > 0:
+                        print(f"  [Brain] ↪ модел: {prov}/{model}")
+                    self._log_usage()
+                    return self._reply(raw_text, self._code_in(raw_text), tool_calls), last_error
+                except requests.exceptions.RequestException as e:
+                    last_error = f"мрежа: {e}"
+                    self._record_stat(prov, time.time() - t0, False)
+                    _print_skip(prov, model, last_error, time.time() - t0)
+                except RuntimeError as e:
+                    last_error = str(e)
+                    self._record_stat(prov, time.time() - t0, False)
+                    _print_skip(prov, model, last_error, time.time() - t0)
+                    _cool_down(prov, model, key, last_error)
+            if ordered_chain and round_i + 1 < RETRY_ROUNDS:
+                print("  [Brain] Всички облачни модели заети/изчерпани, кратка пауза и нов кръг...")
+                time.sleep(8)
+        return None, last_error
 
     def _error_result(self, msg: str):
         return type("Obj", (object,), {"raw_text": msg, "code": "", "usage": None, "tool_calls": None})
