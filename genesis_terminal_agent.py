@@ -427,66 +427,64 @@ def provider_ready(provider_key: str) -> tuple[bool, str]:
     return bool(KEYS.get(key_env)), f"липсва {key_env}"
 
 
+def _list_openai(p: ProviderInfo, key: str) -> list[str] | None:
+    r = requests.get(f"{p['base_url']}/models",
+                     headers={"Authorization": f"Bearer {key}"}, timeout=10)
+    if r.status_code == 200:
+        return sorted([m.get("id", "") for m in r.json().get("data", [])]) or None
+    return None
+
+
+def _list_gemini(p: ProviderInfo, key: str) -> list[str] | None:
+    # Ключът в заглавка, не в адреса: адресът влиза в текста на всяка
+    # грешка на requests, а оттам в лога и на екрана.
+    r = requests.get(str(p["base_url"]), headers={"x-goog-api-key": key}, timeout=10)
+    if r.status_code == 200:
+        return [m["name"].replace("models/", "") for m in r.json().get("models", [])
+                if "generateContent" in m.get("supportedGenerationMethods", [])]
+    return None
+
+
+def _list_vertex(p: ProviderInfo, key: str) -> list[str] | None:
+    # Адресът и токенът се вадят при извикване — и двата зависят от
+    # проекта, а токенът живее около час.
+    from genesis_agent import vertex_auth
+    projects = vertex_auth.projects()
+    token = vertex_auth.token(projects[0]) if projects else None
+    if not token:
+        return None
+    r = requests.get(f"{vertex_auth.endpoint(projects[0])}/models",
+                     headers={"Authorization": f"Bearer {token}"}, timeout=10)
+    if r.status_code == 200:
+        return sorted(m.get("id", "") for m in r.json().get("data", [])) or None
+    return None
+
+
+def _list_ollama(p: ProviderInfo, key: str) -> list[str] | None:
+    # Local Ollama — use /api/tags
+    r = requests.get(f"{p['base_url']}/api/tags", timeout=5)
+    if r.status_code == 200:
+        return [m["name"] for m in r.json().get("models", [])] or ["__no_models__"]
+    return None
+
+
+# Живият списък по вид доставчик; None = резервният от FALLBACKS.
+_MODEL_LISTERS = {"openai": _list_openai, "gemini": _list_gemini,
+                  "vertex": _list_vertex, "ollama": _list_ollama}
+
+
 def fetch_models(provider_key):
     if provider_key in MODELS_CACHE:
         return MODELS_CACHE[provider_key]
     p = PROVIDERS[provider_key]
-    key = KEYS.get(p["key_env"] or "", "")
-    if p["type"] == "openai":
+    lister = _MODEL_LISTERS.get(p["type"])
+    models = None
+    if lister is not None:
         try:
-            r = requests.get(f"{p['base_url']}/models",
-                             headers={"Authorization": f"Bearer {key}"}, timeout=10)
-            if r.status_code == 200:
-                models = sorted([m.get("id","") for m in r.json().get("data",[])])
-                if models:
-                    MODELS_CACHE[provider_key] = models
-                    return models
+            models = lister(p, KEYS.get(p["key_env"] or "", ""))
         except Exception:
-            log.debug("живият списък с модели не дойде — резервният", exc_info=True)
-    elif p["type"] == "gemini":
-        try:
-            # Ключът в заглавка, не в адреса: адресът влиза в текста на всяка
-            # грешка на requests, а оттам в лога и на екрана.
-            r = requests.get(str(p["base_url"]), headers={"x-goog-api-key": key}, timeout=10)
-            if r.status_code == 200:
-                models = [m["name"].replace("models/","") for m in r.json().get("models",[])
-                          if "generateContent" in m.get("supportedGenerationMethods",[])]
-                MODELS_CACHE[provider_key] = models
-                return models
-        except Exception:
-            log.debug("живият списък с модели (Gemini) не дойде — резервният", exc_info=True)
-    elif p["type"] == "vertex":
-        # Адресът и токенът се вадят при извикване — и двата зависят от
-        # проекта, а токенът живее около час.
-        try:
-            from genesis_agent import vertex_auth
-            projects = vertex_auth.projects()
-            token = vertex_auth.token(projects[0]) if projects else None
-            if token:
-                r = requests.get(f"{vertex_auth.endpoint(projects[0])}/models",
-                                 headers={"Authorization": f"Bearer {token}"}, timeout=10)
-                if r.status_code == 200:
-                    models = sorted(m.get("id", "") for m in r.json().get("data", []))
-                    if models:
-                        MODELS_CACHE[provider_key] = models
-                        return models
-        except Exception:
-            log.debug("живият списък с модели (Vertex) не дойде — резервният", exc_info=True)
-    elif p["type"] == "ollama":
-        # Local Ollama — use /api/tags
-        try:
-            r = requests.get(f"{p['base_url']}/api/tags", timeout=5)
-            if r.status_code == 200:
-                ollama_models = [m["name"] for m in r.json().get("models", [])]
-                if ollama_models:
-                    MODELS_CACHE[provider_key] = ollama_models
-                    return MODELS_CACHE[provider_key]
-                else:
-                    MODELS_CACHE[provider_key] = ["__no_models__"]
-                    return MODELS_CACHE[provider_key]
-        except Exception:
-            log.debug("локалният Ollama не отговори — резервният списък", exc_info=True)
-    MODELS_CACHE[provider_key] = FALLBACKS.get(provider_key, [])
+            log.debug("живият списък с модели (%s) не дойде — резервният", p["type"], exc_info=True)
+    MODELS_CACHE[provider_key] = models if models is not None else FALLBACKS.get(provider_key, [])
     return MODELS_CACHE[provider_key]
 
 # Реален usage от ПОСЛЕДНОТО успешно извикване (не estimate_tokens() оценка) —
