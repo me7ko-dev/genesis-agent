@@ -441,6 +441,8 @@ def test_an_excel_csv_request_gets_the_csv_rules_not_the_eik_check(_shipped_skil
     assert "bg_eik_bulstat_validate" not in text
 
 
+_PHONE_TASKS = {"contact-form", "booking-form", "clients-migrate"}
+
 def test_the_contact_form_gets_the_phone_rules_and_nothing_else_does(_shipped_skills) -> None:
     """bench contact-form 2026-10-02: 1/2 — 00359888123456 → +3590359888123456 и
     `from flask import escape` (Flask 3 го няма). Само заявката с мобилен номер го получава —
@@ -449,7 +451,8 @@ def test_the_contact_form_gets_the_phone_rules_and_nothing_else_does(_shipped_sk
     for task in sorted(projects.glob("*/task.txt")):
         text = sl.domain_context(task.read_text(encoding="utf-8"))
         hit = "библиотеката: bg_contact_form_phone" in text
-        assert hit == (task.parent.name == "contact-form"), task.parent.name
+        # booking-form и clients-migrate (2026-10-05) също искат мобилен → +359.
+        assert hit == (task.parent.name in _PHONE_TASKS), task.parent.name
         if hit:
             assert '"00359", ЧАК ТОГАВА "0"' in text and "markupsafe" in text
     site = sl.domain_context("Направи сайт за пекарна с контактна форма и телефон")
@@ -483,7 +486,8 @@ def test_a_csv_with_phones_gets_both_and_a_loose_second_match_stays_out(_shipped
     projects = sl.Path(__file__).resolve().parent.parent / "bench" / "projects"
     for task_file in sorted(projects.glob("*/task.txt")):
         got = sl.domain_context(task_file.read_text(encoding="utf-8"))
-        assert got.count("## Проверено знание от библиотеката:") <= 1, task_file.parent.name
+        expected = 2 if task_file.parent.name == "clients-migrate" else 1  # задачата от по-горе
+        assert got.count("## Проверено знание от библиотеката:") <= expected, task_file.parent.name
 
 
 @pytest.mark.parametrize("name", ["bg_eik_bulstat_validate", "bg_euro_bgn_conversion",
