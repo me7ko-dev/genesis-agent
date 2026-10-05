@@ -952,3 +952,35 @@ def test_dispatch_bad_input_never_raises(monkeypatch) -> None:
     assert "Невалидни аргументи" in gs.dispatch_tool_call("READ_FILE", "{не е json")
     monkeypatch.setattr(gs, "_tool_list_dir", lambda p: [] if p else 1 / 0)
     assert gs.dispatch_tool_call("LIST_DIR", ["не", "dict"]).startswith("[LIST_DIR] Грешка при изпълнение")
+
+
+def test_parse_runs_every_tag_kind_in_text_order_and_skips_nested(monkeypatch) -> None:
+    """Всички видове тагове в една реплика: изпълнение блокове → USE_SKILL без край
+    → едноредови → без аргумент; резултатите — по реда в текста (C901 21)."""
+    ran: list[tuple] = []
+
+    def _rec(name):
+        return lambda *a: ran.append((name, *a)) or f"<{name}>"
+
+    for fn in ("_tool_edit_file", "_tool_write_file", "_tool_use_skill", "_tool_browser_read",
+               "_tool_repo_map", "_tool_task_list"):
+        monkeypatch.setattr(gs, fn, _rec(fn))
+    monkeypatch.setitem(gs._SIMPLE_DISPATCH, "LIST_DIR", _rec("list_dir"))
+    sep = gs._EDIT_SEPARATOR
+    text = (f"[TASK_LIST] [LIST_DIR: src] [EDIT_FILE: a.py]\nold\n{sep}\nnew\n[END_EDIT]"
+            " [USE_SKILL: s] [BROWSER_READ] [EDIT_FILE: b.py]x[END_EDIT]"
+            " [WRITE_FILE: d.md]виж [REPO_MAP] и [LIST_DIR: no][END_WRITE] [REPO_MAP]")
+    out = gs.parse_and_execute_tools(text)
+    assert [r.split("\n")[0] for r in out] == [
+        "<_tool_task_list>", "<list_dir>", "<_tool_edit_file>", "<_tool_use_skill>",
+        "<_tool_browser_read>",
+        f"[EDIT_FILE: b.py] ❌ Липсва разделителят {sep} между стария и новия текст.",
+        "<_tool_write_file>", "<_tool_repo_map>"]
+    assert ran == [("_tool_edit_file", "a.py", "old", "new"),
+                   ("_tool_write_file", "d.md", "виж [REPO_MAP] и [LIST_DIR: no]"),
+                   ("_tool_use_skill", "s", ""),
+                   ("list_dir", "src"),
+                   ("_tool_browser_read",),
+                   ("_tool_repo_map", ""),
+                   ("_tool_task_list", "open")]
+    assert gs.parse_and_execute_tools("") == []
