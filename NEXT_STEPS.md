@@ -49,19 +49,16 @@
   безплатните са от модела, не от цикъла.
 
 ## Без лаптоп (прави се тук, по ред)
-1. **Още bench проекти (А.2):** от `feat/bench-harder` остава booking-form —
-   по един на комит, скритите тестове пускани срещу
-   еталонно решение (в scratchpad, не в репото). expense-bot, clients-migrate, todo-cli са пренесени.
-2. При merge на `feat/desktop-app`: `remote_server.clear()` да вика
+1. При merge на `feat/desktop-app`: `remote_server.clear()` да вика
    `gta.reset_usage()`, не да нулира `total_*` на ръка.
-3. При merge на `feat/android-standalone`: той пипа `run_turn`
+2. При merge на `feat/android-standalone`: той пипа `run_turn`
    (`_compact_midtask`, `_round_checkpoint`, компресия в началото на хода) — ходът
    вече е `agent_core._Turn`; пренеси ги там/в `run_turn` и пусни `loop_diff`.
-4. Сложност над 15 (ruff C901, 16 функции): `repo_agent.repair` 28,
+3. Сложност над 15 (ruff C901, 16 функции): `repo_agent.repair` 28,
    `dispatch_tool_call` 27, `brain.complete` 26, `remote_server.serve` 24,
    `setup_wizard.run` 22, `parse_and_execute_tools` 21, … Една по една, тестове
    преди това (както `main` и мисията), накрая C901 в CI с праг 15.
-5. За преценка (fail-open, нарочно, сега поне в лога): `skill_loader` приема
+4. За преценка (fail-open, нарочно, сега поне в лога): `skill_loader` приема
    подписано умение без проверка, ако криптографията хвърли (тест го иска);
    `browser` преценява клик без пробата „поле с парола наблизо“, ако тя падне.
 
