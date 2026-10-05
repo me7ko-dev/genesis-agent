@@ -27,7 +27,6 @@ from datetime import date
 from pathlib import Path
 
 from genesis_agent import claim_check
-from genesis_agent.acceptance import AcceptanceCheck
 from genesis_agent.budget import clip_for_context
 from genesis_agent.code_check import RunCheck
 from genesis_agent.config import TOOL_ROUND_CAP
@@ -232,8 +231,6 @@ class _Turn:
         self.page_check = FinalCheck()
         # .py, записан и непуснат след последната промяна; буквалните думи от заявката.
         self.run_check = RunCheck(request)
-        # Тестове само от заявката, без кода (GENESIS_ACCEPTANCE=1).
-        self.acceptance = AcceptanceCheck(request)
         # Въртене на място: същият извик, същият резултат, пореден път. Таванът
         # го ограничава по цена, но не го разпознава.
         self.guard = RepeatGuard()
@@ -279,7 +276,6 @@ class _Turn:
     def _observe(self, result: str) -> None:
         self.page_check.observe(result)
         self.run_check.observe(result)
-        self.acceptance.observe(result)
 
     def _native_round(self) -> bool:
         """Native tool calling: същите backend-и като текстовите тагове
@@ -377,7 +373,7 @@ class _Turn:
         if self.retries["tag"] < 2 and skills.looks_like_attempted_tool_tag(self.response):
             self.retries["tag"] += 1
             return self._nudge(_MALFORMED_TAG_NOTE, "Анализирам...")
-        return (self._browser_check() or self._code_check() or self._acceptance_check()
+        return (self._browser_check() or self._code_check()
                 or self._promise_check() or self._claim_check())
 
     def _nudge(self, note: str, label: str) -> bool:
@@ -400,16 +396,6 @@ class _Turn:
             return False
         self.ui.warn("Написа код — казвам му да го пробва и извън примерите.")
         return self._nudge(self.run_check.note(), "Пробвам кода…")
-
-    def _acceptance_check(self) -> bool:
-        if not self.acceptance.due():
-            return False
-        with self.ui.thinking("Независими приемни тестове…", "dots2"):
-            note = self.acceptance.check()
-        if not note:
-            return False
-        self.ui.tool("приемни тестове", note.splitlines()[0])
-        return self._nudge(note, "Оправям според приемните тестове…")
 
     def _promise_check(self) -> bool:
         promise = claim_check.unfinished_promise(self.response)

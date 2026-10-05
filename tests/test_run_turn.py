@@ -20,7 +20,6 @@ import pytest
 
 import genesis_skills
 import genesis_terminal_agent as gta
-from genesis_agent.acceptance import AcceptanceCheck
 from genesis_agent.brain import Brain
 from genesis_agent.config import TOOL_ROUND_CAP
 from genesis_agent.page_check import FinalCheck
@@ -399,18 +398,6 @@ class TestChecksAtTheEnd:
         turn.replies = [("Проверих го в браузъра, няма грешки.", None)]
         turn.run()
         assert len(turn.requests) == 1, "проверката в браузър доказва твърдението"
-
-    def test_acceptance_tests_that_fail_are_sent_back(self, turn, monkeypatch) -> None:
-        monkeypatch.setattr(AcceptanceCheck, "due", lambda self: not getattr(self, "_t", False))
-
-        def _check(self):
-            self._t = True
-            return "[приемни тестове] 1/3 минаха\nподробности"
-        monkeypatch.setattr(AcceptanceCheck, "check", _check)
-        turn.replies = [("Готово.", None), ("Оправих.", None)]
-        turn.run()
-        assert ("приемни тестове", "[приемни тестове] 1/3 минаха") in turn.ui.of("tool")
-        assert "[приемни тестове] 1/3 минаха\nподробности" in turn.system_notes()
 
     def test_a_promise_without_the_work_is_sent_back_once(self, turn) -> None:
         turn.replies = [("Разгледах. Сега ще създам файла.", None),
