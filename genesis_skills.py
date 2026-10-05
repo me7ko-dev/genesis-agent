@@ -1006,6 +1006,51 @@ def looks_like_attempted_tool_tag(response_text: str) -> bool:
 # (config.yaml supports_tools). Двата пътя никога не се разминават в
 # ПОВЕДЕНИЕ, само в това как аргументите стигат до тях.
 
+def _memory_tool(name: str, a: dict) -> str:
+    """Памет за работата — структурираните аргументи тук са по-надеждни от
+    "|"-разделения текстов формат, затова викаме workspace_memory директно."""
+    from genesis_agent import workspace_memory as wm
+    if name == "REMEMBER":
+        kind = str(a.get("kind", "decision")).lower()
+        if kind.startswith(("pref", "предпочит")):
+            return wm.set_preference(a.get("topic", ""), a.get("value", ""))
+        return wm.add_decision(a.get("value", "") or a.get("topic", ""), a.get("why", ""))
+    if name == "TASK_ADD":
+        return wm.add_thread(a.get("title", ""), a.get("next_step", ""))
+    return wm.update_thread(a.get("id", ""), a.get("status", ""), a.get("next_step", ""))
+
+
+def _glob_args(a: dict) -> str:
+    pattern, path = a.get("pattern", ""), a.get("path", "") or ""
+    return f"{pattern} | {path}" if path else pattern
+
+
+# Името на native tool → backend. Ламбдите търсят `_tool_*` при извикване, така
+# че подмяната им (тестове, monkeypatch) важи и тук.
+_NATIVE_TOOLS: dict[str, Callable[[dict], str]] = {
+    "READ_FILE": lambda a: _tool_read_file(a.get("path", ""), a.get("offset"), a.get("limit")),
+    "WRITE_FILE": lambda a: _tool_write_file(a.get("path", ""), a.get("content", "")),
+    "EDIT_FILE": lambda a: _tool_edit_file(a.get("path", ""), a.get("old", ""), a.get("new", ""),
+                                           bool(a.get("replace_all", False))),
+    "SEARCH_CODE": lambda a: _tool_search_code(a.get("pattern", ""), a.get("path", "") or "",
+                                               a.get("glob", "") or ""),
+    "REPO_MAP": lambda a: _tool_repo_map(a.get("path", "") or ""),
+    "GLOB": lambda a: _tool_glob(_glob_args(a)),
+    "RUN_CMD": lambda a: _tool_run_cmd(a.get("command", "")),
+    "ASK_USER": lambda a: _tool_ask_user(a.get("question", ""), a.get("options")),
+    "WEB_SEARCH": lambda a: _tool_web_search(a.get("query", "")),
+    "RESEARCH": lambda a: _tool_research(a.get("question", "")),
+    "LIST_DIR": lambda a: _tool_list_dir(a.get("path", "")),
+    "USE_SKILL": lambda a: _tool_use_skill(a.get("name_or_query", ""), a.get("driver_code", "") or ""),
+    "DELEGATE": lambda a: _tool_delegate(a.get("goal", "")),
+    "BROWSE": lambda a: _tool_browse(a.get("url", "")),
+    "BROWSER_READ": lambda a: _tool_browser_read(),
+    "BROWSER_CLICK": lambda a: _tool_browser_click(a.get("index_or_text", "")),
+    "BROWSER_TYPE": lambda a: _tool_browser_type(f"{a.get('index_or_text', '')} | {a.get('text', '')}"),
+    "TASK_LIST": lambda a: _tool_task_list(a.get("status", "open")),
+}
+
+
 def dispatch_tool_call(name: str, arguments) -> str:
     """Изпълнява един native tool_call. Никога не хвърля — грешка връща като низ,
     така че цикълът може да я подаде обратно на модела и той да опита пак.
@@ -1021,70 +1066,11 @@ def dispatch_tool_call(name: str, arguments) -> str:
     if not isinstance(arguments, dict):
         arguments = {}
     try:
-        if name == "READ_FILE":
-            return _tool_read_file(arguments.get("path", ""),
-                                   arguments.get("offset"), arguments.get("limit"))
-        if name == "WRITE_FILE":
-            return _tool_write_file(arguments.get("path", ""), arguments.get("content", ""))
-        if name == "EDIT_FILE":
-            return _tool_edit_file(arguments.get("path", ""),
-                                   arguments.get("old", ""),
-                                   arguments.get("new", ""),
-                                   bool(arguments.get("replace_all", False)))
-        if name == "SEARCH_CODE":
-            return _tool_search_code(arguments.get("pattern", ""),
-                                     arguments.get("path", "") or "",
-                                     arguments.get("glob", "") or "")
-        if name == "REPO_MAP":
-            return _tool_repo_map(arguments.get("path", "") or "")
-        if name == "GLOB":
-            pattern = arguments.get("pattern", "")
-            path = arguments.get("path", "") or ""
-            return _tool_glob(f"{pattern} | {path}" if path else pattern)
-        if name == "RUN_CMD":
-            return _tool_run_cmd(arguments.get("command", ""))
-        if name == "ASK_USER":
-            return _tool_ask_user(arguments.get("question", ""),
-                                  arguments.get("options"))
-        if name == "WEB_SEARCH":
-            return _tool_web_search(arguments.get("query", ""))
-        if name == "RESEARCH":
-            return _tool_research(arguments.get("question", ""))
-        if name == "LIST_DIR":
-            return _tool_list_dir(arguments.get("path", ""))
-        if name == "USE_SKILL":
-            return _tool_use_skill(arguments.get("name_or_query", ""), arguments.get("driver_code", "") or "")
-        if name == "DELEGATE":
-            return _tool_delegate(arguments.get("goal", ""))
-        if name == "BROWSE":
-            return _tool_browse(arguments.get("url", ""))
-        if name == "BROWSER_READ":
-            return _tool_browser_read()
-        if name == "BROWSER_CLICK":
-            return _tool_browser_click(arguments.get("index_or_text", ""))
-        if name == "BROWSER_TYPE":
-            idx = arguments.get("index_or_text", "")
-            text = arguments.get("text", "")
-            return _tool_browser_type(f"{idx} | {text}")
-        # Памет за работата — структурираните аргументи тук са по-надеждни от
-        # "|"-разделения текстов формат, затова викаме workspace_memory директно.
-        if name in ("REMEMBER", "TASK_ADD", "TASK_UPDATE", "TASK_LIST"):
-            from genesis_agent import workspace_memory as wm
-            if name == "REMEMBER":
-                kind = str(arguments.get("kind", "decision")).lower()
-                if kind.startswith(("pref", "предпочит")):
-                    return wm.set_preference(arguments.get("topic", ""),
-                                             arguments.get("value", ""))
-                return wm.add_decision(arguments.get("value", "") or arguments.get("topic", ""),
-                                       arguments.get("why", ""))
-            if name == "TASK_ADD":
-                return wm.add_thread(arguments.get("title", ""),
-                                     arguments.get("next_step", ""))
-            if name == "TASK_UPDATE":
-                return wm.update_thread(arguments.get("id", ""),
-                                        arguments.get("status", ""),
-                                        arguments.get("next_step", ""))
-            return _tool_task_list(arguments.get("status", "open"))
+        tool = _NATIVE_TOOLS.get(name)
+        if tool is not None:
+            return tool(arguments)
+        if name in ("REMEMBER", "TASK_ADD", "TASK_UPDATE"):
+            return _memory_tool(name, arguments)
         return f"[{name}] Непознат tool."
     except Exception as e:
         log.debug("инструментът падна — грешката отива при модела", exc_info=True)
