@@ -187,3 +187,72 @@ class TestParametersMatchWhatTheModelAccepts:
     def test_the_system_prompt_is_still_cached_on_every_model(self, sent) -> None:
         Brain()._call_anthropic("k", "claude-haiku-4-5", MESSAGES, TOOLS, "high")
         assert sent.params["system"][0]["cache_control"] == {"type": "ephemeral"}
+
+
+class TestErrorsAndReplyShape:
+    """Разклоненията на _call_anthropic преди цепенето (C901 19)."""
+
+    @staticmethod
+    def _raise_on_beta(sent, exc, after=None):
+        calls: list[bool] = []
+
+        def create(**params):
+            calls.append("betas" in params)
+            if "betas" in params:
+                raise exc
+            return after if after is not None else _FakeResponse(_FakeUsage())
+        sent.create = create
+        return calls
+
+    @pytest.mark.parametrize("name, prefix", [
+        ("AuthenticationError", "HTTP_401: "), ("PermissionDeniedError", "HTTP_403: "),
+        ("RateLimitError", "HTTP_429: "), ("APIStatusError", "HTTP_500: "),
+        ("APIConnectionError", "мрежа: "), ("BadRequestError", "HTTP_400: "),
+    ])
+    def test_sdk_errors_become_chain_errors(self, sent, name, prefix) -> None:
+        exc = getattr(sys.modules["anthropic"], name)("лошо")
+        self._raise_on_beta(sent, exc)
+        with pytest.raises(RuntimeError) as e:
+            _call(Brain(), sent)
+        assert str(e.value) == prefix + "лошо"
+
+    def test_a_beta_the_account_lacks_is_retried_without_it(self, sent) -> None:
+        exc = sys.modules["anthropic"].BadRequestError("unknown Beta header")
+        calls = self._raise_on_beta(sent, exc)
+        assert _call(Brain(), sent) == ("готово", None)
+        assert calls == [True, False]
+
+    def test_a_refusal_moves_the_chain_on(self, sent) -> None:
+        resp = _FakeResponse(_FakeUsage())
+        resp.stop_reason, resp.stop_details = "refusal", "тема"
+        sent.create = lambda **p: resp
+        with pytest.raises(RuntimeError, match=r"^HTTP_REFUSAL: .*\(тема\)"):
+            _call(Brain(), sent)
+
+    def test_tool_use_blocks_become_tool_calls(self, sent) -> None:
+        resp = _FakeResponse(None)
+        resp.content = [types.SimpleNamespace(type="tool_use", id="t1", name="READ_FILE",
+                                              input={"path": "a.py"})]
+        sent.create = lambda **p: resp
+        brain = Brain()
+        assert _call(brain, sent) == ("", [{"id": "t1", "type": "function", "function": {
+            "name": "READ_FILE", "arguments": '{"path": "a.py"}'}}])
+        assert brain._last_usage is None
+
+    def test_empty_and_truncated_replies_raise(self, sent) -> None:
+        resp = _FakeResponse(_FakeUsage())
+        resp.content = []
+        sent.create = lambda **p: resp
+        with pytest.raises(RuntimeError, match="^празен отговор$"):
+            _call(Brain(), sent)
+        resp.content = [types.SimpleNamespace(type="text", text="```python\nx = (")]
+        resp.stop_reason = "max_tokens"
+        with pytest.raises(RuntimeError, match="^HTTP_TRUNCATED"):
+            _call(Brain(), sent)
+
+    def test_no_messages_and_no_package(self, sent, monkeypatch) -> None:
+        with pytest.raises(RuntimeError, match="няма съобщения"):
+            _call(Brain(), sent, messages=[{"role": "system", "content": "само system"}])
+        monkeypatch.setitem(sys.modules, "anthropic", None)
+        with pytest.raises(RuntimeError, match="^skip: липсва пакетът"):
+            _call(Brain(), sent)
