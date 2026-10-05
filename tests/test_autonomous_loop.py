@@ -609,3 +609,278 @@ class TestNativeToolCallsDoNotStarveCodeWriting:
         )
         assert forced_at is not None, "spinning never forced code"
         assert forced_at == STOP_AT
+
+
+# ── Разклоненията, които нямаха тест (2026-10-04, преди разделянето) ─────────
+
+def _ok_run(monkeypatch, seen: list | None = None) -> None:
+    def _run(code):
+        if seen is not None:
+            seen.append(code)
+        return ExecResult(ok=True, stdout="OK\n", stderr="", returncode=0)
+    monkeypatch.setattr(al, "run_python_subprocess", _run)
+
+
+def _code(code: str = "print('OK')") -> _Reply:
+    return _Reply(raw_text="```python\n" + code + "\n```", code=code)
+
+
+def _last_user(call: list[dict]) -> str:
+    return next(m["content"] for m in reversed(call) if m["role"] == "user")
+
+
+class TestTheMissionPrompt:
+    def test_an_active_red_zone_token_is_said_out_loud(self, monkeypatch) -> None:
+        monkeypatch.setenv("GENESIS_RED_ZONE_TOKEN", "t")
+        monkeypatch.setenv("GENESIS_RED_ZONE_SECRET", "t")
+        _queue(_Reply(raw_text="без код"))
+        al.run_autonomous_loop("a goal", max_rounds=1)
+        assert "Red Zone elevation token is ACTIVE" in FakeBrain.calls[0][1]["content"]
+
+    def test_lessons_from_past_missions_go_into_the_system_prompt(self, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.reflection.lessons_for_prompt", lambda: "УРОК: пиши тест")
+        _queue(_Reply(raw_text="без код"))
+        al.run_autonomous_loop("a goal", max_rounds=1)
+        assert FakeBrain.calls[0][0]["content"] == "system prompt\n\nУРОК: пиши тест"
+
+    def test_broken_lessons_do_not_stop_the_mission(self, monkeypatch) -> None:
+        def _boom():
+            raise RuntimeError("базата е заключена")
+        monkeypatch.setattr("genesis_agent.reflection.lessons_for_prompt", _boom)
+        _queue(_Reply(raw_text="без код"))
+        al.run_autonomous_loop("a goal", max_rounds=1)
+        assert FakeBrain.calls[0][0]["content"] == "system prompt"
+
+
+class TestStopping:
+    def test_stop_ends_the_mission_before_the_next_round(self) -> None:
+        from genesis_agent.config import stop_event
+        stop_event.set()
+        try:
+            outcome = al.run_autonomous_loop("a goal", max_rounds=3)
+        finally:
+            stop_event.clear()
+        assert FakeBrain.calls == []
+        assert outcome.success is False and "прекъснато" in outcome.last_stderr
+
+    def test_a_chain_error_stops_at_once_instead_of_burning_the_rounds(self) -> None:
+        _queue(*[_Reply(raw_text="Error: всички доставчици паднаха")] * 5)
+        outcome = al.run_autonomous_loop("a goal", max_rounds=5)
+        assert len(FakeBrain.calls) == 1
+        assert outcome.success is False
+
+
+class TestToolsDuringAMission:
+    def test_broken_call_arguments_become_no_arguments(self, monkeypatch) -> None:
+        seen: list = []
+
+        def _dispatch(name, args):
+            seen.append(args)
+            return "ok"
+        monkeypatch.setattr("genesis_skills.dispatch_tool_call", _dispatch)
+        tc = [{"id": "1", "function": {"name": "USE_SKILL", "arguments": "{не е json"}}]
+        _queue(_Reply(raw_text="", tool_calls=tc))
+        al.run_autonomous_loop("a goal", max_rounds=1)
+        assert seen == [{}]
+
+    def test_a_failing_tool_becomes_an_error_result_not_a_crash(self, monkeypatch) -> None:
+        def _boom(name, args):
+            raise RuntimeError("sandbox down")
+        monkeypatch.setattr("genesis_skills.dispatch_tool_call", _boom)
+        tc = [{"id": "1", "function": {"name": "USE_SKILL", "arguments": "{}"}}]
+        _queue(_Reply(raw_text="", tool_calls=tc), _Reply(raw_text="без код"))
+        al.run_autonomous_loop("a goal", max_rounds=2)
+        assert {"role": "tool", "tool_call_id": "error", "name": "error",
+                "content": "[tool грешка: sandbox down]"} in FakeBrain.calls[1]
+
+    def test_read_only_tags_are_run_and_the_model_is_asked_for_code(self, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_skills.parse_and_execute_readonly_tools",
+                            lambda text: ["[WEB_SEARCH: x]\nнамерено"])
+        _queue(_Reply(raw_text="[WEB_SEARCH: x]"), _Reply(raw_text="без код"))
+        al.run_autonomous_loop("a goal", max_rounds=2)
+        asked = _last_user(FakeBrain.calls[1])
+        assert asked.startswith("Резултат от инструментите:\n[WEB_SEARCH: x]\nнамерено")
+        assert "Сега напиши финалния Python скрипт" in asked
+
+    def test_a_read_only_tag_that_fails_still_answers(self, monkeypatch) -> None:
+        def _boom(text):
+            raise RuntimeError("няма мрежа")
+        monkeypatch.setattr("genesis_skills.parse_and_execute_readonly_tools", _boom)
+        _queue(_Reply(raw_text="[READ_FILE: /x]"), _Reply(raw_text="без код"))
+        al.run_autonomous_loop("a goal", max_rounds=2)
+        assert "[tool грешка: няма мрежа]" in _last_user(FakeBrain.calls[1])
+
+    def test_a_read_only_tag_with_no_result_is_treated_as_no_code(self, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_skills.parse_and_execute_readonly_tools", lambda text: [])
+        _queue(_Reply(raw_text="[LIST_DIR: /x]"), _Reply(raw_text="без код"))
+        al.run_autonomous_loop("a goal", max_rounds=2)
+        assert _last_user(FakeBrain.calls[1]).startswith("No ```python``` block found.")
+
+
+class TestTheCodeBeforeItRuns:
+    def test_ruff_fixes_go_into_the_run(self, monkeypatch) -> None:
+        ran: list = []
+        _ok_run(monkeypatch, ran)
+        monkeypatch.setattr("genesis_agent.code_validate.validate_code_with_ruff",
+                            lambda c: (True, "print('поправено')"))
+        monkeypatch.setattr("genesis_agent.verifier.verify_skill",
+                            lambda c: VerifyResult(verified=True, method="self_test_passed"))
+        monkeypatch.setattr(al, "save_skill", lambda **kw: SKILLS_ROOT / "x.md")
+        _queue(_code("print( 'x' )"), _Reply(raw_text="YES"))
+        assert al.run_autonomous_loop("a goal").success
+        assert ran == ["print('поправено')"]
+
+    def test_code_ruff_cannot_fix_goes_back_without_running(self, monkeypatch) -> None:
+        ran: list = []
+        _ok_run(monkeypatch, ran)
+        monkeypatch.setattr("genesis_agent.code_validate.validate_code_with_ruff",
+                            lambda c: (False, "E999 SyntaxError"))
+        _queue(_code("def ("), _Reply(raw_text="без код"))
+        al.run_autonomous_loop("a goal", max_rounds=2)
+        assert ran == []
+        asked = _last_user(FakeBrain.calls[1])
+        assert asked.startswith("E999 SyntaxError") and "Поправи и върни ЦЕЛИЯ" in asked
+
+
+class TestTheGatesAfterARun:
+    def test_a_self_test_that_needs_confirmation_is_explained_not_removed(self, monkeypatch) -> None:
+        _ok_run(monkeypatch)
+        monkeypatch.setattr("genesis_agent.code_validate.validate_code_with_ruff", lambda c: (True, ""))
+        monkeypatch.setattr("genesis_agent.verifier.verify_skill", lambda c: VerifyResult(
+            verified=False, method="needs_confirmation", detail="sudo apt install x"))
+        _queue(_code(), _Reply(raw_text="без код"))
+        al.run_autonomous_loop("a goal", max_rounds=2)
+        asked = _last_user(FakeBrain.calls[1])
+        assert "could NOT be run" in asked and "sudo apt install x" in asked
+        assert "Do NOT remove that capability" in asked
+
+    def test_a_skill_the_library_rejects_is_rewritten(self, monkeypatch) -> None:
+        from genesis_agent import dna
+        _ok_run(monkeypatch)
+        monkeypatch.setattr("genesis_agent.code_validate.validate_code_with_ruff", lambda c: (True, ""))
+        monkeypatch.setattr("genesis_agent.verifier.verify_skill",
+                            lambda c: VerifyResult(verified=True, method="self_test_passed"))
+
+        def _reject(**kw):
+            raise dna.GenesisDNAError("GENE-SECURITY: Red Zone access locked.")
+        monkeypatch.setattr(al, "save_skill", _reject)
+        _queue(_code(), _Reply(raw_text="YES"), _Reply(raw_text="без код"))
+        outcome = al.run_autonomous_loop("a goal", max_rounds=2)
+        asked = _last_user(FakeBrain.calls[2])
+        assert asked.startswith("Skills Library rejected the script under GENESIS DNA")
+        assert "Red Zone access locked" in asked
+        assert outcome.success is False
+
+    def test_a_broken_reuse_check_counts_as_not_reused(self, monkeypatch) -> None:
+        _ok_run(monkeypatch)
+        monkeypatch.setattr("genesis_agent.code_validate.validate_code_with_ruff", lambda c: (True, ""))
+        monkeypatch.setattr("genesis_agent.verifier.verify_skill",
+                            lambda c: VerifyResult(verified=True, method="self_test_passed"))
+        monkeypatch.setattr(al, "save_skill", lambda **kw: SKILLS_ROOT / "x.md")
+
+        def _boom(*a, **kw):
+            raise RuntimeError("нарочно")
+        monkeypatch.setattr("genesis_agent.reflection.detect_reuse", _boom)
+        _queue(_code(), _Reply(raw_text="YES"))
+        outcome = al.run_autonomous_loop("a goal")
+        assert outcome.success and outcome.reused_existing is False
+
+
+class TestEmergencyRepair:
+    def _exhaust(self, monkeypatch, repaired: RepairResult) -> None:
+        code = "raise RuntimeError('boom')"
+        _queue(*[_code(code)] * 2)
+        monkeypatch.setattr(al, "run_python_subprocess",
+                            lambda c: ExecResult(ok=False, stdout="", stderr="boom", returncode=1))
+        monkeypatch.setattr("genesis_agent.code_validate.validate_code_with_ruff", lambda c: (True, ""))
+        monkeypatch.setattr(al, "emergency_repair", lambda code, stderr, stdout: repaired)
+
+    def test_a_repair_that_does_not_verify_is_not_saved(self, monkeypatch) -> None:
+        saved: list = []
+        self._exhaust(monkeypatch, RepairResult(fixed=True, code="x = None", rounds=1,
+                                                method="pattern", fix_desc="masked it"))
+        monkeypatch.setattr("genesis_agent.verifier.verify_skill",
+                            lambda c: VerifyResult(verified=False, method="no_self_test"))
+        monkeypatch.setattr(al, "save_skill", lambda **kw: saved.append(kw))
+        outcome = al.run_autonomous_loop("a goal", max_rounds=2)
+        assert outcome.success is False and saved == []
+
+    def test_a_repair_that_cannot_be_saved_is_a_failure(self, monkeypatch) -> None:
+        self._exhaust(monkeypatch, RepairResult(fixed=True, code="print('OK')", rounds=1,
+                                                method="pattern", fix_desc="fixed"))
+        monkeypatch.setattr("genesis_agent.verifier.verify_skill",
+                            lambda c: VerifyResult(verified=True, method="self_test_passed"))
+
+        def _full(**kw):
+            raise OSError("дискът е пълен")
+        monkeypatch.setattr(al, "save_skill", _full)
+        outcome = al.run_autonomous_loop("a goal", max_rounds=2)
+        assert outcome.success is False
+
+    def test_no_repair_after_a_stop(self, monkeypatch) -> None:
+        from genesis_agent.config import stop_event
+        called: list = []
+        _queue(_code("raise RuntimeError('boom')"))
+
+        def _run(code):
+            stop_event.set()
+            return ExecResult(ok=False, stdout="", stderr="boom", returncode=1)
+        monkeypatch.setattr(al, "run_python_subprocess", _run)
+        monkeypatch.setattr("genesis_agent.code_validate.validate_code_with_ruff", lambda c: (True, ""))
+        monkeypatch.setattr(al, "emergency_repair", lambda *a: called.append(a))
+        try:
+            outcome = al.run_autonomous_loop("a goal", max_rounds=3)
+        finally:
+            stop_event.clear()
+        assert called == [], "спрян от оператора — без авариен ремонт"
+        assert outcome.success is False
+
+
+class TestQualityFailures:
+    def test_a_quality_failure_counts_against_the_provider_and_escalates(self, monkeypatch) -> None:
+        recorded: list = []
+        monkeypatch.setattr(al.provider_stats, "record_call", lambda *a: recorded.append(a))
+
+        class _B:
+            current: ClassVar[dict] = {"provider": "groq"}
+            escalated = 0
+
+            def escalate_to_coding_chain(self):
+                _B.escalated += 1
+        assert al._note_quality_failure(_B(), 0, threshold=2) == 1
+        assert al._note_quality_failure(_B(), 1, threshold=2) == 2
+        assert recorded == [("groq", 0.0, False)] * 2
+        assert _B.escalated == 1
+
+    def test_a_brain_without_escalation_is_fine(self) -> None:
+        class _Old:
+            current = None
+        assert al._note_quality_failure(_Old(), 5, threshold=2) == 6
+
+
+class TestLocalCandidateScore:
+    def test_lint_failure_scores_zero(self, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.code_validate.validate_code_with_ruff", lambda c: (False, "E9"))
+        assert al._score_local_candidate("def (") == (0, "def (")
+
+    def test_a_crash_scores_zero_with_the_fixed_code(self, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.code_validate.validate_code_with_ruff", lambda c: (True, "fixed"))
+        monkeypatch.setattr(al, "run_python_subprocess",
+                            lambda c: ExecResult(ok=False, stdout="", stderr="x", returncode=1))
+        assert al._score_local_candidate("raw") == (0, "fixed")
+
+    @pytest.mark.parametrize(("vres", "score"), [
+        (VerifyResult(verified=True, method="self_test_passed"), 2),
+        (VerifyResult(verified=True, method="runs_clean"), 1),
+        (VerifyResult(verified=False, method="no_self_test"), 0)])
+    def test_the_verifier_decides(self, monkeypatch, vres, score) -> None:
+        monkeypatch.setattr("genesis_agent.code_validate.validate_code_with_ruff", lambda c: (True, ""))
+        _ok_run(monkeypatch)
+        monkeypatch.setattr("genesis_agent.verifier.verify_skill", lambda c: vres)
+        assert al._score_local_candidate("print(1)") == (score, "print(1)")
+
+    def test_it_never_raises(self, monkeypatch) -> None:
+        def _boom(c):
+            raise RuntimeError("ruff липсва")
+        monkeypatch.setattr("genesis_agent.code_validate.validate_code_with_ruff", _boom)
+        assert al._score_local_candidate("x") == (0, "x")

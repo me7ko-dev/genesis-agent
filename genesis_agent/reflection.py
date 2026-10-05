@@ -11,10 +11,13 @@ genesis_agent.reflection — мета-обучение: агентът се уч
 """
 from __future__ import annotations
 
+import logging
 import re
 from collections import Counter
 
 from genesis_agent import episodic_memory as _em
+
+log = logging.getLogger("genesis.reflection")
 
 # Образец на грешка → кратък урок. Проверяват се в реда на списъка.
 _ERROR_LESSONS: list[tuple[re.Pattern[str], str]] = [
@@ -65,7 +68,7 @@ def record_mission(goal: str, success: bool, detail: str = "", *, reused_existin
     Записва изхода на мисия като епизод (безопасно, не хвърля). При провал пази
     СУРОВИЯ текст на грешката, за да може distill_lessons да го категоризира.
     reused_existing=True → мисията реално е композирала инжектиран verified код
-    (виж detect_reuse), пази се като таг за reuse_rate().
+    (виж detect_reuse), пази се като таг `composed` на епизода.
     """
     tags = ["mission", "success" if success else "failure"]
     if reused_existing:
@@ -79,7 +82,7 @@ def record_mission(goal: str, success: bool, detail: str = "", *, reused_existin
             tags=tags,
         )
     except Exception:
-        pass
+        log.debug("изходът на мисията не се записа", exc_info=True)
 
 
 def _recent_missions(last_n: int) -> list[dict]:
@@ -88,8 +91,8 @@ def _recent_missions(last_n: int) -> list[dict]:
     Измерено на реална база (1967 епизода): в последните 60 записа има 7
     мисии — останалите са единични извиквания на инструменти (`READ_FILE`,
     `WRITE_FILE`). Прозорец от 60 записа значеше прозорец от шепа мисии, тоест
-    и `distill_lessons`, и `reuse_rate` работеха върху проба, десет пъти
-    по-малка от поисканата, и мълчаливо връщаха „няма уроци“.
+    `distill_lessons` работеше върху проба, десет пъти по-малка от
+    поисканата, и мълчаливо връщаше „няма уроци“.
 
     При провал на паметта връща празен списък — рефлексията е допълнение, не
     може да вали мисия.
@@ -97,20 +100,9 @@ def _recent_missions(last_n: int) -> list[dict]:
     try:
         episodes = _em._fetch_all_episodes()
     except Exception:
+        log.debug("епизодите не се прочетоха — без уроци", exc_info=True)
         return []
     return [e for e in episodes if "mission" in (e.get("tags") or [])][-last_n:]
-
-
-def reuse_rate(last_n: int = 100) -> float | None:
-    """% от УСПЕШНИТЕ мисии в последните last_n епизода, които реално са композирали
-    (преизползвали) инжектиран verified код. None ако няма успешни мисии в прозореца —
-    компаундинг ефектът трябва да расте с растежа на библиотеката от умения."""
-    episodes = _recent_missions(last_n)
-    successes = [e for e in episodes if e.get("outcome") == "success"]
-    if not successes:
-        return None
-    composed = sum(1 for e in successes if "composed" in (e.get("tags") or []))
-    return composed / len(successes)
 
 
 def distill_lessons(last_n: int = 60, top: int = 4) -> list[str]:

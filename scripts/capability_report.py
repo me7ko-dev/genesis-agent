@@ -33,7 +33,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
 
 from genesis_agent import claim_check
 
@@ -98,33 +99,56 @@ class TaskResult:
     reply_tail: str = ""
 
 
-def _run_one(task: Task, core) -> TaskResult:
-    from genesis_agent.agent_core import run_tool_loop
+def _brain_ask(answered_by: dict):
+    """Едно обръщение към веригата на Brain, както в чата (≥32B, всички
+    инструменти); кой е отговорил се записва в `answered_by`."""
+    from genesis_agent.agent_core import MIN_SIZE_B
+    from genesis_agent.brain import Brain
+    from genesis_agent.tool_schemas import FULL_TOOLS
+
+    def ask(messages):
+        brain = Brain(min_size_b=MIN_SIZE_B)
+        reply = brain.complete(list(messages), tools=FULL_TOOLS)
+        answered_by.update(brain.current or {})
+        return reply.raw_text or "", getattr(reply, "tool_calls", None)
+    return ask
+
+
+def _run_one(task: Task, workspace: Path) -> TaskResult:
+    from genesis_agent.agent_core import TurnUI, run_tool_loop
 
     res = TaskResult(name=task.name)
     executed: list[tuple[str, str]] = []
     replies: list[str] = []
+    answered_by: dict = {}
     started = time.time()
 
-    def on_assistant(text, provider, model):
-        replies.append(text or "")
-        res.provider, res.model = provider or "", model or ""
+    class _Recorder(TurnUI):
+        def assistant(self, text: str) -> None:
+            if text.strip():
+                replies.append(text)
 
-    def on_tool_result(name, result, _extra):
-        # Същото правило като в самия цикъл: блокиран или провалил се
-        # инструмент не е доказателство. Без това отчетът щеше да пропуска
-        # точно симулациите, които съществува да мери.
-        entry = claim_check.counts_as_executed(name, str(result)[:200], str(result))
-        if entry:
-            executed.append(entry)
+        def asked(self, question: str) -> None:
+            replies.append(question)
+
+        def spinning(self, note: str) -> None:
+            replies.append(note)
+
+        def tool(self, name: str, result: str) -> None:
+            # Същото правило като в самия цикъл: блокиран или провалил се
+            # инструмент не е доказателство. Без това отчетът щеше да пропуска
+            # точно симулациите, които съществува да мери.
+            entry = claim_check.counts_as_executed(name, str(result)[:200], str(result))
+            if entry:
+                executed.append(entry)
 
     try:
-        run_tool_loop(
-            core, [{"role": "user", "content": task.prompt}],
-            on_assistant=on_assistant, on_tool_result=on_tool_result,
-        )
-    except Exception as e:
+        run_tool_loop([{"role": "user", "content": task.prompt}], task.prompt,
+                      _Recorder(), _brain_ask(answered_by))
+    except Exception as e:  # noqa: BLE001 — грешката влиза в отчета за задачата
         res.error = f"{type(e).__name__}: {e}"[:300]
+    res.provider = answered_by.get("provider", "")
+    res.model = answered_by.get("model", "")
 
     res.seconds = round(time.time() - started, 1)
     res.tools_used = [n for n, _ in executed]
@@ -140,7 +164,6 @@ def _run_one(task: Task, core) -> TaskResult:
     # Иначе пробата отчита провал при напълно свършена работа, само защото
     # отчетът е пуснат от друга директория.
     if task.proof:
-        workspace = Path(getattr(core, "workspace", ".") or ".")
         candidates = [workspace / task.proof, Path(task.proof)]
         found = next((c for c in candidates if c.is_file()), None)
         res.proof_ok = False
@@ -197,17 +220,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", metavar="PATH", help="запиши суровия отчет и тук")
     args = parser.parse_args(argv)
 
-    from genesis_agent.agent_core import Core
-    core = Core()
-    if not getattr(core, "ok", False) and getattr(core, "error", ""):
-        print(f"Ядрото не се зареди: {core.error}")
-        return 2
-    if not getattr(core, "chain", None) and not core.provider:
+    import yaml
+
+    import genesis_skills
+    from genesis_agent.paths import CONFIG_PATH
+    cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    if not (cfg.get("models") or {}).get("default_provider"):
         print("Няма конфигуриран доставчик — пусни `genesis setup` първо.")
         return 2
+    # Задачите питат за „текущата директория“ — репото, ако config.yaml не
+    # казва друго (както беше с agent_core.Core).
+    workspace = Path((cfg.get("workspace") or {}).get("path") or REPO)
+    genesis_skills.set_workspace(workspace)
 
     tasks = TASKS[:3] if args.quick else TASKS
-    results = [_run_one(t, core) for t in tasks]
+    results = [_run_one(t, workspace) for t in tasks]
     print(_render(results))
 
     if args.json:

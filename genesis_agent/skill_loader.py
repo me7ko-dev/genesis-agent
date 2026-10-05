@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,8 @@ from typing import Any
 import yaml
 
 from genesis_agent.config import SKILLS_DIR
+
+log = logging.getLogger("genesis.skill_loader")
 
 # `file_path` entries in skills.json are stored relative to this, not to
 # PROJECT_ROOT — the two coincide for a git checkout, but diverge for an
@@ -45,6 +48,7 @@ def reload_skills_index() -> dict[str, dict[str, Any]]:
         skills_list = data if isinstance(data, list) else data.get("skills", [])
         _SKILLS_INDEX_CACHE = {s["name"]: s for s in skills_list if "name" in s}
     except Exception:
+        log.debug("индексът на уменията не се прочете — празна библиотека", exc_info=True)
         _SKILLS_INDEX_CACHE = {}
     return _SKILLS_INDEX_CACHE
 
@@ -153,6 +157,7 @@ def skill_view(name: str, *, file_path: Path | None = None) -> dict[str, Any]:
             else:
                 sig_ok = verify_signature(code, signature)
         except Exception:
+            log.debug("подписът на умението НЕ е проверен — инструментите за криптография паднаха", exc_info=True)
             sig_ok = True
         if not sig_ok:
             from genesis_agent.cryptography_utils import KEY_DIR as _KEY_DIR
@@ -256,7 +261,8 @@ def search_skills(query: str, top_n: int = 5, *, use_semantic: bool = True) -> l
                 results.append({**index[name], "_semantic_hit": True})
                 seen.add(name)
         except Exception:
-            pass  # embeddings недостъпни — просто чист keyword резултат
+            # embeddings недостъпни — просто чист keyword резултат
+            log.debug("семантичното търсене е недостъпно — само по ключови думи", exc_info=True)
 
     return results[:top_n]
 
@@ -278,6 +284,7 @@ def domain_context(query: str) -> str:
     try:
         hits = search_skills(query, top_n=10, use_semantic=False)
     except Exception:
+        log.debug("търсенето на знание за заявката падна", exc_info=True)
         return ""
     # Мярката е само по ТРИГЕРИТЕ, не по описанието (2026-09-25): „България“ и
     # „модул“ от описанието на IBAN умението стигнаха за 2 думи — и задача за
@@ -300,7 +307,12 @@ def domain_context(query: str) -> str:
         if score >= need:
             ranked.append((score, h))
     ranked.sort(key=lambda x: x[0], reverse=True)
+    parts: list[str] = []
     for _, h in ranked:
+        # Второ знание — само строго (min_score ≥ 3). bench clients-migrate 2026-10-01: CSV от
+        # Excel + телефон, стигаше само CSV-то → +3590359…; а ЕИК (min 2) не идва с всяко CSV.
+        if parts and (h.get("category") == "web" or int(h.get("min_score", 2)) < 3):
+            continue
         if h.get("category") == "web":
             body = _guide_body(h)
             if body:
@@ -317,12 +329,14 @@ def domain_context(query: str) -> str:
         # „ползвай кода“ и моделът го копира дословно — с validate_egn/parse_egn
         # вместо поисканите validate/parse; правилни правила, счупен интерфейс
         # (скритите тестове не можаха да го импортират, 2026-09-25).
-        return (f"## Проверено знание от библиотеката: {h['name']}\n"
-                "ПРАВИЛАТА в този код са проверени със самотест — вземи ги оттук (и "
-                "очакваните стойности в тестовете), не по памет. ИМЕНАТА, файловете и "
-                "интерфейса вземи от заявката на оператора, не от този код.\n"
-                f"```python\n{code.strip()}\n```")
-    return ""
+        parts.append(f"## Проверено знание от библиотеката: {h['name']}\n"
+                     "ПРАВИЛАТА в този код са проверени със самотест — вземи ги оттук (и "
+                     "очакваните стойности в тестовете), не по памет. ИМЕНАТА, файловете и "
+                     "интерфейса вземи от заявката на оператора, не от този код.\n"
+                     f"```python\n{code.strip()}\n```")
+        if len(parts) == 2:
+            break
+    return "\n\n".join(parts)
 
 
 def _guide_body(meta: dict[str, Any]) -> str:

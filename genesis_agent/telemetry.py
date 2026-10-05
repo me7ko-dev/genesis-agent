@@ -20,5 +20,5 @@ def report_thought(thought: str):
             print(f"[GENESIS]: {thought}")
         except UnicodeEncodeError:
             print(f"[GENESIS]: {thought.encode('ascii', 'ignore').decode('ascii')}")
-    except Exception as e:
+    except (OSError, ValueError) as e:
         print(f"[TELEMETRY-ERR]: {e}")

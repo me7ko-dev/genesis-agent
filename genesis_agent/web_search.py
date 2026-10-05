@@ -53,7 +53,7 @@ def _cache_get(key: str) -> str | None:
         data = json.loads(path.read_text(encoding="utf-8"))
         if time.time() - data["ts"] < CACHE_TTL_SECONDS:
             return data["content"]
-    except Exception:
+    except (OSError, ValueError, LookupError, TypeError):
         pass
     return None
 
@@ -102,6 +102,7 @@ def _extract_text(html: str) -> str:
         parser.feed(html)
         return parser.get_text()
     except Exception:
+        log.debug("HTML парсерът падна — тагове с regex", exc_info=True)
         # Fallback — махаме HTML тагове с regex
         return re.sub(r"<[^>]+>", " ", html)
 
@@ -210,10 +211,8 @@ def search(
         if "uddg=" in result_url:
             m_uddg = re.search(r"uddg=([^&]+)", result_url)
             if m_uddg:
-                try:
-                    result_url = urllib.parse.unquote(m_uddg.group(1))
-                except Exception:
-                    pass
+                # unquote върху низ не хвърля (невалидните байтове стават „�“).
+                result_url = urllib.parse.unquote(m_uddg.group(1))
         results.append({"title": title, "url": result_url, "snippet": snippet[:300]})
 
     # Fallback: показваме извлечен текст ако не е парснат нищо

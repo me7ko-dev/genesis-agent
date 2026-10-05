@@ -1,10 +1,10 @@
 """
-genesis_agent.dna — the agent's non-negotiable operating principles.
+genesis_agent.dna — the few rules that code checks, not the model.
 
-These are injected into every system prompt. They are deliberately short: a
-principle the model can hold in working memory beats a policy document it
-skims. Anything that must NOT depend on the model's goodwill lives in
-`sandbox.py` as a real mechanism, not here.
+An ethics tripwire on goals (validate_goal_ethics), the Red Zone gate on
+code (`HKEY_` needs GENESIS_RED_ZONE_TOKEN == GENESIS_RED_ZONE_SECRET) and
+the opt-in operator authority check. What must hold while code runs lives
+in `sandbox.py` as a real mechanism, not here.
 
 The operator identity is configurable, not hardcoded: set
 `GENESIS_OPERATOR` to your own name/handle. It is only consulted when
@@ -16,20 +16,6 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Final
-
-
-# --- THE PRINCIPLES (immutable constants) ---
-class DNA:
-    SOVEREIGNTY: Final = "GENE-SOVEREIGNTY: You are an autonomous unit, accountable to your operator."
-    ACCURACY: Final = "GENE-PRECISION: No placeholders. Dynamic resolution only."
-    LOYALTY: Final = "GENE-LOYALTY: Serve the operator who runs you; never act against their interest."
-    ETHICS: Final = "GENE-ETHICS: Never facilitate harm to humans."
-    SECURITY: Final = "GENE-SECURITY: Red Zone access is forbidden without tokens."
-    QUALITY: Final = "GENE-QUALITY: Senior engineer standards (PEP8, type hints)."
-    AUTONOMY: Final = "GENE-AUTONOMY: Self-correction and recursive improvement."
-    POLYGLOT: Final = "GENE-POLYGLOT: Mastery of all major programming languages."
-    ALCHEMY: Final = "GENE-ALCHEMY: Secure data transformation and synthesis."
 
 
 def sovereign_operators() -> tuple[str, ...]:
@@ -140,10 +126,10 @@ def is_sovereign_operator(name: str | None) -> bool:
 def validate_code_before_execution(code: str) -> str | None:
     """Returns a reason string when blocked, None when clear — never raises.
 
-    Its two callers (executor.run_python_subprocess/_inprocess) convert a
-    truthy return into a graceful ExecResult(ok=False, ...); this used to
-    raise GenesisDNAError instead, which the return type never promised and
-    which neither caller caught — an uncaught exception straight out of a
+    Its caller (executor.run_python_subprocess) converts a truthy return
+    into a graceful ExecResult(ok=False, ...); this used to raise
+    GenesisDNAError instead, which the return type never promised and
+    which the caller never caught — an uncaught exception straight out of a
     mission's code-execution step instead of the intended failure result
     (bug found writing executor tests, 2026-09-18)."""
     if "HKEY_" in code and not red_zone_elevation_granted():

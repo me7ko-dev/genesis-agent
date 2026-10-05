@@ -76,7 +76,6 @@ _PERSISTED_STATE = (
     ("genesis_agent.memory", "DB_PATH", "persistent_memory.db"),
     ("genesis_agent.workspace_memory", "DB_PATH", "workspace_memory.db"),
     ("genesis_agent.conversation_memory", "DB_PATH", "conversation_memory.db"),
-    ("genesis_agent.knowledge_graph", "GRAPH_PATH", "knowledge_graph.json"),
     ("genesis_agent.provider_stats", "_STATS_PATH", "provider_stats.json"),
     ("genesis_agent.budget", "LOG_PATH", "budget_log.jsonl"),
     ("genesis_agent.free_models", "CACHE_PATH", "free_models.json"),
@@ -105,7 +104,7 @@ def _isolated_persisted_state(monkeypatch, tmp_path):
     for module_name, attr, filename in _PERSISTED_STATE:
         try:
             module = importlib.import_module(module_name)
-        except Exception:  # noqa: S112 — липсващ GTK/незадължителна зависимост:
+        except Exception:  # noqa: BLE001, S112 — липсващ GTK/незадължителна зависимост:
             continue       # щом модулът не се зарежда, няма какво да се изолира
         current = getattr(module, attr, None)
         if current is None:

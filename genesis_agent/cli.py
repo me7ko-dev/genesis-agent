@@ -6,6 +6,7 @@ genesis_agent.cli — the `genesis` command.
     genesis setup           configure API keys
     genesis mission "..."   run one autonomous mission and print the result
     genesis fix PATH "..."  fix a bug in an existing project (tests + diff)
+    genesis pack [PATH]     zip for the client + ОТЧЕТ.md, no keys (`--no-tests`, `-o FILE`)
     genesis skills          library status
     genesis models          the model chain; `--refresh` re-scans, `--check` probes each
     genesis update          is there a newer commit on the installed branch
@@ -129,6 +130,28 @@ def _models(args: list[str]) -> int:
     return 0
 
 
+def _pack(args: list[str]) -> int:
+    """`genesis pack` — проектът за клиента (genesis_agent/pack.py)."""
+    from pathlib import Path
+
+    from genesis_agent.pack import pack, summary
+    run_tests, out, paths = "--no-tests" not in args, None, []
+    rest = [a for a in args if a != "--no-tests"]
+    while rest:
+        a = rest.pop(0)
+        if a in ("-o", "--out") and rest:
+            out = rest.pop(0)
+        else:
+            paths.append(a)
+    root = Path(paths[0] if paths else ".").expanduser()
+    if not root.is_dir():
+        print(f"Няма такава папка: {root}")
+        return 2
+    res = pack(root, out, run_tests=run_tests)
+    print(summary(res))
+    return 1 if res.tests.startswith("❌") else 0
+
+
 def _fix(args: list[str]) -> int:
     """`genesis fix` — поправка на бъг в съществуващ проект."""
     if not args or args[0] in ("-h", "--help"):
@@ -185,9 +208,27 @@ def _fix(args: list[str]) -> int:
     return 0 if out.success else 1
 
 
-def main(argv: list[str] | None = None) -> int:
+def _debug_log() -> None:
+    """GENESIS_DEBUG=1 → ~/.genesis/debug.log. Местата, които нарочно не спират
+    работата при грешка (памет, известия, менюта), я записват с
+    log.debug(exc_info=True); без този файл тя не се вижда никъде."""
+    import os
+    if os.environ.get("GENESIS_DEBUG") != "1":
+        return
+    import logging
+
+    from genesis_agent import paths
+    handler = logging.FileHandler(paths.ensure_genesis_home() / "debug.log", encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+    logger = logging.getLogger("genesis")
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+
+
+def main(argv: list[str] | None = None) -> int:  # noqa: C901 — цепи се след merge (NEXT_STEPS)
     from genesis_agent.paths import ensure_utf8_streams
     ensure_utf8_streams()
+    _debug_log()
     argv = list(sys.argv[1:] if argv is None else argv)
     cmd = argv[0] if argv else "chat"
 
@@ -249,6 +290,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if cmd == "fix":
         return _fix(argv[1:])
+
+    if cmd == "pack":
+        return _pack(argv[1:])
 
     if cmd in ("gui", "voice"):
         # Махнати на 2026-09-23 — Genesis е само терминален. Изрично съобщение,

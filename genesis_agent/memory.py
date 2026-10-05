@@ -109,13 +109,6 @@ def memory_recall(key: str, default: Any = None) -> Any:
         return row[0]
 
 
-def memory_delete(key: str) -> bool:
-    """Изтрива ключ от persistent memory. Връща True ако е намерен."""
-    with _get_conn() as conn:
-        cursor = conn.execute("DELETE FROM kv_store WHERE key = ?;", (key,))
-        return cursor.rowcount > 0
-
-
 def memory_list_keys(prefix: str = "") -> list[str]:
     """Връща всички ключове (с опционален prefix филтър).
 
@@ -148,7 +141,7 @@ def memory_dump() -> dict[str, Any]:
     for key, val_str in rows:
         try:
             result[key] = json.loads(val_str)
-        except Exception:
+        except (ValueError, TypeError):
             result[key] = val_str
     return result
 
@@ -183,6 +176,7 @@ def memory_search(query: str, top_k: int = 5) -> list[dict]:
     try:
         return episodic.search_episodes(query, top_k=top_k)
     except Exception as e:
+        log.debug("семантичното търсене в епизодите падна — текстово", exc_info=True)
         log.warning(f"[memory] Търсенето неуспешно (scikit-learn наличен ли е?): {e}")
         # Fallback: прост текстов search
         episodes = episodic._fetch_all_episodes()

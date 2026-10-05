@@ -14,11 +14,29 @@ import pytest
 from genesis_agent import code_validate
 
 
-def test_fail_open_when_ruff_missing(monkeypatch) -> None:
+def test_fail_open_when_ruff_missing(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(code_validate.shutil, "which", lambda _: None)
+    monkeypatch.setattr(code_validate.sys, "executable", str(tmp_path / "python.exe"))
     ok, detail = code_validate.validate_code_with_ruff("def f(:\n")
     assert ok is True
     assert detail == ""
+
+
+@pytest.mark.parametrize("name", ["ruff.exe", "ruff"])
+def test_ruff_next_to_this_python_counts_when_path_has_none(monkeypatch, tmp_path, name) -> None:
+    """bench cli-config 2026-10-02: Genesis върви като python.exe на pipx venv-а без
+    activate — папката Scripts (с ruff.exe) не е в PATH и всеки WRITE_FILE пропускаше
+    ruff; `eprint` (F821) излезе с ✓ и скритият тест получи NameError вместо код 2."""
+    (tmp_path / name).write_text("", encoding="utf-8")
+    monkeypatch.setattr(code_validate.shutil, "which", lambda _: None)
+    monkeypatch.setattr(code_validate.sys, "executable", str(tmp_path / "python.exe"))
+    assert code_validate._ruff_exe() == str(tmp_path / name)
+    seen = []
+    monkeypatch.setattr(code_validate.subprocess, "run",
+                        lambda argv, **kw: seen.append(argv[0]) or _FakeCompleted(stdout="x = 1\n"))
+    assert code_validate.validate_code_with_ruff("x = 1\n") == (True, "x = 1\n")
+    assert code_validate.lint_note("x = 1\n") == ""
+    assert seen and set(seen) == {str(tmp_path / name)}
 
 
 def test_fail_open_on_timeout(monkeypatch) -> None:
@@ -132,8 +150,9 @@ def test_real_ruff_passes_clean_code() -> None:
 # is a single-call, no-fix path: EDIT_FILE must never have ruff silently
 # rewrite parts of the file the model did not name in its anchor.
 
-def test_lint_note_empty_when_ruff_missing(monkeypatch) -> None:
+def test_lint_note_empty_when_ruff_missing(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(code_validate.shutil, "which", lambda _: None)
+    monkeypatch.setattr(code_validate.sys, "executable", str(tmp_path / "python.exe"))
     assert code_validate.lint_note("x") == ""
 
 
@@ -199,3 +218,16 @@ def test_real_ruff_lint_note_flags_undefined_name() -> None:
 @pytest.mark.skipif(_ruff_missing, reason="ruff not installed")
 def test_real_ruff_lint_note_empty_for_clean_code() -> None:
     assert code_validate.lint_note("def f():\n    return 1\n") == ""
+
+
+STYLE_ONLY = ("from datetime import datetime\nimport os\nfrom typing import Dict\n\n\n"
+              "def f() -> Dict[str, str]:\n    return {'t': datetime.utcnow().isoformat()}\n")
+
+
+@pytest.mark.skipif(not code_validate._ruff_available(), reason="ruff not installed")
+def test_style_rules_are_not_reported_only_what_breaks_at_runtime() -> None:
+    """bench contact-form 2026-10-04 #2: DTZ003 → `datetime.now(datetime.timezone.utc)`
+    (AttributeError), после I001/UP035/F401 → махнат импорт → F821; 14 от 25-те рунда."""
+    assert code_validate.lint_note(STYLE_ONLY) == ""
+    assert code_validate.validate_code_with_ruff(STYLE_ONLY) == (True, STYLE_ONLY)
+    assert "F821" in code_validate.lint_note(STYLE_ONLY.replace("from typing import Dict\n", ""))

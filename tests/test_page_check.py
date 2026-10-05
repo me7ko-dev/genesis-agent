@@ -116,36 +116,24 @@ class TestAgentLoop:
     и той продължава, вместо ходът да свърши."""
 
     def test_the_loop_sends_findings_back_and_continues(self, site, monkeypatch) -> None:
+        import genesis_skills
         from genesis_agent import agent_core as ac
 
-        monkeypatch.setattr("genesis_agent.brain.Brain.compact_chat_history",
-                            staticmethod(lambda messages, threshold=16, keep_recent=10: messages))
         answers = iter([(["компютър: h1 1.6:1"], ""), ([], "")])
         monkeypatch.setattr(pc, "run", lambda page, shots=None: next(answers))
         tc = [{"id": "1", "function": {"name": "WRITE_FILE", "arguments": "{}"}}]
-        replies = [("", tc, "p", "m"), ("Готово.", None, "p", "m"),
-                   ("", tc, "p", "m"), ("Оправих контраста.", None, "p", "m")]
-
-        class Core:
-            def complete(self, messages):
-                return replies.pop(0)
-
-            def remember(self, *a):
-                pass
-
-        class Skills:
-            def dispatch_tool_call(self, name, args):
-                return _write(site / "index.html")
-
-            def parse_and_execute_tools(self, text):
-                return []
-
-        core = Core()
-        core.skills = Skills()
+        replies = [("", tc), ("Готово.", None), ("", tc), ("Оправих контраста.", None)]
+        monkeypatch.setattr(genesis_skills, "dispatch_tool_call",
+                            lambda name, args: _write(site / "index.html"))
+        monkeypatch.setattr(genesis_skills, "parse_and_execute_tools", lambda text: [])
         shown = []
-        messages = ac.run_tool_loop(core, [{"role": "user", "content": "направи сайт"}],
-                                    on_assistant=lambda *a: None,
-                                    on_tool_result=lambda name, res, extra: shown.append((name, res)))
+
+        class UI(ac.TurnUI):
+            def tool(self, name, result):
+                shown.append((name, result))
+
+        messages = [{"role": "user", "content": "направи сайт"}]
+        ac.run_tool_loop(messages, "направи сайт", UI(), lambda msgs: replies.pop(0))
         notes = [m["content"] for m in messages if m["role"] == "system"]
         assert any("h1 1.6:1" in n for n in notes)
         assert messages[-1]["content"] == "Оправих контраста."
@@ -178,3 +166,24 @@ def test_a_real_browser_measures_a_bad_page(tmp_path) -> None:
     assert "по-широка от екрана" in text
     assert "placeholder" in text
     assert "почти без съдържание" in text
+
+
+def test_runner_findings_without_a_browser() -> None:
+    """page_check_runner: находките от измерванията — чисти функции (C901 19)."""
+    from genesis_agent import page_check_runner as r
+    quiet = {"lowContrast": [], "invisible": [], "overflow": [], "placeholders": [],
+             "sparseCount": 0, "sparse": [], "smallCount": 0, "small": [],
+             "bodyBg": "rgb(255, 255, 255)", "htmlBg": "rgba(0, 0, 0, 0)"}
+    wide = dict(quiet, overflow=["div.x"], scrollWidth=900, width=390)
+    measured = {"компютър": quiet, "компютър, тъмна тема": quiet,
+                "телефон": dict(wide, smallCount=2, small=["a", "b"])}
+    assert r._summary_findings(measured, has_toggle=False) == [
+        "телефон: страницата е по-широка от екрана (900 px при 390) — div.x",
+        "телефон: 2 бутона/връзки под 24×24 px (трудни за натискане) — напр. a, b",
+        "тъмна тема: няма бутон, а при prefers-color-scheme: dark фонът не се сменя"]
+    assert r._summary_findings({"компютър": quiet, "компютър, тъмна тема": quiet}, True) == []
+    first = r._first_view_findings(
+        ["бум", "бум"], ["http://127.0.0.1:5/a.css (404)", "https://cdn.x/y.js"], 5,
+        {"h1": 1, "headerHeight": 80})
+    assert first == ["грешка в конзолата: бум", "не се зарежда: a.css (404)",
+                     "външна заявка не мина: https://cdn.x/y.js"]

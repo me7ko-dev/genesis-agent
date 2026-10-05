@@ -5,6 +5,8 @@ resolve_mode/_decide пътищата, които self-check-ът не покр�
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -193,6 +195,24 @@ def test_build_env_extra_overrides(monkeypatch) -> None:
     monkeypatch.setenv("PATH", "/usr/bin")
     env = sandbox._build_env(SandboxPolicy(), extra={"PATH": "/custom/bin"})
     assert env["PATH"] == "/custom/bin"
+
+
+def test_build_env_keeps_what_a_windows_process_needs_to_start(monkeypatch) -> None:
+    """Без SYSTEMROOT Winsock не тръгва: `import asyncio` → WinError 10106 (лаптоп, 2026-10-02)."""
+    monkeypatch.setattr(sandbox.sys, "platform", "win32")
+    monkeypatch.setenv("SYSTEMROOT", r"C:\Windows")
+    monkeypatch.setenv("COMSPEC", r"C:\Windows\system32\cmd.exe")
+    monkeypatch.setenv("SOME_SECRET_API_KEY", "sk-should-not-leak")
+    env = sandbox._build_env(SandboxPolicy(env_passthrough=("PATH",)))
+    assert env["SYSTEMROOT"] == r"C:\Windows" and env["COMSPEC"].endswith("cmd.exe")
+    assert "SOME_SECRET_API_KEY" not in env
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Winsock is Windows-only")
+def test_sandboxed_python_can_import_asyncio_on_windows() -> None:
+    res = sandbox._run([sys.executable, "-c", "import asyncio, socket; socket.socket().close()"],
+                       cwd=Path.cwd(), policy=SandboxPolicy(), timeout=60)
+    assert res.returncode == 0, res.stderr
 
 
 # ── run_shell / run_python: the actual execution boundary ──────────────────
@@ -637,3 +657,36 @@ class TestTimeoutKillsTheWholeTree:
         assert time.time() - t0 < 40, "таймаутът трябва да спре и детето на обвивката"
         assert res.returncode is None
         assert "Timeout" in res.stderr
+
+def test_assess_file_ops_each_command_kind(tmp_path) -> None:
+    """Всеки вид файлова операция → нивото и причините ѝ (преди цепенето, C901 18)."""
+    from genesis_agent.sandbox import _assess_file_ops
+
+    (tmp_path / "a.txt").write_text("a")
+    (tmp_path / "b.txt").write_text("b")
+    (tmp_path / "keep.txt").write_text("k")
+
+    def verdict(cmd):
+        v = _assess_file_ops(cmd, tmp_path)
+        return v.level, [r.split(":")[0] for r in v.reasons]
+
+    C, S, B = RiskLevel.CONFIRM, RiskLevel.SAFE, RiskLevel.BLOCKED
+    assert verdict("mv a.txt keep.txt") == (C, ["преместване върху СЪЩЕСТВУВАЩ файл (ще го презапише)"])
+    assert verdict("cp a.txt new.txt") == (S, [])
+    assert verdict("cp *.txt out/") == (C, ["масово копиране (cp)"])
+    assert verdict("cp -r a.txt out/") == (C, ["масово копиране (cp)"])
+    assert verdict("rsync --delete -a src/ dst/") == (C, [
+        "rsync --delete (трие в целта това, което го няма в източника)", "масово копиране (rsync)"])
+    assert verdict("find . -name '*.pyc' -delete") == (C, ["find с триене под ."])
+    assert verdict("find / -exec rm {} ;") == (
+        B, ["find с триене върху цялата файлова система/дома (/)"])
+    assert verdict("find . -name x") == (S, [])
+    assert verdict("shred a.txt") == (C, ["shred (унищожава съдържание)"])
+    assert "a.txt" in _assess_file_ops("truncate -s 0 a.txt", tmp_path).reasons[0]
+    assert verdict("git reset --hard HEAD") == (C, ["git reset --hard (изхвърля незакоммитната работа)"])
+    assert verdict("git clean -fdx") == (C, ["git clean (трие непроследени файлове)"])
+    assert verdict("git checkout -- .") == (C, ["git checkout/restore (изхвърля локални промени)"])
+    assert verdict("git status") == (S, [])
+    assert verdict("echo 'unbalanced") == (S, [])
+    assert verdict("ls ; ; mv a.txt keep.txt") == (C, [
+        "преместване върху СЪЩЕСТВУВАЩ файл (ще го презапише)"])

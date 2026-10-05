@@ -222,3 +222,91 @@ class TestMaxRoundsExhausted:
         assert out.success is False
         assert out.rounds == 3
         assert isinstance(out, OrchestratedOutcome)
+
+
+class TestRemainingBranches:
+    """TDD, уроци, счупени tool аргументи, отговор без код, DNA отказ при запис —
+    преди цепенето на run_orchestrated (C901 17)."""
+
+    @staticmethod
+    def _ok(monkeypatch, tmp_path, save=None):
+        monkeypatch.setattr(orch_mod, "SKILLS_ROOT", tmp_path)
+        monkeypatch.setattr(orch_mod, "run_python_subprocess",
+                            lambda code: SimpleNamespace(ok=True, stdout="OK", stderr="", returncode=0))
+        monkeypatch.setattr(orch_mod, "verify_skill",
+                            lambda code: SimpleNamespace(verified=True, method="self_test_passed", detail=""))
+        monkeypatch.setattr(orch_mod, "save_skill", save or (lambda **kw: tmp_path / "s.md"))
+
+    def test_tdd_tests_and_lessons_reach_the_coder(self, monkeypatch, tmp_path) -> None:
+        self._ok(monkeypatch, tmp_path)
+        monkeypatch.setattr("genesis_agent.reflection.lessons_for_prompt", lambda: "УРОК: x")
+        instances = _install_fake_brain(monkeypatch, [
+            _reply(raw_text="plan"), _reply(raw_text="```python\nassert f() == 1\n```"),
+            _reply(code="def f(): return 1\nprint('OK')")])
+        assert run_orchestrated("g", tdd=True).success is True
+        coder = instances[0].complete_calls[-1]
+        assert coder[0]["content"] == "sys\n\nУРОК: x"
+        assert "ЗАДЪЛЖИТЕЛНИ ТЕСТОВЕ" in coder[1]["content"] and "assert f() == 1" in coder[1]["content"]
+
+    def test_lessons_failing_and_no_tdd_tests(self, monkeypatch, tmp_path) -> None:
+        self._ok(monkeypatch, tmp_path)
+
+        def _boom():
+            raise OSError("няма уроци")
+        monkeypatch.setattr("genesis_agent.reflection.lessons_for_prompt", _boom)
+        instances = _install_fake_brain(monkeypatch, [
+            _reply(raw_text="plan"), _reply(raw_text="без код"),
+            _reply(code="def f(): return 1\nprint('OK')")])
+        assert run_orchestrated("g", tdd=True).success is True
+        coder = instances[0].complete_calls[-1]
+        assert coder[0]["content"] == "sys" and "ЗАДЪЛЖИТЕЛНИ" not in coder[1]["content"]
+
+    def test_bad_tool_args_and_a_crashing_dispatch(self, monkeypatch, tmp_path) -> None:
+        import sys
+        import types
+        self._ok(monkeypatch, tmp_path)
+        seen = []
+        fake = types.ModuleType("genesis_skills")
+
+        def _dispatch(name, args):
+            seen.append(args)
+            if name == "BOOM":
+                raise RuntimeError("гръмна")
+            return "ok"
+        fake.dispatch_tool_call = _dispatch
+        monkeypatch.setitem(sys.modules, "genesis_skills", fake)
+        instances = _install_fake_brain(monkeypatch, [
+            _reply(raw_text="plan"),
+            _reply(tool_calls=[{"id": "1", "function": {"name": "READ_FILE", "arguments": "{не"}},
+                               {"id": "2", "function": {"name": "BOOM", "arguments": "{}"}}]),
+            _reply(code="def f(): return 1\nprint('OK')")])
+        assert run_orchestrated("g", max_rounds=3).rounds == 2
+        assert seen == [{}, {}]
+        tools = [m for m in instances[0].complete_calls[-1] if m.get("role") == "tool"]
+        assert [m["content"] for m in tools] == ["ok", "[tool грешка: гръмна]"]
+
+    def test_prose_is_asked_for_code_and_an_error_reply_ends(self, monkeypatch, tmp_path) -> None:
+        self._ok(monkeypatch, tmp_path)
+        instances = _install_fake_brain(monkeypatch, [
+            _reply(raw_text="plan"), _reply(raw_text="мисля..."),
+            _reply(raw_text="Error: цялата верига е изчерпана")])
+        out = run_orchestrated("g", max_rounds=5)
+        assert (out.success, out.rounds, out.last_error) == (
+            False, 2, "Error: цялата верига е изчерпана")
+        assert instances[0].complete_calls[-1][-1]["content"] == "Върни само един ```python``` блок с кода."
+
+    def test_dna_refusing_the_save_asks_for_a_rewrite(self, monkeypatch, tmp_path) -> None:
+        saves = iter([orch_mod.dna.GenesisDNAError("забранено"), tmp_path / "s.md"])
+
+        def _save(**kw):
+            r = next(saves)
+            if isinstance(r, Exception):
+                raise r
+            return r
+        self._ok(monkeypatch, tmp_path, save=_save)
+        instances = _install_fake_brain(monkeypatch, [
+            _reply(raw_text="plan"), _reply(code="x = 1\nprint('OK')"),
+            _reply(code="y = 1\nprint('OK')")])
+        out = run_orchestrated("g", max_rounds=3)
+        assert (out.success, out.rounds, out.skill_path) == (True, 2, "s.md")
+        assert instances[0].complete_calls[-1][-1]["content"] == "DNA отказа: забранено. Пренапиши."

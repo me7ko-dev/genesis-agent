@@ -50,23 +50,6 @@ class TestTheWindowCountsMissions:
         assert len(r._recent_missions(10)) == 10
         assert all("mission" in e["tags"] for e in r._recent_missions(10))
 
-    def test_reuse_rate_is_measured_over_missions_too(self) -> None:
-        for i in range(300):
-            _tool_call(f"READ_FILE /tmp/{i}")
-        for i in range(4):
-            em.record_episode(goal=f"композирана {i}", outcome="success",
-                              skill_path="test", tags=["mission", "success", "composed"])
-        for i in range(4):
-            _mission(f"от нула {i}", ok=True)
-        assert r.reuse_rate(last_n=100) == 0.5
-
-    def test_no_missions_at_all_reports_none_not_zero(self) -> None:
-        """Нула значи „нищо не преизползва“; None значи „няма какво да се
-        мери“. Смесването им прави пресен инсталация да изглежда като провал."""
-        for i in range(5):
-            _tool_call(f"READ_FILE /tmp/{i}")
-        assert r.reuse_rate(last_n=50) is None
-
 
 class TestWhatReachesThePrompt:
     def test_the_most_common_failure_leads(self) -> None:
@@ -106,7 +89,6 @@ class TestItNeverBreaksAMission:
         monkeypatch.setattr(em, "_fetch_all_episodes", _boom)
         assert r.distill_lessons() == []
         assert r.lessons_for_prompt() == ""
-        assert r.reuse_rate() is None
 
     def test_an_episode_without_tags_or_lessons_is_survivable(self) -> None:
         em.record_episode(goal="без тагове", outcome="failed", skill_path="test")

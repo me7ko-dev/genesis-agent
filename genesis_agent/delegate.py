@@ -8,7 +8,7 @@ Sub-agent delegation:
   - Може да се делегира към: autonomous_loop, external skill, shell команда
 
 Употреба:
-    from genesis_agent.delegate import delegate_task, wait_all, get_status
+    from genesis_agent.delegate import delegate_task, wait_all
 
     # Паралелно изпълнение на 3 задачи
     t1 = delegate_task("напиши функция за сортиране", agent="autonomous")
@@ -66,21 +66,6 @@ class DelegatedTask:
         return f"{icon} [{self.id[:8]}] {self.agent}:{self.goal[:60]}  ({self.elapsed}s)"
 
 
-# ─── Глобален регистър ────────────────────────────────────────────────────────
-
-_TASKS: dict[str, DelegatedTask] = {}
-_LOCK = threading.Lock()
-
-
-def get_status(task_id: str) -> DelegatedTask | None:
-    return _TASKS.get(task_id)
-
-
-def list_tasks() -> list[DelegatedTask]:
-    with _LOCK:
-        return list(_TASKS.values())
-
-
 # ─── Изпълнители (agent backends) ─────────────────────────────────────────────
 
 def _run_shell(goal: str) -> str:
@@ -134,6 +119,7 @@ def _worker(task: DelegatedTask, timeout: int, on_done: Callable | None):
         log.info(f"[delegate] ✅ Task {task.id[:8]} завършен ({task.elapsed}s)")
 
     except Exception as e:
+        log.debug("делегираната задача падна", exc_info=True)
         task.error = str(e)
         task.status = TaskStatus.FAILED
         log.error(f"[delegate] ❌ Task {task.id[:8]} провален: {e}")
@@ -143,6 +129,7 @@ def _worker(task: DelegatedTask, timeout: int, on_done: Callable | None):
             try:
                 on_done(task)
             except Exception as cb_err:
+                log.debug("on_done на делегираната задача падна", exc_info=True)
                 log.error(f"[delegate] Callback грешка: {cb_err}")
 
 
@@ -169,9 +156,6 @@ def delegate_task(
     """
     task_id = uuid.uuid4().hex
     task = DelegatedTask(id=task_id, goal=goal, agent=agent)
-
-    with _LOCK:
-        _TASKS[task_id] = task
 
     t = threading.Thread(
         target=_worker,

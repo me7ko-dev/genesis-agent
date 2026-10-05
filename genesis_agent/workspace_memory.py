@@ -366,24 +366,7 @@ def _operator_spoke_generally(convo: list[dict]) -> bool:
     return any(marker in said for marker in _GENERAL_MARKERS)
 
 
-def auto_capture(messages: list[dict], max_chars: int = 6000) -> dict:
-    """Извлича трайното от един разговор и го записва — БЕЗ да разчита моделът
-    сам да е викал REMEMBER/TASK_ADD по време на чата.
-
-    Защо: тестове на живо показаха, че моделите в безплатната ротация често
-    НЕ посягат към memory tool-овете, дори с изрична инструкция — тръгват да
-    решават задачата и забравят да запишат. Инструкция не е механизъм. Тук
-    записът се случва независимо от поведението на модела по време на чата.
-
-    Никога не хвърля — провалено извличане не бива да чупи изхода от сесия.
-    Връща какво е записано (за показване/логване)."""
-    written = {"decisions": 0, "preferences": 0, "threads": 0}
-    convo = [m for m in messages if m.get("role") in ("user", "assistant") and m.get("content")]
-    if len(convo) < 2:
-        return written
-
-    text = "\n".join(f"{m['role']}: {str(m['content'])[:1200]}" for m in convo)[-max_chars:]
-
+def _known_block() -> str:
     # Показваме какво ВЕЧЕ е записано, за да преизползва съществуващите
     # формулировки вместо да измисля синоними ("стил на комуникация" срещу
     # "обяснения" за същото нещо). Това е дедупликацията, която реално работи —
@@ -402,7 +385,54 @@ def auto_capture(messages: list[dict], max_chars: int = 6000) -> dict:
         if opens:
             known += "\nВече отворени нишки (НЕ ги дублирай):\n" + "\n".join(f"  - {t}" for t in opens)
     except Exception:
-        pass
+        log.debug("записаното досега не влезе в промпта за auto_capture", exc_info=True)
+    return known
+
+
+def _write_captured(data: dict, convo: list[dict], written: dict[str, int]) -> None:
+    try:
+        for d in (data.get("decisions") or [])[:10]:
+            if isinstance(d, dict) and d.get("what"):
+                add_decision(d["what"], d.get("why", ""))
+                written["decisions"] += 1
+        new_prefs = [p for p in (data.get("preferences") or [])
+                     if isinstance(p, dict) and p.get("topic") and p.get("value")]
+        if len(new_prefs) > _MAX_PREFS_PER_CAPTURE or not _operator_spoke_generally(convo):
+            if new_prefs:
+                log.info("auto_capture: %d preference(s) not kept — a task's requirements, "
+                         "not something the operator said in general", len(new_prefs))
+            new_prefs = []
+        for p in new_prefs:
+            set_preference(p["topic"], p["value"])
+            written["preferences"] += 1
+        for t in (data.get("threads") or [])[:10]:
+            if isinstance(t, dict) and t.get("title"):
+                add_thread(t["title"], t.get("next_step", ""))
+                written["threads"] += 1
+    except Exception:
+        log.warning("auto_capture: writing extracted memory failed partway through "
+                    "(written so far: %r)", written, exc_info=True)
+
+
+def auto_capture(messages: list[dict], max_chars: int = 6000) -> dict:
+    """Извлича трайното от един разговор и го записва — БЕЗ да разчита моделът
+    сам да е викал REMEMBER/TASK_ADD по време на чата.
+
+    Защо: тестове на живо показаха, че моделите в безплатната ротация често
+    НЕ посягат към memory tool-овете, дори с изрична инструкция — тръгват да
+    решават задачата и забравят да запишат. Инструкция не е механизъм. Тук
+    записът се случва независимо от поведението на модела по време на чата.
+
+    Никога не хвърля — провалено извличане не бива да чупи изхода от сесия.
+    Връща какво е записано (за показване/логване)."""
+    written = {"decisions": 0, "preferences": 0, "threads": 0}
+    convo = [m for m in messages if m.get("role") in ("user", "assistant") and m.get("content")]
+    if len(convo) < 2:
+        return written
+
+    text = "\n".join(f"{m['role']}: {str(m['content'])[:1200]}" for m in convo)[-max_chars:]
+
+    known = _known_block()
 
     try:
         import json as _json
@@ -429,28 +459,7 @@ def auto_capture(messages: list[dict], max_chars: int = 6000) -> dict:
         log.warning("auto_capture: extraction failed, nothing written this round", exc_info=True)
         return written
 
-    try:
-        for d in (data.get("decisions") or [])[:10]:
-            if isinstance(d, dict) and d.get("what"):
-                add_decision(d["what"], d.get("why", ""))
-                written["decisions"] += 1
-        new_prefs = [p for p in (data.get("preferences") or [])
-                     if isinstance(p, dict) and p.get("topic") and p.get("value")]
-        if len(new_prefs) > _MAX_PREFS_PER_CAPTURE or not _operator_spoke_generally(convo):
-            if new_prefs:
-                log.info("auto_capture: %d preference(s) not kept — a task's requirements, "
-                         "not something the operator said in general", len(new_prefs))
-            new_prefs = []
-        for p in new_prefs:
-            set_preference(p["topic"], p["value"])
-            written["preferences"] += 1
-        for t in (data.get("threads") or [])[:10]:
-            if isinstance(t, dict) and t.get("title"):
-                add_thread(t["title"], t.get("next_step", ""))
-                written["threads"] += 1
-    except Exception:
-        log.warning("auto_capture: writing extracted memory failed partway through "
-                    "(written so far: %r)", written, exc_info=True)
+    _write_captured(data, convo, written)
     return written
 
 
@@ -463,18 +472,8 @@ def _days_since(iso: str) -> int:
         if then.tzinfo is None:
             then = then.replace(tzinfo=timezone.utc)
         return max(0, (datetime.now(timezone.utc) - then).days)
-    except Exception:
+    except (ValueError, TypeError):
         return 0
-
-
-def stale_threads(days: int = STALE_DAYS) -> list[dict]:
-    """Отворени нишки, непипани от `days` дни. Хигиена: `auto_capture` създава
-    нишки автоматично на всяка компресия и на изход, а 24/7 цикълът пише в тях —
-    но НИЩО не ги затваря само. Без периодично разчистване брифингът за няколко
-    седмици се превръща в стена от изоставени задачи, т.е. точно "остарял списък,
-    по-лош от никакъв". Затова остарелите се показват отделно, с покана да се
-    затворят — а не се трият автоматично (може да са важни, просто спрели)."""
-    return [t for t in list_threads("open", 100) if _days_since(t["updated_at"]) >= days]
 
 
 def close_thread(thread_id: Any, drop: bool = False) -> str:

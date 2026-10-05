@@ -12,10 +12,13 @@ Genesis сам преценя колко трудна е задачата и и�
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 
 import requests
+
+log = logging.getLogger("genesis.model_router")
 
 # Нивата (env-конфигурируеми). От бърз към мощен.
 LOCAL_TIERS = [
@@ -58,6 +61,7 @@ def available_tiers() -> list[bool]:
         r = requests.get("http://localhost:11434/api/tags", timeout=2)
         names = [m.get("name", "") for m in r.json().get("models", [])] if r.status_code == 200 else []
     except Exception:
+        log.debug("локалният Ollama не отговори — няма локални нива", exc_info=True)
         names = []
     return [any(t.split(":")[0] in n and t.split(":")[-1] in n for n in names) for t in LOCAL_TIERS]
 
@@ -207,6 +211,11 @@ _COMMAND_INTENTS = [(cmd, re.compile(rx)) for cmd, rx in (
         r"(изчисти|почисти|izchisti|pochisti|clear)( the)? (разговора|чата|историята|razgovora|chata|"
         r"istoriqta|istoriyata|chat|conversation|history)"
         r"|(нов разговор|нов чат|nov razgovor|nov chat|new chat|new conversation)")),
+    ("/pack", (
+        r"(опаковай|пакетирай|opakovai|opakovaj|paketirai|paketiraj|pack) (проекта|proekta|the project)"
+        r"( (за клиента|za klienta|for the client))?"
+        r"|((направи|napravi|make)( ми| mi)? )?(zip|зип) (на проекта|na proekta|of the project|"
+        r"за клиента|za klienta|for the client)")),
     ("/tasks",
         _SHOW + r" (задачите|нишките|zadachite|nishkite|tasks|the tasks|open tasks)"),
     ("/help", (

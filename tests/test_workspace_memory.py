@@ -248,6 +248,32 @@ class TestAutoCapture:
         assert wm.auto_capture(messages)["preferences"] == 1
         assert wm.list_preferences() == {"език": "само български"}
 
+    def test_what_is_known_goes_into_the_prompt(self, monkeypatch) -> None:
+        """Записаното досега влиза в промпта — преди цепенето (C901 17)."""
+        wm.set_preference("език", "български")
+        wm.add_decision("ползваме pytest")
+        wm.add_thread("документацията")
+        seen: list[str] = []
+
+        class _Reply:
+            raw_text = '{"decisions": [], "preferences": [], "threads": []}'
+
+        monkeypatch.setattr("genesis_agent.brain.Brain.complete",
+                            lambda self, messages: seen.append(messages[0]["content"]) or _Reply())
+        messages = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
+        wm.auto_capture(messages)
+        known = seen[0][len(wm._CAPTURE_PROMPT):]
+        assert known == ("\nВече записани предпочитания (ако новото е за същото — ползвай СЪЩАТА тема):\n"
+                         "  - език: български"
+                         "\nВече записани решения (НЕ ги повтаряй):\n  - ползваме pytest"
+                         "\nВече отворени нишки (НЕ ги дублирай):\n  - документацията")
+
+        def _boom():
+            raise OSError("повреден файл")
+        monkeypatch.setattr(wm, "list_preferences", _boom)
+        wm.auto_capture(messages)
+        assert seen[1] == wm._CAPTURE_PROMPT
+
     def test_strips_markdown_code_fence_around_json(self, monkeypatch) -> None:
         class _Reply:
             raw_text = '```json\n{"decisions": [{"what": "fenced"}], "preferences": [], "threads": []}\n```'
@@ -288,16 +314,7 @@ class TestAutoCapture:
         assert "provider down" in caplog.text
 
 
-class TestStaleThreadsAndCloseThread:
-    def test_stale_threads_lists_only_old_ones(self) -> None:
-        old_ts = (datetime.now(timezone.utc) - timedelta(days=wm.STALE_DAYS + 5)).isoformat(timespec="seconds")
-        with pytest.MonkeyPatch().context() as mp:
-            mp.setattr(wm, "_now", lambda: old_ts)
-            wm.add_thread("old task")
-        wm.add_thread("fresh task")
-        stale = wm.stale_threads()
-        assert [t["title"] for t in stale] == ["old task"]
-
+class TestCloseThread:
     def test_close_thread_marks_done_by_default(self) -> None:
         wm.add_thread("finish me")
         tid = wm.list_threads("open")[0]["id"]

@@ -57,7 +57,7 @@ def bench_one(provider: str, model: str, tasks: list) -> dict:
                 res = run_python_subprocess(reply.code + "\n\n" + check)
                 ok = res.ok and "CHECK_OK" in res.stdout
                 note = "ok" if ok else (res.stderr or "")[:70].replace("\n", " ")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — сривът е провален опит на модела и се записва така
             ok, note = False, f"{type(e).__name__}: {e}"[:70]
         passed += ok
         notes.append(note)

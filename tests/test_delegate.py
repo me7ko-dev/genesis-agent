@@ -8,17 +8,7 @@ from __future__ import annotations
 
 import time
 
-import pytest
-
 import genesis_agent.delegate as dm
-
-
-@pytest.fixture(autouse=True)
-def _clean_registry():
-    """_TASKS is module-level global state shared across tests."""
-    dm._TASKS.clear()
-    yield
-    dm._TASKS.clear()
 
 
 class TestDelegateTaskShellAgent:
@@ -34,12 +24,6 @@ class TestDelegateTaskShellAgent:
         dm.wait_all([task], timeout=10)
         assert task.status == dm.TaskStatus.FAILED
         assert task.error is not None
-
-    def test_registered_in_get_status_and_list_tasks(self) -> None:
-        task = dm.delegate_task("echo x", agent="shell")
-        assert dm.get_status(task.id) is task
-        assert task in dm.list_tasks()
-        dm.wait_all([task], timeout=10)
 
     def test_unknown_agent_type_fails_with_a_clear_message(self) -> None:
         task = dm.delegate_task("whatever", agent="not-a-real-agent")

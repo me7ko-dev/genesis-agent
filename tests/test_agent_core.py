@@ -1,13 +1,17 @@
-"""genesis_agent.agent_core — the shared tool loop behind every full frontend
-(terminal, GTK, Jarvis), previously untested. Covers the pure
-helpers (env_facts, _diff_for_write, _is_question/_clean_question) and
-run_tool_loop's control flow with a fake Core/skills bridge — no real Brain
-call, no real tool dispatch, no real filesystem writes outside tmp_path."""
+"""genesis_agent.agent_core — the one turn loop, plus the helpers around it.
+
+env_facts, restored_history and bounded_history are pure helpers. The loop
+(run_tool_loop) runs with a scripted `ask` and genesis_skills patched — no
+model, no real tool dispatch. The same loop through the terminal (knowledge,
+compaction, the saved session) is in test_run_turn.py."""
 from __future__ import annotations
 
 import pytest
 
+import genesis_skills
 from genesis_agent import agent_core as ac
+from genesis_agent.config import TOOL_ROUND_CAP
+from genesis_agent.repeat_guard import STOP_AT
 
 
 class TestEnvFacts:
@@ -70,495 +74,231 @@ class TestEnvFacts:
         assert str(custom) in out
 
 
-class _FakeSkills:
-    def __init__(self, files: dict[str, str] | None = None) -> None:
-        self.files = files or {}
+class _UI(ac.TurnUI):
+    """Записва какво ходът показва, в реда на показване."""
 
-    def _resolve(self, path: str):
-        class _Target:
-            def __init__(self, exists: bool, content: str) -> None:
-                self._exists = exists
-                self._content = content
+    def __init__(self) -> None:
+        self.shown: list[tuple] = []
 
-            def is_file(self) -> bool:
-                return self._exists
+    def assistant(self, text: str) -> None:
+        self.shown.append(("assistant", text))
 
-            def read_text(self, encoding="utf-8", errors="replace") -> str:
-                return self._content
+    def tool(self, name: str, result: str) -> None:
+        self.shown.append(("tool", name, result))
 
-        return _Target(path in self.files, self.files.get(path, ""))
+    def asked(self, question: str) -> None:
+        self.shown.append(("asked", question))
 
+    def spinning(self, note: str) -> None:
+        self.shown.append(("spinning", note))
 
-class TestDiffForWrite:
-    def test_new_file_shows_a_diff_against_empty(self) -> None:
-        skills = _FakeSkills()
-        diff = ac._diff_for_write(skills, {"path": "new.py", "content": "print(1)\n"})
-        assert diff is not None
-        assert "+print(1)" in diff
+    def warn(self, text: str) -> None:
+        self.shown.append(("warn", text))
 
-    def test_unchanged_content_returns_none(self) -> None:
-        skills = _FakeSkills({"a.py": "same\n"})
-        diff = ac._diff_for_write(skills, {"path": "a.py", "content": "same\n"})
-        assert diff is None
-
-    def test_changed_content_shows_add_and_remove_lines(self) -> None:
-        skills = _FakeSkills({"a.py": "old\n"})
-        diff = ac._diff_for_write(skills, {"path": "a.py", "content": "new\n"})
-        assert "-old" in diff
-        assert "+new" in diff
-
-    def test_missing_path_returns_none(self) -> None:
-        assert ac._diff_for_write(_FakeSkills(), {"content": "x"}) is None
-
-    def test_missing_content_returns_none(self) -> None:
-        assert ac._diff_for_write(_FakeSkills(), {"path": "a.py"}) is None
-
-    def test_resolve_failure_is_swallowed_not_raised(self) -> None:
-        class _Boom:
-            def _resolve(self, path):
-                raise RuntimeError("path escapes workspace")
-
-        assert ac._diff_for_write(_Boom(), {"path": "a.py", "content": "x"}) is None
+    def of(self, kind: str) -> list:
+        return [e[1] if len(e) == 2 else e[1:] for e in self.shown if e[0] == kind]
 
 
-class TestQuestionMarkers:
-    def test_is_question_true_when_marker_present(self) -> None:
-        from genesis_skills import ASK_USER_MARKER
-        assert ac._is_question(f"some text {ASK_USER_MARKER} more") is True
+class _Skills:
+    """genesis_skills с подготвени резултати: `dispatch` за native извикванията,
+    `parse` за текстовите тагове."""
 
-    def test_is_question_false_for_plain_text(self) -> None:
-        assert ac._is_question("just a normal tool result") is False
-
-    def test_is_question_false_for_empty(self) -> None:
-        assert ac._is_question("") is False
-
-    def test_clean_question_strips_the_marker(self) -> None:
-        from genesis_skills import ASK_USER_MARKER
-        cleaned = ac._clean_question(f"  {ASK_USER_MARKER}Which file?  ")
-        assert cleaned == "Which file?"
-        assert ASK_USER_MARKER not in cleaned
-
-
-class _FakeCore:
-    def __init__(self, replies) -> None:
-        self._replies = list(replies)
-        self.skills = None
-        self.wm = None
-        self.remembered: list[tuple[str, str]] = []
-
-    def complete(self, messages):
-        assert self._replies, "core.complete() called more times than the test queued"
-        return self._replies.pop(0)
-
-    def remember(self, role, content) -> None:
-        self.remembered.append((role, content))
-
-
-class _FakeToolSkills:
-    """Fake genesis_skills bridge for run_tool_loop's native tool_calls path."""
-
-    def __init__(self, dispatch_results: list[str]) -> None:
-        self._results = list(dispatch_results)
+    def __init__(self, monkeypatch) -> None:
         self.calls: list[tuple[str, dict]] = []
+        self.dispatch = lambda name, args, n: "ok"
+        self.parse = lambda text: []
+        monkeypatch.setattr(genesis_skills, "dispatch_tool_call", self._dispatch)
+        monkeypatch.setattr(genesis_skills, "parse_and_execute_tools", lambda text: self.parse(text))
 
-    def _resolve(self, path):
-        raise RuntimeError("not used in these tests")
-
-    def dispatch_tool_call(self, name, args):
+    def _dispatch(self, name, args):
         self.calls.append((name, args))
-        return self._results.pop(0)
-
-    def parse_and_execute_tools(self, text):
-        return []
+        return self.dispatch(name, args, len(self.calls))
 
 
-@pytest.fixture(autouse=True)
-def _no_real_compaction(monkeypatch):
-    """compact_chat_history is a static method on the real Brain and hits no
-    network for small message lists (below threshold), but patch it anyway
-    so tests are explicit about what "compaction happened" means."""
-    monkeypatch.setattr(
-        "genesis_agent.brain.Brain.compact_chat_history",
-        staticmethod(lambda messages, threshold=16, keep_recent=10: messages),
-    )
-    yield
+@pytest.fixture
+def skills(monkeypatch) -> _Skills:
+    return _Skills(monkeypatch)
 
 
-class TestRunToolLoopTextOnly:
-    def test_plain_text_reply_ends_the_loop_immediately(self) -> None:
-        core = _FakeCore([("hello there", None, "groq", "llama")])
-        core.skills = _FakeToolSkills([])
-        seen = []
-        result = ac.run_tool_loop(
-            core, [{"role": "user", "content": "hi"}],
-            on_assistant=lambda t, p, m: seen.append((t, p, m)),
-            on_tool_result=lambda *a: pytest.fail("no tool should run"),
-        )
-        assert seen == [("hello there", "groq", "llama")]
-        assert result[-1] == {"role": "assistant", "content": "hello there"}
+def _loop(replies: list, *, request: str = "hi", history: list | None = None, **kw):
+    """Един ход с подготвени отговори на модела; връща (messages, ui, заявките)."""
+    script = list(replies)
+    asked: list[list[dict]] = []
+
+    def ask(messages):
+        asked.append(list(messages))
+        assert script, "моделът е попитан повече пъти от подготвените отговори"
+        return script.pop(0)
+
+    messages = history if history is not None else [{"role": "user", "content": request}]
+    ui = _UI()
+    ac.run_tool_loop(messages, request, ui, ask, **kw)
+    return messages, ui, asked
 
 
-class TestRunToolLoopStopsSpinning:
+def _call(name: str, arguments: str = "{}", cid: str = "1") -> list[dict]:
+    return [{"id": cid, "function": {"name": name, "arguments": arguments}}]
+
+
+class TestAPlainReply:
+    def test_it_ends_the_turn(self, skills) -> None:
+        messages, ui, _ = _loop([("hello there", None)])
+        assert ui.of("assistant") == ["hello there"]
+        assert ui.of("tool") == []
+        assert messages[-1] == {"role": "assistant", "content": "hello there"}
+
+    def test_both_replies_are_remembered(self, skills) -> None:
+        remembered: list = []
+        _loop([("", _call("RUN_CMD")), ("готово", None)],
+              remember=lambda role, text: remembered.append((role, text)))
+        assert remembered == [("assistant", "[повикани 1 tool(-а)]"), ("assistant", "готово")]
+
+
+class TestNativeToolCalls:
+    def test_a_call_is_dispatched_and_the_turn_continues(self, skills) -> None:
+        skills.dispatch = lambda name, args, n: "file1\nfile2"
+        messages, ui, _ = _loop([("", _call("RUN_CMD", '{"cmd": "ls"}')), ("done", None)])
+        assert ui.of("tool") == [("RUN_CMD", "file1\nfile2")]
+        assert skills.calls == [("RUN_CMD", {"cmd": "ls"})]
+        assert messages[-1] == {"role": "assistant", "content": "done"}
+
+    def test_ask_user_stops_the_turn_and_cleans_the_marker(self, skills) -> None:
+        skills.dispatch = lambda name, args, n: f"{genesis_skills.ASK_USER_MARKER}Which file?"
+        _, ui, asked = _loop([("", _call("ASK_USER"))])
+        assert ui.of("asked") == ["Which file?"]
+        assert len(asked) == 1, "въпросът връща контрола на човека, ходът не продължава сам"
+
+    def test_the_round_cap_stops_an_endless_turn(self, skills) -> None:
+        skills.dispatch = lambda name, args, n: f"ok {n}"
+        _, ui, asked = _loop([("", _call("RUN_CMD"))] * 2, round_cap=2)
+        assert len(asked) == 2
+        assert "таван" in ui.of("warn")[-1]
+
+
+class TestSpinningInPlace:
     """Таванът ограничава ЦЕНАТА на въртенето на място, не го разпознава.
     Откакто е 25 (беше 8), един повтарян извик изгаря три пъти повече рундове
     и завършва с "достигнат таван" — най-скъпото съобщение, защото пристига
     последно и не носи нито резултат, нито причина."""
 
-    @staticmethod
-    def _spin(dispatch_result, replies=60):
-        tc = [{"id": "1", "function": {"name": "USE_SKILL",
-                                       "arguments": '{"name_or_query": "foo"}'}}]
-        core = _FakeCore([("", tc, "groq", "llama")] * replies)
+    def test_identical_call_and_result_stops_long_before_the_cap(self, skills) -> None:
+        skills.dispatch = lambda name, args, n: "няма такова умение"
+        _, ui, _ = _loop([("", _call("USE_SKILL", '{"name_or_query": "foo"}'))] * 60)
+        assert len(skills.calls) == STOP_AT
+        assert "USE_SKILL" in ui.of("spinning")[-1]
 
-        class _Repeating:
-            def __init__(self) -> None:
-                self.calls: list[tuple[str, dict]] = []
-
-            def dispatch_tool_call(self, name, args):
-                self.calls.append((name, args))
-                return dispatch_result(len(self.calls))
-
-            def parse_and_execute_tools(self, text):
-                return []
-
-            def _resolve(self, path):
-                raise RuntimeError("not used")
-
-        core.skills = _Repeating()
-        said: list[str] = []
-        ac.run_tool_loop(core, [{"role": "user", "content": "hi"}],
-                         on_assistant=lambda t, p, m: said.append(t),
-                         on_tool_result=lambda *a: None)
-        return core.skills.calls, said
-
-    def test_identical_call_and_result_stops_long_before_the_cap(self) -> None:
-        from genesis_agent.repeat_guard import STOP_AT
-        calls, said = self._spin(lambda i: "няма такова умение")
-        assert len(calls) == STOP_AT
-        assert "USE_SKILL" in said[-1]
-
-    def test_a_changing_result_is_progress_and_runs_to_the_cap(self) -> None:
+    def test_a_changing_result_is_progress_and_runs_to_the_cap(self, skills) -> None:
         """Обратната страна: предпазителят не бива да реже истинска работа."""
-        from genesis_agent.config import TOOL_ROUND_CAP
-        calls, said = self._spin(lambda i: f"резултат {i}")
-        assert len(calls) == TOOL_ROUND_CAP
-        assert "таван" in said[-1]
+        skills.dispatch = lambda name, args, n: f"резултат {n}"
+        _, ui, _ = _loop([("", _call("USE_SKILL", '{"name_or_query": "foo"}'))] * 60)
+        assert len(skills.calls) == TOOL_ROUND_CAP
+        assert "таван" in ui.of("warn")[-1]
 
-    def test_text_tag_mode_stops_spinning_too(self) -> None:
-        from genesis_agent.repeat_guard import STOP_AT
-        core = _FakeCore([("[RUN_CMD: ls]", None, "groq", "llama")] * 60)
-
-        class _RepeatingText:
-            def __init__(self) -> None:
-                self.runs = 0
-
-            def parse_and_execute_tools(self, text):
-                self.runs += 1
-                return ["[RUN_CMD: ls]\nсъщият изход"]
-
-            def dispatch_tool_call(self, name, args):
-                raise AssertionError("native path must not run here")
-
-            def _resolve(self, path):
-                raise RuntimeError("not used")
-
-        core.skills = _RepeatingText()
-        said: list[str] = []
-        ac.run_tool_loop(core, [{"role": "user", "content": "hi"}],
-                         on_assistant=lambda t, p, m: said.append(t),
-                         on_tool_result=lambda *a: None)
-        assert core.skills.runs == STOP_AT
+    def test_text_tag_mode_stops_spinning_too(self, skills) -> None:
+        skills.parse = lambda text: ["[RUN_CMD: ls]\nсъщият изход"]
+        _, ui, asked = _loop([("[RUN_CMD: ls]", None)] * 60)
+        assert len(asked) == STOP_AT
+        assert len(ui.of("spinning")) == 1
+        assert skills.calls == [], "native пътят не бива да тръгва тук"
 
 
-class TestRunToolLoopNativeToolCalls:
-    def test_dispatches_a_tool_call_and_continues(self) -> None:
-        tool_calls = [{"id": "1", "function": {"name": "RUN_CMD", "arguments": '{"cmd": "ls"}'}}]
-        core = _FakeCore([
-            ("", tool_calls, "groq", "llama"),
-            ("done", None, "groq", "llama"),
-        ])
-        core.skills = _FakeToolSkills(["file1\nfile2"])
-        tool_results = []
-        result = ac.run_tool_loop(
-            core, [{"role": "user", "content": "list files"}],
-            on_assistant=lambda t, p, m: None,
-            on_tool_result=lambda name, r, extra: tool_results.append((name, r, extra)),
-        )
-        assert tool_results == [("RUN_CMD", "file1\nfile2", None)]
-        assert core.skills.calls == [("RUN_CMD", {"cmd": "ls"})]
-        assert result[-1] == {"role": "assistant", "content": "done"}
+class TestTextTags:
+    def test_they_are_parsed_executed_and_shown(self, skills) -> None:
+        skills.parse = lambda text: ["[RUN_CMD: ls]\nfile1\nfile2"] if "[RUN_CMD" in text else []
+        messages, ui, _ = _loop([("[RUN_CMD: ls]", None), ("all done", None)])
+        assert ui.of("tool") == [("RUN_CMD", "[RUN_CMD: ls]\nfile1\nfile2")]
+        assert messages[-1] == {"role": "assistant", "content": "all done"}
 
-    def test_ask_user_stops_the_loop_and_cleans_the_marker(self) -> None:
-        from genesis_skills import ASK_USER_MARKER
-        tool_calls = [{"id": "1", "function": {"name": "ASK_USER", "arguments": "{}"}}]
-        core = _FakeCore([("", tool_calls, "groq", "llama")])
-        core.skills = _FakeToolSkills([f"{ASK_USER_MARKER}Which file?"])
-        assistant_msgs = []
-        ac.run_tool_loop(
-            core, [{"role": "user", "content": "do something"}],
-            on_assistant=lambda t, p, m: assistant_msgs.append(t),
-            on_tool_result=lambda *a: None,
-        )
-        assert assistant_msgs[-1] == "Which file?"
-        # complete() must NOT have been called a second time — asking a
-        # question hands control back to the human, it doesn't self-continue.
-        assert core._replies == []
+    def test_no_parseable_tool_ends_the_turn(self, skills) -> None:
+        messages, ui, _ = _loop([("just plain text, no tags", None)])
+        assert ui.of("tool") == []
+        assert messages[-1] == {"role": "assistant", "content": "just plain text, no tags"}
 
-    def test_round_cap_stops_an_infinite_tool_loop(self) -> None:
-        tool_calls = [{"id": "1", "function": {"name": "RUN_CMD", "arguments": "{}"}}]
-        # 3 rounds of tool_calls, cap=2 -> stops after round 2 without needing
-        # a 3rd complete() call.
-        core = _FakeCore([
-            ("", tool_calls, "p", "m"),
-            ("", tool_calls, "p", "m"),
-        ])
-        core.skills = _FakeToolSkills(["ok", "ok"])
-        assistant_msgs = []
-        ac.run_tool_loop(
-            core, [{"role": "user", "content": "loop forever"}],
-            on_assistant=lambda t, p, m: assistant_msgs.append(t),
-            on_tool_result=lambda *a: None,
-            round_cap=2,
-        )
-        assert "таван" in assistant_msgs[-1]
-
-
-class TestRunToolLoopTextTagFallback:
-    def test_the_round_cap_is_announced_here_too_not_only_in_the_native_path(
-        self
-    ) -> None:
+    def test_the_round_cap_is_announced_here_too_not_only_in_the_native_path(self, skills) -> None:
         """Native клонът казва „достигнат таван“; текстовият спираше нямо.
         Последното, което човекът вижда, е репликата с tool таговете — разказ
         за започната работа — така прекъснатата работа изглежда като
         завършена. И точно този клон обслужва моделите без native tool-calling,
         тоест безплатните: там таванът се удря най-често."""
-        core = _FakeCore([
-            ("[RUN_CMD: стъпка 1]", None, "p", "m"),
-            ("[RUN_CMD: стъпка 2]", None, "p", "m"),
-        ])
-
-        class _AlwaysTagged(_FakeToolSkills):
-            def parse_and_execute_tools(self, text):
-                return ["ok"] if "[RUN_CMD" in text else []
-
-        core.skills = _AlwaysTagged([])
-        assistant_msgs: list[str] = []
-        ac.run_tool_loop(
-            core, [{"role": "user", "content": "върти безкрайно"}],
-            on_assistant=lambda t, p, m: assistant_msgs.append(t),
-            on_tool_result=lambda *a: None,
-            round_cap=2,
-        )
-        assert assistant_msgs, "нито едно съобщение до човека при удрян таван"
-        assert "таван" in assistant_msgs[-1], assistant_msgs
-
-    def test_text_tag_tools_are_parsed_and_executed(self) -> None:
-        core = _FakeCore([
-            ("[RUN_CMD: ls]", None, "p", "m"),
-            ("all done", None, "p", "m"),
-        ])
-
-        class _TextTagSkills(_FakeToolSkills):
-            def parse_and_execute_tools(self, text):
-                return ["file1\nfile2"] if "[RUN_CMD" in text else []
-
-        core.skills = _TextTagSkills([])
-        tool_results = []
-        result = ac.run_tool_loop(
-            core, [{"role": "user", "content": "list files"}],
-            on_assistant=lambda t, p, m: None,
-            on_tool_result=lambda name, r, extra: tool_results.append((name, r)),
-        )
-        assert tool_results == [("инструмент", "file1\nfile2")]
-        assert result[-1] == {"role": "assistant", "content": "all done"}
-
-    def test_no_parseable_tools_ends_the_loop(self) -> None:
-        core = _FakeCore([("just plain text, no tags", None, "p", "m")])
-        core.skills = _FakeToolSkills([])
-        result = ac.run_tool_loop(
-            core, [{"role": "user", "content": "hi"}],
-            on_assistant=lambda t, p, m: None,
-            on_tool_result=lambda *a: pytest.fail("no tool should run"),
-        )
-        assert result[-1] == {"role": "assistant", "content": "just plain text, no tags"}
+        skills.parse = lambda text: [text + "\nok"] if "[RUN_CMD" in text else []
+        _, ui, _ = _loop([("[RUN_CMD: стъпка 1]", None), ("[RUN_CMD: стъпка 2]", None)],
+                         round_cap=2)
+        assert "таван" in ui.of("warn")[-1]
 
 
-class TestRunToolLoopCompaction:
-    def test_shrinking_history_triggers_auto_capture_and_status(self, monkeypatch) -> None:
-        monkeypatch.setattr(
-            "genesis_agent.brain.Brain.compact_chat_history",
-            staticmethod(lambda messages, threshold=16, keep_recent=10: messages[-1:]),
-        )
-        # Компресията вика и графа на паметта, а той — истински модел; без
-        # ключове всички доставчици падат и Brain.complete() чака 8 s.
-        monkeypatch.setattr("genesis_agent.knowledge_graph.compact_and_graph_memory",
-                            lambda transcript: {})
-        core = _FakeCore([("hi", None, "p", "m")])
-        core.skills = _FakeToolSkills([])
-        captured = []
+class TestToolResultsAreClippedBeforeEnteringHistory:
+    """A tool result enters `messages` and is then re-sent on every later
+    round until it falls out of the window, so one noisy `cat`/`pip install`
+    is paid for repeatedly. The loop must clip what it stores while the
+    operator still sees the full output.
+    """
 
-        class _WM:
-            def auto_capture(self, pre_compact):
-                captured.append(pre_compact)
+    def test_a_huge_native_tool_result_is_clipped_in_messages_but_not_on_screen(
+        self, skills, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("genesis_agent.budget.TOOL_RESULT_MAX_CHARS", 500)
+        huge = "".join(f"log line {i}\n" for i in range(3000))
+        skills.dispatch = lambda name, args, n: huge
+        messages, ui, _ = _loop([("", _call("RUN_CMD", '{"cmd": "cat big.log"}')), ("done", None)])
+        assert ui.of("tool") == [("RUN_CMD", huge)], "операторът трябва да вижда пълния изход"
+        stored = next(m for m in messages if m.get("role") == "tool")["content"]
+        # Близо до зададения таван, не просто "по-малко от огромното" — иначе
+        # тестът минава и когато клипването изобщо не се е приложило.
+        assert len(stored) < 800
+        assert stored.startswith("log line 0")
+        assert stored.rstrip().endswith("log line 2999")
 
-        core.wm = _WM()
-        statuses = []
-        ac.run_tool_loop(
-            core, [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}],
-            on_assistant=lambda t, p, m: None,
-            on_tool_result=lambda *a: None,
-            on_status=lambda s: statuses.append(s),
-        )
-        assert captured, "auto_capture should have been called once history shrank"
-        assert any("компресирана" in s for s in statuses)
-
-    def test_auto_capture_failure_does_not_propagate(self, monkeypatch) -> None:
-        monkeypatch.setattr(
-            "genesis_agent.brain.Brain.compact_chat_history",
-            staticmethod(lambda messages, threshold=16, keep_recent=10: messages[-1:]),
-        )
-        # Компресията вика и графа на паметта, а той — истински модел; без
-        # ключове всички доставчици падат и Brain.complete() чака 8 s.
-        monkeypatch.setattr("genesis_agent.knowledge_graph.compact_and_graph_memory",
-                            lambda transcript: {})
-        core = _FakeCore([("hi", None, "p", "m")])
-        core.skills = _FakeToolSkills([])
-
-        class _BoomWM:
-            def auto_capture(self, pre_compact):
-                raise RuntimeError("disk full")
-
-        core.wm = _BoomWM()
-        ac.run_tool_loop(
-            core, [{"role": "user", "content": "hi"}],
-            on_assistant=lambda t, p, m: None,
-            on_tool_result=lambda *a: None,
-        )
+    def test_text_tag_results_are_clipped_too(self, skills, monkeypatch) -> None:
+        monkeypatch.setattr("genesis_agent.budget.TOOL_RESULT_MAX_CHARS", 400)
+        skills.parse = lambda text: ["x" * 40_000] if "[RUN_CMD" in text else []
+        messages, _, _ = _loop([("[RUN_CMD: cat big.log]", None), ("done", None)])
+        injected = [m for m in messages
+                    if m.get("role") == "system" and "[Резултат]" in m.get("content", "")]
+        assert injected, "текстовият път трябва да инжектира резултата"
+        assert len(injected[0]["content"]) < 1200
 
 
-class TestLooksLikeEnglish:
-    """Pure-function heuristic (design note, 2026-08-11): no LLM call, just
-    decides whether translation is even worth attempting."""
+class TestSimulatedWorkIsCaughtMidTurn:
+    """The old check only fired on round 0, so any harmless tool call bought
+    the model a free pass for the rest of the turn. These assert the check
+    now follows what was actually executed, whatever the round."""
 
-    def test_cyrillic_text_is_not_english(self) -> None:
-        assert ac._looks_like_english("Напиши функция за проверка дали число е просто") is False
+    def test_a_claim_after_an_unrelated_tool_call_is_challenged(self, skills) -> None:
+        skills.dispatch = lambda name, args, n: "file1\nfile2"
+        messages, _, _ = _loop([("", _call("LIST_DIR", '{"path": "/home/user"}')),
+                                ("Готово — инсталирах пакета.", None),
+                                ("Не съм. Ето какво остава.", None)],
+                               request="инсталирай пакета")
+        nudges = [m for m in messages if m.get("role") == "system"
+                  and "нито един изпълнен инструмент" in str(m.get("content", ""))]
+        assert nudges, "неподкрепеното твърдение трябваше да бъде оспорено"
 
-    def test_short_latin_snippet_is_not_worth_translating(self) -> None:
-        assert ac._looks_like_english("OK") is False
-        assert ac._looks_like_english("done") is False
-
-    def test_long_latin_prose_is_english(self) -> None:
-        assert ac._looks_like_english(
-            "This is a longer English sentence explaining what the code does."
-        ) is True
-
-    def test_code_fence_does_not_count_toward_the_latin_threshold(self) -> None:
-        # All the Latin letters are inside the fence; outside it there's
-        # Cyrillic -- must NOT be flagged as English.
-        text = "Ето кода:\n```python\ndef merge_intervals(intervals): pass\n```"
-        assert ac._looks_like_english(text) is False
-
-    def test_empty_text_is_not_english(self) -> None:
-        assert ac._looks_like_english("") is False
+    def test_a_claim_backed_by_the_matching_command_passes_untouched(self, skills) -> None:
+        skills.dispatch = lambda name, args, n: "Successfully installed ruff"
+        messages, _, _ = _loop([("", _call("RUN_CMD", '{"cmd": "pip install ruff"}')),
+                                ("Инсталирах ruff.", None)], request="инсталирай ruff")
+        nudges = [m for m in messages if m.get("role") == "system"
+                  and "нито един изпълнен инструмент" in str(m.get("content", ""))]
+        assert not nudges, "истинската инсталация не бива да се оспорва"
 
 
-class TestToUserText:
-    def test_bulgarian_text_passes_through_untranslated(self, monkeypatch) -> None:
-        monkeypatch.setattr(
-            "genesis_agent.translator.translate_en_to_bg",
-            lambda t: pytest.fail("should not be called for Bulgarian text"),
-        )
-        assert ac._to_user_text("Готово е.") == "Готово е."
+class TestALongTurnKeepsItsTask:
+    """2026-09-30: deque(maxlen=30) изхвърляше посред хода системния промпт и
+    заявката; ollama после отговаряше празно (done_reason=load) до края."""
 
-    def test_long_english_text_gets_translated(self, monkeypatch) -> None:
-        monkeypatch.setattr(
-            "genesis_agent.translator.translate_en_to_bg",
-            lambda t: "ПРЕВЕДЕНО: " + t,
-        )
-        out = ac._to_user_text("This is a longer English sentence to translate.")
-        assert out.startswith("ПРЕВЕДЕНО: ")
-
-    def test_translator_failure_falls_back_to_the_original_text(self, monkeypatch) -> None:
-        def _boom(t):
-            raise RuntimeError("ollama unreachable")
-
-        monkeypatch.setattr("genesis_agent.translator.translate_en_to_bg", _boom)
-        original = "This is a longer English sentence that fails to translate."
-        assert ac._to_user_text(original) == original
-
-
-class TestTranslateLastUserMessageToEn:
-    def test_bulgarian_user_message_is_translated_in_place(self, monkeypatch) -> None:
-        monkeypatch.setattr(
-            "genesis_agent.translator.translate_bg_to_en",
-            lambda t: "translated: " + t,
-        )
-        messages = [{"role": "system", "content": "sys"},
-                    {"role": "user", "content": "Напиши функция"}]
-        ac._translate_last_user_message_to_en(messages)
-        assert messages[-1]["content"] == "translated: Напиши функция"
-        assert messages[0]["content"] == "sys"  # untouched
-
-    def test_already_english_user_message_is_left_alone(self, monkeypatch) -> None:
-        monkeypatch.setattr(
-            "genesis_agent.translator.translate_bg_to_en",
-            lambda t: pytest.fail("should not be called for English text"),
-        )
-        messages = [{"role": "user", "content": "Write a function"}]
-        ac._translate_last_user_message_to_en(messages)
-        assert messages[-1]["content"] == "Write a function"
-
-    def test_non_user_last_message_is_left_alone(self, monkeypatch) -> None:
-        monkeypatch.setattr(
-            "genesis_agent.translator.translate_bg_to_en",
-            lambda t: pytest.fail("should not be called when the last message isn't from the user"),
-        )
-        messages = [{"role": "user", "content": "Напиши функция"},
-                    {"role": "assistant", "content": "Готово"}]
-        ac._translate_last_user_message_to_en(messages)
-        assert messages[-1]["content"] == "Готово"
-
-    def test_translator_failure_leaves_the_original_bulgarian_text(self, monkeypatch) -> None:
-        def _boom(t):
-            raise RuntimeError("ollama unreachable")
-
-        monkeypatch.setattr("genesis_agent.translator.translate_bg_to_en", _boom)
-        messages = [{"role": "user", "content": "Напиши функция"}]
-        ac._translate_last_user_message_to_en(messages)
-        assert messages[-1]["content"] == "Напиши функция"
-
-
-class TestRunToolLoopBilingualRoundTrip:
-    """End-to-end: a Bulgarian user message reaches the model in English, and
-    a long English model reply reaches on_assistant in Bulgarian -- the two
-    halves of the BG<->EN sandwich (design note, 2026-08-11), wired into the
-    shared loop every frontend calls."""
-
-    def test_user_bg_in_model_en_out_bg_to_the_user(self, monkeypatch) -> None:
-        monkeypatch.setattr(
-            "genesis_agent.translator.translate_bg_to_en",
-            lambda t: "EN: " + t,
-        )
-        monkeypatch.setattr(
-            "genesis_agent.translator.translate_en_to_bg",
-            lambda t: "BG: " + t,
-        )
-        long_english_reply = "This is a sufficiently long English explanation of the fix."
-        core = _FakeCore([(long_english_reply, None, "groq", "llama")])
-        core.skills = _FakeToolSkills([])
-        seen = []
-        messages = [{"role": "user", "content": "Обясни ми поправката"}]
-
-        ac.run_tool_loop(
-            core, messages,
-            on_assistant=lambda t, p, m: seen.append(t),
-            on_tool_result=lambda *a: pytest.fail("no tool should run"),
-        )
-
-        # The model saw the ENGLISH translation, not the raw Bulgarian.
-        assert messages[0]["content"] == "EN: Обясни ми поправката"
-        # The user saw the BULGARIAN translation of the model's English reply.
-        assert seen == ["BG: " + long_english_reply]
+    def test_every_request_of_a_20_round_turn_has_the_system_prompt_and_the_task(
+        self, skills
+    ) -> None:
+        rounds = 20
+        skills.dispatch = lambda name, args, n: f"[READ_FILE: f{n}.py]\nx = {n}"
+        replies = [("", _call("READ_FILE", f'{{"path": "f{i}.py"}}', cid=f"c{i}"))
+                   for i in range(rounds)] + [("готово", None)]
+        history = [{"role": "system", "content": "SYS"}, {"role": "user", "content": "ЗАДАЧАТА"}]
+        _, _, asked = _loop(replies, request="ЗАДАЧАТА", history=history)
+        assert len(asked) == rounds + 1
+        for sent in asked:
+            assert sent[0] == {"role": "system", "content": "SYS"}
+            assert any(m.get("content") == "ЗАДАЧАТА" for m in sent)
 
 
 class TestRestoredHistory:
@@ -612,134 +352,6 @@ class TestRestoredHistory:
         assert len(out) == 5
         assert out[0]["role"] == "system"
         assert out[-1]["content"] == "m19"
-
-
-class TestToolResultsAreClippedBeforeEnteringHistory:
-    """A tool result enters `messages` and is then re-sent on every later
-    round until it falls out of the window, so one noisy `cat`/`pip install`
-    is paid for repeatedly. run_tool_loop must clip what it stores while the
-    frontend callback still receives the full output to show the operator.
-    """
-
-    def test_a_huge_native_tool_result_is_clipped_in_messages_but_not_for_the_frontend(
-        self, monkeypatch
-    ) -> None:
-        monkeypatch.setattr("genesis_agent.budget.TOOL_RESULT_MAX_CHARS", 500)
-        huge = "".join(f"log line {i}\n" for i in range(3000))
-        tool_calls = [{"id": "1", "function": {"name": "RUN_CMD", "arguments": '{"cmd": "cat big.log"}'}}]
-        core = _FakeCore([
-            ("", tool_calls, "groq", "llama"),
-            ("done", None, "groq", "llama"),
-        ])
-        core.skills = _FakeToolSkills([huge])
-        seen = []
-        messages = ac.run_tool_loop(
-            core, [{"role": "user", "content": "read the log"}],
-            on_assistant=lambda t, p, m: None,
-            on_tool_result=lambda name, r, extra: seen.append(r),
-        )
-        assert seen == [huge], "операторът трябва да вижда пълния изход"
-        stored = next(m for m in messages if m.get("role") == "tool")["content"]
-        # Близо до зададения таван, не просто "по-малко от огромното" — иначе
-        # тестът минава и когато клипването изобщо не се е приложило.
-        assert len(stored) < 800
-        assert stored.startswith("log line 0")
-        assert stored.rstrip().endswith("log line 2999")
-
-    def test_text_tag_results_are_clipped_too(self, monkeypatch) -> None:
-        monkeypatch.setattr("genesis_agent.budget.TOOL_RESULT_MAX_CHARS", 400)
-        huge = "x" * 40_000
-        core = _FakeCore([
-            ("[RUN_CMD: cat big.log]", None, "groq", "llama"),
-            ("done", None, "groq", "llama"),
-        ])
-
-        class _TextTagSkills(_FakeToolSkills):
-            def parse_and_execute_tools(self, text):
-                return [huge] if "[RUN_CMD" in text else []
-
-        core.skills = _TextTagSkills([])
-        messages = ac.run_tool_loop(
-            core, [{"role": "user", "content": "read it"}],
-            on_assistant=lambda t, p, m: None,
-            on_tool_result=lambda *a: None,
-        )
-        injected = [m for m in messages
-                    if m.get("role") == "system" and "[Резултат]" in m.get("content", "")]
-        assert injected, "текстовият път трябва да инжектира резултата"
-        assert len(injected[0]["content"]) < 1200
-
-
-class TestSimulatedWorkIsCaughtMidLoop:
-    """The old check only fired on round 0, so any harmless tool call bought
-    the model a free pass for the rest of the turn. These assert the check
-    now follows what was actually executed, whatever the round."""
-
-    def test_a_claim_after_an_unrelated_tool_call_is_challenged(self) -> None:
-        calls = [{"id": "1", "function": {"name": "LIST_DIR",
-                                          "arguments": '{"path": "/home/user"}'}}]
-        core = _FakeCore([
-            ("", calls, "p", "m"),
-            ("Готово — инсталирах пакета.", None, "p", "m"),
-            ("Не съм. Ето какво остава.", None, "p", "m"),
-        ])
-        core.skills = _FakeToolSkills(["file1\nfile2"])
-        messages = ac.run_tool_loop(
-            core, [{"role": "user", "content": "инсталирай пакета"}],
-            on_assistant=lambda t, p, m: None,
-            on_tool_result=lambda *a: None,
-        )
-        nudges = [m for m in messages if m.get("role") == "system"
-                  and "нито един изпълнен инструмент" in str(m.get("content", ""))]
-        assert nudges, "неподкрепеното твърдение трябваше да бъде оспорено"
-
-    def test_a_claim_backed_by_the_matching_command_passes_untouched(self) -> None:
-        calls = [{"id": "1", "function": {"name": "RUN_CMD",
-                                          "arguments": '{"cmd": "pip install ruff"}'}}]
-        core = _FakeCore([
-            ("", calls, "p", "m"),
-            ("Инсталирах ruff.", None, "p", "m"),
-        ])
-        core.skills = _FakeToolSkills(["Successfully installed ruff"])
-        messages = ac.run_tool_loop(
-            core, [{"role": "user", "content": "инсталирай ruff"}],
-            on_assistant=lambda t, p, m: None,
-            on_tool_result=lambda *a: None,
-        )
-        nudges = [m for m in messages if m.get("role") == "system"
-                  and "нито един изпълнен инструмент" in str(m.get("content", ""))]
-        assert not nudges, "истинската инсталация не бива да се оспорва"
-
-
-class TestALongTurnKeepsItsTask:
-    """2026-09-30: deque(maxlen=30) изхвърляше посред хода системния промпт и
-    заявката; ollama после отговаряше празно (done_reason=load) до края."""
-
-    def test_every_request_of_a_20_round_turn_has_the_system_prompt_and_the_task(self) -> None:
-        from collections import deque
-        rounds = 20
-        replies = [("", [{"id": f"c{i}", "function": {"name": "READ_FILE",
-                                                      "arguments": f'{{"path": "f{i}.py"}}'}}],
-                    "ollama", "gpt-oss") for i in range(rounds)] + [("готово", None, "ollama", "gpt-oss")]
-        seen: list[list[dict]] = []
-
-        class _Core(_FakeCore):
-            def complete(self, messages):
-                seen.append(list(messages))
-                return super().complete(messages)
-
-        core = _Core(replies)
-        core.skills = _FakeToolSkills([f"[READ_FILE: f{i}.py]\nx = {i}" for i in range(rounds)])
-        history = deque([{"role": "system", "content": "SYS"}], maxlen=30)
-        history.append({"role": "user", "content": "ЗАДАЧАТА"})
-        out = ac.run_tool_loop(core, history, on_assistant=lambda *a: None,
-                               on_tool_result=lambda *a: None)
-        assert len(seen) == rounds + 1
-        for sent in seen:
-            assert sent[0] == {"role": "system", "content": "SYS"}
-            assert any(m.get("content") == "ЗАДАЧАТА" for m in sent)
-        assert out.maxlen == 30 and out[0]["role"] == "system"
-        assert out[1]["role"] != "tool"
 
 
 def test_bounded_history_keeps_the_system_prompt_and_whole_rounds() -> None:

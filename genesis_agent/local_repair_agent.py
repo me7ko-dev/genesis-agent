@@ -22,10 +22,13 @@ GENESIS 0 — LOCAL REPAIR AGENT (Авариен режим)
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 
 import requests
+
+log = logging.getLogger("genesis.repair")
 
 # ─── КОНФИГУРАЦИЯ ────────────────────────────────────────────────────────────
 # LM Studio директно — порт 1234 е неговият дефолт
@@ -210,7 +213,7 @@ class TinyLLM:
                     self.model = models[0]["id"]
                     return True
         except Exception:
-            pass
+            log.debug("LM Studio не отговори", exc_info=True)
 
         # Опитай Ollama (порт 11434)
         try:
@@ -222,7 +225,7 @@ class TinyLLM:
                     self.ollama_model = models[0]["name"]
                     return True
         except Exception:
-            pass
+            log.debug("локалният Ollama не отговори", exc_info=True)
 
         return False
 
@@ -249,6 +252,7 @@ class TinyLLM:
             else:
                 return self._call_ollama(prompt)
         except Exception as e:
+            log.debug("малкият модел за ремонт падна", exc_info=True)
             print(f"  [RepairLLM] Грешка: {e}")
             return None
 
@@ -305,7 +309,6 @@ class LocalRepairAgent:
 
     def __init__(self):
         self.llm = TinyLLM()
-        self._pattern = PatternFixer()
 
     def repair(self, code: str, error: str, stdout: str = "") -> RepairResult:
         """
@@ -392,6 +395,7 @@ class LocalRepairAgent:
                 code, policy=sandbox.SandboxPolicy(mode="deny"), timeout=15
             )
         except Exception as e:
+            log.debug("пробата на ремонтирания код в sandbox-а падна", exc_info=True)
             return {"ok": False, "error": str(e)}
         if res.blocked:
             return {"ok": False, "error": f"sandbox отказа кода: {res.stderr[:400]}"}

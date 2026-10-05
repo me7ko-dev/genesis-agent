@@ -16,12 +16,15 @@ stdout е поток от JSON редове (`{"kind": ...}`), по един н�
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import time
 from collections import deque
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger("genesis.runner")
 
 MAX_TOOL_OUTPUT = 4000
 # Уеб чатът (cloud/web): всяко съобщение е нов контейнер в СЪЩАТА папка, затова
@@ -141,6 +144,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         gta.run_turn(messages, text, JsonTurnUI())
     except Exception as e:  # всяка грешка трябва да стигне до клиента
+        log.debug("ходът падна — грешката отива при клиента", exc_info=True)
         ok, error = False, f"{type(e).__name__}: {e}"[:500]
     # Изчерпана верига не хвърля — идва като отговор „[Грешка: ...]". Без това
     # задачата, в която нито един модел не отговори, щеше да е „успешна" и

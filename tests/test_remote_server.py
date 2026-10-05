@@ -318,6 +318,18 @@ def test_guessing_is_slowed_down(live) -> None:
     assert codes[0] == 401 and codes[-1] == 429
 
 
+
+def test_a_slowed_down_client_still_reads_its_429(live) -> None:
+    """2026-10-05: 429 без прочитане на тялото → на Windows затварянето с
+    непрочетени данни праща RST и клиентът вижда WinError 10053, не 429."""
+    base, _, _ = live
+    junk = json.dumps({"v": 1, "n": "AAAA", "c": "AAAA"}).encode()
+    for _ in range(30):
+        _post(base, junk)
+    big = json.dumps({"v": 1, "n": "A" * 200_000, "c": "AAAA"}).encode()
+    for _ in range(5):
+        assert _post(base, big)[0] == 429
+
 def test_the_web_page_falls_back_to_a_landing_page(live) -> None:
     base, _, _ = live
     with urllib.request.urlopen(base + "/", timeout=5) as r:

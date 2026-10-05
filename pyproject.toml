@@ -96,27 +96,32 @@ addopts = "--ignore=scripts --ignore=bench"
 target-version = "py310"
 
 [tool.ruff.lint]
+# Сложност (2026-10-05): функциите над 15 са разцепени, всяка с тестове преди
+# това. Трите с `noqa: C901` чакат merge на feat/desktop-app и
+# feat/android-standalone, които ги пренаписват (NEXT_STEPS).
+extend-select = ["C901"]
 ignore = [
     # datetime.now()/date.today() without tzinfo: every flagged call site
     # compares against another naive call from the same process (self-consistent,
     # no aware/naive mixing bug) or formats a filename/display string for the
     # user's local clock, where UTC would be the wrong, more confusing choice.
     "DTZ005", "DTZ006", "DTZ011",
-    # Accepted debt, not a false positive: ~220 call sites across the codebase
-    # (mostly best-effort optional-integration fallbacks) blindly catch or
-    # swallow exceptions. The security/reliability-critical modules (sandbox,
-    # brain, executor, budget) have been triaged —
-    # broad catches there are either narrowed, logged, or annotated with a
-    # specific `# noqa` explaining why. The remaining call sites (peripheral
-    # modules, terminal frontend) still need per-site review; enabling
-    # these two rules repo-wide now would make the CI gate fail on pre-existing
-    # code instead of catching new regressions. Tighten file-by-file as those
-    # modules get touched, then drop the corresponding ignore.
-    "BLE001", "S110",
+    # BLE001/S110 (сляпо `except Exception`, `except: pass`) НЕ са тук: от
+    # 2026-10-04 са включени за цялото репо. Всяко прихващане или е стеснено
+    # до грешките, които наистина идват, или е граница, която нарочно не спира
+    # работата — тогава записва грешката със следата (log.debug(...,
+    # exc_info=True), вижда се с GENESIS_DEBUG=1), или носи `noqa` с причина.
 ]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
 
 [tool.mypy]
 # Optional third-party libs (playwright, google-auth, anthropic) may be
 # missing or ship no type stubs. Without this, mypy
 # on those files is 100% import-resolution noise, not real findings.
 ignore_missing_imports = true
+# Телата на функциите без анотации също се проверяват. Без това mypy
+# прескачаше точно стария код (терминалът, менютата), а там бяха и трите
+# грешки, които излязоха при включването (2026-10-04).
+check_untyped_defs = true

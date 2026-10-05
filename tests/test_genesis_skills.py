@@ -15,6 +15,8 @@ Three properties matter most, and are what these tests are built around:
 """
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -138,12 +140,79 @@ def test_write_file_outside_workspace_is_denied_non_interactively(_workspace, tm
     assert "SANDBOX DENIED" in out or "[WRITE_FILE]" in out
 
 
+def _typo_workspace(tmp_path_factory):
+    """Workspace `Projects/genitest`, моделът пише в `Projects/genittest`."""
+    parent = tmp_path_factory.mktemp("Projects")
+    ws = parent / "genitest"
+    (ws / "src").mkdir(parents=True)
+    gs.set_workspace(ws)
+    return ws, parent / "genittest"
+
+
+def test_write_outside_workspace_with_a_typo_points_into_the_workspace(tmp_path_factory) -> None:
+    """NEXT_STEPS Б.9: абсолютен път с правописна грешка → отказът е правилен,
+    но рундът се губеше. Отказът вече сочи същия път в workspace-а."""
+    ws, typo = _typo_workspace(tmp_path_factory)
+    out = gs._tool_write_file(str(typo / "src" / "egn.py"), "x = 1\n")
+    assert not typo.exists()
+    assert f"Може би: {ws / 'src' / 'egn.py'}" in out
+
+
+def test_edit_outside_workspace_with_a_typo_points_into_the_workspace(tmp_path_factory) -> None:
+    ws, typo = _typo_workspace(tmp_path_factory)
+    (ws / "src" / "egn.py").write_text("x = 1\n", encoding="utf-8")
+    out = gs._tool_edit_file(str(typo / "src" / "egn.py"), "x = 1", "x = 2")
+    assert f"Може би: {ws / 'src' / 'egn.py'}" in out
+
+
+def test_write_unrelated_path_outside_workspace_names_the_workspace(_workspace, tmp_path_factory) -> None:
+    out = gs._tool_write_file(str(tmp_path_factory.mktemp("outside") / "a.txt"), "x")
+    assert f"Workspace: {_workspace.resolve()}" in out and "Може би" not in out
+
+
+def test_first_test_in_tests_dir_gets_a_root_conftest_and_pytest_imports_the_module(_workspace) -> None:
+    """NEXT_STEPS Г.10: при ЕГН 4 рунда отидоха, докато tests/ видят egn.py от
+    корена. С празен conftest.py в корена pytest го вижда от първия път."""
+    gs._tool_write_file("egn.py", "def ok():\n    return True\n")
+    out = gs._tool_write_file("tests/test_egn.py", "from egn import ok\n\n\ndef test_ok():\n    assert ok()\n")
+    assert (_workspace / "conftest.py").is_file() and "+ conftest.py" in out
+    run = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"],
+                         cwd=_workspace, capture_output=True, text=True, timeout=60, check=False)
+    assert run.returncode == 0, run.stdout[-500:]
+
+
+def test_existing_root_conftest_is_left_alone(_workspace) -> None:
+    (_workspace / "conftest.py").write_text("import x  # own\n", encoding="utf-8")
+    out = gs._tool_write_file("tests/test_a.py", "def test_a():\n    pass\n")
+    assert (_workspace / "conftest.py").read_text(encoding="utf-8") == "import x  # own\n"
+    assert "+ conftest.py" not in out
+
+
+def test_workspace_named_tests_gets_no_conftest_above_it(tmp_path_factory) -> None:
+    ws = tmp_path_factory.mktemp("parent") / "tests"
+    ws.mkdir()
+    gs.set_workspace(ws)
+    gs._tool_write_file(str(ws / "test_a.py"), "def test_a():\n    pass\n")
+    assert not (ws.parent / "conftest.py").exists()
+
+
 def test_write_file_without_a_file_name_says_so(_workspace) -> None:
     """bench faktura-excel 2026-09-29: празен path → write_text върху папката →
     „Permission denied“, и моделът питаше дали папката е защитена."""
     for arg in ("", str(_workspace)):
         out = gs._tool_write_file(arg, "x = 1\n")
         assert "Няма име на файл" in out and "Permission" not in out
+
+
+def test_write_file_reports_a_syntax_error_without_ruff(_workspace, monkeypatch) -> None:
+    """bench booking-form 2026-10-01: b'кирилица' в теста се записа с „✓“ и
+    грешката излезе чак при pytest. Записът остава — моделът поиска точно това."""
+    monkeypatch.setattr("genesis_agent.code_validate._ruff_available", lambda: False)
+    out = gs._tool_write_file("test_app.py", "def test_x(r):\n    assert b'Мария' in r\n")
+    assert "✓" in out and "не се компилира" in out and "L2" in out, out
+    assert (_workspace / "test_app.py").exists()
+    out = gs._tool_write_file("ok.py", "x = 1\n")
+    assert "не се компилира" not in out
 
 
 def test_dispatch_repairs_regex_escapes_in_raw_arguments(_workspace) -> None:
@@ -825,3 +894,93 @@ def test_no_import_hint_once_conftest_exists(tmp_path) -> None:
     (tmp_path / "egn.py").write_text("")
     (tmp_path / "conftest.py").write_text("")
     assert gs._import_path_hint(_MISSING, tmp_path) == ""
+
+# ── dispatch_tool_call: всяко име → своя backend със своите аргументи ────────
+_DISPATCH = [
+    ("READ_FILE", {"path": "a.py", "offset": 3, "limit": 9}, "_tool_read_file", ("a.py", 3, 9)),
+    ("READ_FILE", {}, "_tool_read_file", ("", None, None)),
+    ("WRITE_FILE", {"path": "a.py", "content": "x"}, "_tool_write_file", ("a.py", "x")),
+    ("EDIT_FILE", {"path": "a.py", "old": "o", "new": "n", "replace_all": 1},
+     "_tool_edit_file", ("a.py", "o", "n", True)),
+    ("EDIT_FILE", {}, "_tool_edit_file", ("", "", "", False)),
+    ("SEARCH_CODE", {"pattern": "p", "path": None, "glob": "*.py"},
+     "_tool_search_code", ("p", "", "*.py")),
+    ("REPO_MAP", {"path": None}, "_tool_repo_map", ("",)),
+    ("GLOB", {"pattern": "*.py", "path": "src"}, "_tool_glob", ("*.py | src",)),
+    ("GLOB", {"pattern": "*.py"}, "_tool_glob", ("*.py",)),
+    ("RUN_CMD", {"command": "ls"}, "_tool_run_cmd", ("ls",)),
+    ("ASK_USER", {"question": "q", "options": ["a"]}, "_tool_ask_user", ("q", ["a"])),
+    ("WEB_SEARCH", {"query": "q"}, "_tool_web_search", ("q",)),
+    ("RESEARCH", {"question": "q"}, "_tool_research", ("q",)),
+    ("LIST_DIR", {"path": "."}, "_tool_list_dir", (".",)),
+    ("USE_SKILL", {"name_or_query": "s", "driver_code": None}, "_tool_use_skill", ("s", "")),
+    ("DELEGATE", {"goal": "g"}, "_tool_delegate", ("g",)),
+    ("BROWSE", {"url": "u"}, "_tool_browse", ("u",)),
+    ("BROWSER_READ", {"x": 1}, "_tool_browser_read", ()),
+    ("BROWSER_CLICK", {"index_or_text": "3"}, "_tool_browser_click", ("3",)),
+    ("BROWSER_TYPE", {"index_or_text": "3", "text": "hi"}, "_tool_browser_type", ("3 | hi",)),
+    ("TASK_LIST", {}, "_tool_task_list", ("open",)),
+    ("TASK_LIST", {"status": "done"}, "_tool_task_list", ("done",)),
+]
+
+
+@pytest.mark.parametrize("name, args, backend, expected", _DISPATCH)
+def test_dispatch_routes_each_tool(monkeypatch, name, args, backend, expected) -> None:
+    seen: list[tuple] = []
+    monkeypatch.setattr(gs, backend, lambda *a: seen.append(a) or "ok")
+    assert gs.dispatch_tool_call(name, args) == "ok"
+    assert seen == [expected]
+
+
+@pytest.mark.parametrize("name, args, backend, expected", [
+    ("REMEMBER", {"kind": "Предпочитание", "topic": "t", "value": "v"}, "set_preference", ("t", "v")),
+    ("REMEMBER", {"topic": "t", "why": "w"}, "add_decision", ("t", "w")),
+    ("REMEMBER", {"kind": "decision", "topic": "t", "value": "v"}, "add_decision", ("v", "")),
+    ("TASK_ADD", {"title": "t", "next_step": "n"}, "add_thread", ("t", "n")),
+    ("TASK_UPDATE", {"id": 2, "status": "done"}, "update_thread", (2, "done", "")),
+])
+def test_dispatch_routes_memory_tools(monkeypatch, name, args, backend, expected) -> None:
+    from genesis_agent import workspace_memory as wm
+    seen: list[tuple] = []
+    monkeypatch.setattr(wm, backend, lambda *a: seen.append(a) or "ok")
+    assert gs.dispatch_tool_call(name, args) == "ok"
+    assert seen == [expected]
+
+
+def test_dispatch_bad_input_never_raises(monkeypatch) -> None:
+    assert gs.dispatch_tool_call("NOPE", {}) == "[NOPE] Непознат tool."
+    assert "Невалидни аргументи" in gs.dispatch_tool_call("READ_FILE", "{не е json")
+    monkeypatch.setattr(gs, "_tool_list_dir", lambda p: [] if p else 1 / 0)
+    assert gs.dispatch_tool_call("LIST_DIR", ["не", "dict"]).startswith("[LIST_DIR] Грешка при изпълнение")
+
+
+def test_parse_runs_every_tag_kind_in_text_order_and_skips_nested(monkeypatch) -> None:
+    """Всички видове тагове в една реплика: изпълнение блокове → USE_SKILL без край
+    → едноредови → без аргумент; резултатите — по реда в текста (C901 21)."""
+    ran: list[tuple] = []
+
+    def _rec(name):
+        return lambda *a: ran.append((name, *a)) or f"<{name}>"
+
+    for fn in ("_tool_edit_file", "_tool_write_file", "_tool_use_skill", "_tool_browser_read",
+               "_tool_repo_map", "_tool_task_list"):
+        monkeypatch.setattr(gs, fn, _rec(fn))
+    monkeypatch.setitem(gs._SIMPLE_DISPATCH, "LIST_DIR", _rec("list_dir"))
+    sep = gs._EDIT_SEPARATOR
+    text = (f"[TASK_LIST] [LIST_DIR: src] [EDIT_FILE: a.py]\nold\n{sep}\nnew\n[END_EDIT]"
+            " [USE_SKILL: s] [BROWSER_READ] [EDIT_FILE: b.py]x[END_EDIT]"
+            " [WRITE_FILE: d.md]виж [REPO_MAP] и [LIST_DIR: no][END_WRITE] [REPO_MAP]")
+    out = gs.parse_and_execute_tools(text)
+    assert [r.split("\n")[0] for r in out] == [
+        "<_tool_task_list>", "<list_dir>", "<_tool_edit_file>", "<_tool_use_skill>",
+        "<_tool_browser_read>",
+        f"[EDIT_FILE: b.py] ❌ Липсва разделителят {sep} между стария и новия текст.",
+        "<_tool_write_file>", "<_tool_repo_map>"]
+    assert ran == [("_tool_edit_file", "a.py", "old", "new"),
+                   ("_tool_write_file", "d.md", "виж [REPO_MAP] и [LIST_DIR: no]"),
+                   ("_tool_use_skill", "s", ""),
+                   ("list_dir", "src"),
+                   ("_tool_browser_read",),
+                   ("_tool_repo_map", ""),
+                   ("_tool_task_list", "open")]
+    assert gs.parse_and_execute_tools("") == []

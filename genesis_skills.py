@@ -27,10 +27,15 @@ CONFIRM/BLOCKED бариерата) и се записва в genesis_agent.memo
 
 from __future__ import annotations
 
+import difflib
+import logging
 import re
 import sys
 from collections.abc import Callable
 from pathlib import Path
+
+# Прихванатите грешки на инструментите (вижда се с GENESIS_DEBUG=1).
+log = logging.getLogger("genesis.skills")
 
 # Уверяваме се, че genesis_agent/ пакетът е импортируем (мостът стои в root-а).
 _PROJECT_ROOT = Path(__file__).resolve().parent
@@ -45,16 +50,19 @@ from genesis_agent.tool_schemas import load_tool_arguments
 try:
     from genesis_agent.memory import memory_record_episode
 except Exception:  # pragma: no cover
+    log.debug("паметта за епизоди не се зареди — без логване", exc_info=True)
     memory_record_episode = None  # type: ignore
 
 try:
     from genesis_agent import web_search
 except Exception:  # pragma: no cover
+    log.debug("уеб търсенето не се зареди — WEB_SEARCH е изключен", exc_info=True)
     web_search = None  # type: ignore
 
 try:
     from genesis_agent import browser as _browser_mod
 except Exception:  # pragma: no cover
+    log.debug("браузърът не се зареди — BROWSER_* са изключени", exc_info=True)
     _browser_mod = None  # type: ignore
 
 
@@ -86,13 +94,33 @@ def set_workspace(path) -> None:
         from genesis_agent import workspace_memory
         workspace_memory.set_workspace(path)
     except Exception:
-        pass
+        log.debug("паметта за работата не смени папката", exc_info=True)
 
 
 def _resolve(path_str: str) -> Path:
     """Разрешава път — относителните са спрямо workspace-а."""
     p = Path(path_str.strip()).expanduser()
     return p if p.is_absolute() else (_WORKSPACE / p)
+
+
+def _outside_hint(path: Path) -> str:
+    """Посоката към отказа за запис извън workspace-а (NEXT_STEPS Б.9).
+
+    Моделът пише абсолютен път с правописна грешка (`...\\Projects\\genittest`
+    при workspace `genitest`) — отказът е правилен, но без посока рундът се
+    губеше. Папка по пътя, която прилича на името на workspace-а → същият път
+    в него; иначе поне кой е workspace-ът.
+    """
+    ws = _WORKSPACE.resolve()
+    try:
+        path = path.resolve()
+    except OSError:
+        pass
+    parts = path.parts
+    for i in range(len(parts) - 2, 0, -1):
+        if difflib.SequenceMatcher(None, parts[i].casefold(), ws.name.casefold()).ratio() >= 0.8:
+            return f"\nWorkspace: {ws}. Може би: {ws.joinpath(*parts[i + 1:])}"
+    return f"\nWorkspace: {ws} — пиши с относителен път."
 
 
 def _sensitive_root_refusal(tool: str, root: Path) -> str | None:
@@ -133,7 +161,8 @@ def _log_episode(goal: str, outcome: str, tags: list[str]) -> None:
         memory_record_episode(goal=goal, outcome=outcome[:2000],
                               skill_path="genesis_skills.bridge", tags=tags)
     except Exception:
-        pass  # логването никога не бива да чупи изпълнението
+        # логването никога не бива да чупи изпълнението
+        log.debug("епизодът не се записа", exc_info=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -240,7 +269,7 @@ def _tool_write_file(arg: str, content: str) -> str:
                                       [f"запис извън workspace: {path}"])
         allowed, reason = sandbox._decide(f"WRITE_FILE {path}", verdict, sandbox.get_policy())
         if not allowed:
-            return f"[WRITE_FILE] {reason}"
+            return f"[WRITE_FILE] {reason}{_outside_hint(path)}"
     # Ruff pre-check преди диска, само за .py (design note, 2026-07-29): не
     # блокираме записа при unfixable проблеми (моделът изрично поиска точно
     # това съдържание) — но ако ruff го оправи автоматично, пишем ФИКСНАТАТА
@@ -254,6 +283,14 @@ def _tool_write_file(arg: str, content: str) -> str:
             content = detail
         elif not ok:
             lint_note = f"\n{detail}"
+        if not lint_note:
+            # Без ruff (не е задължителен — на лаптопа го няма) счупеният файл
+            # се записваше с „✓“ и грешката излизаше чак при pytest като
+            # срив при събирането (bench booking-form, 2026-10-01).
+            from genesis_agent.code_edit import syntax_error
+            err = syntax_error(path, content)
+            if err:
+                lint_note = f"\n⚠ Файлът е записан, но не се компилира: {err}"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
@@ -263,7 +300,30 @@ def _tool_write_file(arg: str, content: str) -> str:
     _log_episode(f"WRITE_FILE {path}", f"записани {len(content)} символа",
                  ["tool", "write_file"])
     from genesis_agent.web_check import web_note
-    return f"[WRITE_FILE: {path}] ✓ записани {len(content)} символа{lint_note}{web_note(path)}"
+    return (f"[WRITE_FILE: {path}] ✓ записани {len(content)} символа{lint_note}"
+            f"{_root_conftest_note(path)}{web_note(path)}")
+
+
+def _root_conftest_note(path: Path) -> str:
+    """Празен conftest.py в корена при първия тест в tests/ (NEXT_STEPS Г.10).
+
+    `_import_path_hint` казва решението СЛЕД провала; при ЕГН (2026-09-25)
+    дотам отидоха 4 рунда. Празният conftest.py кара pytest да сложи корена в
+    sys.path — тестовете виждат модулите от първото пускане. Само в
+    workspace-а и само ако там още няма conftest.py.
+    """
+    if path.suffix != ".py" or path.parent.name != "tests" or not path.name.startswith("test_"):
+        return ""
+    root = path.parent.parent
+    conftest = root / "conftest.py"
+    try:
+        if conftest.exists() or not root.resolve().is_relative_to(_WORKSPACE.resolve()):
+            return ""
+        conftest.write_text("", encoding="utf-8")
+    except OSError:
+        return ""
+    _SEEN_PATHS.add(conftest.resolve())
+    return f"\n+ conftest.py (празен) в {root} — pytest вижда модулите в корена от tests/."
 
 
 def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False) -> str:
@@ -293,7 +353,7 @@ def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False
                                       [f"редакция извън workspace: {path}"])
         allowed, reason = sandbox._decide(f"EDIT_FILE {path}", verdict, sandbox.get_policy())
         if not allowed:
-            return f"[EDIT_FILE] {reason}"
+            return f"[EDIT_FILE] {reason}{_outside_hint(path)}"
 
     from genesis_agent.code_edit import edit_file
     res = edit_file(path, old, new, replace_all=replace_all)
@@ -423,7 +483,7 @@ def _tool_run_cmd(arg: str) -> str:
             from genesis_agent.notifier import notify
             notify(f"🛡️ **Genesis Sandbox** блокира опасна команда:\n`{command[:300]}`\n{res.stderr[:200]}")
         except Exception:
-            pass
+            log.debug("известието за блокирана команда не тръгна", exc_info=True)
         return f"[RUN_CMD: {command}]\n{res.stderr}"
     out = res.stdout.strip()
     err = res.stderr.strip()
@@ -493,6 +553,7 @@ def _tool_web_search(arg: str) -> str:
     try:
         results = web_search.search(query, max_results=5)
     except Exception as e:
+        log.debug("WEB_SEARCH падна — грешката отива при модела", exc_info=True)
         return f"[WEB_SEARCH: {query}] Грешка: {e}"
     if not results:
         return f"[WEB_SEARCH: {query}] Няма резултати."
@@ -509,7 +570,7 @@ def _tool_research(arg: str) -> str:
     вместо моделът просто да "повярва" на първия snippet."""
     try:
         from genesis_agent.research import grounded_research
-    except Exception as e:
+    except ImportError as e:
         return f"[RESEARCH] research модулът не е наличен: {e}"
     return grounded_research(arg.strip())
 
@@ -607,7 +668,7 @@ def _tool_use_skill(name_arg: str, driver: str) -> str:
     """Реално изпълнение на съществуващо умение (не просто регенерация от нула)."""
     try:
         from genesis_agent.skill_loader import use_skill
-    except Exception as e:
+    except ImportError as e:
         return f"[USE_SKILL] skill_loader модулът не е наличен: {e}"
     result = use_skill(name_arg, driver)
     _log_episode(f"USE_SKILL {name_arg.strip()}", result[:300], ["tool", "use_skill"])
@@ -622,7 +683,7 @@ def _tool_remember(arg: str) -> str:
     да чете инжектираното при старт."""
     try:
         from genesis_agent import workspace_memory as wm
-    except Exception as e:
+    except ImportError as e:
         return f"[REMEMBER] workspace_memory не е наличен: {e}"
     parts = [p.strip() for p in arg.split("|")]
     kind = parts[0].lower() if parts else ""
@@ -642,7 +703,7 @@ def _tool_task_add(arg: str) -> str:
     """[TASK_ADD: заглавие | следваща стъпка]"""
     try:
         from genesis_agent import workspace_memory as wm
-    except Exception as e:
+    except ImportError as e:
         return f"[TASK_ADD] workspace_memory не е наличен: {e}"
     parts = [p.strip() for p in arg.split("|")]
     return wm.add_thread(parts[0], parts[1] if len(parts) > 1 else "")
@@ -652,7 +713,7 @@ def _tool_task_update(arg: str) -> str:
     """[TASK_UPDATE: id | статус | следваща стъпка]  (статус: open/blocked/done)"""
     try:
         from genesis_agent import workspace_memory as wm
-    except Exception as e:
+    except ImportError as e:
         return f"[TASK_UPDATE] workspace_memory не е наличен: {e}"
     parts = [p.strip() for p in arg.split("|")]
     return wm.update_thread(parts[0],
@@ -664,7 +725,7 @@ def _tool_task_list(arg: str = "") -> str:
     """[TASK_LIST] или [TASK_LIST: all|open|blocked|done]"""
     try:
         from genesis_agent import workspace_memory as wm
-    except Exception as e:
+    except ImportError as e:
         return f"[TASK_LIST] workspace_memory не е наличен: {e}"
     status = (arg or "open").strip().lower() or "open"
     rows = wm.list_threads(status, 30)
@@ -681,7 +742,7 @@ def _tool_delegate(arg: str) -> str:
     goal = arg.strip()
     try:
         from genesis_agent.delegate import delegate_task, wait_all
-    except Exception as e:
+    except ImportError as e:
         return f"[DELEGATE: {goal}] delegate модулът не е наличен: {e}"
     task = delegate_task(goal, agent="autonomous", timeout=600)
     wait_all([task], timeout=600)
@@ -781,6 +842,7 @@ def _safe_tool(name: str, fn: Callable[..., str], *args) -> str:
     try:
         return fn(*args)
     except Exception as e:
+        log.debug("инструментът падна — грешката отива при модела", exc_info=True)
         return f"[{name}] Грешка при изпълнение: {e}"
 
 
@@ -799,6 +861,46 @@ def parse_and_execute_readonly_tools(response_text: str) -> list[str]:
         results.append((m.start(), _safe_tool(m.group("tool"), fn, m.group("arg"))))
     results.sort(key=lambda t: t[0])
     return [r for _, r in results]
+
+
+def _run_block(kind: str, m: re.Match) -> str:
+    """Един блоков таг (WRITE_FILE / EDIT_FILE / USE_SKILL), вече решено, че не е вложен."""
+    if kind == "WRITE_FILE":
+        return _safe_tool("WRITE_FILE", _tool_write_file, m.group("path"), m.group("body"))
+    if kind == "USE_SKILL":
+        return _safe_tool("USE_SKILL", _tool_use_skill, m.group("name"), m.group("body"))
+    body = m.group("body")
+    if _EDIT_SEPARATOR not in body:
+        return (f"[EDIT_FILE: {m.group('path').strip()}] ❌ Липсва разделителят "
+                f"{_EDIT_SEPARATOR} между стария и новия текст.")
+    old_part, new_part = body.split(_EDIT_SEPARATOR, 1)
+    return _safe_tool("EDIT_FILE", _tool_edit_file, m.group("path"),
+                      _strip_one_newline(old_part), _strip_one_newline(new_part))
+
+
+def _run_bare_use_skill(m: re.Match) -> str:
+    out = _safe_tool("USE_SKILL", _tool_use_skill, m.group("name"), "")
+    # Изпълнено е — но ако моделът е искал да ВИКА нещо от умението, нека
+    # научи точния синтаксис, вместо да гадае пак следващия рунд. Само при
+    # УСПЕШНО заредено умение: ако такова изобщо няма, синтаксисът на
+    # driver кода е без значение и бележката е чист шум в контекста.
+    if not any(marker in out for marker in _USE_SKILL_FAILURES):
+        out += ("\n(Без driver код — блокът не беше затворен. За да извикаш функция "
+                "от умението: [USE_SKILL: име]<твоят код>[END_USE_SKILL].)")
+    return out
+
+
+# Едноредовите тагове, в реда на изпълнение (стъпки 2–4 в parse_and_execute_tools).
+_LINE_TAGS: list[tuple[re.Pattern[str], Callable[[re.Match], str]]] = [
+    (_SIMPLE_RE, lambda m: _safe_tool(m.group("tool"), _SIMPLE_DISPATCH[m.group("tool")],
+                                      m.group("arg"))),
+    # 3. BROWSER_READ — без аргумент.
+    (_BROWSER_READ_RE, lambda m: _safe_tool("BROWSER_READ", _tool_browser_read)),
+    # 3b. REPO_MAP без аргумент — картира текущия workspace.
+    (_REPO_MAP_RE, lambda m: _safe_tool("REPO_MAP", _tool_repo_map, "")),
+    # 4. TASK_LIST без аргумент — [TASK_LIST] показва отворените нишки.
+    (_TASK_LIST_RE, lambda m: _safe_tool("TASK_LIST", _tool_task_list, "open")),
+]
 
 
 def parse_and_execute_tools(response_text: str) -> list[str]:
@@ -841,24 +943,7 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
         if _inside_block(start):
             continue  # вложен в вече приет блок → това е текст, не тул
         consumed_spans.append((start, end))
-        if kind == "WRITE_FILE":
-            results.append((start, _safe_tool("WRITE_FILE", _tool_write_file,
-                                              m.group("path"), m.group("body"))))
-        elif kind == "EDIT_FILE":
-            body = m.group("body")
-            if _EDIT_SEPARATOR not in body:
-                results.append((start,
-                                (f"[EDIT_FILE: {m.group('path').strip()}] ❌ Липсва разделителят "
-                                 f"{_EDIT_SEPARATOR} между стария и новия текст.")))
-            else:
-                old_part, new_part = body.split(_EDIT_SEPARATOR, 1)
-                results.append((start, _safe_tool("EDIT_FILE", _tool_edit_file,
-                                                  m.group("path"),
-                                                  _strip_one_newline(old_part),
-                                                  _strip_one_newline(new_part))))
-        else:  # USE_SKILL
-            results.append((start, _safe_tool("USE_SKILL", _tool_use_skill,
-                                              m.group("name"), m.group("body"))))
+        results.append((start, _run_block(kind, m)))
 
     # ── 1b. USE_SKILL БЕЗ затварящ [END_USE_SKILL] ──────────────────────────
     # Най-скъпият пропуск в целия парсер (bug fix, 2026-09-20). driver кодът е
@@ -877,40 +962,13 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
         if _inside_block(m.start()):
             continue
         consumed_spans.append((m.start(), m.end()))
-        out = _safe_tool("USE_SKILL", _tool_use_skill, m.group("name"), "")
-        # Изпълнено е — но ако моделът е искал да ВИКА нещо от умението, нека
-        # научи точния синтаксис, вместо да гадае пак следващия рунд. Само при
-        # УСПЕШНО заредено умение: ако такова изобщо няма, синтаксисът на
-        # driver кода е без значение и бележката е чист шум в контекста.
-        if not any(marker in out for marker in _USE_SKILL_FAILURES):
-            out += ("\n(Без driver код — блокът не беше затворен. За да извикаш функция "
-                    "от умението: [USE_SKILL: име]<твоят код>[END_USE_SKILL].)")
-        results.append((m.start(), out))
+        results.append((m.start(), _run_bare_use_skill(m)))
 
-    # ── 2. Едноредови тулове — прескачаме тези вътре в блоков таг ───────────
-    for m in _SIMPLE_RE.finditer(response_text):
-        if _inside_block(m.start()):
-            continue
-        fn = _SIMPLE_DISPATCH[m.group("tool")]
-        results.append((m.start(), _safe_tool(m.group("tool"), fn, m.group("arg"))))
-
-    # 3. BROWSER_READ — без аргумент.
-    for m in _BROWSER_READ_RE.finditer(response_text):
-        if _inside_block(m.start()):
-            continue
-        results.append((m.start(), _safe_tool("BROWSER_READ", _tool_browser_read)))
-
-    # 3b. REPO_MAP без аргумент — картира текущия workspace.
-    for m in _REPO_MAP_RE.finditer(response_text):
-        if _inside_block(m.start()):
-            continue
-        results.append((m.start(), _safe_tool("REPO_MAP", _tool_repo_map, "")))
-
-    # 4. TASK_LIST без аргумент — [TASK_LIST] показва отворените нишки.
-    for m in _TASK_LIST_RE.finditer(response_text):
-        if _inside_block(m.start()):
-            continue
-        results.append((m.start(), _safe_tool("TASK_LIST", _tool_task_list, "open")))
+    # ── 2–4. Едноредови тулове — прескачаме тези вътре в блоков таг ─────────
+    for rx, run in _LINE_TAGS:
+        for m in rx.finditer(response_text):
+            if not _inside_block(m.start()):
+                results.append((m.start(), run(m)))
 
     # Подреждаме по позиция в текста, връщаме само низовете.
     results.sort(key=lambda t: t[0])
@@ -944,6 +1002,51 @@ def looks_like_attempted_tool_tag(response_text: str) -> bool:
 # (config.yaml supports_tools). Двата пътя никога не се разминават в
 # ПОВЕДЕНИЕ, само в това как аргументите стигат до тях.
 
+def _memory_tool(name: str, a: dict) -> str:
+    """Памет за работата — структурираните аргументи тук са по-надеждни от
+    "|"-разделения текстов формат, затова викаме workspace_memory директно."""
+    from genesis_agent import workspace_memory as wm
+    if name == "REMEMBER":
+        kind = str(a.get("kind", "decision")).lower()
+        if kind.startswith(("pref", "предпочит")):
+            return wm.set_preference(a.get("topic", ""), a.get("value", ""))
+        return wm.add_decision(a.get("value", "") or a.get("topic", ""), a.get("why", ""))
+    if name == "TASK_ADD":
+        return wm.add_thread(a.get("title", ""), a.get("next_step", ""))
+    return wm.update_thread(a.get("id", ""), a.get("status", ""), a.get("next_step", ""))
+
+
+def _glob_args(a: dict) -> str:
+    pattern, path = a.get("pattern", ""), a.get("path", "") or ""
+    return f"{pattern} | {path}" if path else pattern
+
+
+# Името на native tool → backend. Ламбдите търсят `_tool_*` при извикване, така
+# че подмяната им (тестове, monkeypatch) важи и тук.
+_NATIVE_TOOLS: dict[str, Callable[[dict], str]] = {
+    "READ_FILE": lambda a: _tool_read_file(a.get("path", ""), a.get("offset"), a.get("limit")),
+    "WRITE_FILE": lambda a: _tool_write_file(a.get("path", ""), a.get("content", "")),
+    "EDIT_FILE": lambda a: _tool_edit_file(a.get("path", ""), a.get("old", ""), a.get("new", ""),
+                                           bool(a.get("replace_all", False))),
+    "SEARCH_CODE": lambda a: _tool_search_code(a.get("pattern", ""), a.get("path", "") or "",
+                                               a.get("glob", "") or ""),
+    "REPO_MAP": lambda a: _tool_repo_map(a.get("path", "") or ""),
+    "GLOB": lambda a: _tool_glob(_glob_args(a)),
+    "RUN_CMD": lambda a: _tool_run_cmd(a.get("command", "")),
+    "ASK_USER": lambda a: _tool_ask_user(a.get("question", ""), a.get("options")),
+    "WEB_SEARCH": lambda a: _tool_web_search(a.get("query", "")),
+    "RESEARCH": lambda a: _tool_research(a.get("question", "")),
+    "LIST_DIR": lambda a: _tool_list_dir(a.get("path", "")),
+    "USE_SKILL": lambda a: _tool_use_skill(a.get("name_or_query", ""), a.get("driver_code", "") or ""),
+    "DELEGATE": lambda a: _tool_delegate(a.get("goal", "")),
+    "BROWSE": lambda a: _tool_browse(a.get("url", "")),
+    "BROWSER_READ": lambda a: _tool_browser_read(),
+    "BROWSER_CLICK": lambda a: _tool_browser_click(a.get("index_or_text", "")),
+    "BROWSER_TYPE": lambda a: _tool_browser_type(f"{a.get('index_or_text', '')} | {a.get('text', '')}"),
+    "TASK_LIST": lambda a: _tool_task_list(a.get("status", "open")),
+}
+
+
 def dispatch_tool_call(name: str, arguments) -> str:
     """Изпълнява един native tool_call. Никога не хвърля — грешка връща като низ,
     така че цикълът може да я подаде обратно на модела и той да опита пак.
@@ -959,72 +1062,14 @@ def dispatch_tool_call(name: str, arguments) -> str:
     if not isinstance(arguments, dict):
         arguments = {}
     try:
-        if name == "READ_FILE":
-            return _tool_read_file(arguments.get("path", ""),
-                                   arguments.get("offset"), arguments.get("limit"))
-        if name == "WRITE_FILE":
-            return _tool_write_file(arguments.get("path", ""), arguments.get("content", ""))
-        if name == "EDIT_FILE":
-            return _tool_edit_file(arguments.get("path", ""),
-                                   arguments.get("old", ""),
-                                   arguments.get("new", ""),
-                                   bool(arguments.get("replace_all", False)))
-        if name == "SEARCH_CODE":
-            return _tool_search_code(arguments.get("pattern", ""),
-                                     arguments.get("path", "") or "",
-                                     arguments.get("glob", "") or "")
-        if name == "REPO_MAP":
-            return _tool_repo_map(arguments.get("path", "") or "")
-        if name == "GLOB":
-            pattern = arguments.get("pattern", "")
-            path = arguments.get("path", "") or ""
-            return _tool_glob(f"{pattern} | {path}" if path else pattern)
-        if name == "RUN_CMD":
-            return _tool_run_cmd(arguments.get("command", ""))
-        if name == "ASK_USER":
-            return _tool_ask_user(arguments.get("question", ""),
-                                  arguments.get("options"))
-        if name == "WEB_SEARCH":
-            return _tool_web_search(arguments.get("query", ""))
-        if name == "RESEARCH":
-            return _tool_research(arguments.get("question", ""))
-        if name == "LIST_DIR":
-            return _tool_list_dir(arguments.get("path", ""))
-        if name == "USE_SKILL":
-            return _tool_use_skill(arguments.get("name_or_query", ""), arguments.get("driver_code", "") or "")
-        if name == "DELEGATE":
-            return _tool_delegate(arguments.get("goal", ""))
-        if name == "BROWSE":
-            return _tool_browse(arguments.get("url", ""))
-        if name == "BROWSER_READ":
-            return _tool_browser_read()
-        if name == "BROWSER_CLICK":
-            return _tool_browser_click(arguments.get("index_or_text", ""))
-        if name == "BROWSER_TYPE":
-            idx = arguments.get("index_or_text", "")
-            text = arguments.get("text", "")
-            return _tool_browser_type(f"{idx} | {text}")
-        # Памет за работата — структурираните аргументи тук са по-надеждни от
-        # "|"-разделения текстов формат, затова викаме workspace_memory директно.
-        if name in ("REMEMBER", "TASK_ADD", "TASK_UPDATE", "TASK_LIST"):
-            from genesis_agent import workspace_memory as wm
-            if name == "REMEMBER":
-                kind = str(arguments.get("kind", "decision")).lower()
-                if kind.startswith(("pref", "предпочит")):
-                    return wm.set_preference(arguments.get("topic", ""),
-                                             arguments.get("value", ""))
-                return wm.add_decision(arguments.get("value", "") or arguments.get("topic", ""),
-                                       arguments.get("why", ""))
-            if name == "TASK_ADD":
-                return wm.add_thread(arguments.get("title", ""),
-                                     arguments.get("next_step", ""))
-            if name == "TASK_UPDATE":
-                return wm.update_thread(arguments.get("id", ""),
-                                        arguments.get("status", ""),
-                                        arguments.get("next_step", ""))
-            return _tool_task_list(arguments.get("status", "open"))
+        tool = _NATIVE_TOOLS.get(name)
+        if tool is not None:
+            return tool(arguments)
+        if name in ("REMEMBER", "TASK_ADD", "TASK_UPDATE"):
+            return _memory_tool(name, arguments)
         return f"[{name}] Непознат tool."
     except Exception as e:
+        log.debug("инструментът падна — грешката отива при модела", exc_info=True)
         return f"[{name}] Грешка при изпълнение: {e}"
 
 

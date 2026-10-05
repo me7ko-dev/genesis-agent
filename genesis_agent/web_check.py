@@ -14,12 +14,15 @@ example.com, aria-label върху div без роля, цени в лева д�
 """
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import subprocess
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
+
+log = logging.getLogger("genesis.web_check")
 
 WEB_SUFFIXES = {".html", ".htm", ".css", ".js", ".mjs"}
 _MAX_FINDINGS = 12
@@ -138,6 +141,7 @@ def check_html(path: Path, content: str) -> list[str]:
         c.feed(content)
         c.close()
     except Exception as e:  # HTMLParser почти не хвърля; ако все пак — казваме го
+        log.debug("HTMLParser хвърли — казва се като находка", exc_info=True)
         return [f"HTML не се парсва: {e}"]
     found: list[str] = []
     found += c.mismatched[:4]
@@ -145,6 +149,11 @@ def check_html(path: Path, content: str) -> list[str]:
               if t not in _OPTIONAL_END][:3]
     if not is_site_page(path, content):
         return found  # данни: само структурата, без SEO/достъпност/цени
+    return found + _link_findings(path, c) + _page_findings(c, content) + _lev_findings(c)
+
+
+def _link_findings(path: Path, c: _Collector) -> list[str]:
+    found: list[str] = []
     for ref_attr, ref in c.refs:
         if ref.startswith("#"):
             if len(ref) > 1 and unquote(ref[1:]) not in c.ids:
@@ -159,6 +168,11 @@ def check_html(path: Path, content: str) -> list[str]:
         host = urlsplit(url).hostname or ""
         if not url or not urlsplit(url).scheme or _PLACEHOLDER_HOST.search(host):
             found.append(f'og/twitter мета сочи към заместител „{url or "(празно)"}" — счупена връзка')
+    return found
+
+
+def _page_findings(c: _Collector, content: str) -> list[str]:
+    found: list[str] = []
     dup = [i for i, n in c.ids.items() if n > 1]
     if dup:
         found.append(f"повтарящи се id: {', '.join(dup[:5])}")
@@ -169,23 +183,25 @@ def check_html(path: Path, content: str) -> list[str]:
         found.append(f"полета без <label for>: {', '.join(unlabeled[:5])}")
     if c.html_lang is not None and not c.html_lang:
         found.append("<html> без lang")
-    if "<html" in content.lower():  # пълен документ, не фрагмент
-        if not c.has_viewport:
-            found.append('няма <meta name="viewport"> — на телефон ще е ситно')
-        if not c.has_charset:
-            found.append('няма <meta charset="utf-8"> — без него кирилицата може да излезе като „Ð”Ð¾…“')
-        if not c.has_title:
-            found.append("няма <title>")
-        if not c.has_description:
-            found.append('няма <meta name="description"> (търсачките показват него)')
+    if "<html" not in content.lower():  # фрагмент, не пълен документ
+        return found
+    missing = [(c.has_viewport, 'няма <meta name="viewport"> — на телефон ще е ситно'),
+               (c.has_charset, ('няма <meta charset="utf-8"> — без него кирилицата може да '
+                                'излезе като „Ð”Ð¾…“')),
+               (c.has_title, "няма <title>"),
+               (c.has_description, 'няма <meta name="description"> (търсачките показват него)')]
+    return found + [note for present, note in missing if not present]
+
+
+def _lev_findings(c: _Collector) -> list[str]:
     # Всички наведнъж: с една цена в бележката моделът оправяше по една на рунд
     # (2026-09-28: 4 рунда за 4 стаи).
     lev = [m.group(0).strip() for m in _LEV_PRICE.finditer(" ".join(c.text))]
-    if lev:
-        found.append(f"{len(lev)} {'цена' if len(lev) == 1 else 'цени'} в лева "
-                     f"({', '.join(lev[:6])}) — от 1 януари 2026 "
-                     "валутата в България е еврото; текущите цени са в € (EUR)")
-    return found
+    if not lev:
+        return []
+    return [(f"{len(lev)} {'цена' if len(lev) == 1 else 'цени'} в лева "
+             f"({', '.join(lev[:6])}) — от 1 януари 2026 "
+             "валутата в България е еврото; текущите цени са в € (EUR)")]
 
 
 def check_css(content: str) -> list[str]:

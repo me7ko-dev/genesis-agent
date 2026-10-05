@@ -6,7 +6,7 @@ Benchmark for `genesis fix`: real bugs in small projects, judged by their tests.
     python scripts/bench_fix.py --only median,cache  # a subset
     python scripts/bench_fix.py --model groq/openai/gpt-oss-120b   # one model pinned
 
-Why this exists (NEXT_STEPS.md, 2026-09-23): `benchmark.py` measures writing a
+Why this exists (docs/history/NEXT_STEPS-2026-09-30.md, 2026-09-23): `benchmark.py` measures writing a
 small function from scratch. `genesis fix` does something else — it reads code
 somebody else wrote, finds the bug and changes only that — and nothing measured
 it. Without a number, "more accurate" is a guess.
@@ -154,7 +154,50 @@ PROJECTS: dict[str, tuple[str, dict[str, str]]] = {
                   "assert parse_date('2026-09-24') == date(2026, 9, 24)\nprint('ALL OK')\n",
         },
     ),
+    "venv_dep": (
+        "total_with_vat връща само ДДС-то, а не сумата с ДДС",
+        {
+            "invoice.py": "from benchmoney import to_money\n\n\ndef total_with_vat(net, rate=20):\n"
+                          "    return to_money(net * rate / 100)\n",
+            TEST: "from decimal import Decimal\n\nfrom invoice import total_with_vat\n\n\n"
+                  "def test_total():\n    assert total_with_vat(100) == Decimal('120.00')\n"
+                  "    assert total_with_vat(12.5, 9) == Decimal('13.63')\n\n\n"
+                  "if __name__ == '__main__':\n    test_total()\n    print('ALL OK')\n",
+        },
+    ),
 }
+
+# Packages that exist ONLY in the project's own .venv — the regression for
+# paths.project_python (PR #30): with Genesis's Python the tests die on
+# `No module named ...`, which no code edit fixes. These projects get no
+# test_command: the detected one (`<.venv python> -m pytest`) is what's measured.
+VENV_DEPS: dict[str, dict[str, str]] = {
+    "venv_dep": {
+        "benchmoney/__init__.py": "from decimal import ROUND_HALF_UP, Decimal\n\n\ndef to_money(x):\n"
+                                  "    return Decimal(str(x)).quantize(Decimal('0.01'), ROUND_HALF_UP)\n",
+    },
+}
+
+
+def make_project(root: Path, name: str, files: dict[str, str]) -> tuple[Path, str]:
+    """Writes the project; returns it and the Python that runs its tests."""
+    root.mkdir(parents=True)
+    for rel, content in files.items():
+        (root / rel).write_text(content, encoding="utf-8")
+    if name not in VENV_DEPS:
+        return root, sys.executable
+    import pytest  # the venv gets the bench's pytest, so `-m pytest` runs there too
+    venv = root / ".venv"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True, timeout=120)
+    python = next(str(p) for p in (venv / "Scripts" / "python.exe", venv / "bin" / "python") if p.is_file())
+    purelib = Path(subprocess.run([python, "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+                                  capture_output=True, text=True, check=True, timeout=60).stdout.strip())
+    for rel, content in VENV_DEPS[name].items():
+        (purelib / rel).parent.mkdir(parents=True, exist_ok=True)
+        (purelib / rel).write_text(content, encoding="utf-8")
+    (purelib / "bench_pytest.pth").write_text(str(Path(pytest.__file__).resolve().parent.parent) + "\n",
+                                              encoding="utf-8")
+    return root, python
 
 
 class _Counting(Brain):
@@ -178,33 +221,32 @@ class _Counting(Brain):
         return reply
 
 
-def _run_test(root: Path) -> bool:
-    r = subprocess.run([sys.executable, TEST], cwd=root, capture_output=True, text=True, timeout=60,
+def _run_test(root: Path, python: str = sys.executable) -> bool:
+    r = subprocess.run([python, TEST], cwd=root, capture_output=True, text=True, timeout=60,
                        check=False)
     return r.returncode == 0 and "ALL OK" in r.stdout
 
 
 def bench_one(name: str, task: str, files: dict[str, str], rounds: int) -> dict:
-    root = Path(tempfile.mkdtemp(prefix=f"bench_fix_{name}_"))
-    for rel, content in files.items():
-        (root / rel).write_text(content, encoding="utf-8")
-    assert not _run_test(root), f"{name}: the planted bug must make the test fail"
+    root, python = make_project(Path(tempfile.mkdtemp(prefix=f"bench_fix_{name}_")) / name, name, files)
+    assert not _run_test(root, python), f"{name}: the planted bug must make the test fail"
     test_before = (root / TEST).read_bytes()
+    test_command = None if name in VENV_DEPS else f'"{sys.executable}" {TEST}'
 
     _Counting.prompt = _Counting.completion = 0
     t0 = time.time()
     try:
-        out = repo_agent.repair(root, task, test_command=f'"{sys.executable}" {TEST}',
+        out = repo_agent.repair(root, task, test_command=test_command,
                                 max_rounds=rounds, on_status=lambda msg: None)
         reported, used_rounds = out.success, out.rounds
-    except Exception as e:  # a crash is a failed fix, recorded as such
+    except Exception as e:  # noqa: BLE001 — a crash is a failed fix, recorded as such
         reported, used_rounds = False, 0
         print(f"    ! {type(e).__name__}: {e}"[:120])
     elapsed = time.time() - t0
 
     test_touched = (root / TEST).read_bytes() != test_before
-    passed = _run_test(root) and not test_touched
-    shutil.rmtree(root, ignore_errors=True)
+    passed = _run_test(root, python) and not test_touched
+    shutil.rmtree(root.parent, ignore_errors=True)
     return {"name": name, "fixed": passed, "reported": reported, "rounds": used_rounds,
             "test_touched": test_touched, "sec": round(elapsed, 1),
             "prompt": _Counting.prompt, "completion": _Counting.completion}

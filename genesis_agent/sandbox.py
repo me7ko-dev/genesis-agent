@@ -28,6 +28,7 @@ genesis_agent.sandbox — единна защитна бариера за изп
 from __future__ import annotations
 
 import ast
+import logging
 import os
 import re
 import shlex
@@ -39,6 +40,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
+
+log = logging.getLogger("genesis.sandbox")
 
 try:  # POSIX-only; resource limits са best-effort на не-Linux платформи.
     import resource  # type: ignore
@@ -60,10 +63,6 @@ class RiskLevel(IntEnum):
 class RiskVerdict:
     level: RiskLevel
     reasons: list[str] = field(default_factory=list)
-
-    @property
-    def is_safe(self) -> bool:
-        return self.level == RiskLevel.SAFE
 
     def merge(self, other: RiskVerdict) -> RiskVerdict:
         return RiskVerdict(
@@ -456,52 +455,69 @@ def _assess_file_ops(command: str, cwd: Path | None = None) -> RiskVerdict:
         if cmd == "rsync" and any("--delete" in f for f in flags):
             bump(RiskLevel.CONFIRM, "rsync --delete (трие в целта това, което го няма в източника)")
 
-        if cmd in _DESTRUCTIVE_MOVE_CMDS and len(operands) >= 2:
-            sources, dest = operands[:-1], operands[-1]
-            paths, had_glob = _expand_targets(sources, cwd)
-            recursive = any(f in ("-r", "-R", "-a", "--recursive") for f in flags)
-            bulk = had_glob or len(sources) > 1 or recursive or len(paths) > 1
-            verb = "преместване" if cmd == "mv" else "копиране"
-            if bulk:
-                bump(RiskLevel.CONFIRM,
-                     f"масово {verb} ({cmd}): {_describe_paths(paths)} → {dest}")
-            else:
-                # Един източник: рискът е тихото ПРЕЗАПИСВАНЕ на целта.
-                dpath = Path(os.path.expanduser(dest))
-                if not dpath.is_absolute() and cwd:
-                    dpath = cwd / dpath
-                if dpath.is_file():
-                    bump(RiskLevel.CONFIRM,
-                         f"{verb} върху СЪЩЕСТВУВАЩ файл (ще го презапише): {dpath}")
-
-        elif cmd == "find":
-            deletes = "-delete" in argv or ("-exec" in argv and "rm" in argv)
-            if deletes:
-                search_root = operands[0] if operands else "."
-                norm = os.path.expanduser(os.path.expandvars(search_root)).rstrip("/")
-                # find / -delete и find ~ -delete са масово унищожение, не "опасна
-                # команда за потвърждение" — трият из цялата машина.
-                if norm in ("", "/", str(Path.home())):
-                    bump(RiskLevel.BLOCKED,
-                         f"find с триене върху цялата файлова система/дома ({search_root})")
-                else:
-                    bump(RiskLevel.CONFIRM, f"find с триене под {search_root}")
-
-        elif cmd in _DESTRUCTIVE_WIPE_CMDS:
-            paths, _ = _expand_targets(operands, cwd)
-            bump(RiskLevel.CONFIRM, f"{cmd} (унищожава съдържание): {_describe_paths(paths)}")
-
-        elif cmd == "git" and len(argv) > 1:
-            sub = argv[1]
-            rest = " ".join(argv[2:])
-            if sub == "reset" and "--hard" in rest:
-                bump(RiskLevel.CONFIRM, "git reset --hard (изхвърля незакоммитната работа)")
-            elif sub == "clean" and re.search(r"-[a-z]*[fdx]", rest):
-                bump(RiskLevel.CONFIRM, "git clean (трие непроследени файлове)")
-            elif sub in ("checkout", "restore") and re.search(r"(^|\s)(\.|--\s)", rest):
-                bump(RiskLevel.CONFIRM, "git checkout/restore (изхвърля локални промени)")
+        for lv, why in _segment_risks(cmd, argv, flags, operands, cwd):
+            bump(lv, why)
 
     return RiskVerdict(level, reasons)
+
+
+_Risks = list[tuple[RiskLevel, str]]
+
+
+def _segment_risks(cmd: str, argv: list[str], flags: list[str], operands: list[str],
+                   cwd: Path | None) -> _Risks:
+    if cmd in _DESTRUCTIVE_MOVE_CMDS and len(operands) >= 2:
+        return _move_risks(cmd, flags, operands, cwd)
+    if cmd == "find":
+        return _find_risks(argv, operands)
+    if cmd in _DESTRUCTIVE_WIPE_CMDS:
+        paths, _ = _expand_targets(operands, cwd)
+        return [(RiskLevel.CONFIRM, f"{cmd} (унищожава съдържание): {_describe_paths(paths)}")]
+    if cmd == "git" and len(argv) > 1:
+        return _git_risks(argv)
+    return []
+
+
+def _move_risks(cmd: str, flags: list[str], operands: list[str], cwd: Path | None) -> _Risks:
+    sources, dest = operands[:-1], operands[-1]
+    paths, had_glob = _expand_targets(sources, cwd)
+    recursive = any(f in ("-r", "-R", "-a", "--recursive") for f in flags)
+    bulk = had_glob or len(sources) > 1 or recursive or len(paths) > 1
+    verb = "преместване" if cmd == "mv" else "копиране"
+    if bulk:
+        return [(RiskLevel.CONFIRM, f"масово {verb} ({cmd}): {_describe_paths(paths)} → {dest}")]
+    # Един източник: рискът е тихото ПРЕЗАПИСВАНЕ на целта.
+    dpath = Path(os.path.expanduser(dest))
+    if not dpath.is_absolute() and cwd:
+        dpath = cwd / dpath
+    if dpath.is_file():
+        return [(RiskLevel.CONFIRM, f"{verb} върху СЪЩЕСТВУВАЩ файл (ще го презапише): {dpath}")]
+    return []
+
+
+def _find_risks(argv: list[str], operands: list[str]) -> _Risks:
+    deletes = "-delete" in argv or ("-exec" in argv and "rm" in argv)
+    if not deletes:
+        return []
+    search_root = operands[0] if operands else "."
+    norm = os.path.expanduser(os.path.expandvars(search_root)).rstrip("/")
+    # find / -delete и find ~ -delete са масово унищожение, не "опасна
+    # команда за потвърждение" — трият из цялата машина.
+    if norm in ("", "/", str(Path.home())):
+        return [(RiskLevel.BLOCKED, f"find с триене върху цялата файлова система/дома ({search_root})")]
+    return [(RiskLevel.CONFIRM, f"find с триене под {search_root}")]
+
+
+def _git_risks(argv: list[str]) -> _Risks:
+    sub = argv[1]
+    rest = " ".join(argv[2:])
+    if sub == "reset" and "--hard" in rest:
+        return [(RiskLevel.CONFIRM, "git reset --hard (изхвърля незакоммитната работа)")]
+    if sub == "clean" and re.search(r"-[a-z]*[fdx]", rest):
+        return [(RiskLevel.CONFIRM, "git clean (трие непроследени файлове)")]
+    if sub in ("checkout", "restore") and re.search(r"(^|\s)(\.|--\s)", rest):
+        return [(RiskLevel.CONFIRM, "git checkout/restore (изхвърля локални промени)")]
+    return []
 
 
 # Пътища, чието рекурсивно триене е катастрофа, а не просто опасно. Сравнява
@@ -821,6 +837,7 @@ def assess_command(command: str, cwd: Path | None = None) -> RiskVerdict:
     try:
         return verdict.merge(_assess_file_ops(command, cwd))
     except Exception as e:
+        log.debug("прегледът на файловите операции падна — остава присъдата без него", exc_info=True)
         verdict.reasons.append(f"(преглед на файловите операции неуспешен: {e})")
         return verdict
 
@@ -1000,11 +1017,20 @@ def _decide(operation: str, verdict: RiskVerdict, policy: SandboxPolicy) -> tupl
 # Изпълнение с реални граници
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Без тях Windows процес не тръгва цял: без SYSTEMROOT Winsock дава WinError 10106
+# на `import asyncio` (pytest с anyio, приемните тестове, всеки asyncio проект) —
+# лаптоп, 2026-10-02. Git Bash ги добавя сам, затова RUN_CMD не го усещаше.
+# Не са тайни.
+_WINDOWS_ESSENTIALS = ("SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP")
+
+
 def _build_env(policy: SandboxPolicy, extra: dict[str, str] | None = None) -> dict[str, str]:
     env = {k: os.environ[k] for k in policy.env_passthrough if k in os.environ}
     env.setdefault("PYTHONIOENCODING", "utf-8")
-    if sys.platform == "win32" and env.get("PATH"):
-        env["PATH"] = _windowsapps_last(env["PATH"])
+    if sys.platform == "win32":
+        env.update({k: os.environ[k] for k in _WINDOWS_ESSENTIALS if k in os.environ and k not in env})
+        if env.get("PATH"):
+            env["PATH"] = _windowsapps_last(env["PATH"])
     if extra:
         env.update(extra)
     return env
@@ -1093,6 +1119,7 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
             preexec_fn=(lambda: _preexec(policy, nproc_cap)) if os.name == "posix" else None,  # noqa: PLW1509 — fork()+exec() is immediate; setrlimit-only preexec, no locks touched
         )
     except Exception as e:
+        log.debug("процесът не тръгна", exc_info=True)
         return SandboxResult(ok=False, stdout="", stderr=f"[sandbox] стартът се провали: {e}",
                              returncode=None)
     try:

@@ -19,15 +19,6 @@ import genesis_skills as gs
 from genesis_agent.skill_loader import load_skills_index
 
 
-@pytest.fixture(autouse=True)
-def _no_real_compaction(monkeypatch):
-    monkeypatch.setattr(
-        "genesis_agent.brain.Brain.compact_chat_history",
-        staticmethod(lambda messages, threshold=16, keep_recent=10: messages),
-    )
-    yield
-
-
 @pytest.fixture
 def a_real_skill() -> str:
     """Кое да е умение от библиотеката — името нарочно не е заковано, за да не
@@ -38,31 +29,24 @@ def a_real_skill() -> str:
     return min(index)
 
 
-class _ScriptedModel:
+class _Shown(ac.TurnUI):
+    """Какво човекът е видял като изпълнено."""
+
+    def __init__(self) -> None:
+        self.executed: list[str] = []
+
+    def tool(self, name: str, result: str) -> None:
+        self.executed.append(result)
+
+
+def _run(replies: list[str], user_text: str):
     """Модел, който казва точно каквото му е написано, в този ред."""
-
-    def __init__(self, replies) -> None:
-        self._replies = list(replies)
-        self.skills = gs
-        self.wm = None
-
-    def complete(self, messages):
-        if not self._replies:
-            return ("готово", None, "fake", "scripted")
-        return (self._replies.pop(0), None, "fake", "scripted")
-
-    def remember(self, role, content) -> None:
-        pass
-
-
-def _run(core, user_text: str):
-    executed: list[str] = []
-    messages = ac.run_tool_loop(
-        core, [{"role": "user", "content": user_text}],
-        on_assistant=lambda t, p, m: None,
-        on_tool_result=lambda name, result, extra: executed.append(result),
-    )
-    return executed, messages
+    script = list(replies)
+    ui = _Shown()
+    messages = [{"role": "user", "content": user_text}]
+    ac.run_tool_loop(messages, user_text, ui,
+                     lambda msgs: (script.pop(0) if script else "готово", None))
+    return ui.executed, messages
 
 
 class TestBareTagReachesTheSandbox:
@@ -70,9 +54,8 @@ class TestBareTagReachesTheSandbox:
         self, a_real_skill, tmp_path
     ) -> None:
         gs.set_workspace(tmp_path)
-        core = _ScriptedModel([f"Ще ползвам умението.\n[USE_SKILL: {a_real_skill}]",
-                               "Готово."])
-        executed, _ = _run(core, "използвай това умение")
+        executed, _ = _run([f"Ще ползвам умението.\n[USE_SKILL: {a_real_skill}]", "Готово."],
+                           "използвай това умение")
 
         assert len(executed) == 1, "умението не беше извикано изобщо"
         # "Достъпни:" идва от skill_loader._extract_signatures, тоест кодът
@@ -91,8 +74,7 @@ class TestBareTagReachesTheSandbox:
         репликата на модела, значи е в историята и когато нищо не е тръгнало.
         """
         gs.set_workspace(tmp_path)
-        core = _ScriptedModel([f"[USE_SKILL: {a_real_skill}]", "Готово."])
-        _, messages = _run(core, "давай")
+        _, messages = _run([f"[USE_SKILL: {a_real_skill}]", "Готово."], "давай")
 
         assert any("Достъпни:" in str(m.get("content", "")) for m in messages)
 
@@ -100,9 +82,8 @@ class TestBareTagReachesTheSandbox:
         self, a_real_skill, tmp_path
     ) -> None:
         gs.set_workspace(tmp_path)
-        core = _ScriptedModel([f"[USE_SKILL: {a_real_skill}]\npass\n[END_USE_SKILL]",
-                               "Готово."])
-        executed, _ = _run(core, "давай")
+        executed, _ = _run([f"[USE_SKILL: {a_real_skill}]\npass\n[END_USE_SKILL]", "Готово."],
+                           "давай")
 
         assert len(executed) == 1
         assert "Достъпни:" in executed[0]
@@ -117,8 +98,7 @@ class TestAMissingSkillDoesNotSpin:
         пишеше същото — и рундовете горяха. Сега умението се търси, отговорът
         е ясен, и повторението спира хода."""
         gs.set_workspace(tmp_path)
-        core = _ScriptedModel(["[USE_SKILL: no_such_skill_anywhere]"] * 30)
-        executed, _ = _run(core, "направи нещо")
+        executed, _ = _run(["[USE_SKILL: no_such_skill_anywhere]"] * 30, "направи нещо")
 
         from genesis_agent.repeat_guard import STOP_AT
         assert len(executed) == STOP_AT

@@ -222,7 +222,7 @@ def record_usage(*, provider: str, model: str, prompt_tokens: int,
         with LOG_PATH.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:
-        pass
+        log.debug("budget: разходът не се записа", exc_info=True)
 
 
 def _read_entries():
@@ -236,7 +236,7 @@ def _read_entries():
                     continue
                 try:
                     yield json.loads(line)
-                except Exception as e:
+                except ValueError as e:
                     log.debug("budget: пропускам развален JSONL ред: %s", e)
                     continue
     except OSError as e:

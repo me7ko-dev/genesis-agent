@@ -36,6 +36,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 import secrets
 import socket
@@ -47,6 +48,8 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger("genesis.remote")
 
 PROTOCOL = 1
 DEFAULT_PORT = 8765
@@ -234,7 +237,7 @@ class RemoteSession:
             try:
                 self._on_event(event)
             except Exception:
-                pass
+                log.debug("показването на събитие в терминала падна", exc_info=True)
         return event
 
     def events_after(self, after: int, wait: float = 0.0) -> dict:
@@ -276,6 +279,7 @@ class RemoteSession:
         try:
             self._runner(text, RemoteTurnUI(self))
         except Exception as e:
+            log.debug("ходът от телефона падна — грешката отива при телефона", exc_info=True)
             self.emit("error", text=f"{type(e).__name__}: {e}")
         finally:
             with self._cond:
@@ -431,7 +435,7 @@ class RemoteServer:
         with self._lock:
             self._failures.setdefault(ip, []).append(time.monotonic())
 
-    def make_http(self, host: str, port: int) -> ThreadingHTTPServer:
+    def make_http(self, host: str, port: int) -> ThreadingHTTPServer:  # noqa: C901 — след merge
         server = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -485,9 +489,6 @@ class RemoteServer:
                 if self.path.split("?", 1)[0] != "/api/v1":
                     self._json(404, {"error": "not_found"})
                     return
-                if server.too_many_failures(ip):
-                    self._json(429, {"error": "slow_down"})
-                    return
                 try:
                     length = int(self.headers.get("Content-Length") or 0)
                 except ValueError:
@@ -495,8 +496,14 @@ class RemoteServer:
                 if not 0 < length <= _MAX_BODY:
                     self._json(413, {"error": "size"})
                     return
+                # Тялото се чете и преди 429: затваряне с непрочетени данни на
+                # Windows праща RST и клиентът не вижда отговора (WinError 10053).
+                body = self.rfile.read(length)
+                if server.too_many_failures(ip):
+                    self._json(429, {"error": "slow_down"})
+                    return
                 try:
-                    envelope = json.loads(self.rfile.read(length).decode("utf-8"))
+                    envelope = json.loads(body.decode("utf-8"))
                     response, rid = server.handle(envelope)
                 except (ProtocolError, ValueError, UnicodeDecodeError) as e:
                     server.record_failure(ip)
@@ -575,7 +582,7 @@ def _web_root() -> Path | None:
     return root if (root / "index.html").is_file() else None
 
 
-def serve(args: list[str]) -> int:
+def serve(args: list[str]) -> int:  # noqa: C901 — цепи се след merge (NEXT_STEPS)
     """`genesis serve [--port N] [--host IP] [--reset]`."""
     try:
         import cryptography  # noqa: F401
@@ -693,7 +700,7 @@ def serve(args: list[str]) -> int:
             if len(convo) >= 2:
                 _wm.auto_capture(list(convo))
         except Exception:
-            pass
+            log.debug("запомнянето при спиране на сървъра падна", exc_info=True)
     console.print("\n[dim]Сървърът за телефона е спрян.[/]")
     return 0
 

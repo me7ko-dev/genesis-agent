@@ -431,7 +431,68 @@ def test_real_requests_get_their_verified_rules(_shipped_skills, query, skill) -
     assert f"библиотеката: {skill}" in sl.domain_context(query)
 
 
-@pytest.mark.parametrize("name", ["bg_eik_bulstat_validate", "bg_euro_bgn_conversion"])
+def test_an_excel_csv_request_gets_the_csv_rules_not_the_eik_check(_shipped_skills) -> None:
+    """bench csv-sqlite 2026-10-02: 1/3 и 0/3 — `encoding="utf-8"` срещу BOM-а на Excel
+    („\\ufeffЕИК“ → всеки ред прескочен). Заявката получаваше ЕИК валидатора само
+    заради „eik“ + „ЕИК“, а 000123456 от теста не минава контролната цифра."""
+    task = sl.Path(__file__).resolve().parent.parent / "bench" / "projects" / "csv-sqlite" / "task.txt"
+    text = sl.domain_context(task.read_text(encoding="utf-8"))
+    assert "библиотеката: bg_excel_csv_import" in text and "utf-8-sig" in text
+    assert "bg_eik_bulstat_validate" not in text
+
+
+_PHONE_TASKS = {"contact-form", "booking-form", "clients-migrate"}
+
+def test_the_contact_form_gets_the_phone_rules_and_nothing_else_does(_shipped_skills) -> None:
+    """bench contact-form 2026-10-02: 1/2 — 00359888123456 → +3590359888123456 и
+    `from flask import escape` (Flask 3 го няма). Само заявката с мобилен номер го получава —
+    не сайтът с контактна форма (уеб ръководството) и не другите bench задачи."""
+    projects = sl.Path(__file__).resolve().parent.parent / "bench" / "projects"
+    for task in sorted(projects.glob("*/task.txt")):
+        text = sl.domain_context(task.read_text(encoding="utf-8"))
+        hit = "библиотеката: bg_contact_form_phone" in text
+        # booking-form и clients-migrate (2026-10-05) също искат мобилен → +359.
+        assert hit == (task.parent.name in _PHONE_TASKS), task.parent.name
+        if hit:
+            assert '"00359", ЧАК ТОГАВА "0"' in text and "markupsafe" in text
+    site = sl.domain_context("Направи сайт за пекарна с контактна форма и телефон")
+    assert "bg_contact_form_phone" not in site and "web_site_2026" in site
+    assert "bg_contact_form_phone" in sl.domain_context("валидирай български мобилен номер")
+
+
+def test_the_shop_scraper_gets_the_price_rules_and_nothing_else_does(_shipped_skills) -> None:
+    """bench shop-scraper 2026-10-01/02: „1 299,00 лв.“ — replace(" ", "") не маха
+    неразделимия интервал; страницата е windows-1251 само в <meta charset>."""
+    projects = sl.Path(__file__).resolve().parent.parent / "bench" / "projects"
+    for task in sorted(projects.glob("*/task.txt")):
+        text = sl.domain_context(task.read_text(encoding="utf-8"))
+        hit = "библиотеката: bg_shop_scrape_prices" in text
+        assert hit == (task.parent.name == "shop-scraper"), task.parent.name
+        if hit:
+            assert "НЕРАЗДЕЛИМ" in text and "r.content" in text
+
+
+def test_a_csv_with_phones_gets_both_and_a_loose_second_match_stays_out(_shipped_skills) -> None:
+    """bench clients-migrate 2026-10-01: Excel CSV + телефон → +3590359888123456. Само едно
+    знание стигаше до модела (CSV-то). Второ — само строго (min_score ≥ 3): ЕИК
+    проверката (min 2) пак не идва с CSV-то на csv-sqlite."""
+    task = ("Имам стар списък с клиенти в CSV (експорт от Excel: UTF-8 с BOM, разделител ;). "
+            "Колони: Име;Имейл;Телефон. Телефонът се пази в международен вид, +359 и цифрите "
+            "без интервали и тирета (водещата 0 или 00359 стават +359).")
+    text = sl.domain_context(task)
+    assert "библиотеката: bg_excel_csv_import" in text
+    assert "библиотеката: bg_contact_form_phone" in text
+    assert text.index("bg_excel_csv_import") < text.index("bg_contact_form_phone")
+    projects = sl.Path(__file__).resolve().parent.parent / "bench" / "projects"
+    for task_file in sorted(projects.glob("*/task.txt")):
+        got = sl.domain_context(task_file.read_text(encoding="utf-8"))
+        expected = 2 if task_file.parent.name == "clients-migrate" else 1  # задачата от по-горе
+        assert got.count("## Проверено знание от библиотеката:") <= expected, task_file.parent.name
+
+
+@pytest.mark.parametrize("name", ["bg_eik_bulstat_validate", "bg_euro_bgn_conversion",
+                                  "bg_excel_csv_import", "bg_contact_form_phone",
+                                  "bg_shop_scrape_prices", "money_round_up_step"])
 def test_shipped_domain_skills_pass_their_self_tests(_shipped_skills, tmp_path, name) -> None:
     import subprocess
     import sys
@@ -440,6 +501,37 @@ def test_shipped_domain_skills_pass_their_self_tests(_shipped_skills, tmp_path, 
     r = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
                        encoding="utf-8", timeout=60, check=False)
     assert r.returncode == 0 and r.stdout.strip() == "OK", r.stderr
+
+
+def test_the_phone_skill_keeps_landlines_when_the_task_is_not_mobile_only(_shipped_skills) -> None:
+    """bench clients-migrate 2026-10-05: 0/2 — и двата пуска копираха normalize_bg_mobile
+    от умението и записаха „02 981 23 45“ като NULL, а задачата иска всяка водеща 0 → +359."""
+    code = sl.skill_view("bg_contact_form_phone")["code"]
+    ns: dict = {}
+    exec(compile(code.split('if __name__ == "__main__":')[0], "skill", "exec"), ns)  # noqa: S102 — кодът на умението от репото, само дефинициите
+    def phone(raw):
+        return ns["normalize_bg_phone"](raw, required=False)
+    assert phone("02 981 23 45") == "+35929812345"
+    assert phone("032 123 456") == "+35932123456"
+    assert phone("00359888123456") == phone("0888 123 456") == "+359888123456"
+    assert phone("") == "" and phone("12345") is None and phone("+44 7700 900123") is None
+    assert "normalize_bg_phone" in code.split("Факти:")[1].split('"""')[0]
+
+
+def test_the_phone_skill_makes_the_caller_say_whether_empty_is_allowed(_shipped_skills) -> None:
+    """bench booking-form 2026-10-05: 2 от 3 провала — празен ЗАДЪЛЖИТЕЛЕН телефон приет,
+    защото normalize_bg_mobile("") върна "" („не е невалиден“). required е без подразбиране."""
+    import pytest as _pytest
+    code = sl.skill_view("bg_contact_form_phone")["code"]
+    ns: dict = {}
+    exec(compile(code.split('if __name__ == "__main__":')[0], "skill", "exec"), ns)  # noqa: S102 — кодът на умението от репото, само дефинициите
+    for fn in (ns["normalize_bg_mobile"], ns["normalize_bg_phone"]):
+        with _pytest.raises(TypeError):
+            fn("")
+        assert fn("  ", required=True) is None
+        assert fn("", required=False) == ""
+        assert fn("0888 123 456", required=True) == "+359888123456"
+    assert "before_first_request" in code
 
 
 _IBAN_REQUEST = ("Направи в текущата папка Python модул iban.py за български IBAN (банкова сметка "
@@ -494,9 +586,22 @@ def test_a_workdays_request_gets_the_working_days_rules(_shipped_skills) -> None
     assert "1 ноември" in text
 
 
+def test_a_price_rounded_up_to_a_step_gets_the_decimal_rules(_shipped_skills) -> None:
+    """bench cli-config 2026-10-02 пуск 1: math.ceil(34.650000000000006 / 0.05) → 34,70.
+    Само това знание — не правилата за ДДС НОМЕР (ставката „ДДС“ не е номер)."""
+    projects = sl.Path(__file__).resolve().parent.parent / "bench" / "projects"
+    for task in sorted(projects.glob("*/task.txt")):
+        text = sl.domain_context(task.read_text(encoding="utf-8"))
+        assert ("библиотеката: money_round_up_step" in text) == (task.parent.name == "cli-config")
+        if task.parent.name == "cli-config":
+            assert "ROUND_CEILING" in text and "bg_vat_number_validate" not in text
+
+
 @pytest.mark.parametrize("project", ["sales-report", "fuel-prices", "tasks-api"])
 def test_requests_without_a_domain_get_no_knowledge(_shipped_skills, project) -> None:
-    """Общи думи („знака“, „число“, „България“) не са тема — само тригерите са."""
+    """Общи думи („знака“, „число“, „България“) не са тема — само тригерите са.
+    cli-config (2026-10-02): ставката „ДДС“ + `"vat": 20` в config-а подаваха
+    правилата за ДДС НОМЕР — тема без думата „номер“ не е тази тема."""
     task = sl.Path(__file__).resolve().parent.parent / "bench" / "projects" / project / "task.txt"
     assert sl.domain_context(task.read_text(encoding="utf-8")) == ""
 

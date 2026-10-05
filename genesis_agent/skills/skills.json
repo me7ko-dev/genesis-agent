@@ -524,6 +524,7 @@
         "bg + егн",
         "bulgarian vat number"
       ],
+      "min_score": 3,
       "version": "1.0",
       "last_updated": "2026-09-25T14:00:00+00:00",
       "verified": true,
@@ -549,6 +550,88 @@
       ],
       "version": "1.0",
       "last_updated": "2026-09-25T17:00:00+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
+    },
+    {
+      "name": "bg_excel_csv_import",
+      "category": "domain",
+      "file_path": "skills/bg_excel_csv_import.md",
+      "description": "CSV, изтеглен от Excel с български настройки — BOM в началото (utf-8-sig), разделител ;, десетична запетая, неразделим интервал за хилядите, полета с ; в кавички, дати дд.мм.гггг, кодове с водещи нули като текст.",
+      "triggers": [
+        "csv от excel",
+        "изтеглен от excel csv",
+        "експорт от excel в csv",
+        "свален от excel",
+        "excel csv export bom"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-10-02T18:00:00+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
+    },
+    {
+      "name": "bg_contact_form_phone",
+      "category": "domain",
+      "file_path": "skills/bg_contact_form_phone.md",
+      "description": "Български телефон → +359… (00359 преди 0) — мобилен само с 87/88/89/98/99 и 9 цифри, когато заявката казва „мобилен“, иначе и стационарен (02 981 23 45 → +35929812345); празно → грешка само при required=True; Flask 3 — escape от markupsafe, без before_first_request, POST → 303 точно към поискания път.",
+      "triggers": [
+        "български мобилен номер",
+        "телефон +359 00359",
+        "мобилен телефон номер",
+        "форма за запитване flask"
+      ],
+      "min_score": 3,
+      "version": "1.0",
+      "last_updated": "2026-10-05T18:00:00+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
+    },
+    {
+      "name": "bg_shop_scrape_prices",
+      "category": "domain",
+      "file_path": "skills/bg_shop_scrape_prices.md",
+      "description": "Цени и страници от български онлайн магазин — „1 299,00 лв.“ с неразделим интервал (U+00A0), старата цена в <s>, windows-1251 само в <meta charset>, относителни връзки „Следваща“ и каталог, който сочи пак към началото.",
+      "triggers": [
+        "scraper онлайн магазин каталог",
+        "windows-1251 meta charset",
+        "scrape продуктите от магазин"
+      ],
+      "min_score": 3,
+      "version": "1.0",
+      "last_updated": "2026-10-04T02:40:00+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
+    },
+    {
+      "name": "money_round_up_step",
+      "category": "domain",
+      "file_path": "skills/money_round_up_step.md",
+      "description": "Цена, закръглена НАГОРЕ до стъпка (0,05 / 0,10 / 1) — с Decimal от самия текст, не с math.ceil върху float (26,25 × 1,1 × 1,2 = 34,65 точно, а float дава 34.650000000000006 → 34,70).",
+      "triggers": [
+        "закръглена нагоре до стъпката",
+        "закръгляне нагоре цена стъпка",
+        "round up price to step"
+      ],
+      "min_score": 3,
+      "version": "1.0",
+      "last_updated": "2026-10-04T02:50:00+00:00",
       "verified": true,
       "verification": {
         "verified": true,

@@ -18,6 +18,7 @@ genesis_agent.orchestrator — мулти-агентна оркестрация 
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from genesis_agent import dna
@@ -28,6 +29,8 @@ from genesis_agent.skill_loader import SKILLS_ROOT
 from genesis_agent.skills_manager import save_skill, slugify
 from genesis_agent.tool_schemas import MISSION_TOOLS, load_tool_arguments
 from genesis_agent.verifier import verify_skill
+
+log = logging.getLogger("genesis.orchestrator")
 
 
 @dataclass
@@ -73,6 +76,58 @@ def _extract_code(raw: str) -> str:
     return ""
 
 
+def _coder_messages(brain: Brain, goal: str, plan: str, tests_block: str) -> list[dict]:
+    # RAG контекст + уроци за Coder-а.
+    rag = brain.build_context(goal)
+    try:
+        from genesis_agent.reflection import lessons_for_prompt
+        lessons = lessons_for_prompt()
+    except Exception:
+        log.debug("уроците от минали мисии не влязоха в промпта", exc_info=True)
+        lessons = ""
+
+    coder_sys = brain.system_prompt_base()
+    if lessons:
+        coder_sys += "\n\n" + lessons
+
+    return [
+        {"role": "system", "content": coder_sys},
+        {"role": "user", "content":
+            f"Цел:\n{goal}\n\nПлан:\n{plan}"
+            + (f"\n\n## КОНТЕКСТ\n{rag}" if rag else "")
+            + tests_block
+            + "\n\nA USE_SKILL tool is also available (native function-calling) — prefer "
+              "calling an existing verified skill directly over reimplementing it when one "
+              "already covers part of the goal."
+            + "\n\nНапиши един Python скрипт по плана, с assert self-test, който печата 'OK'."},
+    ]
+
+
+def _run_tool_calls(reply, messages: list[dict]) -> None:
+    messages.append({"role": "assistant", "content": reply.raw_text or "",
+                      "tool_calls": reply.tool_calls})
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(PROJECT_ROOT))
+        import json as _json
+
+        import genesis_skills
+        for tc in reply.tool_calls:
+            fn = tc.get("function", {}) or {}
+            name = fn.get("name", "")
+            try:
+                args = load_tool_arguments(fn.get("arguments"))
+            except (_json.JSONDecodeError, TypeError):
+                args = {}
+            tool_out = genesis_skills.dispatch_tool_call(name, args)
+            messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
+                              "name": name, "content": tool_out[:4000]})
+    except Exception as _e:
+        log.debug("инструментът падна — грешката отива при модела", exc_info=True)
+        messages.append({"role": "tool", "tool_call_id": "error",
+                          "name": "error", "content": f"[tool грешка: {_e}]"})
+
+
 def run_orchestrated(goal: str, *, max_rounds: int | None = None,
                      operator_id: str | None = None, tdd: bool | None = None,
                      prefer_provider: str | None = None) -> OrchestratedOutcome:
@@ -107,29 +162,7 @@ def run_orchestrated(goal: str, *, max_rounds: int | None = None,
             tests_block = ("\n\nЗАДЪЛЖИТЕЛНИ ТЕСТОВЕ (кодът ти ТРЯБВА да ги минава — вгради ги "
                            f"най-долу и добави print('OK')):\n{tests}")
 
-    # RAG контекст + уроци за Coder-а.
-    rag = brain.build_context(goal)
-    try:
-        from genesis_agent.reflection import lessons_for_prompt
-        lessons = lessons_for_prompt()
-    except Exception:
-        lessons = ""
-
-    coder_sys = brain.system_prompt_base()
-    if lessons:
-        coder_sys += "\n\n" + lessons
-
-    messages = [
-        {"role": "system", "content": coder_sys},
-        {"role": "user", "content":
-            f"Цел:\n{goal}\n\nПлан:\n{plan}"
-            + (f"\n\n## КОНТЕКСТ\n{rag}" if rag else "")
-            + tests_block
-            + "\n\nA USE_SKILL tool is also available (native function-calling) — prefer "
-              "calling an existing verified skill directly over reimplementing it when one "
-              "already covers part of the goal."
-            + "\n\nНапиши един Python скрипт по плана, с assert self-test, който печата 'OK'."},
-    ]
+    messages = _coder_messages(brain, goal, plan, tests_block)
 
     last_error = ""
     for round_i in range(max_rounds):
@@ -140,27 +173,7 @@ def run_orchestrated(goal: str, *, max_rounds: int | None = None,
         # NATIVE TOOL USE (design note, 2026-07-25, "мисиите с реални умения" —
         # разширено и към оркестратора): същият pattern като autonomous_loop.py.
         if reply.tool_calls:
-            messages.append({"role": "assistant", "content": reply.raw_text or "",
-                              "tool_calls": reply.tool_calls})
-            try:
-                import sys as _sys
-                _sys.path.insert(0, str(PROJECT_ROOT))
-                import json as _json
-
-                import genesis_skills
-                for tc in reply.tool_calls:
-                    fn = tc.get("function", {}) or {}
-                    name = fn.get("name", "")
-                    try:
-                        args = load_tool_arguments(fn.get("arguments"))
-                    except (_json.JSONDecodeError, TypeError):
-                        args = {}
-                    tool_out = genesis_skills.dispatch_tool_call(name, args)
-                    messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
-                                      "name": name, "content": tool_out[:4000]})
-            except Exception as _e:
-                messages.append({"role": "tool", "tool_call_id": "error",
-                                  "name": "error", "content": f"[tool грешка: {_e}]"})
+            _run_tool_calls(reply, messages)
             continue
 
         code = reply.code or _extract_code(reply.raw_text or "")

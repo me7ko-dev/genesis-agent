@@ -186,6 +186,18 @@ genesis fix ~/code/theirs "..." --test "npm test -- --run"   # if autodetection 
 genesis fix --revert ~/code/theirs                           # undo everything
 ```
 
+### Hand it over — `genesis pack`
+
+```bash
+genesis pack ~/code/site            # ../site-YYYYMMDD.zip + ОТЧЕТ.md inside
+genesis pack . --no-tests -o out.zip
+```
+
+The zip never carries keys (`.env`, `id_rsa`, … — the same rule `READ_FILE`
+uses) or tooling (`.venv`, `.git`, caches). `ОТЧЕТ.md` says how to run it
+(without this machine's paths), what the project's own tests said when they
+actually ran, and what was left out. Exit code 1 when those tests fail.
+
 ### Coding mode — free
 
 The default chain is a compromise between quality, speed and quota. That is the

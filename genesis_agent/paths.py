@@ -140,7 +140,7 @@ def project_python(root: Path | str | None = None) -> str:
     the real Python on the machine is asked for its own path. The `python` in
     WindowsApps is skipped unprobed: when no Python is installed it is the
     Store stub, which hangs until the timeout instead of failing (measured:
-    ~400 s per command, NEXT_STEPS.md).
+    ~400 s per command, docs/history/NEXT_STEPS-2026-09-30.md).
     """
     global _project_python_cache
     if root is not None:

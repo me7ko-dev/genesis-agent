@@ -32,6 +32,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 from collections import deque
@@ -75,7 +79,7 @@ def _post_with_deadline(url: str, *, headers: dict, json: dict, timeout: int) ->
     def _run() -> None:
         try:
             box["r"] = requests.post(url, headers=headers, json=json, timeout=timeout)
-        except BaseException as e:  # предава се на викащия
+        except BaseException as e:  # noqa: BLE001 — предава се на викащия, който я хвърля отново
             box["e"] = e
 
     worker = threading.Thread(target=_run, daemon=True, name="genesis-http")
@@ -118,7 +122,7 @@ def _output_cap(model: str) -> int:
                     if entry.get("model") and entry.get("max_tokens"):
                         caps[entry["model"]] = int(entry["max_tokens"])
         except Exception as e:
-            log.debug("_output_cap: config.yaml не се чете (%s), таванът остава общ", e)
+            log.debug("_output_cap: config.yaml не се чете (%s), таванът остава общ", e, exc_info=True)
         _OUTPUT_CAPS = caps
     return _OUTPUT_CAPS.get(model, MAX_OUTPUT_TOKENS)
 
@@ -203,10 +207,47 @@ _PROVIDERS = {
     # в `_call` и свой модул (genesis_agent.vertex_auth), вместо ред тук с
     # фиксиран base_url. key_env сочи проекта — „конфигуриран" значи „има проект".
     "vertex": ("dynamic://vertex", "GOOGLE_CLOUD_PROJECT"),
+    # Claude Code CLI (2026-10-02, по искане на оператора): абонаментът му за
+    # Claude през `claude -p`. Само за лична употреба на неговия компютър — не
+    # за клиенти и не през облачния шлюз (там е API ключ, `anthropic`). Има
+    # свой клон в `_call`; без ключ, но не е локален.
+    "claude_code": ("cli://claude-code", None),
 }
 
 # Кои доставчици се викат през native SDK вместо през OpenAI-съвместим HTTP.
 _NATIVE_PROVIDERS = {"anthropic"}
+
+
+def _claude_exe() -> str | None:
+    """Истинският claude.exe: npm слага до него claude.cmd обвивка, през която
+    празен аргумент (`--tools ""`) и кирилица минават през cmd.exe."""
+    if os.environ.get("GENESIS_CLAUDE_BIN"):
+        return os.environ["GENESIS_CLAUDE_BIN"]
+    found = shutil.which("claude")
+    if found and sys.platform == "win32" and not found.lower().endswith(".exe"):
+        exe = Path(found).parent / "node_modules" / "@anthropic-ai" / "claude-code" / "bin" / "claude.exe"
+        if exe.is_file():
+            return str(exe)
+    return found
+
+
+def _claude_transcript(messages: list[dict]) -> tuple[str, str]:
+    """(system prompt, разговорът като текст) за `claude -p`. Само водещите
+    system съобщения са system prompt; по-късните (бележки на code_check,
+    пазача) остават на мястото си в разговора."""
+    lead = 0
+    while lead < len(messages) and messages[lead].get("role") == "system":
+        lead += 1
+    system = "\n\n".join(str(m.get("content") or "") for m in messages[:lead])
+    parts = []
+    for m in messages[lead:]:
+        content = m.get("content") or ""
+        if isinstance(content, list):
+            content = "\n".join(str(c.get("text", "")) for c in content if isinstance(c, dict))
+        label = str(m.get("role") or "user").upper()
+        parts.append(f"<{label}>\n{content}\n</{label}>")
+    parts.append("Продължи разговора: напиши САМО следващото съобщение на ASSISTANT.")
+    return system, "\n\n".join(parts)
 
 
 def _print_skip(provider: str, model: str, error: str, seconds: float) -> None:
@@ -299,6 +340,7 @@ def _local_available(model: str) -> bool:
             names = [m.get("name", "") for m in r.json().get("models", [])]
             return any(model.split(":")[0] in n for n in names)
     except Exception:
+        log.debug("локалният Ollama не отговори за списъка с модели", exc_info=True)
         return False
     return False
 # Грешки, при които минаваме към следващия модел (вкл. остарял/невалиден модел).
@@ -339,6 +381,17 @@ def _is_exhausted(key: str) -> bool:
 
 def _mark_exhausted(key: str) -> None:
     _EXHAUSTED[key] = time.time() + _EXHAUST_COOLDOWN
+
+
+def _cool_down(prov: str, model: str, key: str, error: str) -> None:
+    """При 429/503/402 → изчерпан за cooldown (спестява безсмислени опити);
+    410 → спрян от доставчика, не се пробва цяло денонощие."""
+    if any(f"HTTP_{c}" in error for c in _EXHAUST_CODES):
+        _mark_exhausted(key)
+    if "HTTP_410" in error:
+        _EXHAUSTED[key] = time.time() + _GONE_COOLDOWN
+        print(f"  [Brain] ⛔ {prov}/{model} е спрян от доставчика (410) — "
+              "пропускам го; махни го от config.yaml")
 
 
 def _is_truncated(text: str) -> bool:
@@ -393,7 +446,7 @@ def _load_chain() -> list[dict]:
     филтрира по него за различни контексти (чат/терминал/умения)."""
     try:
         cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
-    except Exception:
+    except (OSError, yaml.YAMLError):
         cfg = {}
     models = cfg.get("models", {})
     fallback_list = models.get("fallback_models", [])
@@ -430,7 +483,7 @@ def _load_chain() -> list[dict]:
                  bool(fm.get("supports_tools", False)))
     except Exception as e:
         # Резервен слой — никога не спира старта.
-        log.debug("_load_chain: без автоматично открити модели (%s)", e)
+        log.debug("_load_chain: без автоматично открити модели (%s)", e, exc_info=True)
 
     # Мъртвите според последната `genesis models --check` (404/410) се
     # прескачат, докато следваща проверка не ги види живи — без да се пипа
@@ -439,7 +492,7 @@ def _load_chain() -> list[dict]:
         from genesis_agent.model_check import dead_models
         dead = dead_models()
     except Exception as e:
-        log.debug("_load_chain: model_check недостъпен (%s)", e)
+        log.debug("_load_chain: model_check недостъпен (%s)", e, exc_info=True)
         dead = set()
 
     # Само доставчици, които знаем как да викаме.
@@ -463,7 +516,7 @@ def _load_coding_chain() -> list[dict]:
     """
     try:
         cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
-    except Exception:
+    except (OSError, yaml.YAMLError):
         return []
     out: list[dict] = []
     for entry in (cfg.get("models", {}) or {}).get("coding_models", []) or []:
@@ -482,7 +535,7 @@ def _load_light_chain() -> list[dict]:
     (извличане на памет, резюмета). Виж коментара в config.yaml за мерките."""
     try:
         cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
-    except Exception:
+    except (OSError, yaml.YAMLError):
         return []
     out: list[dict] = []
     for entry in (cfg.get("models", {}) or {}).get("light_models", []) or []:
@@ -512,7 +565,7 @@ def _load_premium_chain() -> list[dict]:
     """
     try:
         cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
-    except Exception:
+    except (OSError, yaml.YAMLError):
         return []
     out: list[dict] = []
     for entry in (cfg.get("models", {}) or {}).get("premium_models", []) or []:
@@ -535,7 +588,6 @@ class Brain:
         self.keys = _load_keys()
         self.chain = _load_chain()
         self.timeout = CLOUD_TIMEOUT
-        self._fail_count = 0
         self._last_usage: dict | None = None
         self._last_local_error: str | None = None
         # min_size_b (design note, 2026-07-25): филтрира облачната верига по размер —
@@ -640,6 +692,19 @@ class Brain:
                                             "size_b": 0, "supports_tools": False}
                 self.chain = [self._pinned] + rest
 
+        # GENESIS_ONLY_MODEL=provider/model (опит, bench): отговаря ТОЗИ модел или
+        # никой — тиха резерва прави сравнението лъжа. `light` (памет, резюмета)
+        # остава на бързите: второстепенна работа, не мярката.
+        only = os.environ.get("GENESIS_ONLY_MODEL", "").strip()
+        o_prov, _, o_model = only.partition("/")
+        if only and not light and o_prov in _PROVIDERS and o_model:
+            entry = next((c for c in self.chain
+                          if (c["provider"], c["model"]) == (o_prov, o_model)), None)
+            self.chain = [entry or {"provider": o_prov, "model": o_model, "size_b": 0,
+                                    "supports_tools": False}]
+            self._pinned = None
+            self.local = None
+
         self.current = (self.chain[0] if self.chain else None) or self.local
 
     def _on_local_tier(self) -> bool:
@@ -666,7 +731,7 @@ class Brain:
             if m:
                 self._set_local(m)
         except Exception as e:
-            log.debug("route_for_goal: model_router недостъпен, местният модел остава по подразбиране: %s", e)
+            log.debug("route_for_goal: model_router недостъпен, местният модел остава по подразбиране: %s", e, exc_info=True)
 
     def escalate(self) -> bool:
         """Качва ЛОКАЛНИЯ мозък на следващия по-голям НАЛИЧЕН модел. True ако е сменен.
@@ -711,7 +776,7 @@ class Brain:
                               nxt, self.current)
                 return True
         except Exception as e:
-            log.debug("escalate: model_router недостъпен, оставам на текущия модел: %s", e)
+            log.debug("escalate: model_router недостъпен, оставам на текущия модел: %s", e, exc_info=True)
         return False
 
     def escalate_to_coding_chain(self) -> bool:
@@ -794,6 +859,7 @@ class Brain:
                             f"# от умение: {h['name']}\n" + "\n".join(lines_code)
                         )
                     except Exception:
+                        log.debug("build_context: кодът на умение не се зареди", exc_info=True)
                         code_names.discard(h["name"])  # неуспешно зареждане → трети в списъка
                 if code_blocks:
                     parts.append(
@@ -807,7 +873,7 @@ class Brain:
                     lines = [f"- {h['name']}: {h.get('description', '')[:80]}" for h in rest]
                     parts.append("Други подобни умения (само за идея):\n" + "\n".join(lines))
         except Exception as e:
-            log.debug("build_context: skill_loader недостъпен, без инжектирани умения: %s", e)
+            log.debug("build_context: skill_loader недостъпен, без инжектирани умения: %s", e, exc_info=True)
         try:
             from genesis_agent.memory import memory_search
             eps = memory_search(goal, top_k=3)
@@ -818,7 +884,7 @@ class Brain:
             if lessons:
                 parts.append("Уроци от минали мисии:\n" + "\n".join(lessons))
         except Exception as e:
-            log.debug("build_context: memory_search недостъпен, без инжектирани уроци: %s", e)
+            log.debug("build_context: memory_search недостъпен, без инжектирани уроци: %s", e, exc_info=True)
         return "\n\n".join(parts)
 
     def _trim_messages(self, messages: list[dict], max_chars: int = 6000) -> list[dict]:
@@ -961,6 +1027,7 @@ class Brain:
             if not summary or summary.startswith("Error:"):
                 raise ValueError(f"неизползваемо резюме: {summary[:80] or 'празно'}")
         except Exception:
+            log.debug("compact_chat_history: без резюме — пазят се последните", exc_info=True)
             # Fallback: просто пази последните, без резюме (губи старото честно,
             # не гърми разговора).
             return _rebuild([system_msg] + recent_part)
@@ -976,7 +1043,7 @@ class Brain:
         to multiply a quota is against most providers' terms of service, so it
         is not something this project ships by default. Resilience comes from
         breadth instead — many providers in the chain, each used within its
-        own limits. `_ollama_cloud_keys` below is the one opt-in exception,
+        own limits. `_numbered_keys` below is the one opt-in exception,
         gated on the operator's own env vars — see the module docstring.
         """
         val = self.keys.get(key_env)
@@ -985,22 +1052,13 @@ class Brain:
         val = str(val).strip()
         return val or None
 
-    def _ollama_cloud_keys(self) -> list[str]:
-        """
-        Every OLLAMA_API_KEY[_2.._5] the operator has actually set, in order.
-
-        Empty unless they added the extra numbered vars themselves — a bare
-        OLLAMA_API_KEY still returns exactly the one-item list it always did,
-        so nothing changes for anyone who never touches this."""
-        return self._numbered_keys("OLLAMA_API_KEY")
-
     def _numbered_keys(self, base_env: str) -> list[str]:
         """
         Every `<BASE>` / `<BASE>_2` .. `<BASE>_10` the operator has actually
         set in their OWN gitignored ~/.genesis/.env, in order.
 
-        Generalised from `_ollama_cloud_keys` (2026-08-11) at the operator's
-        request, so the same opt-in mechanism covers any provider they hold
+        Generalised from an OLLAMA_API_KEY-only helper (2026-08-11) at the
+        operator's request, so the same opt-in mechanism covers any provider they hold
         several keys for — the numbered vars are read, never written, by this
         code. The caveat in the module docstring applies unchanged and is
         worth restating here, because this generalisation makes it easy to
@@ -1151,6 +1209,12 @@ class Brain:
         except ImportError:
             raise RuntimeError("skip: липсва пакетът `anthropic` (pip install anthropic)")
 
+        params = self._anthropic_params(model, messages, tools, effort)
+        resp = self._anthropic_send(anthropic, key, params)
+        return self._anthropic_reply(resp)
+
+    def _anthropic_params(self, model: str, messages: list[dict], tools: list[dict] | None,
+                          effort: str) -> dict[str, Any]:
         system, msgs = self._to_anthropic_messages(messages)
         if not msgs:
             raise RuntimeError("няма съобщения за изпращане")
@@ -1183,6 +1247,9 @@ class Brain:
         if tools:
             params["tools"] = self._to_anthropic_tools(tools)
 
+        return params
+
+    def _anthropic_send(self, anthropic: Any, key: str, params: dict[str, Any]) -> Any:
         client = anthropic.Anthropic(api_key=key, timeout=float(self.timeout))
         try:
             # Класификаторите за безопасност могат да откажат заявка (връща се
@@ -1207,6 +1274,9 @@ class Brain:
         except anthropic.APIConnectionError as e:
             raise RuntimeError(f"мрежа: {e}") from e
 
+        return resp
+
+    def _anthropic_reply(self, resp: Any) -> tuple[str, list | None]:
         if getattr(resp, "stop_reason", "") == "refusal":
             # Не е техническа грешка — моделът е отказал темата. Като RuntimeError,
             # за да продължи веригата към следващия модел вместо да върне празно.
@@ -1259,6 +1329,8 @@ class Brain:
             # OAuth), затова Vertex не минава през общия път с фиксиран
             # base_url и статичен ключ.
             return self._call_vertex(model, messages, tools, extra)
+        if provider == "claude_code":
+            return self._call_claude_code(model, messages)
         if not key_env:  # локален — без ключ
             # reasoning_effort="none" (design note, 2026-07-31, живо измерено):
             # Qwen3 мисли по подразбиране дори за тривиални задачи — >3 минути
@@ -1396,6 +1468,58 @@ class Brain:
             raise RuntimeError("skip: no usable Vertex credentials (ADC not configured or all cooling down)")
         raise last_err or RuntimeError("HTTP_502: vertex project rotation exhausted")
 
+    def _call_claude_code(self, model: str, messages: list[dict]) -> tuple[str, list | None]:
+        """Абонаментът на оператора за Claude през `claude -p` (Claude Code CLI).
+
+        Само модел: `--tools ""` маха инструментите на Claude Code, действията са
+        таговете на Genesis в текстов режим (supports_tools: false), изпълнени от
+        sandbox-а като при всеки друг модел. Средата е без CLAUDE*/ANTHROPIC*:
+        вложен в сесия на Claude Code CLI-ят тръгва през нейния прокси, а
+        ANTHROPIC_API_KEY би го прехвърлил на платения API. `--strict-mcp-config
+        --setting-sources project` от празна папка — без MCP сървъри, plugin-и и
+        CLAUDE.md: 28 659 → ~800 токена на обаждане (измерено 2026-10-02).
+        """
+        exe = _claude_exe()
+        if not exe:
+            raise RuntimeError("skip: claude (Claude Code CLI) не е инсталиран")
+        system, convo = _claude_transcript(messages)
+        env = {k: v for k, v in os.environ.items()
+               if not k.upper().startswith(("CLAUDE", "ANTHROPIC"))}
+        with tempfile.TemporaryDirectory(prefix="genesis_cc_") as tmp:
+            sp = Path(tmp) / "system.txt"
+            sp.write_text(system or "You are a helpful assistant.", encoding="utf-8")
+            argv = [exe, "-p", "--output-format", "json", "--model", model, "--tools", "",
+                    "--no-session-persistence", "--strict-mcp-config",
+                    "--setting-sources", "project", "--system-prompt-file", str(sp)]
+            try:
+                r = subprocess.run(argv, input=convo, capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace", cwd=tmp, env=env,
+                                   timeout=max(self.timeout, 300), check=False)
+            except subprocess.TimeoutExpired:
+                raise RuntimeError("HTTP_504: claude -p не отговори навреме") from None
+        # stdout е един JSON ред; преди него може да има предупреждения на CLI-я.
+        line = next((ln for ln in reversed((r.stdout or "").splitlines())
+                     if ln.lstrip().startswith("{")), "")
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            raise RuntimeError(f"HTTP_502: claude -p rc={r.returncode}: "
+                               f"{(r.stderr or r.stdout or '').strip()[:200]}") from None
+        result = str(data.get("result") or "")
+        if data.get("is_error"):
+            code = "HTTP_429" if "limit" in result.lower() else "HTTP_502"
+            raise RuntimeError(f"{code}: claude -p: {result[:200]}")
+        usage = data.get("usage") or {}
+        self._last_usage = {
+            "prompt_tokens": usage.get("input_tokens", 0) or 0,
+            "completion_tokens": usage.get("output_tokens", 0) or 0,
+            "cached_read_tokens": usage.get("cache_read_input_tokens", 0) or 0,
+            "cached_write_tokens": usage.get("cache_creation_input_tokens", 0) or 0,
+        }
+        if not result.strip():
+            raise RuntimeError("празен отговор")
+        return result.strip(), None
+
     def _call_local(self, messages: list[dict], attempts: int = 1) -> tuple[str, str] | None:
         """Пробва локалния мозък (текущия tier — 3b/7b/14b, каквото е в self.local).
         Връща (raw_text, code) при успех, None при провал. Локалният никога не
@@ -1409,7 +1533,6 @@ class Brain:
         for _try in range(attempts):
             try:
                 raw_text, _tc = self._call(loc["provider"], loc["model"], trimmed)
-                self._fail_count = 0
                 self.current = self.local
                 code = ""
                 if "```python" in raw_text:
@@ -1420,6 +1543,7 @@ class Brain:
                     self._log_usage()
                     return raw_text, code
             except Exception as e:
+                log.debug("локалният модел не отговори", exc_info=True)
                 last_error = f"локален: {e}"
         self._last_local_error = last_error
         return None
@@ -1448,6 +1572,7 @@ class Brain:
             avail = available_tiers()
             installed = [t for t, ok in zip(LOCAL_TIERS, avail) if ok]
         except Exception:
+            log.debug("generate_local_candidates: инсталираните локални модели не се прочетоха", exc_info=True)
             installed = []
         base_model = self.local["model"]
         others = [m for m in installed if m != base_model]
@@ -1487,7 +1612,7 @@ class Brain:
             try:
                 cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
                 Brain._TAG_PROMPT_CACHE = (cfg.get("tool_tag_prompt") or "").strip()
-            except Exception:
+            except (OSError, yaml.YAMLError, AttributeError):
                 Brain._TAG_PROMPT_CACHE = ""
         return Brain._TAG_PROMPT_CACHE
 
@@ -1565,31 +1690,9 @@ class Brain:
         from genesis_agent.budget import budget_history
         messages = budget_history(messages)
 
-        last_error = "неизвестна грешка"
-        local_only = os.environ.get("GENESIS_LOCAL_ONLY") == "1"
-
         # LOCAL-ONLY: изричен офлайн режим — никога не пипа облака.
-        if local_only:
-            if not self.local:
-                return self._error_result("Error: локален режим — няма наличен локален модел")
-            # Бъг, хванат наживо 2026-07-31 (изричен локален режим + реални tools):
-            # този клон връщаше рано БЕЗ да мине през _with_tool_tag_docs/
-            # _sanitize_for_textmode по-долу — локалният модел никога не
-            # научаваше какъв е синтаксисът на тул-таговете, затова само
-            # разказваше намерение ("Използвам браузър...") без да върне нищо
-            # парсваемо. Локалният модел НИКОГА не връща native tool_calls
-            # (виж _call_local) — единственият му път е text-tag режимът, а той
-            # изисква точно тази документация в system съобщението.
-            local_messages = (
-                self._with_tool_tag_docs(self._sanitize_for_textmode(messages))
-                if tools else messages
-            )
-            hit = self._call_local(local_messages, attempts=2)
-            if hit:
-                raw_text, code = hit
-                return type("Obj", (object,), {"raw_text": raw_text, "code": code,
-                                               "usage": self._last_usage, "tool_calls": None})
-            return self._error_result(f"Error: локален режим — {self._last_local_error}")
+        if os.environ.get("GENESIS_LOCAL_ONLY") == "1":
+            return self._complete_local_only(messages, tools)
 
         # ОБЛАКЪТ Е ВИНАГИ ПЪРВИ (design note, 2026-07-25): локалният мозък — малък,
         # среден или голям tier, без значение — е ПОСЛЕДНА резерва. Пробва се
@@ -1597,6 +1700,59 @@ class Brain:
         # RETRY_ROUNDS обхождания) е изчерпана. Облакът е безплатен и по-силен
         # от локалния 3B/7B/14B — няма смисъл да предпочитаме по-слабия модел,
         # докато има свободна облачна квота.
+        ordered_chain, messages_notools = self._ordered_chain(messages, tools, avoid)
+        reply, last_error = self._walk_chain(ordered_chain, messages, messages_notools, tools)
+        if reply is not None:
+            return reply
+
+        # ПОСЛЕДНА РЕЗЕРВА: локалният собствен мозък — само ако облакът напълно
+        # отказа (или изобщо няма конфигурирани облачни модели).
+        local_avoided = bool(avoid and self.local
+                             and (self.local["provider"], self.local["model"]) == avoid)
+        if self.local and not local_avoided:
+            print("  [Brain] ☁️ Облакът е изчерпан/недостъпен → 🏠 локален мозък като резерва...")
+            hit = self._call_local(messages_notools, attempts=1)
+            if hit:
+                return self._reply(*hit, None)
+            last_error = self._last_local_error or last_error
+
+        return self._error_result(f"Error: цялата верига е изчерпана | последна: {last_error}")
+
+    def _reply(self, raw_text: str, code: str, tool_calls: list | None):
+        return type("Obj", (object,), {"raw_text": raw_text, "code": code,
+                                       "usage": self._last_usage, "tool_calls": tool_calls})
+
+    @staticmethod
+    def _code_in(raw_text: str) -> str:
+        if "```python" in raw_text:
+            return raw_text.split("```python")[1].split("```")[0].strip()
+        if raw_text.lstrip().startswith(("def ", "import ", "from ", "class ")):
+            return raw_text
+        return ""
+
+    def _complete_local_only(self, messages: list[dict], tools: list[dict] | None):
+        if not self.local:
+            return self._error_result("Error: локален режим — няма наличен локален модел")
+        # Бъг, хванат наживо 2026-07-31 (изричен локален режим + реални tools):
+        # този клон връщаше рано БЕЗ да мине през _with_tool_tag_docs/
+        # _sanitize_for_textmode по-долу — локалният модел никога не
+        # научаваше какъв е синтаксисът на тул-таговете, затова само
+        # разказваше намерение ("Използвам браузър...") без да върне нищо
+        # парсваемо. Локалният модел НИКОГА не връща native tool_calls
+        # (виж _call_local) — единственият му път е text-tag режимът, а той
+        # изисква точно тази документация в system съобщението.
+        local_messages = (
+            self._with_tool_tag_docs(self._sanitize_for_textmode(messages))
+            if tools else messages
+        )
+        hit = self._call_local(local_messages, attempts=2)
+        if hit:
+            return self._reply(*hit, None)
+        return self._error_result(f"Error: локален режим — {self._last_local_error}")
+
+    def _ordered_chain(self, messages: list[dict], tools: list[dict] | None,
+                       avoid: tuple[str, str] | None) -> tuple[list[dict], list[dict]]:
+        """Веригата за ТАЗИ заявка и историята за моделите без native tools."""
         # Data-driven деприоритизация (design note, 2026-07-25): доставчик с
         # ПОТВЪРДЕН (≥5 извадки) rolling success rate <50% минава на края на
         # веригата ТОЗИ рунд — не се маркира изчерпан, не се трие, просто не
@@ -1612,7 +1768,7 @@ class Brain:
             from genesis_agent.provider_stats import deprioritize_flaky
             chain = deprioritize_flaky(chain)
         except Exception as e:
-            log.debug("provider_stats недостъпен, реда на веригата остава непроменен: %s", e)
+            log.debug("provider_stats недостъпен, реда на веригата остава непроменен: %s", e, exc_info=True)
 
         # tools заявен → tools-способните (config.yaml supports_tools) вървят
         # ПРЪВ (native, реален tool_calls), останалите — след тях, в стария
@@ -1648,102 +1804,71 @@ class Brain:
         if avoid:
             ordered_chain = [c for c in ordered_chain
                              if (c["provider"], c["model"]) != avoid]
+        return ordered_chain, messages_notools
 
-        n = len(ordered_chain)
-        if n > 0:
-            # ВИНАГИ отгоре надолу, прескачайки временно изчерпаните.
-            #
-            # По-рано тук имаше ротиращ офсет, който се местеше след всеки
-            # УСПЕХ, за да разпределя товара. Три неща не работеха:
-            #   • всяко съобщение идваше от друг модел, с видимо различно
-            #     качество — потребителят го усеща като нестабилност;
-            #   • веригата стигаше до дъното си, докато горните модели са
-            #     напълно свободни;
-            #   • и най-лошото: щом веднъж слезеше долу, оставаше там —
-            #     офсетът не се връщаше нагоре, когато горните излязат от
-            #     cooldown.
-            # Обхождане отгоре дава и залепване (докато моделът работи, той
-            # отговаря), и самолечение (щом cooldown-ът мине, се връщаме на
-            # най-добрия наличен), без нищо да се помни между извикванията.
-            for round_i in range(RETRY_ROUNDS):
-                for step in range(n):
-                    attempt = ordered_chain[step]
-                    prov, model = attempt["provider"], attempt["model"]
-                    key = f"{prov}::{model}"
-                    if _is_exhausted(key):
-                        continue  # временно изчерпан → пропускаме
-                    use_tools = tools if (tools and attempt.get("supports_tools")) else None
-                    msgs = messages if use_tools else messages_notools
-                    t0 = time.time()
+    def _walk_chain(self, ordered_chain: list[dict], messages: list[dict],
+                    messages_notools: list[dict], tools: list[dict] | None):
+        """(отговор, последна грешка); отговорът е None, ако никой не отговори."""
+        # ВИНАГИ отгоре надолу, прескачайки временно изчерпаните.
+        #
+        # По-рано тук имаше ротиращ офсет, който се местеше след всеки
+        # УСПЕХ, за да разпределя товара. Три неща не работеха:
+        #   • всяко съобщение идваше от друг модел, с видимо различно
+        #     качество — потребителят го усеща като нестабилност;
+        #   • веригата стигаше до дъното си, докато горните модели са
+        #     напълно свободни;
+        #   • и най-лошото: щом веднъж слезеше долу, оставаше там —
+        #     офсетът не се връщаше нагоре, когато горните излязат от
+        #     cooldown.
+        # Обхождане отгоре дава и залепване (докато моделът работи, той
+        # отговаря), и самолечение (щом cooldown-ът мине, се връщаме на
+        # най-добрия наличен), без нищо да се помни между извикванията.
+        last_error = "неизвестна грешка"
+        for round_i in range(RETRY_ROUNDS):
+            for step, attempt in enumerate(ordered_chain):
+                prov, model = attempt["provider"], attempt["model"]
+                key = f"{prov}::{model}"
+                if _is_exhausted(key):
+                    continue  # временно изчерпан → пропускаме
+                use_tools = tools if (tools and attempt.get("supports_tools")) else None
+                msgs = messages if use_tools else messages_notools
+                t0 = time.time()
+                try:
                     try:
-                        try:
-                            raw_text, tool_calls = self._call(prov, model, msgs, tools=use_tools)
-                        except RuntimeError as e:
-                            if not _is_transient(str(e)):
-                                raise
-                            # В статистиката влиза само крайният изход на
-                            # обръщението: 500 + провал на повторния опит се
-                            # броеше за два провала и сваляше ollama в края на
-                            # веригата за 15 мин (bench 2026-09-30: 78 отговора
-                            # на NVIDIA без нито един опит на ollama срещу 25).
-                            reason = " ".join(str(e).split())[:80]
-                            print(f"  [Brain] ↻ {prov}/{model} след {time.time() - t0:.1f}s: "
-                                  f"{reason} → същият пак след {_TRANSIENT_PAUSE_S:.0f}s")
-                            time.sleep(_TRANSIENT_PAUSE_S)
-                            t0 = time.time()
-                            raw_text, tool_calls = self._call(prov, model, msgs, tools=use_tools)
-                        self._record_stat(prov, time.time() - t0, True)
-                        self._fail_count = 0
-                        self.current = attempt
-                        if step > 0 or round_i > 0:
-                            print(f"  [Brain] ↪ модел: {prov}/{model}")
-                        code = ""
-                        if "```python" in raw_text:
-                            code = raw_text.split("```python")[1].split("```")[0].strip()
-                        elif raw_text.lstrip().startswith(("def ", "import ", "from ", "class ")):
-                            code = raw_text
-                        self._log_usage()
-                        return type("Obj", (object,), {"raw_text": raw_text, "code": code,
-                                                       "usage": self._last_usage, "tool_calls": tool_calls})
-                    except requests.exceptions.RequestException as e:
-                        last_error = f"мрежа: {e}"
-                        self._fail_count += 1
-                        self._record_stat(prov, time.time() - t0, False)
-                        _print_skip(prov, model, last_error, time.time() - t0)
-                        continue
+                        raw_text, tool_calls = self._call(prov, model, msgs, tools=use_tools)
                     except RuntimeError as e:
-                        last_error = str(e)
-                        self._fail_count += 1
-                        self._record_stat(prov, time.time() - t0, False)
-                        _print_skip(prov, model, last_error, time.time() - t0)
-                        # При 429/503/402 → маркирай изчерпан за cooldown (спестява безсмислени опити).
-                        for c in _EXHAUST_CODES:
-                            if f"HTTP_{c}" in last_error:
-                                _mark_exhausted(key)
-                                break
-                        if "HTTP_410" in last_error:
-                            _EXHAUSTED[key] = time.time() + _GONE_COOLDOWN
-                            print(f"  [Brain] ⛔ {prov}/{model} е спрян от доставчика (410) — "
-                                  "пропускам го; махни го от config.yaml")
-                        continue
-                if round_i + 1 < RETRY_ROUNDS:
-                    print("  [Brain] Всички облачни модели заети/изчерпани, кратка пауза и нов кръг...")
-                    time.sleep(8)
-
-        # ПОСЛЕДНА РЕЗЕРВА: локалният собствен мозък — само ако облакът напълно
-        # отказа (или изобщо няма конфигурирани облачни модели).
-        local_avoided = bool(avoid and self.local
-                             and (self.local["provider"], self.local["model"]) == avoid)
-        if self.local and not local_avoided:
-            print("  [Brain] ☁️ Облакът е изчерпан/недостъпен → 🏠 локален мозък като резерва...")
-            hit = self._call_local(messages_notools, attempts=1)
-            if hit:
-                raw_text, code = hit
-                return type("Obj", (object,), {"raw_text": raw_text, "code": code,
-                                               "usage": self._last_usage, "tool_calls": None})
-            last_error = self._last_local_error or last_error
-
-        return self._error_result(f"Error: цялата верига е изчерпана | последна: {last_error}")
+                        if not _is_transient(str(e)):
+                            raise
+                        # В статистиката влиза само крайният изход на
+                        # обръщението: 500 + провал на повторния опит се
+                        # броеше за два провала и сваляше ollama в края на
+                        # веригата за 15 мин (bench 2026-09-30: 78 отговора
+                        # на NVIDIA без нито един опит на ollama срещу 25).
+                        reason = " ".join(str(e).split())[:80]
+                        print(f"  [Brain] ↻ {prov}/{model} след {time.time() - t0:.1f}s: "
+                              f"{reason} → същият пак след {_TRANSIENT_PAUSE_S:.0f}s")
+                        time.sleep(_TRANSIENT_PAUSE_S)
+                        t0 = time.time()
+                        raw_text, tool_calls = self._call(prov, model, msgs, tools=use_tools)
+                    self._record_stat(prov, time.time() - t0, True)
+                    self.current = attempt
+                    if step > 0 or round_i > 0:
+                        print(f"  [Brain] ↪ модел: {prov}/{model}")
+                    self._log_usage()
+                    return self._reply(raw_text, self._code_in(raw_text), tool_calls), last_error
+                except requests.exceptions.RequestException as e:
+                    last_error = f"мрежа: {e}"
+                    self._record_stat(prov, time.time() - t0, False)
+                    _print_skip(prov, model, last_error, time.time() - t0)
+                except RuntimeError as e:
+                    last_error = str(e)
+                    self._record_stat(prov, time.time() - t0, False)
+                    _print_skip(prov, model, last_error, time.time() - t0)
+                    _cool_down(prov, model, key, last_error)
+            if ordered_chain and round_i + 1 < RETRY_ROUNDS:
+                print("  [Brain] Всички облачни модели заети/изчерпани, кратка пауза и нов кръг...")
+                time.sleep(8)
+        return None, last_error
 
     def _error_result(self, msg: str):
         return type("Obj", (object,), {"raw_text": msg, "code": "", "usage": None, "tool_calls": None})
@@ -1755,7 +1880,7 @@ class Brain:
             from genesis_agent.provider_stats import record_call
             record_call(provider, latency_s, success)
         except Exception as e:
-            log.debug("provider_stats недостъпен, повикването не е записано: %s", e)
+            log.debug("provider_stats недостъпен, повикването не е записано: %s", e, exc_info=True)
 
     def _log_usage(self) -> None:
         """Безопасно логва token usage за последното успешно извикване (ако има).
@@ -1773,4 +1898,4 @@ class Brain:
                 cached_write_tokens=int(self._last_usage.get("cached_write_tokens", 0) or 0),
             )
         except Exception as e:
-            log.debug("budget недостъпен, usage не е записан: %s", e)
+            log.debug("budget недостъпен, usage не е записан: %s", e, exc_info=True)

@@ -31,6 +31,44 @@ def test_version_flag_returns_0(capsys) -> None:
         assert cli_mod.__version__ in capsys.readouterr().out
 
 
+class TestDebugLog:
+    """Местата, които нарочно не спират работата при грешка, я записват с
+    log.debug(exc_info=True). GENESIS_DEBUG=1 е начинът тя да се види."""
+
+    @pytest.fixture
+    def genesis_logger(self):
+        import logging
+        logger = logging.getLogger("genesis")
+        before = (list(logger.handlers), logger.level)
+        yield logger
+        for h in logger.handlers[:]:
+            if h not in before[0]:
+                logger.removeHandler(h)
+                h.close()
+        logger.setLevel(before[1])
+
+    def test_on_it_writes_swallowed_errors_to_a_file(self, monkeypatch, tmp_path, genesis_logger) -> None:
+        import logging
+        monkeypatch.setenv("GENESIS_DEBUG", "1")
+        monkeypatch.setattr("genesis_agent.paths.GENESIS_HOME", tmp_path)
+        assert cli_mod.main(["--version"]) == 0
+        try:
+            raise ValueError("нарочно")
+        except ValueError:
+            logging.getLogger("genesis.terminal").debug("паметта не записа", exc_info=True)
+        for h in genesis_logger.handlers:
+            h.flush()
+        text = (tmp_path / "debug.log").read_text(encoding="utf-8")
+        assert "genesis.terminal" in text and "паметта не записа" in text
+        assert "ValueError: нарочно" in text
+
+    def test_off_by_default(self, monkeypatch, tmp_path, genesis_logger) -> None:
+        monkeypatch.delenv("GENESIS_DEBUG", raising=False)
+        monkeypatch.setattr("genesis_agent.paths.GENESIS_HOME", tmp_path)
+        cli_mod.main(["--version"])
+        assert not (tmp_path / "debug.log").exists()
+
+
 def test_no_args_defaults_to_chat(monkeypatch) -> None:
     called = []
     monkeypatch.setattr(cli_mod, "_chat", lambda: called.append(True) or 0)
@@ -241,3 +279,28 @@ class TestFixArgParsing:
         rc = cli_mod.main(["fix", "--revert", "/proj"])
         assert rc == 0
         assert called == ["/proj"]
+
+
+def test_pack_zips_the_project_and_prints_the_report_lines(tmp_path, capsys) -> None:
+    proj = tmp_path / "site"
+    proj.mkdir()
+    (proj / "app.py").write_text("print(1)\n", encoding="utf-8")
+    (proj / ".env").write_text("KEY=x\n", encoding="utf-8")
+    assert cli_mod.main(["pack", str(proj), "--no-tests"]) == 0
+    out = capsys.readouterr().out
+    zips = list(tmp_path.glob("site-*.zip"))
+    assert len(zips) == 1 and str(zips[0]) in out
+    assert "1 файл" in out and ".env" in out
+
+
+def test_pack_returns_1_when_the_projects_tests_fail(tmp_path, capsys) -> None:
+    proj = tmp_path / "p"
+    (proj / "tests").mkdir(parents=True)
+    (proj / "tests" / "test_a.py").write_text("def test_a():\n    assert False\n", encoding="utf-8")
+    assert cli_mod.main(["pack", str(proj), "-o", str(tmp_path / "out.zip")]) == 1
+    assert (tmp_path / "out.zip").is_file() and "❌" in capsys.readouterr().out
+
+
+def test_pack_of_a_missing_folder_says_so(tmp_path, capsys) -> None:
+    assert cli_mod.main(["pack", str(tmp_path / "nope")]) == 2
+    assert "Няма такава папка" in capsys.readouterr().out
