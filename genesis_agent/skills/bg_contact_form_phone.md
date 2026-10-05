@@ -4,7 +4,8 @@ category: domain
 min_score: 3
 description: Български телефон → +359… (00359 преди 0) — мобилен само с 87/88/89/98/99 и 9
   цифри, когато заявката казва „мобилен“, иначе и стационарен (02 981 23 45 → +35929812345);
-  Flask 3 — escape от markupsafe, POST → 303 точно към поискания път.
+  празно → грешка само при required=True; Flask 3 — escape от markupsafe, без
+  before_first_request, POST → 303 точно към поискания път.
 triggers:
 - български мобилен номер
 - телефон +359 00359
@@ -12,7 +13,7 @@ triggers:
 - форма за запитване flask
 version: '1.0'
 author: Genesis
-last_updated: '2026-10-05T12:00:00+00:00'
+last_updated: '2026-10-05T18:00:00+00:00'
 ---
 
 ## Описание
@@ -38,8 +39,12 @@ last_updated: '2026-10-05T12:00:00+00:00'
   Ако иска само „международен вид / +359“ → normalize_bg_phone: и стационарните остават
   (02 981 23 45 → +35929812345, 032 123 456 → +35932123456). Измерено 2026-10-05
   (bench clients-migrate 0/2): mobile-проверка там записа стационарния номер като NULL.
-- Празно поле, когато телефонът не е задължителен, е "" — не грешка.
-- Flask 3.0 махна flask.escape и flask.Markup: `from markupsafe import escape`.
+- Празно поле: required=True (задължително — „всички полета са задължителни“) → None,
+  тоест грешка 400; required=False → "". Без подразбиране: измерено 2026-10-05 (bench
+  booking-form, 2 от 3 провала) — "" минаваше за „валиден“ при задължителен телефон.
+- Flask 3.0 махна flask.escape и flask.Markup: `from markupsafe import escape`; махнат е и
+  @app.before_first_request (2026-10-05: booking-form 0/25 — приложението не тръгна) —
+  таблиците се създават направо в create_app(), с `with app.app_context()` при нужда.
   render_template_string и шаблоните .html ескейпват {{ value }} сами — не ползвай |safe
   за въведеното от потребителя.
 - Post/Redirect/Get: `return redirect(url_for("thanks"), code=303)` — Location е точно
@@ -55,12 +60,12 @@ _SEPARATORS = re.compile(r"[\s  ().\-/]")
 _MOBILE = re.compile(r"(?:8[789]|9[89])\d{7}")
 
 
-def normalize_bg_mobile(raw: str | None) -> str | None:
+def normalize_bg_mobile(raw: str | None, *, required: bool) -> str | None:
     """'0888 123 456' / '+359 888 123 456' / '00359888123456' → '+359888123456';
-    '' → ''; невалиден → None."""
+    празно → None при required, иначе ''; невалиден → None."""
     s = _SEPARATORS.sub("", raw or "")
     if not s:
-        return ""
+        return None if required else ""
     for prefix in ("+359", "00359", "0"):
         if s.startswith(prefix):
             rest = s[len(prefix):]
@@ -71,12 +76,12 @@ def normalize_bg_mobile(raw: str | None) -> str | None:
 _NATIONAL = re.compile(r"[2-9]\d{7,8}")  # след 0: 8 цифри стационарен, 9 мобилен
 
 
-def normalize_bg_phone(raw: str | None) -> str | None:
+def normalize_bg_phone(raw: str | None, *, required: bool) -> str | None:
     """Всеки български номер (и стационарен): '02 981 23 45' → '+35929812345';
-    '' → ''; невалиден → None. Префиксите в същия ред: +359, 00359, 0."""
+    празно → None при required, иначе ''; невалиден → None. Префиксите: +359, 00359, 0."""
     s = _SEPARATORS.sub("", raw or "")
     if not s:
-        return ""
+        return None if required else ""
     for prefix in ("+359", "00359", "0"):
         if s.startswith(prefix):
             rest = s[len(prefix):]
@@ -94,22 +99,22 @@ if __name__ == "__main__":
     assert naive("00359888123456") == "+3590359888123456"
     for raw in ("0888 123 456", "+359 888 123 456", "00359888123456", "0888-123-456",
                 "(0888) 123 456", "+359 888 123 456"):
-        assert normalize_bg_mobile(raw) == "+359888123456", raw
-    assert normalize_bg_mobile("+359 887 000 111") == "+359887000111"
-    assert normalize_bg_mobile("0899 99 99 99") == "+359899999999"
-    assert normalize_bg_mobile("0988 123 456") == "+359988123456"
-    assert normalize_bg_mobile("") == "" and normalize_bg_mobile("   ") == ""
+        assert normalize_bg_mobile(raw, required=True) == "+359888123456", raw
+    assert normalize_bg_mobile("+359 887 000 111", required=True) == "+359887000111"
+    assert normalize_bg_mobile("0899 99 99 99", required=True) == "+359899999999"
+    assert normalize_bg_mobile("0988 123 456", required=True) == "+359988123456"
+    assert normalize_bg_mobile("", required=False) == "" and normalize_bg_mobile("   ", required=True) is None
     for bad in ("12345", "0888 123 45", "0888 123 4567", "00359 888 123 45",
                 "+359 2 123 4567", "0359888123456", "+44 7700 900123", "0777 123 456",
                 "0888 123 45a"):
-        assert normalize_bg_mobile(bad) is None, bad
-    assert normalize_bg_phone("02 981 23 45") == "+35929812345"
-    assert normalize_bg_phone("+359 2 981 2345") == "+35929812345"
-    assert normalize_bg_phone("032 123 456") == "+35932123456"
-    assert normalize_bg_phone("00359888123456") == "+359888123456"
-    assert normalize_bg_phone("") == ""
+        assert normalize_bg_mobile(bad, required=True) is None, bad
+    assert normalize_bg_phone("02 981 23 45", required=True) == "+35929812345"
+    assert normalize_bg_phone("+359 2 981 2345", required=True) == "+35929812345"
+    assert normalize_bg_phone("032 123 456", required=True) == "+35932123456"
+    assert normalize_bg_phone("00359888123456", required=True) == "+359888123456"
+    assert normalize_bg_phone("", required=False) == ""
     for bad in ("12345", "0888 123 4567", "+44 7700 900123", "0359888123456", "02 981 23"):
-        assert normalize_bg_phone(bad) is None, bad
+        assert normalize_bg_phone(bad, required=True) is None, bad
     # Това прави markupsafe.escape (и Jinja за {{ }}) с въведеното.
     assert html.escape('<script>"x"</script>') == "&lt;script&gt;&quot;x&quot;&lt;/script&gt;"
     print("OK")

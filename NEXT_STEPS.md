@@ -21,6 +21,10 @@
   (`/add@бот`; месец по София; /list първите 5), clients-migrate 0/2 — И ДВАТА копираха
   `normalize_bg_mobile` от умението → стационарният „02 …“ стана NULL. Поправено в
   `f2f023f` (`normalize_bg_phone`). ~70% от обръщенията — ollama_cloud (Groq на лимит).
+- След `f2f023f` (`2026-10-05-phone`): clients-migrate 0/2 → 2/2 (и двата взеха
+  `normalize_bg_phone`). booking-form 0/2: #1 `@app.before_first_request` (Flask 3 го
+  няма) → 0/25; #2 празен задължителен телефон приет ("" от умението). Оттук
+  `required` без подразбиране + бележка за Flask 3.
 - 2026-10-04 вечер, същите 5 × 2 (`2026-10-04-*-merged`, без пробите без мрежа):
   `f568d3f` 8/11 — shop-scraper 2/2 (беше 0/2: `decode_html` от знанието),
   cli-config 2/2, contact-form 2/3, sales-report 2/2, sklad 0/2 (67%). След единия

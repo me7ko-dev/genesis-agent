@@ -509,12 +509,29 @@ def test_the_phone_skill_keeps_landlines_when_the_task_is_not_mobile_only(_shipp
     code = sl.skill_view("bg_contact_form_phone")["code"]
     ns: dict = {}
     exec(compile(code.split('if __name__ == "__main__":')[0], "skill", "exec"), ns)  # noqa: S102 — кодът на умението от репото, само дефинициите
-    phone = ns["normalize_bg_phone"]
+    def phone(raw):
+        return ns["normalize_bg_phone"](raw, required=False)
     assert phone("02 981 23 45") == "+35929812345"
     assert phone("032 123 456") == "+35932123456"
     assert phone("00359888123456") == phone("0888 123 456") == "+359888123456"
     assert phone("") == "" and phone("12345") is None and phone("+44 7700 900123") is None
     assert "normalize_bg_phone" in code.split("Факти:")[1].split('"""')[0]
+
+
+def test_the_phone_skill_makes_the_caller_say_whether_empty_is_allowed(_shipped_skills) -> None:
+    """bench booking-form 2026-10-05: 2 от 3 провала — празен ЗАДЪЛЖИТЕЛЕН телефон приет,
+    защото normalize_bg_mobile("") върна "" („не е невалиден“). required е без подразбиране."""
+    import pytest as _pytest
+    code = sl.skill_view("bg_contact_form_phone")["code"]
+    ns: dict = {}
+    exec(compile(code.split('if __name__ == "__main__":')[0], "skill", "exec"), ns)  # noqa: S102 — кодът на умението от репото, само дефинициите
+    for fn in (ns["normalize_bg_mobile"], ns["normalize_bg_phone"]):
+        with _pytest.raises(TypeError):
+            fn("")
+        assert fn("  ", required=True) is None
+        assert fn("", required=False) == ""
+        assert fn("0888 123 456", required=True) == "+359888123456"
+    assert "before_first_request" in code
 
 
 _IBAN_REQUEST = ("Направи в текущата папка Python модул iban.py за български IBAN (банкова сметка "
