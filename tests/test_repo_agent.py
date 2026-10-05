@@ -322,3 +322,77 @@ class TestVerifyRightAfterAnEdit:
         repo_agent.repair(str(project), "fix it", max_rounds=3, test_command="t",
                           on_status=lambda m: None)
         assert len(calls) == 3
+
+_TAG_EDIT = {"edit": ["[EDIT_FILE: stats.py] ✓ 1 замяна"]}
+
+
+class TestRepairBranches:
+    """Пазят поведението на `repair` по разклонения, преди да се цепи (C901 28)."""
+
+    def _run(self, project, monkeypatch, replies, results, *, cmd="t", max_rounds=4,
+             tags=None, **kw):
+        runs: list[bool] = []
+
+        def _fake_run_tests(root, command):
+            if not command:
+                return repo_agent.TestRun(ran=False, passed=False, output="", command="")
+            passed = results[min(len(runs), len(results) - 1)]
+            runs.append(passed)
+            return repo_agent.TestRun(ran=True, passed=passed, output="boom", command=command)
+
+        calls: list[list] = []
+        script = iter(replies)
+
+        class _ScriptedBrain:
+            def __init__(self, *a, **k) -> None:
+                pass
+
+            def complete(self, messages, tools=None):
+                calls.append(list(messages))
+                return type("R", (), {"raw_text": next(script), "tool_calls": None})()
+
+        monkeypatch.setattr(repo_agent, "run_tests", _fake_run_tests)
+        monkeypatch.setattr(repo_agent, "Brain", _ScriptedBrain)
+        monkeypatch.setattr("genesis_skills.parse_and_execute_tools",
+                            lambda raw: (tags or {}).get(raw, []))
+        out = repo_agent.repair(str(project), "fix it", max_rounds=max_rounds,
+                                test_command=cmd, on_status=lambda m: None, **kw)
+        return out, runs, calls
+
+    def test_tag_edit_then_green(self, project, monkeypatch) -> None:
+        out, runs, _ = self._run(project, monkeypatch, ["edit"], [False, True], tags=_TAG_EDIT)
+        assert (out.success, out.rounds, out.files_touched, runs) == (True, 1, ["stats.py"], [False, True])
+        assert out.summary.startswith("Поправено")
+
+    def test_prose_without_change_is_pushed_back_twice_then_fails(self, project, monkeypatch) -> None:
+        out, _, calls = self._run(project, monkeypatch, ["a", "b", "c"], [False])
+        assert len(calls) == 3
+        assert sum("Ти ОПИСА" in str(m.get("content")) for m in calls[-1]) == 2
+        assert (out.success, out.summary, out.rounds, out.files_touched) == (False, "c", 3, [])
+
+    def test_prose_after_a_change_reruns_tests_and_sends_them_back(self, project, monkeypatch) -> None:
+        out, runs, calls = self._run(project, monkeypatch, ["edit", "готово", "готово"],
+                                     [False], tags=_TAG_EDIT, max_rounds=3)
+        assert runs == [False, False, False, False]
+        assert any("ВСЕ ОЩЕ падат след промените ти" in str(m.get("content")) for m in calls[2])
+        assert out.success is False and out.rounds == 3
+        assert out.summary.startswith("НЕ е поправено — тестовете още падат след 3 рунда")
+
+    def test_no_test_command_is_unverified(self, project, monkeypatch) -> None:
+        monkeypatch.setattr(repo_agent, "detect_project",
+                            lambda root: type("I", (), {"language": "python", "test_command": None})())
+        out, runs, _ = self._run(project, monkeypatch, ["edit", "готово"], [False],
+                                 tags=_TAG_EDIT, cmd=None)
+        assert runs == [] and out.success is False and "НЕ са проверени" in out.summary
+
+    def test_green_before_proves_nothing(self, project, monkeypatch) -> None:
+        out, _, _ = self._run(project, monkeypatch, ["edit", "готово"], [True], tags=_TAG_EDIT)
+        assert out.success is True and "не доказват нищо" in out.summary
+
+    def test_failed_snapshot_changes_nothing(self, project, monkeypatch) -> None:
+        def _boom(root):
+            raise OSError("диск")
+        monkeypatch.setattr(repo_agent, "create_checkpoint", _boom)
+        out, runs, calls = self._run(project, monkeypatch, [], [False], checkpoint=True)
+        assert out.success is False and "Снимката не успя" in out.summary
+        assert runs == [] and calls == []
