@@ -25,6 +25,8 @@
   `normalize_bg_phone`). booking-form 0/2: #1 `@app.before_first_request` (Flask 3 го
   няма) → 0/25; #2 празен задължителен телефон приет ("" от умението). Оттук
   `required` без подразбиране + бележка за Flask 3.
+- След `1b4edfe` (`2026-10-05-required`): booking-form 0/2 → 2/2, contact-form 2/2
+  (13/13 и двата; 10-04 беше 1/2). Остава от new4: expense-bot 0/2 (грешки на модела).
 - 2026-10-04 вечер, същите 5 × 2 (`2026-10-04-*-merged`, без пробите без мрежа):
   `f568d3f` 8/11 — shop-scraper 2/2 (беше 0/2: `decode_html` от знанието),
   cli-config 2/2, contact-form 2/3, sales-report 2/2, sklad 0/2 (67%). След единия
