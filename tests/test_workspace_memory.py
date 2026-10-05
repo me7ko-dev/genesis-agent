@@ -248,6 +248,32 @@ class TestAutoCapture:
         assert wm.auto_capture(messages)["preferences"] == 1
         assert wm.list_preferences() == {"език": "само български"}
 
+    def test_what_is_known_goes_into_the_prompt(self, monkeypatch) -> None:
+        """Записаното досега влиза в промпта — преди цепенето (C901 17)."""
+        wm.set_preference("език", "български")
+        wm.add_decision("ползваме pytest")
+        wm.add_thread("документацията")
+        seen: list[str] = []
+
+        class _Reply:
+            raw_text = '{"decisions": [], "preferences": [], "threads": []}'
+
+        monkeypatch.setattr("genesis_agent.brain.Brain.complete",
+                            lambda self, messages: seen.append(messages[0]["content"]) or _Reply())
+        messages = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
+        wm.auto_capture(messages)
+        known = seen[0][len(wm._CAPTURE_PROMPT):]
+        assert known == ("\nВече записани предпочитания (ако новото е за същото — ползвай СЪЩАТА тема):\n"
+                         "  - език: български"
+                         "\nВече записани решения (НЕ ги повтаряй):\n  - ползваме pytest"
+                         "\nВече отворени нишки (НЕ ги дублирай):\n  - документацията")
+
+        def _boom():
+            raise OSError("повреден файл")
+        monkeypatch.setattr(wm, "list_preferences", _boom)
+        wm.auto_capture(messages)
+        assert seen[1] == wm._CAPTURE_PROMPT
+
     def test_strips_markdown_code_fence_around_json(self, monkeypatch) -> None:
         class _Reply:
             raw_text = '```json\n{"decisions": [{"what": "fenced"}], "preferences": [], "threads": []}\n```'
