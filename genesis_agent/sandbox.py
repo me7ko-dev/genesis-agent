@@ -455,52 +455,69 @@ def _assess_file_ops(command: str, cwd: Path | None = None) -> RiskVerdict:
         if cmd == "rsync" and any("--delete" in f for f in flags):
             bump(RiskLevel.CONFIRM, "rsync --delete (трие в целта това, което го няма в източника)")
 
-        if cmd in _DESTRUCTIVE_MOVE_CMDS and len(operands) >= 2:
-            sources, dest = operands[:-1], operands[-1]
-            paths, had_glob = _expand_targets(sources, cwd)
-            recursive = any(f in ("-r", "-R", "-a", "--recursive") for f in flags)
-            bulk = had_glob or len(sources) > 1 or recursive or len(paths) > 1
-            verb = "преместване" if cmd == "mv" else "копиране"
-            if bulk:
-                bump(RiskLevel.CONFIRM,
-                     f"масово {verb} ({cmd}): {_describe_paths(paths)} → {dest}")
-            else:
-                # Един източник: рискът е тихото ПРЕЗАПИСВАНЕ на целта.
-                dpath = Path(os.path.expanduser(dest))
-                if not dpath.is_absolute() and cwd:
-                    dpath = cwd / dpath
-                if dpath.is_file():
-                    bump(RiskLevel.CONFIRM,
-                         f"{verb} върху СЪЩЕСТВУВАЩ файл (ще го презапише): {dpath}")
-
-        elif cmd == "find":
-            deletes = "-delete" in argv or ("-exec" in argv and "rm" in argv)
-            if deletes:
-                search_root = operands[0] if operands else "."
-                norm = os.path.expanduser(os.path.expandvars(search_root)).rstrip("/")
-                # find / -delete и find ~ -delete са масово унищожение, не "опасна
-                # команда за потвърждение" — трият из цялата машина.
-                if norm in ("", "/", str(Path.home())):
-                    bump(RiskLevel.BLOCKED,
-                         f"find с триене върху цялата файлова система/дома ({search_root})")
-                else:
-                    bump(RiskLevel.CONFIRM, f"find с триене под {search_root}")
-
-        elif cmd in _DESTRUCTIVE_WIPE_CMDS:
-            paths, _ = _expand_targets(operands, cwd)
-            bump(RiskLevel.CONFIRM, f"{cmd} (унищожава съдържание): {_describe_paths(paths)}")
-
-        elif cmd == "git" and len(argv) > 1:
-            sub = argv[1]
-            rest = " ".join(argv[2:])
-            if sub == "reset" and "--hard" in rest:
-                bump(RiskLevel.CONFIRM, "git reset --hard (изхвърля незакоммитната работа)")
-            elif sub == "clean" and re.search(r"-[a-z]*[fdx]", rest):
-                bump(RiskLevel.CONFIRM, "git clean (трие непроследени файлове)")
-            elif sub in ("checkout", "restore") and re.search(r"(^|\s)(\.|--\s)", rest):
-                bump(RiskLevel.CONFIRM, "git checkout/restore (изхвърля локални промени)")
+        for lv, why in _segment_risks(cmd, argv, flags, operands, cwd):
+            bump(lv, why)
 
     return RiskVerdict(level, reasons)
+
+
+_Risks = list[tuple[RiskLevel, str]]
+
+
+def _segment_risks(cmd: str, argv: list[str], flags: list[str], operands: list[str],
+                   cwd: Path | None) -> _Risks:
+    if cmd in _DESTRUCTIVE_MOVE_CMDS and len(operands) >= 2:
+        return _move_risks(cmd, flags, operands, cwd)
+    if cmd == "find":
+        return _find_risks(argv, operands)
+    if cmd in _DESTRUCTIVE_WIPE_CMDS:
+        paths, _ = _expand_targets(operands, cwd)
+        return [(RiskLevel.CONFIRM, f"{cmd} (унищожава съдържание): {_describe_paths(paths)}")]
+    if cmd == "git" and len(argv) > 1:
+        return _git_risks(argv)
+    return []
+
+
+def _move_risks(cmd: str, flags: list[str], operands: list[str], cwd: Path | None) -> _Risks:
+    sources, dest = operands[:-1], operands[-1]
+    paths, had_glob = _expand_targets(sources, cwd)
+    recursive = any(f in ("-r", "-R", "-a", "--recursive") for f in flags)
+    bulk = had_glob or len(sources) > 1 or recursive or len(paths) > 1
+    verb = "преместване" if cmd == "mv" else "копиране"
+    if bulk:
+        return [(RiskLevel.CONFIRM, f"масово {verb} ({cmd}): {_describe_paths(paths)} → {dest}")]
+    # Един източник: рискът е тихото ПРЕЗАПИСВАНЕ на целта.
+    dpath = Path(os.path.expanduser(dest))
+    if not dpath.is_absolute() and cwd:
+        dpath = cwd / dpath
+    if dpath.is_file():
+        return [(RiskLevel.CONFIRM, f"{verb} върху СЪЩЕСТВУВАЩ файл (ще го презапише): {dpath}")]
+    return []
+
+
+def _find_risks(argv: list[str], operands: list[str]) -> _Risks:
+    deletes = "-delete" in argv or ("-exec" in argv and "rm" in argv)
+    if not deletes:
+        return []
+    search_root = operands[0] if operands else "."
+    norm = os.path.expanduser(os.path.expandvars(search_root)).rstrip("/")
+    # find / -delete и find ~ -delete са масово унищожение, не "опасна
+    # команда за потвърждение" — трият из цялата машина.
+    if norm in ("", "/", str(Path.home())):
+        return [(RiskLevel.BLOCKED, f"find с триене върху цялата файлова система/дома ({search_root})")]
+    return [(RiskLevel.CONFIRM, f"find с триене под {search_root}")]
+
+
+def _git_risks(argv: list[str]) -> _Risks:
+    sub = argv[1]
+    rest = " ".join(argv[2:])
+    if sub == "reset" and "--hard" in rest:
+        return [(RiskLevel.CONFIRM, "git reset --hard (изхвърля незакоммитната работа)")]
+    if sub == "clean" and re.search(r"-[a-z]*[fdx]", rest):
+        return [(RiskLevel.CONFIRM, "git clean (трие непроследени файлове)")]
+    if sub in ("checkout", "restore") and re.search(r"(^|\s)(\.|--\s)", rest):
+        return [(RiskLevel.CONFIRM, "git checkout/restore (изхвърля локални промени)")]
+    return []
 
 
 # Пътища, чието рекурсивно триене е катастрофа, а не просто опасно. Сравнява
