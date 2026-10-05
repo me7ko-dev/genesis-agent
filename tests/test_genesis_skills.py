@@ -894,3 +894,61 @@ def test_no_import_hint_once_conftest_exists(tmp_path) -> None:
     (tmp_path / "egn.py").write_text("")
     (tmp_path / "conftest.py").write_text("")
     assert gs._import_path_hint(_MISSING, tmp_path) == ""
+
+# ── dispatch_tool_call: всяко име → своя backend със своите аргументи ────────
+_DISPATCH = [
+    ("READ_FILE", {"path": "a.py", "offset": 3, "limit": 9}, "_tool_read_file", ("a.py", 3, 9)),
+    ("READ_FILE", {}, "_tool_read_file", ("", None, None)),
+    ("WRITE_FILE", {"path": "a.py", "content": "x"}, "_tool_write_file", ("a.py", "x")),
+    ("EDIT_FILE", {"path": "a.py", "old": "o", "new": "n", "replace_all": 1},
+     "_tool_edit_file", ("a.py", "o", "n", True)),
+    ("EDIT_FILE", {}, "_tool_edit_file", ("", "", "", False)),
+    ("SEARCH_CODE", {"pattern": "p", "path": None, "glob": "*.py"},
+     "_tool_search_code", ("p", "", "*.py")),
+    ("REPO_MAP", {"path": None}, "_tool_repo_map", ("",)),
+    ("GLOB", {"pattern": "*.py", "path": "src"}, "_tool_glob", ("*.py | src",)),
+    ("GLOB", {"pattern": "*.py"}, "_tool_glob", ("*.py",)),
+    ("RUN_CMD", {"command": "ls"}, "_tool_run_cmd", ("ls",)),
+    ("ASK_USER", {"question": "q", "options": ["a"]}, "_tool_ask_user", ("q", ["a"])),
+    ("WEB_SEARCH", {"query": "q"}, "_tool_web_search", ("q",)),
+    ("RESEARCH", {"question": "q"}, "_tool_research", ("q",)),
+    ("LIST_DIR", {"path": "."}, "_tool_list_dir", (".",)),
+    ("USE_SKILL", {"name_or_query": "s", "driver_code": None}, "_tool_use_skill", ("s", "")),
+    ("DELEGATE", {"goal": "g"}, "_tool_delegate", ("g",)),
+    ("BROWSE", {"url": "u"}, "_tool_browse", ("u",)),
+    ("BROWSER_READ", {"x": 1}, "_tool_browser_read", ()),
+    ("BROWSER_CLICK", {"index_or_text": "3"}, "_tool_browser_click", ("3",)),
+    ("BROWSER_TYPE", {"index_or_text": "3", "text": "hi"}, "_tool_browser_type", ("3 | hi",)),
+    ("TASK_LIST", {}, "_tool_task_list", ("open",)),
+    ("TASK_LIST", {"status": "done"}, "_tool_task_list", ("done",)),
+]
+
+
+@pytest.mark.parametrize("name, args, backend, expected", _DISPATCH)
+def test_dispatch_routes_each_tool(monkeypatch, name, args, backend, expected) -> None:
+    seen: list[tuple] = []
+    monkeypatch.setattr(gs, backend, lambda *a: seen.append(a) or "ok")
+    assert gs.dispatch_tool_call(name, args) == "ok"
+    assert seen == [expected]
+
+
+@pytest.mark.parametrize("name, args, backend, expected", [
+    ("REMEMBER", {"kind": "Предпочитание", "topic": "t", "value": "v"}, "set_preference", ("t", "v")),
+    ("REMEMBER", {"topic": "t", "why": "w"}, "add_decision", ("t", "w")),
+    ("REMEMBER", {"kind": "decision", "topic": "t", "value": "v"}, "add_decision", ("v", "")),
+    ("TASK_ADD", {"title": "t", "next_step": "n"}, "add_thread", ("t", "n")),
+    ("TASK_UPDATE", {"id": 2, "status": "done"}, "update_thread", (2, "done", "")),
+])
+def test_dispatch_routes_memory_tools(monkeypatch, name, args, backend, expected) -> None:
+    from genesis_agent import workspace_memory as wm
+    seen: list[tuple] = []
+    monkeypatch.setattr(wm, backend, lambda *a: seen.append(a) or "ok")
+    assert gs.dispatch_tool_call(name, args) == "ok"
+    assert seen == [expected]
+
+
+def test_dispatch_bad_input_never_raises(monkeypatch) -> None:
+    assert gs.dispatch_tool_call("NOPE", {}) == "[NOPE] Непознат tool."
+    assert "Невалидни аргументи" in gs.dispatch_tool_call("READ_FILE", "{не е json")
+    monkeypatch.setattr(gs, "_tool_list_dir", lambda p: [] if p else 1 / 0)
+    assert gs.dispatch_tool_call("LIST_DIR", ["не", "dict"]).startswith("[LIST_DIR] Грешка при изпълнение")
