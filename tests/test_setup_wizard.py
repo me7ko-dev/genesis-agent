@@ -236,3 +236,110 @@ class TestExisting:
         monkeypatch.delenv("SOME_KEY", raising=False)
         monkeypatch.setattr(sw, "read_env_files", lambda var: None)
         assert sw._existing("SOME_KEY") == ""
+
+
+# ── run(): целият съветник по сценарий, без мрежа и без истинския .env ──────
+_FREE = [("A_KEY", "A", "https://a", "https://a/v1", "m"),
+         ("B_KEY", "B", "https://b", "https://b/v1", "m"),
+         ("C_KEY", "C", "https://c", "https://c/v1", "m"),
+         ("D_KEY", "D", "https://d", "https://d/v1", "m"),
+         ("E_KEY", "E", "https://e", "https://e/v1", "m")]
+_PAID = [("P_KEY", "P", "https://p", "native://anthropic", "m"),
+         ("Q_KEY", "Q", "https://q", "https://q/v1", "m")]
+
+
+def _wizard(monkeypatch, tmp_path, existing: dict, answers: list[str], good: set[str]):
+    env = tmp_path / ".env"
+    asked: list[str] = []
+    script = iter(answers)
+
+    def _prompt(text: str) -> str:
+        asked.append(text)
+        return next(script)
+
+    tested: list[str] = []
+
+    def _test(*args):
+        key = args[1] if len(args) == 3 else args[0]
+        tested.append(key)
+        return key in good, "ok" if key in good else "лош"
+
+    monkeypatch.setattr(sw, "PROVIDERS", _FREE)
+    monkeypatch.setattr(sw, "PAID_PROVIDERS", _PAID)
+    monkeypatch.setattr(sw, "ENV_FILE", env)
+    monkeypatch.setattr(sw, "ensure_genesis_home", lambda: None)
+    monkeypatch.setattr(sw, "_existing", lambda var: existing.get(var, ""))
+    monkeypatch.setattr(sw, "_prompt", _prompt)
+    monkeypatch.setattr(sw, "_test_key", _test)
+    monkeypatch.setattr(sw, "_test_anthropic_key", _test)
+    code = sw.run()
+    written = {}
+    if env.exists():
+        for line in env.read_text(encoding="utf-8").splitlines():
+            if line and not line.startswith("#"):
+                k, _, v = line.partition("=")
+                written[k] = v
+    return code, written, asked, tested
+
+
+def test_wizard_free_keys_every_branch(monkeypatch, tmp_path, capsys) -> None:
+    existing = {"A_KEY": "a-good", "B_KEY": "b-good", "C_KEY": "c-bad", "D_KEY": "d-bad"}
+    answers = ["",           # A: работещ, Enter → запазен
+               "b-new",      # B: работещ, заменен с нов работещ
+               "",           # C: счупен, Enter → оставен
+               "d-new", "y",  # D: счупен → нов, пак лош, „запиши въпреки това“
+               "e-new",      # E: нов работещ
+               ""]           # платени: [y/N] → не
+    code, written, asked, tested = _wizard(monkeypatch, tmp_path, existing, answers,
+                                           {"a-good", "b-good", "b-new", "e-new"})
+    assert code == 0
+    assert written == {"A_KEY": "a-good", "B_KEY": "b-new", "C_KEY": "c-bad",
+                       "D_KEY": "d-new", "E_KEY": "e-new"}
+    assert tested == ["a-good", "b-good", "b-new", "c-bad", "d-bad", "d-new", "e-new"]
+    assert asked[-1] == "  Да настроя ли платен ключ? [y/N] "
+    out = capsys.readouterr().out
+    assert "3 работещи доставчика." in out and "този доставчик няма да работи" in out
+
+
+def test_wizard_a_bad_new_key_is_dropped_on_no(monkeypatch, tmp_path) -> None:
+    code, written, _, _ = _wizard(monkeypatch, tmp_path, {},
+                                  ["a-new", "n", "", "", "", "e-new", "", ""], {"e-new"})
+    assert code == 0 and written == {"E_KEY": "e-new"}
+
+
+def test_wizard_paid_defaults_to_yes_when_one_exists(monkeypatch, tmp_path) -> None:
+    answers = ["", "", "", "", "e-new",
+               "",           # платени: [Y/n] → да
+               "",           # P: има, Enter → запазен
+               "q-new", "n"]  # Q: нов, лош, не
+    code, written, asked, tested = _wizard(monkeypatch, tmp_path, {"P_KEY": "p-old"}, answers,
+                                           {"e-new"})
+    assert code == 0 and written == {"E_KEY": "e-new", "P_KEY": "p-old"}
+    assert "  Да настроя ли платен ключ? [Y/n] " in asked
+    assert tested == ["e-new", "p-old", "q-new"]
+
+
+def test_wizard_paid_refused_still_carries_the_existing_key(monkeypatch, tmp_path) -> None:
+    code, written, _, _ = _wizard(monkeypatch, tmp_path, {"P_KEY": "p-old"},
+                                  ["", "", "", "", "", "n"], set())
+    assert code == 0 and written == {"P_KEY": "p-old"}
+
+
+def test_wizard_paid_new_key_saved_when_good(monkeypatch, tmp_path) -> None:
+    code, written, _, _ = _wizard(monkeypatch, tmp_path, {},
+                                  ["", "", "", "", "", "y", "p-new", ""], {"p-new"})
+    assert code == 0 and written == {"P_KEY": "p-new"}
+
+
+def test_wizard_nothing_set_writes_nothing(monkeypatch, tmp_path) -> None:
+    code, written, _, _ = _wizard(monkeypatch, tmp_path, {}, [""] * 6, set())
+    assert code == 1 and written == {} and not (tmp_path / ".env").exists()
+
+
+def test_wizard_keeps_unmanaged_settings_and_backs_up(monkeypatch, tmp_path) -> None:
+    (tmp_path / ".env").write_text("# стар\nexport OTHER=1\nA_KEY=old\nEMPTY=\n", encoding="utf-8")
+    code, written, _, _ = _wizard(monkeypatch, tmp_path, {},
+                                  ["a-new", "", "", "", "", ""], {"a-new"})
+    assert code == 0 and written == {"A_KEY": "a-new", "OTHER": "1"}
+    backups = list(tmp_path.glob(".env.backup-*"))
+    assert len(backups) == 1 and "A_KEY=old" in backups[0].read_text(encoding="utf-8")
