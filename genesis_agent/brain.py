@@ -1209,6 +1209,12 @@ class Brain:
         except ImportError:
             raise RuntimeError("skip: липсва пакетът `anthropic` (pip install anthropic)")
 
+        params = self._anthropic_params(model, messages, tools, effort)
+        resp = self._anthropic_send(anthropic, key, params)
+        return self._anthropic_reply(resp)
+
+    def _anthropic_params(self, model: str, messages: list[dict], tools: list[dict] | None,
+                          effort: str) -> dict[str, Any]:
         system, msgs = self._to_anthropic_messages(messages)
         if not msgs:
             raise RuntimeError("няма съобщения за изпращане")
@@ -1241,6 +1247,9 @@ class Brain:
         if tools:
             params["tools"] = self._to_anthropic_tools(tools)
 
+        return params
+
+    def _anthropic_send(self, anthropic: Any, key: str, params: dict[str, Any]) -> Any:
         client = anthropic.Anthropic(api_key=key, timeout=float(self.timeout))
         try:
             # Класификаторите за безопасност могат да откажат заявка (връща се
@@ -1265,6 +1274,9 @@ class Brain:
         except anthropic.APIConnectionError as e:
             raise RuntimeError(f"мрежа: {e}") from e
 
+        return resp
+
+    def _anthropic_reply(self, resp: Any) -> tuple[str, list | None]:
         if getattr(resp, "stop_reason", "") == "refusal":
             # Не е техническа грешка — моделът е отказал темата. Като RuntimeError,
             # за да продължи веригата към следващия модел вместо да върне празно.
