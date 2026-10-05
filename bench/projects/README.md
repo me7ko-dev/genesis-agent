@@ -24,6 +24,7 @@
 | `sklad-package` | пакет от 6 модула + `python -m sklad`: Decimal в JSON като низ, отказ без частична промяна, „под прага“ строго, код 1 без traceback | не е пускан |
 | `expense-bot` | Telegram бот (само логиката): update като от Telegram, суми със запетая, месецът по Europe/Sofia (на Windows иска `tzdata`), отделни чатове, /undo, SQLite след рестарт | не е пускан |
 | `clients-migrate` | CSV от Excel → SQLite: BOM, интервали, имейл като ключ без значение главни/малки, телефон → +359…, 31.02 се прескача, втори пуск без дубликати, броячите inserted/updated/skipped | не е пускан |
+| `todo-cli` | argparse CLI с JSON: ред флаг → env → todo.toml → подразбиране за файл и приоритет, list по приоритет и id, код 1 за липсващо ID, код 2 за невалиден приоритет отвсякъде | не е пускан |
 | `faktura-excel` | реалистична българска PDF фактура (само Windows — шрифт Arial) | ✅ след `genesis fix` |
 
 ## Пускане на всички наведнъж
