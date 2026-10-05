@@ -489,9 +489,6 @@ class RemoteServer:
                 if self.path.split("?", 1)[0] != "/api/v1":
                     self._json(404, {"error": "not_found"})
                     return
-                if server.too_many_failures(ip):
-                    self._json(429, {"error": "slow_down"})
-                    return
                 try:
                     length = int(self.headers.get("Content-Length") or 0)
                 except ValueError:
@@ -499,8 +496,14 @@ class RemoteServer:
                 if not 0 < length <= _MAX_BODY:
                     self._json(413, {"error": "size"})
                     return
+                # Тялото се чете и преди 429: затваряне с непрочетени данни на
+                # Windows праща RST и клиентът не вижда отговора (WinError 10053).
+                body = self.rfile.read(length)
+                if server.too_many_failures(ip):
+                    self._json(429, {"error": "slow_down"})
+                    return
                 try:
-                    envelope = json.loads(self.rfile.read(length).decode("utf-8"))
+                    envelope = json.loads(body.decode("utf-8"))
                     response, rid = server.handle(envelope)
                 except (ProtocolError, ValueError, UnicodeDecodeError) as e:
                     server.record_failure(ip)
