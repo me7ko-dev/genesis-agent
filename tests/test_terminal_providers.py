@@ -73,6 +73,27 @@ class TestFetchModels:
         monkeypatch.setattr(gta.requests, "get", lambda url, timeout=None: _Resp(200, {"models": []}))
         assert gta.fetch_models("ollama") == ["__no_models__"]
 
+    @pytest.mark.parametrize("provider", ["gemini", "ollama", "vertex"])
+    def test_every_kind_falls_back_when_the_list_fails(self, monkeypatch, provider) -> None:
+        from genesis_agent import vertex_auth
+
+        def _get(*a, **kw):
+            raise ConnectionError("няма мрежа")
+        monkeypatch.setattr(gta.requests, "get", _get)
+        monkeypatch.setattr(vertex_auth, "projects", lambda: ["проект"])
+        monkeypatch.setattr(vertex_auth, "token", lambda p: "tok")
+        monkeypatch.setattr(vertex_auth, "endpoint", lambda p: "https://vertex.example/v1")
+        assert gta.fetch_models(provider) == gta.FALLBACKS.get(provider, [])
+        assert gta.MODELS_CACHE[provider] == gta.FALLBACKS.get(provider, [])
+
+    def test_an_empty_openai_list_is_not_cached_as_empty(self, monkeypatch) -> None:
+        monkeypatch.setattr(gta.requests, "get", lambda *a, **kw: _Resp(200, {"data": []}))
+        assert gta.fetch_models("groq") == gta.FALLBACKS["groq"]
+
+    def test_a_non_200_gemini_list_falls_back(self, monkeypatch) -> None:
+        monkeypatch.setattr(gta.requests, "get", lambda *a, **kw: _Resp(500, {}))
+        assert gta.fetch_models("gemini") == gta.FALLBACKS.get("gemini", [])
+
     def test_vertex_with_a_token_lists_live_models(self, monkeypatch) -> None:
         from genesis_agent import vertex_auth
         monkeypatch.setattr(vertex_auth, "projects", lambda: ["проект"])
