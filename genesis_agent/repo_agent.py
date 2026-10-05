@@ -409,37 +409,14 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
 
     say(f"🔎 {root.name}: {info.language}, тестове: {cmd or 'няма открити'}")
 
-    snapshot: Path | None = None
-    if checkpoint:
-        try:
-            snapshot = create_checkpoint(root)
-        except (RuntimeError, OSError) as e:
-            return RepairOutcome(False, f"Снимката не успя, нищо не е променено: {e}")
-        say(f"📦 Снимка преди промените: {snapshot.name}")
-    elif (root / ".git").exists():
-        say("↩️  Без снимка — връщане с `git checkout .` (или `--checkpoint` за снимка).")
-    else:
-        say("⚠️  Без снимка и без git — промените НЯМА как да се върнат. "
-            "Пусни с `--checkpoint`, ако искаш снимка.")
+    try:
+        snapshot = _snapshot_or_warn(root, checkpoint, say)
+    except (RuntimeError, OSError) as e:
+        return RepairOutcome(False, f"Снимката не успя, нищо не е променено: {e}")
 
     before = run_tests(root, cmd)
-    if before.ran:
-        say(f"🧪 Преди: {'минават ✅' if before.passed else 'падат ❌'}")
-        if before.passed:
-            # Worth saying out loud: a green suite cannot confirm this fix, so
-            # the user should not read a later green run as proof of anything.
-            say("   ⚠️  Тестовете вече минават — те НЕ могат да потвърдят тази поправка.")
-
-    messages: list[dict] = [
-        {"role": "system", "content": _SYSTEM},
-        {"role": "user", "content":
-            f"ПРОЕКТ: {root}\n\n{repo_map(root)}\n\n"
-            f"ЗАДАЧА: {task}\n\n"
-            + (f"Тестова команда: {cmd}\n"
-               f"Изход преди промените ({'минават' if before.passed else 'падат'}):\n"
-               f"{before.output[:2000]}\n" if before.ran else
-               "Тестова команда не е открита — провери ръчно дали поправката работи.\n")},
-    ]
+    _report_before(before, say)
+    messages = _first_messages(root, task, cmd, before)
 
     brain = Brain(quality=quality)
     touched: list[str] = []
@@ -448,64 +425,18 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
     rounds = 0
     pushbacks = 0
     after = before
-    edited_now = False
     try:
         for rounds in range(1, max_rounds + 1):
             reply = brain.complete(messages, tools=REPAIR_TOOLS)
             raw = (reply.raw_text or "").strip()
 
-            # ── Native tool calls ───────────────────────────────────────────
             if getattr(reply, "tool_calls", None):
-                messages.append({"role": "assistant", "content": raw or None,
-                                 "tool_calls": reply.tool_calls})
-                for tc in reply.tool_calls:
-                    fn = tc.get("function", {})
-                    name = fn.get("name", "")
-                    try:
-                        args = load_tool_arguments(fn.get("arguments"))
-                    except (ValueError, TypeError):
-                        args = {}
-                    say(f"  ⚙️  {name} {str(args.get('path') or args.get('pattern') or args.get('command') or '')[:70]}")
-                    result = genesis_skills.dispatch_tool_call(name, args)
-                    if _edit_succeeded(result):
-                        touched += [_relative(root, p) for p in _tool_call_paths(name, args)]
-                        edited_now = True
-                    messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
-                                     "content": result[:_MAX_TOOL_OUTPUT]})
-                if edited_now:
-                    edited_now = False
-                    verdict = _verify_after_edit(root, cmd, before, messages, say)
-                    if verdict is not None:
-                        after = verdict
-                        break
-                messages = _compact_history(messages)
-                if _nudge_if_stalled(messages, touched, rounds):
-                    say("  ↯ само четене досега — подсещам модела да действа")
-                continue
-
-            # ── Text-tag fallback (models without native tool-calling) ──────
-            tag_results = genesis_skills.parse_and_execute_tools(raw)
-            if tag_results:
-                for r in tag_results:
-                    say(f"  ⚙️  {r.splitlines()[0][:90] if r else ''}")
-                edited = _paths_from_tag_results(root, tag_results)
-                touched += edited
-                messages.append({"role": "assistant", "content": raw})
-                messages.append({"role": "user", "content":
-                                 "Резултати от инструментите:\n"
-                                 + "\n".join(r[:_MAX_TOOL_OUTPUT] for r in tag_results)})
-                if edited:
-                    verdict = _verify_after_edit(root, cmd, before, messages, say)
-                    if verdict is not None:
-                        after = verdict
-                        break
-                messages = _compact_history(messages)
-                if _nudge_if_stalled(messages, touched, rounds):
-                    say("  ↯ само четене досега — подсещам модела да действа")
-                continue
-
+                edited = _native_round(root, reply.tool_calls, raw, messages, touched, say)
+            elif tag_results := genesis_skills.parse_and_execute_tools(raw):
+                # Text-tag fallback (models without native tool-calling).
+                edited = _tag_round(root, tag_results, raw, messages, touched, say)
             # ── No tools: the model considers itself done ───────────────────
-            if not touched:
+            elif not touched:
                 # It answered in prose without changing anything. Usually that
                 # means it wrote the fixed code INTO the reply and asked the
                 # user to paste it — the exact "described it instead of doing
@@ -515,31 +446,28 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
                 # burn every round) before giving up.
                 if pushbacks < _MAX_PUSHBACKS and rounds < max_rounds:
                     pushbacks += 1
-                    say("  ↯ описа промяна, но не я направи — искам я реално")
-                    messages.append({"role": "assistant", "content": raw})
-                    messages.append({"role": "user", "content":
-                                     "Ти ОПИСА какво трябва да се промени, но не промени нищо — "
-                                     "файловете на диска са непокътнати. Направи промяната сега "
-                                     "с EDIT_FILE (path + точния съществуващ текст + новия). "
-                                     "Не пиши поправения код в отговора си — приложи го."})
+                    _push_back(raw, messages, say)
                     messages = _compact_history(messages)
                     continue
                 return RepairOutcome(
                     False, raw or "Моделът не направи нито една промяна.",
                     rounds, snapshot, [], "", before, before)
+            else:
+                after = run_tests(root, cmd)
+                if not after.ran or after.passed or rounds >= max_rounds:
+                    break
+                _send_back_failure(raw, after, rounds, messages, say)
+                messages = _compact_history(messages)
+                continue
 
-            after = run_tests(root, cmd)
-            if not after.ran or after.passed:
-                break
-            if rounds >= max_rounds:
-                break
-            say(f"🧪 Рунд {rounds}: тестовете още падат — връщам изхода на модела")
-            messages.append({"role": "assistant", "content": raw})
-            messages.append({"role": "user", "content":
-                             f"Тестовете ВСЕ ОЩЕ падат след промените ти:\n{after.output}\n\n"
-                             "Продължи да поправяш. Ако причината е в самия тест, а не в кода, "
-                             "кажи го изрично и не го променяй."})
+            if edited:
+                verdict = _verify_after_edit(root, cmd, before, messages, say)
+                if verdict is not None:
+                    after = verdict
+                    break
             messages = _compact_history(messages)
+            if _nudge_if_stalled(messages, touched, rounds):
+                say("  ↯ само четене досега — подсещам модела да действа")
     finally:
         genesis_skills.set_workspace(prev_workspace)
 
@@ -558,22 +486,117 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
         say("🧪 Рундовете свършиха — пускам тестовете за финална присъда…")
         after = run_tests(root, cmd)
 
+    ok, summary = _verdict(root, cmd, rounds, snapshot, before, after)
     diff = project_diff(root, snapshot, touched)
-    files = sorted(set(touched))
+    return RepairOutcome(ok, summary, rounds, snapshot, sorted(set(touched)), diff, before, after)
 
-    if after.ran and after.passed and not before.passed:
-        ok, summary = True, f"Поправено: тестовете вече минават ({cmd})."
-    elif after.ran and not after.passed:
-        ok, summary = False, (f"НЕ е поправено — тестовете още падат след {rounds} рунда. "
-                              f"Промените са запазени за преглед; {_undo_hint(root, snapshot)}")
-    elif not after.ran:
-        ok, summary = False, ("Промените са направени, но НЕ са проверени — този проект няма "
-                              "открита тестова команда. Прегледай диффа преди да му вярваш.")
+
+def _snapshot_or_warn(root: Path, checkpoint: bool, say) -> Path | None:
+    """Снимка само при поискване; иначе казва как (и дали) има връщане."""
+    if checkpoint:
+        snapshot = create_checkpoint(root)
+        say(f"📦 Снимка преди промените: {snapshot.name}")
+        return snapshot
+    if (root / ".git").exists():
+        say("↩️  Без снимка — връщане с `git checkout .` (или `--checkpoint` за снимка).")
     else:
-        ok, summary = True, ("Промените са направени. Тестовете минаваха и преди поправката, "
-                             "така че те не доказват нищо за нея — прегледай диффа.")
+        say("⚠️  Без снимка и без git — промените НЯМА как да се върнат. "
+            "Пусни с `--checkpoint`, ако искаш снимка.")
+    return None
 
-    return RepairOutcome(ok, summary, rounds, snapshot, files, diff, before, after)
+
+def _report_before(before: TestRun, say) -> None:
+    if not before.ran:
+        return
+    say(f"🧪 Преди: {'минават ✅' if before.passed else 'падат ❌'}")
+    if before.passed:
+        # Worth saying out loud: a green suite cannot confirm this fix, so
+        # the user should not read a later green run as proof of anything.
+        say("   ⚠️  Тестовете вече минават — те НЕ могат да потвърдят тази поправка.")
+
+
+def _first_messages(root: Path, task: str, cmd: str | None, before: TestRun) -> list[dict]:
+    return [
+        {"role": "system", "content": _SYSTEM},
+        {"role": "user", "content":
+            f"ПРОЕКТ: {root}\n\n{repo_map(root)}\n\n"
+            f"ЗАДАЧА: {task}\n\n"
+            + (f"Тестова команда: {cmd}\n"
+               f"Изход преди промените ({'минават' if before.passed else 'падат'}):\n"
+               f"{before.output[:2000]}\n" if before.ran else
+               "Тестова команда не е открита — провери ръчно дали поправката работи.\n")},
+    ]
+
+
+def _native_round(root: Path, tool_calls: list[dict], raw: str, messages: list[dict],
+                  touched: list[str], say) -> bool:
+    """Native tool calls; True, ако поне една редакция е минала."""
+    import genesis_skills
+
+    messages.append({"role": "assistant", "content": raw or None, "tool_calls": tool_calls})
+    edited = False
+    for tc in tool_calls:
+        fn = tc.get("function", {})
+        name = fn.get("name", "")
+        try:
+            args = load_tool_arguments(fn.get("arguments"))
+        except (ValueError, TypeError):
+            args = {}
+        say(f"  ⚙️  {name} {str(args.get('path') or args.get('pattern') or args.get('command') or '')[:70]}")
+        result = genesis_skills.dispatch_tool_call(name, args)
+        if _edit_succeeded(result):
+            touched.extend(_relative(root, p) for p in _tool_call_paths(name, args))
+            edited = True
+        messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
+                         "content": result[:_MAX_TOOL_OUTPUT]})
+    return edited
+
+
+def _tag_round(root: Path, tag_results: list[str], raw: str, messages: list[dict],
+               touched: list[str], say) -> bool:
+    """Резултатите от текстовите тагове; True, ако поне една редакция е минала."""
+    for r in tag_results:
+        say(f"  ⚙️  {r.splitlines()[0][:90] if r else ''}")
+    edited = _paths_from_tag_results(root, tag_results)
+    touched.extend(edited)
+    messages.append({"role": "assistant", "content": raw})
+    messages.append({"role": "user", "content":
+                     "Резултати от инструментите:\n"
+                     + "\n".join(r[:_MAX_TOOL_OUTPUT] for r in tag_results)})
+    return bool(edited)
+
+
+def _push_back(raw: str, messages: list[dict], say) -> None:
+    say("  ↯ описа промяна, но не я направи — искам я реално")
+    messages.append({"role": "assistant", "content": raw})
+    messages.append({"role": "user", "content":
+                     "Ти ОПИСА какво трябва да се промени, но не промени нищо — "
+                     "файловете на диска са непокътнати. Направи промяната сега "
+                     "с EDIT_FILE (path + точния съществуващ текст + новия). "
+                     "Не пиши поправения код в отговора си — приложи го."})
+
+
+def _send_back_failure(raw: str, after: TestRun, rounds: int, messages: list[dict], say) -> None:
+    say(f"🧪 Рунд {rounds}: тестовете още падат — връщам изхода на модела")
+    messages.append({"role": "assistant", "content": raw})
+    messages.append({"role": "user", "content":
+                     f"Тестовете ВСЕ ОЩЕ падат след промените ти:\n{after.output}\n\n"
+                     "Продължи да поправяш. Ако причината е в самия тест, а не в кода, "
+                     "кажи го изрично и не го променяй."})
+
+
+def _verdict(root: Path, cmd: str | None, rounds: int, snapshot: Path | None,
+             before: TestRun, after: TestRun) -> tuple[bool, str]:
+    if after.ran and after.passed and not before.passed:
+        return True, f"Поправено: тестовете вече минават ({cmd})."
+    if after.ran and not after.passed:
+        return False, (f"НЕ е поправено — тестовете още падат след {rounds} рунда. "
+                       f"Промените са запазени за преглед; {_undo_hint(root, snapshot)}")
+    if not after.ran:
+        return False, ("Промените са направени, но НЕ са проверени — този проект няма "
+                       "открита тестова команда. Прегледай диффа преди да му вярваш.")
+    return True, ("Промените са направени. Тестовете минаваха и преди поправката, "
+                  "така че те не доказват нищо за нея — прегледай диффа.")
 
 
 def _undo_hint(root: Path, snapshot: Path | None) -> str:
