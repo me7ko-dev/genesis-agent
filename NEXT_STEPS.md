@@ -54,7 +54,8 @@
 2. При merge на `feat/android-standalone`: той пипа `run_turn`
    (`_compact_midtask`, `_round_checkpoint`, компресия в началото на хода) — ходът
    вече е `agent_core._Turn`; пренеси ги там/в `run_turn` и пусни `loop_diff`.
-3. Сложност над 15 (ruff C901, 8 функции): `page_check_runner.check` 19, … Една по една, тестове преди това, накрая C901 в CI с праг 15. `remote_server.serve`/`make_http` и
+3. Сложност над 15 (ruff C901, 7 функции): `sandbox._assess_file_ops` 18,
+   `fetch_models` 18, `run_orchestrated` 17, `auto_capture` 17, … Една по една, тестове преди това, накрая C901 в CI с праг 15. `remote_server.serve`/`make_http` и
    `cli.main` — след merge на т. 1–2 (двата клона ги пренаписват).
 4. За преценка (fail-open, нарочно, сега поне в лога): `skill_loader` приема
    подписано умение без проверка, ако криптографията хвърли (тест го иска);

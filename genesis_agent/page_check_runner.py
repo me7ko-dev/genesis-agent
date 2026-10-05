@@ -264,6 +264,70 @@ def _theme_and_form(page, before: dict) -> tuple[list[str], bool]:
     return out, target is not None
 
 
+def _shoot(page, shot: Path) -> str:
+    # Снимката е за хора: анимациите, вързани за скрола, иначе оставят
+    # всичко под първия екран празно (елементите още „не са влезли“).
+    frozen = page.add_style_tag(content=_NO_ANIMATION)
+    page.wait_for_timeout(150)
+    page.screenshot(path=str(shot), full_page=True)
+    frozen.evaluate("el => el.remove()")
+    return str(shot)
+
+
+def _first_view_findings(errors: list[str], failed: list[str], port: int, m: dict) -> list[str]:
+    """Конзолата, заявките и структурата — веднъж, от първия изглед."""
+    findings = [f"грешка в конзолата: {e[:160]}" for e in dict.fromkeys(errors)]
+    local = [f for f in dict.fromkeys(failed) if f"127.0.0.1:{port}" in f]
+    other = [f for f in dict.fromkeys(failed) if f not in local]
+    findings += [f"не се зарежда: {f.replace(f'http://127.0.0.1:{port}/', '')}" for f in local[:4]]
+    findings += [f"външна заявка не мина: {f[:120]}" for f in other[:2]]
+    if m["h1"] != 1:
+        findings.append(f"<h1> е {m['h1']} пъти (трябва точно 1)")
+    if m["headerHeight"] > 110:
+        findings.append(f"header-ът е висок {m['headerHeight']} px на компютър — "
+                        "лого, навигация и бутоните не са на един ред")
+    return findings
+
+
+def _view_bodies(m: dict) -> list[str]:
+    bodies = []
+    if m["lowContrast"]:
+        bodies.append(f"{len(m['lowContrast'])} текста с нисък контраст (нужно ≥4.5:1, за "
+                      f"едър ≥3:1) — напр. {_examples(m['lowContrast'])}")
+    if m["invisible"]:
+        bodies.append(f"{len(m['invisible'])} текста остават невидими (opacity≈0) и след "
+                      f"скрол — напр. {m['invisible'][0]}; анимацията не се задейства")
+    if m["overflow"]:
+        bodies.append(f"страницата е по-широка от екрана ({m['scrollWidth']} px при "
+                      f"{m['width']}) — {', '.join(m['overflow'])}")
+    if m["placeholders"]:
+        bodies.append(f"видим заместител — {', '.join(m['placeholders'][:3])}; направи "
+                      "истинско съдържание (SVG, текст)")
+    if m["sparseCount"]:
+        bodies.append(f"{m['sparseCount']} големи полета почти без съдържание (само емоджи или "
+                      f"едноцветна форма) — напр. {', '.join(m['sparse'][:3])}; нарисувай SVG "
+                      "сцена със слоеве/градиенти по темата")
+    return bodies
+
+
+def _summary_findings(measured: dict[str, dict], has_toggle: bool) -> list[str]:
+    # Един и същ проблем обикновено се вижда в няколко изгледа — казва се веднъж,
+    # с изброени изгледи, вместо три почти еднакви реда.
+    per_view: dict[str, list[str]] = {}
+    for name, m in measured.items():
+        for b in _view_bodies(m):
+            per_view.setdefault(b, []).append(name)
+    findings = [f"{' / '.join(names)}: {body}" for body, names in per_view.items()]
+    phone = measured.get("телефон")
+    if phone and phone["smallCount"]:
+        findings.append(f"телефон: {phone['smallCount']} бутона/връзки под 24×24 px (трудни за "
+                        f"натискане) — напр. {', '.join(phone['small'][:3])}")
+    light, dark = measured.get("компютър"), measured.get("компютър, тъмна тема")
+    if light and dark and _bg(light) == _bg(dark) and not has_toggle:
+        findings.append("тъмна тема: няма бутон, а при prefers-color-scheme: dark фонът не се сменя")
+    return findings
+
+
 def check(html: Path, shots: Path | None, single: bool = False) -> dict:
     from playwright.sync_api import TimeoutError as PlaywrightTimeout
     from playwright.sync_api import sync_playwright
@@ -306,28 +370,9 @@ def check(html: Path, shots: Path | None, single: bool = False) -> dict:
                 m = _measure(page)
                 measured[name] = m
                 if shots:
-                    # Снимката е за хора: анимациите, вързани за скрола, иначе оставят
-                    # всичко под първия екран празно (елементите още „не са влезли“).
-                    frozen = page.add_style_tag(content=_NO_ANIMATION)
-                    page.wait_for_timeout(150)
-                    shot = shots / f"{'mobile' if w < 500 else 'desktop'}-{scheme}.png"
-                    page.screenshot(path=str(shot), full_page=True)
-                    saved.append(str(shot))
-                    frozen.evaluate("el => el.remove()")
+                    saved.append(_shoot(page, shots / f"{'mobile' if w < 500 else 'desktop'}-{scheme}.png"))
                 if name == "компютър":
-                    for e in dict.fromkeys(errors):
-                        findings.append(f"грешка в конзолата: {e[:160]}")
-                    local = [f for f in dict.fromkeys(failed) if f"127.0.0.1:{port}" in f]
-                    other = [f for f in dict.fromkeys(failed) if f not in local]
-                    for f in local[:4]:
-                        findings.append(f"не се зарежда: {f.replace(f'http://127.0.0.1:{port}/', '')}")
-                    for f in other[:2]:
-                        findings.append(f"външна заявка не мина: {f[:120]}")
-                    if m["h1"] != 1:
-                        findings.append(f"<h1> е {m['h1']} пъти (трябва точно 1)")
-                    if m["headerHeight"] > 110:
-                        findings.append(f"header-ът е висок {m['headerHeight']} px на компютър — "
-                                        "лого, навигация и бутоните не са на един ред")
+                    findings += _first_view_findings(errors, failed, port, m)
                     extra, has_toggle = _theme_and_form(page, m)
                     findings += extra
                     # Бутонът за тема помни избора — следващият изглед не бива да го наследи.
@@ -336,37 +381,7 @@ def check(html: Path, shots: Path | None, single: bool = False) -> dict:
     finally:
         srv.shutdown()
 
-    # Един и същ проблем обикновено се вижда в няколко изгледа — казва се веднъж,
-    # с изброени изгледи, вместо три почти еднакви реда.
-    per_view: dict[str, list[str]] = {}
-    for name, m in measured.items():
-        bodies = []
-        if m["lowContrast"]:
-            bodies.append(f"{len(m['lowContrast'])} текста с нисък контраст (нужно ≥4.5:1, за "
-                          f"едър ≥3:1) — напр. {_examples(m['lowContrast'])}")
-        if m["invisible"]:
-            bodies.append(f"{len(m['invisible'])} текста остават невидими (opacity≈0) и след "
-                          f"скрол — напр. {m['invisible'][0]}; анимацията не се задейства")
-        if m["overflow"]:
-            bodies.append(f"страницата е по-широка от екрана ({m['scrollWidth']} px при "
-                          f"{m['width']}) — {', '.join(m['overflow'])}")
-        if m["placeholders"]:
-            bodies.append(f"видим заместител — {', '.join(m['placeholders'][:3])}; направи "
-                          "истинско съдържание (SVG, текст)")
-        if m["sparseCount"]:
-            bodies.append(f"{m['sparseCount']} големи полета почти без съдържание (само емоджи или "
-                          f"едноцветна форма) — напр. {', '.join(m['sparse'][:3])}; нарисувай SVG "
-                          "сцена със слоеве/градиенти по темата")
-        for b in bodies:
-            per_view.setdefault(b, []).append(name)
-    findings += [f"{' / '.join(names)}: {body}" for body, names in per_view.items()]
-    phone = measured.get("телефон")
-    if phone and phone["smallCount"]:
-        findings.append(f"телефон: {phone['smallCount']} бутона/връзки под 24×24 px (трудни за "
-                        f"натискане) — напр. {', '.join(phone['small'][:3])}")
-    light, dark = measured.get("компютър"), measured.get("компютър, тъмна тема")
-    if light and dark and _bg(light) == _bg(dark) and not has_toggle:
-        findings.append("тъмна тема: няма бутон, а при prefers-color-scheme: dark фонът не се сменя")
+    findings += _summary_findings(measured, has_toggle)
     return {"findings": list(dict.fromkeys(findings)), "shots": saved}
 
 

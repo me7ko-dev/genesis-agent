@@ -166,3 +166,24 @@ def test_a_real_browser_measures_a_bad_page(tmp_path) -> None:
     assert "по-широка от екрана" in text
     assert "placeholder" in text
     assert "почти без съдържание" in text
+
+
+def test_runner_findings_without_a_browser() -> None:
+    """page_check_runner: находките от измерванията — чисти функции (C901 19)."""
+    from genesis_agent import page_check_runner as r
+    quiet = {"lowContrast": [], "invisible": [], "overflow": [], "placeholders": [],
+             "sparseCount": 0, "sparse": [], "smallCount": 0, "small": [],
+             "bodyBg": "rgb(255, 255, 255)", "htmlBg": "rgba(0, 0, 0, 0)"}
+    wide = dict(quiet, overflow=["div.x"], scrollWidth=900, width=390)
+    measured = {"компютър": quiet, "компютър, тъмна тема": quiet,
+                "телефон": dict(wide, smallCount=2, small=["a", "b"])}
+    assert r._summary_findings(measured, has_toggle=False) == [
+        "телефон: страницата е по-широка от екрана (900 px при 390) — div.x",
+        "телефон: 2 бутона/връзки под 24×24 px (трудни за натискане) — напр. a, b",
+        "тъмна тема: няма бутон, а при prefers-color-scheme: dark фонът не се сменя"]
+    assert r._summary_findings({"компютър": quiet, "компютър, тъмна тема": quiet}, True) == []
+    first = r._first_view_findings(
+        ["бум", "бум"], ["http://127.0.0.1:5/a.css (404)", "https://cdn.x/y.js"], 5,
+        {"h1": 1, "headerHeight": 80})
+    assert first == ["грешка в конзолата: бум", "не се зарежда: a.css (404)",
+                     "външна заявка не мина: https://cdn.x/y.js"]
