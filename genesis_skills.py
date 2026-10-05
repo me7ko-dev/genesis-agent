@@ -863,6 +863,46 @@ def parse_and_execute_readonly_tools(response_text: str) -> list[str]:
     return [r for _, r in results]
 
 
+def _run_block(kind: str, m: re.Match) -> str:
+    """Един блоков таг (WRITE_FILE / EDIT_FILE / USE_SKILL), вече решено, че не е вложен."""
+    if kind == "WRITE_FILE":
+        return _safe_tool("WRITE_FILE", _tool_write_file, m.group("path"), m.group("body"))
+    if kind == "USE_SKILL":
+        return _safe_tool("USE_SKILL", _tool_use_skill, m.group("name"), m.group("body"))
+    body = m.group("body")
+    if _EDIT_SEPARATOR not in body:
+        return (f"[EDIT_FILE: {m.group('path').strip()}] ❌ Липсва разделителят "
+                f"{_EDIT_SEPARATOR} между стария и новия текст.")
+    old_part, new_part = body.split(_EDIT_SEPARATOR, 1)
+    return _safe_tool("EDIT_FILE", _tool_edit_file, m.group("path"),
+                      _strip_one_newline(old_part), _strip_one_newline(new_part))
+
+
+def _run_bare_use_skill(m: re.Match) -> str:
+    out = _safe_tool("USE_SKILL", _tool_use_skill, m.group("name"), "")
+    # Изпълнено е — но ако моделът е искал да ВИКА нещо от умението, нека
+    # научи точния синтаксис, вместо да гадае пак следващия рунд. Само при
+    # УСПЕШНО заредено умение: ако такова изобщо няма, синтаксисът на
+    # driver кода е без значение и бележката е чист шум в контекста.
+    if not any(marker in out for marker in _USE_SKILL_FAILURES):
+        out += ("\n(Без driver код — блокът не беше затворен. За да извикаш функция "
+                "от умението: [USE_SKILL: име]<твоят код>[END_USE_SKILL].)")
+    return out
+
+
+# Едноредовите тагове, в реда на изпълнение (стъпки 2–4 в parse_and_execute_tools).
+_LINE_TAGS: list[tuple[re.Pattern[str], Callable[[re.Match], str]]] = [
+    (_SIMPLE_RE, lambda m: _safe_tool(m.group("tool"), _SIMPLE_DISPATCH[m.group("tool")],
+                                      m.group("arg"))),
+    # 3. BROWSER_READ — без аргумент.
+    (_BROWSER_READ_RE, lambda m: _safe_tool("BROWSER_READ", _tool_browser_read)),
+    # 3b. REPO_MAP без аргумент — картира текущия workspace.
+    (_REPO_MAP_RE, lambda m: _safe_tool("REPO_MAP", _tool_repo_map, "")),
+    # 4. TASK_LIST без аргумент — [TASK_LIST] показва отворените нишки.
+    (_TASK_LIST_RE, lambda m: _safe_tool("TASK_LIST", _tool_task_list, "open")),
+]
+
+
 def parse_and_execute_tools(response_text: str) -> list[str]:
     """
     Извлича и изпълнява всички тул-тагове в реда, в който се появяват.
@@ -903,24 +943,7 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
         if _inside_block(start):
             continue  # вложен в вече приет блок → това е текст, не тул
         consumed_spans.append((start, end))
-        if kind == "WRITE_FILE":
-            results.append((start, _safe_tool("WRITE_FILE", _tool_write_file,
-                                              m.group("path"), m.group("body"))))
-        elif kind == "EDIT_FILE":
-            body = m.group("body")
-            if _EDIT_SEPARATOR not in body:
-                results.append((start,
-                                (f"[EDIT_FILE: {m.group('path').strip()}] ❌ Липсва разделителят "
-                                 f"{_EDIT_SEPARATOR} между стария и новия текст.")))
-            else:
-                old_part, new_part = body.split(_EDIT_SEPARATOR, 1)
-                results.append((start, _safe_tool("EDIT_FILE", _tool_edit_file,
-                                                  m.group("path"),
-                                                  _strip_one_newline(old_part),
-                                                  _strip_one_newline(new_part))))
-        else:  # USE_SKILL
-            results.append((start, _safe_tool("USE_SKILL", _tool_use_skill,
-                                              m.group("name"), m.group("body"))))
+        results.append((start, _run_block(kind, m)))
 
     # ── 1b. USE_SKILL БЕЗ затварящ [END_USE_SKILL] ──────────────────────────
     # Най-скъпият пропуск в целия парсер (bug fix, 2026-09-20). driver кодът е
@@ -939,40 +962,13 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
         if _inside_block(m.start()):
             continue
         consumed_spans.append((m.start(), m.end()))
-        out = _safe_tool("USE_SKILL", _tool_use_skill, m.group("name"), "")
-        # Изпълнено е — но ако моделът е искал да ВИКА нещо от умението, нека
-        # научи точния синтаксис, вместо да гадае пак следващия рунд. Само при
-        # УСПЕШНО заредено умение: ако такова изобщо няма, синтаксисът на
-        # driver кода е без значение и бележката е чист шум в контекста.
-        if not any(marker in out for marker in _USE_SKILL_FAILURES):
-            out += ("\n(Без driver код — блокът не беше затворен. За да извикаш функция "
-                    "от умението: [USE_SKILL: име]<твоят код>[END_USE_SKILL].)")
-        results.append((m.start(), out))
+        results.append((m.start(), _run_bare_use_skill(m)))
 
-    # ── 2. Едноредови тулове — прескачаме тези вътре в блоков таг ───────────
-    for m in _SIMPLE_RE.finditer(response_text):
-        if _inside_block(m.start()):
-            continue
-        fn = _SIMPLE_DISPATCH[m.group("tool")]
-        results.append((m.start(), _safe_tool(m.group("tool"), fn, m.group("arg"))))
-
-    # 3. BROWSER_READ — без аргумент.
-    for m in _BROWSER_READ_RE.finditer(response_text):
-        if _inside_block(m.start()):
-            continue
-        results.append((m.start(), _safe_tool("BROWSER_READ", _tool_browser_read)))
-
-    # 3b. REPO_MAP без аргумент — картира текущия workspace.
-    for m in _REPO_MAP_RE.finditer(response_text):
-        if _inside_block(m.start()):
-            continue
-        results.append((m.start(), _safe_tool("REPO_MAP", _tool_repo_map, "")))
-
-    # 4. TASK_LIST без аргумент — [TASK_LIST] показва отворените нишки.
-    for m in _TASK_LIST_RE.finditer(response_text):
-        if _inside_block(m.start()):
-            continue
-        results.append((m.start(), _safe_tool("TASK_LIST", _tool_task_list, "open")))
+    # ── 2–4. Едноредови тулове — прескачаме тези вътре в блоков таг ─────────
+    for rx, run in _LINE_TAGS:
+        for m in rx.finditer(response_text):
+            if not _inside_block(m.start()):
+                results.append((m.start(), run(m)))
 
     # Подреждаме по позиция в текста, връщаме само низовете.
     results.sort(key=lambda t: t[0])
