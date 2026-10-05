@@ -54,8 +54,7 @@
 2. При merge на `feat/android-standalone`: той пипа `run_turn`
    (`_compact_midtask`, `_round_checkpoint`, компресия в началото на хода) — ходът
    вече е `agent_core._Turn`; пренеси ги там/в `run_turn` и пусни `loop_diff`.
-3. Сложност над 15 (ruff C901, 12 функции): `setup_wizard.run` 22,
-   `parse_and_execute_tools` 21, `web_check.check_html` 20, … Една по една, тестове
+3. Сложност над 15 (ruff C901, 11 функции): `parse_and_execute_tools` 21, `web_check.check_html` 20, … Една по една, тестове
    преди това, накрая C901 в CI с праг 15. `remote_server.serve`/`make_http` и
    `cli.main` — след merge на т. 1–2 (двата клона ги пренаписват).
 4. За преценка (fail-open, нарочно, сега поне в лога): `skill_loader` приема

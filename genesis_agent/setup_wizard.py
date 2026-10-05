@@ -204,63 +204,77 @@ def _existing(var: str) -> str:
     return os.environ.get(var) or read_env_files(var) or ""
 
 
-def run() -> int:
-    print("\n  ⚡ Genesis Agent — настройка\n")
-    print("  Всеки ключ е по избор. Един е достатъчен, за да тръгнеш.")
-    print("  Enter без нищо = пропусни този доставчик.")
-    print("  Ключовете се записват в:", ENV_FILE)
-    print()
+def _check(base_url: str, key: str, model: str) -> tuple[bool, str]:
+    print("    проверявам…", end=" ", flush=True)
+    ok, why = (_test_anthropic_key(key, model) if base_url.startswith("native://")
+               else _test_key(base_url, key, model))
+    print("✅" if ok else "❌", why)
+    return ok, why
 
-    collected: dict[str, str] = {}
-    working = 0
 
-    for var, name, url, base_url, model in PROVIDERS:
-        current = _existing(var)
-
-        if current:
-            # An existing key is TESTED, not assumed good. A wizard that prints
-            # a checkmark next to a dead key is worse than one that says
-            # nothing — it is the reason you stop checking.
-            print(f"  {name}  —  ключ вече има, проверявам…", end=" ", flush=True)
-            ok, why = _test_key(base_url, current, model)
-            print("✅" if ok else "❌", why)
-            if ok:
-                # Working key: keep it unless the user deliberately replaces it.
-                key = _prompt("    [Enter] запази · или въведи нов ключ: ")
-                if not key:
-                    collected[var] = current
-                    working += 1
-                    print("    запазен\n")
-                    continue
-            else:
-                # Broken key: replacing is the obvious move, so make that the
-                # default and require a deliberate choice to keep it.
-                print(f"    Вземи нов от: {url}")
-                key = _prompt("    Нов ключ (Enter = остави счупения): ")
-                if not key:
-                    collected[var] = current
-                    print("    оставен непроменен — този доставчик няма да работи\n")
-                    continue
-        else:
-            print(f"  {name}  —  вземи ключ от: {url}")
-            key = _prompt(f"    {var} = ")
-            if not key:
-                print("    (пропуснат)\n")
-                continue
-
-        print("    проверявам…", end=" ", flush=True)
-        ok, why = _test_key(base_url, key, model)
+def _ask_free(var: str, name: str, url: str, base_url: str, model: str) -> tuple[str, bool]:
+    """(ключ за запис или "", работи ли)."""
+    current = _existing(var)
+    if current:
+        # An existing key is TESTED, not assumed good. A wizard that prints
+        # a checkmark next to a dead key is worse than one that says
+        # nothing — it is the reason you stop checking.
+        print(f"  {name}  —  ключ вече има, проверявам…", end=" ", flush=True)
+        ok, why = _test_key(base_url, current, model)
         print("✅" if ok else "❌", why)
         if ok:
-            collected[var] = key
-            working += 1
+            # Working key: keep it unless the user deliberately replaces it.
+            key = _prompt("    [Enter] запази · или въведи нов ключ: ")
+            if not key:
+                print("    запазен\n")
+                return current, True
         else:
-            keep = _prompt("    Да го запиша ли въпреки това? [y/N] ").lower()
-            if keep.startswith("y"):
-                collected[var] = key
-        print()
+            # Broken key: replacing is the obvious move, so make that the
+            # default and require a deliberate choice to keep it.
+            print(f"    Вземи нов от: {url}")
+            key = _prompt("    Нов ключ (Enter = остави счупения): ")
+            if not key:
+                print("    оставен непроменен — този доставчик няма да работи\n")
+                return current, False
+    else:
+        print(f"  {name}  —  вземи ключ от: {url}")
+        key = _prompt(f"    {var} = ")
+        if not key:
+            print("    (пропуснат)\n")
+            return "", False
 
-    # ── Платени доставчици (по избор) ─────────────────────────────────────
+    ok, _ = _check(base_url, key, model)
+    saved = key if ok or _prompt("    Да го запиша ли въпреки това? [y/N] ").lower().startswith("y") else ""
+    print()
+    return saved, ok
+
+
+def _ask_paid(var: str, name: str, url: str, base_url: str, model: str) -> str:
+    """Ключ за запис или ""."""
+    current = _existing(var)
+    if current:
+        print(f"  {name}  —  ключ вече има, проверявам…", end=" ", flush=True)
+        ok, why = (_test_anthropic_key(current, model)
+                   if base_url.startswith("native://")
+                   else _test_key(base_url, current, model))
+        print("✅" if ok else "❌", why)
+        key = _prompt("    [Enter] запази · или въведи нов ключ: ")
+        if not key:
+            print()
+            return current
+    else:
+        print(f"  {name}  —  вземи ключ от: {url}")
+        key = _prompt(f"    {var} = ")
+        if not key:
+            print("    (пропуснат)\n")
+            return ""
+    ok, _ = _check(base_url, key, model)
+    saved = key if ok or _prompt("    Да го запиша ли въпреки това? [y/N] ").lower().startswith("y") else ""
+    print()
+    return saved
+
+
+def _paid_keys() -> dict[str, str]:
     print("  ── Платени модели (по избор) ──")
     print("  Безплатната верига стига за повечето неща. За най-трудното —")
     print("  например поправка на бъг в чужд проект — платен модел е")
@@ -272,39 +286,55 @@ def run() -> int:
     prompt = "  Да настроя ли платен ключ? [Y/n] " if default_yes else "  Да настроя ли платен ключ? [y/N] "
     answer = _prompt(prompt).lower()
     want_paid = (not answer.startswith("n")) if default_yes else answer.startswith("y")
-    if want_paid:
-        print()
-        for var, name, url, base_url, model in PAID_PROVIDERS:
-            current = _existing(var)
-            if current:
-                print(f"  {name}  —  ключ вече има, проверявам…", end=" ", flush=True)
-                ok, why = (_test_anthropic_key(current, model)
-                           if base_url.startswith("native://")
-                           else _test_key(base_url, current, model))
-                print("✅" if ok else "❌", why)
-                key = _prompt("    [Enter] запази · или въведи нов ключ: ")
-                if not key:
-                    collected[var] = current
-                    print()
-                    continue
-            else:
-                print(f"  {name}  —  вземи ключ от: {url}")
-                key = _prompt(f"    {var} = ")
-                if not key:
-                    print("    (пропуснат)\n")
-                    continue
-            print("    проверявам…", end=" ", flush=True)
-            ok, why = (_test_anthropic_key(key, model) if base_url.startswith("native://")
-                       else _test_key(base_url, key, model))
-            print("✅" if ok else "❌", why)
-            if ok or _prompt("    Да го запиша ли въпреки това? [y/N] ").lower().startswith("y"):
-                collected[var] = key
-            print()
-    else:
+    print()
+    if not want_paid:
         # Съществуващ платен ключ се пренася, а не се трие мълчаливо.
-        for var in existing_paid:
-            collected[var] = _existing(var)
-        print()
+        return {var: _existing(var) for var in existing_paid}
+    return {var: key for var, *rest in PAID_PROVIDERS if (key := _ask_paid(var, *rest))}
+
+
+def _preserved_and_backup(collected: dict[str, str]) -> dict[str, str]:
+    # Anything already in the file that this wizard does not manage is carried
+    # over verbatim. Overwriting with only what we collected silently deleted
+    # unrelated settings — running setup to add one key must never cost you
+    # another.
+    preserved: dict[str, str] = {}
+    if not ENV_FILE.exists():
+        return preserved
+    for line in ENV_FILE.read_text(encoding="utf-8", errors="ignore").splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or "=" not in s:
+            continue
+        k, _, v = s.partition("=")
+        k = k.strip().removeprefix("export ").strip()
+        if k and k not in collected and v.strip():
+            preserved[k] = v.strip()
+
+    # A dated copy before every write, so a mistake here is recoverable.
+    backup = ENV_FILE.with_name(f".env.backup-{datetime.datetime.now():%Y%m%d-%H%M%S}")
+    _write_private(backup, ENV_FILE.read_text(encoding="utf-8"))
+    _prune_backups(ENV_FILE.parent)
+    print(f"  предишният файл е запазен като {backup.name}")
+    return preserved
+
+
+def run() -> int:
+    print("\n  ⚡ Genesis Agent — настройка\n")
+    print("  Всеки ключ е по избор. Един е достатъчен, за да тръгнеш.")
+    print("  Enter без нищо = пропусни този доставчик.")
+    print("  Ключовете се записват в:", ENV_FILE)
+    print()
+
+    collected: dict[str, str] = {}
+    working = 0
+    for var, *rest in PROVIDERS:
+        key, ok = _ask_free(var, *rest)
+        if key:
+            collected[var] = key
+        working += ok
+
+    # ── Платени доставчици (по избор) ─────────────────────────────────────
+    collected.update(_paid_keys())
 
     if not collected:
         print("  Нито един ключ не е зададен. Genesis може да работи и само с")
@@ -314,28 +344,7 @@ def run() -> int:
 
     # ── Write ─────────────────────────────────────────────────────────────
     ensure_genesis_home()
-
-    # Anything already in the file that this wizard does not manage is carried
-    # over verbatim. Overwriting with only what we collected silently deleted
-    # unrelated settings — running setup to add one key must never cost you
-    # another.
-    preserved: dict[str, str] = {}
-    if ENV_FILE.exists():
-        for line in ENV_FILE.read_text(encoding="utf-8", errors="ignore").splitlines():
-            s = line.strip()
-            if not s or s.startswith("#") or "=" not in s:
-                continue
-            k, _, v = s.partition("=")
-            k = k.strip().removeprefix("export ").strip()
-            if k and k not in collected and v.strip():
-                preserved[k] = v.strip()
-
-        # A dated copy before every write, so a mistake here is recoverable.
-        backup = ENV_FILE.with_name(f".env.backup-{datetime.datetime.now():%Y%m%d-%H%M%S}")
-        _write_private(backup, ENV_FILE.read_text(encoding="utf-8"))
-        _prune_backups(ENV_FILE.parent)
-        print(f"  предишният файл е запазен като {backup.name}")
-
+    preserved = _preserved_and_backup(collected)
     lines = ["# Genesis Agent — written by `genesis setup`.",
              "# Keep this file private. It is never committed.",
              "#",
