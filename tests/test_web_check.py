@@ -146,3 +146,25 @@ def test_html_written_as_data_gets_only_the_structure(tmp_path) -> None:
     assert web_note(sample) == ""
     sample.write_text("<html><body><table><tr><td>A95</div></body></html>", encoding="utf-8")
     assert "div" in web_note(sample)
+
+
+def test_every_finding_in_its_order(tmp_path, monkeypatch) -> None:
+    """Пълен документ с по една находка от всеки вид — редът им е договорът (C901 20)."""
+    page = tmp_path / "index.html"
+    html = ('<html lang=""><head><link rel="stylesheet" href="s.css">'
+            '<meta property="og:image" content="https://example.com/x.png"></head><body>'
+            '<a href="#nope">a</a><a href="mailto:a@b.bg">m</a><a href="https://x.bg/">x</a>'
+            '<a href="about.html">b</a><p id="d">1</p><p id="d">2</p><img src="s.css">'
+            '<input id="q"><p>Цена 12 лв.</p><div></body></html>')
+    (tmp_path / "s.css").write_text("", encoding="utf-8")
+    found = check_html(page, html)
+    assert [f.split(" ")[0] for f in found] == [
+        "ред", "връзка", 'href="about.html"', "og/twitter", "повтарящи",
+        "1", "полета", "<html>", "няма", "няма", "няма", "няма", "1"]
+    assert "viewport" in found[8] and "charset" in found[9] and found[10] == "няма <title>"
+    assert "description" in found[11] and "в лева (12 лв.)" in found[12]
+
+    def _boom(self, data):
+        raise ValueError("счупено")
+    monkeypatch.setattr("genesis_agent.web_check._Collector.feed", _boom)
+    assert check_html(page, html) == ["HTML не се парсва: счупено"]
