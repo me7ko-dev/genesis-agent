@@ -435,7 +435,7 @@ class RemoteServer:
         with self._lock:
             self._failures.setdefault(ip, []).append(time.monotonic())
 
-    def make_http(self, host: str, port: int) -> ThreadingHTTPServer:
+    def make_http(self, host: str, port: int) -> ThreadingHTTPServer:  # noqa: C901 — след merge
         server = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -582,7 +582,7 @@ def _web_root() -> Path | None:
     return root if (root / "index.html").is_file() else None
 
 
-def serve(args: list[str]) -> int:
+def serve(args: list[str]) -> int:  # noqa: C901 — цепи се след merge (NEXT_STEPS)
     """`genesis serve [--port N] [--host IP] [--reset]`."""
     try:
         import cryptography  # noqa: F401

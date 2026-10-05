@@ -96,6 +96,10 @@ addopts = "--ignore=scripts --ignore=bench"
 target-version = "py310"
 
 [tool.ruff.lint]
+# Сложност (2026-10-05): функциите над 15 са разцепени, всяка с тестове преди
+# това. Трите с `noqa: C901` чакат merge на feat/desktop-app и
+# feat/android-standalone, които ги пренаписват (NEXT_STEPS).
+extend-select = ["C901"]
 ignore = [
     # datetime.now()/date.today() without tzinfo: every flagged call site
     # compares against another naive call from the same process (self-consistent,
@@ -108,6 +112,9 @@ ignore = [
     # работата — тогава записва грешката със следата (log.debug(...,
     # exc_info=True), вижда се с GENESIS_DEBUG=1), или носи `noqa` с причина.
 ]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
 
 [tool.mypy]
 # Optional third-party libs (playwright, google-auth, anthropic) may be

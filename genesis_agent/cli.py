@@ -225,7 +225,7 @@ def _debug_log() -> None:
     logger.addHandler(handler)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:  # noqa: C901 — цепи се след merge (NEXT_STEPS)
     from genesis_agent.paths import ensure_utf8_streams
     ensure_utf8_streams()
     _debug_log()
