@@ -296,8 +296,21 @@ def domain_context(query: str) -> str:
         triggers = h.get("triggers", [])
         if isinstance(triggers, str):
             triggers = [triggers]
+        # `not_with`: думи, които отменят знанието. bench car-ads (2026-10-06):
+        # „scraper.py … обяви от сайт за коли“ — „сайт“ подаваше уеб
+        # ръководството на скрейпър; да събираш от сайт не е да правиш сайт.
+        blockers = h.get("not_with", [])
+        if isinstance(blockers, str):
+            blockers = [blockers]
+        if query_words & {w for b in blockers for w in _keywords(b)}:
+            continue
         score = len(query_words & {w for t in triggers for w in _keywords(t)})
-        if score >= need:
+        # Поне един тригер — целият. bench library-pkg (2026-10-06): „проверка
+        # на контролната цифра“ + „номер на читателя“ за ISBN дадоха 3 думи от
+        # тригерите на ЕГН („проверка на егн контролна цифра“, „единен граждански
+        # номер“) без самото „егн“ — и правилата за ЕГН отиваха в задача за книги.
+        whole = any(kw and kw <= query_words for kw in (_keywords(t) for t in triggers))
+        if whole and score >= need:
             ranked.append((score, h))
     ranked.sort(key=lambda x: x[0], reverse=True)
     for _, h in ranked:

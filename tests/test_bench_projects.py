@@ -1,6 +1,9 @@
 """scripts/bench_projects.py — the parts that decide the numbers, without a model."""
 import importlib.util
+import shutil
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location("bench_projects", ROOT / "scripts" / "bench_projects.py")
@@ -83,3 +86,29 @@ def test_every_trial_gets_an_empty_memory_outside_its_folder(tmp_path):
     assert line.endswith("[]")
     assert workdir not in memory.parents and tmp_path not in memory.parents
     assert not memory.exists()
+
+
+_WITH_REFERENCE = sorted(p.name for p in bp.PROJECTS_DIR.iterdir() if (p / "reference").is_dir())
+
+
+def test_the_new_projects_carry_a_reference_solution():
+    assert len(_WITH_REFERENCE) >= 6
+
+
+@pytest.mark.parametrize("name", _WITH_REFERENCE)
+def test_hidden_tests_pass_against_the_reference(name, tmp_path):
+    """A hidden test nobody can pass measures nothing: each project that ships
+    a `reference/` solution must pass its own hidden tests with it — through
+    the same `run_hidden` the benchmark uses. A package the project needs and
+    this machine lacks (CI has no flask/bs4) skips, it does not fail."""
+    import re
+    import sys
+    project = bp.PROJECTS_DIR / name
+    workdir = tmp_path / f"{name}-1"
+    shutil.copytree(project / "reference", workdir)
+    passed, total, out = bp.run_hidden(sys.executable, project, workdir)
+    missing = re.search(r"No module named '([\w.]+)'", out)
+    if passed < total and missing and not (workdir / missing.group(1).split(".")[0]).exists() \
+            and not (workdir / f"{missing.group(1).split('.')[0]}.py").exists():
+        pytest.skip(f"{name}: needs {missing.group(1)}")
+    assert passed == total and total > 1, out[-2000:]

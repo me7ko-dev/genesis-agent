@@ -396,6 +396,32 @@ def test_an_unrelated_request_gets_nothing(_shipped_skills) -> None:
     assert sl.domain_context("напиши rate limiter с asyncio и тестове") == ""
 
 
+_BENCH_KNOWLEDGE = {
+    "booking-form": "web_site_2026", "egn-check": "bg_egn_validate_and_decode",
+    "eik-check": "bg_eik_bulstat_validate", "euro-convert": "bg_euro_bgn_conversion",
+    "faktura-excel": "bg_invoice_fields", "iban-check": "bg_iban_validate",
+    "vat-check": "bg_vat_number_validate", "workdays": "bg_working_days",
+}
+
+
+def test_every_bench_task_gets_exactly_its_knowledge(_shipped_skills) -> None:
+    """Всяка задача от bench/projects — само своето знание, другите нищо.
+    2026-10-06: ISBN задачата (library-pkg) получаваше правилата за ЕГН по
+    „проверка“ + „цифра“ + „номер“, а скрейпърът (car-ads) — уеб ръководството
+    по „от сайт“."""
+    import re
+    bench = sl.Path(__file__).resolve().parent.parent / "bench" / "projects"
+    got = {t.parent.name: re.findall(r"библиотеката: (\S+)", sl.domain_context(t.read_text("utf-8")))
+           for t in sorted(bench.glob("*/task.txt"))}
+    assert len(got) >= 16
+    assert got == {name: [_BENCH_KNOWLEDGE[name]] if name in _BENCH_KNOWLEDGE else [] for name in got}
+
+
+def test_shared_words_without_a_whole_trigger_are_not_a_match(_shipped_skills) -> None:
+    assert sl.domain_context(
+        "ISBN-13 с проверка на контролната цифра; add_reader връща номер на читателя") == ""
+
+
 def test_a_general_skill_is_never_injected_in_chat(monkeypatch) -> None:
     hit = {"name": "event_bus", "category": "autonomous", "verified": True, "_kw_score": 9}
     monkeypatch.setattr(sl, "search_skills", lambda *a, **k: [hit])
