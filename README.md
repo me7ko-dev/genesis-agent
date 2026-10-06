@@ -67,6 +67,12 @@ scan it with the Genesis Remote app and use the same agent from the phone —
 end-to-end encrypted, dangerous commands confirmed on the phone. See
 [docs/MOBILE.md](docs/MOBILE.md).
 
+**For your own apps and games**: `genesis api` serves a local, text-only
+OpenAI-compatible endpoint on `http://127.0.0.1:8770` (`POST /v1/chat/completions`,
+`GET /v1/health`) backed by the same free model chain. It never runs tools,
+commands or the browser, listens on 127.0.0.1 only and accepts browser calls
+only from `http://127.0.0.1` / `http://localhost` pages.
+
 Prefer your own Python? `scripts/install_windows.ps1` installs through pipx and first checks
 the three things that actually break there — the Microsoft Store Python stub, a
 stale PATH, and `bash.exe` resolving to the WSL launcher instead of Git Bash.
