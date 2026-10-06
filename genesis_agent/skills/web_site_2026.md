@@ -11,6 +11,14 @@ triggers:
 - лендинг
 - website
 - landing
+not_with:
+- scraper
+- scrape
+- scraping
+- crawler
+- скрейпър
+- скрейпинг
+- свали
 version: '1.0'
 author: Genesis
 last_updated: '2026-09-28T14:00:00+00:00'
