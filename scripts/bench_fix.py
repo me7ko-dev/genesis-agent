@@ -36,8 +36,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from genesis_agent import repo_agent
 from genesis_agent.brain import Brain
+from genesis_agent.paths import project_python
 
 TEST = "test_app.py"
+
+# Projects whose test needs a package outside the standard library, and which
+# `genesis fix` must therefore test with the PROJECT'S Python, found on its own
+# (no test command passed in): the regression for PR #30, where pytest ran in
+# the pipx venv and every test died on `No module named 'reportlab'`. A machine
+# without the packages (pytest included: the detected command is pytest) skips
+# the project instead of counting a failure.
+NEEDS: dict[str, tuple[str, ...]] = {"excel_total": ("openpyxl", "pytest")}
 
 # name -> (task as the operator would write it, {file: content})
 PROJECTS: dict[str, tuple[str, dict[str, str]]] = {
@@ -154,6 +163,27 @@ PROJECTS: dict[str, tuple[str, dict[str, str]]] = {
                   "assert parse_date('2026-09-24') == date(2026, 9, 24)\nprint('ALL OK')\n",
         },
     ),
+    "excel_total": (
+        "в Excel отчета редът ОБЩО показва грешна сума",
+        {
+            "pyproject.toml": "[project]\nname = 'shop-report'\nversion = '0.1'\ndependencies = ['openpyxl']\n",
+            "report.py": "from openpyxl import Workbook\n\n\ndef write_report(rows, path):\n"
+                         "    wb = Workbook()\n    ws = wb.active\n"
+                         "    ws.append(['Продукт', 'Количество', 'Цена', 'Сума'])\n"
+                         "    for name, qty, price in rows:\n"
+                         "        ws.append([name, qty, price, round(qty * price, 2)])\n"
+                         "    ws.append(['ОБЩО', None, None, round(sum(p for _, _, p in rows), 2)])\n"
+                         "    wb.save(path)\n",
+            TEST: "import os\nimport tempfile\n\nfrom openpyxl import load_workbook\n\n"
+                  "from report import write_report\n\n\ndef test_total():\n"
+                  "    path = os.path.join(tempfile.mkdtemp(), 'r.xlsx')\n"
+                  "    write_report([('Хляб', 3, 1.8), ('Мляко', 2, 2.5)], path)\n"
+                  "    ws = load_workbook(path).active\n"
+                  "    last = [c.value for c in ws[ws.max_row]]\n"
+                  "    assert last[0] == 'ОБЩО'\n    assert last[3] == 10.4\n\n\n"
+                  "if __name__ == '__main__':\n    test_total()\n    print('ALL OK')\n",
+        },
+    ),
 }
 
 
@@ -179,22 +209,43 @@ class _Counting(Brain):
 
 
 def _run_test(root: Path) -> bool:
-    r = subprocess.run([sys.executable, TEST], cwd=root, capture_output=True, text=True, timeout=60,
+    """The independent re-check, with the interpreter `genesis fix` itself
+    uses for the project — under pipx, `sys.executable` has none of its packages."""
+    r = subprocess.run([project_python(root), TEST], cwd=root, capture_output=True, text=True, timeout=60,
                        check=False)
     return r.returncode == 0 and "ALL OK" in r.stdout
 
 
-def bench_one(name: str, task: str, files: dict[str, str], rounds: int) -> dict:
+def _missing(root: Path, packages: tuple[str, ...]) -> list[str]:
+    return [p for p in packages if not _imports(root, p)]
+
+
+def _imports(root: Path, package: str) -> bool:
+    r = subprocess.run([project_python(root), "-c", f"import {package}"], cwd=root,
+                       capture_output=True, timeout=60, check=False)
+    return r.returncode == 0
+
+
+def bench_one(name: str, task: str, files: dict[str, str], rounds: int) -> dict | None:
+    """One project. None when the machine lacks a package the project needs."""
     root = Path(tempfile.mkdtemp(prefix=f"bench_fix_{name}_"))
     for rel, content in files.items():
         (root / rel).write_text(content, encoding="utf-8")
+    needs = NEEDS.get(name, ())
+    if _missing(root, needs):
+        shutil.rmtree(root, ignore_errors=True)
+        return None
     assert not _run_test(root), f"{name}: the planted bug must make the test fail"
     test_before = (root / TEST).read_bytes()
+    # A project with a package outside the stdlib is tested the way `genesis
+    # fix` finds it (pyproject.toml → pytest with the project's Python); the
+    # rest get the plain-script command, with that same interpreter.
+    test_command = None if needs else f'"{project_python(root)}" {TEST}'
 
     _Counting.prompt = _Counting.completion = 0
     t0 = time.time()
     try:
-        out = repo_agent.repair(root, task, test_command=f'"{sys.executable}" {TEST}',
+        out = repo_agent.repair(root, task, test_command=test_command,
                                 max_rounds=rounds, on_status=lambda msg: None)
         reported, used_rounds = out.success, out.rounds
     except Exception as e:  # a crash is a failed fix, recorded as such
@@ -228,6 +279,10 @@ def main() -> int:
     for name in names:
         task, files = PROJECTS[name]
         r = bench_one(name, task, files, args.rounds)
+        if r is None:
+            print(f"  ⏭  {name:16} пропуснат: Python-ът на проекта ({project_python()}) няма "
+                  f"{', '.join(NEEDS[name])}", flush=True)
+            continue
         results.append(r)
         flag = "✅" if r["fixed"] else ("⚠️ пипна теста" if r["test_touched"] else "❌")
         lie = "  (каза „поправено“, не е)" if r["reported"] and not r["fixed"] else ""
@@ -235,6 +290,9 @@ def main() -> int:
               f"токени={r['prompt'] + r['completion']:>7}{lie}", flush=True)
 
     n = len(results)
+    if not n:
+        print("\nНито един проект не е пуснат.")
+        return 1
     fixed = sum(r["fixed"] for r in results)
     toks = sum(r["prompt"] + r["completion"] for r in results)
     secs = sum(r["sec"] for r in results)
