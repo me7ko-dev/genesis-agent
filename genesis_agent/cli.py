@@ -11,6 +11,7 @@ genesis_agent.cli — the `genesis` command.
     genesis update          is there a newer commit on the installed branch
     genesis budget [N]      token usage today + last N days (default 7)
     genesis serve           use Genesis from your phone (Android / iOS app)
+    genesis api             local text-only OpenAI-compatible endpoint (127.0.0.1:8770)
     genesis --version
 """
 from __future__ import annotations
@@ -260,6 +261,10 @@ def main(argv: list[str] | None = None) -> int:
         sys.path.insert(0, str(_project_root()))
         from genesis_agent.remote_server import serve
         return serve(argv[1:])
+
+    if cmd == "api":
+        from genesis_agent.llm_api import serve as serve_api
+        return serve_api(argv[1:])
 
     if cmd == "chat":
         return _chat()
