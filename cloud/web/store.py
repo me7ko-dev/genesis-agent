@@ -21,6 +21,15 @@ from typing import Any
 SESSION_SECONDS = 14 * 24 * 3600
 _SCRYPT = {"n": 2 ** 14, "r": 8, "p": 1}
 
+_DUMMY: list[str] = []
+
+
+def _dummy_hash() -> str:
+    if not _DUMMY:
+        _DUMMY.append(hash_password(secrets.token_hex(16)))
+    return _DUMMY[0]
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
@@ -115,7 +124,9 @@ class Store:
                             (email.strip().lower(),)).fetchone()
         if row is None:
             # Същото време като при грешна парола — да не издава кои имейли има.
-            verify_password(password, hash_password("x" * 10))
+            # ЕДНО scrypt, като при съществуващ имейл: hash_password + verify бяха
+            # две и непознатият имейл се отказваше 2× по-бавно (одит 2026-10-07).
+            verify_password(password, _dummy_hash())
             return None
         return int(row["id"]) if verify_password(password, row["password"]) else None
 

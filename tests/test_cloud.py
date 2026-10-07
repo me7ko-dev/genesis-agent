@@ -95,9 +95,13 @@ def test_keys_and_runtime_are_optional(tmp_path) -> None:
 
 
 class _FakeProc:
-    def __init__(self, lines: list[str], code: int = 0, stderr: str = "") -> None:
-        self.stdout = io.StringIO("".join(line + "\n" for line in lines))
-        self.stderr = io.StringIO(stderr)
+    """Като `docker run`: stdout е тръба с байтове, stderr — файлът, подаден от
+    run_task (там отива, за да не блокира пълна тръба)."""
+
+    def __init__(self, lines: list[str], code: int = 0, stderr: str = "", err_file=None) -> None:
+        self.stdout = io.BytesIO("".join(line + "\n" for line in lines).encode("utf-8"))
+        if err_file is not None:
+            err_file.write(stderr.encode("utf-8"))
         self._code = code
 
     def wait(self) -> int:
@@ -105,7 +109,8 @@ class _FakeProc:
 
 
 def _run(monkeypatch, tmp_path, lines, code=0, stderr=""):
-    monkeypatch.setattr(launch.subprocess, "Popen", lambda *a, **k: _FakeProc(lines, code, stderr))
+    monkeypatch.setattr(launch.subprocess, "Popen",
+                        lambda *a, **k: _FakeProc(lines, code, stderr, k.get("stderr")))
     seen = []
     res = launch.run_task("задача", tmp_path / "ws", on_event=seen.append)
     return res, seen
@@ -191,3 +196,12 @@ async def _ask_proxy(request: bytes) -> bytes:
 def test_the_running_proxy_answers_403(request_line) -> None:
     import asyncio
     assert asyncio.run(_ask_proxy(request_line)).startswith(b"HTTP/1.1 403")
+
+
+def test_a_huge_stderr_or_an_endless_line_does_not_stall_or_bloat(monkeypatch, tmp_path) -> None:
+    """Одит 2026-10-07: 200 KB stderr блокираше тръбата до тавана; ред без
+    край изяждаше паметта на уеб сървъра."""
+    monkeypatch.setattr(launch, "_MAX_EVENT_LINE", 1024)
+    done = {"kind": "done", "ok": True, "error": "", "seconds": 1, "tokens": {}}
+    res, seen = _run(monkeypatch, tmp_path, ["x" * 5000, json.dumps(done)], stderr="W" * 200_000)
+    assert res.ok and [e["kind"] for e in seen] == ["done"]

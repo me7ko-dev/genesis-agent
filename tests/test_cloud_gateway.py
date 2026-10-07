@@ -272,7 +272,7 @@ class _Proc:
         gw.Ledger(usage).add(name, "groq", "m", {"prompt_tokens": 90, "completion_tokens": 10})
         claim = {"kind": "done", "ok": True, "error": "", "seconds": 1.0,
                  "tokens": {"total_tokens": 1}}   # контейнерът лъже, че е 1 токен
-        self.stdout = io.StringIO(json.dumps(claim) + "\n")
+        self.stdout = io.BytesIO((json.dumps(claim) + "\n").encode())
         self.stderr = io.StringIO("")
 
     def wait(self) -> int:

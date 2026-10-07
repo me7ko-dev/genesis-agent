@@ -19,6 +19,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -79,6 +80,9 @@ class Result:
     tokens: dict[str, int] = field(default_factory=dict)
     error: str = ""
     events: list[dict[str, Any]] = field(default_factory=list)
+
+# Най-дългият ред събитие от контейнера, който се чете (1 MiB).
+_MAX_EVENT_LINE = 1 << 20
 
 
 def docker_args(name: str, workspace: Path, text: str, *, limits: Limits | None = None,
@@ -162,23 +166,39 @@ def run_task(text: str, workspace: Path, *, limits: Limits | None = None,
     timer = threading.Timer(limits.seconds, _watchdog)
     timer.start()
     events: list[dict[str, Any]] = []
+    # stderr отива във временен файл, не в тръба: контейнер, който пише над
+    # 64 KB предупреждения, блокираше на пълната тръба, stdout никога не
+    # стигаше до края и завършен ход се убиваше на тавана (одит 2026-10-07).
+    err_file = tempfile.TemporaryFile()  # noqa: SIM115 — затваря се във finally, ползва се от Popen
     try:
-        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, encoding="utf-8", errors="replace")
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=err_file)
         assert proc.stdout is not None
-        for line in proc.stdout:
+        skipping = False
+        while True:
+            # Ред с таван: един ред без край от контейнера иначе изяждаше
+            # паметта на уеб сървъра (400 MiB → 826 MiB RSS).
+            raw = proc.stdout.readline(_MAX_EVENT_LINE)
+            if not raw:
+                break
+            complete = raw.endswith(b"\n")
+            if skipping or not complete and len(raw) >= _MAX_EVENT_LINE:
+                skipping = not complete
+                continue
             try:
-                ev = json.loads(line)
+                ev = json.loads(raw.decode("utf-8", "replace"))
             except ValueError:
                 continue  # шум от Python/rich — не е събитие
             if isinstance(ev, dict) and "kind" in ev:
                 events.append(ev)
                 if on_event:
                     on_event(ev)
-        stderr = proc.stderr.read() if proc.stderr else ""
         code = proc.wait()
+        err_file.seek(0, os.SEEK_END)
+        err_file.seek(max(0, err_file.tell() - 8192))
+        stderr = err_file.read().decode("utf-8", "replace")
     finally:
         timer.cancel()
+        err_file.close()
 
     done = next((e for e in reversed(events) if e.get("kind") == "done"), None)
     seconds = round(time.monotonic() - t0, 1)

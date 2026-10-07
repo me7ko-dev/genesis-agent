@@ -68,13 +68,17 @@ _SECURITY_HEADERS = {
 }
 
 
+class LoginBlocked(Exception):
+    """Твърде много неуспешни опити — 429."""
+
+
 class App:
     """Всичко без HTTP: може да се тества и да се пусне с фалшив runner."""
 
     def __init__(self, store: Store, jobs_dir: Path, *, runner: Runner = launch.run_task,
                  workers: int = 2, limits: launch.Limits | None = None,
                  env_file: str | None = None, runtime: str | None = None,
-                 secure_cookie: bool = True, trust_proxy: bool = False,
+                 secure_cookie: bool = True, trust_proxy: bool | str = False,
                  gateway: launch.Gateway | None = None) -> None:
         self.store = store
         self.jobs_dir = jobs_dir
@@ -111,14 +115,28 @@ class App:
                    for k in (self._email_key(email), f"ip:{ip}"))
 
     def login(self, email: str, password: str, ip: str) -> str | None:
+        """None при грешка ИЛИ при заключване. Опитът се записва като провал
+        ПРЕДИ проверката на паролата и под заключване (одит 2026-10-07: 60
+        паралелни опита минаваха проверката преди първият провал да е записан
+        — 60 проверки, 0 × 429) и се маха само при успех."""
+        keys = (self._email_key(email), f"ip:{ip}")
+        stamp = time.time()
+        with self._lock:
+            now = time.time()
+            for k in keys:
+                self._failures[k] = [t for t in self._failures.get(k, []) if now - t < LOGIN_WINDOW]
+            if any(len(self._failures[k]) >= LOGIN_FAILURES for k in keys):
+                raise LoginBlocked
+            for k in keys:
+                self._failures[k].append(stamp)
         user_id = self.store.check_password(email, password)
         if user_id is None:
-            with self._lock:
-                for k in (self._email_key(email), f"ip:{ip}"):
-                    self._failures.setdefault(k, []).append(time.time())
             return None
         with self._lock:
             self._failures.pop(self._email_key(email), None)
+            ip_list = self._failures.get(f"ip:{ip}", [])
+            if stamp in ip_list:
+                ip_list.remove(stamp)
         return self.store.new_session(user_id)
 
     # ── сваляне ─────────────────────────────────────────────────────────────
@@ -272,10 +290,17 @@ class Handler(BaseHTTPRequestHandler):
         self._json(code, {"error": message})
 
     def _ip(self) -> str:
-        if self.app.trust_proxy:
-            # CF-Connecting-IP го слага Cloudflare. От X-Forwarded-For — ПОСЛЕДНИЯТ
-            # адрес (добавен от нашия прокси); първият е каквото клиентът е написал.
-            fwd = self.headers.get("CF-Connecting-IP") or self.headers.get("X-Forwarded-For", "")
+        # Заглавие се вярва само от прокси, който го СЛАГА: зад Caddy клиентът
+        # може да напише свой CF-Connecting-IP на всяка заявка и да получи нов
+        # брояч за опити (одит 2026-10-07). Затова двата режима са отделни.
+        if self.app.trust_proxy == "cloudflare":
+            ip = self.headers.get("CF-Connecting-IP", "").strip()
+            if ip:
+                return ip
+        elif self.app.trust_proxy:
+            # От X-Forwarded-For — ПОСЛЕДНИЯТ адрес (добавен от нашия прокси);
+            # първият е каквото клиентът е написал.
+            fwd = self.headers.get("X-Forwarded-For", "")
             if fwd:
                 return fwd.split(",")[-1].strip()
         return self.client_address[0]
@@ -449,10 +474,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/login":
             email, password = str(body.get("email", "")), str(body.get("password", ""))
             ip = self._ip()
-            if self.app.login_blocked(email, ip):
+            try:
+                token = self.app.login(email, password, ip)
+            except LoginBlocked:
                 self._error(429, "твърде много опити — опитай пак след 15 минути")
                 return
-            token = self.app.login(email, password, ip)
             if token is None:
                 self._error(401, "грешен имейл или парола")
                 return
@@ -514,7 +540,9 @@ def main(argv: list[str] | None = None) -> int:
     srv.add_argument("--insecure-cookie", action="store_true",
                      help="само за локален тест по http://")
     srv.add_argument("--trust-proxy", action="store_true",
-                     help="IP от CF-Connecting-IP / X-Forwarded-For (зад Cloudflare/Caddy)")
+                     help="IP от последния адрес в X-Forwarded-For (зад Caddy/nginx)")
+    srv.add_argument("--trust-cloudflare", action="store_true",
+                     help="IP от CF-Connecting-IP (само зад Cloudflare Tunnel)")
     a = p.parse_args(argv)
     store = Store(a.data / "web.db")
     if a.cmd == "add-user":
@@ -534,7 +562,7 @@ def main(argv: list[str] | None = None) -> int:
         gateway = launch.Gateway.from_keys_file(Path(a.env_file), a.gateway_usage)
     app = App(store, a.jobs, workers=a.workers, limits=launch.Limits(seconds=a.seconds),
               env_file=a.env_file, runtime=a.runtime, secure_cookie=not a.insecure_cookie,
-              trust_proxy=a.trust_proxy, gateway=gateway)
+              trust_proxy="cloudflare" if a.trust_cloudflare else a.trust_proxy, gateway=gateway)
     server = make_server(app, a.host, a.port)
     print(f"genesis web: http://{a.host}:{server.server_address[1]}", flush=True)
     with contextlib.suppress(KeyboardInterrupt):

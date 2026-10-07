@@ -527,3 +527,72 @@ def test_local_only_never_takes_the_legacy_cloud_path(monkeypatch) -> None:
 def test_questions_about_this_machine_are_not_light(q) -> None:
     from genesis_agent.model_router import is_light_request
     assert not is_light_request(q)
+
+
+# ── облак, известия, setup (одит 2026-10-07, четвърта вълна) ─────────────────
+
+def test_parallel_logins_cannot_outrun_the_lockout(tmp_path) -> None:
+    import threading
+
+    from cloud.web import server as web
+    from cloud.web.store import Store
+    store = Store(tmp_path / "web.db")
+    store.add_user("ana@example.com", "a-long-password-1")
+    app = web.App(store, tmp_path / "jobs", runner=lambda *a, **k: None, secure_cookie=False)
+    results: list[str] = []
+
+    def attempt() -> None:
+        try:
+            results.append("ok" if app.login("ana@example.com", "wrong-password", "1.2.3.4") else "401")
+        except web.LoginBlocked:
+            results.append("429")
+    threads = [threading.Thread(target=attempt) for _ in range(30)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    app.pool.shutdown(wait=False)
+    assert results.count("401") <= web.LOGIN_FAILURES
+    assert results.count("429") >= 30 - web.LOGIN_FAILURES
+
+
+def test_cf_header_is_ignored_behind_a_plain_proxy() -> None:
+    from cloud.web import server as web
+
+    class _H:
+        def __init__(self, mode, headers):
+            self.app = type("A", (), {"trust_proxy": mode})()
+            self.headers = headers
+            self.client_address = ("10.0.0.1", 1)
+    spoof = {"CF-Connecting-IP": "6.6.6.6", "X-Forwarded-For": "6.6.6.6, 203.0.113.9"}
+    assert web.Handler._ip(_H(True, spoof)) == "203.0.113.9"
+    assert web.Handler._ip(_H("cloudflare", spoof)) == "6.6.6.6"
+    assert web.Handler._ip(_H(False, spoof)) == "10.0.0.1"
+
+
+@pytest.mark.parametrize("text", [
+    "git push --force https://me:ghp_SECRETTOKEN1234567890@github.com/me/r.git main",
+    "rm -rf / # OPENAI_API_KEY=sk-live-SECRETSECRET",
+    "curl -H 'Authorization: Bearer sk-ant-SECRETSECRET' https://x",
+])
+def test_notifications_never_carry_secrets(monkeypatch, text) -> None:
+    from genesis_agent import notifier
+    sent: list[str] = []
+    monkeypatch.setattr(notifier, "resolve_setting", lambda key, *a, **k: "configured")
+    monkeypatch.setattr(notifier, "_send_telegram", lambda body, token, chat: sent.append(body) or True)
+    notifier.send_message(f"blocked `{text}` <&>")
+    assert sent and "SECRET" not in sent[0]
+    assert "<&>" not in sent[0] and "&lt;&amp;&gt;" in sent[0]
+
+
+def test_setup_warns_when_a_project_env_overrides_the_new_key(tmp_path, monkeypatch) -> None:
+    from genesis_agent import paths, setup_wizard
+    project_env, home_env = tmp_path / "project.env", tmp_path / "home.env"
+    project_env.write_text("HF_TOKEN=hf_OLD_REVOKED\n", encoding="utf-8")
+    monkeypatch.setattr(paths, "ENV_FILES", [project_env, home_env])
+    monkeypatch.setattr(setup_wizard, "ENV_FILE", home_env)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    assert "project.env" in setup_wizard._overridden_warning("HF_TOKEN")
+    kept: dict = {}
+    setup_wizard._keep(kept, "HF_TOKEN", "hf_OLD_REVOKED")
+    assert kept == {}                                   # не се копира тихо в глобалния файл
