@@ -241,6 +241,10 @@ _EVENTS = re.compile(r"^/api/turns/(\d+)/events$")
 
 
 class Handler(BaseHTTPRequestHandler):
+    # Сокетът чака най-много толкова и при четене, и при запис: свалящ,
+    # който спре да чете, иначе държеше разговора заключен безкрайно (преглед
+    # 2026-10-07 — нов ход връщаше 409 и след 30 s).
+    timeout = 60
     server_version = "genesis-web"
     sys_version = ""
     app: App  # закача се от make_server

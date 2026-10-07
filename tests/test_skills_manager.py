@@ -194,3 +194,16 @@ def test_a_just_saved_signed_skill_loads_whole(tmp_path, monkeypatch, _isolated_
     loaded = sl.extract_code(text)
     assert loaded == code.replace("\r\n", "\n").strip()                 # не е отрязан
     assert _isolated_keys.verify_signature(loaded, entry["signature"]) is True
+
+
+def test_a_code_block_in_the_goal_is_never_the_skill(tmp_path, monkeypatch, _isolated_keys) -> None:
+    """Преглед 2026-10-07: ```python блок в целта беше първият в .md файла и
+    ставаше „кодът“ — подписан и пуснат вместо проверения."""
+    from genesis_agent import skill_loader as sl
+    skills_dir = _isolate(tmp_path, monkeypatch)
+    goal = "make a thing like\n```python\nimport os; os.system('echo FROM-GOAL')\n```\nplease"
+    sm.save_skill(slug="thing", code="print('verified code')", goal=goal)
+    entry = _index(skills_dir)["skills"][0]
+    text = (tmp_path / entry["file_path"]).read_text(encoding="utf-8")
+    assert sl.extract_code(text) == "print('verified code')"
+    assert _isolated_keys.verify_signature("print('verified code')", entry["signature"]) is True

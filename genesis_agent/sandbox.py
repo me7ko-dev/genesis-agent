@@ -413,6 +413,7 @@ def _split_segments(command: str) -> list[str]:
     out: list[str] = []
     buf: list[str] = []
     quote = ""
+    heredocs: list[str] = []            # разделители, чиито тела следват след този ред
     i, n = 0, len(command)
     while i < n:
         ch = command[i]
@@ -426,8 +427,27 @@ def _split_segments(command: str) -> list[str]:
         elif ch == "\\" and i + 1 < n:
             buf += [ch, command[i + 1]]
             i += 1
+        elif ch == "#" and (not buf or buf[-1] in " \t;&|("):
+            # Коментар до края на реда: `# don't` не отваря кавичка.
+            while i + 1 < n and command[i + 1] != "\n":
+                i += 1
+        elif ch == "$" and command.startswith("$'", i):
+            # ANSI-C низ: `\'` вътре е буквален апостроф, не край.
+            j = i + 2
+            while j < n and command[j] != "'":
+                j += 2 if command[j] == "\\" else 1
+            buf.append(command[i:j + 1])
+            i = j
         elif ch in "'\"":
             quote = ch
+            buf.append(ch)
+        elif command.startswith("<<", i) and not command.startswith("<<<", i):
+            m = re.match(r"<<-?\s*(['\"]?)([A-Za-z_][\w-]*)\1", command[i:])
+            if m:
+                heredocs.append(m.group(2))
+                buf.append(m.group(0))
+                i += len(m.group(0))
+                continue
             buf.append(ch)
         elif command.startswith(("&&", "||"), i):
             out.append("".join(buf))
@@ -435,6 +455,20 @@ def _split_segments(command: str) -> list[str]:
             i += 1
         elif ch == "&" and ((i and command[i - 1] in "<>") or (i + 1 < n and command[i + 1] == ">")):
             buf.append(ch)
+        elif ch == "\n" and heredocs:
+            # Телата на heredoc-овете са данни, не команди: апостроф в
+            # „Don't touch“ не бива да отваря кавичка до края на командата.
+            out.append("".join(buf))
+            buf = []
+            lines = command[i + 1:].split("\n")
+            consumed = 0
+            for delim in heredocs:
+                while consumed < len(lines) and lines[consumed].strip() != delim:
+                    consumed += 1
+                consumed += 1
+            heredocs = []
+            skip = sum(len(line) + 1 for line in lines[:consumed])
+            i += skip
         elif ch in ";|&\n":
             out.append("".join(buf))
             buf = []
@@ -442,7 +476,12 @@ def _split_segments(command: str) -> list[str]:
             buf.append(ch)
         i += 1
     out.append("".join(buf))
-    return [s for s in out if s.strip()]
+    segments = [s for s in out if s.strip()]
+    if quote:
+        # Незатворена кавичка: не знаем къде свършва — оценяваме И грубия
+        # разрез, за да не стане опасна команда SAFE (затваряне при съмнение).
+        segments += [s for s in re.split(r"&&|\|\||[;|&\n]", command) if s.strip()]
+    return segments
 
 
 def _expand_targets(tokens: list[str], cwd: Path | None) -> tuple[list[Path], bool]:
@@ -864,7 +903,9 @@ _INTERPRETERS = re.compile(r"^(python[\d.]*|py|pypy[\d.]*|perl|ruby|node|deno|bu
                            re.IGNORECASE)
 _INLINE_FLAGS = frozenset({"-c", "-e", "-E", "--eval", "-p", "--print"})
 # Кратки флагове на python без аргумент, слепени с `-c`: `-uc`, `-Bc`, `-c"…"`.
-_PY_SHORT_C = re.compile(r"^-[bBdEhiIOqsSuvx]*c(.*)$", re.DOTALL)
+_PY_SHORT_C = re.compile(r"^-[bBdEhiIOPqRsSuvx]*c(.*)$", re.DOTALL)
+# perl/ruby/node: `-e`, слепен с други флагове (`perl -le`, `perl -ne`).
+_OTHER_SHORT_E = re.compile(r"^-[a-zA-Z]*[eE]$")
 # perl/ruby/node: триене и пускане на процеси с техните имена.
 _OTHER_LANG_RISK = re.compile(
     r"\b(unlink|rmtree|rm_rf|rm_r|rmSync|rmdirSync|unlinkSync|File\.delete|FileUtils\.rm\w*"
@@ -909,7 +950,10 @@ def _inline_code_reasons(command: str) -> list[str]:
         while j < len(tokens):              # флаговете на интерпретатора до кода
             t = tokens[j]
             m = _PY_SHORT_C.match(t) if is_python else None
-            if t in _INLINE_FLAGS or m:
+            inline = (t == "-c" or m) if is_python else (t in _INLINE_FLAGS or _OTHER_SHORT_E.match(t))
+            if t.startswith("<<") or t == "<":
+                break                       # кодът идва от heredoc/файл на stdin
+            if inline:
                 # `-c code`, `-uc code`, `-c"code"` (shlex го слепва в `-ccode`)
                 attached = m.group(1) if m else ""
                 code = attached or (tokens[j + 1] if j + 1 < len(tokens) else "")
@@ -922,7 +966,7 @@ def _inline_code_reasons(command: str) -> list[str]:
             elif t.startswith("-") and t != "-":
                 j += 1
             else:
-                script = t != "-"
+                script = t != "-" and not t.startswith(("<", "|", ";", "&"))
                 break
         if not code and not script and ("|" in command[:command.find(tok)] or "<<" in command
                                         or (j < len(tokens) and tokens[j] == "-")):

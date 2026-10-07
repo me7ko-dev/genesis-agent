@@ -84,7 +84,14 @@ def extract_code(content: str) -> str | None:
     се отрязва при първия такъв ред (одит 2026-10-07: подписано и проверено
     умение се отказваше като „подправено“, а неподписано пускаше отрязан код).
     """
-    m = _CODE_FENCE.search(content.replace("\r\n", "\n"))
+    text = content.replace("\r\n", "\n")
+    # След ПОСЛЕДНОТО заглавие „## Python Код“ (преглед 2026-10-07): целта на
+    # умението се записва дословно в „## Описание“ над него, и ```python блок в
+    # нея ставаше „кодът“ — подписан и пуснат вместо проверения.
+    head = text.rfind("\n## Python Код")
+    if head != -1:
+        text = text[head:]
+    m = _CODE_FENCE.search(text)
     return m.group(2).strip() if m else None
 
 

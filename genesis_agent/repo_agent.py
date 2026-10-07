@@ -93,10 +93,19 @@ class RepairOutcome:
 _SKIP_ONLY_AT_TOP = {"build", "dist", "env", "target"}
 
 
-def _skip_in_snapshot(rel_parts: tuple[str, ...]) -> bool:
+def _skip_in_snapshot(rel_parts: tuple[str, ...], root: Path | None = None) -> bool:
     for depth, part in enumerate(rel_parts):
-        if part in _SKIP_IN_SNAPSHOT and (depth == 0 or part not in _SKIP_ONLY_AT_TOP):
+        if part not in _SKIP_IN_SNAPSHOT:
+            continue
+        if depth == 0 or part not in _SKIP_ONLY_AT_TOP:
             return True
+        # Вложено `backend/env/`, `rustlib/target/`: артефакт е, ако си личи —
+        # venv (pyvenv.cfg), кеш (CACHEDIR.TAG) или `target` до Cargo.toml.
+        if root is not None:
+            here = root.joinpath(*rel_parts[:depth + 1])
+            if ((here / "pyvenv.cfg").is_file() or (here / "CACHEDIR.TAG").is_file()
+                    or (part == "target" and (here.parent / "Cargo.toml").is_file())):
+                return True
     return False
 
 
@@ -104,7 +113,7 @@ def _tree_size_mb(root: Path) -> float:
     total = 0
     for p in root.rglob("*"):
         # Спрямо корена: проект в `~/build/app` иначе мереше 0 MB и минаваше тавана.
-        if _skip_in_snapshot(p.relative_to(root).parts):
+        if _skip_in_snapshot(p.relative_to(root).parts, root):
             continue
         try:
             if p.is_file():
@@ -114,9 +123,12 @@ def _tree_size_mb(root: Path) -> float:
     return total / (1024 * 1024)
 
 
+_SNAPSHOT_ROOT: Path | None = None
+
+
 def _snapshot_filter(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
     parts = tuple(p for p in Path(info.name).parts if p != ".")
-    if _skip_in_snapshot(parts):
+    if _skip_in_snapshot(parts, _SNAPSHOT_ROOT):
         return None
     return info
 
@@ -134,8 +146,13 @@ def create_checkpoint(root: Path) -> Path:
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     dest = CHECKPOINT_DIR / f"{root.name}-{stamp}.tar.gz"
-    with tarfile.open(dest, "w:gz") as tar:
-        tar.add(root, arcname=".", filter=_snapshot_filter)
+    global _SNAPSHOT_ROOT
+    _SNAPSHOT_ROOT = root
+    try:
+        with tarfile.open(dest, "w:gz") as tar:
+            tar.add(root, arcname=".", filter=_snapshot_filter)
+    finally:
+        _SNAPSHOT_ROOT = None
     meta = {
         "project": str(root),
         "created": stamp,
@@ -144,6 +161,16 @@ def create_checkpoint(root: Path) -> Path:
     }
     dest.with_suffix(".json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     return dest
+
+
+def _git_raw(root: Path, *args: str) -> str:
+    """Като _git, но без strip — за `-z` изход."""
+    try:
+        proc = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=30, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return proc.stdout if proc.returncode == 0 else ""
 
 
 def _git(root: Path, *args: str) -> str:
@@ -200,11 +227,27 @@ def restore_checkpoint(root: str | Path, checkpoint: str | Path | None = None) -
             target = root / rel
             try:
                 if member.issym():
-                    if target.is_symlink() or target.is_file():
+                    # Нищо извън проекта (преглед 2026-10-07): родител, който сега
+                    # е връзка навън, или `..`/абсолютно име в архива биха
+                    # изтрили и заместили чужд файл.
+                    if (Path(rel).is_absolute() or ".." in Path(rel).parts
+                            or not target.parent.resolve().is_relative_to(root)):
+                        skipped.append(f"{rel} (извън проекта)")
+                        continue
+                    if target.is_symlink():
+                        if os.readlink(target) == member.linkname:
+                            continue
                         target.unlink()
-                    if not target.exists():
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        os.symlink(member.linkname, target)
+                    elif target.is_dir():
+                        skipped.append(f"{rel} (сега е папка, в снимката — връзка)")
+                        continue
+                    elif target.exists():
+                        target.unlink()
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    os.symlink(member.linkname, target)
+                    continue
+                if member.isdir() and target.is_symlink():
+                    skipped.append(f"{rel} (сега е връзка, в снимката — папка)")
                     continue
                 try:
                     tar.extract(member, root, filter="data")  # type: ignore[call-arg]
@@ -228,7 +271,7 @@ def _created_since(root: Path, in_archive: set[str]) -> list[str]:
     for dirpath, dirnames, filenames in os.walk(root):
         base = Path(dirpath)
         rel_dir = base.relative_to(root).parts
-        dirnames[:] = [d for d in dirnames if not _skip_in_snapshot(rel_dir + (d,))]
+        dirnames[:] = [d for d in dirnames if not _skip_in_snapshot(rel_dir + (d,), root)]
         for name in filenames:
             rel = (base / name).relative_to(root).as_posix()
             if rel not in in_archive:
@@ -294,11 +337,15 @@ def project_diff(root: Path, checkpoint: Path | None, files: list[str]) -> str:
         d = _git(root, "diff")
         # `git diff` не вижда нови (неследени) файлове — помощен модул, нов
         # тест. Одит 2026-10-07: поправка САМО с нов файл даваше празен дифф.
-        new = [line[3:].strip().strip('"') for line in
-               _git(root, "status", "--porcelain", "--untracked-files=all").splitlines()
-               if line.startswith("?? ")]
-        for rel in new[:20]:
+        # Само новите файлове, които поправката е пипнала — не всеки неследен
+        # файл в проекта (200k-редов data.csv); `-z` пази кирилицата в имената.
+        untracked = set(filter(None, _git_raw(root, "ls-files", "--others", "--exclude-standard",
+                                              "-z").split("\0")))
+        touched = {Path(f).as_posix() for f in files}
+        for rel in sorted(untracked & touched)[:20]:
             try:
+                if (root / rel).stat().st_size > 200_000:
+                    continue
                 after = (root / rel).read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 continue

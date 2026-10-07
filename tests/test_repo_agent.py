@@ -394,3 +394,58 @@ def test_relative_paths_are_normalised(tmp_path) -> None:
     from genesis_agent.repo_agent import _relative
     assert _relative(tmp_path, "./stats.py") == "stats.py"
     assert _relative(tmp_path, str(tmp_path / "pkg" / "a.py")) == "pkg/a.py"
+
+
+def test_restore_never_touches_a_file_outside_through_a_swapped_parent(tmp_path, monkeypatch) -> None:
+    import os
+
+    from genesis_agent import repo_agent as ra
+    monkeypatch.setattr(ra, "CHECKPOINT_DIR", tmp_path / "cps")
+    proj = tmp_path / "proj"
+    (proj / "cfg").mkdir(parents=True)
+    (proj / "cfg" / "real.txt").write_text("r\n", encoding="utf-8")
+    try:
+        os.symlink("real.txt", proj / "cfg" / "current")
+    except (OSError, NotImplementedError):
+        pytest.skip("no symlinks here")
+    cp = ra.create_checkpoint(proj)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "current").write_text("PRECIOUS\n", encoding="utf-8")
+    import shutil
+    shutil.rmtree(proj / "cfg")
+    os.symlink("../outside", proj / "cfg")
+    out = ra.restore_checkpoint(proj, cp)
+    assert (outside / "current").read_text(encoding="utf-8") == "PRECIOUS\n"
+    assert not (outside / "current").is_symlink()
+    assert "НЕ върнати" in out
+
+
+def test_nested_venv_and_rust_target_stay_out_of_the_snapshot(tmp_path) -> None:
+    from genesis_agent.repo_agent import _skip_in_snapshot
+    (tmp_path / "backend" / "env").mkdir(parents=True)
+    (tmp_path / "backend" / "env" / "pyvenv.cfg").write_text("", encoding="utf-8")
+    (tmp_path / "rustlib" / "target").mkdir(parents=True)
+    (tmp_path / "rustlib" / "Cargo.toml").write_text("", encoding="utf-8")
+    (tmp_path / "mypkg" / "build").mkdir(parents=True)
+    assert _skip_in_snapshot(("backend", "env", "lib.py"), tmp_path)
+    assert _skip_in_snapshot(("rustlib", "target", "x.o"), tmp_path)
+    assert not _skip_in_snapshot(("mypkg", "build", "builder.py"), tmp_path)
+
+
+def test_git_diff_shows_only_the_new_files_the_repair_touched(tmp_path) -> None:
+    import shutil
+    import subprocess
+
+    from genesis_agent.repo_agent import project_diff
+    if not shutil.which("git"):
+        pytest.skip("no git")
+    for args in (["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]):
+        subprocess.run(["git", "-C", str(tmp_path), *args], check=True)
+    (tmp_path / "a.py").write_text("X = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "init"], check=True)
+    (tmp_path / "data.csv").write_text("a,b\n" * 1000, encoding="utf-8")
+    (tmp_path / "помощник.py").write_text("H = 1\n", encoding="utf-8")
+    d = project_diff(tmp_path, None, ["помощник.py"])
+    assert "помощник.py" in d and "data.csv" not in d

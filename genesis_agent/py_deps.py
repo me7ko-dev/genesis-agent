@@ -65,7 +65,8 @@ def pip_name(module: str) -> str:
     if top in _NAMESPACES:
         if len(parts) < 2:
             return ""
-        return "-".join(parts[:3] if parts[1] == "cloud" and len(parts) > 2 else parts[:2])
+        three = len(parts) > 2 and (parts[1] == "cloud" or top == "azure")
+        return "-".join(parts[:3] if three else parts[:2])
     return IMPORT_TO_PIP.get(top) or top
 
 
@@ -155,7 +156,8 @@ def third_party_imports(root: Path) -> dict[str, list[str]]:
             if m in IMPORT_TO_PIP:
                 key = m
             elif top in _NAMESPACES:
-                key = ".".join(parts[:3] if len(parts) > 2 and parts[1] == "cloud" else parts[:2])
+                key = ".".join(parts[:3] if len(parts) > 2 and (parts[1] == "cloud" or top == "azure")
+                               else parts[:2])
             else:
                 key = top
             found.setdefault(key, []).append(p.relative_to(root).as_posix())

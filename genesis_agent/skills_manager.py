@@ -338,7 +338,13 @@ def save_skill(
                 # writing skills_api tests, 2026-09-18).
                 # Подписва се точно това, което skill_view ще извади от записания
                 # файл — не входът (CRLF, ``` в кода → различен низ при четене).
-                signature = sign_code(extract_code(md_path.read_text(encoding="utf-8")) or "")
+                written = extract_code(md_path.read_text(encoding="utf-8")) or ""
+                # Подписва се само ако прочетеното е точно провереното.
+                if written == code.replace("\r\n", "\n").strip():
+                    signature = sign_code(written)
+                else:
+                    log.warning("умението %s: записаният код не съвпада с проверения — без подпис",
+                                final_slug)
             except Exception:
                 pass
 
