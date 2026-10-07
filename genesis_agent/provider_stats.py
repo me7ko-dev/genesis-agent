@@ -10,7 +10,10 @@ genesis_agent.provider_stats — data-driven ред на веригата (desig
 from __future__ import annotations
 
 import json
+import os
+import sys
 import time
+from contextlib import contextmanager
 from threading import Lock
 
 from genesis_agent.config import DATA_DIR
@@ -39,15 +42,51 @@ def _load() -> dict:
 
 
 def _save(data: dict) -> None:
+    # През временен файл + os.replace: write_text първо изпразва файла и
+    # паралелен _load() виждаше {} — и записваше само своята извадка, триейки
+    # историята на всички доставчици (одит 2026-10-07: 4 процеса × 30 записа →
+    # остават 1–4).
     try:
-        _STATS_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp = _STATS_PATH.with_name(f"{_STATS_PATH.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(tmp, _STATS_PATH)
     except Exception:
         pass  # статистиката е "nice to have" — никога не бива да чупи мисия
 
 
+@contextmanager
+def _across_processes():
+    """Заключване между процеси (чат + bench + `genesis serve` едновременно).
+    Най-добро усилие: без заключване работи както преди."""
+    fh = None
+    try:
+        fh = open(_STATS_PATH.with_name(_STATS_PATH.name + ".lock"), "a+b")  # noqa: SIM115
+        if sys.platform == "win32":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    except Exception:
+        pass
+    try:
+        yield
+    finally:
+        if fh is not None:
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+            except Exception:
+                pass
+            fh.close()
+
+
 def record_call(provider: str, latency_s: float, success: bool) -> None:
     """Записва резултат от едно API извикване (успех/провал + латентност)."""
-    with _lock:
+    with _lock, _across_processes():
         data = _load()
         entry = data.setdefault(provider, {"samples": []})
         entry["samples"].append({"t": round(time.time()), "ok": success, "lat": round(latency_s, 2)})

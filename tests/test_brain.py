@@ -652,8 +652,17 @@ class TestOverloadIsPerModelNotPerKey:
         assert not brain_mod._is_exhausted("key::NVIDIA_API_KEY")
 
     def test_quota_errors_still_stop_the_whole_key(self) -> None:
-        assert {429, 402, 401, 403} <= brain_mod._KEY_DEAD_CODES
+        assert {402, 401, 403} <= brain_mod._KEY_DEAD_CODES
         assert 503 not in brain_mod._KEY_DEAD_CODES
+        assert 429 in brain_mod._ROTATE_CODES          # при въртене — следващият ключ
+
+    def test_one_models_429_does_not_stop_the_key_a_second_one_does(self, monkeypatch) -> None:
+        """Одит 2026-10-07: лимитът на Groq е по модел — един 429 спираше ключа
+        и здравите модели под него не бяха пробвани."""
+        monkeypatch.setattr(brain_mod, "_KEY_429_MODELS", {})
+        assert brain_mod._note_key_429("key::GROQ_API_KEY", "llama-A") is False
+        assert brain_mod._note_key_429("key::GROQ_API_KEY", "llama-A") is False
+        assert brain_mod._note_key_429("key::GROQ_API_KEY", "llama-B") is True
 
 class TestTotalDeadline:
     """2026-09-25: OpenRouter държи връзката жива, докато безплатният модел
@@ -776,3 +785,35 @@ def test_a_retried_call_counts_once_in_the_provider_stats(monkeypatch) -> None:
     monkeypatch.setattr(b, "_call", _track)
     assert b.complete([{"role": "user", "content": "hi"}]).raw_text == "ok"
     assert recorded == [("stat-a", False), ("stat-b", True)]
+
+
+def test_a_truncated_but_paid_answer_is_recorded(monkeypatch) -> None:
+    """Одит 2026-10-07: отрязан (finish_reason=length) отговор е платен, но
+    разходът му не стигаше до budget_log."""
+    brain = Brain(use_local=False)
+    brain.chain = [{"provider": "openai", "model": "m1"}, {"provider": "deepseek", "model": "m2"}]
+    brain.local = None
+
+    def fake_call(prov, model, msgs, tools=None):
+        brain._last_usage = {"prompt_tokens": 3000 if model == "m1" else 10, "completion_tokens": 4096}
+        if model == "m1":
+            brain._usage_attempt = brain._attempt_id
+            raise RuntimeError("HTTP_TRUNCATED: отрязан")
+        return "ok", None
+
+    monkeypatch.setattr(brain, "_call", fake_call)
+    monkeypatch.setattr(brain, "_record_stat", lambda *a: None)
+    seen: list = []
+    monkeypatch.setattr("genesis_agent.budget.record_usage", lambda **kw: seen.append((kw["provider"], kw["prompt_tokens"])))
+    assert brain.complete([{"role": "user", "content": "x"}]).raw_text == "ok"
+    assert seen == [("openai", 3000), ("deepseek", 10)]
+
+
+def test_models_found_dead_are_left_out_of_the_coding_and_light_chains(monkeypatch) -> None:
+    cfg = {"models": {"coding_models": [{"provider": "groq", "model": "dead"}, {"provider": "groq", "model": "ok"}],
+                      "light_models": [{"provider": "groq", "model": "dead"}, {"provider": "groq", "model": "ok"}]}}
+    import yaml
+    monkeypatch.setattr(brain_mod.CONFIG_PATH.__class__, "read_text", lambda self, **kw: yaml.safe_dump(cfg))
+    monkeypatch.setattr(brain_mod, "_dead_models", lambda: {("groq", "dead")})
+    assert [c["model"] for c in brain_mod._load_coding_chain()] == ["ok"]
+    assert [c["model"] for c in brain_mod._load_light_chain()] == ["ok"]

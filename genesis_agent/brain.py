@@ -309,7 +309,24 @@ _EXHAUST_CODES = {429, 402, 503}
 # се спира целият ключ. 503 „претоварен" НЕ е тук (bench 2026-09-23): той е за
 # един модел, а спирането на ключа прати 0/21 и на здравия nemotron-super под
 # същия NVIDIA ключ. 503 остава cooldown само за модела (в complete()).
-_KEY_DEAD_CODES = {429, 402, 401, 403}
+_KEY_DEAD_CODES = {402, 401, 403}
+# 429 е за МОДЕЛ при Groq/Cerebras/OpenRouter (лимитите им са по модел), а за
+# целия ключ — при дневна квота. Одит 2026-10-07: един 429 спираше ключа и
+# здравите groq/B и groq/C не бяха пробвани. Ключът спира едва когато ВТОРИ
+# различен модел под него върне 429 в рамките на cooldown-а.
+_KEY_429_MODELS: dict[str, dict[str, float]] = {}
+# При въртене на няколко ключа/проекта 429 праща към СЛЕДВАЩИЯ ключ веднага —
+# там цената е само един опит с друг ключ, не загубен здрав модел.
+_ROTATE_CODES = _KEY_DEAD_CODES | {429}
+
+
+def _note_key_429(key_id: str, model: str) -> bool:
+    """Записва 429 за модел под ключ; True, ако вече е за ≥2 модела (→ целият ключ)."""
+    now = time.time()
+    seen = {m: t for m, t in _KEY_429_MODELS.get(key_id, {}).items() if now - t < _EXHAUST_COOLDOWN}
+    seen[model] = now
+    _KEY_429_MODELS[key_id] = seen
+    return len(seen) >= 2
 _EXHAUST_COOLDOWN = 300  # секунди (5 мин) — колкото типичен OpenRouter free reset
 # 410 Gone = доставчикът е спрял модела завинаги (на живо 2026-09-23: NVIDIA
 # openai/gpt-oss-120b). Пет минути cooldown само го отлагат — пропуска се до
@@ -435,16 +452,24 @@ def _load_chain() -> list[dict]:
     # Мъртвите според последната `genesis models --check` (404/410) се
     # прескачат, докато следваща проверка не ги види живи — без да се пипа
     # config.yaml. Зает (429/503) не е мъртъв и остава.
-    try:
-        from genesis_agent.model_check import dead_models
-        dead = dead_models()
-    except Exception as e:
-        log.debug("_load_chain: model_check недостъпен (%s)", e)
-        dead = set()
+    dead = _dead_models()
 
     # Само доставчици, които знаем как да викаме.
     return [c for c in chain
             if c["provider"] in _PROVIDERS and (c["provider"], c["model"]) not in dead]
+
+
+def _dead_models() -> set:
+    """Мъртвите според последната `genesis models --check` — за ВСИЧКИ вериги.
+    Одит 2026-10-07: филтърът беше само в _load_chain, а coding/light веригите
+    слагаха мъртвия модел първи и го викаха при всяко обръщение (404 не дава
+    cooldown)."""
+    try:
+        from genesis_agent.model_check import dead_models
+        return set(dead_models())
+    except Exception as e:
+        log.debug("model_check недостъпен (%s)", e)
+        return set()
 
 
 def _load_coding_chain() -> list[dict]:
@@ -466,9 +491,10 @@ def _load_coding_chain() -> list[dict]:
     except Exception:
         return []
     out: list[dict] = []
+    dead = _dead_models()
     for entry in (cfg.get("models", {}) or {}).get("coding_models", []) or []:
         provider, model = entry.get("provider"), entry.get("model")
-        if not provider or not model or provider not in _PROVIDERS:
+        if not provider or not model or provider not in _PROVIDERS or (provider, model) in dead:
             continue
         out.append({"provider": provider, "model": model,
                     "size_b": entry.get("size_b", 0),
@@ -485,9 +511,10 @@ def _load_light_chain() -> list[dict]:
     except Exception:
         return []
     out: list[dict] = []
+    dead = _dead_models()
     for entry in (cfg.get("models", {}) or {}).get("light_models", []) or []:
         provider, model = entry.get("provider"), entry.get("model")
-        if provider in _PROVIDERS and model:
+        if provider in _PROVIDERS and model and (provider, model) not in dead:
             out.append({"provider": provider, "model": model,
                         "size_b": entry.get("size_b", 0),
                         "supports_tools": bool(entry.get("supports_tools", False))})
@@ -1085,6 +1112,8 @@ class Brain:
         # по-надолу. НЕ съвпада с _EXHAUST_CODES (429/402/503) нарочно — таванът
         # не е изчерпана квота и не бива да вкарва модела в cooldown.
         if finish_reason == "length" and _is_truncated(content or ""):
+            self._last_usage = _openai_usage(data.get("usage"))
+            self._usage_attempt = getattr(self, "_attempt_id", None)
             raise RuntimeError(
                 f"HTTP_TRUNCATED: отговорът е отрязан на тавана от {_output_cap(model)} "
                 f"токена, посред код-ограда (finish_reason=length). Вдигни го с "
@@ -1106,12 +1135,23 @@ class Brain:
         """(system, messages) в Anthropic формат."""
         system_parts: list[str] = []
         out: list[dict] = []
+        leading = True
         for m in messages:
             role = m.get("role")
             content = m.get("content") or ""
-            if role == "system":
+            if role == "system" and leading:
                 if content:
                     system_parts.append(content)
+                continue
+            leading = False
+            if role == "system":
+                # System съобщение СЛЕД разговора (резултат в текстов режим,
+                # подкана на claim_check/code_check) е ход към модела, не част от
+                # системния промпт: иначе разговорът свършваше с assistant ход —
+                # prefill, който claude-opus-5/sonnet-5 отказват с 400, а кешът
+                # на system блока се пренаписваше на всеки рунд (одит 2026-10-07).
+                if content:
+                    out.append({"role": "user", "content": f"[system] {content}"})
             elif role == "tool":
                 out.append({"role": "user", "content": [{
                     "type": "tool_result",
@@ -1139,7 +1179,22 @@ class Brain:
         # Разговорът трябва да започва с user ход.
         while out and out[0]["role"] != "user":
             out.pop(0)
-        return "\n\n".join(system_parts), out
+        # tool_result без своя tool_use (изпаднал при рязане на историята) →
+        # 400 от API-то на всеки следващ ход. Махат се; празен ход отпада.
+        asked = {b["id"] for m in out if m["role"] == "assistant"
+                 for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_use"}
+        cleaned: list[dict] = []
+        for m in out:
+            if m["role"] == "user" and isinstance(m["content"], list):
+                kept = [b for b in m["content"]
+                        if not (b.get("type") == "tool_result" and b.get("tool_use_id") not in asked)]
+                if not kept:
+                    continue
+                m = {**m, "content": kept}
+            cleaned.append(m)
+        while cleaned and cleaned[0]["role"] != "user":
+            cleaned.pop(0)
+        return "\n\n".join(system_parts), cleaned
 
     @staticmethod
     def _to_anthropic_tools(tools: list[dict]) -> list[dict]:
@@ -1236,12 +1291,19 @@ class Brain:
         # повтарящи се заявки, нещо мълчаливо разваля префикса (променлив
         # системен промпт, различен набор инструменти) — и това се вижда в
         # `genesis budget`, вместо да се приема на доверие.
+        cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+        cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        # input_tokens на Anthropic е БЕЗ кеша, prompt_tokens на OpenAI — с него.
+        # Тук се привежда към OpenAI смисъла, иначе отчетът казваше „кеш 7500%
+        # от prompt“ (одит 2026-10-07).
         self._last_usage = {
-            "prompt_tokens": getattr(usage, "input_tokens", 0) or 0,
+            "prompt_tokens": (getattr(usage, "input_tokens", 0) or 0) + cache_read + cache_write,
             "completion_tokens": getattr(usage, "output_tokens", 0) or 0,
-            "cached_read_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
-            "cached_write_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
+            "cached_read_tokens": cache_read,
+            "cached_write_tokens": cache_write,
         } if usage else None
+        # Отказан/отрязан отговор по-долу пак е платен — complete() го записва.
+        self._usage_attempt = getattr(self, "_attempt_id", None) if usage else None
 
         text = "".join(text_parts).strip()
         if not text and not tool_calls:
@@ -1315,7 +1377,8 @@ class Brain:
             # 429/402 (quota gone) or 401/403 (bad or forbidden key): this
             # provider is unusable for a while. Mark it and let the chain move
             # on to the next provider rather than hammering a dead endpoint.
-            if any(f"HTTP_{c}" in last for c in _KEY_DEAD_CODES):
+            if any(f"HTTP_{c}" in last for c in _KEY_DEAD_CODES) or (
+                    "HTTP_429" in last and _note_key_429(kid, model)):
                 _mark_exhausted(kid)
                 print(f"  [Brain] 🔑 {key_env} unavailable ({last[:60]}) → next provider")
             raise
@@ -1348,7 +1411,7 @@ class Brain:
             except RuntimeError as e:
                 last = str(e)
                 last_err = e
-                if any(f"HTTP_{c}" in last for c in _KEY_DEAD_CODES):
+                if any(f"HTTP_{c}" in last for c in _ROTATE_CODES):
                     _mark_exhausted(kid)
                     print(f"  [Brain] 🔑 {key_env}#{idx} unavailable ({last[:60]}) → next key")
                     continue
@@ -1396,7 +1459,7 @@ class Brain:
             except RuntimeError as e:
                 last = str(e)
                 last_err = e
-                if any(f"HTTP_{c}" in last for c in _KEY_DEAD_CODES):
+                if any(f"HTTP_{c}" in last for c in _ROTATE_CODES):
                     _mark_exhausted(kid)
                     print(f"  [Brain] 🔑 vertex/{project} unavailable ({last[:60]}) → next")
                     continue
@@ -1684,6 +1747,8 @@ class Brain:
                     use_tools = tools if (tools and attempt.get("supports_tools")) else None
                     msgs = messages if use_tools else messages_notools
                     t0 = time.time()
+                    self._attempt_id = (prov, model)
+                    self._usage_attempt = None
                     try:
                         try:
                             raw_text, tool_calls = self._call(prov, model, msgs, tools=use_tools)
@@ -1722,8 +1787,20 @@ class Brain:
                         continue
                     except RuntimeError as e:
                         last_error = str(e)
-                        self._fail_count += 1
-                        self._record_stat(prov, time.time() - t0, False)
+                        # Пропуск без заявка („skip: няма ключ“, „cooling down“) не
+                        # е провал на доставчика — в статистиката влизат само
+                        # истински обръщения (одит 2026-10-07: 3 провала на groq
+                        # за 1 заявка).
+                        synthetic = last_error.startswith("skip:") or "cooling down" in last_error
+                        if not synthetic:
+                            self._fail_count += 1
+                            self._record_stat(prov, time.time() - t0, False)
+                            # Отрязан/отказан отговор е платен — разходът се записва.
+                            if getattr(self, "_usage_attempt", None) == (prov, model):
+                                previous, self.current = getattr(self, "current", None), attempt
+                                self._log_usage()
+                                self.current = previous
+                        self._usage_attempt = None
                         _print_skip(prov, model, last_error, time.time() - t0)
                         # При 429/503/402 → маркирай изчерпан за cooldown (спестява безсмислени опити).
                         for c in _EXHAUST_CODES:
