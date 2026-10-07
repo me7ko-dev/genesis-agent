@@ -29,6 +29,23 @@
 се копира в папката на пуска); `tests/test_bench_projects.py` пуска скритите
 тестове срещу него, за да няма тест, който никой не може да мине.
 
+## Всички мерки с една команда
+
+```powershell
+& "$HOME\AppData\Local\pipx\pipx\venvs\genesis-agent\Scripts\python.exe" scripts\bench_all.py
+#   --dry-run       само показва плана и с кои предишни резултати ще сравни
+#   --quick         без втория пуск с GENESIS_ACCEPTANCE=1
+#   --steps projects,fix   само някои стъпки
+```
+
+`bench_all.py` пуска подред `bench_projects` (`--runs 2`), същото с приемните
+тестове (`GENESIS_ACCEPTANCE=1`), `bench_fix` и трудните задачи от `bench_fcc`
+(същите, като в последното им пускане). Всяка стъпка се сравнява с най-новия
+предишен `results.json` от същия вид в `~/.genesis/bench`; приемните тестове —
+с пускането без тях от СЪЩИЯ път. Отчетът е `~/.genesis/bench/all-<дата>/report.md`:
+верни, секунди и токени на пуск спрямо базата, регресиите по име и присъда.
+Изходен код 1 при регресия.
+
 ## Пускане на всички наведнъж
 
 ```powershell
