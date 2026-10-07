@@ -135,13 +135,14 @@ class TestAuditWave20261007:
 
 def test_tool_episodes_are_pruned_and_missions_kept(monkeypatch) -> None:
     import sqlite3
-    monkeypatch.setattr(em, "MAX_TOOL_EPISODES", 10)
+    monkeypatch.setattr(em, "MAX_TOOL_EPISODES", 5)
+    monkeypatch.setattr(em, "_PRUNE_EVERY", 5)  # sqlite commit-ът е бавен на Windows
     _mission("важна мисия", ok=True)
-    for i in range(250):
+    for i in range(30):
         em.record_episode(goal=f"READ_FILE {i}", outcome="x" * 50,
                           skill_path=em._TOOL_PATH, tags=["tool"])
     with sqlite3.connect(em.DB_PATH) as conn:
         tools = conn.execute("SELECT COUNT(*) FROM episodes WHERE skill_path = ?",
                              (em._TOOL_PATH,)).fetchone()[0]
-    assert tools <= 110
+    assert tools <= 10
     assert [e["goal"] for e in em.recent_with_tag("mission", 5)] == ["важна мисия"]

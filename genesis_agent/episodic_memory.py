@@ -98,7 +98,7 @@ def record_episode(
         # Плъзгащ се таван за епизодите от инструменти (до 2000 знака на всяко
         # READ/WRITE/EDIT_FILE): нищо не ги чистеше — 100k записа = 205 MB и
         # 2 s на всяка мисия (одит 2026-10-07). Мисиите не се пипат.
-        if skill_path == _TOOL_PATH and (cur.lastrowid or 0) % 100 == 0:
+        if skill_path == _TOOL_PATH and (cur.lastrowid or 0) % _PRUNE_EVERY == 0:
             conn.execute(
                 """
                 DELETE FROM episodes WHERE skill_path = ? AND id <= (
@@ -112,6 +112,7 @@ def record_episode(
 
 _TOOL_PATH = "genesis_skills.bridge"
 MAX_TOOL_EPISODES = 5000
+_PRUNE_EVERY = 100
 
 
 def recent_with_tag(tag: str, last_n: int) -> list[dict]:

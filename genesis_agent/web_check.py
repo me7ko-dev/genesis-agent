@@ -23,7 +23,9 @@ from urllib.parse import unquote, urlsplit
 
 WEB_SUFFIXES = {".html", ".htm", ".css", ".js", ".mjs"}
 _MAX_FINDINGS = 12
-_NODE_TIMEOUT = 10
+# Първото пускане на node на Windows (Defender сканира) мина 10 s в CI и
+# грешката в JS изчезна от бележката (2026-10-07). Чисто парсване е < 1 s.
+_NODE_TIMEOUT = 30
 
 # Елементи без затварящ таг и такива, чийто край HTML позволява да се пропусне
 # — за тях липсващ `</x>` не е грешка.
