@@ -243,6 +243,33 @@ def _stem(word: str) -> str:
     return word
 
 
+def _light_stem(word: str) -> str:
+    """Само членът и окончанието на съществително — без глаголните окончания.
+
+    За проверката „цял тригер“ в domain_context. Пълната основа (_stem) слива
+    „работи“ (глагол) с „работни“ — и „скриптът не работи вече 3 дни“ получаваше
+    правилата за работни дни (одит 2026-10-07); „основните полета“ — правилата
+    за фактури („данъчна основа“). Тук „работи“ и „работни“ остават различни,
+    а „фактурите“/„фактура“, „уебсайта“/„уебсайт“, „номерата“/„номер“ се срещат.
+    """
+    if len(word) < 4 or not _CYRILLIC_WORD.match(word):
+        return word
+    if word.endswith(("ът", "ят")) and len(word) >= 5:
+        return word[:-2]
+    if word.endswith(("та", "то", "те")) and len(word) >= 5 and word[-3] in _BG_VOWELS:
+        word = word[:-2]
+    if word[-1] in "ая" and word[-2] not in _BG_VOWELS and len(word) >= 5:
+        word = word[:-1]
+    return word
+
+
+def _light_keywords(text: str) -> set[str]:
+    return {
+        _light_stem(w) for w in re.findall(r"\w+", text.lower())
+        if len(w) >= 3 and w not in _STOPWORDS and w not in _BG_FRAGMENTS
+    }
+
+
 def _keywords(text: str) -> set[str]:
     r"""Думите, по които се мери съвпадение. `\w` вместо `[a-z0-9_]` (2026-09-20):
     старият клас беше само ASCII, тоест всяка дума на кирилица беше невидима.
@@ -354,7 +381,8 @@ def domain_context(query: str) -> str:
         # на контролната цифра“ + „номер на читателя“ за ISBN дадоха 3 думи от
         # тригерите на ЕГН („проверка на егн контролна цифра“, „единен граждански
         # номер“) без самото „егн“ — и правилата за ЕГН отиваха в задача за книги.
-        whole = any(kw and kw <= query_words for kw in (_keywords(t) for t in triggers))
+        light_query = _light_keywords(query)
+        whole = any(kw and kw <= light_query for kw in (_light_keywords(t) for t in triggers))
         if whole and score >= need:
             ranked.append((score, h))
     ranked.sort(key=lambda x: x[0], reverse=True)

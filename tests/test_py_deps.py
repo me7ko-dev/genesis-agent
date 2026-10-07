@@ -95,3 +95,26 @@ def test_export_report_warns_about_undeclared_imports(tmp_path, monkeypatch) -> 
     report = deliver.export(proj, tmp_path / "o.zip", run_tests=False).report
     assert "`openpyxl` (`import openpyxl` в main.py)" in report
     assert "`requests` (" not in report
+
+
+def test_equivalent_distributions_and_namespaces(tmp_path) -> None:
+    """Одит 2026-10-07: декларираните psycopg2-binary, opencv-python-headless,
+    google-cloud-storage, google-api-python-client се отчитаха като липсващи."""
+    _write(tmp_path, "app.py", "import psycopg2\nimport cv2\nfrom google.cloud import storage\n"
+                               "import googleapiclient.discovery\nfrom google.oauth2 import service_account\n")
+    _write(tmp_path, "requirements.txt", "psycopg2-binary\nopencv-python-headless\n"
+                                         "google-cloud-storage\ngoogle-api-python-client\n")
+    assert [pip for _, pip, _ in py_deps.undeclared(tmp_path)] == ["google-auth"]
+
+
+def test_a_bare_namespace_gets_no_wrong_hint(tmp_path) -> None:
+    assert py_deps.missing_module_hint("No module named 'google'", tmp_path) == ""
+    assert "google-cloud-storage" in py_deps.missing_module_hint(
+        "No module named 'google.cloud.storage'", tmp_path)
+
+
+def test_the_walk_does_not_descend_into_node_modules(tmp_path, monkeypatch) -> None:
+    _write(tmp_path, "app.py", "import requests\n")
+    _write(tmp_path, "node_modules/x/y.py", "import numpy\n")
+    _write(tmp_path, ".venv/lib/z.py", "import pandas\n")
+    assert set(py_deps.third_party_imports(tmp_path)) == {"requests"}

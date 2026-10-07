@@ -30,7 +30,24 @@ IMPORT_TO_PIP = {
     "win32api": "pywin32", "win32com": "pywin32", "pythoncom": "pywin32", "usb": "pyusb",
     "Levenshtein": "python-Levenshtein", "slugify": "python-slugify", "ldap": "python-ldap",
     "skimage": "scikit-image", "zmq": "pyzmq", "git": "GitPython", "discord": "discord.py",
+    "googleapiclient": "google-api-python-client", "psycopg2": "psycopg2-binary",
+    "google.oauth2": "google-auth", "google.auth": "google-auth", "google.protobuf": "protobuf",
 }
+# Внасянето е едно, дистрибуциите — няколко равностойни (одит 2026-10-07:
+# `psycopg2-binary` в requirements се отчиташе като „липсващ psycopg2“).
+ALSO_PROVIDED_BY = {
+    "psycopg2": {"psycopg2", "psycopg2-binary"},
+    "cv2": {"opencv-python", "opencv-python-headless", "opencv-contrib-python",
+            "opencv-contrib-python-headless"},
+    "PIL": {"pillow", "pil"},
+    "yaml": {"pyyaml", "ruamel-yaml"},
+    "Crypto": {"pycryptodome", "pycryptodomex", "pycrypto"},
+    "jwt": {"pyjwt", "jwt"},
+}
+# Пространства от имена: `google` сам по себе не е пакет — `pip install google`
+# е друг, безполезен пакет. Името е от първите две части (`google.cloud.storage`
+# → `google-cloud-storage`); без втора част — никаква подсказка, не грешна.
+_NAMESPACES = {"google", "azure", "zope", "jaraco", "backports"}
 
 _SKIP_DIRS = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", "build",
               "dist", ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache", "site-packages"}
@@ -40,8 +57,28 @@ _DEV_ONLY = {"pytest", "_pytest", "hypothesis", "mypy", "ruff"}
 
 
 def pip_name(module: str) -> str:
+    """Името в PyPI; "" за голо пространство от имена (`google`)."""
+    parts = module.split(".")
+    top = parts[0]
+    if module in IMPORT_TO_PIP:
+        return IMPORT_TO_PIP[module]
+    if top in _NAMESPACES:
+        if len(parts) < 2:
+            return ""
+        return "-".join(parts[:3] if parts[1] == "cloud" and len(parts) > 2 else parts[:2])
+    return IMPORT_TO_PIP.get(top) or top
+
+
+def _accepted(module: str) -> set[str]:
+    """Всички нормализирани имена, които покриват това внасяне."""
     top = module.split(".")[0]
-    return IMPORT_TO_PIP.get(module) or IMPORT_TO_PIP.get(top) or top
+    names = {normalize(n) for n in ALSO_PROVIDED_BY.get(top, set())}
+    pip = pip_name(module)
+    if pip:
+        names.add(normalize(pip))
+    if top not in _NAMESPACES:
+        names.add(normalize(top))
+    return names
 
 
 def normalize(name: str) -> str:
@@ -54,11 +91,22 @@ def _stdlib() -> frozenset[str]:
     return frozenset(names) | {"__future__"} if names else frozenset({"__future__"})
 
 
+_MAX_FILES = 3000
+
+
 def _py_files(root: Path):
-    for p in root.rglob("*.py"):
-        if any(part in _SKIP_DIRS for part in p.relative_to(root).parts[:-1]):
-            continue
-        yield p
+    """.py файловете на проекта — без да се слиза в node_modules/.venv (одит
+    2026-10-07: rglob ги обхождаше целите, ~1 s на всеки падащ RUN_CMD)."""
+    import os
+    seen = 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".")]
+        for name in filenames:
+            if name.endswith(".py"):
+                seen += 1
+                if seen > _MAX_FILES:
+                    return
+                yield Path(dirpath) / name
 
 
 def local_modules(root: Path) -> set[str]:
@@ -94,12 +142,22 @@ def third_party_imports(root: Path) -> dict[str, list[str]]:
             if isinstance(node, ast.Import):
                 mods.update(a.name for a in node.names)
             elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-                mods.add(node.module)
+                if node.module.split(".")[0] in _NAMESPACES:
+                    # `from google.cloud import storage` → google.cloud.storage
+                    mods.update(f"{node.module}.{a.name}" for a in node.names)
+                else:
+                    mods.add(node.module)
         for m in mods:
             top = m.split(".")[0]
             if top in std or top in local or top in _DEV_ONLY:
                 continue
-            key = m if m in IMPORT_TO_PIP else top
+            parts = m.split(".")
+            if m in IMPORT_TO_PIP:
+                key = m
+            elif top in _NAMESPACES:
+                key = ".".join(parts[:3] if len(parts) > 2 and parts[1] == "cloud" else parts[:2])
+            else:
+                key = top
             found.setdefault(key, []).append(p.relative_to(root).as_posix())
     return dict(sorted(found.items()))
 
@@ -159,7 +217,7 @@ def undeclared(root: Path) -> list[tuple[str, str, list[str]]]:
     out = []
     for mod, files in third_party_imports(root).items():
         pip = pip_name(mod)
-        if normalize(pip) not in have and normalize(mod.split(".")[0]) not in have:
+        if pip and not (_accepted(mod) & have):
             out.append((mod, pip, files))
     return out
 
@@ -175,6 +233,8 @@ def missing_module_hint(output: str, root: Path, python: str = "python") -> str:
     if top in _stdlib() or top in local_modules(Path(root)):
         return ""
     pip = pip_name(module)
+    if not pip:
+        return ""
     renamed = f" (пакетът се казва `{pip}`, не `{top}`)" if normalize(pip) != normalize(top) else ""
     req = Path(root) / "requirements.txt"
     note = ("и го добави в requirements.txt" if req.is_file() else

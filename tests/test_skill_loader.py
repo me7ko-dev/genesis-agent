@@ -580,7 +580,7 @@ def test_the_invoice_skill_passes_its_self_test(_shipped_skills, tmp_path) -> No
     ("провери ЕГН-то на клиента", "bg_egn_validate_and_decode"),
     ("направи уебсайта на пекарната", "web_site_2026"),
     ("провери IBAN-ите", "bg_iban_validate"),
-    ("колко работни дена има през май", "bg_working_days"),
+    ("изчисли работните дни до края на месеца", "bg_working_days"),
     ("сметни ДДС номерата", "bg_vat_number_validate"),
 ])
 def test_another_word_form_still_gets_the_verified_rules(_shipped_skills, query, skill) -> None:
@@ -607,3 +607,15 @@ def test_stemming_changes_no_bench_task_knowledge(_shipped_skills, project) -> N
         assert f"библиотеката: {expected}" in text
     else:
         assert text == ""
+
+
+
+@pytest.mark.parametrize("query", [
+    "Скриптът не работи вече 3 дни, оправи го",
+    "Провери дали cron задачата работи през последните 7 дни",
+    "калкулатор за данъчни облекчения, основните полета на формата",
+])
+def test_a_shared_stem_is_not_a_whole_trigger(_shipped_skills, query) -> None:
+    """Одит 2026-10-07: „работи“ (глагол) ≈ „работни“ и „основните“ ≈ „основа“
+    през пълната основа подаваха правилата за работни дни / фактури."""
+    assert sl.domain_context(query) == ""
