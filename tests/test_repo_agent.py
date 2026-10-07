@@ -322,3 +322,75 @@ class TestVerifyRightAfterAnEdit:
         repo_agent.repair(str(project), "fix it", max_rounds=3, test_command="t",
                           on_status=lambda m: None)
         assert len(calls) == 3
+
+# ── одит 2026-10-07 ──────────────────────────────────────────────────────────
+
+def test_revert_survives_a_symlink_outside_and_restores_everything_after_it(tmp_path, monkeypatch) -> None:
+    import os
+
+    from genesis_agent import repo_agent as ra
+    monkeypatch.setattr(ra, "CHECKPOINT_DIR", tmp_path / "cps")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (tmp_path / "common").mkdir()
+    (proj / "a.py").write_text("A = 1\n", encoding="utf-8")
+    (proj / "c.py").write_text("C = 1\n", encoding="utf-8")
+    try:
+        os.symlink("../common", proj / "b_shared")
+    except (OSError, NotImplementedError):
+        pytest.skip("no symlinks here")
+    cp = ra.create_checkpoint(proj)
+    (proj / "a.py").write_text("A = 999\n", encoding="utf-8")
+    (proj / "c.py").write_text("C = 999\n", encoding="utf-8")
+    out = ra.restore_checkpoint(proj, cp)
+    assert (proj / "a.py").read_text(encoding="utf-8") == "A = 1\n"
+    assert (proj / "c.py").read_text(encoding="utf-8") == "C = 1\n"
+    assert os.readlink(proj / "b_shared") == "../common"
+    assert out.startswith("✓")
+
+
+def test_source_folders_named_build_or_env_are_in_the_snapshot(tmp_path, monkeypatch) -> None:
+    from genesis_agent import repo_agent as ra
+    monkeypatch.setattr(ra, "CHECKPOINT_DIR", tmp_path / "cps")
+    proj = tmp_path / "proj"
+    for rel in ("mypkg/build/builder.py", "mypkg/env/settings.py", "build/junk.o", "node_modules/x.js"):
+        (proj / rel).parent.mkdir(parents=True, exist_ok=True)
+        (proj / rel).write_text("ORIGINAL\n", encoding="utf-8")
+    cp = ra.create_checkpoint(proj)
+    (proj / "mypkg/build/builder.py").write_text("CHANGED\n", encoding="utf-8")
+    (proj / "mypkg/env/settings.py").write_text("CHANGED\n", encoding="utf-8")
+    (proj / "new_helper.py").write_text("x\n", encoding="utf-8")
+    out = ra.restore_checkpoint(proj, cp)
+    assert (proj / "mypkg/build/builder.py").read_text(encoding="utf-8") == "ORIGINAL\n"
+    assert (proj / "mypkg/env/settings.py").read_text(encoding="utf-8") == "ORIGINAL\n"
+    assert "new_helper.py" in out
+
+
+def test_a_refusal_quoting_a_tick_is_not_a_successful_edit() -> None:
+    from genesis_agent.repo_agent import _edit_succeeded
+    assert not _edit_succeeded('[EDIT_FILE: /p/report.py] ❌ Anchor-ът не е намерен\n  L3: return "✓ готово"')
+    assert _edit_succeeded("[EDIT_FILE: /p/report.py] ✓ заменено (1)")
+    assert _edit_succeeded("[WRITE_FILE: /p/app/[id]/x.py] ✓ записани 3 символа")
+
+
+def test_git_diff_includes_new_files(tmp_path) -> None:
+    import shutil
+    import subprocess
+
+    from genesis_agent.repo_agent import project_diff
+    if not shutil.which("git"):
+        pytest.skip("no git")
+    for args in (["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]):
+        subprocess.run(["git", "-C", str(tmp_path), *args], check=True)
+    (tmp_path / "stats.py").write_text("X = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "init"], check=True)
+    (tmp_path / "_helpers.py").write_text("def h():\n    return 1\n", encoding="utf-8")
+    d = project_diff(tmp_path, None, ["_helpers.py"])
+    assert "b/_helpers.py" in d and "+def h():" in d
+
+
+def test_relative_paths_are_normalised(tmp_path) -> None:
+    from genesis_agent.repo_agent import _relative
+    assert _relative(tmp_path, "./stats.py") == "stats.py"
+    assert _relative(tmp_path, str(tmp_path / "pkg" / "a.py")) == "pkg/a.py"

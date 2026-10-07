@@ -150,7 +150,7 @@ def search(
     if use_cache:
         cached = _cache_get(cache_key)
         # Кеш отпреди поправката може да носи самата CAPTCHA страница като резултат.
-        if cached and not _is_challenge(cached):
+        if cached and not _cached_challenge(cached):
             return json.loads(cached)
 
     # Координати/адрес: геокодерът на OpenStreetMap, през urllib (правилно кодиран
@@ -234,9 +234,25 @@ _CHALLENGE_MARKERS = ("bots use duckduckgo", "anomaly-modal", "unusual traffic",
 
 
 def _is_challenge(html: str) -> bool:
-    """Страница „докажи, че си човек“ вместо резултати."""
+    """Страница „докажи, че си човек“ вместо резултати.
+
+    Страница с резултати НЕ е такава, дори да съдържа „captcha“: DuckDuckGo
+    Lite повтаря заявката, а резултатите за „selenium recaptcha login“ носят
+    думата (одит 2026-10-07: такива търсения винаги падаха към Wikipedia)."""
+    if "result-link" in html or "result-snippet" in html:
+        return False
     low = html[:20000].lower()
     return any(m in low for m in _CHALLENGE_MARKERS)
+
+
+def _cached_challenge(cached: str) -> bool:
+    """Кеш отпреди поправката: единичен „Резултат за:“ с текста на CAPTCHA-та."""
+    try:
+        rows = json.loads(cached)
+    except ValueError:
+        return True
+    return any(isinstance(r, dict) and str(r.get("title", "")).startswith("Резултат за:")
+               and _is_challenge(str(r.get("snippet", ""))) for r in rows) if isinstance(rows, list) else True
 
 
 _WIKI_NOISE = re.compile(r"\b(координати|координатите|gps|coordinates|latitude|longitude|lat|lon|"

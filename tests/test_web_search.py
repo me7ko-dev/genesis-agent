@@ -78,3 +78,16 @@ def test_an_ordinary_query_does_not_geocode(monkeypatch) -> None:
     monkeypatch.setattr(ws, "_http_get", _fake_http({"duckduckgo": CAPTCHA, "wikipedia": WIKI}, seen))
     ws.search("python retry decorator", use_cache=False)
     assert not any("nominatim" in u for u in seen)
+
+
+def test_a_results_page_mentioning_captcha_is_still_results(monkeypatch) -> None:
+    """Одит 2026-10-07: заявка с „recaptcha“ (DDG я повтаря в страницата)
+    падаше към Wikipedia като CAPTCHA."""
+    html = ('<input value="selenium recaptcha login form">'
+            '<a rel="nofollow" class="result-link" href="https://example.org/r">reCAPTCHA in Selenium</a>'
+            "<td class='result-snippet'>how to handle captcha</td>")
+    seen: list[str] = []
+    monkeypatch.setattr(ws, "_http_get", _fake_http({"duckduckgo": html}, seen))
+    results = ws.search("selenium recaptcha login form", use_cache=False)
+    assert results[0]["url"] == "https://example.org/r"
+    assert not any("wikipedia" in u for u in seen)

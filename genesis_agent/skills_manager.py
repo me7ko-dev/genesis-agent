@@ -202,6 +202,9 @@ def list_skills() -> list[dict[str, Any]]:
 
 def _build_md(*, slug: str, description: str, triggers: list[str], code: str,
               last_updated: str, note: str) -> str:
+    # Оградата е по-дълга от всяка поредица ` в кода (виж skill_loader.extract_code).
+    longest = max((len(m) for m in re.findall(r"`{3,}", code)), default=2)
+    fence = "`" * max(3, longest + 1)
     # Сглобяваше се на ръка с единични кавички: цел, съдържаща апостроф
     # ("don't repeat the user's work"), даваше НЕВАЛИДЕН YAML, а
     # skill_loader лови YAMLError и продължава с празни метаданни — тоест
@@ -220,7 +223,7 @@ def _build_md(*, slug: str, description: str, triggers: list[str], code: str,
         meta, allow_unicode=True, sort_keys=False, default_flow_style=False) + "---\n"
     body = (
         f"\n## Описание\n{description}\n\n"
-        f"## Python Код\n```python\n{code.rstrip()}\n```\n\n"
+        f"## Python Код\n{fence}python\n{code.rstrip()}\n{fence}\n\n"
         f"## Pitfalls\n- {note}\n"
     )
     return frontmatter + body
@@ -324,6 +327,7 @@ def save_skill(
         if SKILLS_DIR != PACKAGE_DIR / "skills":
             try:
                 from genesis_agent.cryptography_utils import sign_code
+                from genesis_agent.skill_loader import extract_code
                 # Sign the SAME string skill_view() will later verify against,
                 # not the caller's raw `code` — _build_md above embeds
                 # code.rstrip(), and skill_view()'s fence regex does a full
@@ -332,7 +336,9 @@ def save_skill(
                 # LLM-generated code) got a signature that could never verify,
                 # wrongly refusing an untouched skill as "tampered" (bug found
                 # writing skills_api tests, 2026-09-18).
-                signature = sign_code(code.strip())
+                # Подписва се точно това, което skill_view ще извади от записания
+                # файл — не входът (CRLF, ``` в кода → различен низ при четене).
+                signature = sign_code(extract_code(md_path.read_text(encoding="utf-8")) or "")
             except Exception:
                 pass
 

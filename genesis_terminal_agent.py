@@ -1600,9 +1600,9 @@ def main():
                     continue
                 if check.up_to_date:
                     console.print(f"[green]✅ Вече си на последното "
-                                  f"({check.src.short}, {check.src.ref}).[/]")
+                                  f"({check.src.short}, {check.src.ref or 'основния клон'}).[/]")
                     continue
-                console.print(f"[cyan]⬆ Има по-ново на {check.src.ref}: "
+                console.print(f"[cyan]⬆ Има по-ново на {check.src.ref or 'основния клон'}: "
                               f"{check.src.short} → {check.latest[:7]}[/]")
                 subjects = version_info.changelog(
                     check.src.owner_repo, check.src.commit, check.latest)

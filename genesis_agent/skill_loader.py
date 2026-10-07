@@ -73,6 +73,21 @@ def format_skill_list(width: int = 70) -> str:
     return "\n".join(lines)
 
 
+_CODE_FENCE = re.compile(r"^(`{3,})python\n(.*?)\n\1[ \t]*$", re.DOTALL | re.MULTILINE)
+
+
+def extract_code(content: str) -> str | None:
+    """Кодът от първия ```python блок — същият низ, който се подписва.
+
+    Затварящата ограда е със СЪЩАТА дължина като отварящата и на свой ред:
+    код с ред, започващ с ``` (Markdown шаблон), се пише в ````python и не
+    се отрязва при първия такъв ред (одит 2026-10-07: подписано и проверено
+    умение се отказваше като „подправено“, а неподписано пускаше отрязан код).
+    """
+    m = _CODE_FENCE.search(content.replace("\r\n", "\n"))
+    return m.group(2).strip() if m else None
+
+
 def skill_view(name: str, *, file_path: Path | None = None) -> dict[str, Any]:
     """
     Зарежда .md файл на умение и връща YAML метаданни + код.
@@ -114,10 +129,9 @@ def skill_view(name: str, *, file_path: Path | None = None) -> dict[str, Any]:
     metadata.setdefault("name", name)
 
     # Извличане на Python код
-    code_match = re.search(r"```python\n(.*?)\n```", content, re.DOTALL)
-    if not code_match:
+    code = extract_code(content)
+    if code is None:
         raise ValueError(f"Няма Python код блок в: {md_path}")
-    code = code_match.group(1).strip()
 
     # Signature check (design note, 2026-08-12): skills_manager.save_skill
     # signs NEW skills going forward — see its comment for why. Deliberately

@@ -152,8 +152,16 @@ def check_html(path: Path, content: str) -> list[str]:
             continue
         if not _is_local(ref) or ref.startswith(("mailto:", "tel:", "data:", "javascript:")):
             continue
-        target = (path.parent / unquote(urlsplit(ref).path)).resolve()
-        if urlsplit(ref).path and not target.exists():
+        local = unquote(urlsplit(ref).path)
+        if local.startswith("/"):
+            # `/css/style.css` е спрямо корена на САЙТА, не на диска (одит
+            # 2026-10-07: всяка такава връзка излизаше „няма такъв файл“).
+            # Коренът не се знае — валидно е, ако файлът го има над страницата.
+            exists = any((base / local.lstrip("/")).exists()
+                         for base in [path.parent, *list(path.parent.parents)[:4]])
+        else:
+            exists = (path.parent / local).resolve().exists()
+        if local and not exists:
             found.append(f'{ref_attr}="{ref}" — няма такъв файл до {path.name} (още ли предстои?)')
     for url in c.external:
         host = urlsplit(url).hostname or ""
