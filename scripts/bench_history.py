@@ -28,7 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from genesis_agent import budget  # noqa: E402
+from genesis_agent import budget
 
 SYSTEM = "x" * 7600          # ~2 200 tokens: system prompt + schemas, measured in PR #7
 TASK = ("Направи в текущата папка Python проект за фактури: парсване на PDF, валидиране на ЕИК, "
