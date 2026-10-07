@@ -88,6 +88,7 @@ class App:
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="turn")
         self._failures: dict[str, list[float]] = {}
         self._lock = threading.Lock()
+        self._downloading: set[str] = set()
         store.fail_unfinished("сървърът беше рестартиран по време на задачата")
 
     # ── вход ────────────────────────────────────────────────────────────────
@@ -98,20 +99,44 @@ class App:
             self._failures[key] = kept
             return kept
 
+    @staticmethod
+    def _email_key(email: str) -> str:
+        # Същото свеждане като store.check_password: „ivan@x.bg “ с интервал е
+        # същият човек, а броячът беше нов за всеки вариант (одит 2026-10-07:
+        # 12 грешни опита с 0..11 интервала — нито един 429).
+        return f"e:{email.strip().lower()}"
+
     def login_blocked(self, email: str, ip: str) -> bool:
         return any(len(self._recent_failures(k)) >= LOGIN_FAILURES
-                   for k in (f"e:{email.lower()}", f"ip:{ip}"))
+                   for k in (self._email_key(email), f"ip:{ip}"))
 
     def login(self, email: str, password: str, ip: str) -> str | None:
         user_id = self.store.check_password(email, password)
         if user_id is None:
             with self._lock:
-                for k in (f"e:{email.lower()}", f"ip:{ip}"):
+                for k in (self._email_key(email), f"ip:{ip}"):
                     self._failures.setdefault(k, []).append(time.time())
             return None
         with self._lock:
-            self._failures.pop(f"e:{email.lower()}", None)
+            self._failures.pop(self._email_key(email), None)
         return self.store.new_session(user_id)
+
+    # ── сваляне ─────────────────────────────────────────────────────────────
+    def begin_download(self, chat_id: str) -> bool:
+        """Сваляне само между ходовете — и ход не започва, докато трае.
+
+        Проверка „не е зает“ веднъж в началото не стигаше (одит 2026-10-07):
+        ход, пуснат милисекунди след нея, подменяше папка с връзка посред
+        архивирането и в zip-а влизаха файлове на сървъра."""
+        with self._lock:
+            if self.store.busy(chat_id=chat_id) or chat_id in self._downloading:
+                return False
+            self._downloading.add(chat_id)
+            return True
+
+    def end_download(self, chat_id: str) -> None:
+        with self._lock:
+            self._downloading.discard(chat_id)
 
     # ── ходове ──────────────────────────────────────────────────────────────
     def workspace(self, user_id: int, chat_id: str) -> Path:
@@ -120,7 +145,7 @@ class App:
     def start_turn(self, user: dict[str, Any], chat_id: str, text: str) -> int | None:
         """Нов ход, или None ако човекът вече чака отговор (по един на човек)."""
         with self._lock:
-            if self.store.busy(user_id=user["id"]):
+            if self.store.busy(user_id=user["id"]) or chat_id in self._downloading:
                 return None
             turn_id = self.store.add_turn(chat_id, text)
         self.pool.submit(self._run, turn_id, text, self.workspace(user["id"], chat_id))
@@ -244,9 +269,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def _ip(self) -> str:
         if self.app.trust_proxy:
+            # CF-Connecting-IP го слага Cloudflare. От X-Forwarded-For — ПОСЛЕДНИЯТ
+            # адрес (добавен от нашия прокси); първият е каквото клиентът е написал.
             fwd = self.headers.get("CF-Connecting-IP") or self.headers.get("X-Forwarded-For", "")
             if fwd:
-                return fwd.split(",")[0].strip()
+                return fwd.split(",")[-1].strip()
         return self.client_address[0]
 
     def _token(self) -> str:
@@ -353,26 +380,61 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"files": list_files(ws), "busy": bool(store.busy(chat_id=chat["id"]))})
             return
         # Докато върви ход, кодът в контейнера може да подмени файл с връзка
-        # между проверката и четенето. Затова се сваля само между ходовете.
-        if store.busy(chat_id=chat["id"]):
+        # между проверката и четенето. Затова се сваля само между ходовете —
+        # и докато трае свалянето, нов ход в този разговор не започва.
+        if not self.app.begin_download(chat["id"]):
             self._error(409, "задачата още върви — файловете ще са готови след нея")
             return
-        if m.re is _ZIP:
-            data = zip_files(ws)
-            if data is None:
-                self._error(413, "файловете са твърде големи за един архив")
+        try:
+            if m.re is _ZIP:
+                data = zip_files(ws)
+                if data is None:
+                    self._error(413, "файловете са твърде големи за един архив")
+                    return
+                self._send(200, data, "application/octet-stream", {
+                    "Content-Disposition": "attachment; filename*=UTF-8''genesis-files.zip"})
                 return
-            name = "genesis-files.zip"
-        else:
             rel = unquote(m[2])
             p = safe_file(ws, rel)
             if p is None:
                 self._error(404, "няма такъв файл")
                 return
-            data = read_file(p)
-            name = PurePosixPath(rel).name
-        self._send(200, data, "application/octet-stream", {
-            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"})
+            self._send_file(p, PurePosixPath(rel).name)
+        finally:
+            self.app.end_download(chat["id"])
+
+    def _send_file(self, path: Path, name: str) -> None:
+        """Един файл, на парчета — не целият в паметта (одит 2026-10-07: 3 GiB
+        празен файл, направен от кода в контейнера, сваляше сървъра с MemoryError)."""
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+        try:
+            fd = os.open(path, flags)
+        except OSError:
+            self._error(404, "няма такъв файл")
+            return
+        with os.fdopen(fd, "rb") as f:
+            size = os.fstat(f.fileno()).st_size
+            if size > MAX_ZIP_BYTES:
+                self._error(413, "файлът е твърде голям за сваляне")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(size))
+            self.send_header("Cache-Control", "no-store")
+            headers = {**_SECURITY_HEADERS,
+                       "Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"}
+            for k, v in headers.items():
+                self.send_header(k, v)
+            self.end_headers()
+            if self.command == "HEAD":
+                return
+            left = size
+            while left > 0:
+                chunk = f.read(min(1 << 16, left))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                left -= len(chunk)
 
     # ── POST ──
     def do_POST(self) -> None:

@@ -374,3 +374,19 @@ def test_run_turn_stops_before_the_next_tool(monkeypatch, tmp_path) -> None:
     assert ran == [], "a tool ran after stop"
     assert ui.warnings == ["Спряно от оператора."]
     assert "tool_calls" not in list(messages)[-1], "history left with unanswered tool_calls"
+
+
+def test_a_replay_is_still_rejected_after_a_restart(tmp_path) -> None:
+    """Одит 2026-10-07: видяното беше само в паметта — след рестарт на
+    `genesis serve` записано съобщение се изпълняваше пак."""
+    path = tmp_path / "remote_seen.json"
+    payload = _request("send", text="rm -rf build && deploy")
+    rs.ReplayGuard(path=path).check(payload)
+    with pytest.raises(rs.ProtocolError, match="replayed"):
+        rs.ReplayGuard(path=path).check(payload)          # нов процес, същият файл
+
+
+def test_a_broken_seen_file_does_not_stop_the_server(tmp_path) -> None:
+    path = tmp_path / "remote_seen.json"
+    path.write_text("{not json", encoding="utf-8")
+    rs.ReplayGuard(path=path).check(_request("status"))
