@@ -22,7 +22,8 @@
           "NSAllowsArbitraryLoads": true
         },
         "ITSAppUsesNonExemptEncryption": false
-      }
+      },
+      "runtimeVersion": "exposdk:57.0.0"
     },
     "android": {
       "package": "dev.me7ko.genesisremote",
@@ -32,8 +33,15 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "blockedPermissions": ["android.permission.RECORD_AUDIO"],
-      "predictiveBackGestureEnabled": false
+      "blockedPermissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.RECORD_AUDIO"
+      ],
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.CAMERA"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png",
@@ -55,12 +63,23 @@
       [
         "expo-build-properties",
         {
-          "android": { "usesCleartextTraffic": true }
+          "android": {
+            "usesCleartextTraffic": true
+          }
         }
       ]
     ],
     "experiments": {
       "typedRoutes": false
+    },
+    "owner": "metko777s-team",
+    "extra": {
+      "eas": {
+        "projectId": "7e19e096-90e8-4598-970b-01c4a0e717f7"
+      }
+    },
+    "updates": {
+      "url": "https://u.expo.dev/7e19e096-90e8-4598-970b-01c4a0e717f7"
     }
   }
 }

@@ -15,6 +15,7 @@
     "expo-secure-store": "~57.0.4",
     "expo-status-bar": "~57.0.1",
     "expo-system-ui": "~57.0.4",
+    "expo-updates": "~57.0.25",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-native": "0.86.3",
