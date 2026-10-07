@@ -89,6 +89,7 @@ except Exception:
 # All paths come from genesis_agent.paths, which derives them from the
 # installed package and the user's own home — nothing machine-specific here.
 from genesis_agent import claim_check
+from genesis_agent.acceptance import AcceptanceCheck as _AcceptanceCheck
 from genesis_agent.budget import clip_for_context
 from genesis_agent.code_check import RunCheck as _RunCheck
 from genesis_agent.config import TOOL_ROUND_CAP as _TOOL_ROUND_CAP
@@ -1238,6 +1239,8 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     _page_check = _PageCheck()
     # .py, записан и непуснат след последната промяна (genesis_agent.code_check).
     _run_check = _RunCheck()
+    # Приемни тестове само от заявката (GENESIS_ACCEPTANCE=1, genesis_agent.acceptance).
+    _accept = _AcceptanceCheck(user_input, Path(genesis_skills._WORKSPACE), rules=knowledge)
     # Въртене на място: същият извик, същият резултат, пореден път.
     # Таванът го ограничава по цена, но не го разпознава — виж
     # genesis_agent.repeat_guard.
@@ -1280,6 +1283,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
                 result = genesis_skills.dispatch_tool_call(name, args)
                 _page_check.observe(result)
                 _run_check.observe(result)
+                _accept.observe(result)
                 _entry = claim_check.counts_as_executed(
                     name, " ".join(str(v) for v in args.values()), result)
                 if _entry:
@@ -1326,6 +1330,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
         for _r in tool_results:
             _page_check.observe(_r)
             _run_check.observe(_r)
+            _accept.observe(_r)
         if not tool_results:
             # Празно ≠ непременно "приключи" — може да е объркан tool tag
             # (виж agent_core.run_tool_loop, същият фикс, design note
@@ -1364,6 +1369,16 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
                 with ui.thinking("Пробвам кода…", "aesthetic"):
                     response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
                 continue
+            if _accept.due():
+                with ui.thinking("Приемни тестове само от заявката…", "dots2"):
+                    _acc_note, _acc_line = _accept.check()
+                if _acc_line:
+                    ui.tool("приемни тестове", _acc_line)
+                if _acc_note:
+                    messages.append({"role": "system", "content": _acc_note})
+                    with ui.thinking("Сверявам със заявката…", "aesthetic"):
+                        response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
+                    continue
             _promise = claim_check.unfinished_promise(response)
             if _promise and _promise_retries < 1:
                 _promise_retries += 1
