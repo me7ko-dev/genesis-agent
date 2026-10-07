@@ -624,6 +624,9 @@ def serve(args: list[str]) -> int:
     def clear() -> None:
         state["messages"] = deque([{"role": "system", "content": system_prompt}],
                                   maxlen=gta._HISTORY_MAXLEN)
+        # Нов разговор от телефона = нова сесия и за брояча (NEXT_STEPS В.8):
+        # иначе статус редът на компютъра носеше Σ на стария разговор.
+        gta.reset_usage()
 
     def status() -> dict:
         return {"model": f"{gta.current_provider}/{gta.current_model_id}",
