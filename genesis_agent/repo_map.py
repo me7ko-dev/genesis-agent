@@ -203,13 +203,25 @@ def search_code(pattern: str, path: str | Path = ".", glob: str | None = None,
     root = Path(path).expanduser()
     if not root.exists():
         raise FileNotFoundError(f"няма такъв път: {root}")
+    only: Path | None = None
     if root.is_file():
-        root, glob = root.parent, root.name
-    if shutil.which("rg"):
-        hits = _search_ripgrep(root, pattern, glob, max_results)
-        if hits is not None:
-            return hits
-    return _search_python(root, pattern, glob, max_results)
+        # Само този файл — не и едноименните в подпапките (`src/__init__.py`
+        # иначе връщаше и `src/sub/__init__.py`).
+        only, root, glob = root.resolve(), root.parent, root.name
+    hits = _search_ripgrep(root, pattern, glob, max_results) if shutil.which("rg") else None
+    if hits is None:
+        hits = _search_python(root, pattern, glob, max_results)
+    if only is not None:
+        hits = [h for h in hits if _same_file(h.path, root, only)]
+    return hits
+
+
+def _same_file(hit_path: str, root: Path, target: Path) -> bool:
+    p = Path(hit_path)
+    try:
+        return (p if p.is_absolute() else root / p).resolve() == target
+    except OSError:
+        return False
 
 
 # ── Project shape ────────────────────────────────────────────────────────────
