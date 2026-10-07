@@ -1256,7 +1256,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
             assistant_msg["tool_calls"] = tool_calls
         messages.append(assistant_msg)
         _remember("assistant", response if response.strip() else
-                  f"[повикани {len(tool_calls)} tool(-а)]")
+                  f"[повикани {len(tool_calls or [])} tool(-а)]")
         if ui.cancelled():
             # Преди следващия инструмент, не по средата му. Недовършените
             # tool_calls остават без резултат — затова се махат, иначе

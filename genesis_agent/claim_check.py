@@ -73,8 +73,11 @@ _CATEGORIES: tuple[tuple[str, re.Pattern[str], frozenset[str], frozenset[str]], 
     (
         "пускане на тестове",
         re.compile(
-            r"\b(пуснах тестовете|тестовете мина\w*|"
-            r"i(?:'ve| have) run the tests|tests? (?:now )?pass(?:ed|es)?)\b",
+            # Само свършено (2026-10-07): „дали тестовете минават“ и „make sure
+            # the tests pass“ са съвет към оператора, не твърдение.
+            r"\b(пуснах тестовете|тестовете (?:вече |сега )?(?:минаха|минават успешно)|"
+            r"тестовете вече минават|всички тестове (?:минаха|минават)|"
+            r"i(?:'ve| have) run the tests|tests? (?:now pass(?:es)?|passed)|all (?:the )?tests pass)\b",
             re.IGNORECASE),
         frozenset({"RUN_CMD", "USE_SKILL", "DELEGATE"}),
         frozenset({"pytest", "test", "tests", "unittest", "tox", "nose", "make",
@@ -146,9 +149,25 @@ _FAILURE_MARKERS = (
 _RESULT_PREFIX_RE = re.compile(r"\[([A-Z_]+)[:\]]\s*([^\]]*)")
 
 
+# Отказ на самия инструмент: `[WRITE_FILE: p] ❌ Файлът вече съществува…`,
+# `[WRITE_FILE] Грешка: [Errno 13]…`, `[EDIT_FILE: p] ❌ Anchor-ът…`. Дотук се
+# броеше за изпълнено и „записах app.py“ минаваше след отказан запис.
+_TOOL_REFUSED_RE = re.compile(r"^\[[A-Z_]+(?::[^\]\n]*)?\]\s*(?:❌|Грешка)")
+_TEST_CMD_RE = re.compile(r"\b(pytest|unittest|tox|nose2?|test|tests|jest|vitest|mocha)\b", re.IGNORECASE)
+
+
 def counts_as_executed(name: str, args: str, result: str) -> tuple[str, str] | None:
     """Записът за `executed`, или None, ако резултатът не доказва изпълнение."""
-    if any(marker in (result or "") for marker in _FAILURE_MARKERS):
+    result = result or ""
+    if _TOOL_REFUSED_RE.match(result.lstrip()):
+        return None
+    # Пуснат тест, който пада, пак е пуснат тест: `(rc=1)` и Traceback в
+    # изхода значат, че командата е тръгнала. Без това вярното „Пуснах
+    # тестовете: test_div пада“ се връщаше като неподкрепено.
+    first = result.split("\n", 1)[0]
+    if name == "RUN_CMD" and "(rc=" in first and _TEST_CMD_RE.search(args or ""):
+        return (name, args)
+    if any(marker in result for marker in _FAILURE_MARKERS):
         return None
     return (name, args)
 

@@ -422,7 +422,11 @@ REPAIR_TOOLS: list[dict] = [
 ]
 
 
-_JSON_ESCAPE = re.compile(r"\\(.)", re.DOTALL)
+_JSON_ESCAPE = re.compile(r"\\(u[0-9a-fA-F]{4}|.)", re.DOTALL)
+# В поправката `\b` и `\f` също са буквална черта (2026-10-07): щом моделът е
+# писал `\d` сурово, `\b` до него е границата на дума в регекса, не backspace —
+# иначе `r"\bcat\d+\b"` стигаше до диска с два невидими \x08 знака.
+_KEEP_ESCAPES = {'"', "\\", "/", "n", "r", "t"}
 
 
 def load_tool_arguments(raw) -> dict:
@@ -441,7 +445,8 @@ def load_tool_arguments(raw) -> dict:
         value = json.loads(text)
     except json.JSONDecodeError as first:
         fixed = _JSON_ESCAPE.sub(
-            lambda m: m.group(0) if m.group(1) in '"\\/bfnrtu' else "\\\\" + m.group(1), text)
+            lambda m: m.group(0) if m.group(1) in _KEEP_ESCAPES or len(m.group(1)) == 5
+            else "\\\\" + m.group(1), text)
         try:
             value = json.loads(fixed)
         except json.JSONDecodeError:

@@ -925,8 +925,17 @@ class Brain:
         if len(rest) <= threshold:
             return messages
 
-        old_part = rest[:-keep_recent]
-        recent_part = rest[-keep_recent:]
+        # Срезът не бива да пада между извикване и неговите tool резултати:
+        # `[system, резюме, tool(c5), …]` е невалидна история (400 от всеки
+        # доставчик, после веригата пада надолу на всяко следващо обръщение).
+        # Затова срезът се мести назад до асистента, който ги е поискал.
+        cut = len(rest) - keep_recent
+        while cut > 0 and rest[cut].get("role") == "tool":
+            cut -= 1
+        if cut <= 0:
+            return messages
+        old_part = rest[:cut]
+        recent_part = rest[cut:]
         transcript = "\n".join(
             f"{m.get('role', '?')}: {str(m.get('content', ''))[:500]}" for m in old_part
         )

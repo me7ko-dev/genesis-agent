@@ -15,7 +15,7 @@ from pathlib import Path
 _WRITTEN = re.compile(r"^\[(?:WRITE_FILE|EDIT_FILE): ([^\]\n]+)\] ✓", re.MULTILINE)
 _RUN = re.compile(r"^\[RUN_CMD: ", re.MULTILINE)
 # A command word, not ".py" at the end of a file name.
-_PYTHON_CMD = re.compile(r"""(?:^|[\s"'/\\&|;(])(?:python3?|py|pytest)(?:\.exe)?(?=[\s"']|$)""",
+_PYTHON_CMD = re.compile(r"""(?:^|[\s"'/\\&|;(])(?:python(?:\d+(?:\.\d+)?)?|py|pytest)(?:\.exe)?(?=[\s"']|$)""",
                          re.IGNORECASE | re.MULTILINE)
 _CASES = ("по един случай за всяко правило или ограничение в условието, различен от примерите "
           "в заявката: по-сложен вход, граничните стойности и вход, който трябва да бъде "

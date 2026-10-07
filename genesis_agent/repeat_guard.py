@@ -134,4 +134,9 @@ class RepeatGuard:
         name = result[1:result.index(":")].strip() if (
             result.startswith("[") and ":" in result[:40]
         ) else "инструментът"
+        # Успешен запис казва само път и брой знаци — три различни версии на
+        # файл с еднаква дължина изглеждаха като въртене и спираха хода
+        # (2026-10-07). Тук съдържанието не се вижда; запис не е повторение.
+        if name in ("WRITE_FILE", "EDIT_FILE") and "] ✓" in result.split("\n", 1)[0]:
+            return Verdict(repeats=1, stop=False, note="")
         return self.observe(name, None, result)

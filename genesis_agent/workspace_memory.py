@@ -126,16 +126,19 @@ def add_thread(title: str, next_step: str = "", notes: str = "") -> str:
         return "[TASK_ADD] Празно заглавие — нищо не е добавено."
     ws = current_workspace()
     with _conn() as c:
-        row = c.execute(
-            "SELECT id, status FROM threads WHERE lower(title) = lower(?) AND workspace = ?;",
-            (title, ws),
-        ).fetchone()
+        # Сравнение в Python, не със SQL lower(): той сгъва само ASCII и
+        # „Миграция“/„миграция“ ставаха две нишки. Затворена нишка със същото
+        # заглавие е стара работа — новата задача е отворена, не „вече съществува“.
+        key = title.casefold()
+        row = next((r for r in c.execute(
+            "SELECT id, status, title FROM threads WHERE workspace = ? AND status != 'done';",
+            (ws,)) if r[2].casefold() == key), None)
         if row:
             # Съществува — обновяваме следващата стъпка вместо да дублираме.
-            c.execute(
-                "UPDATE threads SET next_step = ?, updated_at = ? WHERE id = ?;",
-                (_clean(next_step) or "", _now(), row[0]),
-            )
+            # Празна нова стъпка не трие записаната (auto_capture подава "").
+            if _clean(next_step):
+                c.execute("UPDATE threads SET next_step = ?, updated_at = ? WHERE id = ?;",
+                          (_clean(next_step), _now(), row[0]))
             return f"[TASK_ADD] Нишка #{row[0]} вече съществува ({row[1]}) — обнових следващата стъпка."
         cur = c.execute(
             "INSERT INTO threads (title, status, next_step, notes, created_at, updated_at, workspace)"
@@ -211,7 +214,10 @@ def _is_semantic_dup(text: str, existing: list[str]) -> str | None:
     """
     if not existing:
         return None
-    norm = lambda s: "".join(ch.lower() for ch in s if ch.isalnum() or ch.isspace()).strip()
+    # Регистър, интервали и точката накрая — нищо повече. Махането на всички
+    # знаци сливаше „C#“ с „C++“, „1.5 секунди“ с „15 секунди“, „<= 4“ с „>= 4“.
+    def norm(s: str) -> str:
+        return " ".join(s.casefold().split()).rstrip(".!;, ")
     n_new = norm(text)
     for e in existing:
         if norm(e) == n_new:
