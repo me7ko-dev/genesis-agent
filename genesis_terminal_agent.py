@@ -1550,6 +1550,19 @@ def main():
                     console.print(f"[red]❌ Архивирането се провали:[/] {err[:200]}")
                 continue
 
+            if user_input.lower().split(" ", 1)[0] in ("/export", "/предай"):
+                # Zip + GENESIS_REPORT.md на текущия workspace (deliver.py) —
+                # без модел: отчетът се взима от проекта, не от разговора.
+                _arg = user_input.split(" ", 1)[1].strip() if " " in user_input else ""
+                try:
+                    from genesis_agent.deliver import export, summary
+                    with console.status("[cyan]📦 Опаковам проекта и пускам тестовете…[/]"):
+                        _d = export(WORKSPACE, _arg or None)
+                    console.print(summary(_d), markup=False, highlight=False)
+                except (ValueError, OSError) as e:
+                    console.print(f"[red]❌ {e}[/]")
+                continue
+
             # ── /update — реално обновяване от GitHub, не само проверка ──
             # `genesis update` (CLI) нарочно само пита; тук питаме за
             # потвърждение и, при „да", НАСРОЧВАМЕ обновяването на заден
@@ -1682,6 +1695,7 @@ def main():
                 help_table.add_row("/status", "Системна информация и статистика")
                 help_table.add_row("/history", "Преглед и зареждане на стари сесии")
                 help_table.add_row("/backup", "Архивиране към GENESIS_BACKUP_DIR")
+                help_table.add_row("/export [файл.zip]", "Проектът за предаване: zip + отчет (тестове, как се пуска, допускания)")
                 help_table.add_row("/update", "Провери и обнови от GitHub (питa за потвърждение)")
                 help_table.add_row("/skills", "Списък с уменията (без модел, мигновено)")
                 help_table.add_row("/tasks", "Състояние на работата — отворени нишки, решения")

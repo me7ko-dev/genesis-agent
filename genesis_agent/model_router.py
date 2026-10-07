@@ -209,14 +209,19 @@ _COMMAND_INTENTS = [(cmd, re.compile(rx)) for cmd, rx in (
         r"|(нов разговор|нов чат|nov razgovor|nov chat|new chat|new conversation)")),
     ("/tasks",
         _SHOW + r" (задачите|нишките|zadachite|nishkite|tasks|the tasks|open tasks)"),
+    ("/export", (
+        r"(предай|експортирай|опаковай|predai|eksportiraj|eksportirai|opakovai|opakovaj|export|package)"
+        r"( ми| mi)? (проекта|proekta|the project|project)( за клиента| za klienta)?"
+        r"|(направи|napravi|make)( ми| mi)? (zip|зип)( на| na| of)?( проекта| proekta| the project)?")),
     ("/help", (
         r"помощ|pomosht|pomosh|help"
         r"|(какви|kakvi) (команди|komandi) (има|имаш|ima|imash)"
         r"|what commands (are there|do you have)"
         r"|" + _SHOW + r" (командите|komandite|commands|the commands)")),
 )]
-# Тези променят нещо (архив с --delete в целта; изгубена история) — питат.
-CONFIRM_COMMANDS = frozenset({"/backup", "/clear"})
+# Тези променят нещо (архив с --delete в целта; изгубена история; пуснати
+# тестове на проекта и нов zip) — питат.
+CONFIRM_COMMANDS = frozenset({"/backup", "/clear", "/export"})
 
 
 def command_for_request(text: str) -> str | None:

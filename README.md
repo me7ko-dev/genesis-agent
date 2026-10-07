@@ -219,6 +219,23 @@ genesis fix ~/code/theirs "..." --max    # or: export GENESIS_QUALITY=max
 without `--max` / `GENESIS_QUALITY=max` the chain, the order and the spend are
 exactly as before.
 
+## Handing a project over
+
+```bash
+genesis export ~/code/invoices              # → invoices-20261007-1412.zip next to it
+genesis export . -o client.zip --no-tests
+```
+
+In the chat: `/export` (or just "предай проекта"). The zip carries
+`GENESIS_REPORT.md`, written from the project at that moment rather than from
+the conversation: the files, how to run it (the README's own section, or worked
+out from `requirements.txt` / `package.json` / `main.py`), its dependencies, the
+test suite **run right then** with its result, the assumptions (the README's
+"Assumptions" section plus the decisions remembered for that folder) and what is
+still open. `.env`, `*.pem` and other secrets stay out of the archive and the
+report names them, so the recipient knows to supply their own. Exit code 1 when
+the tests fail.
+
 ## What it can do
 
 - **Run commands** through a three-level safety gate (see below)
