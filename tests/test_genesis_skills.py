@@ -825,3 +825,113 @@ def test_no_import_hint_once_conftest_exists(tmp_path) -> None:
     (tmp_path / "egn.py").write_text("")
     (tmp_path / "conftest.py").write_text("")
     assert gs._import_path_hint(_MISSING, tmp_path) == ""
+
+# ── пътища с правописна грешка (NEXT_STEPS В.9) ───────────────────────────
+
+def _project(tmp_path_factory, name: str = "genitest") -> Path:
+    root = tmp_path_factory.mktemp("Projects")
+    ws = root / name
+    ws.mkdir()
+    gs.set_workspace(ws)
+    return ws
+
+
+def test_write_file_typo_in_workspace_name_lands_in_the_workspace(tmp_path_factory) -> None:
+    ws = _project(tmp_path_factory)
+    typo = ws.parent / "genittest" / "egn.py"
+    out = gs._tool_write_file(str(typo), "X = 1\n")
+    assert "✓" in out
+    assert (ws / "egn.py").read_text(encoding="utf-8") == "X = 1\n"
+    assert not typo.parent.exists()
+    assert "правописна" in out
+
+
+def test_typo_redirect_keeps_subfolders(tmp_path_factory) -> None:
+    ws = _project(tmp_path_factory)
+    typo = ws.parent / "gentiest" / "tests" / "test_a.py"   # размяна на съседни
+    out = gs._tool_write_file(str(typo), "def test_a():\n    assert True\n")
+    assert "✓" in out
+    assert (ws / "tests" / "test_a.py").is_file()
+
+
+def test_a_sibling_project_with_a_suffix_is_not_a_typo(tmp_path_factory) -> None:
+    """`genitest2` може да е нарочна нова папка — не се пренасочва тихо."""
+    ws = _project(tmp_path_factory)
+    other = ws.parent / "genitest2" / "x.py"
+    assert gs._resolve(str(other)) == other
+    out = gs._tool_write_file(str(other), "x")
+    assert not (ws / "x.py").exists()
+    assert not other.exists()           # извън workspace → отказано без tty
+    assert "[WRITE_FILE]" in out
+
+
+def test_an_unrelated_absolute_path_passes_through(tmp_path_factory) -> None:
+    ws = _project(tmp_path_factory)
+    other = ws.parent / "completely-different" / "x.py"
+    assert gs._resolve(str(other)) == other
+
+
+def test_existing_folder_is_never_redirected(tmp_path_factory) -> None:
+    ws = _project(tmp_path_factory)
+    real = ws.parent / "genittest"
+    real.mkdir()
+    assert gs._resolve(str(real / "a.py")) == real / "a.py"
+
+
+def test_read_file_through_a_typo_reads_the_workspace_file(tmp_path_factory) -> None:
+    ws = _project(tmp_path_factory)
+    (ws / "data.txt").write_text("hello", encoding="utf-8")
+    out = gs._tool_read_file(str(ws.parent / "Genitest" / "data.txt"))
+    assert "hello" in out
+
+
+@pytest.mark.parametrize(("a", "b", "typo"), [
+    ("genittest", "genitest", True),
+    ("Projetcs", "Projects", True),
+    ("projects", "Projects", True),
+    ("genitest2", "genitest", False),
+    ("site-old", "site", False),
+    ("app", "apx", False),               # твърде кратко за да се гадае
+    ("invoices", "customers", False),
+])
+def test_is_typo(a, b, typo) -> None:
+    assert gs._is_typo(a, b) is typo
+
+
+# ── „може би имаше предвид“ ──────────────────────────────────────────────
+
+def test_read_file_missing_suggests_the_same_name_elsewhere(_workspace) -> None:
+    (_workspace / "src").mkdir()
+    (_workspace / "src" / "utils.py").write_text("", encoding="utf-8")
+    out = gs._tool_read_file("utils.py")
+    assert "не съществува" in out
+    assert "src/utils.py" in out.replace("\\", "/")
+
+
+def test_read_file_missing_suggests_a_close_name(_workspace) -> None:
+    (_workspace / "utils.py").write_text("", encoding="utf-8")
+    out = gs._tool_read_file("util.py")
+    assert "Може би: utils.py" in out
+
+
+def test_read_file_missing_without_candidates_has_no_hint(_workspace) -> None:
+    assert "Може би" not in gs._tool_read_file("nothing_like_it.py")
+
+
+def test_read_file_on_a_folder_says_use_list_dir(_workspace) -> None:
+    (_workspace / "pkg").mkdir()
+    out = gs._tool_read_file("pkg")
+    assert "LIST_DIR" in out
+
+
+def test_edit_file_missing_suggests_the_real_file(_workspace) -> None:
+    (_workspace / "app").mkdir()
+    (_workspace / "app" / "main.py").write_text("x = 1\n", encoding="utf-8")
+    out = gs._tool_edit_file("main.py", "x = 1", "x = 2")
+    assert "❌" in out
+    assert "app/main.py" in out.replace("\\", "/")
+
+
+def test_list_dir_on_a_file_says_use_read_file(_workspace) -> None:
+    (_workspace / "a.txt").write_text("", encoding="utf-8")
+    assert "READ_FILE" in gs._tool_list_dir("a.txt")

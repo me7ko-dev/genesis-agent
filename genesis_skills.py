@@ -91,8 +91,134 @@ def set_workspace(path) -> None:
 
 def _resolve(path_str: str) -> Path:
     """Разрешава път — относителните са спрямо workspace-а."""
+    return _resolve_noted(path_str)[0]
+
+
+def _resolve_noted(path_str: str) -> tuple[Path, str]:
+    """Като _resolve, но абсолютен път с правописна грешка в пътя до
+    workspace-а се пренасочва в него — и бележката го казва на модела.
+
+    NEXT_STEPS В.9: моделът пише `...\\Projects\\genittest\\egn.py` при
+    workspace `...\\Projects\\genitest`; sandbox-ът правилно спира записа
+    извън workspace-а, но рундът се губи, а следващият често повтаря същото.
+    Пренасочва се САМО когато папката с грешката не съществува и всяка част
+    до нея е буквена грешка на частта от workspace-а (виж _is_typo) — не
+    `genitest2` или `genitest-old`, които може да са нарочна съседна папка.
+    """
     p = Path(path_str.strip()).expanduser()
-    return p if p.is_absolute() else (_WORKSPACE / p)
+    if not p.is_absolute():
+        return _WORKSPACE / p, ""
+    fixed = _typo_into_workspace(p)
+    if fixed is None:
+        return p, ""
+    return fixed, (f"\n[път] {p} не съществува — това е workspace-ът с правописна "
+                   f"грешка, ползван е {fixed}. Пиши пътищата спрямо workspace-а "
+                   "(относителни), не абсолютни.")
+
+
+def _is_typo(a: str, b: str) -> bool:
+    """Две имена на папки, които са една и съща с буквена грешка.
+
+    Разлика само в регистъра, или разстояние ≤2 (вмъкване, изтриване, замяна,
+    размяна на съседни) при имена от ≥4 знака. НЕ е грешка, ако едното е
+    продължение на другото (`app` → `app2`, `site` → `site-old`): това е друга
+    папка със смисъл, а не изпусната буква.
+    """
+    if a == b:
+        return True
+    if a.lower() == b.lower():
+        return True
+    if min(len(a), len(b)) < 4:
+        return False
+    la, lb = a.lower(), b.lower()
+    if la.startswith(lb) or lb.startswith(la) or la.endswith(lb) or lb.endswith(la):
+        return False
+    return _edit_distance(la, lb, limit=2) <= min(2, max(len(a), len(b)) // 4)
+
+
+def _edit_distance(a: str, b: str, limit: int) -> int:
+    """Damerau-Levenshtein (с размяна на съседни), спира над `limit`."""
+    if abs(len(a) - len(b)) > limit:
+        return limit + 1
+    prev2: list[int] = []
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb))
+            if i > 1 and j > 1 and ca == b[j - 2] and a[i - 2] == cb:
+                cur[j] = min(cur[j], prev2[j - 2] + 1)
+        if min(cur) > limit:
+            return limit + 1
+        prev2, prev = prev, cur
+    return prev[-1]
+
+
+def _typo_into_workspace(p: Path) -> Path | None:
+    """Пътят в workspace-а, който `p` очевидно е имал предвид — или None."""
+    if p.exists():
+        return None
+    try:
+        ws = _WORKSPACE.resolve()
+    except OSError:
+        return None
+    anchor = p.parent
+    while not anchor.exists():
+        if anchor.parent == anchor:
+            return None
+        anchor = anchor.parent
+    try:
+        ws_rest = ws.relative_to(anchor.resolve()).parts
+        rest = p.relative_to(anchor).parts
+    except (ValueError, OSError):
+        return None
+    if not ws_rest or len(rest) <= len(ws_rest):
+        return None
+    if not all(_is_typo(a, b) for a, b in zip(rest, ws_rest)):
+        return None
+    return ws.joinpath(*rest[len(ws_rest):])
+
+
+# Папки, в които „може би имаше предвид“ не търси: огромни и никога не са
+# мястото, където моделът мисли, че е файлът му.
+_SKIP_DIRS = {".git", ".hg", ".venv", "venv", "node_modules", "__pycache__",
+              ".mypy_cache", ".pytest_cache", ".ruff_cache", "dist", "build"}
+
+
+def _did_you_mean(path: Path, *, limit: int = 3) -> str:
+    """Подсказка за липсващ файл: същото име другаде в workspace-а или
+    близко име в същата папка. Празно, ако няма нищо правдоподобно.
+
+    Без нея „Файлът не съществува“ води до GLOB/LIST_DIR рунд само за да се
+    намери, че файлът е в `src/`, или че се казва `utils.py`, а не `util.py`.
+    """
+    import difflib
+    import os
+    found: list[str] = []
+    try:
+        ws = _WORKSPACE.resolve()
+        seen = 0
+        for dirpath, dirnames, filenames in os.walk(ws):
+            dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+            seen += len(filenames)
+            if path.name in filenames:
+                cand = Path(dirpath) / path.name
+                if cand != path:
+                    found.append(str(cand.relative_to(ws)))
+            if seen > 5000 or len(found) >= limit:
+                break
+        if len(found) < limit and path.parent.is_dir():
+            names = [e.name for e in path.parent.iterdir()][:2000]
+            for n in difflib.get_close_matches(path.name, names, n=limit, cutoff=0.75):
+                cand = path.parent / n
+                rel = str(cand.relative_to(ws)) if cand.is_relative_to(ws) else str(cand)
+                if rel not in found:
+                    found.append(rel)
+    except OSError:
+        return ""
+    if not found:
+        return ""
+    return " Може би: " + ", ".join(found[:limit]) + "?"
 
 
 def _sensitive_root_refusal(tool: str, root: Path) -> str | None:
@@ -166,7 +292,7 @@ def _tool_read_file(arg: str, offset=None, limit=None) -> str:
     except (TypeError, ValueError):
         limit_i = None
 
-    path = _resolve(path_str)
+    path, redirect = _resolve_noted(path_str)
     # Четенето на ключове минава през СЪЩОТО решение като `cat ~/.genesis/.env`
     # (design note, 2026-09-20). Дотук не минаваше през нищо: shell пътят беше
     # с гейт, а инструментът — не, тоест по-лесният път беше отворен. А
@@ -182,7 +308,9 @@ def _tool_read_file(arg: str, offset=None, limit=None) -> str:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
-        return f"[READ_FILE] Файлът не съществува: {path}"
+        return f"[READ_FILE] Файлът не съществува: {path}.{_did_you_mean(path)}"
+    except IsADirectoryError:
+        return f"[READ_FILE] {path} е папка, не файл — ползвай LIST_DIR."
     except OSError as e:
         return f"[READ_FILE] Грешка: {e}"
     _SEEN_PATHS.add(path.resolve())
@@ -201,7 +329,7 @@ def _tool_read_file(arg: str, offset=None, limit=None) -> str:
             chunk = chunk[:8000] + "\n… [отрязано, диапазонът е по-голям от 8000 символа]"
         _log_episode(f"READ_FILE {path}", "прочетен (диапазон)", ["tool", "read_file"])
         return (f"[READ_FILE: {path}]  (редове {start + 1}-{min(end, len(lines))} от {len(lines)})\n"
-                + chunk)
+                + chunk + redirect)
 
     if len(text) > 8000:
         total_lines = text.count("\n") + 1
@@ -209,11 +337,11 @@ def _tool_read_file(arg: str, offset=None, limit=None) -> str:
                 + f"\n… [отрязано, общо {len(text)} символа, {total_lines} реда — "
                   f"за конкретен диапазон: READ_FILE: {path_str} | offset | limit]")
     _log_episode(f"READ_FILE {path}", "прочетен", ["tool", "read_file"])
-    return f"[READ_FILE: {path}]\n{text}"
+    return f"[READ_FILE: {path}]\n{text}{redirect}"
 
 
 def _tool_write_file(arg: str, content: str) -> str:
-    path = _resolve(arg)
+    path, redirect = _resolve_noted(arg)
     if not arg.strip() or path.is_dir():
         # Иначе write_text върху папка → „Permission denied“, а моделът го
         # чете като защитена папка и спира да пита (виж load_tool_arguments).
@@ -263,7 +391,8 @@ def _tool_write_file(arg: str, content: str) -> str:
     _log_episode(f"WRITE_FILE {path}", f"записани {len(content)} символа",
                  ["tool", "write_file"])
     from genesis_agent.web_check import web_note
-    return f"[WRITE_FILE: {path}] ✓ записани {len(content)} символа{lint_note}{web_note(path)}"
+    return (f"[WRITE_FILE: {path}] ✓ записани {len(content)} символа{lint_note}"
+            f"{web_note(path)}{redirect}")
 
 
 def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False) -> str:
@@ -272,7 +401,7 @@ def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False
     Минава през същата CONFIRM бариера като WRITE_FILE при запис извън
     workspace-а — редакцията е по-малка по обхват, но не е по-малко реална.
     """
-    path = _resolve(path_arg)
+    path, redirect = _resolve_noted(path_arg)
     # Същата бариера като при READ_FILE, по същата причина — и намерена по
     # същия начин: `EDIT_FILE` връща unified diff, а диффът носи КОНТЕКСТНИ
     # редове. Редакция на `.env` с произволна котва връща в отговора реда
@@ -300,7 +429,8 @@ def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False
     if not res.ok:
         _log_episode(f"EDIT_FILE {path}", f"отказана: {res.detail[:200]}",
                      ["tool", "edit_file", "rejected"])
-        return f"[EDIT_FILE: {path}] ❌ {res.detail}"
+        hint = _did_you_mean(path) if not path.exists() else ""
+        return f"[EDIT_FILE: {path}] ❌ {res.detail}{hint}{redirect}"
     _SEEN_PATHS.add(path.resolve())
     _log_episode(f"EDIT_FILE {path}", res.detail, ["tool", "edit_file"])
     # Диффът се връща на модела нарочно: така следващият рунд вижда какво РЕАЛНО
@@ -318,7 +448,7 @@ def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False
         except OSError:
             pass
     from genesis_agent.web_check import web_note
-    return f"[EDIT_FILE: {path}] {res.detail}\n{diff}{ruff_note}{web_note(path)}"
+    return f"[EDIT_FILE: {path}] {res.detail}\n{diff}{ruff_note}{web_note(path)}{redirect}"
 
 
 def _tool_search_code(arg: str, path: str = "", glob: str = "") -> str:
@@ -515,9 +645,11 @@ def _tool_research(arg: str) -> str:
 
 
 def _tool_list_dir(arg: str) -> str:
-    path = _resolve(arg)
+    path, redirect = _resolve_noted(arg)
     if not path.is_dir():
-        return f"[LIST_DIR] Не е директория: {path}"
+        if path.is_file():
+            return f"[LIST_DIR] {path} е файл, не папка — ползвай READ_FILE."
+        return f"[LIST_DIR] Не е директория: {path}.{_did_you_mean(path)}"
     # Изброяването на `~/.ssh` не дава съдържание, но дава ИМЕНАТА на ключовете
     # — първата стъпка на всяко "кое има смисъл да прочета". Същият пазач,
     # който вече стои на READ_FILE и EDIT_FILE (design note, 2026-09-20);
@@ -537,7 +669,7 @@ def _tool_list_dir(arg: str) -> str:
         entries = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
     except OSError as e:
         return f"[LIST_DIR] Грешка: {e}"
-    lines = [f"[LIST_DIR: {path}]"]
+    lines = [f"[LIST_DIR: {path}]{redirect}"]
     if not entries:
         # Само заглавието, без нито един ред, моделът чете като „инструментът
         # не отговори“ и пита отново. Измерено 2026-09-28 (bench_projects):
