@@ -980,3 +980,46 @@ def test_pyproject_without_pytest_section_still_gets_the_scaffold(_workspace) ->
     (_workspace / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
     gs._tool_write_file("tests/test_a.py", "def test_a():\n    assert True\n")
     assert (_workspace / "conftest.py").is_file()
+
+
+def test_read_file_through_a_symlink_to_a_key_is_refused(_workspace, tmp_path_factory) -> None:
+    home = tmp_path_factory.mktemp("home")
+    key = home / ".ssh" / "id_rsa"
+    key.parent.mkdir()
+    key.write_text("SECRETKEYBODY", encoding="utf-8")
+    try:
+        (_workspace / "notes.txt").symlink_to(key)
+    except (OSError, NotImplementedError):
+        pytest.skip("no symlinks here")
+    out = gs._tool_read_file("notes.txt")
+    assert "SECRETKEYBODY" not in out
+
+
+def test_tools_work_in_a_project_under_a_folder_named_build(tmp_path_factory) -> None:
+    ws = tmp_path_factory.mktemp("build") / "proj"
+    (ws / "src").mkdir(parents=True)
+    (ws / "src" / "app.py").write_text("def parse_config():\n    pass\n", encoding="utf-8")
+    (ws / "node_modules").mkdir()
+    (ws / "node_modules" / "x.py").write_text("parse_config = 1\n", encoding="utf-8")
+    gs.set_workspace(ws)
+    out = gs._tool_glob("**/*.py")
+    assert "app.py" in out and "x.py" not in out
+
+
+def test_text_tag_arguments_may_contain_brackets(_workspace) -> None:
+    page = _workspace / "app" / "[id]" / "page.tsx"
+    page.parent.mkdir(parents=True)
+    page.write_text("export default 1\n", encoding="utf-8")
+    out = gs.parse_and_execute_tools(
+        "[READ_FILE: app/[id]/page.tsx]\n[LIST_DIR: app] [GLOB: *.tsx]")
+    joined = "\n".join(out)
+    assert "export default 1" in joined
+    assert "[id]" in joined
+    assert len(out) == 3
+
+
+def test_run_cmd_with_indexing_reaches_the_shell_whole(_workspace) -> None:
+    import sys
+    out = gs.parse_and_execute_tools(
+        f'[RUN_CMD: "{sys.executable}" -c "import sys; print(sys.argv[1:])" a b]')
+    assert "['a', 'b']" in "\n".join(out)

@@ -120,3 +120,13 @@ def test_indentation_damage_is_caught_by_the_syntax_gate(tmp_path) -> None:
     assert res.ok is False
     assert "синтаксиса" in res.detail
     assert p.read_text(encoding="utf-8") == SRC
+
+
+def test_a_file_with_a_utf8_bom_can_be_edited(tmp_path) -> None:
+    from genesis_agent.code_edit import edit_file
+    p = tmp_path / "bom.py"
+    p.write_bytes(b"\xef\xbb\xbfdef f():\n    return 1\n")
+    res = edit_file(p, "return 1", "return 2")
+    assert res.ok, res.detail
+    assert p.read_bytes().startswith(b"\xef\xbb\xbf")
+    assert b"return 2" in p.read_bytes()

@@ -131,9 +131,12 @@ _BLOCK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 # 2026-09-28: `Get-Content ~/.genesis/private_key.pem`, `cat ~/.genesis/remote.json`
 # (ключът за сдвояване с телефона — с него някой управлява агента) и
 # `gh/hosts.yml` (GitHub токенът) минаваха като SAFE, а READ_FILE ги четеше
-# без въпрос.
+# без въпрос. Папките (`.ssh`, `.aws`, `.gnupg`) — и без наклонена черта след
+# тях (2026-10-07): `grep -r SECRET ~/.ssh ~/.aws` и `tar cz ~/.ssh` минаваха
+# като SAFE и печатаха ключовете, макар `cat ~/.ssh/id_rsa` да беше спрян.
 _SECRET_PATHS = (
-    r"\.ssh[/\\]|\.aws[/\\]|\.gnupg[/\\]|id_rsa|id_ed25519|\.env\b|credentials\b"
+    r"\.ssh(?:[/\\]|\b)|\.aws(?:[/\\]|\b)|\.gnupg(?:[/\\]|\b)|id_rsa|id_ed25519|id_ecdsa|id_dsa"
+    r"|\bid_[*?\[]|\.env\b|credentials\b"
     r"|\.pem\b|\.p12\b|\.pfx\b|\.genesis[/\\]remote\.json|gh[/\\]hosts\.yml"
     r"|\.npmrc\b|\.pypirc\b|\.netrc\b|\.docker[/\\]config\.json|\.kube[/\\]config\b"
     r"|Login Data\b"
@@ -376,7 +379,9 @@ def _split_segments(command: str) -> list[str]:
     """Реже съставна команда на отделни сегменти (`&&`, `||`, `;`, `|`), за да
     се оцени всеки поотделно. Груб разрез — не пълен shell парсър; целта е да
     не пропуснем `ls && mv *.jpg /другаде`, чиято опасна част е втора."""
-    return [s for s in re.split(r"&&|\|\||[;|]", command) if s.strip()]
+    # Нов ред и единичен `&` също делят команди (2026-10-07): `cd photos\nmv
+    # *.jpg /другаде` минаваше като SAFE, защото вторият ред не беше сегмент.
+    return [s for s in re.split(r"&&|\|\||[;|&\n]", command) if s.strip()]
 
 
 def _expand_targets(tokens: list[str], cwd: Path | None) -> tuple[list[Path], bool]:
@@ -444,6 +449,8 @@ def _assess_file_ops(command: str, cwd: Path | None = None) -> RiskVerdict:
             argv = _shlex_split_for_classification(seg)
         except ValueError:  # неуравновесени кавички — не гадаем
             continue
+        # `nohup mv *.jpg …`, `time mv …` — обвивката не прави местенето по-малко масово.
+        argv = _strip_wrappers(argv)
         if not argv:
             continue
         cmd = os.path.basename(argv[0])
@@ -713,6 +720,13 @@ def _critical_root_reason(target: str) -> str | None:
     norm = _normalise_target(target)
     if norm in _CATASTROPHIC_ROOTS:
         return f"критичен корен ({target})"
+    # `/etc/*` трие същото като `/etc`, `/home/ivan/*` — същото като
+    # `/home/ivan` (2026-10-07: двете бяха само CONFIRM, а в режим „allow“
+    # CONFIRM се изпълнява сам).
+    if norm.endswith("/*"):
+        norm = norm[:-2] or "/"
+        if norm in _CATASTROPHIC_ROOTS:
+            return f"критичен корен ({target})"
     for parent in _HOME_PARENTS:
         if norm.startswith(parent) and norm.count("/") == parent.count("/"):
             return f"цяла home директория ({target})"
@@ -785,6 +799,70 @@ def _catastrophic_rm_reason(command: str) -> str | None:
     return None
 
 
+_INTERPRETERS = re.compile(r"^(python[\d.]*|py|pypy[\d.]*|perl|ruby|node|deno|bun)(\.exe)?$",
+                           re.IGNORECASE)
+_INLINE_FLAGS = frozenset({"-c", "-e", "-E", "--eval", "-p", "--print"})
+# perl/ruby/node: триене и пускане на процеси с техните имена.
+_OTHER_LANG_RISK = re.compile(
+    r"\b(unlink|rmtree|rm_rf|rm_r|rmSync|rmdirSync|unlinkSync|File\.delete|FileUtils\.rm\w*"
+    r"|system|exec|execSync|spawnSync|child_process|`)", re.IGNORECASE)
+_RF_FLAG = re.compile(r"^(-[a-zA-Z]*[rRfF][a-zA-Z]*|--recursive|--force)$")
+
+
+def _inline_code_reasons(command: str) -> list[str]:
+    """Кодът в `python -c "…"` (и perl/ruby/node -e) получава Python образците.
+
+    2026-10-07: `python3 -c "import shutil; shutil.rmtree(…)"` минаваше като
+    SAFE и триеше в режим „deny“, а същото като `rm -rf` се спираше —
+    _PY_CONFIRM_PATTERNS се прилагаха само в assess_code. Изчислена командна
+    дума с флагове за рекурсия/сила (`$(echo rm) -rf ~`, `$x -rf ~`) не може да
+    се оцени статично — тя също пита; `$PY -m pytest` не.
+    """
+    reasons: list[str] = []
+    for seg in _split_segments(command):
+        try:
+            argv = _strip_wrappers(_shlex_split_for_classification(seg))
+        except ValueError:
+            continue
+        if not argv:
+            continue
+        head = argv[0]
+        if head.startswith(("$", "`")) or "$(" in head:
+            if any(_RF_FLAG.match(a) for a in argv[1:]):
+                reasons.append(f"изчислена команда с -r/-f ({head[:40]}) — не може да се оцени")
+            continue
+    # Кодът след `-c` е в кавички и носи `;` — сегментите отгоре го режат по
+    # средата, затова тук цялата команда се чете с кавичките.
+    try:
+        tokens = _shlex_split_for_classification(command)
+    except ValueError:
+        tokens = command.split()
+    for i, tok in enumerate(tokens[:-1]):
+        name = os.path.basename(tok)
+        if not _INTERPRETERS.match(name):
+            continue
+        code, j = "", i + 1
+        while j < len(tokens) - 1:          # флаговете на интерпретатора до кода
+            t = tokens[j]
+            if t in _INLINE_FLAGS:
+                code = tokens[j + 1]
+                break
+            if t in ("-X", "-W"):           # `python -X utf8 -c …`
+                j += 2
+            elif t.startswith("-") and t not in ("-m", "--"):
+                j += 1
+            else:
+                break
+        if not code:
+            continue
+        if name.lower().startswith("py"):
+            reasons += [f"{why} — в код на командния ред"
+                        for rx, why in _PY_CONFIRM_PATTERNS if rx.search(code)]
+        elif _OTHER_LANG_RISK.search(code):
+            reasons.append("триене/пускане на процес — в код на командния ред")
+    return reasons
+
+
 def assess_command(command: str, cwd: Path | None = None) -> RiskVerdict:
     """Оценява риска на shell команда.
 
@@ -817,6 +895,10 @@ def assess_command(command: str, cwd: Path | None = None) -> RiskVerdict:
         if rx.search(command):
             reasons.append(why)
             level = RiskLevel.CONFIRM
+    inline = _inline_code_reasons(command)
+    if inline:
+        reasons.extend(inline)
+        level = RiskLevel(max(level, RiskLevel.CONFIRM))
     verdict = RiskVerdict(level, reasons)
     try:
         return verdict.merge(_assess_file_ops(command, cwd))
@@ -867,10 +949,27 @@ def sensitive_path_reason(path: str | os.PathLike[str]) -> str | None:
     # sandbox._split_segment вече прави точно тази нормализация, и то по
     # същата причина.
     text = str(path).replace("\\", "/")
-    if _SENSITIVE_PATH_EXEMPT_RE.search(text):
-        return None
-    match = _SENSITIVE_PATH_RE.search(text)
-    return f"достъп до чувствителен файл ({match.group(0)})" if match else None
+    if not _SENSITIVE_PATH_EXEMPT_RE.search(text):
+        match = _SENSITIVE_PATH_RE.search(text)
+        if match:
+            return f"достъп до чувствителен файл ({match.group(0)})"
+    # Символна връзка в workspace-а към ключ (2026-10-07): `notes.txt → ~/.ssh/id_rsa`
+    # се четеше без въпрос — образецът гледаше само името, което моделът написа.
+    # Само за абсолютни пътища: относителният се разрешава спрямо cwd на
+    # процеса, а не спрямо папката, за която пита извикващият.
+    raw = os.fspath(path)
+    if os.path.isabs(raw):
+        try:
+            real = os.path.realpath(raw)
+        except (OSError, ValueError):
+            return None
+        if os.path.normcase(real) != os.path.normcase(os.path.abspath(raw)):
+            real_text = real.replace("\\", "/")
+            if not _SENSITIVE_PATH_EXEMPT_RE.search(real_text):
+                match = _SENSITIVE_PATH_RE.search(real_text)
+                if match:
+                    return f"достъп до чувствителен файл ({match.group(0)}, през символна връзка)"
+    return None
 
 
 def _python_reads_sensitive_path(code: str) -> bool:

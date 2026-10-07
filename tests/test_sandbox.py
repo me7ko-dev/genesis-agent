@@ -637,3 +637,55 @@ class TestTimeoutKillsTheWholeTree:
         assert time.time() - t0 < 40, "таймаутът трябва да спре и детето на обвивката"
         assert res.returncode is None
         assert "Timeout" in res.stderr
+
+# ── 2026-10-07: одит — пропуски, доказани с изпълнение ───────────────────────
+
+@pytest.mark.parametrize("command", [
+    "grep -r SECRET ~/.ssh ~/.aws",
+    "tar cz ~/.ssh | base64",
+    "ls ~/.gnupg",
+    "cat ~/.s*/id_*",
+])
+def test_a_secret_folder_named_without_a_slash_asks(command) -> None:
+    assert sandbox.assess_command(command).level == sandbox.RiskLevel.CONFIRM
+
+
+@pytest.mark.parametrize("command", [
+    "python3 -c \"import shutil; shutil.rmtree('/x')\"",
+    "python -X utf8 -c \"import os; os.remove('a')\"",
+    "python3 -u -c \"import subprocess; subprocess.run(['ls'])\"",
+    "node -e \"require('fs').rmSync('/x', {recursive: true})\"",
+    "$(echo rm) -rf ~",
+    "x=rm; $x -rf ~",
+    "cd photos\nmv *.jpg /tmp/dest/",
+    "nohup mv *.jpg /tmp/x/",
+])
+def test_deletion_hidden_in_inline_code_or_another_line_asks(command) -> None:
+    assert sandbox.assess_command(command).level >= sandbox.RiskLevel.CONFIRM
+
+
+@pytest.mark.parametrize("command", ["rm -rf /etc/*", "rm -rf /usr/*", "rm -rf /home/user/*"])
+def test_everything_inside_a_critical_root_is_blocked_like_the_root(command) -> None:
+    assert sandbox.assess_command(command).level == sandbox.RiskLevel.BLOCKED
+
+
+@pytest.mark.parametrize("command", [
+    "python -m pytest -q", "$PY -m pytest -q", "python -c \"print(1 + 1)\"",
+    "ls -la 2>&1 | head", "echo .sshrc", "python script.py --env prod", "grep -r foo src/",
+])
+def test_ordinary_commands_stay_safe(command) -> None:
+    assert sandbox.assess_command(command).level == sandbox.RiskLevel.SAFE
+
+
+def test_a_symlink_to_a_key_is_a_key(tmp_path) -> None:
+    key = tmp_path / ".ssh" / "id_rsa"
+    key.parent.mkdir()
+    key.write_text("SECRET", encoding="utf-8")
+    link = tmp_path / "ws" / "notes.txt"
+    link.parent.mkdir()
+    try:
+        link.symlink_to(key)
+    except (OSError, NotImplementedError):
+        pytest.skip("no symlinks here")
+    assert sandbox.sensitive_path_reason(link)
+    assert sandbox.sensitive_path_reason(tmp_path / "ws" / "plain.txt") is None

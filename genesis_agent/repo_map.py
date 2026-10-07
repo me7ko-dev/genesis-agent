@@ -57,11 +57,22 @@ class Match:
     text: str
 
 
+def _skipped(p: Path, root: Path) -> bool:
+    """В папка за пропускане ВЪТРЕ в проекта. Само частите под корена:
+    проект в `~/build/app` или `~/env/proj` иначе губеше всеки свой файл
+    (2026-10-07: GLOB „няма файлове“, REPO_MAP „0 файла с код“)."""
+    try:
+        parts = p.relative_to(root).parts[:-1]
+    except ValueError:
+        parts = p.parts[:-1]
+    return any(part in _SKIP_DIRS for part in parts)
+
+
 def _iter_files(root: Path, glob: str | None = None):
     for p in root.rglob(glob or "*"):
         if p.is_dir():
             continue
-        if any(part in _SKIP_DIRS for part in p.parts):
+        if _skipped(p, root):
             continue
         if glob is None and p.suffix.lower() not in _TEXT_SUFFIXES:
             continue
@@ -174,7 +185,7 @@ def find_files(pattern: str, path: str | Path = ".",
     for p in root.rglob(pattern):
         if p.is_dir():
             continue
-        if any(part in _SKIP_DIRS for part in p.parts):
+        if _skipped(p, root):
             continue
         try:
             out.append(str(p.relative_to(root)))

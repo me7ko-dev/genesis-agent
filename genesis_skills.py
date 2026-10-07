@@ -910,11 +910,15 @@ _USE_SKILL_FAILURES = ("Няма достатъчно близко умение"
 _EDIT_SEPARATOR = "---GENESIS-REPLACE-WITH---"
 _EDIT_RE = re.compile(r"\[EDIT_FILE:\s*(?P<path>[^\]]+)\](?P<body>.*?)\[END_EDIT\]",
                       re.DOTALL)
+# Аргументът може да носи скоби до две нива: `app/[id]/page.tsx` (Next.js),
+# `sys.argv[1:]`, `[ -f x ]`. С `[^\]]+` (до 2026-10-07) всичко се режеше на
+# първата `]` — файлът „не съществуваше“, а командата падаше с незатворени кавички.
+_BRACKETS = r"\[(?:[^\[\]]|\[[^\[\]]*\])*\]"
 _SIMPLE_RE = re.compile(
     r"\[(?P<tool>READ_FILE|RUN_CMD|WEB_SEARCH|LIST_DIR|DELEGATE|RESEARCH|BROWSE|ASK_USER|"
     r"SEARCH_CODE|REPO_MAP|GLOB|"
     r"BROWSER_CLICK|BROWSER_TYPE|REMEMBER|TASK_ADD|TASK_UPDATE|TASK_LIST):"
-    r"\s*(?P<arg>[^\]]+)\]"
+    r"\s*(?P<arg>(?:[^\[\]]|" + _BRACKETS + r")+)\]"
 )
 # REPO_MAP без аргумент = текущият workspace (както BROWSER_READ/TASK_LIST).
 _REPO_MAP_RE = re.compile(r"\[REPO_MAP\]")
