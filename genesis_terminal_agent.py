@@ -1250,8 +1250,15 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     except Exception:
         knowledge = ""
     if knowledge:
+        head = knowledge.splitlines()[0]
+        # Веднъж на разговор: всяко продължение („смени цвета на сайта“) пак
+        # съвпада със същото ръководство и историята растеше с ~16K знака на
+        # ход — 4 копия след 4 реплики (одит 2026-10-07).
+        if any(head in str(m.get("content") or "") for m in messages if m.get("role") == "user"):
+            knowledge = ""
+    if knowledge:
         content = f"{user_input}\n\n{knowledge}"
-        ui.info(f"📚 проверено знание: {knowledge.splitlines()[0].split(': ', 1)[-1]}")
+        ui.info(f"📚 проверено знание: {head.split(': ', 1)[-1]}")
     # Без таван до края на хода: deque(maxlen) изхвърляше посред задачата
     # системния промпт и самата заявка (виж agent_core.bounded_history).
     limit = getattr(messages, "maxlen", None)

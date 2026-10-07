@@ -11,9 +11,7 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import time
-from contextlib import contextmanager
 from threading import Lock
 
 from genesis_agent.config import DATA_DIR
@@ -54,34 +52,10 @@ def _save(data: dict) -> None:
         pass  # статистиката е "nice to have" — никога не бива да чупи мисия
 
 
-@contextmanager
 def _across_processes():
-    """Заключване между процеси (чат + bench + `genesis serve` едновременно).
-    Най-добро усилие: без заключване работи както преди."""
-    fh = None
-    try:
-        fh = open(_STATS_PATH.with_name(_STATS_PATH.name + ".lock"), "a+b")  # noqa: SIM115
-        if sys.platform == "win32":
-            import msvcrt
-            fh.seek(0)
-            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-    except Exception:
-        pass
-    try:
-        yield
-    finally:
-        if fh is not None:
-            try:
-                if sys.platform == "win32":
-                    import msvcrt
-                    fh.seek(0)
-                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
-            except Exception:
-                pass
-            fh.close()
+    """Заключване между процеси (чат + bench + `genesis serve` едновременно)."""
+    from genesis_agent.file_lock import locked
+    return locked(_STATS_PATH)
 
 
 def record_call(provider: str, latency_s: float, success: bool) -> None:

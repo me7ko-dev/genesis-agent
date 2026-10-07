@@ -277,7 +277,9 @@ def save_skill(
 
     # Критична секция — под lock, за да са безопасни паралелните записи И за да
     # решим финалния slug atomically с колизионната проверка по-долу.
-    with _SAVE_LOCK:
+    # И между процеси: две мисии едновременно губеха записи в индекса.
+    from genesis_agent.file_lock import locked
+    with _SAVE_LOCK, locked(_index_path()):
         idx = _load_index()
         skills: list[dict[str, Any]] = list(idx.get("skills", []))
         existing = next((s for s in skills if s.get("name") == base_slug), None)

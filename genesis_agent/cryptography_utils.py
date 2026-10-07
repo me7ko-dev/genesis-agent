@@ -25,8 +25,11 @@ KEY_DIR = Path(os.environ.get("GENESIS_KEY_DIR", _GENESIS_HOME))
 PRIVATE_KEY_PATH = KEY_DIR / "private_key.pem"
 PUBLIC_KEY_PATH = KEY_DIR / "public_key.pem"
 
-def generate_keys():
-    """Generate this installation's RSA key pair for signing skills."""
+def generate_keys(*, exclusive: bool = False):
+    """Generate this installation's RSA key pair for signing skills.
+
+    exclusive=True (the implicit first-use path): an existing key wins and is
+    returned instead of being replaced."""
     print(f"[DNA] Generating secure keys in {KEY_DIR}...")
     KEY_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     # mkdir's `mode` only applies when this call actually creates the
@@ -41,48 +44,87 @@ def generate_keys():
         public_exponent=65537,
         key_size=2048
     )
-
-    # Save Private Key. `open(..., "wb")` alone leaves it at the process
-    # umask (0o644 on a typical Linux default: group/other CAN read an
-    # unencrypted RSA private key) — this directory holds the same class of
-    # secret as ~/.genesis/.env (paths.ensure_genesis_home already locks that
-    # one to 0o700); the key file itself needs the same treatment, design
-    # note 2026-08-12.
-    with open(PRIVATE_KEY_PATH, "wb") as f:
-        f.write(private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption()
-        ))
+    pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption()
+    )
+    # Two processes on a fresh install used to overwrite each other's key, so
+    # a skill one of them had just signed failed its check as "tampered"
+    # (audit 2026-10-07). The key is written to a private temp file (0o600
+    # from creation — never readable by group/other, design note 2026-08-12)
+    # and published with os.link, which refuses an existing target: the first
+    # process wins and every other one loads the winner's key.
+    tmp = KEY_DIR / f".private_key.{os.getpid()}.{os.urandom(4).hex()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(pem)
+        try:
+            if exclusive:
+                os.link(tmp, PRIVATE_KEY_PATH)
+            else:
+                os.replace(tmp, PRIVATE_KEY_PATH)
+        except FileExistsError:
+            private_key = _load_private_key()
+        except OSError:  # a filesystem without hard links
+            if not PRIVATE_KEY_PATH.exists():
+                os.replace(tmp, PRIVATE_KEY_PATH)
+            else:
+                private_key = _load_private_key()
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
     try:
         os.chmod(PRIVATE_KEY_PATH, 0o600)
     except OSError:
         pass
-
-    # Save Public Key
-    public_key = private_key.public_key()
-    with open(PUBLIC_KEY_PATH, "wb") as f:
-        f.write(public_key.public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        ))
-
+    _write_public_key(private_key)
     print("[DNA] Keys generated successfully. Keep the private key safe!")
     return private_key
 
+
+def _load_private_key():
+    with open(PRIVATE_KEY_PATH, "rb") as f:
+        key = serialization.load_pem_private_key(f.read(), password=None)
+    if not isinstance(key, rsa.RSAPrivateKey):
+        raise TypeError(f"{PRIVATE_KEY_PATH} does not hold an RSA key (this "
+                        f"module only generates/expects RSA keys)")
+    return key
+
+
+def _write_public_key(private_key) -> None:
+    data = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    tmp = KEY_DIR / f".public_key.{os.getpid()}.{os.urandom(4).hex()}.tmp"
+    tmp.write_bytes(data)
+    os.replace(tmp, PUBLIC_KEY_PATH)
+
+
+def _load_public_key():
+    """The public key; derived from the private one when public_key.pem is
+    missing (deleting it must not switch the signature check off — audit
+    2026-10-07). None when this installation has no keys at all."""
+    if PUBLIC_KEY_PATH.exists():
+        with open(PUBLIC_KEY_PATH, "rb") as f:
+            key = serialization.load_pem_public_key(f.read())
+        return key if isinstance(key, rsa.RSAPublicKey) else None
+    if PRIVATE_KEY_PATH.exists():
+        return _load_private_key().public_key()
+    return None
+
+
+def have_keys() -> bool:
+    return PUBLIC_KEY_PATH.exists() or PRIVATE_KEY_PATH.exists()
+
+
 def sign_code(code_text: str) -> str:
     """Sign skill code with the private key."""
-    if not PRIVATE_KEY_PATH.exists():
-        generate_keys()
-        
-    with open(PRIVATE_KEY_PATH, "rb") as f:
-        private_key = serialization.load_pem_private_key(
-            f.read(),
-            password=None
-        )
-    if not isinstance(private_key, rsa.RSAPrivateKey):
-        raise TypeError(f"{PRIVATE_KEY_PATH} does not hold an RSA key (this "
-                         f"module only generates/expects RSA keys)")
+    private_key = generate_keys(exclusive=True) if not PRIVATE_KEY_PATH.exists() else _load_private_key()
 
     signature = private_key.sign(
         code_text.encode('utf-8'),
@@ -96,12 +138,11 @@ def sign_code(code_text: str) -> str:
 
 def verify_signature(code_text: str, signature_hex: str) -> bool:
     """Verify skill code against its signature using the public key."""
-    if not PUBLIC_KEY_PATH.exists():
+    try:
+        public_key = _load_public_key()
+    except (OSError, ValueError, TypeError):
         return False
-        
-    with open(PUBLIC_KEY_PATH, "rb") as f:
-        public_key = serialization.load_pem_public_key(f.read())
-    if not isinstance(public_key, rsa.RSAPublicKey):
+    if public_key is None:
         return False
 
     try:

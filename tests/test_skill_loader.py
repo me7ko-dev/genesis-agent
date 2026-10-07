@@ -177,6 +177,17 @@ class TestMissingKeyIsNotTampering:
         with pytest.raises(ValueError, match="подпис"):
             sl.skill_view("fibonacci")
 
+    def test_deleting_the_public_key_does_not_let_tampering_through(
+        self, _isolated_skills, _isolated_keys
+    ) -> None:
+        """Одит 2026-10-07: код, пуснат от умение, трие public_key.pem и
+        пренаписва умението; проверката не бива да изчезва с файла."""
+        path = sm.save_skill(slug="fibonacci", code="print(1)", goal="fibonacci helper")
+        _tamper_code_block(path, "print('PWNED')")
+        _isolated_keys.PUBLIC_KEY_PATH.unlink()
+        with pytest.raises(ValueError, match="подпис"):
+            sl.skill_view("fibonacci")
+
     def test_the_refusal_names_both_possible_causes(
         self, _isolated_skills, _isolated_keys
     ) -> None:

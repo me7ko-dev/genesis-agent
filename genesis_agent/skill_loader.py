@@ -157,10 +157,7 @@ def skill_view(name: str, *, file_path: Path | None = None) -> dict[str, Any]:
     signature = (skill_meta or {}).get("signature") or ""
     if signature:
         try:
-            from genesis_agent.cryptography_utils import (
-                PUBLIC_KEY_PATH,
-                verify_signature,
-            )
+            from genesis_agent.cryptography_utils import have_keys, verify_signature
             # Липсващ публичен ключ НЕ е провалена проверка (bug found
             # end-to-end, 2026-08-12): verify_signature() връща False и в двата
             # случая, а третирането им еднакво значи, че всяко клониране без
@@ -168,8 +165,11 @@ def skill_view(name: str, *, file_path: Path | None = None) -> dict[str, Any]:
             # библиотека незаредима, при това с обвинение в подправяне.
             # Липсата на ключ значи "не мога да преценя", не "открих намеса";
             # тогава се държим точно както при неподписаните умения.
-            # Несъвпадение ПРИ наличен ключ си остава твърд отказ.
-            if not PUBLIC_KEY_PATH.exists():
+            # Несъвпадение ПРИ наличен ключ си остава твърд отказ. Изтрит
+            # public_key.pem при наличен частен ключ не изключва проверката —
+            # публичният се извежда от частния (одит 2026-10-07: код, пуснат
+            # от умение, трие public_key.pem и подменя умението трайно).
+            if not have_keys():
                 sig_ok = True
             else:
                 sig_ok = verify_signature(code, signature)

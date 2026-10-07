@@ -1110,28 +1110,55 @@ def sensitive_path_reason(path: str | os.PathLike[str]) -> str | None:
     return None
 
 
+# Където споменаването на чувствителен път е само сравнение/филтър, не четене:
+# `if name.startswith(".env")`, `re.search(r"\.pem$", f)`, `print("пази .env")`.
+_BENIGN_STR_CALLS = {"startswith", "endswith", "match", "fullmatch", "search", "compile",
+                     "sub", "findall", "fnmatch", "print"}
+
+
 def _python_reads_sensitive_path(code: str) -> bool:
-    """True ако код реално ЧЕТЕ чувствителен път (не само го споменава/сравнява).
-    При SyntaxError или друга несигурност връща True (консервативно — не
-    сваляме предупреждение за код, който не можем уверено да разберем)."""
+    """True ако код може да ЧЕТЕ чувствителен път (не само го сравнява).
+
+    Всеки низ с такъв път брои, освен ако е в сравнение (`in`, `==`), в
+    шаблон/филтър (startswith, re.search, fnmatch), в print или е голо
+    изречение (docstring). Одит 2026-10-07: проверката гледаше само низ,
+    подаден ПРЯКО на open()/read_text(), и `Path.home().joinpath(".ssh",
+    "id_rsa").read_text()` минаваше без въпрос в USE_SKILL, докато RUN_CMD
+    отказваше същото. При SyntaxError → True (консервативно)."""
     try:
         tree = ast.parse(code)
     except SyntaxError:
         return True
+    parents: dict[int, ast.AST] = {}
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        name = func.attr if isinstance(func, ast.Attribute) else (
-            func.id if isinstance(func, ast.Name) else None)
-        if name not in _FILE_READ_CALL_NAMES and not (
-                isinstance(func, ast.Attribute) and func.attr == "open" and
-                isinstance(func.value, ast.Name) and func.value.id == "os"):
-            continue
-        for arg in list(node.args) + [kw.value for kw in node.keywords]:
-            if (isinstance(arg, ast.Constant) and isinstance(arg.value, str)
-                    and _SENSITIVE_PATH_RE.search(arg.value)):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+
+    def benign(node: ast.AST) -> bool:
+        cur: ast.AST | None = node
+        while cur is not None and not isinstance(cur, ast.stmt):
+            parent = parents.get(id(cur))
+            if isinstance(parent, ast.Compare):
                 return True
+            if isinstance(parent, ast.Call):
+                if cur is parent.func:
+                    return False  # `(home / ".env").read_text()` — метод върху пътя
+                func = parent.func
+                name = func.attr if isinstance(func, ast.Attribute) else (
+                    func.id if isinstance(func, ast.Name) else None)
+                # подаден на друго извикване — може да е четене
+                return name in _BENIGN_STR_CALLS
+            if isinstance(parent, ast.Expr):
+                return True       # docstring / голо изречение
+            cur = parent
+        return False
+
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and _SENSITIVE_PATH_RE.search(node.value)
+                and not _SENSITIVE_PATH_EXEMPT_RE.search(node.value)
+                and not benign(node)):
+            return True
     return False
 
 

@@ -72,47 +72,93 @@ def seed_user_skills(shipped: Path, user_dir: Path) -> int:
     следващото обновяване. Доставеният набор е част от версията; който иска да
     го няма, го празни, а не го трие.
     """
+    import hashlib
     import json
     import shutil
 
-    user_dir.mkdir(parents=True, exist_ok=True)
-    added: list[str] = []
-    for md in sorted(shipped.glob("*.md")):
-        target = user_dir / md.name
-        if not target.exists():
-            shutil.copy2(md, target)
-            added.append(md.stem)
-    if not added:
-        return 0
+    from genesis_agent.file_lock import locked
 
-    # Индексът се слива по име. Записът на оператора за същото име печели —
-    # той сочи неговия файл, който току-що НЕ презаписахме.
+    def sha(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    user_dir.mkdir(parents=True, exist_ok=True)
     index_path = user_dir / "skills.json"
-    try:
-        current = json.loads(index_path.read_text(encoding="utf-8"))
-        entries = list(current.get("skills") or [])
-    except (OSError, ValueError):
-        current, entries = {"version": "1.0"}, []
-    known = {e.get("name") for e in entries}
     try:
         shipped_index = json.loads((shipped / "skills.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         shipped_index = {"skills": []}
-    for entry in shipped_index.get("skills") or []:
-        if entry.get("name") in added and entry.get("name") not in known:
-            entries.append(entry)
-    current["skills"] = entries
-    # Пише се през временен файл: прекъснат запис на индекса прави ЦЯЛАТА
-    # библиотека незаредима, а това се случва при стартиране.
-    tmp = index_path.with_suffix(".json.tmp")
-    try:
-        tmp.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n",
-                       encoding="utf-8")
-        tmp.replace(index_path)
-    except OSError:
-        log.warning("не можах да обновя %s — новите умения са копирани, но не са в индекса",
-                    index_path)
-    return len(added)
+    shipped_entries = {e.get("name"): e for e in shipped_index.get("skills") or []
+                       if isinstance(e, dict)}
+
+    # Под заключване: две стартиращи копия (чат + `genesis serve`) пишат
+    # същия индекс (одит 2026-10-07).
+    with locked(index_path):
+        try:
+            current = json.loads(index_path.read_text(encoding="utf-8"))
+            if not isinstance(current, dict) or not isinstance(current.get("skills"), list):
+                raise TypeError("unexpected shape")
+        except FileNotFoundError:
+            current = {"version": "1.0", "skills": []}
+        except (ValueError, TypeError):
+            # Повреден индекс: настрани, не върху него — той е картата към
+            # уменията на оператора (одит 2026-10-07: изтриваше се без следа).
+            from genesis_agent.skills_manager import _free_corrupt_name
+            kept = _free_corrupt_name(index_path)
+            index_path.replace(kept)
+            log.warning("skills.json е нечетим — запазен като %s", kept.name)
+            current = {"version": "1.0", "skills": []}
+        entries: list[dict] = list(current["skills"])
+        by_name = {e.get("name"): e for e in entries if isinstance(e, dict)}
+
+        changed: list[str] = []
+        for md in sorted(shipped.glob("*.md")):
+            name, target = md.stem, user_dir / md.name
+            new_sha = sha(md)
+            entry = shipped_entries.get(name)
+            if not target.exists():
+                shutil.copy2(md, target)
+            else:
+                have = sha(target)
+                mine = by_name.get(name) or {}
+                # Непипано копие на по-стара доставка → новата версия. Само
+                # когато знаем какво сме доставили (shipped_sha): иначе не можем
+                # да различим редакция на оператора и тя печели.
+                untouched_old = mine.get("shipped_sha") == have and have != new_sha
+                if untouched_old:
+                    shutil.copy2(md, target)
+                elif have != new_sha:
+                    continue
+                # Същото съдържание без запис (копиран, но записът на индекса
+                # се провали) → долу влиза в индекса.
+                elif name in by_name:
+                    if mine.get("shipped_sha") != new_sha:
+                        mine["shipped_sha"] = new_sha    # същото съдържание: запомни го
+                        changed.append("")
+                    continue
+            if entry is None:
+                changed.append(name)
+                continue
+            fresh = dict(entry, shipped_sha=new_sha)
+            if name in by_name:
+                entries[entries.index(by_name[name])] = fresh
+            else:
+                entries.append(fresh)
+            by_name[name] = fresh
+            changed.append(name)
+        if not changed:
+            return 0
+        current["skills"] = entries
+        # Пише се през временен файл: прекъснат запис на индекса прави ЦЯЛАТА
+        # библиотека незаредима, а това се случва при стартиране.
+        tmp = index_path.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n",
+                           encoding="utf-8")
+            tmp.replace(index_path)
+        except OSError:
+            log.warning("не можах да обновя %s — новите умения са копирани, но не са в индекса; "
+                        "ще опитам пак при следващото стартиране", index_path)
+        return len([n for n in changed if n])
 
 
 def _default_skills_dir() -> Path:

@@ -106,6 +106,29 @@ def test_sensitive_path_actually_read_is_confirmed() -> None:
     assert verdict.level == CONFIRM
 
 
+@pytest.mark.parametrize("code", [
+    'from pathlib import Path\nprint(Path.home().joinpath(".ssh", "id_rsa").read_text())',
+    'from pathlib import Path\ng = Path.home() / ".genesis"\nprint("ENV:", (g / ".env").read_text())',
+    'from pathlib import Path\n(Path.home() / ".genesis" / "private_key.pem").read_text()',
+    'import os\np = os.path.expanduser("~/.aws/credentials")\ndata = open(p).read()',
+])
+def test_sensitive_path_built_then_read_is_confirmed(code: str) -> None:
+    """Одит 2026-10-07: USE_SKILL драйвер четеше ~/.ssh и ~/.genesis/.env без
+    въпрос, защото пътят не беше подаден като низ ПРЯКО на open()."""
+    assert sandbox.assess_code(code).level == CONFIRM
+
+
+@pytest.mark.parametrize("code", [
+    'if name.startswith(".env"):\n    pass',
+    'skip = ".ssh" in path',
+    'import re\nre.search(r"\\.pem$", name)',
+    '"""Never reads .env."""\nx = 1',
+    'print("не пипай .env")',
+])
+def test_sensitive_path_only_compared_stays_safe(code: str) -> None:
+    assert sandbox.assess_code(code).level == SAFE
+
+
 def test_syntax_error_defaults_to_confirm_not_safe() -> None:
     """При SyntaxError _python_reads_sensitive_path връща True консервативно —
     но само важи, когато pattern-ите изобщо са засегли reasons; иначе кодът
