@@ -689,3 +689,23 @@ def test_a_symlink_to_a_key_is_a_key(tmp_path) -> None:
         pytest.skip("no symlinks here")
     assert sandbox.sensitive_path_reason(link)
     assert sandbox.sensitive_path_reason(tmp_path / "ws" / "plain.txt") is None
+
+
+@pytest.mark.parametrize("command", [
+    'mv *.jpg "/mnt/backup/Tom & Jerry"',
+    "mv *.jpg /mnt/backup/R\\&D",
+    "python3 -uc \"import shutil; shutil.rmtree('/x')\"",
+    "python3 -c\"import shutil; shutil.rmtree('/x')\"",
+    "echo \"import shutil; shutil.rmtree('/x')\" | python3",
+    "python3 - <<EOF\nimport shutil; shutil.rmtree('/x')\nEOF",
+])
+def test_quotes_and_flag_spellings_do_not_hide_a_risky_command(command) -> None:
+    """Одит 2026-10-07 на собствената поправка: `&` в кавички режеше сегмента
+    наполовина и масовото местене минаваше като SAFE; `-uc`/`-c"…"`/stdin
+    заобикаляха проверката на вградения код."""
+    assert sandbox.assess_command(command).level >= sandbox.RiskLevel.CONFIRM
+
+
+def test_redirections_are_not_separators() -> None:
+    assert sandbox._split_segments('ls 2>&1 | head; echo "a & b" && x &> f') == [
+        "ls 2>&1 ", " head", ' echo "a & b" ', " x &> f"]

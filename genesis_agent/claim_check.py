@@ -152,7 +152,7 @@ _RESULT_PREFIX_RE = re.compile(r"\[([A-Z_]+)[:\]]\s*([^\]]*)")
 # Отказ на самия инструмент: `[WRITE_FILE: p] ❌ Файлът вече съществува…`,
 # `[WRITE_FILE] Грешка: [Errno 13]…`, `[EDIT_FILE: p] ❌ Anchor-ът…`. Дотук се
 # броеше за изпълнено и „записах app.py“ минаваше след отказан запис.
-_TOOL_REFUSED_RE = re.compile(r"^\[[A-Z_]+(?::[^\]\n]*)?\]\s*(?:❌|Грешка)")
+_TOOL_REFUSED_RE = re.compile(r"^\[[A-Z_]+(?::[^\n]*?)?\]\s*(?:❌|Грешка)")
 _TEST_CMD_RE = re.compile(r"\b(pytest|unittest|tox|nose2?|test|tests|jest|vitest|mocha)\b", re.IGNORECASE)
 
 

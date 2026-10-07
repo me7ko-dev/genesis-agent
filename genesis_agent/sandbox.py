@@ -381,7 +381,43 @@ def _split_segments(command: str) -> list[str]:
     не пропуснем `ls && mv *.jpg /другаде`, чиято опасна част е втора."""
     # Нов ред и единичен `&` също делят команди (2026-10-07): `cd photos\nmv
     # *.jpg /другаде` минаваше като SAFE, защото вторият ред не беше сегмент.
-    return [s for s in re.split(r"&&|\|\||[;|&\n]", command) if s.strip()]
+    # Само ИЗВЪН кавички и без `\`: `mv *.jpg "/mnt/Tom & Jerry"` иначе се
+    # режеше на две половини с незатворени кавички, shlex падаше, сегментът се
+    # пропускаше — и масовото местене минаваше като SAFE. `2>&1`, `&>`, `>&`
+    # са пренасочване, не разделител.
+    out: list[str] = []
+    buf: list[str] = []
+    quote = ""
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote:
+            buf.append(ch)
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                buf.append(command[i + 1])
+                i += 1
+            elif ch == quote:
+                quote = ""
+        elif ch == "\\" and i + 1 < n:
+            buf += [ch, command[i + 1]]
+            i += 1
+        elif ch in "'\"":
+            quote = ch
+            buf.append(ch)
+        elif command.startswith(("&&", "||"), i):
+            out.append("".join(buf))
+            buf = []
+            i += 1
+        elif ch == "&" and ((i and command[i - 1] in "<>") or (i + 1 < n and command[i + 1] == ">")):
+            buf.append(ch)
+        elif ch in ";|&\n":
+            out.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    out.append("".join(buf))
+    return [s for s in out if s.strip()]
 
 
 def _expand_targets(tokens: list[str], cwd: Path | None) -> tuple[list[Path], bool]:
@@ -802,6 +838,8 @@ def _catastrophic_rm_reason(command: str) -> str | None:
 _INTERPRETERS = re.compile(r"^(python[\d.]*|py|pypy[\d.]*|perl|ruby|node|deno|bun)(\.exe)?$",
                            re.IGNORECASE)
 _INLINE_FLAGS = frozenset({"-c", "-e", "-E", "--eval", "-p", "--print"})
+# Кратки флагове на python без аргумент, слепени с `-c`: `-uc`, `-Bc`, `-c"…"`.
+_PY_SHORT_C = re.compile(r"^-[bBdEhiIOqsSuvx]*c(.*)$", re.DOTALL)
 # perl/ruby/node: триене и пускане на процеси с техните имена.
 _OTHER_LANG_RISK = re.compile(
     r"\b(unlink|rmtree|rm_rf|rm_r|rmSync|rmdirSync|unlinkSync|File\.delete|FileUtils\.rm\w*"
@@ -837,25 +875,37 @@ def _inline_code_reasons(command: str) -> list[str]:
         tokens = _shlex_split_for_classification(command)
     except ValueError:
         tokens = command.split()
-    for i, tok in enumerate(tokens[:-1]):
+    for i, tok in enumerate(tokens):
         name = os.path.basename(tok)
         if not _INTERPRETERS.match(name):
             continue
-        code, j = "", i + 1
-        while j < len(tokens) - 1:          # флаговете на интерпретатора до кода
+        is_python = name.lower().startswith("py")
+        code, j, script = "", i + 1, False
+        while j < len(tokens):              # флаговете на интерпретатора до кода
             t = tokens[j]
-            if t in _INLINE_FLAGS:
-                code = tokens[j + 1]
+            m = _PY_SHORT_C.match(t) if is_python else None
+            if t in _INLINE_FLAGS or m:
+                # `-c code`, `-uc code`, `-c"code"` (shlex го слепва в `-ccode`)
+                attached = m.group(1) if m else ""
+                code = attached or (tokens[j + 1] if j + 1 < len(tokens) else "")
                 break
             if t in ("-X", "-W"):           # `python -X utf8 -c …`
                 j += 2
-            elif t.startswith("-") and t not in ("-m", "--"):
+            elif t == "-m":
+                script = True
+                break
+            elif t.startswith("-") and t != "-":
                 j += 1
             else:
+                script = t != "-"
                 break
+        if not code and not script and ("|" in command[:command.find(tok)] or "<<" in command
+                                        or (j < len(tokens) and tokens[j] == "-")):
+            # Кодът идва от stdin: `echo "…" | python3`, `python3 - <<EOF`.
+            code = command
         if not code:
             continue
-        if name.lower().startswith("py"):
+        if is_python:
             reasons += [f"{why} — в код на командния ред"
                         for rx, why in _PY_CONFIRM_PATTERNS if rx.search(code)]
         elif _OTHER_LANG_RISK.search(code):

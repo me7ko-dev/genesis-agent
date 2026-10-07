@@ -36,6 +36,33 @@ _SKIP_DIRS = {
 _SKIP_SUFFIXES = {".pyc", ".pyo"}
 _SKIP_NAMES = {".DS_Store", "Thumbs.db"}
 
+# Тайни, които образецът на sandbox-а не познава (той пази команди, не
+# предаване). Одит 2026-10-07: `.envrc`, `.streamlit/secrets.toml`,
+# `certs/server.key`, `token.json`, `client_secret_*.json`, `master.key`,
+# `service-account.json`, `.htpasswd` влизаха в архива.
+_EXPORT_SECRETS = re.compile(
+    r"(^|/)(\.envrc|\.htpasswd|token\.json|master\.key|credentials\.json|\.git-credentials)$"
+    r"|\.(key|jks|keystore|kdbx|ppk|p8|ovpn)$"
+    r"|(^|/)secrets?\.[a-z]+$|(^|/)client_secret[^/]*\.json$|service[-_]?account[^/]*\.json$",
+    re.IGNORECASE)
+# И по съдържание — частен ключ в иначе невинно име (`config.json`, `deploy.txt`).
+_SECRET_CONTENT = re.compile(rb"-----BEGIN [A-Z ]*PRIVATE KEY-----|\"private_key\"\s*:\s*\"-----BEGIN")
+_SCAN_BYTES = 256 * 1024
+
+
+def _secret_file(p: Path, rel: str) -> bool:
+    from genesis_agent import sandbox
+    if sandbox.sensitive_path_reason(rel) or sandbox.sensitive_path_reason(p.name):
+        return True
+    if _EXPORT_SECRETS.search(rel):
+        return True
+    try:
+        with p.open("rb") as f:
+            return bool(_SECRET_CONTENT.search(f.read(_SCAN_BYTES)))
+    except OSError:
+        return False
+
+
 _RUN_HEADINGS = ("how to run", "running", "usage", "quick start", "quickstart",
                  "getting started", "install", "как се пуска", "пускане",
                  "стартиране", "употреба", "инсталация", "как да")
@@ -55,8 +82,6 @@ class Delivery:
 
 def project_files(root: Path, *, exclude: Path | None = None) -> tuple[list[Path], list[str]]:
     """(files to ship, secret files withheld) — both relative-sortable."""
-    from genesis_agent import sandbox
-
     keep: list[Path] = []
     withheld: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
@@ -71,7 +96,7 @@ def project_files(root: Path, *, exclude: Path | None = None) -> tuple[list[Path
             rel = p.relative_to(root).as_posix()
             if name == REPORT_NAME and p.parent == root:
                 continue  # regenerated below; an old one would be stale
-            if sandbox.sensitive_path_reason(rel) or sandbox.sensitive_path_reason(name):
+            if _secret_file(p, rel):
                 withheld.append(rel)
                 continue
             keep.append(p)

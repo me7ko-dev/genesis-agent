@@ -94,7 +94,7 @@ def _resolve(path_str: str) -> Path:
     return _resolve_noted(path_str)[0]
 
 
-def _resolve_noted(path_str: str) -> tuple[Path, str]:
+def _resolve_noted(path_str: str, *, redirect: bool = True) -> tuple[Path, str]:
     """Като _resolve, но абсолютен път с правописна грешка в пътя до
     workspace-а се пренасочва в него — и бележката го казва на модела.
 
@@ -104,6 +104,12 @@ def _resolve_noted(path_str: str) -> tuple[Path, str]:
     Пренасочва се САМО когато папката с грешката не съществува и всяка част
     до нея е буквена грешка на частта от workspace-а (виж _is_typo) — не
     `genitest2` или `genitest-old`, които може да са нарочна съседна папка.
+
+    `redirect=False` (запис и редакция): пътят остава какъвто е — записът
+    извън workspace-а пита както винаги, а бележката казва кой е вероятният
+    път. Одит 2026-10-07: workspace `api-v1`, WRITE_FILE `…/api-v2/app.py` се
+    пренасочваше и ПРЕЗАПИСВАШЕ `api-v1/app.py` без въпрос — запис по догадка
+    не бива да минава покрай потвърждението.
     """
     p = Path(path_str.strip()).expanduser()
     if not p.is_absolute():
@@ -111,6 +117,10 @@ def _resolve_noted(path_str: str) -> tuple[Path, str]:
     fixed = _typo_into_workspace(p)
     if fixed is None:
         return p, ""
+    if not redirect:
+        return p, (f"\n[път] {p} изглежда като workspace-а с правописна грешка — "
+                   f"вероятно имаше предвид {fixed}. Пиши пътищата спрямо workspace-а "
+                   "(относителни).")
     return fixed, (f"\n[път] {p} не съществува — това е workspace-ът с правописна "
                    f"грешка, ползван е {fixed}. Пиши пътищата спрямо workspace-а "
                    "(относителни), не абсолютни.")
@@ -126,6 +136,10 @@ def _is_typo(a: str, b: str) -> bool:
     """
     if a == b:
         return True
+    # Различни числа са различни неща, не грешка: `api-v1`/`api-v2`,
+    # `report2025`/`report2026`, `proj1`/`proj2`.
+    if re.sub(r"\D", "", a) != re.sub(r"\D", "", b):
+        return False
     if a.lower() == b.lower():
         return True
     if min(len(a), len(b)) < 4:
@@ -207,7 +221,11 @@ def _did_you_mean(path: Path, *, limit: int = 3) -> str:
                     found.append(str(cand.relative_to(ws)))
             if seen > 5000 or len(found) >= limit:
                 break
-        if len(found) < limit and path.parent.is_dir():
+        # Съседите се изброяват само в workspace-а и никога в папка с ключове:
+        # „Може би: ~/.ssh/id_ed25519_work_github?“ издаваше имената им.
+        parent_ok = (path.parent.is_dir() and path.parent.resolve().is_relative_to(ws)
+                     and not sandbox.sensitive_path_reason(path.parent.as_posix() + "/"))
+        if len(found) < limit and parent_ok:
             names = [e.name for e in path.parent.iterdir()][:2000]
             for n in difflib.get_close_matches(path.name, names, n=limit, cutoff=0.75):
                 cand = path.parent / n
@@ -341,7 +359,7 @@ def _tool_read_file(arg: str, offset=None, limit=None) -> str:
 
 
 def _tool_write_file(arg: str, content: str) -> str:
-    path, redirect = _resolve_noted(arg)
+    path, redirect = _resolve_noted(arg, redirect=False)
     if not arg.strip() or path.is_dir():
         # Иначе write_text върху папка → „Permission denied“, а моделът го
         # чете като защитена папка и спира да пита (виж load_tool_arguments).
@@ -365,10 +383,10 @@ def _tool_write_file(arg: str, content: str) -> str:
         inside = False
     if not inside:
         verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM,
-                                      [f"запис извън workspace: {path}"])
+                                      [f"запис извън workspace: {path}" + redirect.replace("\n", " ")])
         allowed, reason = sandbox._decide(f"WRITE_FILE {path}", verdict, sandbox.get_policy())
         if not allowed:
-            return f"[WRITE_FILE] {reason}"
+            return f"[WRITE_FILE] {reason}{redirect}"
     # Ruff pre-check преди диска, само за .py (design note, 2026-07-29): не
     # блокираме записа при unfixable проблеми (моделът изрично поиска точно
     # това съдържание) — но ако ruff го оправи автоматично, пишем ФИКСНАТАТА
@@ -418,11 +436,16 @@ def _scaffold_tests(path: Path) -> str:
         return ""
     if len(rel.parts) < 2 or rel.parts[0] in _SKIP_DIRS:
         return ""
-    conftest = root / "conftest.py"
+    # Проектът е папката над `tests/` — `egn/tests/test_egn.py` → `egn/`, не
+    # коренът на workspace-а (там conftest-ът не помага на `pytest` в `egn/`).
+    idx = next((i for i, part in enumerate(rel.parts[:-1]) if part in ("tests", "test")), 0)
+    project = root.joinpath(*rel.parts[:idx])
+    test_dir = rel.parts[idx]
+    conftest = project / "conftest.py"
     if conftest.exists():
         return ""
     for name, section in _PYTEST_CONFIGS:
-        cfg = root / name
+        cfg = project / name
         try:
             if cfg.is_file() and (not section or section in cfg.read_text(encoding="utf-8", errors="replace")):
                 return ""
@@ -435,9 +458,9 @@ def _scaffold_tests(path: Path) -> str:
     except OSError:
         return ""
     _SEEN_PATHS.add(conftest)
-    return ("\n[скеле] Създаден е празен conftest.py в корена — тестовете в "
-            f"{rel.parts[0]}/ внасят модулите от корена директно (`from x import y`), "
-            "без sys.path хакове.")
+    where = conftest.relative_to(root).as_posix()
+    return (f"\n[скеле] Създаден е празен {where} — тестовете в {test_dir}/ внасят "
+            "модулите до него директно (`from x import y`), без sys.path хакове.")
 
 
 def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False) -> str:
@@ -446,7 +469,7 @@ def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False
     Минава през същата CONFIRM бариера като WRITE_FILE при запис извън
     workspace-а — редакцията е по-малка по обхват, но не е по-малко реална.
     """
-    path, redirect = _resolve_noted(path_arg)
+    path, redirect = _resolve_noted(path_arg, redirect=False)
     # Същата бариера като при READ_FILE, по същата причина — и намерена по
     # същия начин: `EDIT_FILE` връща unified diff, а диффът носи КОНТЕКСТНИ
     # редове. Редакция на `.env` с произволна котва връща в отговора реда
@@ -464,10 +487,10 @@ def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False
         inside = False
     if not inside:
         verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM,
-                                      [f"редакция извън workspace: {path}"])
+                                      [f"редакция извън workspace: {path}" + redirect.replace("\n", " ")])
         allowed, reason = sandbox._decide(f"EDIT_FILE {path}", verdict, sandbox.get_policy())
         if not allowed:
-            return f"[EDIT_FILE] {reason}"
+            return f"[EDIT_FILE] {reason}{redirect}"
 
     from genesis_agent.code_edit import edit_file
     res = edit_file(path, old, new, replace_all=replace_all)
@@ -707,6 +730,8 @@ def _tool_research(arg: str) -> str:
 def _tool_list_dir(arg: str) -> str:
     path, redirect = _resolve_noted(arg)
     if not path.is_dir():
+        if sandbox.sensitive_path_reason(path) or sandbox.sensitive_path_reason(path.as_posix() + "/"):
+            return f"[LIST_DIR] Не е директория: {path}"
         if path.is_file():
             return f"[LIST_DIR] {path} е файл, не папка — ползвай READ_FILE."
         return f"[LIST_DIR] Не е директория: {path}.{_did_you_mean(path)}"

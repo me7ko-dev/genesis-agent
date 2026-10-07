@@ -160,3 +160,17 @@ def test_cli_export(tmp_path, capsys) -> None:
     assert "тестовете минават" in capsys.readouterr().out
     assert (tmp_path / "x.zip").is_file()
     assert main(["export", str(p), "--bogus"]) == 2
+
+
+def test_common_secret_files_stay_out(tmp_path) -> None:
+    p = _project(tmp_path)
+    secrets = [".envrc", ".streamlit/secrets.toml", "certs/server.key", "token.json",
+               "client_secret_1234.json", "config/master.key", "service-account.json", ".htpasswd"]
+    for rel in secrets:
+        (p / rel).parent.mkdir(parents=True, exist_ok=True)
+        (p / rel).write_text("x", encoding="utf-8")
+    (p / "deploy.txt").write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nAAA\n", encoding="utf-8")
+    (p / "settings.toml").write_text("debug = true\n", encoding="utf-8")
+    d = deliver.export(p, tmp_path / "out.zip", run_tests=False)
+    assert set(secrets) | {"deploy.txt"} <= set(d.withheld)
+    assert "settings.toml" in d.files

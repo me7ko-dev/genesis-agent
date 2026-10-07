@@ -836,22 +836,35 @@ def _project(tmp_path_factory, name: str = "genitest") -> Path:
     return ws
 
 
-def test_write_file_typo_in_workspace_name_lands_in_the_workspace(tmp_path_factory) -> None:
+def test_write_file_typo_in_workspace_name_asks_and_names_the_likely_path(tmp_path_factory) -> None:
+    """Запис по догадка не минава покрай потвърждението (одит 2026-10-07);
+    отказът казва кой е вероятният път, за да е верен следващият рунд."""
     ws = _project(tmp_path_factory)
     typo = ws.parent / "genittest" / "egn.py"
     out = gs._tool_write_file(str(typo), "X = 1\n")
-    assert "✓" in out
-    assert (ws / "egn.py").read_text(encoding="utf-8") == "X = 1\n"
-    assert not typo.parent.exists()
-    assert "правописна" in out
+    assert not (ws / "egn.py").exists() and not typo.exists()   # без tty → отказ
+    assert str(ws / "egn.py") in out and "правописна" in out
 
 
-def test_typo_redirect_keeps_subfolders(tmp_path_factory) -> None:
+def test_typo_redirect_for_reads_keeps_subfolders(tmp_path_factory) -> None:
     ws = _project(tmp_path_factory)
-    typo = ws.parent / "gentiest" / "tests" / "test_a.py"   # размяна на съседни
-    out = gs._tool_write_file(str(typo), "def test_a():\n    assert True\n")
-    assert "✓" in out
-    assert (ws / "tests" / "test_a.py").is_file()
+    (ws / "tests").mkdir()
+    (ws / "tests" / "test_a.py").write_text("OK = 1\n", encoding="utf-8")
+    out = gs._tool_read_file(str(ws.parent / "gentiest" / "tests" / "test_a.py"))   # размяна
+    assert "OK = 1" in out
+
+
+def test_a_versioned_sibling_is_never_the_workspace(tmp_path_factory) -> None:
+    """api-v1 → api-v2: преди одита записът презаписваше api-v1/app.py."""
+    root = tmp_path_factory.mktemp("projects")
+    ws = root / "api-v1"
+    ws.mkdir()
+    (ws / "app.py").write_text("OLD v1\n", encoding="utf-8")
+    gs.set_workspace(ws)
+    gs._tool_read_file("app.py")
+    gs._tool_write_file(str(root / "api-v2" / "app.py"), "NEW v2\n")
+    assert (ws / "app.py").read_text(encoding="utf-8") == "OLD v1\n"
+    assert gs._resolve(str(root / "api-v2" / "app.py")) == root / "api-v2" / "app.py"
 
 
 def test_a_sibling_project_with_a_suffix_is_not_a_typo(tmp_path_factory) -> None:
@@ -890,6 +903,8 @@ def test_read_file_through_a_typo_reads_the_workspace_file(tmp_path_factory) -> 
     ("Projetcs", "Projects", True),
     ("projects", "Projects", True),
     ("genitest2", "genitest", False),
+    ("api-v2", "api-v1", False),
+    ("report2026", "report2025", False),
     ("site-old", "site", False),
     ("app", "apx", False),               # твърде кратко за да се гадае
     ("invoices", "customers", False),
@@ -1023,3 +1038,20 @@ def test_run_cmd_with_indexing_reaches_the_shell_whole(_workspace) -> None:
     out = gs.parse_and_execute_tools(
         f'[RUN_CMD: "{sys.executable}" -c "import sys; print(sys.argv[1:])" a b]')
     assert "['a', 'b']" in "\n".join(out)
+
+
+
+def test_list_dir_does_not_leak_names_from_a_key_folder(_workspace, tmp_path_factory) -> None:
+    home = tmp_path_factory.mktemp("home")
+    (home / ".ssh").mkdir()
+    (home / ".ssh" / "id_ed25519_work_github").write_text("k", encoding="utf-8")
+    out = gs._tool_list_dir(str(home / ".ssh" / "id_ed25519_work"))
+    assert "github" not in out
+
+
+def test_scaffold_for_a_project_in_a_subfolder_goes_next_to_its_tests(_workspace) -> None:
+    gs._tool_write_file("egn/egn.py", "def ok():\n    return True\n")
+    out = gs._tool_write_file("egn/tests/test_egn.py", "from egn import ok\n\n\ndef test_ok():\n    assert ok()\n")
+    assert (_workspace / "egn" / "conftest.py").is_file()
+    assert not (_workspace / "conftest.py").exists()
+    assert "egn/conftest.py" in out

@@ -179,3 +179,8 @@ def test_a_versioned_python_counts_as_running_the_file() -> None:
     c.observe("[WRITE_FILE: /ws/calc.py] ✓ записани 30 символа")
     c.observe("[RUN_CMD: python3.12 calc.py]  (rc=0)\nok")
     assert "НЕ пуснат" not in c.note()
+
+
+def test_a_refused_write_to_a_bracketed_path_does_not_count() -> None:
+    assert claim_check.executed_from_text_results(
+        ["[WRITE_FILE: app/[id]/page.tsx] ❌ Файлът вече съществува"]) == []
