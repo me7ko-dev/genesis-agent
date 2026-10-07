@@ -1176,25 +1176,27 @@ class Brain:
                     out.append({"role": "assistant", "content": blocks})
             else:
                 out.append({"role": "user", "content": content or "(празно)"})
-        # Разговорът трябва да започва с user ход.
-        while out and out[0]["role"] != "user":
-            out.pop(0)
-        # tool_result без своя tool_use (изпаднал при рязане на историята) →
-        # 400 от API-то на всеки следващ ход. Махат се; празен ход отпада.
-        asked = {b["id"] for m in out if m["role"] == "assistant"
-                 for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_use"}
-        cleaned: list[dict] = []
-        for m in out:
-            if m["role"] == "user" and isinstance(m["content"], list):
-                kept = [b for b in m["content"]
-                        if not (b.get("type") == "tool_result" and b.get("tool_use_id") not in asked)]
-                if not kept:
-                    continue
-                m = {**m, "content": kept}
-            cleaned.append(m)
-        while cleaned and cleaned[0]["role"] != "user":
-            cleaned.pop(0)
-        return "\n\n".join(system_parts), cleaned
+        # Разговорът трябва да започва с user ход, и tool_result без своя
+        # tool_use (изпаднал при рязане на историята) дава 400 на всеки ход.
+        # Двете се повтарят, докато нищо не се променя: махането на водещ
+        # assistant може да осироти резултатите му (преглед 2026-10-07).
+        while True:
+            while out and out[0]["role"] != "user":
+                out.pop(0)
+            asked = {b["id"] for m in out if m["role"] == "assistant"
+                     for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_use"}
+            cleaned: list[dict] = []
+            for m in out:
+                if m["role"] == "user" and isinstance(m["content"], list):
+                    kept = [b for b in m["content"]
+                            if not (b.get("type") == "tool_result" and b.get("tool_use_id") not in asked)]
+                    if not kept:
+                        continue
+                    m = {**m, "content": kept}
+                cleaned.append(m)
+            if len(cleaned) == len(out) and (not cleaned or cleaned[0]["role"] == "user"):
+                return "\n\n".join(system_parts), cleaned
+            out = cleaned
 
     @staticmethod
     def _to_anthropic_tools(tools: list[dict]) -> list[dict]:
@@ -1271,6 +1273,27 @@ class Brain:
         except anthropic.APIConnectionError as e:
             raise RuntimeError(f"мрежа: {e}") from e
 
+        usage = getattr(resp, "usage", None)
+        # Прочетените от кеша токени се отчитат ОТДЕЛНО, за да е проверимо, че
+        # кеширането работи: ако `cached_read_tokens` стои на нула при
+        # повтарящи се заявки, нещо мълчаливо разваля префикса (променлив
+        # системен промпт, различен набор инструменти) — и това се вижда в
+        # `genesis budget`, вместо да се приема на доверие. Записва се ПРЕДИ
+        # проверката за отказ: отказаният отговор също е платен.
+        cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+        cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        # input_tokens на Anthropic е БЕЗ кеша, prompt_tokens на OpenAI — с него.
+        # Тук се привежда към OpenAI смисъла, иначе отчетът казваше „кеш 7500%
+        # от prompt“ (одит 2026-10-07).
+        self._last_usage = {
+            "prompt_tokens": (getattr(usage, "input_tokens", 0) or 0) + cache_read + cache_write,
+            "completion_tokens": getattr(usage, "output_tokens", 0) or 0,
+            "cached_read_tokens": cache_read,
+            "cached_write_tokens": cache_write,
+        } if usage else None
+        # Отказан/отрязан отговор по-долу пак е платен — complete() го записва.
+        self._usage_attempt = getattr(self, "_attempt_id", None) if usage else None
+
         if getattr(resp, "stop_reason", "") == "refusal":
             # Не е техническа грешка — моделът е отказал темата. Като RuntimeError,
             # за да продължи веригата към следващия модел вместо да върне празно.
@@ -1285,25 +1308,6 @@ class Brain:
                 tool_calls.append({"id": block.id, "type": "function",
                                    "function": {"name": block.name,
                                                 "arguments": json.dumps(block.input)}})
-        usage = getattr(resp, "usage", None)
-        # Прочетените от кеша токени се отчитат ОТДЕЛНО, за да е проверимо, че
-        # кеширането работи: ако `cached_read_tokens` стои на нула при
-        # повтарящи се заявки, нещо мълчаливо разваля префикса (променлив
-        # системен промпт, различен набор инструменти) — и това се вижда в
-        # `genesis budget`, вместо да се приема на доверие.
-        cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
-        cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
-        # input_tokens на Anthropic е БЕЗ кеша, prompt_tokens на OpenAI — с него.
-        # Тук се привежда към OpenAI смисъла, иначе отчетът казваше „кеш 7500%
-        # от prompt“ (одит 2026-10-07).
-        self._last_usage = {
-            "prompt_tokens": (getattr(usage, "input_tokens", 0) or 0) + cache_read + cache_write,
-            "completion_tokens": getattr(usage, "output_tokens", 0) or 0,
-            "cached_read_tokens": cache_read,
-            "cached_write_tokens": cache_write,
-        } if usage else None
-        # Отказан/отрязан отговор по-долу пак е платен — complete() го записва.
-        self._usage_attempt = getattr(self, "_attempt_id", None) if usage else None
 
         text = "".join(text_parts).strip()
         if not text and not tool_calls:

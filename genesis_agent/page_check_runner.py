@@ -171,8 +171,11 @@ _UTF8_TYPES = {".html": "text/html; charset=utf-8", ".htm": "text/html; charset=
 # Какво сървърът НЕ дава на страницата (одит 2026-10-07): папката на сайта
 # често е коренът на проекта (Vite), до index.html стои `.env` — и всеки скрипт
 # на страницата, включително от CDN, можеше да го вземе с fetch('/.env').
-_PRIVATE = re.compile(r"(^|/)(\.[^/]*|node_modules|__pycache__|venv|env)(/|$)"
-                      r"|\.(pem|key|p12|pfx|jks|keystore|sqlite3?|db)$|(^|/)(id_rsa|id_ed25519)",
+# `node_modules/` остава достъпен: страница без бъндлър го реферира законно
+# (`/node_modules/chart.js/dist/chart.umd.js`), а 404 там е фалшива находка.
+_PRIVATE = re.compile(r"(^|/)(\.[^/]*|__pycache__|venv|env)(/|$)"
+                      r"|\.(pem|key|p12|pfx|jks|keystore|sqlite3?|db|env|sql)$|(^|/)(id_rsa|id_ed25519)"
+                      r"|(^|/)(credentials|service[-_]?account|client_secret)[^/]*\.json$",
                       re.IGNORECASE)
 
 

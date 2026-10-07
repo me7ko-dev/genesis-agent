@@ -18,6 +18,8 @@ genesis_agent.research — grounded web research с cross-verification.
 """
 from __future__ import annotations
 
+import re
+
 _EXTRACT_SYS = (
     "Ти извличаш факти САМО от дадения ти текст. Никога не ползвай знание извън "
     "него. Ако отговорът го няма в текста, кажи точно 'НЕ Е ОТКРИТО В ТОЗИ ИЗТОЧНИК' "
@@ -52,6 +54,7 @@ def grounded_research(question: str, *, top_n: int = 3) -> str:
     brain = Brain()
 
     per_source: list[str] = []
+    not_found = 0
     for r in results:
         title, url, snippet = r.get("title", ""), r.get("url", ""), r.get("snippet", "")
         if not snippet:
@@ -72,12 +75,16 @@ def grounded_research(question: str, *, top_n: int = 3) -> str:
             continue
         # „Не е открито“ не е глас за отговора (одит 2026-10-07): три източника,
         # от които само един съдържа факта, излизаха „проверено през 3 източника“.
-        if answer.upper().lstrip("*_ ").startswith(("НЕ Е ОТКРИТО", "NOT FOUND")):
-            continue
+        if re.search(r"НЕ Е ОТКРИТО|NOT FOUND", answer[:80], re.IGNORECASE):
+            not_found += 1
+            continue  # и в кавички: 'НЕ Е ОТКРИТО…', „НЕ Е ОТКРИТО…“, „Отговор: НЕ Е…“
         per_source.append(f"[{url}] {answer}")
 
-    if not per_source:
+    if not per_source and not not_found:
         return f"[RESEARCH] Търсенето върна резултати без съдържание за: {question}"
+    if not per_source:
+        return (f"[RESEARCH] {question}\n\nНито един от намерените източници не съдържа "
+                "отговора — НЕ Е ОТКРИТО. Не го измисляй; кажи, че не е проверено.")
 
     if len(per_source) == 1:
         return f"[RESEARCH] {question}\n\n(само 1 източник, без cross-check)\n{per_source[0]}"

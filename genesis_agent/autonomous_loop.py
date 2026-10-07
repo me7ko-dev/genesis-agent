@@ -214,6 +214,10 @@ def _run_and_report(goal: str, *, max_rounds: int | None, skill_slug: str | None
     outcome = _run_autonomous_loop_impl(
         goal, max_rounds=max_rounds, skill_slug=skill_slug, operator_id=operator_id
     )
+    if _past_deadline() and not outcome.success:
+        # Изтекло време не е провал на мисията: без урок от стар traceback и
+        # без „❌ не успя“ (преглед 2026-10-07).
+        return outcome
     # Мета-обучение: запиши изхода, за да се учи от грешките си.
     try:
         from genesis_agent.reflection import record_mission

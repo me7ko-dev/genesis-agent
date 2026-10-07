@@ -356,18 +356,26 @@ _SENSITIVE_FIELD_PATTERNS: list[re.Pattern[str]] = [
 _SENSITIVE_AUTOCOMPLETE = re.compile(r"(^|\s)(cc-[\w-]+|current-password|new-password|one-time-code)(\s|$)",
                                      re.IGNORECASE)
 _SENSITIVE_CLICK_PATTERNS: list[re.Pattern[str]] = [
-    # Английски — и с цена след думата („Pay $49.99“), и сами.
-    _c(_L + r"(buy|purchase|checkout|check\s+out|pay)" + _R),
-    _c(r"(place|submit|complete|confirm|finish)\s+(your\s+|my\s+|the\s+)?(order|purchase|payment|booking)"),
-    _c(r"confirm\s+and\s+pay|proceed\s+to\s+(checkout|payment)|" + _L + r"subscribe" + _R),
-    # Български — глаголите, не съществителните („Моите поръчки“ е меню, не плащане).
-    _c(r"(?<![а-я])(купи|купете|поръчай|поръчайте|плати|платете|заплати|заплатете|плащане)(?![а-я])"),
-    _c(r"(завърши|завършете|потвърди|потвърдете|изпрати|изпратете|направи|направете)\s+"
-       r"(поръчка|покупка|плащане)\w*"),
-    _c(r"към\s+(плащане|касата|поръчката)"),
+    # Английски: голата дума е бутон за плащане само когато Е целият етикет
+    # (с цена след нея): „Pay $49.99“, „Buy now“, „Checkout“. Посред текст —
+    # „Pay attention“, „How to buy“, „Purchase history“ — е навигация (преглед
+    # 2026-10-07: BLOCKED не може да се одобри, и тези спираха работа).
+    _c(r"(^|\|)\W*(buy|purchase|checkout|pay|order|pre-?order|donate)(\s+now)?"
+       r"(\s*[$€£]?\s*[\d.,]+\s*\S{0,4})?\W*($|\|)"),
+    _c(r"(place|submit|complete|confirm|finish)\s+(your\s+|my\s+|the\s+)?(order|purchase|payment|booking)"
+       r"(?!\s*(feedback|history|status|details))"),
+    _c(r"confirm\s+and\s+pay|proceed\s+to\s+(checkout|payment)|(buy|order|pay|checkout)\s+now"
+       r"|" + _L + r"subscribe" + _R),
+    # Български — глаголите, не съществителните („Плащане и доставка“, „Моите
+    # поръчки“ са информация, не плащане).
+    _c(r"(?<![а-я])(купи|купете|поръчай|поръчайте|поръчвам|плати|платете|заплати|заплатете)(?![а-я])"),
+    _c(r"(завърши|завършете|потвърди|потвърдете|изпрати|изпратете|направи|направете|финализирай|"
+       r"финализирайте|приключи|приключете)\s+(поръчка|покупка|плащане)\w*"),
+    _c(r"към\s+(плащане|касата|поръчката)|(^|\|)\W*плащане\W*($|\|)"),
     # Немски, испански, френски, италиански.
-    _c(r"(?<![a-zà-ü])(kaufen|bestellen|zahlungspflichtig|comprar|pagar|acheter|payer|commander|acquista|paga)"
-       r"(?![a-zà-ü])"),
+    _c(r"(?<![a-zà-ü])(kaufen|bestellen|bezahlen|zahlungspflichtig|comprar|pagar|acheter|payer|commander"
+       r"|acquista|paga)(?![a-zà-ü])"),
+    _c(r"zur\s+kasse|valider\s+(la\s+)?commande|confirmer\s+le\s+paiement|finalizar\s+(la\s+)?compra"),
 ]
 
 

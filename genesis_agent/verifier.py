@@ -69,13 +69,57 @@ def _self_evident(test: ast.AST) -> bool:
 _SWALLOWS = {"AssertionError", "Exception", "BaseException"}
 
 
+_EXITS = {"exit", "_exit", "abort"}
+
+
+def _handler_fails_loudly(body: list[ast.stmt]) -> bool:
+    """Обработчикът пак проваля: `raise`, `sys.exit(1)`, `os._exit(1)`."""
+    for n in ast.walk(ast.Module(body=body, type_ignores=[])):
+        if isinstance(n, ast.Raise):
+            return True
+        if isinstance(n, ast.Call):
+            f = n.func
+            name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
+            if name in _EXITS:
+                return True
+    return False
+
+
 def _swallows_failures(node: ast.Try) -> bool:
     for h in node.handlers:
-        if h.type is None:
+        names = [] if h.type is None else (h.type.elts if isinstance(h.type, ast.Tuple) else [h.type])
+        catches = h.type is None or any(isinstance(n, ast.Name) and n.id in _SWALLOWS for n in names)
+        # `except AssertionError: print(...); sys.exit(1)` е най-честият честен
+        # самотест — той пак проваля (преглед 2026-10-07).
+        if catches and not _handler_fails_loudly(h.body):
             return True
-        names = h.type.elts if isinstance(h.type, ast.Tuple) else [h.type]
-        if any(isinstance(n, ast.Name) and n.id in _SWALLOWS for n in names):
-            return True
+    return False
+
+
+def _dead_branch(test: ast.AST) -> bool:
+    """`if False:`, `while 0:`, `if 1 == 2:` — известно преди пускане, че е лъжа.
+    `while True:` и `if 1:` са живи."""
+    import operator
+    ops = {ast.Eq: operator.eq, ast.NotEq: operator.ne, ast.Lt: operator.lt, ast.LtE: operator.le,
+           ast.Gt: operator.gt, ast.GtE: operator.ge, ast.Is: operator.is_, ast.IsNot: operator.is_not}
+    try:
+        if isinstance(test, ast.Compare) and len(test.ops) == 1 and type(test.ops[0]) in ops:
+            left = ast.literal_eval(test.left)
+            right = ast.literal_eval(test.comparators[0])
+            return not ops[type(test.ops[0])](left, right)
+        return not bool(ast.literal_eval(test))   # без eval: само литерали
+    except (ValueError, TypeError, SyntaxError):
+        return False
+
+
+def _suppresses(node: ast.With | ast.AsyncWith) -> bool:
+    """`with contextlib.suppress(AssertionError):` — като try, който поглъща."""
+    for item in node.items:
+        ctx = item.context_expr
+        if isinstance(ctx, ast.Call):
+            f = ctx.func
+            if (f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")) == "suppress":
+                return True
     return False
 
 
@@ -91,33 +135,53 @@ def _checks_in(stmts: list[ast.stmt], funcs: dict[str, _Func], seen: set[str]) -
     for st in stmts:
         if isinstance(st, ast.Assert) and not _is_tautological_assert(st):
             return True
-        if isinstance(st, (ast.If, ast.While)) and _self_evident(st.test) and not (
-                isinstance(st.test, ast.Compare)):  # `if False:` / `while 0:` — мъртъв код
-            if isinstance(st, ast.If) and _checks_in(st.orelse, funcs, seen):
+        if isinstance(st, (ast.If, ast.While)) and _dead_branch(st.test):
+            if _checks_in(st.orelse, funcs, seen):
                 return True
             continue
-        if isinstance(st, (ast.If, ast.For, ast.While)) and any(isinstance(b, ast.Raise) for b in st.body):
+        if isinstance(st, (ast.If, ast.For, ast.AsyncFor, ast.While)) and any(
+                isinstance(b, ast.Raise) for b in st.body):
             return True
         if isinstance(st, ast.Try):
             if not _swallows_failures(st) and _checks_in(st.body, funcs, seen):
                 return True
+            if any(_checks_in(h.body, funcs, seen) for h in st.handlers):
+                return True
             if _checks_in(st.orelse, funcs, seen) or _checks_in(st.finalbody, funcs, seen):
                 return True
             continue
-        if isinstance(st, (ast.If, ast.For, ast.While, ast.With)):
-            if _checks_in(st.body, funcs, seen) or _checks_in(getattr(st, "orelse", []), funcs, seen):
+        if isinstance(st, (ast.With, ast.AsyncWith)):
+            if not _suppresses(st) and _checks_in(st.body, funcs, seen):
+                return True
+            continue
+        if isinstance(st, (ast.If, ast.For, ast.AsyncFor, ast.While)):
+            if _checks_in(st.body, funcs, seen) or _checks_in(st.orelse, funcs, seen):
+                return True
+            # `for t in (test_add, test_sub): t()` — функциите са в итерируемото.
+            if isinstance(st, (ast.For, ast.AsyncFor)) and _checks_in(
+                    [ast.Expr(value=st.iter)], funcs, seen):
+                return True
+            continue
+        if isinstance(st, ast.Match):
+            if any(_checks_in(c.body, funcs, seen) for c in st.cases):
                 return True
             continue
         if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             continue
-        # Извикана функция: проверките в нея се броят (едно ниво навътре и т.н.).
+        # Извикана функция или метод (`T().run()`, `for t in (test_add,): t()` —
+        # името стои в израза): проверките в нея се броят.
         for n in ast.walk(st):
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
-                f = funcs.get(n.func.id)
-                if f is not None and n.func.id not in seen:
-                    seen.add(n.func.id)
-                    if _checks_in(f.body, funcs, seen):
-                        return True
+            name = ""
+            if isinstance(n, ast.Call):
+                f = n.func
+                name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
+            elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+                name = n.id
+            f_def = funcs.get(name)
+            if f_def is not None and name not in seen:
+                seen.add(name)
+                if _checks_in(f_def.body, funcs, seen):
+                    return True
     return False
 
 

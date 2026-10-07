@@ -294,3 +294,98 @@ def test_research_does_not_count_not_found_as_a_source(monkeypatch) -> None:
         {"title": t, "url": f"https://{t}.test", "snippet": "s"} for t in "abc"])
     out = rs.grounded_research("what is X")
     assert "само 1 източник" in out and "проверено през" not in out
+
+
+# ── преглед на поправките (2026-10-07, трета вълна) ─────────────────────────
+
+@pytest.mark.parametrize("tail", [
+    "import sys\ntry:\n    assert add(2, 3) == 5\nexcept AssertionError as e:\n    print('FAIL', e)\n    sys.exit(1)\nprint('OK')",
+    "try:\n    assert add(2, 3) == 5\nexcept Exception:\n    print('x')\n    raise\nprint('OK')",
+    "class T:\n    def run(self):\n        assert add(2, 3) == 5\nT().run()\nprint('OK')",
+    "def test_add():\n    assert add(2, 3) == 5\nfor t in (test_add,):\n    t()\nprint('OK')",
+    "while True:\n    assert add(2, 3) == 5\n    break\nprint('OK')",
+    "match 1:\n    case 1:\n        assert add(2, 3) == 5\nprint('OK')",
+])
+def test_honest_self_test_shapes_still_pass(tail) -> None:
+    from genesis_agent.verifier import verify_skill
+    assert verify_skill("def add(a, b):\n    return a + b\n" + tail).method == "self_test_passed"
+
+
+@pytest.mark.parametrize("tail", [
+    "import contextlib\nwith contextlib.suppress(AssertionError):\n    assert add(2, 3) == 5\nprint('OK')",
+    "if 1 == 2:\n    assert add(2, 3) == 5\nprint('OK')",
+])
+def test_suppressed_or_dead_checks_do_not(tail) -> None:
+    from genesis_agent.verifier import verify_skill
+    assert verify_skill(_BROKEN + tail).method != "self_test_passed"
+
+
+def test_anthropic_history_never_starts_with_an_orphaned_result() -> None:
+    from genesis_agent.brain import Brain
+
+    def call(i):
+        return {"id": i, "type": "function", "function": {"name": "READ_FILE", "arguments": "{}"}}
+    _, msgs = Brain._to_anthropic_messages([
+        {"role": "system", "content": "s"},
+        {"role": "tool", "tool_call_id": "A", "content": "a"},
+        {"role": "assistant", "content": "", "tool_calls": [call("B")]},
+        {"role": "tool", "tool_call_id": "B", "content": "b"},
+        {"role": "user", "content": "next"},
+    ])
+    assert msgs == [{"role": "user", "content": "next"}]
+
+
+@pytest.mark.parametrize("label", [
+    "Order now", "Order", "Pre-order", "Jetzt bezahlen", "Bezahlen", "Zur Kasse", "Valider la commande",
+    "Confirmer le paiement", "Finalizar compra", "Финализирай поръчката", "Приключи поръчката", "Поръчвам",
+    "Donate"])
+def test_more_checkout_buttons_are_blocked(label) -> None:
+    assert _sb.assess_browser_click(label).level == _sb.RiskLevel.BLOCKED
+
+
+@pytest.mark.parametrize("label", [
+    "Плащане и доставка", "Начини на плащане", "Опции за плащане", "Check out the docs", "How to buy",
+    "Purchase history", "Checkout docs", "Search | git-checkout", "Pay attention", "Pay-as-you-go pricing",
+    "Submit order feedback"])
+def test_information_links_about_paying_stay_clickable(label) -> None:
+    """BLOCKED не може да се одобри — информационна връзка не бива да е такава."""
+    assert _sb.assess_browser_click(label).level == _sb.RiskLevel.CONFIRM
+
+
+@pytest.mark.parametrize("answer", ["'НЕ Е ОТКРИТО В ТОЗИ ИЗТОЧНИК'", "„НЕ Е ОТКРИТО В ТОЗИ ИЗТОЧНИК“",
+                                    "Отговор: НЕ Е ОТКРИТО В ТОЗИ ИЗТОЧНИК"])
+def test_research_not_found_in_quotes_is_not_a_source(monkeypatch, answer) -> None:
+    from genesis_agent import research as rs
+
+    class _B:
+        def __init__(self) -> None:
+            self.replies = ["X is 42", answer, answer]
+
+        def complete(self, messages):
+            return type("R", (), {"raw_text": self.replies.pop(0)})()
+    brain = _B()
+    monkeypatch.setattr("genesis_agent.brain.Brain", lambda: brain)
+    monkeypatch.setattr("genesis_agent.web_search.search", lambda *a, **k: [
+        {"title": t, "url": f"https://{t}.test", "snippet": "s"} for t in "abc"])
+    assert "само 1 източник" in rs.grounded_research("what is X")
+
+
+def test_page_check_serves_node_modules_but_not_credentials(tmp_path) -> None:
+    import sys
+    import urllib.error
+    import urllib.request
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "genesis_agent"))
+    import page_check_runner as r
+    (tmp_path / "node_modules" / "chart.js").mkdir(parents=True)
+    (tmp_path / "node_modules" / "chart.js" / "chart.umd.js").write_text("x", encoding="utf-8")
+    for name in ("credentials.json", "service-account.json", "prod.env", "backup.sql"):
+        (tmp_path / name).write_text("secret", encoding="utf-8")
+    srv, port = r._serve(tmp_path)
+    try:
+        assert urllib.request.urlopen(f"http://127.0.0.1:{port}/node_modules/chart.js/chart.umd.js").status == 200
+        for name in ("credentials.json", "service-account.json", "prod.env", "backup.sql"):
+            with pytest.raises(urllib.error.HTTPError):
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/{name}")
+    finally:
+        srv.shutdown()
