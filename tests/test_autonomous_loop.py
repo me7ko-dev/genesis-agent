@@ -650,3 +650,13 @@ class TestNativeToolCallsDoNotStarveCodeWriting:
         )
         assert forced_at is not None, "spinning never forced code"
         assert forced_at == STOP_AT
+
+
+def test_a_mission_past_its_deadline_saves_nothing(monkeypatch) -> None:
+    import time as _t
+    code = "print('OK')"
+    _queue(_Reply(raw_text="```python\n" + code + "\n```", code=code), _Reply(raw_text="YES"))
+    saved: list = []
+    monkeypatch.setattr(al, "save_skill", lambda **kw: saved.append(kw) or SKILLS_ROOT / "x.md")
+    out = al.run_autonomous_loop("anything", max_rounds=1, deadline=_t.time() - 1)
+    assert out.success is False and saved == []

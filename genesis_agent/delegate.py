@@ -83,10 +83,10 @@ def list_tasks() -> list[DelegatedTask]:
 
 # ─── Изпълнители (agent backends) ─────────────────────────────────────────────
 
-def _run_shell(goal: str) -> str:
+def _run_shell(goal: str, timeout: int | None = None) -> str:
     """Изпълнява shell команда през genesis_agent.sandbox и връща stdout."""
     from genesis_agent import sandbox
-    res = sandbox.run_shell(goal, timeout=120)
+    res = sandbox.run_shell(goal, timeout=min(timeout or 120, 120))
     if res.blocked:
         raise RuntimeError(res.stderr)
     if not res.ok:
@@ -102,11 +102,12 @@ def _run_skill(skill_name: str) -> str:
     return run_skill(skill_name)
 
 
-def _run_autonomous(goal: str) -> str:
-    """Изпълнява задача чрез Genesis autonomous_loop."""
+def _run_autonomous(goal: str, timeout: int | None = None) -> str:
+    """Изпълнява задача чрез Genesis autonomous_loop — до `timeout` секунди."""
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from genesis_agent.autonomous_loop import run_autonomous_loop
-    out = run_autonomous_loop(goal, operator_id="DELEGATE")
+    deadline = time.time() + timeout if timeout else None
+    out = run_autonomous_loop(goal, operator_id="DELEGATE", deadline=deadline)
     if out.success:
         name = Path(out.skill_path).name if out.skill_path else "(без файл)"
         return f"✅ Готово за {out.rounds} рунда → {name}"
@@ -121,21 +122,24 @@ def _worker(task: DelegatedTask, timeout: int, on_done: Callable | None):
 
     try:
         if task.agent == "shell":
-            result = _run_shell(task.goal)
+            result = _run_shell(task.goal, timeout)
         elif task.agent == "skill":
             result = _run_skill(task.goal)
         elif task.agent == "autonomous":
-            result = _run_autonomous(task.goal)
+            result = _run_autonomous(task.goal, timeout)
         else:
             raise ValueError(f"Непознат agent тип: '{task.agent}'. Използвай: shell, skill, autonomous")
 
         task.result = result
-        task.status = TaskStatus.DONE
+        # Изтекла задача остава „timeout“: викащият вече е получил този отговор.
+        if task.status != TaskStatus.TIMEOUT:
+            task.status = TaskStatus.DONE
         log.info(f"[delegate] ✅ Task {task.id[:8]} завършен ({task.elapsed}s)")
 
     except Exception as e:
         task.error = str(e)
-        task.status = TaskStatus.FAILED
+        if task.status != TaskStatus.TIMEOUT:
+            task.status = TaskStatus.FAILED
         log.error(f"[delegate] ❌ Task {task.id[:8]} провален: {e}")
     finally:
         task.finished_at = time.time()
