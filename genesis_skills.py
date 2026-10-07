@@ -607,7 +607,7 @@ def _tool_run_cmd(arg: str) -> str:
         parts.append(out[:6000])
     if err:
         parts.append("stderr:\n" + err[:2000])
-    hint = _import_path_hint(out + "\n" + err, Path(_WORKSPACE))
+    hint = _import_path_hint(out + "\n" + err, Path(_WORKSPACE)) or _missing_package_hint(out + "\n" + err)
     if hint:
         parts.append(hint)
     _log_episode(f"RUN_CMD {command}", "ok" if res.ok else f"rc={res.returncode}",
@@ -633,6 +633,21 @@ def _import_path_hint(output: str, root: Path) -> str:
     return (f"[подсказка] `{name}` е в корена на проекта, но pytest не го вижда от tests/. "
             "Решение: празен conftest.py в корена (или `pythonpath = .` в pytest.ini) — "
             "не sys.path хакове в тестовете.")
+
+
+def _missing_package_hint(output: str) -> str:
+    """`No module named 'docx'` → точното име в PyPI (`python-docx`) и с кой
+    Python да се инсталира. Без нея моделът гадае `pip install docx` (друг,
+    стар пакет) или инсталира в Python-а на Genesis, не на проекта."""
+    if "No module named" not in output:
+        return ""
+    try:
+        from genesis_agent.paths import project_python
+        from genesis_agent.py_deps import missing_module_hint
+        py = project_python(_WORKSPACE)
+        return missing_module_hint(output, Path(_WORKSPACE), f'"{py}"' if " " in py else py)
+    except Exception:
+        return ""
 
 
 # Маркер, по който агентният цикъл разпознава "агентът чака отговор" и спира,

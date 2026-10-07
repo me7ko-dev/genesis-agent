@@ -290,6 +290,16 @@ def build_report(root: Path, files: list[Path], withheld: list[str], *,
     deps = _dependencies(root, rel)
     if deps:
         lines += ["Зависимости: " + ", ".join(f"`{d}`" for d in deps[:30]), ""]
+    try:
+        from genesis_agent.py_deps import undeclared
+        missing = undeclared(root)
+    except Exception:
+        missing = []
+    if missing:
+        lines += [("⚠️ Кодът внася пакети, които не са записани в requirements.txt / "
+                   "pyproject.toml — на друга машина няма да тръгне без тях:"), ""]
+        lines += [f"- `{pip}` (`import {mod}` в {', '.join(files[:3])})" for mod, pip, files in missing]
+        lines.append("")
 
     lines += ["## Тестове", ""]
     passed: bool | None = None
