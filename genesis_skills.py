@@ -392,7 +392,52 @@ def _tool_write_file(arg: str, content: str) -> str:
                  ["tool", "write_file"])
     from genesis_agent.web_check import web_note
     return (f"[WRITE_FILE: {path}] ✓ записани {len(content)} символа{lint_note}"
-            f"{web_note(path)}{redirect}")
+            f"{_scaffold_tests(path)}{web_note(path)}{redirect}")
+
+
+_PYTEST_CONFIGS = (("pytest.ini", ""), ("pyproject.toml", "[tool.pytest"),
+                   ("setup.cfg", "[tool:pytest]"), ("tox.ini", "[pytest]"))
+
+
+def _scaffold_tests(path: Path) -> str:
+    """Първият тест в подпапка на проект без pytest настройка → празен
+    conftest.py в корена, за да вижда тестът модулите от корена.
+
+    NEXT_STEPS Г.10: проектът за ЕГН загуби 4 рунда по импорти, преди
+    подсказката в RUN_CMD (_import_path_hint) да се появи — тя идва чак СЛЕД
+    падналия pytest. Тук се слага преди първото пускане. Само ако коренът няма
+    conftest.py и никаква pytest настройка: в съществуващ проект пътят вече е
+    решен по някакъв начин и не е наша работа да го сменяме.
+    """
+    if path.suffix != ".py" or not (path.name.startswith("test_") or path.name.endswith("_test.py")):
+        return ""
+    try:
+        root = _WORKSPACE.resolve()
+        rel = path.resolve().relative_to(root)
+    except (ValueError, OSError):
+        return ""
+    if len(rel.parts) < 2 or rel.parts[0] in _SKIP_DIRS:
+        return ""
+    conftest = root / "conftest.py"
+    if conftest.exists():
+        return ""
+    for name, section in _PYTEST_CONFIGS:
+        cfg = root / name
+        try:
+            if cfg.is_file() and (not section or section in cfg.read_text(encoding="utf-8", errors="replace")):
+                return ""
+        except OSError:
+            return ""
+    try:
+        conftest.write_text(
+            "# Коренът на проекта е в sys.path на pytest, за да се внасят модулите\n"
+            "# от корена в tests/ без sys.path хакове.\n", encoding="utf-8")
+    except OSError:
+        return ""
+    _SEEN_PATHS.add(conftest)
+    return ("\n[скеле] Създаден е празен conftest.py в корена — тестовете в "
+            f"{rel.parts[0]}/ внасят модулите от корена директно (`from x import y`), "
+            "без sys.path хакове.")
 
 
 def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False) -> str:

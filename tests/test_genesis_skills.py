@@ -935,3 +935,48 @@ def test_edit_file_missing_suggests_the_real_file(_workspace) -> None:
 def test_list_dir_on_a_file_says_use_read_file(_workspace) -> None:
     (_workspace / "a.txt").write_text("", encoding="utf-8")
     assert "READ_FILE" in gs._tool_list_dir("a.txt")
+
+
+# ── скеле за тестовете (NEXT_STEPS Г.10) ─────────────────────────────────
+
+def test_first_test_in_a_subfolder_gets_a_root_conftest(_workspace) -> None:
+    gs._tool_write_file("egn.py", "def ok():\n    return True\n")
+    out = gs._tool_write_file("tests/test_egn.py", "from egn import ok\n\n\ndef test_ok():\n    assert ok()\n")
+    assert (_workspace / "conftest.py").is_file()
+    assert "[скеле]" in out
+
+
+def test_the_scaffold_makes_root_modules_importable_from_tests(_workspace) -> None:
+    import subprocess
+    import sys
+    gs._tool_write_file("egn.py", "def ok():\n    return True\n")
+    gs._tool_write_file("tests/test_egn.py", "from egn import ok\n\n\ndef test_ok():\n    assert ok()\n")
+    r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"],
+                       cwd=_workspace, capture_output=True, text=True, timeout=120, check=False)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+@pytest.mark.parametrize(("name", "content"), [
+    ("conftest.py", ""),
+    ("pytest.ini", "[pytest]\n"),
+    ("pyproject.toml", "[tool.pytest.ini_options]\npythonpath = ['.']\n"),
+    ("setup.cfg", "[tool:pytest]\n"),
+])
+def test_an_existing_pytest_setup_is_left_alone(_workspace, name, content) -> None:
+    (_workspace / name).write_text(content, encoding="utf-8")
+    out = gs._tool_write_file("tests/test_a.py", "def test_a():\n    assert True\n")
+    assert "[скеле]" not in out
+    if name != "conftest.py":
+        assert not (_workspace / "conftest.py").exists()
+
+
+def test_a_test_in_the_root_or_a_non_test_file_gets_no_scaffold(_workspace) -> None:
+    gs._tool_write_file("test_root.py", "def test_a():\n    assert True\n")
+    gs._tool_write_file("pkg/helpers.py", "X = 1\n")
+    assert not (_workspace / "conftest.py").exists()
+
+
+def test_pyproject_without_pytest_section_still_gets_the_scaffold(_workspace) -> None:
+    (_workspace / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+    gs._tool_write_file("tests/test_a.py", "def test_a():\n    assert True\n")
+    assert (_workspace / "conftest.py").is_file()
