@@ -248,6 +248,10 @@ def save_skill(
     """
     from genesis_agent.verifier import verify_skill
 
+    # Само `\n`: на Windows write_text превръща всяко `\n` в `\r\n`, тоест
+    # `\r\n` от кода ставаше `\r\r\n` във файла, при четене — празни редове,
+    # и подписът никога не съвпадаше (CI на Windows, 2026-10-07).
+    code = code.replace("\r\n", "\n").replace("\r", "\n")
     dna.validate_skill_payload(goal=goal, code=code)
 
     if require_verified is None:

@@ -323,12 +323,14 @@ def _tool_read_file(arg: str, offset=None, limit=None) -> str:
         allowed, reason = sandbox._decide(f"READ_FILE {path}", verdict, sandbox.get_policy())
         if not allowed:
             return f"[READ_FILE] {reason}"
+    # Преди четенето: на Windows папка дава PermissionError, не IsADirectoryError,
+    # и моделът виждаше „Permission denied“ (CI на Windows, 2026-10-07).
+    if path.is_dir():
+        return f"[READ_FILE] {path} е папка, не файл — ползвай LIST_DIR."
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return f"[READ_FILE] Файлът не съществува: {path}.{_did_you_mean(path)}"
-    except IsADirectoryError:
-        return f"[READ_FILE] {path} е папка, не файл — ползвай LIST_DIR."
     except OSError as e:
         return f"[READ_FILE] Грешка: {e}"
     _SEEN_PATHS.add(path.resolve())
