@@ -355,23 +355,34 @@ _SENSITIVE_FIELD_PATTERNS: list[re.Pattern[str]] = [
 # Стойности на autocomplete, които са категорични сами по себе си.
 _SENSITIVE_AUTOCOMPLETE = re.compile(r"(^|\s)(cc-[\w-]+|current-password|new-password|one-time-code)(\s|$)",
                                      re.IGNORECASE)
+# Етикетите на елемента идват съединени с „ | “ (текст, aria-label, value,
+# title, name, id, <label>), затова „начало на етикет“ е `^` или `|`.
+_SEG = r"(^|\|)\W*"
+# Думи след „pay/buy/checkout“, които правят връзката информация, не плащане.
+_INFO_AFTER = (r"(?!\s*-?\s*(history|attention|as-you-go|docs?|documentation|guide|faq|status|details"
+               r"|tracking|methods?|options?|policy|terms|info|later\s+info)\b)"
+               r"(?!\s+(the|our|this|these|more|how)\b)")
 _SENSITIVE_CLICK_PATTERNS: list[re.Pattern[str]] = [
-    # Английски: голата дума е бутон за плащане само когато Е целият етикет
-    # (с цена след нея): „Pay $49.99“, „Buy now“, „Checkout“. Посред текст —
-    # „Pay attention“, „How to buy“, „Purchase history“ — е навигация (преглед
-    # 2026-10-07: BLOCKED не може да се одобри, и тези спираха работа).
-    _c(r"(^|\|)\W*(buy|purchase|checkout|pay|order|pre-?order|donate)(\s+now)?"
-       r"(\s*[$€£]?\s*[\d.,]+\s*\S{0,4})?\W*($|\|)"),
+    # Етикет, който ЗАПОЧВА с глагола за плащане: „Pay with card“, „Buy It Now“,
+    # „Check out“, „Checkout ($19.99)“, „Buy – $9“. Посред текст („How to buy“)
+    # или със съществително след него („Purchase history“, „Pay attention“) —
+    # навигация (прегледи 2026-10-07: BLOCKED не може да се одобри).
+    _c(_SEG + r"(buy|purchase|checkout|check\s+out|pay|pre-?order|donate)(?![a-z])" + _INFO_AFTER),
     _c(r"(place|submit|complete|confirm|finish)\s+(your\s+|my\s+|the\s+)?(order|purchase|payment|booking)"
        r"(?!\s*(feedback|history|status|details))"),
     _c(r"confirm\s+and\s+pay|proceed\s+to\s+(checkout|payment)|(buy|order|pay|checkout)\s+now"
-       r"|" + _L + r"subscribe" + _R),
+       + r"|" + _L + r"(go\s+to|continue\s+to|secure|complete)\s+checkout" + _R
+       + r"|" + _L + r"subscribe" + _R),
+    # Имена/id на бутони: pay_now, buy-now, place_order, btn-checkout.
+    _c(_L + r"(pay[-_]?now|buy[-_]?now|place[-_]?order|(btn|button)[-_]?check[-_]?out"
+       r"|check[-_]?out[-_]?(btn|button))" + _R),
     # Български — глаголите, не съществителните („Плащане и доставка“, „Моите
     # поръчки“ са информация, не плащане).
-    _c(r"(?<![а-я])(купи|купете|поръчай|поръчайте|поръчвам|плати|платете|заплати|заплатете)(?![а-я])"),
+    _c(r"(?<![а-я])(купи|купете|купувам|поръчай|поръчайте|поръчвам|плати|платете|плащам|заплати|заплатете)"
+       r"(?![а-я])"),
     _c(r"(завърши|завършете|потвърди|потвърдете|изпрати|изпратете|направи|направете|финализирай|"
-       r"финализирайте|приключи|приключете)\s+(поръчка|покупка|плащане)\w*"),
-    _c(r"към\s+(плащане|касата|поръчката)|(^|\|)\W*плащане\W*($|\|)"),
+       r"финализирайте|приключи|приключете|оформи|оформете)\s+(поръчка|покупка|плащане)\w*"),
+    _c(r"към\s+(плащане|касата|поръчката)|(^|\|)\W*плащане(\s+с\s+(карта|paypal))?\W*($|\|)"),
     # Немски, испански, френски, италиански.
     _c(r"(?<![a-zà-ü])(kaufen|bestellen|bezahlen|zahlungspflichtig|comprar|pagar|acheter|payer|commander"
        r"|acquista|paga)(?![a-zà-ü])"),

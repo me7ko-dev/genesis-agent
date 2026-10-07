@@ -336,7 +336,7 @@ def test_anthropic_history_never_starts_with_an_orphaned_result() -> None:
 
 
 @pytest.mark.parametrize("label", [
-    "Order now", "Order", "Pre-order", "Jetzt bezahlen", "Bezahlen", "Zur Kasse", "Valider la commande",
+    "Order now", "Pre-order", "Jetzt bezahlen", "Bezahlen", "Zur Kasse", "Valider la commande",
     "Confirmer le paiement", "Finalizar compra", "Финализирай поръчката", "Приключи поръчката", "Поръчвам",
     "Donate"])
 def test_more_checkout_buttons_are_blocked(label) -> None:
@@ -389,3 +389,56 @@ def test_page_check_serves_node_modules_but_not_credentials(tmp_path) -> None:
                 urllib.request.urlopen(f"http://127.0.0.1:{port}/{name}")
     finally:
         srv.shutdown()
+
+
+# ── преглед на третата вълна ─────────────────────────────────────────────────
+
+@pytest.mark.parametrize("tail", [
+    "def _test():\n    assert add(2, 3) == 5\nif __name__ == '__main__':\n    _test\n    print('OK')",
+    "def test_add():\n    assert add(2, 3) == 5\nTESTS = [test_add]\nprint('OK')",
+    "import os\ndef get(key):\n    assert add(2, 3) == 5\nos.environ.get('HOME')\nprint('OK')",
+    "try:\n    r = add(2, 3)\nexcept TypeError as e:\n    assert 'int' in str(e)\nprint('OK')",
+    "import sys\ntry:\n    assert add(2, 3) == 5\nexcept AssertionError:\n    print('OK')\n    sys.exit(0)\nprint('OK')",
+    "try:\n    assert add(2, 3) == 5\nexcept AssertionError:\n    print('OK')\n    raise SystemExit\nprint('OK')",
+])
+def test_a_mentioned_never_run_or_exit_zero_check_does_not_count(tail) -> None:
+    from genesis_agent.verifier import verify_skill
+    assert verify_skill(_BROKEN + tail).method != "self_test_passed"
+
+
+def test_an_expected_error_test_with_else_counts() -> None:
+    from genesis_agent.verifier import verify_skill
+    code = ("def add(a, b):\n    return a + b\n"
+            "try:\n    add('a', 1)\nexcept TypeError:\n    pass\nelse:\n    raise AssertionError('no error')\n"
+            "assert add(1, 1) == 2\nprint('OK')")
+    assert verify_skill(code).method == "self_test_passed"
+
+
+@pytest.mark.parametrize("label", [
+    "Check out", "Buy It Now", "Pay with card", "Pay with PayPal", "Pay securely", "Buy – $9", "Pay (€9)",
+    "Checkout ($19.99)", "Checkout (2)", "Go to checkout", "Continue to checkout", "Secure checkout",
+    "Complete checkout", "Buy for $9", "Buy with 1-Click", "x | btn-checkout", "x | pay_now",
+    "Плащане с карта", "Оформи поръчката", "Купувам", "Плащам", "PLACE ORDER", "Complete Purchase"])
+def test_payment_buttons_with_more_words_are_blocked(label) -> None:
+    assert _sb.assess_browser_click(label).level == _sb.RiskLevel.BLOCKED
+
+
+@pytest.mark.parametrize("label", ["Price | order", "Sort by | order", "News | Order", "Order 2024"])
+def test_a_sort_control_named_order_is_not_a_payment(label) -> None:
+    assert _sb.assess_browser_click(label).level == _sb.RiskLevel.CONFIRM
+
+
+def test_research_keeps_answers_that_merely_mention_not_found(monkeypatch) -> None:
+    from genesis_agent import research as rs
+
+    class _B:
+        def __init__(self) -> None:
+            self.replies = ["404 Not Found means the server cannot find it."] * 3 + ["агреед"]
+
+        def complete(self, messages):
+            return type("R", (), {"raw_text": self.replies.pop(0)})()
+    brain = _B()
+    monkeypatch.setattr("genesis_agent.brain.Brain", lambda: brain)
+    monkeypatch.setattr("genesis_agent.web_search.search", lambda *a, **k: [
+        {"title": t, "url": f"https://{t}.test", "snippet": "s"} for t in "abc"])
+    assert "проверено през 3 източника" in rs.grounded_research("what is 404")

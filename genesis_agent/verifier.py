@@ -72,16 +72,41 @@ _SWALLOWS = {"AssertionError", "Exception", "BaseException"}
 _EXITS = {"exit", "_exit", "abort"}
 
 
+def _nonzero_exit_code(args: list[ast.expr]) -> bool:
+    """`exit(1)`, `exit("FAIL")` — да; `exit()`, `exit(0)`, `exit(None)` — не."""
+    if not args:
+        return False
+    try:
+        return ast.literal_eval(args[0]) not in (None, 0, False)
+    except (ValueError, TypeError, SyntaxError):
+        return True  # изчислен код — приема се за провал, както би го приел shell
+
+
 def _handler_fails_loudly(body: list[ast.stmt]) -> bool:
-    """Обработчикът пак проваля: `raise`, `sys.exit(1)`, `os._exit(1)`."""
-    for n in ast.walk(ast.Module(body=body, type_ignores=[])):
+    """Обработчикът пак проваля: `raise`, `sys.exit(1)`, `os._exit(1)`.
+    Не: `sys.exit(0)`, `raise SystemExit`, и нищо във вложена функция/lambda."""
+    stack: list[ast.AST] = list(body)
+    while stack:
+        n = stack.pop()
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
         if isinstance(n, ast.Raise):
+            exc = n.exc
+            if exc is None:
+                return True                      # голо `raise` — пак хвърля
+            call = exc if isinstance(exc, ast.Call) else None
+            target = call.func if call else exc
+            if getattr(target, "id", getattr(target, "attr", "")) == "SystemExit":
+                if call is not None and _nonzero_exit_code(call.args):
+                    return True
+                continue
             return True
         if isinstance(n, ast.Call):
             f = n.func
             name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
-            if name in _EXITS:
+            if name in _EXITS and _nonzero_exit_code(n.args):
                 return True
+        stack.extend(ast.iter_child_nodes(n))
     return False
 
 
@@ -145,8 +170,6 @@ def _checks_in(stmts: list[ast.stmt], funcs: dict[str, _Func], seen: set[str]) -
         if isinstance(st, ast.Try):
             if not _swallows_failures(st) and _checks_in(st.body, funcs, seen):
                 return True
-            if any(_checks_in(h.body, funcs, seen) for h in st.handlers):
-                return True
             if _checks_in(st.orelse, funcs, seen) or _checks_in(st.finalbody, funcs, seen):
                 return True
             continue
@@ -157,10 +180,19 @@ def _checks_in(stmts: list[ast.stmt], funcs: dict[str, _Func], seen: set[str]) -
         if isinstance(st, (ast.If, ast.For, ast.AsyncFor, ast.While)):
             if _checks_in(st.body, funcs, seen) or _checks_in(st.orelse, funcs, seen):
                 return True
-            # `for t in (test_add, test_sub): t()` — функциите са в итерируемото.
-            if isinstance(st, (ast.For, ast.AsyncFor)) and _checks_in(
-                    [ast.Expr(value=st.iter)], funcs, seen):
-                return True
+            # `for t in (test_add, test_sub): t()` — функциите са в итерируемото,
+            # но само ако тялото наистина вика променливата на цикъла.
+            if (isinstance(st, (ast.For, ast.AsyncFor)) and isinstance(st.target, ast.Name)
+                    and any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                            and n.func.id == st.target.id for b in st.body for n in ast.walk(b))):
+                for n in ast.walk(st.iter):
+                    if not isinstance(n, ast.Name):
+                        continue
+                    f_def = funcs.get(n.id)
+                    if f_def is not None and n.id not in seen:
+                        seen.add(n.id)
+                        if _checks_in(f_def.body, funcs, seen):
+                            return True
             continue
         if isinstance(st, ast.Match):
             if any(_checks_in(c.body, funcs, seen) for c in st.cases):
@@ -168,18 +200,23 @@ def _checks_in(stmts: list[ast.stmt], funcs: dict[str, _Func], seen: set[str]) -
             continue
         if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             continue
-        # Извикана функция или метод (`T().run()`, `for t in (test_add,): t()` —
-        # името стои в израза): проверките в нея се броят.
+        # Извикана функция (`_test()`) или метод на клас от файла (`T().run()`):
+        # проверките в нея се броят. Само споменато име (`_test` без скоби,
+        # `TESTS = [test_add]`) не е извикване; `os.environ.get()` не е `def get`
+        # (преглед 2026-10-07).
         for n in ast.walk(st):
-            name = ""
-            if isinstance(n, ast.Call):
-                f = n.func
-                name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
-            elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
-                name = n.id
-            f_def = funcs.get(name)
-            if f_def is not None and name not in seen:
-                seen.add(name)
+            if not isinstance(n, ast.Call):
+                continue
+            f = n.func
+            if isinstance(f, ast.Name):
+                key, f_def = f.id, funcs.get(f.id)
+            elif isinstance(f, ast.Attribute):
+                key = "." + f.attr      # методите стоят под „.име“ — виж _has_real_check
+                f_def = funcs.get(key)
+            else:
+                continue
+            if f_def is not None and key not in seen:
+                seen.add(key)
                 if _checks_in(f_def.body, funcs, seen):
                     return True
     return False
@@ -203,8 +240,19 @@ def _has_real_check(tree: ast.AST) -> bool:
     """
     # Всички функции по име — и вложените (`async def _run_tests()` в
     # `if __name__ == "__main__":`, извикана с asyncio.run).
-    funcs: dict[str, _Func] = {n.name: n for n in ast.walk(tree)
-                               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    # Методите на класовете във файла — под „.име“, отделно от функциите на
+    # модула, за да не стане `os.environ.get()` „извикване“ на `def get`.
+    funcs: dict[str, _Func] = {}
+    method_ids: set[int] = set()
+    for cls in ast.walk(tree):
+        if isinstance(cls, ast.ClassDef):
+            for m in cls.body:
+                if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    funcs["." + m.name] = m
+                    method_ids.add(id(m))
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and id(n) not in method_ids:
+            funcs.setdefault(n.name, n)
     return _checks_in(getattr(tree, "body", []), funcs, set())
 
 

@@ -75,7 +75,10 @@ def grounded_research(question: str, *, top_n: int = 3) -> str:
             continue
         # „Не е открито“ не е глас за отговора (одит 2026-10-07): три източника,
         # от които само един съдържа факта, излизаха „проверено през 3 източника“.
-        if re.search(r"НЕ Е ОТКРИТО|NOT FOUND", answer[:80], re.IGNORECASE):
+        # Точната фраза от промпта, с кавички и „Отговор:“ около нея — не всяко
+        # „404 Not Found means…“ (преглед 2026-10-07).
+        if re.fullmatch(r"\W*(отговор:\s*|answer:\s*)?(НЕ Е ОТКРИТО В ТОЗИ ИЗТОЧНИК|NOT FOUND IN "
+                        r"(THIS|THE) SOURCE)\W*", answer.strip(), re.IGNORECASE):
             not_found += 1
             continue  # и в кавички: 'НЕ Е ОТКРИТО…', „НЕ Е ОТКРИТО…“, „Отговор: НЕ Е…“
         per_source.append(f"[{url}] {answer}")
