@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -589,7 +590,10 @@ def _run_autonomous_loop_impl(
                     writer_pair = (w_provider, w_model)
             critic_eval = brain.complete(critic_msg, avoid=writer_pair).raw_text.strip()
 
-            if critic_eval.upper().startswith("NO"):
+            # Одобрение е само изрично „YES“ (одит 2026-10-07): провалена верига
+            # („Error: цялата верига е изчерпана…“), „**NO**:“ и „Answer: NO“
+            # минаваха за одобрение, защото проверката беше startswith("NO").
+            if not re.match(r"\W*YES\b", critic_eval, re.IGNORECASE):
                 _quality_failures = _note_quality_failure(brain, _quality_failures, _quality_escalate_after)
                 report_thought(f"🔍 Критикът отхвърли резултата: {critic_eval}")
                 messages.append({"role": "assistant", "content": reply.raw_text})
@@ -700,7 +704,10 @@ def _run_autonomous_loop_impl(
         repair_vres = None
         if repair.fixed:
             repair_vres = verify_skill(repair.code)
-            repair_verified = repair_vres.verified
+            # Същият гейт като основния път: САМО минал самотест. `verified` е
+            # True и за `runs_clean` (без никакъв тест) — така маскиращата
+            # поправка `d.get('total')` се записваше (одит 2026-10-07).
+            repair_verified = repair_vres.method == "self_test_passed"
             if not repair_verified:
                 print(f"  [РЕМОНТ ОТХВЪРЛЕН] Поправеният код не мина verify_skill "
                       f"({repair_vres.method}) - вероятно маскира грешката вместо да я "

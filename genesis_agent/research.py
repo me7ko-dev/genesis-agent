@@ -70,6 +70,10 @@ def grounded_research(question: str, *, top_n: int = 3) -> str:
         # cross-check, зад което няма нищо (bug fix, 2026-08-12).
         if not answer or answer.startswith("Error:"):
             continue
+        # „Не е открито“ не е глас за отговора (одит 2026-10-07): три източника,
+        # от които само един съдържа факта, излизаха „проверено през 3 източника“.
+        if answer.upper().lstrip("*_ ").startswith(("НЕ Е ОТКРИТО", "NOT FOUND")):
+            continue
         per_source.append(f"[{url}] {answer}")
 
     if not per_source:

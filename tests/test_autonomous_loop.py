@@ -208,6 +208,28 @@ class TestCriticGate:
         assert outcome.rounds == 2
 
 
+class TestCriticMustSayYes:
+    @pytest.mark.parametrize("verdict", ["Error: цялата верига е изчерпана | последна: HTTP_429",
+                                         "**NO**: misses the file", "Answer: NO"])
+    def test_anything_but_yes_is_not_approval(self, monkeypatch, verdict) -> None:
+        """Одит 2026-10-07: проверката беше startswith("NO") — провалена верига
+        и „**NO**“ минаваха за одобрение и умението се записваше."""
+        code = "print('OK')"
+        _queue(_Reply(raw_text="```python\n" + code + "\n```", code=code), _Reply(raw_text=verdict))
+        monkeypatch.setattr(al, "run_python_subprocess",
+                             lambda c: ExecResult(ok=True, stdout="OK\n", stderr="", returncode=0))
+        monkeypatch.setattr("genesis_agent.code_validate.validate_code_with_ruff", lambda c: (True, ""))
+        monkeypatch.setattr("genesis_agent.verifier.verify_skill",
+                             lambda c: VerifyResult(verified=True, method="self_test_passed"))
+        saved: list = []
+        monkeypatch.setattr(al, "save_skill", lambda **kw: saved.append(kw) or SKILLS_ROOT / "x.md")
+        monkeypatch.setattr(al, "emergency_repair",
+                             lambda code, stderr, stdout: RepairResult(fixed=False, code=code, rounds=0,
+                                                                       method="none", fix_desc=""))
+        al.run_autonomous_loop("save the result to a file", max_rounds=1)
+        assert saved == []
+
+
 class TestEscalation:
     def test_brain_escalates_after_a_third_of_max_rounds_fail(self, monkeypatch) -> None:
         max_rounds = 6
@@ -308,8 +330,8 @@ class TestExhaustion:
         monkeypatch.setattr("genesis_agent.code_validate.validate_code_with_ruff", lambda c: (True, ""))
         monkeypatch.setattr(al, "emergency_repair",
                              lambda code, stderr, stdout: RepairResult(
-                                 fixed=True, code="print('fixed')", rounds=2,
-                                 method="pattern", fix_desc="added a try/except"))
+                                 fixed=True, code="def f():\n    return 1\n\n\nassert f() == 1\nprint('OK')",
+                                 rounds=2, method="pattern", fix_desc="added a try/except"))
         saved = {}
 
         def _fake_save_skill(*, slug, code, goal, verification_stdout, extra):
@@ -324,6 +346,25 @@ class TestExhaustion:
         assert outcome.success is True
         assert outcome.rounds == max_rounds + 2
         assert saved["slug"] == "broken-thing_repaired"
+
+    def test_a_repair_without_a_self_test_is_not_saved(self, monkeypatch) -> None:
+        """Одит 2026-10-07: маскиращата поправка (`d.get('total')`, без тест)
+        минаваше като runs_clean и се записваше в библиотеката."""
+        code = "raise RuntimeError('boom')"
+        _queue(*[_Reply(raw_text="```python\n" + code + "\n```", code=code) for _ in range(2)])
+        monkeypatch.setattr(al, "run_python_subprocess",
+                             lambda c: ExecResult(ok=False, stdout="", stderr="boom", returncode=1))
+        monkeypatch.setattr("genesis_agent.code_validate.validate_code_with_ruff", lambda c: (True, ""))
+        monkeypatch.setattr(al, "emergency_repair",
+                             lambda code, stderr, stdout: RepairResult(
+                                 fixed=True, code="d = {}\nprint(d.get('total'))", rounds=2,
+                                 method="pattern", fix_desc="masked KeyError"))
+        saved: dict = {}
+        monkeypatch.setattr(al, "save_skill", lambda **kw: saved.update(kw) or SKILLS_ROOT / "x.md")
+        outcome = al.run_autonomous_loop("compute twice the order total", max_rounds=2,
+                                          skill_slug="total")
+        assert outcome.success is False
+        assert saved == {}
 
 
 class TestPublicWrapperNeverCrashesOnNotification:

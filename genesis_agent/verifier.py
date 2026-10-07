@@ -56,12 +56,68 @@ def _is_tautological_assert(node: ast.Assert) -> bool:
     нищо реално. Слаб модел, инструктиран да "винаги сложи self-test", но без
     уменията да напише истински такъв, свършва точно тук — verify_skill досега
     приемаше това като пълноценен self_test_passed (design note, 2026-08-11)."""
-    test = node.test
-    if isinstance(test, ast.Constant):
-        return True
-    if isinstance(test, ast.Compare):
-        operands = [test.left, *test.comparators]
-        return all(isinstance(o, ast.Constant) for o in operands)
+    return _self_evident(node.test)
+
+
+def _self_evident(test: ast.AST) -> bool:
+    """Израз без нищо от кода — без име, извикване, атрибут: `2 + 3 == 5`,
+    `True`, `(1, 2) == (1, 2)`. Резултатът му е известен преди да се пусне."""
+    return not any(isinstance(n, (ast.Name, ast.Call, ast.Attribute, ast.Subscript))
+                   for n in ast.walk(test))
+
+
+_SWALLOWS = {"AssertionError", "Exception", "BaseException"}
+
+
+def _swallows_failures(node: ast.Try) -> bool:
+    for h in node.handlers:
+        if h.type is None:
+            return True
+        names = h.type.elts if isinstance(h.type, ast.Tuple) else [h.type]
+        if any(isinstance(n, ast.Name) and n.id in _SWALLOWS for n in names):
+            return True
+    return False
+
+
+_Func = ast.FunctionDef | ast.AsyncFunctionDef
+
+
+def _checks_in(stmts: list[ast.stmt], funcs: dict[str, _Func], seen: set[str]) -> bool:
+    """Има ли проверка, която РЕАЛНО се изпълнява, в тези оператори?
+
+    Одит 2026-10-07: брояше се всеки assert в кода — и в `def _test()`,
+    която никой не вика, и в `try: assert … / except AssertionError: pass`,
+    и `if False: raise`. Счупена `add` минаваше като self_test_passed."""
+    for st in stmts:
+        if isinstance(st, ast.Assert) and not _is_tautological_assert(st):
+            return True
+        if isinstance(st, (ast.If, ast.While)) and _self_evident(st.test) and not (
+                isinstance(st.test, ast.Compare)):  # `if False:` / `while 0:` — мъртъв код
+            if isinstance(st, ast.If) and _checks_in(st.orelse, funcs, seen):
+                return True
+            continue
+        if isinstance(st, (ast.If, ast.For, ast.While)) and any(isinstance(b, ast.Raise) for b in st.body):
+            return True
+        if isinstance(st, ast.Try):
+            if not _swallows_failures(st) and _checks_in(st.body, funcs, seen):
+                return True
+            if _checks_in(st.orelse, funcs, seen) or _checks_in(st.finalbody, funcs, seen):
+                return True
+            continue
+        if isinstance(st, (ast.If, ast.For, ast.While, ast.With)):
+            if _checks_in(st.body, funcs, seen) or _checks_in(getattr(st, "orelse", []), funcs, seen):
+                return True
+            continue
+        if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        # Извикана функция: проверките в нея се броят (едно ниво навътре и т.н.).
+        for n in ast.walk(st):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
+                f = funcs.get(n.func.id)
+                if f is not None and n.func.id not in seen:
+                    seen.add(n.func.id)
+                    if _checks_in(f.body, funcs, seen):
+                        return True
     return False
 
 
@@ -81,14 +137,11 @@ def _has_real_check(tree: ast.AST) -> bool:
     Присъдата отиваше в библиотеката като self_test_passed и оттам се
     преизползва от бъдещи мисии през RAG.
     """
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assert) and not _is_tautological_assert(node):
-            return True
-        if isinstance(node, (ast.If, ast.For, ast.While)) and any(
-            isinstance(b, ast.Raise) for b in node.body
-        ):
-            return True
-    return False
+    # Всички функции по име — и вложените (`async def _run_tests()` в
+    # `if __name__ == "__main__":`, извикана с asyncio.run).
+    funcs: dict[str, _Func] = {n.name: n for n in ast.walk(tree)
+                               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    return _checks_in(getattr(tree, "body", []), funcs, set())
 
 
 # Промптите навсякъде искат „print 'OK' on success", и всяко умение в

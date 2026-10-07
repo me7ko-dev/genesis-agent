@@ -336,39 +336,64 @@ _PY_CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 # не суров текст за regex над цяла команда. ПАРОЛИ/ПЛАЩАНИЯ са BLOCKED винаги
 # (независимо от mode="allow" в 24/7/маратон режим) — категорично не се
 # автоматизират, дори при изрично поискване (виж genesis_agent/browser.py коментар).
+# Без `\b`: в него `_` е буква и `user_password`, `cc_number` минаваха (одит
+# 2026-10-07). Граница тук е „не латинска буква“ отляво/отдясно.
+_L = r"(?<![a-z])"
+_R = r"(?![a-z])"
 _SENSITIVE_FIELD_PATTERNS: list[re.Pattern[str]] = [
-    _c(r"\bpass(wo?rd)?\b"), _c(r"\bpwd\b"), _c(r"\bpasскод\b"),
-    _c(r"\bcard[_\s-]?(number|num|no)?\b"), _c(r"\bcvv\b"), _c(r"\bcvc\b"),
-    _c(r"\bexp(iry|iration)?[_\s-]?(date|month|year)?\b"),
-    _c(r"\bssn\b"), _c(r"\bsocial[_\s-]?security\b"),
-    _c(r"\biban\b"), _c(r"\brouting[_\s-]?number\b"), _c(r"\baccount[_\s-]?number\b"),
-    _c(r"\bprivate[_\s-]?key\b"), _c(r"\bseed[_\s-]?phrase\b"), _c(r"\bmnemonic\b"),
-    _c(r"\bsecret[_\s-]?key\b"), _c(r"\bapi[_\s-]?key\b"),
+    _c(r"pass(wo?r?d|phrase|code)|passwd|" + _L + r"pass" + _R + "|" + _L + r"pwd" + _R),
+    _c(r"парол|пин\s*код|" + r"(?<![а-я])пин(?![а-я])"),
+    _c(r"card.?(number|num|no|holder|cvv|cvc|code|exp)|" + _L + r"card" + _R
+       + r"|" + _L + r"cc.?(num|number|csc|exp|cvv|cvc|name|type)|ccnum"),
+    _c(_L + r"(cvv\d?|cvc|csc)" + _R + r"|security.?code"),
+    _c(r"(номер|данни)\s+(на|от)\s+(банков\w*\s+)?карта|банкова\s+карта|срок\s+на\s+валидност"),
+    _c(_L + r"exp(iry|iration)?.?(date|month|year)" + _R + "|" + _L + r"expiry" + _R),
+    _c(_L + r"ssn" + _R + r"|social.?security|егн"),
+    _c(_L + r"iban" + _R + r"|routing.?number|account.?number"),
+    _c(r"private.?key|seed.?phrase|mnemonic|secret.?key|api.?key|one.?time.?code|" + _L + r"otp" + _R),
 ]
+# Стойности на autocomplete, които са категорични сами по себе си.
+_SENSITIVE_AUTOCOMPLETE = re.compile(r"(^|\s)(cc-[\w-]+|current-password|new-password|one-time-code)(\s|$)",
+                                     re.IGNORECASE)
 _SENSITIVE_CLICK_PATTERNS: list[re.Pattern[str]] = [
-    _c(r"\b(buy|purchase|checkout|pay)\s*now\b"), _c(r"\bplace\s+order\b"),
-    _c(r"\bconfirm\s+(order|purchase|payment)\b"), _c(r"\bcomplete\s+purchase\b"),
-    _c(r"\bsubscribe\b"), _c(r"\badd\s+to\s+cart\b.*\bcheckout\b"),
-    _c(r"\b(купи|плати|поръчай|потвърди\s+поръчка)\b"),
+    # Английски — и с цена след думата („Pay $49.99“), и сами.
+    _c(_L + r"(buy|purchase|checkout|check\s+out|pay)" + _R),
+    _c(r"(place|submit|complete|confirm|finish)\s+(your\s+|my\s+|the\s+)?(order|purchase|payment|booking)"),
+    _c(r"confirm\s+and\s+pay|proceed\s+to\s+(checkout|payment)|" + _L + r"subscribe" + _R),
+    # Български — глаголите, не съществителните („Моите поръчки“ е меню, не плащане).
+    _c(r"(?<![а-я])(купи|купете|поръчай|поръчайте|плати|платете|заплати|заплатете|плащане)(?![а-я])"),
+    _c(r"(завърши|завършете|потвърди|потвърдете|изпрати|изпратете|направи|направете)\s+"
+       r"(поръчка|покупка|плащане)\w*"),
+    _c(r"към\s+(плащане|касата|поръчката)"),
+    # Немски, испански, френски, италиански.
+    _c(r"(?<![a-zà-ü])(kaufen|bestellen|zahlungspflichtig|comprar|pagar|acheter|payer|commander|acquista|paga)"
+       r"(?![a-zà-ü])"),
 ]
 
 
-def assess_browser_field(field_type: str, field_name: str) -> RiskVerdict:
+def assess_browser_field(field_type: str, field_name: str, autocomplete: str = "") -> RiskVerdict:
     """Оценява риска на попълване на поле в браузър формуляр.
     field_type: HTML input type ('password', 'text', 'email', ...).
-    field_name: name/id/placeholder/aria-label на полето (каквото е налично)."""
+    field_name: ВСИЧКИ етикети на полето заедно — name, id, placeholder,
+    aria-label, <label>; безсмислено name („field_7“) не бива да скрие
+    „Номер на карта“ (одит 2026-10-07).
+    autocomplete: атрибутът — `cc-number`, `current-password` решават сами."""
     if field_type.lower() == "password":
         return RiskVerdict(RiskLevel.BLOCKED, ["парола (input type=password)"])
+    if autocomplete and _SENSITIVE_AUTOCOMPLETE.search(autocomplete):
+        return RiskVerdict(RiskLevel.BLOCKED, [f"чувствително поле (autocomplete={autocomplete})"])
     for rx in _SENSITIVE_FIELD_PATTERNS:
         if rx.search(field_name):
-            return RiskVerdict(RiskLevel.BLOCKED, [f"чувствително поле: {field_name}"])
+            return RiskVerdict(RiskLevel.BLOCKED, [f"чувствително поле: {field_name[:80]}"])
     return RiskVerdict(RiskLevel.CONFIRM, ["попълване на браузър поле"])
 
 
 def assess_browser_click(label: str, is_submit_near_password: bool = False) -> RiskVerdict:
-    """Оценява риска на клик върху браузър елемент по видимия му текст/label."""
+    """Оценява риска на клик върху браузър елемент по ВСИЧКИ негови етикети
+    (видим текст, aria-label, value, title, name) — бутон „🔒“ с aria-label
+    „Pay now“ е бутон за плащане."""
     if is_submit_near_password:
-        return RiskVerdict(RiskLevel.BLOCKED, ["submit бутон в/до форма с парола (логин/регистрация)"])
+        return RiskVerdict(RiskLevel.BLOCKED, ["submit бутон във форма с парола или карта"])
     for rx in _SENSITIVE_CLICK_PATTERNS:
         if rx.search(label):
             return RiskVerdict(RiskLevel.BLOCKED, [f"плащане/поръчка: \"{label.strip()[:60]}\""])

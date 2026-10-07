@@ -184,3 +184,113 @@ def test_a_versioned_python_counts_as_running_the_file() -> None:
 def test_a_refused_write_to_a_bracketed_path_does_not_count() -> None:
     assert claim_check.executed_from_text_results(
         ["[WRITE_FILE: app/[id]/page.tsx] ❌ Файлът вече съществува"]) == []
+
+
+# ── браузър: плащания и пароли (одит 2026-10-07, втора вълна) ─────────────────
+
+from genesis_agent import sandbox as _sb
+
+
+@pytest.mark.parametrize("label", [
+    "Завърши поръчката", "Потвърди поръчката", "Към плащане", "Плащане", "Купете", "Платете",
+    "Place your order", "Pay $49.99", "Pay", "Checkout", "Proceed to checkout", "Buy",
+    "Complete order", "Confirm and pay", "Submit order", "Jetzt kaufen",
+    "Zahlungspflichtig bestellen", "Comprar", "Acheter", "🔒 | Pay now",
+])
+def test_checkout_buttons_are_blocked(label) -> None:
+    assert _sb.assess_browser_click(label).level == _sb.RiskLevel.BLOCKED
+
+
+@pytest.mark.parametrize("label", ["Моите поръчки", "PayPal docs", "Buyer's guide", "Order by date",
+                                   "Payments overview", "Вход", "Следваща страница"])
+def test_ordinary_buttons_are_not(label) -> None:
+    assert _sb.assess_browser_click(label).level == _sb.RiskLevel.CONFIRM
+
+
+@pytest.mark.parametrize("name", [
+    "cc-number", "cc_number", "ccnum", "billing_card_number", "passwd", "user_password", "login_pass",
+    "confirmPassword", "Парола", "Номер на карта", "cvv2", "card_cvv", "securityCode", "cc-csc",
+])
+def test_card_and_password_fields_are_blocked(name) -> None:
+    assert _sb.assess_browser_field("text", name).level == _sb.RiskLevel.BLOCKED
+
+
+def test_autocomplete_alone_blocks_a_field_with_a_meaningless_name() -> None:
+    assert _sb.assess_browser_field("text", "field_7", "cc-number").level == _sb.RiskLevel.BLOCKED
+    assert _sb.assess_browser_field("text", "field_7", "street-address").level == _sb.RiskLevel.CONFIRM
+
+
+@pytest.mark.parametrize("name", ["email", "search", "username", "passenger_name", "compass", "Търси в картата"])
+def test_ordinary_fields_are_not(name) -> None:
+    assert _sb.assess_browser_field("text", name).level == _sb.RiskLevel.CONFIRM
+
+
+def test_page_check_server_hides_the_projects_secrets(tmp_path) -> None:
+    import sys
+    import urllib.error
+    import urllib.request
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "genesis_agent"))
+    import page_check_runner as r
+    (tmp_path / "index.html").write_text("<p>x</p>", encoding="utf-8")
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-live-123", encoding="utf-8")
+    srv, port = r._serve(tmp_path)
+    try:
+        assert urllib.request.urlopen(f"http://127.0.0.1:{port}/index.html").status == 200
+        for path in ("/.env", "/%2eenv", "/.git/config"):
+            with pytest.raises(urllib.error.HTTPError):
+                urllib.request.urlopen(f"http://127.0.0.1:{port}{path}")
+    finally:
+        srv.shutdown()
+
+
+def test_page_check_env_drops_credentials_in_urls(monkeypatch) -> None:
+    from genesis_agent import page_check
+    monkeypatch.setenv("DATABASE_URL", "postgres://u:hunter2@db/x")
+    monkeypatch.setenv("SOME_URL", "https://u:p@host/")
+    monkeypatch.setenv("HTTPS_PROXY", "http://user:pw@proxy:8080")
+    env = page_check._clean_env()
+    assert "DATABASE_URL" not in env and "SOME_URL" not in env
+    assert "HTTPS_PROXY" in env
+
+
+# ── гейтовете за умения ──────────────────────────────────────────────────────
+
+_BROKEN = "def add(a, b):\n    return a - b\n"
+
+
+@pytest.mark.parametrize("tail", [
+    "def _test():\n    assert add(2, 3) == 5\nprint('OK')",
+    "try:\n    assert add(2, 3) == 5\nexcept AssertionError:\n    pass\nprint('OK')",
+    "assert 2 + 3 == 5\nprint('OK')",
+    "if False:\n    raise SystemExit(1)\nprint('OK')",
+])
+def test_a_check_that_never_runs_is_not_a_self_test(tail) -> None:
+    from genesis_agent.verifier import verify_skill
+    assert verify_skill(_BROKEN + tail).method != "self_test_passed"
+
+
+def test_a_check_in_a_called_or_nested_async_function_counts() -> None:
+    import ast
+
+    from genesis_agent.verifier import _has_real_check
+    code = ("import asyncio\nasync def f():\n    return 1\nif __name__ == '__main__':\n"
+            "    async def _run():\n        assert await f() == 1\n    asyncio.run(_run())\n    print('OK')\n")
+    assert _has_real_check(ast.parse(code))
+
+
+def test_research_does_not_count_not_found_as_a_source(monkeypatch) -> None:
+    from genesis_agent import research as rs
+
+    class _B:
+        def __init__(self) -> None:
+            self.replies = ["X is 42", "НЕ Е ОТКРИТО В ТОЗИ ИЗТОЧНИК", "НЕ Е ОТКРИТО В ТОЗИ ИЗТОЧНИК"]
+
+        def complete(self, messages):
+            return type("R", (), {"raw_text": self.replies.pop(0)})()
+    brain = _B()
+    monkeypatch.setattr("genesis_agent.brain.Brain", lambda: brain)
+    monkeypatch.setattr("genesis_agent.web_search.search", lambda *a, **k: [
+        {"title": t, "url": f"https://{t}.test", "snippet": "s"} for t in "abc"])
+    out = rs.grounded_research("what is X")
+    assert "само 1 източник" in out and "проверено през" not in out
