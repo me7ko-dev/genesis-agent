@@ -87,9 +87,15 @@ def normalize(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+# Стандартни в по-нов Python, отколкото може да върви Genesis (≥3.10): на 3.10
+# `No module named 'tomllib'` не е липсващ пакет — `pip install tomllib` е
+# грешният съвет (CI на 3.10, 2026-10-07). Нито се броят за незаписани.
+_NEWER_STDLIB = frozenset({"tomllib", "__future__"})
+
+
 def _stdlib() -> frozenset[str]:
     names = getattr(sys, "stdlib_module_names", None)  # 3.10+
-    return frozenset(names) | {"__future__"} if names else frozenset({"__future__"})
+    return frozenset(names or ()) | _NEWER_STDLIB
 
 
 _MAX_FILES = 3000
