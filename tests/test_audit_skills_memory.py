@@ -88,3 +88,30 @@ def test_the_ethics_tripwire_leaves_ordinary_work_alone(goal: str) -> None:
 def test_the_red_zone_sees_through_nfkc_and_abbreviations(code: str, monkeypatch) -> None:
     monkeypatch.delenv("GENESIS_RED_ZONE_TOKEN", raising=False)
     assert dna.validate_code_before_execution(code)
+
+
+# ── translator: code never goes to the translator ──────────────────────────
+
+def _fake_translate(monkeypatch):
+    from genesis_agent import translator as tr
+    monkeypatch.setattr(tr, "_call", lambda model, prompt: "Ⓣ" + prompt.split('"', 1)[1].rsplit('"', 1)[0])
+    return tr
+
+
+@pytest.mark.parametrize("code", [
+    "```python\ndef add(a, b):\n    return a + b\n",                  # незатворен (отрязан изход)
+    "~~~bash\nrm build\n~~~\n",
+    "````markdown\nПример:\n```bash\nls\n```\n````\n",
+])
+def test_fenced_code_is_never_translated(monkeypatch, code: str) -> None:
+    tr = _fake_translate(monkeypatch)
+    out = tr.translate_en_to_bg("Here it is:\n" + code)
+    assert out.endswith(code)
+    assert out.startswith("Ⓣ")
+
+
+def test_bulgarian_hyphenated_words_are_not_masked() -> None:
+    from genesis_agent import translator as tr
+    masked, kept = tr._mask("по-бърза и най-кратка версия на genesis_agent")
+    assert "по-бърза" in masked and "най-кратка" in masked
+    assert kept == ["genesis_agent"]

@@ -82,7 +82,8 @@ class TestWhatReachesThePrompt:
         от малкото слотове от истински съвет."""
         for _ in range(9):
             _mission("нещо", ok=False, lesson="съвсем непознат текст")
-        _mission("познат", ok=False, lesson="ModuleNotFoundError: no module named x")
+        for _ in range(2):  # урок = повтаряща се грешка
+            _mission("познат", ok=False, lesson="ModuleNotFoundError: no module named x")
         lessons = r.distill_lessons(last_n=60)
         assert all("Unknown" not in les for les in lessons), lessons
         assert any("Липсващ пакет" in les for les in lessons), lessons
@@ -111,3 +112,36 @@ class TestItNeverBreaksAMission:
     def test_an_episode_without_tags_or_lessons_is_survivable(self) -> None:
         em.record_episode(goal="без тагове", outcome="failed", skill_path="test")
         assert isinstance(r.distill_lessons(last_n=60), list)
+
+
+class TestAuditWave20261007:
+    def test_the_exception_line_survives_a_long_traceback(self) -> None:
+        tb = ("Traceback (most recent call last):\n"
+              + "".join(f'  File "/very/long/path/to/project/module_{i}.py", line {i}, in _self_test\n'
+                        f"    helper_{i}()\n" for i in range(12))
+              + "ZeroDivisionError: division by zero\n")
+        gist = r._failure_gist(tb)
+        assert "ZeroDivisionError" in gist and len(gist) <= 300
+
+    def test_a_self_test_frame_is_not_a_missing_self_test(self) -> None:
+        for _ in range(3):
+            _mission("x", ok=False, lesson='File "a.py", line 3, in _self_test\nZeroDivisionError: x')
+        assert not any("self-test" in les for les in r.distill_lessons(last_n=60))
+
+    def test_one_failure_is_not_a_lesson(self) -> None:
+        _mission("x", ok=False, lesson="ModuleNotFoundError: no module named x")
+        assert r.distill_lessons(last_n=60) == []
+
+
+def test_tool_episodes_are_pruned_and_missions_kept(monkeypatch) -> None:
+    import sqlite3
+    monkeypatch.setattr(em, "MAX_TOOL_EPISODES", 10)
+    _mission("важна мисия", ok=True)
+    for i in range(250):
+        em.record_episode(goal=f"READ_FILE {i}", outcome="x" * 50,
+                          skill_path=em._TOOL_PATH, tags=["tool"])
+    with sqlite3.connect(em.DB_PATH) as conn:
+        tools = conn.execute("SELECT COUNT(*) FROM episodes WHERE skill_path = ?",
+                             (em._TOOL_PATH,)).fetchone()[0]
+    assert tools <= 110
+    assert [e["goal"] for e in em.recent_with_tag("mission", 5)] == ["важна мисия"]

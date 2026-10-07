@@ -204,7 +204,7 @@ class Core:
             try:
                 from genesis_agent import knowledge_graph as kgraph
 
-                graph_text = kgraph.graph_briefing()
+                graph_text = kgraph.graph_briefing(workspace=str(workspace))
                 if graph_text:
                     self.system_prompt += (
                         "\n\n## ЗНАНИЕВ ГРАФ (entities/relations/states)\n" + graph_text
@@ -640,7 +640,8 @@ def run_tool_loop(
                 f"{m.get('role')}: {m.get('content')}" for m in pre_compact
                 if isinstance(m.get("content"), str)
             )
-            kgraph.compact_and_graph_memory(transcript)
+            kgraph.compact_and_graph_memory(
+                transcript, workspace=str(getattr(core, "workspace", "") or "") or None)
         except Exception:
             pass
         _status(f"история компресирана ({before_len} → {len(messages)})")

@@ -87,7 +87,7 @@ def record_episode(
     tags_str = ",".join(tags) if tags else None
 
     with _get_connection() as conn:
-        conn.execute(
+        cur = conn.execute(
             """
             INSERT INTO episodes
             (timestamp, goal, outcome, skill_path, lessons_learned, tags)
@@ -95,7 +95,49 @@ def record_episode(
             """,
             (timestamp, goal, outcome, skill_path, lessons_json, tags_str),
         )
+        # Плъзгащ се таван за епизодите от инструменти (до 2000 знака на всяко
+        # READ/WRITE/EDIT_FILE): нищо не ги чистеше — 100k записа = 205 MB и
+        # 2 s на всяка мисия (одит 2026-10-07). Мисиите не се пипат.
+        if skill_path == _TOOL_PATH and (cur.lastrowid or 0) % 100 == 0:
+            conn.execute(
+                """
+                DELETE FROM episodes WHERE skill_path = ? AND id <= (
+                    SELECT id FROM episodes WHERE skill_path = ?
+                    ORDER BY id DESC LIMIT 1 OFFSET ?);
+                """,
+                (_TOOL_PATH, _TOOL_PATH, MAX_TOOL_EPISODES),
+            )
         conn.commit()
+
+
+_TOOL_PATH = "genesis_skills.bridge"
+MAX_TOOL_EPISODES = 5000
+
+
+def recent_with_tag(tag: str, last_n: int) -> list[dict]:
+    """Последните `last_n` епизода с този таг — в SQL, не през всички записи."""
+    with _get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, timestamp, goal, outcome, skill_path, lessons_learned, tags
+            FROM episodes WHERE ',' || tags || ',' LIKE ?
+            ORDER BY id DESC LIMIT ?;
+            """,
+            (f"%,{tag},%", last_n),
+        ).fetchall()
+    return [_row(r) for r in reversed(rows)]
+
+
+def _row(row: tuple) -> dict:
+    return {
+        "id": row[0],
+        "timestamp": row[1],
+        "goal": row[2],
+        "outcome": row[3],
+        "skill_path": row[4],
+        "lessons_learned": _json_decode(row[5]),
+        "tags": row[6].split(",") if row[6] else [],
+    }
 
 
 def _fetch_all_episodes() -> list[dict]:
@@ -110,19 +152,7 @@ def _fetch_all_episodes() -> list[dict]:
             """
         ).fetchall()
 
-    episodes = []
-    for row in rows:
-        ep = {
-            "id": row[0],
-            "timestamp": row[1],
-            "goal": row[2],
-            "outcome": row[3],
-            "skill_path": row[4],
-            "lessons_learned": _json_decode(row[5]),
-            "tags": row[6].split(",") if row[6] else [],
-        }
-        episodes.append(ep)
-    return episodes
+    return [_row(r) for r in rows]
 
 
 def search_episodes(query: str, top_k: int = 5) -> list[dict]:
