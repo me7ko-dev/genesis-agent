@@ -303,9 +303,11 @@ class RemoteSession:
 
     def request_stop(self) -> None:
         self._stop.set()
-        for pending in list(self._pending.values()):
-            pending.allow = False
-            pending.event.set()
+        with self._cond:
+            for pending in list(self._pending.values()):
+                if not pending.event.is_set():
+                    pending.allow = False
+                    pending.event.set()
 
     def stopped(self) -> bool:
         return self._stop.is_set()
@@ -323,11 +325,14 @@ class RemoteSession:
         return allow
 
     def answer(self, cid: str, allow: bool) -> bool:
-        pending = self._pending.get(cid)
-        if pending is None:
-            return False
-        pending.allow = bool(allow)
-        pending.event.set()
+        # Първият отговор печели: второ докосване („Откажи“ и веднага
+        # „Изпълни“) не сменя вече даденото решение (одит 2026-10-07).
+        with self._cond:
+            pending = self._pending.get(cid)
+            if pending is None or pending.event.is_set():
+                return False
+            pending.allow = bool(allow)
+            pending.event.set()
         return True
 
 

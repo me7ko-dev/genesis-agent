@@ -27,7 +27,7 @@ export async function savePairing(pairing: Pairing): Promise<void> {
     globalThis.localStorage?.setItem(KEY, raw);
     return;
   }
-  await SecureStore.setItemAsync(KEY, raw, { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK });
+  await SecureStore.setItemAsync(KEY, raw, { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY });
 }
 
 export async function clearPairing(): Promise<void> {

@@ -103,7 +103,9 @@ export type Pairing = {
  */
 export function parsePairingUrl(raw: string): Pairing | null {
   const text = raw.trim();
-  const match = /^(https?:\/\/[^/#?\s]+)[^#]*#(.+)$/i.exec(text);
+  // Only scheme://host[:port]/#… — no user@, no backslash, no path or query
+  // (audit 2026-10-07: `http://pc@evil:1/#k=…` showed "pc" and talked to "evil").
+  const match = /^(https?:\/\/(?:[a-z0-9-]+(?:\.[a-z0-9-]+)*|\[[0-9a-f:.]+\])(?::\d{1,5})?)\/?#(.+)$/i.exec(text);
   if (!match) return null;
   const params: Record<string, string> = {};
   for (const part of match[2].split('&')) {
@@ -255,7 +257,9 @@ export class GenesisClient {
       if (detail.includes('stale')) throw new ProtocolError('clock', 'clock');
       throw new ProtocolError(detail || 'rejected', 'unauthorized');
     }
-    if (response.status === 429) throw new ProtocolError('too many failed attempts', 'unauthorized');
+    // The server's brake after failed attempts from this address — temporary,
+    // retry later; it says nothing about our key (unpairing over it lost the pairing).
+    if (response.status === 429) throw new ProtocolError('too many failed attempts — wait a minute', 'network');
     if (response.status !== 200) throw new ProtocolError(`server error ${response.status}`, 'server');
     return open(this.key, data as Envelope, RES_AAD + rid) as T;
   }

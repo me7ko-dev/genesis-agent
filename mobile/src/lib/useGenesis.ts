@@ -62,8 +62,17 @@ export function useGenesis(pairing: Pairing) {
           const reply = await client.events(lastSeq.current, first ? 0 : LONG_POLL_S);
           first = false;
           if (stopped) return;
-          // A restarted server numbers its events from 1 again.
-          const reset = reply.reset || (epoch.current !== '' && reply.epoch !== epoch.current);
+          // A restarted server numbers its events from 1 again: what it just
+          // sent was counted from our old seq, so start over from 0 (audit
+          // 2026-10-07: the new run's first events were skipped).
+          if (epoch.current !== '' && reply.epoch !== epoch.current) {
+            epoch.current = reply.epoch;
+            lastSeq.current = 0;
+            setEvents([]);
+            first = true;
+            continue;
+          }
+          const reset = reply.reset;
           epoch.current = reply.epoch;
           lastSeq.current = reply.last;
           setEvents((cur) => mergeEvents(cur, reply.events, reset));
@@ -106,7 +115,13 @@ export function useGenesis(pairing: Pairing) {
     return !!reply;
   }, [act, client]);
 
-  const confirm = useCallback((id: string, allow: boolean) => act(() => client.confirm(id, allow)), [act, client]);
+  const confirm = useCallback(async (id: string, allow: boolean) => {
+    const reply = await act(() => client.confirm(id, allow));
+    // ok:false — already answered, timed out or stopped: confirm_done shows
+    // what happened, nothing to retry.
+    if (reply && !reply.ok) setError('Това потвърждение вече е отговорено или изтече.');
+    return reply !== null;
+  }, [act, client]);
   const stop = useCallback(() => act(() => client.stop()), [act, client]);
   const clear = useCallback(() => act(() => client.clear()), [act, client]);
 
