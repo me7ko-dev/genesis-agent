@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -170,7 +171,8 @@ def update_thread(thread_id: Any, status: str = "", next_step: str = "", notes: 
     sets.append("updated_at = ?"); params.append(_now())
     params.append(tid)
     with _conn() as c:
-        cur = c.execute(f"UPDATE threads SET {', '.join(sets)} WHERE id = ?;", params)
+        params.append(current_workspace())
+        cur = c.execute(f"UPDATE threads SET {', '.join(sets)} WHERE id = ? AND workspace = ?;", params)
         if cur.rowcount == 0:
             return f"[TASK_UPDATE] Няма нишка #{tid}."
     return f"[TASK_UPDATE] ✓ Нишка #{tid} обновена."
@@ -367,8 +369,20 @@ _GENERAL_MARKERS = ("винаги", "никога", "всеки път", "от �
 _MAX_PREFS_PER_CAPTURE = 2
 
 
+# Чатът лепи провереното знание от библиотеката под заявката на оператора
+# (run_turn → domain_context). То НЕ е казано от оператора: 15K знака уеб
+# ръководство съдържат „никога“ и отключваха глобални предпочитания от една
+# задача за сайт (одит 2026-10-07 — точно случаят от 2026-09-28).
+_INJECTED = re.compile(r"\n\n## Проверено (ръководство|знание) от библиотеката:.*", re.DOTALL)
+
+
+def operator_text(content: Any) -> str:
+    """Само каквото операторът е написал — без приложеното знание."""
+    return _INJECTED.sub("", str(content or ""))
+
+
 def _operator_spoke_generally(convo: list[dict]) -> bool:
-    said = " ".join(str(m["content"]).lower() for m in convo if m.get("role") == "user")
+    said = " ".join(operator_text(m["content"]).lower() for m in convo if m.get("role") == "user")
     return any(marker in said for marker in _GENERAL_MARKERS)
 
 
@@ -388,7 +402,8 @@ def auto_capture(messages: list[dict], max_chars: int = 6000) -> dict:
     if len(convo) < 2:
         return written
 
-    text = "\n".join(f"{m['role']}: {str(m['content'])[:1200]}" for m in convo)[-max_chars:]
+    text = "\n".join(f"{m['role']}: {(operator_text(m['content']) if m['role'] == 'user' else str(m['content']))[:1200]}"
+                     for m in convo)[-max_chars:]
 
     # Показваме какво ВЕЧЕ е записано, за да преизползва съществуващите
     # формулировки вместо да измисля синоними ("стил на комуникация" срещу
@@ -494,7 +509,10 @@ def close_thread(thread_id: Any, drop: bool = False) -> str:
     if not drop:
         return update_thread(tid, status="done")
     with _conn() as c:
-        cur = c.execute("DELETE FROM threads WHERE id = ?;", (tid,))
+        # Само в ТОЗИ workspace: `/tasks` показва само неговите нишки, а номер
+        # от друг проект се триеше тихо (одит 2026-10-07).
+        cur = c.execute("DELETE FROM threads WHERE id = ? AND workspace = ?;",
+                        (tid, current_workspace()))
         if cur.rowcount == 0:
             return f"[DROP] Няма нишка #{tid}."
     return f"[DROP] ✓ Нишка #{tid} изтрита."

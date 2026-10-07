@@ -129,6 +129,14 @@ _LIVE_INFO = re.compile(
     r"vremeto|navan|navun|navyn|prognoz|novin|kurs|cen[ai]\b|bors|rezultat|dneshn|sega\b|"
     r"weather|forecast|news|prices?\b|stock|latest|today|current|score)",
     re.IGNORECASE)
+# Въпрос за ТАЗИ машина или файл: отговорът е там, не в знанието на модела.
+# Малкият модел без инструменти отговаряше „Имаш 16 GB RAM.“ наслуки (одит
+# 2026-10-07) — и ескалация нямаше, защото не беше поискал инструмент.
+_MACHINE = re.compile(
+    r"(\bram\b|паметта|процесор|видеокарт|компютър|лаптоп|свободн|място|версия|инсталир|\bip\b|"
+    r"ip-то|readme|имам\b|\bmoq\b|\bmoya\b|kompjut|kompyut|laptop|svobodn|mqsto|versiq|versi[aq]\b|"
+    r"\b(cpu|gpu|memory|disk|space|version|installed|my|mine|machine|computer|pc)\b)",
+    re.IGNORECASE)
 _TECHNICAL = re.compile(r"```|`|https?://|[\\/~]\w|\b\w+\.(py|js|ts|json|ya?ml|md|txt|sh|ps1|exe|zip)\b|[{}<>=;]")
 
 LIGHT_MAX_CHARS = 160
@@ -140,7 +148,7 @@ def is_light_request(text: str) -> bool:
     if not t or len(t) > LIGHT_MAX_CHARS or t.count("\n") > 1:
         return False
     return not (_TECHNICAL.search(t) or _ACTION.search(t) or _WORK_NOUN.search(t)
-                or _LIVE_INFO.search(t) or _CONFIRM.search(t))
+                or _LIVE_INFO.search(t) or _CONFIRM.search(t) or _MACHINE.search(t))
 
 
 def is_light_turn(messages: list[dict]) -> bool:

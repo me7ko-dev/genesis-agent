@@ -131,6 +131,31 @@ DEFAULT_CONTEXT_WINDOW = config.get("models", {}).get("context_window", 128000)
 
 # ── Session tracking ──────────────────────────────────────────────────────────
 session_start_time = time.time()
+_SESSION_FILE: Path | None = None
+
+
+def _session_file() -> Path:
+    """Файлът на ТЕКУЩИЯ разговор — същият през целия разговор, нов след
+    `/clear` и след възстановяване от `/history` (одит 2026-10-07: файлът
+    беше по началото на процеса и следващият разговор презаписваше
+    изчистения — `/history` вече нямаше какво да върне)."""
+    global _SESSION_FILE
+    if _SESSION_FILE is None:
+        stamp = datetime.fromtimestamp(session_start_time).strftime('%Y%m%d_%H%M%S')
+        candidate = HISTORY_DIR / f"session_{stamp}.json"
+        n = 2
+        while candidate.exists():
+            candidate = HISTORY_DIR / f"session_{stamp}_{n}.json"
+            n += 1
+        _SESSION_FILE = candidate
+    return _SESSION_FILE
+
+
+def _new_session() -> None:
+    """Следващият разговор се пише в нов файл."""
+    global session_start_time, _SESSION_FILE
+    session_start_time = time.time()
+    _SESSION_FILE = None
 total_input_tokens = 0
 total_output_tokens = 0
 # Размерът на ПОСЛЕДНАТА заявка (prompt + отговор) — това е заетият контекст.
@@ -219,15 +244,19 @@ KEYS = {
 }
 
 def load_env(path):
+    """Ключовете от един .env файл. Първият файл в ENV_FILES печели — същият
+    ред като paths.read_env_files, който ползва Brain (одит 2026-10-07: тук
+    печелеше последният и терминалът и Brain виждаха различни ключове)."""
+    from genesis_agent.paths import env_value
     if not path.exists(): return
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
         line = line.strip()
         if not line or line.startswith("#"): continue
         line = line.removeprefix("export ").strip()
         if "=" in line:
             k, v = line.split("=", 1)
-            k, v = k.strip(), _strip_inline_comment(v.strip()).strip('"').strip("'")
-            if k in KEYS and v: KEYS[k] = v
+            k, v = k.strip(), env_value(v)
+            if k in KEYS and v and not KEYS[k]: KEYS[k] = v
 
 # Real environment variables win over the .env files, matching
 # paths.get_secret. The loop below used to run the other way round, so an
@@ -689,7 +718,9 @@ def ask_genesis(messages, tools=None):
     различен модел на всяко съобщение и не се качваше обратно нагоре.
     """
     # Ръчно избран доставчик, който Brain не познава → стария директен път.
-    if not _brain_handles(current_provider):
+    # Не и в изричен офлайн режим (/local_model_*): там облакът не се пипа
+    # (одит 2026-10-07: закачен github/gpt-4o пак отговаряше от облака).
+    if not _brain_handles(current_provider) and not os.environ.get("GENESIS_LOCAL_ONLY"):
         return _ask_via_legacy(messages, tools, current_provider, current_model_id)
 
     from genesis_agent.brain import Brain
@@ -775,12 +806,23 @@ def _backup_workspace(src: Path, dest: Path) -> tuple[bool, str]:
     src, dest = Path(src).resolve(), Path(dest).resolve()
     if dest == src or src in dest.parents:
         return False, f"целта {dest} е вътре в {src} — избери друга GENESIS_BACKUP_DIR"
+    # Цел НАД проекта (одит 2026-10-07): `rsync --delete WS/ ROOT/` трие всичко
+    # в ROOT, което го няма в проекта — съседните проекти и самия проект.
+    if dest in src.parents:
+        return False, (f"целта {dest} съдържа проекта {src} — архивът би изтрил съседните "
+                       "папки; избери друга GENESIS_BACKUP_DIR")
+    marker = dest / ".genesis-backup"
     try:
+        # --delete само в папка, която е НАШ архив (маркер) или е празна: чужда
+        # непразна папка се допълва, нищо в нея не се трие.
+        mirror = marker.is_file() or not dest.exists() or not any(dest.iterdir())
         dest.mkdir(parents=True, exist_ok=True)
         if _rsync():
-            excl = [a for x in _BACKUP_EXCLUDE for a in ("--exclude", x)]
-            r = subprocess.run(["rsync", "-a", "--delete", *excl, f"{src}/", f"{dest}/"],
-                               capture_output=True, text=True, check=False)
+            excl = [a for x in (*_BACKUP_EXCLUDE, ".genesis-backup") for a in ("--exclude", x)]
+            argv = ["rsync", "-a", *(["--delete"] if mirror else []), *excl, f"{src}/", f"{dest}/"]
+            r = subprocess.run(argv, capture_output=True, text=True, check=False)
+            if r.returncode == 0 and mirror:
+                marker.write_text(str(src), encoding="utf-8")
             return r.returncode == 0, r.stderr.strip()
         shutil.copytree(src, dest, dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns(*_BACKUP_EXCLUDE))
@@ -1456,7 +1498,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
             pass
 
     # Save session history — convert deque to list for JSON serialization!
-    session_file = HISTORY_DIR / f"session_{datetime.fromtimestamp(session_start_time).strftime('%Y%m%d_%H%M%S')}.json"
+    session_file = _session_file()
     with open(session_file, "w", encoding="utf-8") as f:
         json.dump(list(messages), f, ensure_ascii=False, indent=None, separators=(',', ':'))
     from genesis_agent.agent_core import bounded_history
@@ -1542,6 +1584,7 @@ def main():
             if user_input.lower() == "/clear":
                 messages = deque([{"role": "system", "content": SYSTEM_PROMPT}], maxlen=_HISTORY_MAXLEN)
                 reset_usage()
+                _new_session()
                 print_minimal_banner()
                 continue
 
@@ -1807,6 +1850,7 @@ def main():
                         with open(shown[hsel - 1], "r", encoding="utf-8") as f:
                             loaded = json.load(f)
                         messages = _restore_session(loaded, SYSTEM_PROMPT)
+                        _new_session()   # продължението — в нов файл, старият остава
                         console.print(f"[green]✓ Сесията е заредена! ({len(messages)} съобщения)[/]")
                     elif hsel != 0:
                         console.print("[red]Невалиден избор.[/]")

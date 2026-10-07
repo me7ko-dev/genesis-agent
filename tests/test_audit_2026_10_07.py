@@ -442,3 +442,88 @@ def test_research_keeps_answers_that_merely_mention_not_found(monkeypatch) -> No
     monkeypatch.setattr("genesis_agent.web_search.search", lambda *a, **k: [
         {"title": t, "url": f"https://{t}.test", "snippet": "s"} for t in "abc"])
     assert "проверено през 3 източника" in rs.grounded_research("what is 404")
+
+
+# ── чат цикълът (одит 2026-10-07, четвърта вълна) ───────────────────────────
+
+def test_a_new_session_gets_a_new_history_file(tmp_path, monkeypatch) -> None:
+    import genesis_terminal_agent as gta
+    monkeypatch.setattr(gta, "HISTORY_DIR", tmp_path)
+    monkeypatch.setattr(gta, "_SESSION_FILE", None)
+    first = gta._session_file()
+    first.write_text("[]", encoding="utf-8")
+    assert gta._session_file() == first                    # същият разговор — същият файл
+    gta._new_session()
+    second = gta._session_file()
+    assert second != first and not second.exists()
+
+
+def test_drop_and_done_stay_in_their_workspace(wm, tmp_path) -> None:
+    other = tmp_path / "A"
+    other.mkdir()
+    wm.set_workspace(other)
+    wm.add_thread("работа в A")
+    tid = wm.list_threads("open")[0]["id"]
+    wm.set_workspace(tmp_path)
+    assert "Няма нишка" in wm.close_thread(tid, drop=True)
+    assert "Няма нишка" in wm.update_thread(tid, status="done")
+    wm.set_workspace(other)
+    assert [t["status"] for t in wm.list_threads("all")] == ["open"]
+
+
+def test_injected_knowledge_is_not_what_the_operator_said(wm) -> None:
+    content = "направи сайт за пекарна\n\n## Проверено ръководство от библиотеката: web\nникога не ползвай..."
+    assert wm.operator_text(content) == "направи сайт за пекарна"
+    assert not wm._operator_spoke_generally([{"role": "user", "content": content}])
+
+
+@pytest.mark.parametrize(("raw", "value"), [
+    ('"sk-proj #1"', "sk-proj #1"), ("abc # note", "abc"), ("a#b", "a#b"), ("'x y'", "x y"), ("plain", "plain")])
+def test_env_values(raw, value) -> None:
+    from genesis_agent.paths import env_value
+    assert env_value(raw) == value
+
+
+def test_a_bom_does_not_hide_the_first_key(tmp_path, monkeypatch) -> None:
+    from genesis_agent import paths
+    env = tmp_path / ".env"
+    env.write_bytes("﻿GITHUB_TOKEN=gh_123\n".encode())
+    monkeypatch.setattr(paths, "ENV_FILES", [env])
+    assert paths.read_env_files("GITHUB_TOKEN") == "gh_123"
+
+
+def test_the_terminal_reads_env_files_in_brains_order(tmp_path, monkeypatch) -> None:
+    import genesis_terminal_agent as gta
+    project, home = tmp_path / "p.env", tmp_path / "h.env"
+    project.write_text("GITHUB_TOKEN=project_key\n", encoding="utf-8")
+    home.write_text("﻿GITHUB_TOKEN=home_key\n", encoding="utf-8")
+    monkeypatch.setitem(gta.KEYS, "GITHUB_TOKEN", "")
+    gta.load_env(project)
+    gta.load_env(home)
+    assert gta.KEYS["GITHUB_TOKEN"] == "project_key"
+
+
+def test_local_only_never_takes_the_legacy_cloud_path(monkeypatch) -> None:
+    import genesis_terminal_agent as gta
+    monkeypatch.setenv("GENESIS_LOCAL_ONLY", "1")
+    monkeypatch.setattr(gta, "current_provider", "github")
+    monkeypatch.setattr(gta, "_ask_via_legacy", lambda *a, **k: pytest.fail("облакът е пипнат"))
+
+    class _B:
+        def __init__(self, *a, **k):
+            pass
+
+        def complete(self, messages, tools=None):
+            return type("R", (), {"raw_text": "local", "tool_calls": None, "usage": None})()
+    monkeypatch.setattr("genesis_agent.brain.Brain", _B)
+    try:
+        gta.ask_genesis([{"role": "user", "content": "x"}])
+    except Exception as e:  # пътят през Brain може да иска още неща — важното е легаси пътят
+        assert "облакът" not in str(e)
+
+
+@pytest.mark.parametrize("q", ["колко RAM имам?", "какво е IP-то ми?", "how much free space do I have?",
+                               "кажи ми какво пише в README"])
+def test_questions_about_this_machine_are_not_light(q) -> None:
+    from genesis_agent.model_router import is_light_request
+    assert not is_light_request(q)

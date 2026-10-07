@@ -272,6 +272,18 @@ def _strip_inline_comment(value: str) -> str:
     return value
 
 
+def env_value(raw: str) -> str:
+    """Стойността от ред `KEY=…` в .env: в кавички — точно съдържанието им
+    (`"sk-proj #1"` остава с `#`, одит 2026-10-07); без кавички — без коментара
+    след интервал."""
+    v = raw.strip()
+    if len(v) >= 2 and v[0] in "\"'":
+        end = v.find(v[0], 1)
+        if end != -1:
+            return v[1:end]
+    return _strip_inline_comment(v).strip('"').strip("'")
+
+
 def read_env_files(key: str) -> str | None:
     """
     Look up `key` in the .env files. Returns None if absent.
@@ -284,7 +296,9 @@ def read_env_files(key: str) -> str | None:
         if not p.exists():
             continue
         try:
-            for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+            # utf-8-sig: .env, записан от PowerShell 5.1, започва с BOM и
+            # първият ключ иначе е „\ufeffKEY“ — тоест невидим.
+            for line in p.read_text(encoding="utf-8-sig", errors="ignore").splitlines():
                 line = line.strip()
                 if not line or line.startswith("#") or "=" not in line:
                     continue
@@ -293,7 +307,7 @@ def read_env_files(key: str) -> str | None:
                 if k.startswith("export "):
                     k = k[len("export "):].strip()
                 if k == key:
-                    return _strip_inline_comment(v.strip()).strip('"').strip("'")
+                    return env_value(v)
         except OSError:
             continue
     return None

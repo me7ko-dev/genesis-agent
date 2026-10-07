@@ -53,9 +53,16 @@ def restored_history(saved: list[dict], system_prompt: str,
     той носи СВЕЖИ env_facts/брифинг за текущата сесия, не онези отпреди
     седмица.
     """
+    # Резюмето от компресията е system съобщение, но е ПАМЕТТА на разговора, не
+    # старият промпт — пази се (одит 2026-10-07: всяка сесия над 16 съобщения е
+    # компресирана, и възстановяването ѝ губеше целия по-ранен контекст).
+    summaries = [m for m in saved if m.get("role") == "system"
+                 and str(m.get("content", "")).startswith("## Резюме на по-ранния разговор")][-1:]
     body = [m for m in saved if m.get("role") != "system"]
-    return deque([{"role": "system", "content": system_prompt}] + body[-(maxlen - 1):],
-                 maxlen=maxlen)
+    tail = body[-(maxlen - 1 - len(summaries)):]
+    while tail and tail[0].get("role") == "tool":
+        tail = tail[1:]       # резултат без извикването си е невалидна история
+    return deque([{"role": "system", "content": system_prompt}, *summaries, *tail], maxlen=maxlen)
 
 
 def bounded_history(messages, maxlen: int | None) -> deque:

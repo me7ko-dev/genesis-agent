@@ -126,18 +126,21 @@ class TestRestoreSession:
         assert restored[0] == {"role": "system", "content": "CURRENT PROMPT"}
         assert restored[1:] == loaded[1:]
 
-    def test_duplicate_system_messages_collapse_to_one(self) -> None:
-        """compact_chat_history injects a second system message (the summary),
-        so a restored file can legitimately contain more than one — the result
-        must still carry exactly one, at the head."""
+    def test_the_old_prompt_goes_but_the_compaction_summary_stays(self) -> None:
+        """compact_chat_history injects a second system message (the summary).
+        The stale prompt is replaced by the current one; the summary is the
+        conversation's memory and stays right after it (одит 2026-10-07: it was
+        dropped, and every restored long session lost its earlier context)."""
         loaded = [
             {"role": "system", "content": "original"},
-            {"role": "system", "content": "## Резюме на по-ранния разговор:\n..."},
+            {"role": "system", "content": "## Резюме на по-ранния разговор:\nPostgres 16, порт 5433"},
             {"role": "user", "content": "hi"},
         ]
         restored = gta._restore_session(loaded, "CURRENT PROMPT")
         assert restored[0]["content"] == "CURRENT PROMPT"
-        assert sum(1 for m in restored if m.get("role") == "system") == 1
+        assert [m["content"] for m in restored if m.get("role") == "system"][1:] == [
+            "## Резюме на по-ранния разговор:\nPostgres 16, порт 5433"]
+        assert all("original" != m["content"] for m in restored)
 
 
 class TestTerminalHasTheSameIntegrityCheckAsTheSharedCore:
@@ -416,6 +419,28 @@ def test_backup_uses_rsync_when_present(tmp_path, monkeypatch) -> None:
     ok, _ = gta._backup_workspace(tmp_path / "ws", tmp_path / "bk")
     assert ok and calls[0][:3] == ["rsync", "-a", "--delete"]
     assert calls[0][calls[0].index(".env") - 1] == "--exclude"
+
+
+def test_backup_never_deletes_in_a_foreign_folder_or_above_the_project(tmp_path, monkeypatch) -> None:
+    """Одит 2026-10-07: цел над проекта или чужда непразна папка + `--delete`
+    би изтрила съседни проекти."""
+    calls = []
+
+    class _R:
+        returncode, stderr = 0, ""
+
+    monkeypatch.setattr(gta, "_rsync", lambda: "/usr/bin/rsync")
+    monkeypatch.setattr(gta.subprocess, "run", lambda argv, **kw: calls.append(argv) or _R())
+    parent = tmp_path / "projects"
+    (parent / "ws").mkdir(parents=True)
+    (parent / "sibling").mkdir()
+    ok, err = gta._backup_workspace(parent / "ws", parent)
+    assert not ok and "съседните" in err and calls == []
+    foreign = tmp_path / "usb"
+    foreign.mkdir()
+    (foreign / "photos").mkdir()
+    assert gta._backup_workspace(parent / "ws", foreign)[0]
+    assert "--delete" not in calls[-1]
 
 
 @pytest.mark.parametrize("inside", ["", "backup", "a/b"])
