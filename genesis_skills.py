@@ -1041,39 +1041,62 @@ def _safe_tool(name: str, fn: Callable[..., str], *args) -> str:
 
 def _text_args(name: str, args: tuple) -> dict:
     """The text-tag arguments in the shape the native path has (for hooks)."""
+    if name == "EDIT_FILE" and len(args) >= 3:
+        return {"path": str(args[0]).strip(), "old": args[1], "new": args[2]}
     if name in ("WRITE_FILE", "EDIT_FILE", "READ_FILE", "LIST_DIR") and args:
         return {"path": str(args[0]).strip(), **({"content": args[1]} if name == "WRITE_FILE"
                                                   and len(args) > 1 else {})}
-    if name == "RUN_CMD" and args:
+    if name in ("RUN_CMD", "RUN_BG") and args:
         return {"command": str(args[0])}
     return {"arg": " | ".join(str(a) for a in args)}
+
+
+def _hook_view(name: str, args: dict) -> tuple[str, dict]:
+    """Как hooks виждат извикването: `[RUN_BG: …]` е RUN_CMD във фона —
+    hook с matcher RUN_CMD не бива да се заобикаля с другото име (одит 2026-10-08)."""
+    if name == "RUN_BG":
+        return "RUN_CMD", {"command": args.get("arg", args.get("command", "")), "background": True}
+    return name, args
 
 
 def _before_tool(name: str, args: dict) -> str | None:
     """One gate for both paths (text tags and native calls): plan mode, the
     operator's PreToolUse hooks, and the /undo snapshot of a file about to
-    change. Never raises."""
+    change. Never raises — and fails CLOSED: an error in the gate refuses the
+    tool (it used to be swallowed and the tool ran past a hook that had
+    just blocked it — audit 2026-10-08)."""
     try:
         from genesis_agent import plan_mode
         refusal = plan_mode.refusal(name, args)
         if refusal:
             return refusal
         from genesis_agent import hooks
-        blocked = hooks.pre_tool(name, args)
+        hook_name, hook_args = _hook_view(name, args)
+        blocked = hooks.pre_tool(hook_name, hook_args)
         if blocked:
             return blocked
-        if name in ("WRITE_FILE", "EDIT_FILE") and args.get("path"):
+    except Exception as e:
+        return f"[{name}] ⛔ Проверката преди инструмента се провали ({e}) — не е изпълнен."
+    if name in ("WRITE_FILE", "EDIT_FILE") and args.get("path"):
+        try:
             from genesis_agent import edit_history
             edit_history.record(_resolve_noted(str(args["path"]), redirect=False)[0])
-    except Exception:
-        pass
+        except Exception:
+            pass
     return None
 
 
 def _after_tool(name: str, args: dict, result: str) -> str:
+    if name in ("WRITE_FILE", "EDIT_FILE") and args.get("path"):
+        try:  # отказан/неуспешен запис не е промяна за /undo
+            from genesis_agent import edit_history
+            edit_history.forget_if_unchanged(_resolve_noted(str(args["path"]), redirect=False)[0])
+        except Exception:
+            pass
     try:
         from genesis_agent import hooks
-        return hooks.post_tool(name, args, result)
+        hook_name, hook_args = _hook_view(name, args)
+        return hooks.post_tool(hook_name, hook_args, result)
     except Exception:
         return result
 
@@ -1281,7 +1304,8 @@ def _dispatch(name: str, arguments: dict) -> str:
             path = arguments.get("path", "") or ""
             return _tool_glob(f"{pattern} | {path}" if path else pattern)
         if name == "RUN_CMD":
-            if arguments.get("background"):
+            # „false“ като низ е истина в Python — фонът само при изрично да (одит 2026-10-08)
+            if str(arguments.get("background", "")).strip().lower() in ("true", "1", "yes"):
                 return _tool_run_bg(arguments.get("command", ""))
             return _tool_run_cmd(arguments.get("command", ""))
         if name == "EXPLORE":

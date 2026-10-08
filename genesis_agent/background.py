@@ -11,8 +11,11 @@ ends. `/bg` in the chat lists them.
 from __future__ import annotations
 
 import atexit
+import codecs
 import itertools
+import signal
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +33,8 @@ class Job:
     log: Path
     started: float = field(default_factory=time.time)
     read_to: int = 0
+    decoder: codecs.IncrementalDecoder = field(
+        default_factory=lambda: codecs.getincrementaldecoder("utf-8")(errors="replace"))
 
 
 _jobs: dict[str, Job] = {}
@@ -62,6 +67,7 @@ def start(command: str, cwd: Path | None = None) -> str:
     if proc is None:
         return f"[RUN_BG: {command}] {refusal}"
     _jobs[job_id] = Job(job_id, command, proc, log)
+    _install_signal_handlers()
     time.sleep(1.0)  # грешка при старта (порт зает, липсваща команда) се вижда веднага
     first = output(job_id)
     return (f"[RUN_BG: {command}] ▶ пуснато във фона като {job_id}. Изходът: BG_OUTPUT {job_id}; "
@@ -75,13 +81,17 @@ def output(job_id: str = "") -> str:
     job = _jobs.get(job_id)
     if job is None:
         return f"[BG_OUTPUT] ❌ Няма фонова команда {job_id}. {summary()}"
+    # Само новото и с инкрементален декодер: кирилска буква, разрязана между
+    # две четения, ставаше „з�“ + „�равей“, а целият лог (до 512 MB) се четеше
+    # при всяко поглеждане (одит 2026-10-08).
     try:
-        data = job.log.read_bytes()
+        with open(job.log, "rb") as fh:
+            fh.seek(job.read_to)
+            new = fh.read(4 * _MAX_OUTPUT + 1_000_000)
     except OSError:
-        data = b""
-    new = data[job.read_to:]
-    job.read_to = len(data)
-    text = new.decode("utf-8", errors="replace")
+        new = b""
+    job.read_to += len(new)
+    text = job.decoder.decode(new)
     if len(text) > _MAX_OUTPUT:
         text = f"… [пропуснати {len(text) - _MAX_OUTPUT} знака] …\n" + text[-_MAX_OUTPUT:]
     code = job.proc.poll()
@@ -114,3 +124,33 @@ def stop_all() -> None:
     from genesis_agent import sandbox
     for job in _running():
         sandbox.stop_process(job.proc)
+
+
+_handlers_installed = False
+
+
+def _install_signal_handlers() -> None:
+    """Затворен терминал (SIGHUP) или kill (SIGTERM) не минава през atexit —
+    сървърите във фона оставаха живи, осиновени от init (одит 2026-10-08).
+    Спираме ги и предаваме сигнала на предишния обработчик."""
+    global _handlers_installed
+    if _handlers_installed or threading.current_thread() is not threading.main_thread():
+        return
+    _handlers_installed = True
+    for name in ("SIGHUP", "SIGTERM"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        previous = signal.getsignal(sig)
+
+        def handler(signum, frame, previous=previous):
+            stop_all()
+            if callable(previous):
+                previous(signum, frame)
+            elif previous == signal.SIG_DFL:
+                signal.signal(signum, signal.SIG_DFL)
+                signal.raise_signal(signum)
+        try:
+            signal.signal(sig, handler)
+        except (ValueError, OSError):
+            pass

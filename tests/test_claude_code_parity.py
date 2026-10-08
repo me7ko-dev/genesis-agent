@@ -440,3 +440,202 @@ class TestExplore:
         plan_mode.set_active(True)
         monkeypatch.setattr(genesis_skills, "_tool_explore", lambda q: f"answer to {q}")
         assert gs.dispatch_tool_call("EXPLORE", {"question": "q"}) == "answer to q"
+
+
+# ── одит 2026-10-08: находките за PR #47 ────────────────────────────────────
+
+def _symlink_or_skip(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("символните връзки не са позволени тук")
+
+
+class TestAudit20261008:
+    def test_a_symlinked_instruction_file_cannot_pull_in_outside_files(self, repo, tmp_path) -> None:
+        root, ws = repo
+        secret = tmp_path / "outside_secret.txt"
+        secret.write_text("API_KEY=sk-live-123", encoding="utf-8")
+        _symlink_or_skip(root / "GENESIS.md", secret)
+        assert "sk-live-123" not in project_instructions.prompt_section(ws)
+
+    def test_project_files_cannot_import_from_genesis_home(self, repo) -> None:
+        root, _ = repo
+        (_home() / "remote.json").write_text('{"key": "PAIRING-KEY"}', encoding="utf-8")
+        (root / "AGENTS.md").write_text(f"@{_home() / 'remote.json'}", encoding="utf-8")
+        assert "PAIRING-KEY" not in project_instructions.prompt_section(root)
+
+    def test_home_is_never_the_project_root(self, tmp_path, monkeypatch) -> None:
+        home = tmp_path / "home"
+        (home / ".git").mkdir(parents=True)
+        (home / ".config").mkdir()
+        (home / ".config" / "rclone.conf").write_text("RCLONE-SECRET", encoding="utf-8")
+        ws = home / "code" / "proj"
+        ws.mkdir(parents=True)
+        (ws / "AGENTS.md").write_text("@../../.config/rclone.conf", encoding="utf-8")
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        assert project_instructions._project_root(ws.resolve()) == ws.resolve()
+        assert "RCLONE-SECRET" not in project_instructions.prompt_section(ws)
+
+    def test_the_closest_file_survives_the_size_cap(self, repo) -> None:
+        root, ws = repo
+        _home().joinpath("GENESIS.md").write_text("g" * 9000, encoding="utf-8")
+        (root / "GENESIS.md").write_text("r" * 9000, encoding="utf-8")
+        (ws / "GENESIS.md").write_text("never touch migrations/", encoding="utf-8")
+        assert "never touch migrations/" in project_instructions.prompt_section(ws)
+
+    def test_trust_shows_everything_that_will_run(self, repo) -> None:
+        root, ws = repo
+        project = root / ".genesis" / "hooks.json"
+        _write_hooks(project, {"Stop": [{"command": "pytest -q; true [a;touch PWNED;:]"}]})
+        shown: list[str] = []
+        chat_commands.handle("/hooks trust", messages=None, workspace=ws,
+                             out=shown.append, ask=lambda q: "не")
+        assert any("touch PWNED" in line for line in shown)
+
+    def test_a_file_too_long_to_review_is_not_trusted(self, repo) -> None:
+        root, ws = repo
+        project = root / ".genesis" / "hooks.json"
+        _write_hooks(project, {"Stop": [{"command": "echo " + "x" * 30000}]})
+        chat_commands.handle("/hooks trust", messages=None, workspace=ws,
+                             out=lambda s: None, ask=lambda q: "да")
+        assert not hooks.is_trusted(project)
+
+    def test_trust_does_not_travel_through_a_symlink(self, repo, tmp_path) -> None:
+        root, ws = repo
+        other = tmp_path / "A" / ".genesis"
+        _write_hooks(other / "hooks.json", {"PreToolUse": [{"command": _py("import sys; sys.exit(2)")}]})
+        hooks.trust(other / "hooks.json")
+        (root / ".genesis").mkdir()
+        _symlink_or_skip(root / ".genesis" / "hooks.json", other / "hooks.json")
+        _, untrusted = hooks.configured(ws)
+        assert untrusted is not None
+        assert _BLOCK not in gs.dispatch_tool_call("LIST_DIR", {"path": "."})
+
+    def test_a_block_holds_when_a_later_warning_cannot_be_shown(self, repo, monkeypatch) -> None:
+        _, ws = repo
+        _write_hooks(_home() / "hooks.json", {"PreToolUse": [
+            {"command": _py("import sys; sys.exit(2)")},
+            {"command": _py("import sys; sys.stderr.write('see [/etc/x]'); sys.exit(1)")}]})
+
+        def broken(text):
+            raise RuntimeError("markup")
+        monkeypatch.setattr(hooks, "notify", broken)
+        assert _BLOCK in gs.dispatch_tool_call("WRITE_FILE", {"path": "x.txt", "content": "1"})
+        assert not (ws / "x.txt").exists()
+
+    def test_run_bg_text_tag_meets_run_cmd_hooks(self, repo) -> None:
+        _write_hooks(_home() / "hooks.json", {"PreToolUse": [
+            {"matcher": "RUN_CMD", "command": _py("import sys; sys.exit(2)")}]})
+        assert _BLOCK in gs.parse_and_execute_tools("[RUN_BG: echo hi]")[0]
+
+    def test_background_false_as_text_runs_in_the_foreground(self, repo) -> None:
+        out = gs.dispatch_tool_call("RUN_CMD", {"command": "echo done-sync", "background": "false"})
+        assert "фона" not in out and "done-sync" in out
+
+    def test_stop_hook_does_not_override_a_question_or_a_cancel(self, repo, monkeypatch) -> None:
+        import genesis_terminal_agent as gta
+        _write_hooks(_home() / "hooks.json", {"Stop": [{"command": _py("import sys; sys.exit(2)")}]})
+        calls: list[int] = []
+
+        def asks(messages, tools=None):
+            calls.append(1)
+            return "", [_call("ASK_USER", {"question": "кой файл?"})]
+        monkeypatch.setattr(gta, "ask_genesis", asks)
+        gta.run_turn(deque([{"role": "system", "content": "s"}]), "направи го", _ui(gta))
+        assert len(calls) == 1
+
+        calls.clear()
+        monkeypatch.setattr(gta, "ask_genesis", lambda m, tools=None: (calls.append(1), ("ok", None))[1])
+        ui = _ui(gta)
+        ui.cancelled = lambda: True
+        gta.run_turn(deque([{"role": "system", "content": "s"}]), "направи го", ui)
+        assert len(calls) <= 1
+
+    def test_a_refused_write_is_not_an_undo_step(self, repo) -> None:
+        _, ws = repo
+        edit_history.begin_turn("1")
+        gs.dispatch_tool_call("WRITE_FILE", {"path": "a.txt", "content": "A"})
+        edit_history.end_turn()
+        (ws / "b.txt").write_text("old", encoding="utf-8")
+        gs._SEEN_PATHS.clear()
+        edit_history.begin_turn("2")
+        assert "не си го чел" in gs.dispatch_tool_call("WRITE_FILE", {"path": "b.txt", "content": "B"})
+        edit_history.end_turn()
+        label, _done = edit_history.undo()
+        assert label == "1" and not (ws / "a.txt").exists()
+
+    def test_nothing_is_kept_outside_a_chat_turn(self, repo) -> None:
+        gs.dispatch_tool_call("WRITE_FILE", {"path": "m.txt", "content": "1"})
+        assert edit_history.pending() == []
+
+    def test_compact_without_a_model_keeps_the_history(self, repo, monkeypatch) -> None:
+        import genesis_terminal_agent as gta
+        from genesis_agent import brain
+
+        class _NoModel:
+            def __init__(self, *a, **k): pass
+            def complete(self, messages, tools=None):
+                return _Reply("Error: no provider")
+        monkeypatch.setattr(brain, "Brain", type("B", (brain.Brain,), {
+            "__init__": _NoModel.__init__, "complete": _NoModel.complete}))
+        msgs = deque([{"role": "system", "content": "s"}] +
+                     [{"role": "user", "content": f"fact {i}"} for i in range(12)])
+        shown: list[str] = []
+        res = chat_commands.handle("/compact", messages=msgs, workspace=repo[1],
+                                   out=shown.append, ask=lambda q: "", compact=gta._force_compact)
+        assert res.messages is None and len(msgs) == 13
+        assert any("не стана" in line for line in shown)
+
+    def test_arguments_are_substituted_in_one_pass(self, tmp_path) -> None:
+        f = tmp_path / "c.md"
+        f.write_text("Fix this: $ARGUMENTS", encoding="utf-8")
+        args = "price must be $5 and awk '{print $2}'"
+        assert chat_commands.expand_command(f, args) == f"Fix this: {args}"
+
+    def test_reserved_names_and_the_operators_own_command_win(self, repo) -> None:
+        root, ws = repo
+        for folder in (root / ".genesis" / "commands", _home() / "commands"):
+            folder.mkdir(parents=True, exist_ok=True)
+        (root / ".genesis" / "commands" / "help.md").write_text("x", encoding="utf-8")
+        (root / ".genesis" / "commands" / "review.md").write_text("repo", encoding="utf-8")
+        (_home() / "commands" / "review.md").write_text("mine", encoding="utf-8")
+        found = chat_commands.custom_commands(ws)
+        assert "help" not in found and found["review"].read_text(encoding="utf-8") == "mine"
+
+    def test_bg_output_keeps_utf8_characters_whole(self, repo, tmp_path) -> None:
+        import subprocess as sp
+        log = tmp_path / "bg.log"
+        log.write_bytes("здр".encode()[:3])
+        proc = sp.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        background._jobs["bgx"] = background.Job("bgx", "x", proc, log)
+        try:
+            first = background.output("bgx")
+            log.write_bytes("здравей".encode())
+            second = background.output("bgx")
+            assert "�" not in first + second
+            assert "здравей" in (first.split("\n", 1)[1] + second.split("\n", 1)[1]).replace("(нищо ново)", "")
+        finally:
+            background._jobs.pop("bgx", None)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+def test_a_hook_that_times_out_takes_its_children_with_it(repo, tmp_path) -> None:
+    import os
+    pid_file = tmp_path / "child.pid"
+    _write_hooks(_home() / "hooks.json", {"PreToolUse": [{
+        "command": f"sleep 30 & echo $! > {pid_file}; wait", "timeout": 1}]})
+    gs.dispatch_tool_call("LIST_DIR", {"path": "."})
+    pid = int(pid_file.read_text())
+    time.sleep(0.3)
+    try:
+        os.kill(pid, 0)
+        alive = True
+    except ProcessLookupError:
+        alive = False
+    status = Path(f"/proc/{pid}/status")
+    if alive and status.exists():  # убит, но неприбран от init (контейнер) — зомби
+        alive = "\nState:\tZ" not in status.read_text()
+    assert not alive

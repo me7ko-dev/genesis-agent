@@ -877,7 +877,16 @@ def _force_compact(messages: "deque") -> "deque":
     """/compact: обобщава всичко освен последните няколко съобщения, сега."""
     from genesis_agent.brain import Brain
     keep = 4
-    return Brain.compact_chat_history(messages, threshold=keep + 1, keep_recent=keep)
+    new = Brain.compact_chat_history(messages, threshold=keep + 1, keep_recent=keep)
+    # Без отговор от модел компресията пада на „пази последните, без резюме“ —
+    # за изрична /compact това е загуба на историята под името „успех“ (одит
+    # 2026-10-08). Тогава историята остава, както е.
+    old = {str(m.get("content")) for m in messages}
+    summarized = any(m.get("role") == "system" and str(m.get("content")).startswith("## Резюме")
+                     and str(m.get("content")) not in old for m in new)
+    if len(new) < len(messages) and not summarized:
+        raise RuntimeError("няма модел за резюмето — историята е оставена непокътната")
+    return new
 
 
 # ── Tools ─────────────────────────────────────────────────────────────────────
@@ -1158,6 +1167,48 @@ class TurnUI:
         return False
 
 
+class _WatchedUI(TurnUI):
+    """Препраща към истинския UI и помни ЗАЩО ходът спря: Stop hook не бива
+    да връща хода на модела, когато операторът го е спрял, когато моделът го
+    пита нещо, или при таван/въртене (одит 2026-10-08: бутонът „Стоп“ на
+    телефона и ASK_USER бяха прескачани)."""
+
+    def __init__(self, inner: TurnUI) -> None:
+        self.inner = inner
+        self.stopped_for = ""
+
+    def thinking(self, label: str, spinner: str = "dots"):
+        return self.inner.thinking(label, spinner)
+
+    def assistant(self, text: str) -> None:
+        self.inner.assistant(text)
+
+    def tool(self, name: str, result: str) -> None:
+        self.inner.tool(name, result)
+
+    def asked(self, question: str) -> None:
+        self.stopped_for = "ask"
+        self.inner.asked(question)
+
+    def spinning(self, note: str) -> None:
+        self.stopped_for = "spin"
+        self.inner.spinning(note)
+
+    def warn(self, text: str) -> None:
+        if "таван" in text:
+            self.stopped_for = "cap"
+        self.inner.warn(text)
+
+    def info(self, text: str) -> None:
+        self.inner.info(text)
+
+    def cancelled(self) -> bool:
+        if self.inner.cancelled():
+            self.stopped_for = "cancel"
+            return True
+        return False
+
+
 class RichTurnUI(TurnUI):
     def thinking(self, label: str, spinner: str = "dots"):
         return console.status(f"[dim]{label}[/]", spinner=spinner)
@@ -1183,11 +1234,13 @@ class RichTurnUI(TurnUI):
         console.print(Panel(Text(note), title="🔁 Въртене на място",
                             border_style="yellow", padding=(1, 2)))
 
+    # Text, не разметка: съобщение от hook или инструмент с `[` хвърляше
+    # MarkupError насред хода (одит 2026-10-08).
     def warn(self, text: str) -> None:
-        console.print(f"[yellow]⚠ {text}[/]")
+        console.print(Text(f"⚠ {text}", style="yellow"))
 
     def info(self, text: str) -> None:
-        console.print(f"[dim]{text}[/]")
+        console.print(Text(text, style="dim"))
 
 
 RICH_UI = RichTurnUI()
@@ -1301,9 +1354,12 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     if plan_mode.active():
         extra += "\n\n" + plan_mode.PROMPT_NOTE
     edit_history.begin_turn(user_input)
+    watched = _WatchedUI(ui)
     try:
-        messages = _run_turn_once(messages, user_input, ui, extra)
+        messages = _run_turn_once(messages, user_input, watched, extra)
         for _ in range(_STOP_HOOK_ROUNDS):
+            if watched.stopped_for:
+                break
             last = next((str(m.get("content") or "") for m in reversed(messages)
                          if m.get("role") == "assistant"), "")
             try:
@@ -1314,7 +1370,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
                 break
             ui.warn("↻ hook Stop на оператора върна хода на модела")
             messages = _run_turn_once(
-                messages, f"[hook Stop на оператора — довърши, преди да спреш]\n{stop.message}", ui, "")
+                messages, f"[hook Stop на оператора — довърши, преди да спреш]\n{stop.message}", watched, "")
     finally:
         edit_history.end_turn()
     return messages
@@ -1966,7 +2022,10 @@ def main():
             from genesis_agent import chat_commands as _chat_commands
             _res = _chat_commands.handle(
                 user_input, messages=messages, workspace=Path(WORKSPACE),
-                out=console.print, ask=console.input, compact=_force_compact)
+                # Без Rich разметка: `[a;touch PWNED;:]` в hooks.json изчезваше от
+                # прегледа преди /hooks trust (одит 2026-10-08).
+                out=lambda text: console.print(text, markup=False, highlight=False),
+                ask=console.input, compact=_force_compact)
             if _res is not None:
                 if _res.messages is not None:
                     messages = _res.messages

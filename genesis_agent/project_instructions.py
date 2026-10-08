@@ -22,6 +22,7 @@ Total size is capped: this goes into EVERY request.
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,14 +52,16 @@ def _home() -> Path:
 
 def _project_root(workspace: Path) -> Path:
     """The repository root above the workspace (the folder with .git), or the
-    workspace itself. Never above the home folder."""
+    workspace itself. The home folder is never a project root: a dotfiles
+    repository in ~ made all of ~ "the project" — every config file there
+    importable, ~/.genesis/hooks.json a "project" file (audit 2026-10-08)."""
     home = Path.home().resolve()
     cur = workspace
     for _ in range(_MAX_LEVELS):
-        if (cur / ".git").exists():
-            return cur
         if cur == home or cur.parent == cur:
             break
+        if (cur / ".git").exists():
+            return cur
         cur = cur.parent
     return workspace
 
@@ -80,15 +83,37 @@ def _read(path: Path) -> str:
         return ""
 
 
-def _allowed(path: Path, roots: list[Path]) -> bool:
+def _under(path: Path, roots: list[Path]) -> bool:
+    return any(path == r or r in path.parents for r in roots)
+
+
+def _allowed(path: Path, roots: list[Path]) -> Path | None:
+    """The real path when `path` is a readable instruction file inside `roots`.
+
+    The text of the path is checked BEFORE the filesystem is touched: on Windows
+    resolving `\\\\host\\share\\x.md` already opens it over SMB (and hands the
+    machine's NTLM hash to that host). Then the real path — through symlinks —
+    must still be inside, a regular file, and not a key or secret: a cloned
+    repository's `GENESIS.md -> /proc/self/environ` or `-> ~/.ssh/id_rsa` put
+    those into the prompt sent to the provider (audit 2026-10-08)."""
     from genesis_agent.sandbox import sensitive_path_reason
+    text = str(path)
+    if text.startswith(("\\\\", "//")) or re.match(r"^[A-Za-z]:[^\\/]", text):
+        return None
+    if not _under(Path(os.path.normpath(text)), roots):
+        return None
     try:
         real = path.resolve()
     except OSError:
-        return False
-    if sensitive_path_reason(str(real)):
-        return False
-    return any(real == r or r in real.parents for r in roots) and real.is_file()
+        return None
+    if not _under(real, roots) or sensitive_path_reason(str(real)):
+        return None
+    if str(real).startswith(("/proc/", "/dev/", "/sys/")):
+        return None
+    try:
+        return real if real.is_file() else None
+    except OSError:
+        return None
 
 
 def _expand(text: str, base: Path, roots: list[Path], depth: int, seen: set[Path]) -> str:
@@ -110,16 +135,21 @@ def _expand(text: str, base: Path, roots: list[Path], depth: int, seen: set[Path
                 found.append((raw, target))
     extra = []
     for raw, target in found:
-        if not _allowed(target, roots):
-            continue
-        real = target.resolve()
-        if real in seen:
+        real = _allowed(target, roots)
+        if real is None or real in seen:
             continue
         seen.add(real)
         body = _expand(_read(real)[:_MAX_FILE], real.parent, roots, depth + 1, seen)
         if body.strip():
             extra.append(f"\n\n### @{raw}\n{body.strip()}")
     return text + "".join(extra)
+
+
+def _resolved(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except OSError:
+        return path
 
 
 def load(workspace: str | Path) -> list[Source]:
@@ -129,41 +159,42 @@ def load(workspace: str | Path) -> list[Source]:
         ws = ws.resolve()
     except OSError:
         return []
-    home = _home()
-    try:
-        home_real = home.resolve()
-    except OSError:
-        home_real = home
-    roots = [_project_root(ws), home_real]
-    candidates: list[Path] = [home / "GENESIS.md"]
+    home = _resolved(_home())
+    project = [_project_root(ws)]
+    # (кандидат, откъде може да внася): файлът на оператора — от ~/.genesis;
+    # файловете на проекта — само от проекта (не и от ~/.genesis: там е ключът
+    # за телефона, логовете, уменията — одит 2026-10-08).
+    candidates: list[tuple[Path, list[Path]]] = [(home / "GENESIS.md", [home])]
     for folder in _folders(ws):
         main = next((folder / n for n in NAMES if (folder / n).is_file()), None)
         if main is not None:
-            candidates.append(main)
-        candidates.append(folder / LOCAL_NAME)
-    out: list[Source] = []
+            candidates.append((main, project))
+        candidates.append((folder / LOCAL_NAME, project))
+    texts: list[tuple[Path, str]] = []
     seen: set[Path] = set()
-    total = 0
-    for path in candidates:
-        if not path.is_file():
-            continue
-        real = path.resolve()
-        if real in seen:
+    for path, roots in candidates:
+        real = _allowed(path, roots)
+        if real is None or real in seen:
             continue
         seen.add(real)
         text = _read(real)
-        if not text.strip():
-            continue
-        text = _expand(text, real.parent, roots, 0, seen)
-        truncated = False
-        room = min(_MAX_FILE * 2, _MAX_TOTAL - total)
+        if text.strip():
+            texts.append((path, _expand(text, real.parent, roots, 0, seen)))
+    # Таванът се пълни от най-близкия файл навън: той печели при разминаване и
+    # не бива да е този, който изпада (одит 2026-10-08: глобален 8K + корен 9K
+    # изхвърляха „не пипай migrations/“ на папката без следа).
+    budget = _MAX_TOTAL
+    kept: list[Source] = []
+    for path, text in reversed(texts):
+        room = min(_MAX_FILE * 2, budget)
         if room <= 0:
-            break
-        if len(text) > room:
-            text, truncated = text[:room], True
-        total += len(text)
-        out.append(Source(path, text.strip(), truncated))
-    return out
+            kept.append(Source(path, "", True))
+            continue
+        truncated = len(text) > room
+        text = text[:room]
+        budget -= len(text)
+        kept.append(Source(path, text.strip(), truncated))
+    return list(reversed(kept))
 
 
 def prompt_section(workspace: str | Path) -> str:

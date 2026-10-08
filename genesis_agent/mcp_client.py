@@ -278,7 +278,9 @@ def configured(ws: Path | None = None) -> tuple[list[Server], Path | None]:
     project = project_file(ws)
     untrusted = None
     if project.is_file():
-        if hooks.is_trusted(project):
+        from genesis_agent.project_instructions import _project_root
+        root = _project_root(Path(ws or _workspace()).resolve())
+        if hooks.stays_in_project(project, root) and hooks.is_trusted(project):
             names = {s.name for s in servers}
             servers += [s for s in _parse(project) if s.name not in names]
         else:
