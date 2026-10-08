@@ -171,10 +171,22 @@ class Cipher:
 class ReplayGuard:
     """Отказва заявка извън ±5 минути или с вече виждан идентификатор."""
 
-    def __init__(self, max_skew_ms: int = _MAX_SKEW_MS) -> None:
+    def __init__(self, max_skew_ms: int = _MAX_SKEW_MS, *, path: Path | None = None) -> None:
         self._max_skew_ms = max_skew_ms
         self._seen: dict[str, float] = {}
         self._lock = threading.Lock()
+        # Видяното се пази и на диска (одит 2026-10-07): само в паметта
+        # рестарт на `genesis serve` го губеше и записано от мрежата съобщение
+        # („rm -rf build && deploy“) се изпълняваше пак в рамките на 5-те минути.
+        self._path = path
+        if path is not None:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                horizon = time.time() * 1000 - 2 * max_skew_ms
+                self._seen = {str(r): float(t) for r, t in data.items()
+                              if isinstance(t, (int, float)) and t >= horizon}
+            except (OSError, ValueError, AttributeError):
+                self._seen = {}
 
     def check(self, payload: dict, now_ms: float | None = None) -> str:
         now_ms = time.time() * 1000 if now_ms is None else now_ms
@@ -190,6 +202,13 @@ class ReplayGuard:
             if rid in self._seen:
                 raise ProtocolError("replayed request")
             self._seen[rid] = now_ms
+            if self._path is not None:
+                try:
+                    tmp = self._path.with_name(self._path.name + ".tmp")
+                    tmp.write_text(json.dumps(self._seen), encoding="utf-8")
+                    os.replace(tmp, self._path)
+                except OSError:
+                    pass  # без запис пазим поне в паметта — както преди
         return rid
 
 
@@ -284,9 +303,11 @@ class RemoteSession:
 
     def request_stop(self) -> None:
         self._stop.set()
-        for pending in list(self._pending.values()):
-            pending.allow = False
-            pending.event.set()
+        with self._cond:
+            for pending in list(self._pending.values()):
+                if not pending.event.is_set():
+                    pending.allow = False
+                    pending.event.set()
 
     def stopped(self) -> bool:
         return self._stop.is_set()
@@ -304,11 +325,14 @@ class RemoteSession:
         return allow
 
     def answer(self, cid: str, allow: bool) -> bool:
-        pending = self._pending.get(cid)
-        if pending is None:
-            return False
-        pending.allow = bool(allow)
-        pending.event.set()
+        # Първият отговор печели: второ докосване („Откажи“ и веднага
+        # „Изпълни“) не сменя вече даденото решение (одит 2026-10-07).
+        with self._cond:
+            pending = self._pending.get(cid)
+            if pending is None or pending.event.is_set():
+                return False
+            pending.allow = bool(allow)
+            pending.event.set()
         return True
 
 
@@ -359,10 +383,10 @@ class RemoteServer:
     def __init__(self, key: bytes, session: RemoteSession, *, name: str,
                  status: Callable[[], dict] | None = None,
                  clear: Callable[[], None] | None = None,
-                 web_root: Path | None = None) -> None:
+                 web_root: Path | None = None, replay_path: Path | None = None) -> None:
         self.key = key
         self.cipher = Cipher(key)
-        self.replay = ReplayGuard()
+        self.replay = ReplayGuard(path=replay_path)
         self.session = session
         self.name = name
         self.status = status or (dict)
@@ -624,6 +648,9 @@ def serve(args: list[str]) -> int:
     def clear() -> None:
         state["messages"] = deque([{"role": "system", "content": system_prompt}],
                                   maxlen=gta._HISTORY_MAXLEN)
+        # Нов разговор от телефона = нова сесия и за брояча (NEXT_STEPS В.8):
+        # иначе статус редът на компютъра носеше Σ на стария разговор.
+        gta.reset_usage()
 
     def status() -> dict:
         return {"model": f"{gta.current_provider}/{gta.current_model_id}",
@@ -652,7 +679,8 @@ def serve(args: list[str]) -> int:
         confirm_fn=lambda op, verdict: session.confirm(op, list(verdict.reasons))))
 
     name = socket.gethostname()
-    server = RemoteServer(key, session, name=name, status=status, clear=clear, web_root=_web_root())
+    server = RemoteServer(key, session, name=name, status=status, clear=clear, web_root=_web_root(),
+                          replay_path=_config_path().with_name("remote_seen.json"))
     try:
         httpd = server.make_http("0.0.0.0", port)
     except OSError as e:

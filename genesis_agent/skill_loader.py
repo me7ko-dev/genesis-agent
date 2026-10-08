@@ -73,6 +73,28 @@ def format_skill_list(width: int = 70) -> str:
     return "\n".join(lines)
 
 
+_CODE_FENCE = re.compile(r"^(`{3,})python\n(.*?)\n\1[ \t]*$", re.DOTALL | re.MULTILINE)
+
+
+def extract_code(content: str) -> str | None:
+    """Кодът от първия ```python блок — същият низ, който се подписва.
+
+    Затварящата ограда е със СЪЩАТА дължина като отварящата и на свой ред:
+    код с ред, започващ с ``` (Markdown шаблон), се пише в ````python и не
+    се отрязва при първия такъв ред (одит 2026-10-07: подписано и проверено
+    умение се отказваше като „подправено“, а неподписано пускаше отрязан код).
+    """
+    text = content.replace("\r\n", "\n")
+    # След ПОСЛЕДНОТО заглавие „## Python Код“ (преглед 2026-10-07): целта на
+    # умението се записва дословно в „## Описание“ над него, и ```python блок в
+    # нея ставаше „кодът“ — подписан и пуснат вместо проверения.
+    head = text.rfind("\n## Python Код")
+    if head != -1:
+        text = text[head:]
+    m = _CODE_FENCE.search(text)
+    return m.group(2).strip() if m else None
+
+
 def skill_view(name: str, *, file_path: Path | None = None) -> dict[str, Any]:
     """
     Зарежда .md файл на умение и връща YAML метаданни + код.
@@ -114,10 +136,9 @@ def skill_view(name: str, *, file_path: Path | None = None) -> dict[str, Any]:
     metadata.setdefault("name", name)
 
     # Извличане на Python код
-    code_match = re.search(r"```python\n(.*?)\n```", content, re.DOTALL)
-    if not code_match:
+    code = extract_code(content)
+    if code is None:
         raise ValueError(f"Няма Python код блок в: {md_path}")
-    code = code_match.group(1).strip()
 
     # Signature check (design note, 2026-08-12): skills_manager.save_skill
     # signs NEW skills going forward — see its comment for why. Deliberately
@@ -136,10 +157,7 @@ def skill_view(name: str, *, file_path: Path | None = None) -> dict[str, Any]:
     signature = (skill_meta or {}).get("signature") or ""
     if signature:
         try:
-            from genesis_agent.cryptography_utils import (
-                PUBLIC_KEY_PATH,
-                verify_signature,
-            )
+            from genesis_agent.cryptography_utils import have_keys, verify_signature
             # Липсващ публичен ключ НЕ е провалена проверка (bug found
             # end-to-end, 2026-08-12): verify_signature() връща False и в двата
             # случая, а третирането им еднакво значи, че всяко клониране без
@@ -147,8 +165,11 @@ def skill_view(name: str, *, file_path: Path | None = None) -> dict[str, Any]:
             # библиотека незаредима, при това с обвинение в подправяне.
             # Липсата на ключ значи "не мога да преценя", не "открих намеса";
             # тогава се държим точно както при неподписаните умения.
-            # Несъвпадение ПРИ наличен ключ си остава твърд отказ.
-            if not PUBLIC_KEY_PATH.exists():
+            # Несъвпадение ПРИ наличен ключ си остава твърд отказ. Изтрит
+            # public_key.pem при наличен частен ключ не изключва проверката —
+            # публичният се извежда от частния (одит 2026-10-07: код, пуснат
+            # от умение, трие public_key.pem и подменя умението трайно).
+            if not have_keys():
                 sig_ok = True
             else:
                 sig_ok = verify_signature(code, signature)
@@ -201,16 +222,88 @@ _STOPWORDS = {
 }
 
 
+# Окончания на български, най-дългите първи. Не е граматика, а сгъване на
+# формите, които операторът реално пише за едно и също: „фактура/фактурите“,
+# „провери/проверка“, „уебсайт/уебсайта“, „работни/работните/работен“,
+# „умение/уменията“. Измерено 2026-10-07 (domain_context върху заявки като
+# „провери ЕГН-то на клиента“, „направи уебсайта на пекарната“, „провери
+# IBAN-ите“, „извлечи полетата от фактурите“): без него и четирите не получаваха
+# провереното знание, макар темата да е точно тя — само заради формата на думата.
+_BG_SUFFIXES = tuple(sorted({
+    "ение", "ения", "ие", "ия", "ове", "еве", "ища", "ане", "яне", "ания",
+    "ни", "на", "но", "ен", "ена", "ено", "ени",
+    "ам", "ям", "аме", "яме", "ате", "яте", "ат", "ах", "ях", "еше", "аше",
+    "ете", "ем", "еш", "иш", "им", "ал", "ала", "ало", "али", "ял", "яла", "яли",
+    "ка", "ки", "а", "я", "о", "е", "и", "у", "ю",
+}, key=len, reverse=True))
+_BG_VOWELS = set("аъоуеияю")
+# Остатъкът от „IBAN-ите“, „ЕГН-то“: `\w+` реже на тирето и членът остава
+# като отделна „дума“, която съвпада с нищо смислено.
+_BG_FRAGMENTS = {"ите", "ата", "ото", "ият", "ния"}
+_CYRILLIC_WORD = re.compile(r"^[а-яѝ]+$")
+
+
+def _stem(word: str) -> str:
+    """Основата на българска дума: първо членът, после едно окончание;
+    основата остава поне 3 букви.
+
+    Членът „-та/-то/-те“ се маха само след гласна („фактура|та“), иначе
+    „-а“ е окончанието („уебсайт|а“, не „уебсай|та“). Латиница и думи под
+    4 букви (`егн`, `ддс`, `iban`) не се пипат — там формата е една и
+    съкращаването само би слепило различни неща.
+    """
+    if len(word) < 4 or not _CYRILLIC_WORD.match(word):
+        return word
+    article = word.endswith(("ът", "ят")) or (
+        word.endswith(("та", "то", "те")) and word[-3] in _BG_VOWELS)
+    if article and len(word) >= 5:
+        word = word[:-2]
+    for suffix in _BG_SUFFIXES:
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            return word[: -len(suffix)]
+    return word
+
+
+def _light_stem(word: str) -> str:
+    """Само членът и окончанието на съществително — без глаголните окончания.
+
+    За проверката „цял тригер“ в domain_context. Пълната основа (_stem) слива
+    „работи“ (глагол) с „работни“ — и „скриптът не работи вече 3 дни“ получаваше
+    правилата за работни дни (одит 2026-10-07); „основните полета“ — правилата
+    за фактури („данъчна основа“). Тук „работи“ и „работни“ остават различни,
+    а „фактурите“/„фактура“, „уебсайта“/„уебсайт“, „номерата“/„номер“ се срещат.
+    """
+    if len(word) < 4 or not _CYRILLIC_WORD.match(word):
+        return word
+    if word.endswith(("ът", "ят")) and len(word) >= 5:
+        return word[:-2]
+    if word.endswith(("та", "то", "те")) and len(word) >= 5 and word[-3] in _BG_VOWELS:
+        word = word[:-2]
+    if word[-1] in "ая" and word[-2] not in _BG_VOWELS and len(word) >= 5:
+        word = word[:-1]
+    return word
+
+
+def _light_keywords(text: str) -> set[str]:
+    return {
+        _light_stem(w) for w in re.findall(r"\w+", text.lower())
+        if len(w) >= 3 and w not in _STOPWORDS and w not in _BG_FRAGMENTS
+    }
+
+
 def _keywords(text: str) -> set[str]:
     r"""Думите, по които се мери съвпадение. `\w` вместо `[a-z0-9_]` (2026-09-20):
     старият клас беше само ASCII, тоест всяка дума на кирилица беше невидима.
     Измерено преди поправката — заявка изцяло на български даваше ПРАЗНО
     множество, значи score 0 за всяко умение, значи нито едно не можеше да се
     преизползва никога. А преизползването е целият смисъл на библиотеката.
+
+    Българските думи се свеждат до основата си (_stem) — и в заявката, и в
+    тригерите, затова „фактурите“ съвпада с тригер „фактура“.
     """
     return {
-        w for w in re.findall(r"\w+", text.lower())
-        if len(w) >= 3 and w not in _STOPWORDS
+        _stem(w) for w in re.findall(r"\w+", text.lower())
+        if len(w) >= 3 and w not in _STOPWORDS and w not in _BG_FRAGMENTS
     }
 
 
@@ -309,7 +402,8 @@ def domain_context(query: str) -> str:
         # на контролната цифра“ + „номер на читателя“ за ISBN дадоха 3 думи от
         # тригерите на ЕГН („проверка на егн контролна цифра“, „единен граждански
         # номер“) без самото „егн“ — и правилата за ЕГН отиваха в задача за книги.
-        whole = any(kw and kw <= query_words for kw in (_keywords(t) for t in triggers))
+        light_query = _light_keywords(query)
+        whole = any(kw and kw <= light_query for kw in (_light_keywords(t) for t in triggers))
         if whole and score >= need:
             ranked.append((score, h))
     ranked.sort(key=lambda x: x[0], reverse=True)

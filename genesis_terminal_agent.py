@@ -89,6 +89,7 @@ except Exception:
 # All paths come from genesis_agent.paths, which derives them from the
 # installed package and the user's own home — nothing machine-specific here.
 from genesis_agent import claim_check
+from genesis_agent.acceptance import AcceptanceCheck as _AcceptanceCheck
 from genesis_agent.budget import clip_for_context
 from genesis_agent.code_check import RunCheck as _RunCheck
 from genesis_agent.config import TOOL_ROUND_CAP as _TOOL_ROUND_CAP
@@ -130,6 +131,31 @@ DEFAULT_CONTEXT_WINDOW = config.get("models", {}).get("context_window", 128000)
 
 # ── Session tracking ──────────────────────────────────────────────────────────
 session_start_time = time.time()
+_SESSION_FILE: Path | None = None
+
+
+def _session_file() -> Path:
+    """Файлът на ТЕКУЩИЯ разговор — същият през целия разговор, нов след
+    `/clear` и след възстановяване от `/history` (одит 2026-10-07: файлът
+    беше по началото на процеса и следващият разговор презаписваше
+    изчистения — `/history` вече нямаше какво да върне)."""
+    global _SESSION_FILE
+    if _SESSION_FILE is None:
+        stamp = datetime.fromtimestamp(session_start_time).strftime('%Y%m%d_%H%M%S')
+        candidate = HISTORY_DIR / f"session_{stamp}.json"
+        n = 2
+        while candidate.exists():
+            candidate = HISTORY_DIR / f"session_{stamp}_{n}.json"
+            n += 1
+        _SESSION_FILE = candidate
+    return _SESSION_FILE
+
+
+def _new_session() -> None:
+    """Следващият разговор се пише в нов файл."""
+    global session_start_time, _SESSION_FILE
+    session_start_time = time.time()
+    _SESSION_FILE = None
 total_input_tokens = 0
 total_output_tokens = 0
 # Размерът на ПОСЛЕДНАТА заявка (prompt + отговор) — това е заетият контекст.
@@ -218,15 +244,19 @@ KEYS = {
 }
 
 def load_env(path):
+    """Ключовете от един .env файл. Първият файл в ENV_FILES печели — същият
+    ред като paths.read_env_files, който ползва Brain (одит 2026-10-07: тук
+    печелеше последният и терминалът и Brain виждаха различни ключове)."""
+    from genesis_agent.paths import env_value
     if not path.exists(): return
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
         line = line.strip()
         if not line or line.startswith("#"): continue
         line = line.removeprefix("export ").strip()
         if "=" in line:
             k, v = line.split("=", 1)
-            k, v = k.strip(), _strip_inline_comment(v.strip()).strip('"').strip("'")
-            if k in KEYS and v: KEYS[k] = v
+            k, v = k.strip(), env_value(v)
+            if k in KEYS and v and not KEYS[k]: KEYS[k] = v
 
 # Real environment variables win over the .env files, matching
 # paths.get_secret. The loop below used to run the other way round, so an
@@ -688,7 +718,9 @@ def ask_genesis(messages, tools=None):
     различен модел на всяко съобщение и не се качваше обратно нагоре.
     """
     # Ръчно избран доставчик, който Brain не познава → стария директен път.
-    if not _brain_handles(current_provider):
+    # Не и в изричен офлайн режим (/local_model_*): там облакът не се пипа
+    # (одит 2026-10-07: закачен github/gpt-4o пак отговаряше от облака).
+    if not _brain_handles(current_provider) and not os.environ.get("GENESIS_LOCAL_ONLY"):
         return _ask_via_legacy(messages, tools, current_provider, current_model_id)
 
     from genesis_agent.brain import Brain
@@ -774,12 +806,23 @@ def _backup_workspace(src: Path, dest: Path) -> tuple[bool, str]:
     src, dest = Path(src).resolve(), Path(dest).resolve()
     if dest == src or src in dest.parents:
         return False, f"целта {dest} е вътре в {src} — избери друга GENESIS_BACKUP_DIR"
+    # Цел НАД проекта (одит 2026-10-07): `rsync --delete WS/ ROOT/` трие всичко
+    # в ROOT, което го няма в проекта — съседните проекти и самия проект.
+    if dest in src.parents:
+        return False, (f"целта {dest} съдържа проекта {src} — архивът би изтрил съседните "
+                       "папки; избери друга GENESIS_BACKUP_DIR")
+    marker = dest / ".genesis-backup"
     try:
+        # --delete само в папка, която е НАШ архив (маркер) или е празна: чужда
+        # непразна папка се допълва, нищо в нея не се трие.
+        mirror = marker.is_file() or not dest.exists() or not any(dest.iterdir())
         dest.mkdir(parents=True, exist_ok=True)
         if _rsync():
-            excl = [a for x in _BACKUP_EXCLUDE for a in ("--exclude", x)]
-            r = subprocess.run(["rsync", "-a", "--delete", *excl, f"{src}/", f"{dest}/"],
-                               capture_output=True, text=True, check=False)
+            excl = [a for x in (*_BACKUP_EXCLUDE, ".genesis-backup") for a in ("--exclude", x)]
+            argv = ["rsync", "-a", *(["--delete"] if mirror else []), *excl, f"{src}/", f"{dest}/"]
+            r = subprocess.run(argv, capture_output=True, text=True, check=False)
+            if r.returncode == 0 and mirror:
+                marker.write_text(str(src), encoding="utf-8")
             return r.returncode == 0, r.stderr.strip()
         shutil.copytree(src, dest, dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns(*_BACKUP_EXCLUDE))
@@ -1207,8 +1250,15 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     except Exception:
         knowledge = ""
     if knowledge:
+        head = knowledge.splitlines()[0]
+        # Веднъж на разговор: всяко продължение („смени цвета на сайта“) пак
+        # съвпада със същото ръководство и историята растеше с ~16K знака на
+        # ход — 4 копия след 4 реплики (одит 2026-10-07).
+        if any(head in str(m.get("content") or "") for m in messages if m.get("role") == "user"):
+            knowledge = ""
+    if knowledge:
         content = f"{user_input}\n\n{knowledge}"
-        ui.info(f"📚 проверено знание: {knowledge.splitlines()[0].split(': ', 1)[-1]}")
+        ui.info(f"📚 проверено знание: {head.split(': ', 1)[-1]}")
     # Без таван до края на хода: deque(maxlen) изхвърляше посред задачата
     # системния промпт и самата заявка (виж agent_core.bounded_history).
     limit = getattr(messages, "maxlen", None)
@@ -1238,6 +1288,8 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     _page_check = _PageCheck()
     # .py, записан и непуснат след последната промяна (genesis_agent.code_check).
     _run_check = _RunCheck()
+    # Приемни тестове само от заявката (GENESIS_ACCEPTANCE=1, genesis_agent.acceptance).
+    _accept = _AcceptanceCheck(user_input, Path(genesis_skills._WORKSPACE), rules=knowledge)
     # Въртене на място: същият извик, същият резултат, пореден път.
     # Таванът го ограничава по цена, но не го разпознава — виж
     # genesis_agent.repeat_guard.
@@ -1253,7 +1305,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
             assistant_msg["tool_calls"] = tool_calls
         messages.append(assistant_msg)
         _remember("assistant", response if response.strip() else
-                  f"[повикани {len(tool_calls)} tool(-а)]")
+                  f"[повикани {len(tool_calls or [])} tool(-а)]")
         if ui.cancelled():
             # Преди следващия инструмент, не по средата му. Недовършените
             # tool_calls остават без резултат — затова се махат, иначе
@@ -1280,6 +1332,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
                 result = genesis_skills.dispatch_tool_call(name, args)
                 _page_check.observe(result)
                 _run_check.observe(result)
+                _accept.observe(result)
                 _entry = claim_check.counts_as_executed(
                     name, " ".join(str(v) for v in args.values()), result)
                 if _entry:
@@ -1326,6 +1379,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
         for _r in tool_results:
             _page_check.observe(_r)
             _run_check.observe(_r)
+            _accept.observe(_r)
         if not tool_results:
             # Празно ≠ непременно "приключи" — може да е объркан tool tag
             # (виж agent_core.run_tool_loop, същият фикс, design note
@@ -1364,6 +1418,16 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
                 with ui.thinking("Пробвам кода…", "aesthetic"):
                     response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
                 continue
+            if _accept.due():
+                with ui.thinking("Приемни тестове само от заявката…", "dots2"):
+                    _acc_note, _acc_line = _accept.check()
+                if _acc_line:
+                    ui.tool("приемни тестове", _acc_line)
+                if _acc_note:
+                    messages.append({"role": "system", "content": _acc_note})
+                    with ui.thinking("Сверявам със заявката…", "aesthetic"):
+                        response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
+                    continue
             _promise = claim_check.unfinished_promise(response)
             if _promise and _promise_retries < 1:
                 _promise_retries += 1
@@ -1441,7 +1505,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
             pass
 
     # Save session history — convert deque to list for JSON serialization!
-    session_file = HISTORY_DIR / f"session_{datetime.fromtimestamp(session_start_time).strftime('%Y%m%d_%H%M%S')}.json"
+    session_file = _session_file()
     with open(session_file, "w", encoding="utf-8") as f:
         json.dump(list(messages), f, ensure_ascii=False, indent=None, separators=(',', ':'))
     from genesis_agent.agent_core import bounded_history
@@ -1527,6 +1591,7 @@ def main():
             if user_input.lower() == "/clear":
                 messages = deque([{"role": "system", "content": SYSTEM_PROMPT}], maxlen=_HISTORY_MAXLEN)
                 reset_usage()
+                _new_session()
                 print_minimal_banner()
                 continue
 
@@ -1548,6 +1613,19 @@ def main():
                     console.print("[green]✅ Архивирането завърши.[/]")
                 else:
                     console.print(f"[red]❌ Архивирането се провали:[/] {err[:200]}")
+                continue
+
+            if user_input.lower().split(" ", 1)[0] in ("/export", "/предай"):
+                # Zip + GENESIS_REPORT.md на текущия workspace (deliver.py) —
+                # без модел: отчетът се взима от проекта, не от разговора.
+                _arg = user_input.split(" ", 1)[1].strip() if " " in user_input else ""
+                try:
+                    from genesis_agent.deliver import export, summary
+                    with console.status("[cyan]📦 Опаковам проекта и пускам тестовете…[/]"):
+                        _d = export(WORKSPACE, _arg or None)
+                    console.print(summary(_d), markup=False, highlight=False)
+                except (ValueError, OSError) as e:
+                    console.print(f"[red]❌ {e}[/]")
                 continue
 
             # ── /update — реално обновяване от GitHub, не само проверка ──
@@ -1572,9 +1650,9 @@ def main():
                     continue
                 if check.up_to_date:
                     console.print(f"[green]✅ Вече си на последното "
-                                  f"({check.src.short}, {check.src.ref}).[/]")
+                                  f"({check.src.short}, {check.src.ref or 'основния клон'}).[/]")
                     continue
-                console.print(f"[cyan]⬆ Има по-ново на {check.src.ref}: "
+                console.print(f"[cyan]⬆ Има по-ново на {check.src.ref or 'основния клон'}: "
                               f"{check.src.short} → {check.latest[:7]}[/]")
                 subjects = version_info.changelog(
                     check.src.owner_repo, check.src.commit, check.latest)
@@ -1682,6 +1760,7 @@ def main():
                 help_table.add_row("/status", "Системна информация и статистика")
                 help_table.add_row("/history", "Преглед и зареждане на стари сесии")
                 help_table.add_row("/backup", "Архивиране към GENESIS_BACKUP_DIR")
+                help_table.add_row("/export [файл.zip]", "Проектът за предаване: zip + отчет (тестове, как се пуска, допускания)")
                 help_table.add_row("/update", "Провери и обнови от GitHub (питa за потвърждение)")
                 help_table.add_row("/skills", "Списък с уменията (без модел, мигновено)")
                 help_table.add_row("/tasks", "Състояние на работата — отворени нишки, решения")
@@ -1778,6 +1857,7 @@ def main():
                         with open(shown[hsel - 1], "r", encoding="utf-8") as f:
                             loaded = json.load(f)
                         messages = _restore_session(loaded, SYSTEM_PROMPT)
+                        _new_session()   # продължението — в нов файл, старият остава
                         console.print(f"[green]✓ Сесията е заредена! ({len(messages)} съобщения)[/]")
                     elif hsel != 0:
                         console.print("[red]Невалиден избор.[/]")

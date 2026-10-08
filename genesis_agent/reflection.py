@@ -20,7 +20,9 @@ from genesis_agent import episodic_memory as _em
 _ERROR_LESSONS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"ModuleNotFoundError|No module named", re.IGNORECASE),
      "Липсващ пакет е чест проблем — пиши със СТАНДАРТНАТА библиотека, без външни зависимости."),
-    (re.compile(r"no passing self-test|has NO passing self-test|self.test", re.IGNORECASE),
+    # Само съобщението на проверката: `self.test` хващаше и реда `in _self_test`
+    # от всеки traceback на код, който ИМА самотест (одит 2026-10-07).
+    (re.compile(r"no passing self-test", re.IGNORECASE),
      "Винаги слагай assert-based self-test най-отдолу, който проверява целта и печата 'OK'."),
     (re.compile(r"AssertionError", re.IGNORECASE),
      "Логиката често не минава собствения тест — провери граничните случаи преди да върнеш кода."),
@@ -35,6 +37,9 @@ _ERROR_LESSONS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"FileNotFoundError", re.IGNORECASE),
      "Не разчитай на външни файлове — създавай нужните данни в самия скрипт."),
 ]
+
+
+_MIN_REPEATS = 2
 
 
 def detect_reuse(rag_context: str, code: str, threshold: float = 0.25) -> bool:
@@ -75,11 +80,26 @@ def record_mission(goal: str, success: bool, detail: str = "", *, reused_existin
             goal=goal,
             outcome="success" if success else "failed",
             skill_path="autonomous_loop",
-            lessons_learned=[detail[:300]] if (not success and detail) else None,
+            lessons_learned=[_failure_gist(detail)] if (not success and detail) else None,
             tags=tags,
         )
     except Exception:
         pass
+
+
+_EXC_LINE = re.compile(r"^\s*(?:[\w.]+(?:Error|Exception|Exit|Interrupt)|SANDBOX \w+)\b.*$", re.MULTILINE)
+
+
+def _failure_gist(detail: str, limit: int = 300) -> str:
+    """Какво се обърка: последният ред с изключение + края на изхода. Началото
+    на traceback-а (`detail[:300]`) е пътища и рамки — типът на грешката е на
+    последния ред и се отрязваше (одит 2026-10-07)."""
+    text = detail.strip()
+    found = _EXC_LINE.findall(text)
+    tail = text[-limit:]
+    if found and found[-1].strip() not in tail:
+        return (found[-1].strip()[:120] + " … " + text[-(limit - 125):])[:limit]
+    return tail
 
 
 def _recent_missions(last_n: int) -> list[dict]:
@@ -95,10 +115,9 @@ def _recent_missions(last_n: int) -> list[dict]:
     може да вали мисия.
     """
     try:
-        episodes = _em._fetch_all_episodes()
+        return _em.recent_with_tag("mission", last_n)
     except Exception:
         return []
-    return [e for e in episodes if "mission" in (e.get("tags") or [])][-last_n:]
 
 
 def reuse_rate(last_n: int = 100) -> float | None:
@@ -136,7 +155,10 @@ def distill_lessons(last_n: int = 60, top: int = 4) -> list[str]:
     # LLM-а и открадва един от малкото top слота от реален съвет. Затова взимаме
     # top+1 кандидата и го филтрираме след класирането, вместо да го изключим от
     # броенето (broenето само по себе си остава коректно за бъдеща диагностика).
-    ranked = [les for les, _ in counter.most_common(top + 1) if les != "Unknown Error"]
+    # Урок е повтаряща се грешка: една-единствена не е правило за всяка
+    # следваща мисия (модулът го обещаваше, кодът не го правеше).
+    ranked = [les for les, n in counter.most_common(top + 1)
+              if les != "Unknown Error" and n >= _MIN_REPEATS]
     return ranked[:top]
 
 

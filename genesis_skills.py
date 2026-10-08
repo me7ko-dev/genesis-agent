@@ -91,8 +91,152 @@ def set_workspace(path) -> None:
 
 def _resolve(path_str: str) -> Path:
     """Разрешава път — относителните са спрямо workspace-а."""
+    return _resolve_noted(path_str)[0]
+
+
+def _resolve_noted(path_str: str, *, redirect: bool = True) -> tuple[Path, str]:
+    """Като _resolve, но абсолютен път с правописна грешка в пътя до
+    workspace-а се пренасочва в него — и бележката го казва на модела.
+
+    NEXT_STEPS В.9: моделът пише `...\\Projects\\genittest\\egn.py` при
+    workspace `...\\Projects\\genitest`; sandbox-ът правилно спира записа
+    извън workspace-а, но рундът се губи, а следващият често повтаря същото.
+    Пренасочва се САМО когато папката с грешката не съществува и всяка част
+    до нея е буквена грешка на частта от workspace-а (виж _is_typo) — не
+    `genitest2` или `genitest-old`, които може да са нарочна съседна папка.
+
+    `redirect=False` (запис и редакция): пътят остава какъвто е — записът
+    извън workspace-а пита както винаги, а бележката казва кой е вероятният
+    път. Одит 2026-10-07: workspace `api-v1`, WRITE_FILE `…/api-v2/app.py` се
+    пренасочваше и ПРЕЗАПИСВАШЕ `api-v1/app.py` без въпрос — запис по догадка
+    не бива да минава покрай потвърждението.
+    """
     p = Path(path_str.strip()).expanduser()
-    return p if p.is_absolute() else (_WORKSPACE / p)
+    if not p.is_absolute():
+        return _WORKSPACE / p, ""
+    fixed = _typo_into_workspace(p)
+    if fixed is None:
+        return p, ""
+    if not redirect:
+        return p, (f"\n[път] {p} изглежда като workspace-а с правописна грешка — "
+                   f"вероятно имаше предвид {fixed}. Пиши пътищата спрямо workspace-а "
+                   "(относителни).")
+    return fixed, (f"\n[път] {p} не съществува — това е workspace-ът с правописна "
+                   f"грешка, ползван е {fixed}. Пиши пътищата спрямо workspace-а "
+                   "(относителни), не абсолютни.")
+
+
+def _is_typo(a: str, b: str) -> bool:
+    """Две имена на папки, които са една и съща с буквена грешка.
+
+    Разлика само в регистъра, или разстояние ≤2 (вмъкване, изтриване, замяна,
+    размяна на съседни) при имена от ≥4 знака. НЕ е грешка, ако едното е
+    продължение на другото (`app` → `app2`, `site` → `site-old`): това е друга
+    папка със смисъл, а не изпусната буква.
+    """
+    if a == b:
+        return True
+    # Различни числа са различни неща, не грешка: `api-v1`/`api-v2`,
+    # `report2025`/`report2026`, `proj1`/`proj2`.
+    if re.sub(r"\D", "", a) != re.sub(r"\D", "", b):
+        return False
+    if a.lower() == b.lower():
+        return True
+    if min(len(a), len(b)) < 4:
+        return False
+    la, lb = a.lower(), b.lower()
+    if la.startswith(lb) or lb.startswith(la) or la.endswith(lb) or lb.endswith(la):
+        return False
+    return _edit_distance(la, lb, limit=2) <= min(2, max(len(a), len(b)) // 4)
+
+
+def _edit_distance(a: str, b: str, limit: int) -> int:
+    """Damerau-Levenshtein (с размяна на съседни), спира над `limit`."""
+    if abs(len(a) - len(b)) > limit:
+        return limit + 1
+    prev2: list[int] = []
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb))
+            if i > 1 and j > 1 and ca == b[j - 2] and a[i - 2] == cb:
+                cur[j] = min(cur[j], prev2[j - 2] + 1)
+        if min(cur) > limit:
+            return limit + 1
+        prev2, prev = prev, cur
+    return prev[-1]
+
+
+def _typo_into_workspace(p: Path) -> Path | None:
+    """Пътят в workspace-а, който `p` очевидно е имал предвид — или None."""
+    if p.exists():
+        return None
+    try:
+        ws = _WORKSPACE.resolve()
+    except OSError:
+        return None
+    anchor = p.parent
+    while not anchor.exists():
+        if anchor.parent == anchor:
+            return None
+        anchor = anchor.parent
+    try:
+        ws_rest = ws.relative_to(anchor.resolve()).parts
+        rest = p.relative_to(anchor).parts
+    except (ValueError, OSError):
+        return None
+    if not ws_rest or len(rest) <= len(ws_rest):
+        return None
+    if not all(_is_typo(a, b) for a, b in zip(rest, ws_rest)):
+        return None
+    return ws.joinpath(*rest[len(ws_rest):])
+
+
+# Папки, в които „може би имаше предвид“ не търси: огромни и никога не са
+# мястото, където моделът мисли, че е файлът му.
+_SKIP_DIRS = {".git", ".hg", ".venv", "venv", "node_modules", "__pycache__",
+              ".mypy_cache", ".pytest_cache", ".ruff_cache", "dist", "build"}
+
+
+def _did_you_mean(path: Path, *, limit: int = 3) -> str:
+    """Подсказка за липсващ файл: същото име другаде в workspace-а или
+    близко име в същата папка. Празно, ако няма нищо правдоподобно.
+
+    Без нея „Файлът не съществува“ води до GLOB/LIST_DIR рунд само за да се
+    намери, че файлът е в `src/`, или че се казва `utils.py`, а не `util.py`.
+    """
+    import difflib
+    import os
+    found: list[str] = []
+    try:
+        ws = _WORKSPACE.resolve()
+        seen = 0
+        for dirpath, dirnames, filenames in os.walk(ws):
+            dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+            seen += len(filenames)
+            if path.name in filenames:
+                cand = Path(dirpath) / path.name
+                if cand != path:
+                    found.append(str(cand.relative_to(ws)))
+            if seen > 5000 or len(found) >= limit:
+                break
+        # Съседите се изброяват само в workspace-а и никога в папка с ключове:
+        # „Може би: ~/.ssh/id_ed25519_work_github?“ издаваше имената им.
+        parent_ok = (path.parent.is_dir() and path.parent.resolve().is_relative_to(ws)
+                     and not sandbox.sensitive_path_reason(path.parent.as_posix() + "/"))
+        if len(found) < limit and parent_ok:
+            names = [e.name for e in path.parent.iterdir()][:2000]
+            for n in difflib.get_close_matches(path.name, names, n=limit, cutoff=0.75):
+                cand = path.parent / n
+                rel = str(cand.relative_to(ws)) if cand.is_relative_to(ws) else str(cand)
+                if rel not in found:
+                    found.append(rel)
+    except OSError:
+        return ""
+    if not found:
+        return ""
+    return " Може би: " + ", ".join(found[:limit]) + "?"
 
 
 def _sensitive_root_refusal(tool: str, root: Path) -> str | None:
@@ -166,7 +310,7 @@ def _tool_read_file(arg: str, offset=None, limit=None) -> str:
     except (TypeError, ValueError):
         limit_i = None
 
-    path = _resolve(path_str)
+    path, redirect = _resolve_noted(path_str)
     # Четенето на ключове минава през СЪЩОТО решение като `cat ~/.genesis/.env`
     # (design note, 2026-09-20). Дотук не минаваше през нищо: shell пътят беше
     # с гейт, а инструментът — не, тоест по-лесният път беше отворен. А
@@ -179,10 +323,14 @@ def _tool_read_file(arg: str, offset=None, limit=None) -> str:
         allowed, reason = sandbox._decide(f"READ_FILE {path}", verdict, sandbox.get_policy())
         if not allowed:
             return f"[READ_FILE] {reason}"
+    # Преди четенето: на Windows папка дава PermissionError, не IsADirectoryError,
+    # и моделът виждаше „Permission denied“ (CI на Windows, 2026-10-07).
+    if path.is_dir():
+        return f"[READ_FILE] {path} е папка, не файл — ползвай LIST_DIR."
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
-        return f"[READ_FILE] Файлът не съществува: {path}"
+        return f"[READ_FILE] Файлът не съществува: {path}.{_did_you_mean(path)}"
     except OSError as e:
         return f"[READ_FILE] Грешка: {e}"
     _SEEN_PATHS.add(path.resolve())
@@ -201,7 +349,7 @@ def _tool_read_file(arg: str, offset=None, limit=None) -> str:
             chunk = chunk[:8000] + "\n… [отрязано, диапазонът е по-голям от 8000 символа]"
         _log_episode(f"READ_FILE {path}", "прочетен (диапазон)", ["tool", "read_file"])
         return (f"[READ_FILE: {path}]  (редове {start + 1}-{min(end, len(lines))} от {len(lines)})\n"
-                + chunk)
+                + chunk + redirect)
 
     if len(text) > 8000:
         total_lines = text.count("\n") + 1
@@ -209,11 +357,11 @@ def _tool_read_file(arg: str, offset=None, limit=None) -> str:
                 + f"\n… [отрязано, общо {len(text)} символа, {total_lines} реда — "
                   f"за конкретен диапазон: READ_FILE: {path_str} | offset | limit]")
     _log_episode(f"READ_FILE {path}", "прочетен", ["tool", "read_file"])
-    return f"[READ_FILE: {path}]\n{text}"
+    return f"[READ_FILE: {path}]\n{text}{redirect}"
 
 
 def _tool_write_file(arg: str, content: str) -> str:
-    path = _resolve(arg)
+    path, redirect = _resolve_noted(arg, redirect=False)
     if not arg.strip() or path.is_dir():
         # Иначе write_text върху папка → „Permission denied“, а моделът го
         # чете като защитена папка и спира да пита (виж load_tool_arguments).
@@ -237,10 +385,10 @@ def _tool_write_file(arg: str, content: str) -> str:
         inside = False
     if not inside:
         verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM,
-                                      [f"запис извън workspace: {path}"])
+                                      [f"запис извън workspace: {path}" + redirect.replace("\n", " ")])
         allowed, reason = sandbox._decide(f"WRITE_FILE {path}", verdict, sandbox.get_policy())
         if not allowed:
-            return f"[WRITE_FILE] {reason}"
+            return f"[WRITE_FILE] {reason}{redirect}"
     # Ruff pre-check преди диска, само за .py (design note, 2026-07-29): не
     # блокираме записа при unfixable проблеми (моделът изрично поиска точно
     # това съдържание) — но ако ruff го оправи автоматично, пишем ФИКСНАТАТА
@@ -263,7 +411,58 @@ def _tool_write_file(arg: str, content: str) -> str:
     _log_episode(f"WRITE_FILE {path}", f"записани {len(content)} символа",
                  ["tool", "write_file"])
     from genesis_agent.web_check import web_note
-    return f"[WRITE_FILE: {path}] ✓ записани {len(content)} символа{lint_note}{web_note(path)}"
+    return (f"[WRITE_FILE: {path}] ✓ записани {len(content)} символа{lint_note}"
+            f"{_scaffold_tests(path)}{web_note(path)}{redirect}")
+
+
+_PYTEST_CONFIGS = (("pytest.ini", ""), ("pyproject.toml", "[tool.pytest"),
+                   ("setup.cfg", "[tool:pytest]"), ("tox.ini", "[pytest]"))
+
+
+def _scaffold_tests(path: Path) -> str:
+    """Първият тест в подпапка на проект без pytest настройка → празен
+    conftest.py в корена, за да вижда тестът модулите от корена.
+
+    NEXT_STEPS Г.10: проектът за ЕГН загуби 4 рунда по импорти, преди
+    подсказката в RUN_CMD (_import_path_hint) да се появи — тя идва чак СЛЕД
+    падналия pytest. Тук се слага преди първото пускане. Само ако коренът няма
+    conftest.py и никаква pytest настройка: в съществуващ проект пътят вече е
+    решен по някакъв начин и не е наша работа да го сменяме.
+    """
+    if path.suffix != ".py" or not (path.name.startswith("test_") or path.name.endswith("_test.py")):
+        return ""
+    try:
+        root = _WORKSPACE.resolve()
+        rel = path.resolve().relative_to(root)
+    except (ValueError, OSError):
+        return ""
+    if len(rel.parts) < 2 or rel.parts[0] in _SKIP_DIRS:
+        return ""
+    # Проектът е папката над `tests/` — `egn/tests/test_egn.py` → `egn/`, не
+    # коренът на workspace-а (там conftest-ът не помага на `pytest` в `egn/`).
+    idx = next((i for i, part in enumerate(rel.parts[:-1]) if part in ("tests", "test")), 0)
+    project = root.joinpath(*rel.parts[:idx])
+    test_dir = rel.parts[idx]
+    conftest = project / "conftest.py"
+    if conftest.exists():
+        return ""
+    for name, section in _PYTEST_CONFIGS:
+        cfg = project / name
+        try:
+            if cfg.is_file() and (not section or section in cfg.read_text(encoding="utf-8", errors="replace")):
+                return ""
+        except OSError:
+            return ""
+    try:
+        conftest.write_text(
+            "# Коренът на проекта е в sys.path на pytest, за да се внасят модулите\n"
+            "# от корена в tests/ без sys.path хакове.\n", encoding="utf-8")
+    except OSError:
+        return ""
+    _SEEN_PATHS.add(conftest)
+    where = conftest.relative_to(root).as_posix()
+    return (f"\n[скеле] Създаден е празен {where} — тестовете в {test_dir}/ внасят "
+            "модулите до него директно (`from x import y`), без sys.path хакове.")
 
 
 def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False) -> str:
@@ -272,7 +471,7 @@ def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False
     Минава през същата CONFIRM бариера като WRITE_FILE при запис извън
     workspace-а — редакцията е по-малка по обхват, но не е по-малко реална.
     """
-    path = _resolve(path_arg)
+    path, redirect = _resolve_noted(path_arg, redirect=False)
     # Същата бариера като при READ_FILE, по същата причина — и намерена по
     # същия начин: `EDIT_FILE` връща unified diff, а диффът носи КОНТЕКСТНИ
     # редове. Редакция на `.env` с произволна котва връща в отговора реда
@@ -290,17 +489,18 @@ def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False
         inside = False
     if not inside:
         verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM,
-                                      [f"редакция извън workspace: {path}"])
+                                      [f"редакция извън workspace: {path}" + redirect.replace("\n", " ")])
         allowed, reason = sandbox._decide(f"EDIT_FILE {path}", verdict, sandbox.get_policy())
         if not allowed:
-            return f"[EDIT_FILE] {reason}"
+            return f"[EDIT_FILE] {reason}{redirect}"
 
     from genesis_agent.code_edit import edit_file
     res = edit_file(path, old, new, replace_all=replace_all)
     if not res.ok:
         _log_episode(f"EDIT_FILE {path}", f"отказана: {res.detail[:200]}",
                      ["tool", "edit_file", "rejected"])
-        return f"[EDIT_FILE: {path}] ❌ {res.detail}"
+        hint = _did_you_mean(path) if not path.exists() else ""
+        return f"[EDIT_FILE: {path}] ❌ {res.detail}{hint}{redirect}"
     _SEEN_PATHS.add(path.resolve())
     _log_episode(f"EDIT_FILE {path}", res.detail, ["tool", "edit_file"])
     # Диффът се връща на модела нарочно: така следващият рунд вижда какво РЕАЛНО
@@ -318,7 +518,7 @@ def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False
         except OSError:
             pass
     from genesis_agent.web_check import web_note
-    return f"[EDIT_FILE: {path}] {res.detail}\n{diff}{ruff_note}{web_note(path)}"
+    return f"[EDIT_FILE: {path}] {res.detail}\n{diff}{ruff_note}{web_note(path)}{redirect}"
 
 
 def _tool_search_code(arg: str, path: str = "", glob: str = "") -> str:
@@ -432,7 +632,7 @@ def _tool_run_cmd(arg: str) -> str:
         parts.append(out[:6000])
     if err:
         parts.append("stderr:\n" + err[:2000])
-    hint = _import_path_hint(out + "\n" + err, Path(_WORKSPACE))
+    hint = _import_path_hint(out + "\n" + err, Path(_WORKSPACE)) or _missing_package_hint(out + "\n" + err)
     if hint:
         parts.append(hint)
     _log_episode(f"RUN_CMD {command}", "ok" if res.ok else f"rc={res.returncode}",
@@ -458,6 +658,21 @@ def _import_path_hint(output: str, root: Path) -> str:
     return (f"[подсказка] `{name}` е в корена на проекта, но pytest не го вижда от tests/. "
             "Решение: празен conftest.py в корена (или `pythonpath = .` в pytest.ini) — "
             "не sys.path хакове в тестовете.")
+
+
+def _missing_package_hint(output: str) -> str:
+    """`No module named 'docx'` → точното име в PyPI (`python-docx`) и с кой
+    Python да се инсталира. Без нея моделът гадае `pip install docx` (друг,
+    стар пакет) или инсталира в Python-а на Genesis, не на проекта."""
+    if "No module named" not in output:
+        return ""
+    try:
+        from genesis_agent.paths import project_python
+        from genesis_agent.py_deps import missing_module_hint
+        py = project_python(_WORKSPACE)
+        return missing_module_hint(output, Path(_WORKSPACE), f'"{py}"' if " " in py else py)
+    except Exception:
+        return ""
 
 
 # Маркер, по който агентният цикъл разпознава "агентът чака отговор" и спира,
@@ -515,9 +730,13 @@ def _tool_research(arg: str) -> str:
 
 
 def _tool_list_dir(arg: str) -> str:
-    path = _resolve(arg)
+    path, redirect = _resolve_noted(arg)
     if not path.is_dir():
-        return f"[LIST_DIR] Не е директория: {path}"
+        if sandbox.sensitive_path_reason(path) or sandbox.sensitive_path_reason(path.as_posix() + "/"):
+            return f"[LIST_DIR] Не е директория: {path}"
+        if path.is_file():
+            return f"[LIST_DIR] {path} е файл, не папка — ползвай READ_FILE."
+        return f"[LIST_DIR] Не е директория: {path}.{_did_you_mean(path)}"
     # Изброяването на `~/.ssh` не дава съдържание, но дава ИМЕНАТА на ключовете
     # — първата стъпка на всяко "кое има смисъл да прочета". Същият пазач,
     # който вече стои на READ_FILE и EDIT_FILE (design note, 2026-09-20);
@@ -537,7 +756,7 @@ def _tool_list_dir(arg: str) -> str:
         entries = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
     except OSError as e:
         return f"[LIST_DIR] Грешка: {e}"
-    lines = [f"[LIST_DIR: {path}]"]
+    lines = [f"[LIST_DIR: {path}]{redirect}"]
     if not entries:
         # Само заглавието, без нито един ред, моделът чете като „инструментът
         # не отговори“ и пита отново. Измерено 2026-09-28 (bench_projects):
@@ -718,11 +937,15 @@ _USE_SKILL_FAILURES = ("Няма достатъчно близко умение"
 _EDIT_SEPARATOR = "---GENESIS-REPLACE-WITH---"
 _EDIT_RE = re.compile(r"\[EDIT_FILE:\s*(?P<path>[^\]]+)\](?P<body>.*?)\[END_EDIT\]",
                       re.DOTALL)
+# Аргументът може да носи скоби до две нива: `app/[id]/page.tsx` (Next.js),
+# `sys.argv[1:]`, `[ -f x ]`. С `[^\]]+` (до 2026-10-07) всичко се режеше на
+# първата `]` — файлът „не съществуваше“, а командата падаше с незатворени кавички.
+_BRACKETS = r"\[(?:[^\[\]]|\[[^\[\]]*\])*\]"
 _SIMPLE_RE = re.compile(
     r"\[(?P<tool>READ_FILE|RUN_CMD|WEB_SEARCH|LIST_DIR|DELEGATE|RESEARCH|BROWSE|ASK_USER|"
     r"SEARCH_CODE|REPO_MAP|GLOB|"
     r"BROWSER_CLICK|BROWSER_TYPE|REMEMBER|TASK_ADD|TASK_UPDATE|TASK_LIST):"
-    r"\s*(?P<arg>[^\]]+)\]"
+    r"\s*(?P<arg>(?:[^\[\]]|" + _BRACKETS + r")+)\]"
 )
 # REPO_MAP без аргумент = текущият workspace (както BROWSER_READ/TASK_LIST).
 _REPO_MAP_RE = re.compile(r"\[REPO_MAP\]")

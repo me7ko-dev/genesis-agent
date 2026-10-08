@@ -204,6 +204,44 @@ def _existing(var: str) -> str:
     return os.environ.get(var) or read_env_files(var) or ""
 
 
+def _source(var: str) -> str:
+    """Откъде идва действащата стойност: "" (няма), "env", или пътя на .env файла."""
+    if os.environ.get(var):
+        return "env"
+    from genesis_agent.paths import ENV_FILES, env_value
+    for envf in ENV_FILES:
+        p = Path(envf)
+        try:
+            for line in p.read_text(encoding="utf-8-sig", errors="ignore").splitlines():
+                k, sep, v = line.strip().removeprefix("export ").partition("=")
+                if sep and k.strip() == var and env_value(v):
+                    return str(p)
+        except OSError:
+            continue
+    return ""
+
+
+def _overridden_warning(var: str) -> str:
+    """Предупреждение, когато записът в ENV_FILE няма да се ползва: действащата
+    стойност идва от променлива на средата или от .env на проекта, които имат
+    предимство (одит 2026-10-07: „✅ Записано“, а Genesis продължаваше със
+    стария, отнет ключ)."""
+    src = _source(var)
+    if not src or Path(src) == ENV_FILE:
+        return ""
+    where = f"променливата на средата {var}" if src == "env" else src
+    return (f"    ⚠️  Действащият ключ идва от {where} — той има предимство пред {ENV_FILE}. "
+            "Смени го там (или го махни), иначе новият няма да се ползва.")
+
+
+def _keep(collected: dict[str, str], var: str, value: str) -> None:
+    """Запазен ключ, който живее другаде (среда, .env на проекта), не се копира
+    тихо в глобалния файл — остава, където е."""
+    src = _source(var)
+    if not src or Path(src) == ENV_FILE:
+        collected[var] = value
+
+
 def run() -> int:
     print("\n  ⚡ Genesis Agent — настройка\n")
     print("  Всеки ключ е по избор. Един е достатъчен, за да тръгнеш.")
@@ -228,7 +266,7 @@ def run() -> int:
                 # Working key: keep it unless the user deliberately replaces it.
                 key = _prompt("    [Enter] запази · или въведи нов ключ: ")
                 if not key:
-                    collected[var] = current
+                    _keep(collected, var, current)
                     working += 1
                     print("    запазен\n")
                     continue
@@ -238,7 +276,7 @@ def run() -> int:
                 print(f"    Вземи нов от: {url}")
                 key = _prompt("    Нов ключ (Enter = остави счупения): ")
                 if not key:
-                    collected[var] = current
+                    _keep(collected, var, current)
                     print("    оставен непроменен — този доставчик няма да работи\n")
                     continue
         else:
@@ -258,6 +296,10 @@ def run() -> int:
             keep = _prompt("    Да го запиша ли въпреки това? [y/N] ").lower()
             if keep.startswith("y"):
                 collected[var] = key
+        if var in collected and collected[var] != current:
+            warning = _overridden_warning(var)
+            if warning:
+                print(warning)
         print()
 
     # ── Платени доставчици (по избор) ─────────────────────────────────────

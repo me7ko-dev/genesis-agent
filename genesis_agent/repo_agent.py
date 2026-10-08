@@ -34,6 +34,7 @@ from __future__ import annotations
 import difflib
 import json
 import os
+import re
 import subprocess
 import tarfile
 import time
@@ -85,10 +86,34 @@ class RepairOutcome:
 
 # ── Checkpoints ──────────────────────────────────────────────────────────────
 
+# Имена, които са и обичайни папки с код (`mypkg/build/builder.py`,
+# `app/env/settings.py`): пропускат се само в КОРЕНА на проекта. Одит
+# 2026-10-07: пропускани на всяка дълбочина, те изчезваха от снимката, а
+# `--revert` пак казваше „✓ върнат“ — без да ги върне.
+_SKIP_ONLY_AT_TOP = {"build", "dist", "env", "target"}
+
+
+def _skip_in_snapshot(rel_parts: tuple[str, ...], root: Path | None = None) -> bool:
+    for depth, part in enumerate(rel_parts):
+        if part not in _SKIP_IN_SNAPSHOT:
+            continue
+        if depth == 0 or part not in _SKIP_ONLY_AT_TOP:
+            return True
+        # Вложено `backend/env/`, `rustlib/target/`: артефакт е, ако си личи —
+        # venv (pyvenv.cfg), кеш (CACHEDIR.TAG) или `target` до Cargo.toml.
+        if root is not None:
+            here = root.joinpath(*rel_parts[:depth + 1])
+            if ((here / "pyvenv.cfg").is_file() or (here / "CACHEDIR.TAG").is_file()
+                    or (part == "target" and (here.parent / "Cargo.toml").is_file())):
+                return True
+    return False
+
+
 def _tree_size_mb(root: Path) -> float:
     total = 0
     for p in root.rglob("*"):
-        if any(part in _SKIP_IN_SNAPSHOT for part in p.parts):
+        # Спрямо корена: проект в `~/build/app` иначе мереше 0 MB и минаваше тавана.
+        if _skip_in_snapshot(p.relative_to(root).parts, root):
             continue
         try:
             if p.is_file():
@@ -98,9 +123,12 @@ def _tree_size_mb(root: Path) -> float:
     return total / (1024 * 1024)
 
 
+_SNAPSHOT_ROOT: Path | None = None
+
+
 def _snapshot_filter(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
-    parts = Path(info.name).parts
-    if any(part in _SKIP_IN_SNAPSHOT for part in parts):
+    parts = tuple(p for p in Path(info.name).parts if p != ".")
+    if _skip_in_snapshot(parts, _SNAPSHOT_ROOT):
         return None
     return info
 
@@ -118,8 +146,13 @@ def create_checkpoint(root: Path) -> Path:
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     dest = CHECKPOINT_DIR / f"{root.name}-{stamp}.tar.gz"
-    with tarfile.open(dest, "w:gz") as tar:
-        tar.add(root, arcname=".", filter=_snapshot_filter)
+    global _SNAPSHOT_ROOT
+    _SNAPSHOT_ROOT = root
+    try:
+        with tarfile.open(dest, "w:gz") as tar:
+            tar.add(root, arcname=".", filter=_snapshot_filter)
+    finally:
+        _SNAPSHOT_ROOT = None
     meta = {
         "project": str(root),
         "created": stamp,
@@ -128,6 +161,16 @@ def create_checkpoint(root: Path) -> Path:
     }
     dest.with_suffix(".json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     return dest
+
+
+def _git_raw(root: Path, *args: str) -> str:
+    """Като _git, но без strip — за `-z` изход."""
+    try:
+        proc = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=30, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return proc.stdout if proc.returncode == 0 else ""
 
 
 def _git(root: Path, *args: str) -> str:
@@ -167,14 +210,75 @@ def restore_checkpoint(root: str | Path, checkpoint: str | Path | None = None) -
     cp = Path(checkpoint) if checkpoint else latest_checkpoint(root)
     if not cp or not cp.exists():
         return f"❌ Няма намерена снимка за {root}."
+    skipped: list[str] = []
+    in_archive: set[str] = set()
     with tarfile.open(cp, "r:gz") as tar:
-        # Python 3.12+ validates member paths; on older versions the archive is
-        # one we wrote ourselves minutes ago, so there is nothing to filter.
-        try:
-            tar.extractall(root, filter="data")  # type: ignore[call-arg]
-        except TypeError:
-            tar.extractall(root)
-    return f"✓ {root} е върнат към снимката {cp.name}"
+        # Член по член (одит 2026-10-07): с extractall символна връзка извън
+        # проекта (`shared -> ../common`) хвърляше OutsideDestinationError
+        # посред възстановяването — всичко след нея по азбучен ред оставаше
+        # променено. Връзките се пресъздават такива, каквито бяха; останалото
+        # минава през филтъра "data" (Python 3.12+), а грешка в един член не
+        # спира другите и се казва.
+        for member in tar.getmembers():
+            rel = Path(member.name).as_posix().removeprefix("./")
+            if rel in ("", "."):
+                continue
+            in_archive.add(rel)
+            target = root / rel
+            try:
+                if member.issym():
+                    # Нищо извън проекта (преглед 2026-10-07): родител, който сега
+                    # е връзка навън, или `..`/абсолютно име в архива биха
+                    # изтрили и заместили чужд файл.
+                    if (Path(rel).is_absolute() or ".." in Path(rel).parts
+                            or not target.parent.resolve().is_relative_to(root)):
+                        skipped.append(f"{rel} (извън проекта)")
+                        continue
+                    if target.is_symlink():
+                        if os.readlink(target) == member.linkname:
+                            continue
+                        target.unlink()
+                    elif target.is_dir():
+                        skipped.append(f"{rel} (сега е папка, в снимката — връзка)")
+                        continue
+                    elif target.exists():
+                        target.unlink()
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    os.symlink(member.linkname, target)
+                    continue
+                if member.isdir() and target.is_symlink():
+                    skipped.append(f"{rel} (сега е връзка, в снимката — папка)")
+                    continue
+                try:
+                    tar.extract(member, root, filter="data")  # type: ignore[call-arg]
+                except TypeError:
+                    tar.extract(member, root)
+            except (tarfile.TarError, OSError) as e:
+                skipped.append(f"{rel} ({type(e).__name__})")
+    created = _created_since(root, in_archive)
+    lines = [f"{'✓' if not skipped else '⚠️'} {root} е върнат към снимката {cp.name}"]
+    if skipped:
+        lines.append("  НЕ върнати: " + ", ".join(skipped[:10]) + (" …" if len(skipped) > 10 else ""))
+    if created:
+        lines.append("  Файлове, създадени след снимката (оставени — изтрий ги, ако не трябват): "
+                     + ", ".join(created[:10]) + (" …" if len(created) > 10 else ""))
+    return "\n".join(lines)
+
+
+def _created_since(root: Path, in_archive: set[str]) -> list[str]:
+    """Файлове в проекта, които ги няма в снимката (без пропусканите папки)."""
+    out: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        base = Path(dirpath)
+        rel_dir = base.relative_to(root).parts
+        dirnames[:] = [d for d in dirnames if not _skip_in_snapshot(rel_dir + (d,), root)]
+        for name in filenames:
+            rel = (base / name).relative_to(root).as_posix()
+            if rel not in in_archive:
+                out.append(rel)
+            if len(out) > 50:
+                return sorted(out)
+    return sorted(out)
 
 
 # ── Tests ────────────────────────────────────────────────────────────────────
@@ -231,6 +335,22 @@ def project_diff(root: Path, checkpoint: Path | None, files: list[str]) -> str:
     root = Path(root)
     if (root / ".git").exists():
         d = _git(root, "diff")
+        # `git diff` не вижда нови (неследени) файлове — помощен модул, нов
+        # тест. Одит 2026-10-07: поправка САМО с нов файл даваше празен дифф.
+        # Само новите файлове, които поправката е пипнала — не всеки неследен
+        # файл в проекта (200k-редов data.csv); `-z` пази кирилицата в имената.
+        untracked = set(filter(None, _git_raw(root, "ls-files", "--others", "--exclude-standard",
+                                              "-z").split("\0")))
+        touched = {Path(f).as_posix() for f in files}
+        for rel in sorted(untracked & touched)[:20]:
+            try:
+                if (root / rel).stat().st_size > 200_000:
+                    continue
+                after = (root / rel).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            d += ("\n" if d and not d.endswith("\n") else "") + "".join(difflib.unified_diff(
+                [], after.splitlines(keepends=True), fromfile="/dev/null", tofile=f"b/{rel}"))
         if d:
             return d
     if checkpoint:
@@ -343,7 +463,9 @@ def _edit_succeeded(result: str) -> bool:
         от него, защото още не е променил нищо.
     genesis_skills слага "✓" при успех и "❌" при отказ и в двата инструмента.
     """
-    return "✓" in (result or "")
+    # Само в заглавието: отказът цитира близки редове от файла и `return "✓ готово"`
+    # в тях се броеше за успех (одит 2026-10-07).
+    return bool(re.match(r"\[(?:EDIT|WRITE)_FILE: [^\n]*?\] ✓", (result or "").lstrip()))
 
 
 def _verify_after_edit(root: Path, cmd: str | None, before: TestRun,
@@ -378,9 +500,11 @@ def _verify_after_edit(root: Path, cmd: str | None, before: TestRun,
 def _relative(root: Path, path_str: str) -> str:
     p = Path(path_str)
     if not p.is_absolute():
-        return path_str
+        # `./stats.py` → `stats.py`: иначе търсенето в снимката е `././stats.py`
+        # и целият файл излизаше като нов в диффа.
+        p = root / p
     try:
-        return str(p.resolve().relative_to(root.resolve()))
+        return p.resolve().relative_to(root.resolve()).as_posix()
     except (ValueError, OSError):
         return path_str
 

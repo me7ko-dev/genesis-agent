@@ -457,3 +457,39 @@ def test_tampered_history_is_ignored_not_trusted(tmp_path) -> None:
     assert task.load_history(tmp_path) == [{"role": "user", "content": "ok"}]
     (tmp_path / ".genesis" / "history.json").write_text("{broken", encoding="utf-8")
     assert task.load_history(tmp_path) == []
+
+
+# ── одит 2026-10-07 ──────────────────────────────────────────────────────────
+
+def test_whitespace_in_the_email_does_not_reset_the_lockout(env) -> None:
+    _, _, client = env
+    cl = client()
+    codes = [cl.login(email="ana@example.com" + " " * i, password="wrong-password")
+             for i in range(web.LOGIN_FAILURES + 2)]
+    assert 429 in codes
+    assert cl.login() == 429
+
+
+def test_a_file_over_the_cap_is_refused_not_loaded(env, monkeypatch) -> None:
+    _, _, client = env
+    cl = client()
+    cl.login()
+    chat_id, _ = _chat_with_turn(cl)
+    monkeypatch.setattr(web, "MAX_ZIP_BYTES", 4)
+    code, _, _ = cl.req("GET", f"/api/chats/{chat_id}/files/out/result.csv")
+    assert code == 413
+
+
+def test_no_turn_starts_while_a_download_is_in_progress(env) -> None:
+    app, _, client = env
+    cl = client()
+    cl.login()
+    chat_id, _ = _chat_with_turn(cl)
+    assert app.begin_download(chat_id)
+    try:
+        code, _ = cl.json("POST", f"/api/chats/{chat_id}/turns", {"text": "още"})
+        assert code != 202
+    finally:
+        app.end_download(chat_id)
+    code, _ = cl.json("POST", f"/api/chats/{chat_id}/turns", {"text": "още"})
+    assert code == 202

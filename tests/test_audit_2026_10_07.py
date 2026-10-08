@@ -1,0 +1,598 @@
+"""Regressions for the core-loop bugs an audit reproduced on 2026-10-07."""
+from __future__ import annotations
+
+from collections import deque
+
+import pytest
+
+from genesis_agent import claim_check, repeat_guard
+from genesis_agent.code_check import RunCheck
+from genesis_agent.tool_schemas import load_tool_arguments
+
+# ── 1. compaction never leaves a tool result without its call ────────────────
+
+def _rounds(n: int) -> list[dict]:
+    msgs = [{"role": "system", "content": "sys"}, {"role": "user", "content": "task"}]
+    k = 0
+    for _ in range(n):
+        ids = [f"c{k + j}" for j in range(3)]
+        k += 3
+        msgs.append({"role": "assistant", "content": "",
+                     "tool_calls": [{"id": i, "type": "function",
+                                     "function": {"name": "READ_FILE", "arguments": "{}"}} for i in ids]})
+        msgs += [{"role": "tool", "tool_call_id": i, "name": "READ_FILE", "content": "x"} for i in ids]
+    msgs.append({"role": "assistant", "content": "готово"})
+    return msgs
+
+
+def _orphans(msgs: list[dict]) -> list[str]:
+    asked: set[str] = set()
+    out = []
+    for m in msgs:
+        for tc in m.get("tool_calls") or []:
+            asked.add(tc["id"])
+        if m.get("role") == "tool" and m["tool_call_id"] not in asked:
+            out.append(m["tool_call_id"])
+    return out
+
+
+def test_compaction_cuts_before_the_call_not_between_its_results(monkeypatch) -> None:
+    from genesis_agent import brain as brain_mod
+
+    class _Reply:
+        raw_text = "резюме"
+    monkeypatch.setattr(brain_mod.Brain, "__init__", lambda self, *a, **k: None)
+    monkeypatch.setattr(brain_mod.Brain, "complete", lambda self, m, tools=None: _Reply())
+    out = brain_mod.Brain.compact_chat_history(deque(_rounds(4), maxlen=30), 16, 10)
+    assert _orphans(list(out)) == []
+    assert list(out)[2]["role"] != "tool"
+
+
+# ── 2. an empty reply with no tool calls ends the turn, not the program ──────
+
+def test_run_turn_survives_an_empty_reply(monkeypatch) -> None:
+    import genesis_terminal_agent as gta
+    monkeypatch.setattr(gta, "ask_genesis", lambda m, tools=None: ("", None))
+
+    class UI(gta.TurnUI):
+        def thinking(self, label, spinner="dots"):
+            import contextlib
+            return contextlib.nullcontext()
+        def assistant(self, text): pass
+        def tool(self, name, result): pass
+        def asked(self, question): pass
+        def spinning(self, note): pass
+        def warn(self, text): pass
+        def info(self, text): pass
+        def cancelled(self): return False
+
+    out = gta.run_turn(deque([{"role": "system", "content": "s"}], maxlen=30), "здравей", UI())
+    assert out[-1]["role"] == "assistant"
+
+
+# ── 3. a refused write is not a write ────────────────────────────────────────
+
+@pytest.mark.parametrize("result", [
+    "[WRITE_FILE: /ws/app.py] ❌ Файлът вече съществува и не си го чел в тази сесия",
+    "[WRITE_FILE] Грешка: [Errno 13] Permission denied",
+    "[EDIT_FILE: /ws/app.py] ❌ Anchor-ът не е намерен",
+])
+def test_a_refused_write_does_not_count(result) -> None:
+    assert claim_check.executed_from_text_results([result]) == []
+    assert claim_check.counts_as_executed("WRITE_FILE", "/ws/app.py", result) is None
+
+
+def test_a_successful_write_still_counts() -> None:
+    assert claim_check.executed_from_text_results(["[WRITE_FILE: /ws/a.py] ✓ записани 3 символа"])
+
+
+# ── 7. test claims: past tense only; a failing test run is still a run ──────
+
+@pytest.mark.parametrize("text", [
+    "Make sure the tests pass after you pull.",
+    "Пусни pytest локално, за да видиш дали тестовете минават.",
+])
+def test_advice_about_tests_is_not_a_claim(text) -> None:
+    assert claim_check.unsupported_claims(text, []) == []
+
+
+@pytest.mark.parametrize("text", ["All tests pass now.", "Тестовете минаха.", "Пуснах тестовете."])
+def test_claims_about_tests_still_need_a_run(text) -> None:
+    assert claim_check.unsupported_claims(text, [])
+
+
+def test_a_failing_test_run_counts_as_run() -> None:
+    result = ("[RUN_CMD: python -m unittest test_calc.py]  (rc=1)\n"
+              "Traceback (most recent call last):\n  ...\nAssertionError")
+    entry = claim_check.counts_as_executed("RUN_CMD", "python -m unittest test_calc.py", result)
+    assert entry is not None
+    assert claim_check.unsupported_claims("Пуснах тестовете: test_div пада.", [entry]) == []
+
+
+# ── 4. JSON repair: \b is a regex word boundary, \d a digit class ────────────
+
+def test_repair_keeps_regex_word_boundaries() -> None:
+    raw = r'{"path": "w.py", "content": "WORD = re.compile(r\"\bcat\d+\b\")\n"}'
+    assert load_tool_arguments(raw)["content"] == 'WORD = re.compile(r"\\bcat\\d+\\b")\n'
+
+
+def test_repair_handles_latex_backslash_u() -> None:
+    raw = r'{"path": "doc.tex", "content": "\documentclass{article}\n\usepackage{x}\n"}'
+    assert load_tool_arguments(raw)["path"] == "doc.tex"
+
+
+def test_valid_json_is_untouched() -> None:
+    assert load_tool_arguments('{"a": "x\\by\\u0436"}')["a"] == "x\byж"
+
+
+# ── 5/6. work memory dedup ──────────────────────────────────────────────────
+
+@pytest.fixture
+def wm(tmp_path, monkeypatch):
+    from genesis_agent import workspace_memory
+    monkeypatch.setattr(workspace_memory, "DB_PATH", tmp_path / "wm.db")
+    workspace_memory.set_workspace(tmp_path)
+    yield workspace_memory
+    workspace_memory.set_workspace(None)
+
+
+def test_cyrillic_titles_differing_in_case_are_one_thread(wm) -> None:
+    wm.add_thread("Миграция към Postgres", "напиши alembic скрипта")
+    assert "вече съществува" in wm.add_thread("миграция към postgres")
+    threads = wm.list_threads("open")
+    assert len(threads) == 1
+    assert threads[0]["next_step"] == "напиши alembic скрипта"     # празното не трие
+
+
+def test_a_closed_thread_does_not_swallow_new_work(wm) -> None:
+    wm.add_thread("Обнови зависимостите")
+    wm.close_thread(wm.list_threads("open")[0]["id"])
+    assert "✓" in wm.add_thread("Обнови зависимостите", "requests има CVE")
+    assert len(wm.list_threads("open")) == 1
+
+
+@pytest.mark.parametrize(("a", "b"), [
+    ("Бекендът се пише на C#", "Бекендът се пише на C++"),
+    ("Таймаут: 1.5 секунди", "Таймаут: 15 секунди"),
+])
+def test_decisions_differing_in_symbols_are_distinct(wm, a, b) -> None:
+    wm.add_decision(a)
+    assert "✓" in wm.add_decision(b)
+
+
+def test_same_decision_with_a_trailing_period_is_a_duplicate(wm) -> None:
+    wm.add_decision("Комитите са на български")
+    assert "Вече е записано" in wm.add_decision("комитите са на български.")
+
+
+# ── 8. guards that fired on legitimate work ──────────────────────────────────
+
+def test_rewriting_a_file_in_text_mode_is_not_spinning() -> None:
+    g = repeat_guard.RepeatGuard()
+    for _ in range(4):
+        v = g.observe_text_result("[WRITE_FILE: /ws/app.py] ✓ записани 412 символа")
+    assert not v.stop and not v.note
+
+
+def test_a_versioned_python_counts_as_running_the_file() -> None:
+    c = RunCheck()
+    c.observe("[WRITE_FILE: /ws/calc.py] ✓ записани 30 символа")
+    c.observe("[RUN_CMD: python3.12 calc.py]  (rc=0)\nok")
+    assert "НЕ пуснат" not in c.note()
+
+
+def test_a_refused_write_to_a_bracketed_path_does_not_count() -> None:
+    assert claim_check.executed_from_text_results(
+        ["[WRITE_FILE: app/[id]/page.tsx] ❌ Файлът вече съществува"]) == []
+
+
+# ── браузър: плащания и пароли (одит 2026-10-07, втора вълна) ─────────────────
+
+from genesis_agent import sandbox as _sb
+
+
+@pytest.mark.parametrize("label", [
+    "Завърши поръчката", "Потвърди поръчката", "Към плащане", "Плащане", "Купете", "Платете",
+    "Place your order", "Pay $49.99", "Pay", "Checkout", "Proceed to checkout", "Buy",
+    "Complete order", "Confirm and pay", "Submit order", "Jetzt kaufen",
+    "Zahlungspflichtig bestellen", "Comprar", "Acheter", "🔒 | Pay now",
+])
+def test_checkout_buttons_are_blocked(label) -> None:
+    assert _sb.assess_browser_click(label).level == _sb.RiskLevel.BLOCKED
+
+
+@pytest.mark.parametrize("label", ["Моите поръчки", "PayPal docs", "Buyer's guide", "Order by date",
+                                   "Payments overview", "Вход", "Следваща страница"])
+def test_ordinary_buttons_are_not(label) -> None:
+    assert _sb.assess_browser_click(label).level == _sb.RiskLevel.CONFIRM
+
+
+@pytest.mark.parametrize("name", [
+    "cc-number", "cc_number", "ccnum", "billing_card_number", "passwd", "user_password", "login_pass",
+    "confirmPassword", "Парола", "Номер на карта", "cvv2", "card_cvv", "securityCode", "cc-csc",
+])
+def test_card_and_password_fields_are_blocked(name) -> None:
+    assert _sb.assess_browser_field("text", name).level == _sb.RiskLevel.BLOCKED
+
+
+def test_autocomplete_alone_blocks_a_field_with_a_meaningless_name() -> None:
+    assert _sb.assess_browser_field("text", "field_7", "cc-number").level == _sb.RiskLevel.BLOCKED
+    assert _sb.assess_browser_field("text", "field_7", "street-address").level == _sb.RiskLevel.CONFIRM
+
+
+@pytest.mark.parametrize("name", ["email", "search", "username", "passenger_name", "compass", "Търси в картата"])
+def test_ordinary_fields_are_not(name) -> None:
+    assert _sb.assess_browser_field("text", name).level == _sb.RiskLevel.CONFIRM
+
+
+def test_page_check_server_hides_the_projects_secrets(tmp_path) -> None:
+    import sys
+    import urllib.error
+    import urllib.request
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "genesis_agent"))
+    import page_check_runner as r
+    (tmp_path / "index.html").write_text("<p>x</p>", encoding="utf-8")
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-live-123", encoding="utf-8")
+    srv, port = r._serve(tmp_path)
+    try:
+        assert urllib.request.urlopen(f"http://127.0.0.1:{port}/index.html").status == 200
+        for path in ("/.env", "/%2eenv", "/.git/config"):
+            with pytest.raises(urllib.error.HTTPError):
+                urllib.request.urlopen(f"http://127.0.0.1:{port}{path}")
+    finally:
+        srv.shutdown()
+
+
+def test_page_check_env_drops_credentials_in_urls(monkeypatch) -> None:
+    from genesis_agent import page_check
+    monkeypatch.setenv("DATABASE_URL", "postgres://u:hunter2@db/x")
+    monkeypatch.setenv("SOME_URL", "https://u:p@host/")
+    monkeypatch.setenv("HTTPS_PROXY", "http://user:pw@proxy:8080")
+    env = page_check._clean_env()
+    assert "DATABASE_URL" not in env and "SOME_URL" not in env
+    assert "HTTPS_PROXY" in env
+
+
+# ── гейтовете за умения ──────────────────────────────────────────────────────
+
+_BROKEN = "def add(a, b):\n    return a - b\n"
+
+
+@pytest.mark.parametrize("tail", [
+    "def _test():\n    assert add(2, 3) == 5\nprint('OK')",
+    "try:\n    assert add(2, 3) == 5\nexcept AssertionError:\n    pass\nprint('OK')",
+    "assert 2 + 3 == 5\nprint('OK')",
+    "if False:\n    raise SystemExit(1)\nprint('OK')",
+])
+def test_a_check_that_never_runs_is_not_a_self_test(tail) -> None:
+    from genesis_agent.verifier import verify_skill
+    assert verify_skill(_BROKEN + tail).method != "self_test_passed"
+
+
+def test_a_check_in_a_called_or_nested_async_function_counts() -> None:
+    import ast
+
+    from genesis_agent.verifier import _has_real_check
+    code = ("import asyncio\nasync def f():\n    return 1\nif __name__ == '__main__':\n"
+            "    async def _run():\n        assert await f() == 1\n    asyncio.run(_run())\n    print('OK')\n")
+    assert _has_real_check(ast.parse(code))
+
+
+def test_research_does_not_count_not_found_as_a_source(monkeypatch) -> None:
+    from genesis_agent import research as rs
+
+    class _B:
+        def __init__(self) -> None:
+            self.replies = ["X is 42", "НЕ Е ОТКРИТО В ТОЗИ ИЗТОЧНИК", "НЕ Е ОТКРИТО В ТОЗИ ИЗТОЧНИК"]
+
+        def complete(self, messages):
+            return type("R", (), {"raw_text": self.replies.pop(0)})()
+    brain = _B()
+    monkeypatch.setattr("genesis_agent.brain.Brain", lambda: brain)
+    monkeypatch.setattr("genesis_agent.web_search.search", lambda *a, **k: [
+        {"title": t, "url": f"https://{t}.test", "snippet": "s"} for t in "abc"])
+    out = rs.grounded_research("what is X")
+    assert "само 1 източник" in out and "проверено през" not in out
+
+
+# ── преглед на поправките (2026-10-07, трета вълна) ─────────────────────────
+
+@pytest.mark.parametrize("tail", [
+    "import sys\ntry:\n    assert add(2, 3) == 5\nexcept AssertionError as e:\n    print('FAIL', e)\n    sys.exit(1)\nprint('OK')",
+    "try:\n    assert add(2, 3) == 5\nexcept Exception:\n    print('x')\n    raise\nprint('OK')",
+    "class T:\n    def run(self):\n        assert add(2, 3) == 5\nT().run()\nprint('OK')",
+    "def test_add():\n    assert add(2, 3) == 5\nfor t in (test_add,):\n    t()\nprint('OK')",
+    "while True:\n    assert add(2, 3) == 5\n    break\nprint('OK')",
+    "match 1:\n    case 1:\n        assert add(2, 3) == 5\nprint('OK')",
+])
+def test_honest_self_test_shapes_still_pass(tail) -> None:
+    from genesis_agent.verifier import verify_skill
+    assert verify_skill("def add(a, b):\n    return a + b\n" + tail).method == "self_test_passed"
+
+
+@pytest.mark.parametrize("tail", [
+    "import contextlib\nwith contextlib.suppress(AssertionError):\n    assert add(2, 3) == 5\nprint('OK')",
+    "if 1 == 2:\n    assert add(2, 3) == 5\nprint('OK')",
+])
+def test_suppressed_or_dead_checks_do_not(tail) -> None:
+    from genesis_agent.verifier import verify_skill
+    assert verify_skill(_BROKEN + tail).method != "self_test_passed"
+
+
+def test_anthropic_history_never_starts_with_an_orphaned_result() -> None:
+    from genesis_agent.brain import Brain
+
+    def call(i):
+        return {"id": i, "type": "function", "function": {"name": "READ_FILE", "arguments": "{}"}}
+    _, msgs = Brain._to_anthropic_messages([
+        {"role": "system", "content": "s"},
+        {"role": "tool", "tool_call_id": "A", "content": "a"},
+        {"role": "assistant", "content": "", "tool_calls": [call("B")]},
+        {"role": "tool", "tool_call_id": "B", "content": "b"},
+        {"role": "user", "content": "next"},
+    ])
+    assert msgs == [{"role": "user", "content": "next"}]
+
+
+@pytest.mark.parametrize("label", [
+    "Order now", "Pre-order", "Jetzt bezahlen", "Bezahlen", "Zur Kasse", "Valider la commande",
+    "Confirmer le paiement", "Finalizar compra", "Финализирай поръчката", "Приключи поръчката", "Поръчвам",
+    "Donate"])
+def test_more_checkout_buttons_are_blocked(label) -> None:
+    assert _sb.assess_browser_click(label).level == _sb.RiskLevel.BLOCKED
+
+
+@pytest.mark.parametrize("label", [
+    "Плащане и доставка", "Начини на плащане", "Опции за плащане", "Check out the docs", "How to buy",
+    "Purchase history", "Checkout docs", "Search | git-checkout", "Pay attention", "Pay-as-you-go pricing",
+    "Submit order feedback"])
+def test_information_links_about_paying_stay_clickable(label) -> None:
+    """BLOCKED не може да се одобри — информационна връзка не бива да е такава."""
+    assert _sb.assess_browser_click(label).level == _sb.RiskLevel.CONFIRM
+
+
+@pytest.mark.parametrize("answer", ["'НЕ Е ОТКРИТО В ТОЗИ ИЗТОЧНИК'", "„НЕ Е ОТКРИТО В ТОЗИ ИЗТОЧНИК“",
+                                    "Отговор: НЕ Е ОТКРИТО В ТОЗИ ИЗТОЧНИК"])
+def test_research_not_found_in_quotes_is_not_a_source(monkeypatch, answer) -> None:
+    from genesis_agent import research as rs
+
+    class _B:
+        def __init__(self) -> None:
+            self.replies = ["X is 42", answer, answer]
+
+        def complete(self, messages):
+            return type("R", (), {"raw_text": self.replies.pop(0)})()
+    brain = _B()
+    monkeypatch.setattr("genesis_agent.brain.Brain", lambda: brain)
+    monkeypatch.setattr("genesis_agent.web_search.search", lambda *a, **k: [
+        {"title": t, "url": f"https://{t}.test", "snippet": "s"} for t in "abc"])
+    assert "само 1 източник" in rs.grounded_research("what is X")
+
+
+def test_page_check_serves_node_modules_but_not_credentials(tmp_path) -> None:
+    import sys
+    import urllib.error
+    import urllib.request
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "genesis_agent"))
+    import page_check_runner as r
+    (tmp_path / "node_modules" / "chart.js").mkdir(parents=True)
+    (tmp_path / "node_modules" / "chart.js" / "chart.umd.js").write_text("x", encoding="utf-8")
+    for name in ("credentials.json", "service-account.json", "prod.env", "backup.sql"):
+        (tmp_path / name).write_text("secret", encoding="utf-8")
+    srv, port = r._serve(tmp_path)
+    try:
+        assert urllib.request.urlopen(f"http://127.0.0.1:{port}/node_modules/chart.js/chart.umd.js").status == 200
+        for name in ("credentials.json", "service-account.json", "prod.env", "backup.sql"):
+            with pytest.raises(urllib.error.HTTPError):
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/{name}")
+    finally:
+        srv.shutdown()
+
+
+# ── преглед на третата вълна ─────────────────────────────────────────────────
+
+@pytest.mark.parametrize("tail", [
+    "def _test():\n    assert add(2, 3) == 5\nif __name__ == '__main__':\n    _test\n    print('OK')",
+    "def test_add():\n    assert add(2, 3) == 5\nTESTS = [test_add]\nprint('OK')",
+    "import os\ndef get(key):\n    assert add(2, 3) == 5\nos.environ.get('HOME')\nprint('OK')",
+    "try:\n    r = add(2, 3)\nexcept TypeError as e:\n    assert 'int' in str(e)\nprint('OK')",
+    "import sys\ntry:\n    assert add(2, 3) == 5\nexcept AssertionError:\n    print('OK')\n    sys.exit(0)\nprint('OK')",
+    "try:\n    assert add(2, 3) == 5\nexcept AssertionError:\n    print('OK')\n    raise SystemExit\nprint('OK')",
+])
+def test_a_mentioned_never_run_or_exit_zero_check_does_not_count(tail) -> None:
+    from genesis_agent.verifier import verify_skill
+    assert verify_skill(_BROKEN + tail).method != "self_test_passed"
+
+
+def test_an_expected_error_test_with_else_counts() -> None:
+    from genesis_agent.verifier import verify_skill
+    code = ("def add(a, b):\n    return a + b\n"
+            "try:\n    add('a', 1)\nexcept TypeError:\n    pass\nelse:\n    raise AssertionError('no error')\n"
+            "assert add(1, 1) == 2\nprint('OK')")
+    assert verify_skill(code).method == "self_test_passed"
+
+
+@pytest.mark.parametrize("label", [
+    "Check out", "Buy It Now", "Pay with card", "Pay with PayPal", "Pay securely", "Buy – $9", "Pay (€9)",
+    "Checkout ($19.99)", "Checkout (2)", "Go to checkout", "Continue to checkout", "Secure checkout",
+    "Complete checkout", "Buy for $9", "Buy with 1-Click", "x | btn-checkout", "x | pay_now",
+    "Плащане с карта", "Оформи поръчката", "Купувам", "Плащам", "PLACE ORDER", "Complete Purchase"])
+def test_payment_buttons_with_more_words_are_blocked(label) -> None:
+    assert _sb.assess_browser_click(label).level == _sb.RiskLevel.BLOCKED
+
+
+@pytest.mark.parametrize("label", ["Price | order", "Sort by | order", "News | Order", "Order 2024"])
+def test_a_sort_control_named_order_is_not_a_payment(label) -> None:
+    assert _sb.assess_browser_click(label).level == _sb.RiskLevel.CONFIRM
+
+
+def test_research_keeps_answers_that_merely_mention_not_found(monkeypatch) -> None:
+    from genesis_agent import research as rs
+
+    class _B:
+        def __init__(self) -> None:
+            self.replies = ["404 Not Found means the server cannot find it."] * 3 + ["агреед"]
+
+        def complete(self, messages):
+            return type("R", (), {"raw_text": self.replies.pop(0)})()
+    brain = _B()
+    monkeypatch.setattr("genesis_agent.brain.Brain", lambda: brain)
+    monkeypatch.setattr("genesis_agent.web_search.search", lambda *a, **k: [
+        {"title": t, "url": f"https://{t}.test", "snippet": "s"} for t in "abc"])
+    assert "проверено през 3 източника" in rs.grounded_research("what is 404")
+
+
+# ── чат цикълът (одит 2026-10-07, четвърта вълна) ───────────────────────────
+
+def test_a_new_session_gets_a_new_history_file(tmp_path, monkeypatch) -> None:
+    import genesis_terminal_agent as gta
+    monkeypatch.setattr(gta, "HISTORY_DIR", tmp_path)
+    monkeypatch.setattr(gta, "_SESSION_FILE", None)
+    first = gta._session_file()
+    first.write_text("[]", encoding="utf-8")
+    assert gta._session_file() == first                    # същият разговор — същият файл
+    gta._new_session()
+    second = gta._session_file()
+    assert second != first and not second.exists()
+
+
+def test_drop_and_done_stay_in_their_workspace(wm, tmp_path) -> None:
+    other = tmp_path / "A"
+    other.mkdir()
+    wm.set_workspace(other)
+    wm.add_thread("работа в A")
+    tid = wm.list_threads("open")[0]["id"]
+    wm.set_workspace(tmp_path)
+    assert "Няма нишка" in wm.close_thread(tid, drop=True)
+    assert "Няма нишка" in wm.update_thread(tid, status="done")
+    wm.set_workspace(other)
+    assert [t["status"] for t in wm.list_threads("all")] == ["open"]
+
+
+def test_injected_knowledge_is_not_what_the_operator_said(wm) -> None:
+    content = "направи сайт за пекарна\n\n## Проверено ръководство от библиотеката: web\nникога не ползвай..."
+    assert wm.operator_text(content) == "направи сайт за пекарна"
+    assert not wm._operator_spoke_generally([{"role": "user", "content": content}])
+
+
+@pytest.mark.parametrize(("raw", "value"), [
+    ('"sk-proj #1"', "sk-proj #1"), ("abc # note", "abc"), ("a#b", "a#b"), ("'x y'", "x y"), ("plain", "plain")])
+def test_env_values(raw, value) -> None:
+    from genesis_agent.paths import env_value
+    assert env_value(raw) == value
+
+
+def test_a_bom_does_not_hide_the_first_key(tmp_path, monkeypatch) -> None:
+    from genesis_agent import paths
+    env = tmp_path / ".env"
+    env.write_bytes("﻿GITHUB_TOKEN=gh_123\n".encode())
+    monkeypatch.setattr(paths, "ENV_FILES", [env])
+    assert paths.read_env_files("GITHUB_TOKEN") == "gh_123"
+
+
+def test_the_terminal_reads_env_files_in_brains_order(tmp_path, monkeypatch) -> None:
+    import genesis_terminal_agent as gta
+    project, home = tmp_path / "p.env", tmp_path / "h.env"
+    project.write_text("GITHUB_TOKEN=project_key\n", encoding="utf-8")
+    home.write_text("﻿GITHUB_TOKEN=home_key\n", encoding="utf-8")
+    monkeypatch.setitem(gta.KEYS, "GITHUB_TOKEN", "")
+    gta.load_env(project)
+    gta.load_env(home)
+    assert gta.KEYS["GITHUB_TOKEN"] == "project_key"
+
+
+def test_local_only_never_takes_the_legacy_cloud_path(monkeypatch) -> None:
+    import genesis_terminal_agent as gta
+    monkeypatch.setenv("GENESIS_LOCAL_ONLY", "1")
+    monkeypatch.setattr(gta, "current_provider", "github")
+    monkeypatch.setattr(gta, "_ask_via_legacy", lambda *a, **k: pytest.fail("облакът е пипнат"))
+
+    class _B:
+        def __init__(self, *a, **k):
+            pass
+
+        def complete(self, messages, tools=None):
+            return type("R", (), {"raw_text": "local", "tool_calls": None, "usage": None})()
+    monkeypatch.setattr("genesis_agent.brain.Brain", _B)
+    try:
+        gta.ask_genesis([{"role": "user", "content": "x"}])
+    except Exception as e:  # пътят през Brain може да иска още неща — важното е легаси пътят
+        assert "облакът" not in str(e)
+
+
+@pytest.mark.parametrize("q", ["колко RAM имам?", "какво е IP-то ми?", "how much free space do I have?",
+                               "кажи ми какво пише в README"])
+def test_questions_about_this_machine_are_not_light(q) -> None:
+    from genesis_agent.model_router import is_light_request
+    assert not is_light_request(q)
+
+
+# ── облак, известия, setup (одит 2026-10-07, четвърта вълна) ─────────────────
+
+def test_parallel_logins_cannot_outrun_the_lockout(tmp_path) -> None:
+    import threading
+
+    from cloud.web import server as web
+    from cloud.web.store import Store
+    store = Store(tmp_path / "web.db")
+    store.add_user("ana@example.com", "a-long-password-1")
+    app = web.App(store, tmp_path / "jobs", runner=lambda *a, **k: None, secure_cookie=False)
+    results: list[str] = []
+
+    def attempt() -> None:
+        try:
+            results.append("ok" if app.login("ana@example.com", "wrong-password", "1.2.3.4") else "401")
+        except web.LoginBlocked:
+            results.append("429")
+    threads = [threading.Thread(target=attempt) for _ in range(30)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    app.pool.shutdown(wait=False)
+    assert results.count("401") <= web.LOGIN_FAILURES
+    assert results.count("429") >= 30 - web.LOGIN_FAILURES
+
+
+def test_cf_header_is_ignored_behind_a_plain_proxy() -> None:
+    from cloud.web import server as web
+
+    class _H:
+        def __init__(self, mode, headers):
+            self.app = type("A", (), {"trust_proxy": mode})()
+            self.headers = headers
+            self.client_address = ("10.0.0.1", 1)
+    spoof = {"CF-Connecting-IP": "6.6.6.6", "X-Forwarded-For": "6.6.6.6, 203.0.113.9"}
+    assert web.Handler._ip(_H(True, spoof)) == "203.0.113.9"
+    assert web.Handler._ip(_H("cloudflare", spoof)) == "6.6.6.6"
+    assert web.Handler._ip(_H(False, spoof)) == "10.0.0.1"
+
+
+@pytest.mark.parametrize("text", [
+    "git push --force https://me:ghp_SECRETTOKEN1234567890@github.com/me/r.git main",
+    "rm -rf / # OPENAI_API_KEY=sk-live-SECRETSECRET",
+    "curl -H 'Authorization: Bearer sk-ant-SECRETSECRET' https://x",
+])
+def test_notifications_never_carry_secrets(monkeypatch, text) -> None:
+    from genesis_agent import notifier
+    sent: list[str] = []
+    monkeypatch.setattr(notifier, "resolve_setting", lambda key, *a, **k: "configured")
+    monkeypatch.setattr(notifier, "_send_telegram", lambda body, token, chat: sent.append(body) or True)
+    notifier.send_message(f"blocked `{text}` <&>")
+    assert sent and "SECRET" not in sent[0]
+    assert "<&>" not in sent[0] and "&lt;&amp;&gt;" in sent[0]
+
+
+def test_setup_warns_when_a_project_env_overrides_the_new_key(tmp_path, monkeypatch) -> None:
+    from genesis_agent import paths, setup_wizard
+    project_env, home_env = tmp_path / "project.env", tmp_path / "home.env"
+    project_env.write_text("HF_TOKEN=hf_OLD_REVOKED\n", encoding="utf-8")
+    monkeypatch.setattr(paths, "ENV_FILES", [project_env, home_env])
+    monkeypatch.setattr(setup_wizard, "ENV_FILE", home_env)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    assert "project.env" in setup_wizard._overridden_warning("HF_TOKEN")
+    kept: dict = {}
+    setup_wizard._keep(kept, "HF_TOKEN", "hf_OLD_REVOKED")
+    assert kept == {}                                   # не се копира тихо в глобалния файл

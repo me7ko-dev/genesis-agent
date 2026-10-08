@@ -146,3 +146,15 @@ def test_html_written_as_data_gets_only_the_structure(tmp_path) -> None:
     assert web_note(sample) == ""
     sample.write_text("<html><body><table><tr><td>A95</div></body></html>", encoding="utf-8")
     assert "div" in web_note(sample)
+
+
+def test_a_root_relative_link_to_an_existing_file_is_fine(tmp_path) -> None:
+    """Одит 2026-10-07: `/css/style.css` се търсеше в корена на диска."""
+    (tmp_path / "css").mkdir()
+    (tmp_path / "css" / "style.css").write_text("", encoding="utf-8")
+    page = CLEAN.replace('href="styles.css"', 'href="/css/style.css"')
+    for name in ("script.js", "bear.svg"):
+        (tmp_path / name).write_text("", encoding="utf-8")
+    assert check_html(tmp_path / "index.html", page) == []
+    missing = CLEAN.replace('href="styles.css"', 'href="/css/missing.css"')
+    assert any("missing.css" in f for f in check_html(tmp_path / "index.html", missing))

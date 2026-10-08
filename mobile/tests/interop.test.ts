@@ -55,6 +55,14 @@ test('pairing URL: key only from the fragment', () => {
   assert.equal(parsePairingUrl('http://192.168.1.5:8765/?k=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8'), null);
   assert.equal(parsePairingUrl('http://x:1/#k=short'), null);
   assert.equal(parsePairingUrl('not a url'), null);
+  // The host shown is the host talked to: no user@, backslash, path or query.
+  const k = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
+  for (const bad of [`http://my-pc@evil.example:8765/#k=${k}`, `http://evil.example\\@my-pc/#k=${k}`,
+    `http://my-pc:8765/x#k=${k}`, `http://my-pc:8765/?a=1#k=${k}`]) {
+    assert.equal(parsePairingUrl(bad), null, bad);
+  }
+  assert.equal(parsePairingUrl(`http://[fe80::1]:8765/#k=${k}`)?.base, 'http://[fe80::1]:8765');
+  assert.equal(parsePairingUrl(`https://pc.local#k=${k}`)?.base, 'https://pc.local');
 });
 
 test('a whole conversation with the real server', async () => {

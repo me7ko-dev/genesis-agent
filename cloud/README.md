@@ -56,8 +56,12 @@ python -m cloud.runner.launch --workspace /srv/jobs/1 --env-file /srv/genesis/ke
 
 ```bash
 python -m cloud.web.server add-user ivan@example.com      # бета: хората се добавят ръчно, печата парола
-python -m cloud.web.server serve --data /srv/genesis/web --jobs /srv/jobs   --env-file /srv/genesis/keys.env --trust-proxy           # 127.0.0.1:8080, отпред Caddy/Cloudflare с HTTPS
+python -m cloud.web.server serve --data /srv/genesis/web --jobs /srv/jobs   --env-file /srv/genesis/keys.env --trust-proxy           # 127.0.0.1:8080, отпред Caddy с HTTPS
 ```
+
+Зад Cloudflare Tunnel — `--trust-cloudflare` (IP от `CF-Connecting-IP`); зад Caddy/nginx —
+`--trust-proxy` (последният адрес в `X-Forwarded-For`). Никога и двете: зад Caddy клиентът
+може сам да напише `CF-Connecting-IP` и да заобиколи ограничението на опитите за вход.
 
 Разговорът е една папка; всяко съобщение е нов контейнер върху нея, историята
 (само въпроси и крайни отговори, ≤20 съобщения / 12k знака) е в `/work/.genesis`.

@@ -46,3 +46,17 @@ def test_the_dependency_project_is_fixable_and_found_as_pytest(tmp_path):
 
 def test_a_missing_package_is_reported(tmp_path):
     assert bf._missing(tmp_path, ("json", "no_such_package_xyz")) == ["no_such_package_xyz"]
+
+
+def test_results_json_has_the_shape_bench_all_compares(tmp_path) -> None:
+    import json
+    results = [{"name": "median", "fixed": True, "reported": True, "rounds": 2, "test_touched": False,
+                "sec": 4.0, "prompt": 5000, "completion": 900},
+               {"name": "cache", "fixed": False, "reported": True, "rounds": 6, "test_touched": False,
+                "sec": 30.0, "prompt": 9000, "completion": 1000}]
+    path = bf.write_results(tmp_path / "fix", results, "")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["summary"]["median"] == {"runs": 1, "ok": 1, "tests": 1.0, "seconds": 4.0, "tokens": 5900,
+                                         "false_claim": False, "test_touched": False}
+    assert data["summary"]["cache"]["false_claim"] is True
+    assert data["runs"][0]["fixed"] is True             # bench_all разпознава вида по това

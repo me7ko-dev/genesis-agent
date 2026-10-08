@@ -177,6 +177,17 @@ class TestMissingKeyIsNotTampering:
         with pytest.raises(ValueError, match="подпис"):
             sl.skill_view("fibonacci")
 
+    def test_deleting_the_public_key_does_not_let_tampering_through(
+        self, _isolated_skills, _isolated_keys
+    ) -> None:
+        """Одит 2026-10-07: код, пуснат от умение, трие public_key.pem и
+        пренаписва умението; проверката не бива да изчезва с файла."""
+        path = sm.save_skill(slug="fibonacci", code="print(1)", goal="fibonacci helper")
+        _tamper_code_block(path, "print('PWNED')")
+        _isolated_keys.PUBLIC_KEY_PATH.unlink()
+        with pytest.raises(ValueError, match="подпис"):
+            sl.skill_view("fibonacci")
+
     def test_the_refusal_names_both_possible_causes(
         self, _isolated_skills, _isolated_keys
     ) -> None:
@@ -259,9 +270,29 @@ class TestSearchSeesTheOperatorsLanguage:
 
     def test_a_cyrillic_query_produces_keywords_at_all(self) -> None:
         words = sl._keywords("обработка на CSV файлове")
-        assert "обработка" in words
-        assert "файлове" in words
+        assert sl._stem("обработка") in words
+        assert sl._stem("файлове") in words
         assert "csv" in words, "латиницата в смесен текст трябва да оцелее"
+
+    @pytest.mark.parametrize("forms", [
+        ("фактура", "фактури", "фактурите", "фактурата"),
+        ("уебсайт", "уебсайта", "уебсайтът"),
+        ("работни", "работните", "работен"),
+        ("провери", "проверка"),
+        ("умение", "уменията"),
+        ("номер", "номера", "номерата"),
+    ])
+    def test_word_forms_of_one_word_meet(self, forms) -> None:
+        """2026-10-07: „провери ЕГН-то“, „уебсайта“, „IBAN-ите“ не стигаха до
+        провереното знание само заради формата на думата."""
+        assert len({sl._stem(f) for f in forms}) == 1, {f: sl._stem(f) for f in forms}
+
+    def test_latin_and_short_words_are_not_stemmed(self) -> None:
+        for w in ("iban", "egn", "егн", "ддс", "invoices", "дни"):
+            assert sl._stem(w) == w
+
+    def test_a_dangling_article_after_a_hyphen_is_not_a_word(self) -> None:
+        assert sl._keywords("провери IBAN-ите") == {sl._stem("провери"), "iban"}
 
     def test_a_fully_cyrillic_query_is_no_longer_empty(self) -> None:
         assert sl._keywords("четене на конфигурационен файл")
@@ -554,3 +585,48 @@ def test_the_invoice_skill_passes_its_self_test(_shipped_skills, tmp_path) -> No
     r = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
                        encoding="utf-8", timeout=60, check=False)
     assert r.returncode == 0 and r.stdout.strip() == "OK", r.stderr
+
+
+@pytest.mark.parametrize("query,skill", [
+    ("провери ЕГН-то на клиента", "bg_egn_validate_and_decode"),
+    ("направи уебсайта на пекарната", "web_site_2026"),
+    ("провери IBAN-ите", "bg_iban_validate"),
+    ("изчисли работните дни до края на месеца", "bg_working_days"),
+    ("сметни ДДС номерата", "bg_vat_number_validate"),
+])
+def test_another_word_form_still_gets_the_verified_rules(_shipped_skills, query, skill) -> None:
+    """Измерено 2026-10-07 преди _stem: и петте → нищо, само заради формата
+    на думата („провери“ ≠ „проверка“, „уебсайта“ ≠ „уебсайт“)."""
+    assert f"библиотеката: {skill}" in sl.domain_context(query)
+
+
+@pytest.mark.parametrize("project", sorted(
+    p.name for p in (sl.Path(__file__).resolve().parent.parent / "bench" / "projects").iterdir()
+    if (p / "task.txt").is_file()))
+def test_stemming_changes_no_bench_task_knowledge(_shipped_skills, project) -> None:
+    """Кое знание получава всяка задача от bench-а — същото като преди _stem
+    (2026-10-07). Нов тригер тук е фалшива тревога, която bench-ът е мерил без."""
+    expected = {
+        "booking-form": "web_site_2026", "egn-check": "bg_egn_validate_and_decode",
+        "eik-check": "bg_eik_bulstat_validate", "euro-convert": "bg_euro_bgn_conversion",
+        "faktura-excel": "bg_invoice_fields", "iban-check": "bg_iban_validate",
+        "vat-check": "bg_vat_number_validate", "workdays": "bg_working_days",
+    }.get(project)
+    task = sl.Path(__file__).resolve().parent.parent / "bench" / "projects" / project / "task.txt"
+    text = sl.domain_context(task.read_text(encoding="utf-8"))
+    if expected:
+        assert f"библиотеката: {expected}" in text
+    else:
+        assert text == ""
+
+
+
+@pytest.mark.parametrize("query", [
+    "Скриптът не работи вече 3 дни, оправи го",
+    "Провери дали cron задачата работи през последните 7 дни",
+    "калкулатор за данъчни облекчения, основните полета на формата",
+])
+def test_a_shared_stem_is_not_a_whole_trigger(_shipped_skills, query) -> None:
+    """Одит 2026-10-07: „работи“ (глагол) ≈ „работни“ и „основните“ ≈ „основа“
+    през пълната основа подаваха правилата за работни дни / фактури."""
+    assert sl.domain_context(query) == ""

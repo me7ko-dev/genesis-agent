@@ -106,6 +106,29 @@ def test_sensitive_path_actually_read_is_confirmed() -> None:
     assert verdict.level == CONFIRM
 
 
+@pytest.mark.parametrize("code", [
+    'from pathlib import Path\nprint(Path.home().joinpath(".ssh", "id_rsa").read_text())',
+    'from pathlib import Path\ng = Path.home() / ".genesis"\nprint("ENV:", (g / ".env").read_text())',
+    'from pathlib import Path\n(Path.home() / ".genesis" / "private_key.pem").read_text()',
+    'import os\np = os.path.expanduser("~/.aws/credentials")\ndata = open(p).read()',
+])
+def test_sensitive_path_built_then_read_is_confirmed(code: str) -> None:
+    """Одит 2026-10-07: USE_SKILL драйвер четеше ~/.ssh и ~/.genesis/.env без
+    въпрос, защото пътят не беше подаден като низ ПРЯКО на open()."""
+    assert sandbox.assess_code(code).level == CONFIRM
+
+
+@pytest.mark.parametrize("code", [
+    'if name.startswith(".env"):\n    pass',
+    'skip = ".ssh" in path',
+    'import re\nre.search(r"\\.pem$", name)',
+    '"""Never reads .env."""\nx = 1',
+    'print("не пипай .env")',
+])
+def test_sensitive_path_only_compared_stays_safe(code: str) -> None:
+    assert sandbox.assess_code(code).level == SAFE
+
+
 def test_syntax_error_defaults_to_confirm_not_safe() -> None:
     """При SyntaxError _python_reads_sensitive_path връща True консервативно —
     но само важи, когато pattern-ите изобщо са засегли reasons; иначе кодът
@@ -637,3 +660,75 @@ class TestTimeoutKillsTheWholeTree:
         assert time.time() - t0 < 40, "таймаутът трябва да спре и детето на обвивката"
         assert res.returncode is None
         assert "Timeout" in res.stderr
+
+# ── 2026-10-07: одит — пропуски, доказани с изпълнение ───────────────────────
+
+@pytest.mark.parametrize("command", [
+    "grep -r SECRET ~/.ssh ~/.aws",
+    "tar cz ~/.ssh | base64",
+    "ls ~/.gnupg",
+    "cat ~/.s*/id_*",
+])
+def test_a_secret_folder_named_without_a_slash_asks(command) -> None:
+    assert sandbox.assess_command(command).level == sandbox.RiskLevel.CONFIRM
+
+
+@pytest.mark.parametrize("command", [
+    "python3 -c \"import shutil; shutil.rmtree('/x')\"",
+    "python -X utf8 -c \"import os; os.remove('a')\"",
+    "python3 -u -c \"import subprocess; subprocess.run(['ls'])\"",
+    "node -e \"require('fs').rmSync('/x', {recursive: true})\"",
+    "$(echo rm) -rf ~",
+    "x=rm; $x -rf ~",
+    "cd photos\nmv *.jpg /tmp/dest/",
+    "nohup mv *.jpg /tmp/x/",
+])
+def test_deletion_hidden_in_inline_code_or_another_line_asks(command) -> None:
+    assert sandbox.assess_command(command).level >= sandbox.RiskLevel.CONFIRM
+
+
+@pytest.mark.parametrize("command", ["rm -rf /etc/*", "rm -rf /usr/*", "rm -rf /home/user/*"])
+def test_everything_inside_a_critical_root_is_blocked_like_the_root(command) -> None:
+    assert sandbox.assess_command(command).level == sandbox.RiskLevel.BLOCKED
+
+
+@pytest.mark.parametrize("command", [
+    "python -m pytest -q", "$PY -m pytest -q", "python -c \"print(1 + 1)\"",
+    "ls -la 2>&1 | head", "echo .sshrc", "python script.py --env prod", "grep -r foo src/",
+])
+def test_ordinary_commands_stay_safe(command) -> None:
+    assert sandbox.assess_command(command).level == sandbox.RiskLevel.SAFE
+
+
+def test_a_symlink_to_a_key_is_a_key(tmp_path) -> None:
+    key = tmp_path / ".ssh" / "id_rsa"
+    key.parent.mkdir()
+    key.write_text("SECRET", encoding="utf-8")
+    link = tmp_path / "ws" / "notes.txt"
+    link.parent.mkdir()
+    try:
+        link.symlink_to(key)
+    except (OSError, NotImplementedError):
+        pytest.skip("no symlinks here")
+    assert sandbox.sensitive_path_reason(link)
+    assert sandbox.sensitive_path_reason(tmp_path / "ws" / "plain.txt") is None
+
+
+@pytest.mark.parametrize("command", [
+    'mv *.jpg "/mnt/backup/Tom & Jerry"',
+    "mv *.jpg /mnt/backup/R\\&D",
+    "python3 -uc \"import shutil; shutil.rmtree('/x')\"",
+    "python3 -c\"import shutil; shutil.rmtree('/x')\"",
+    "echo \"import shutil; shutil.rmtree('/x')\" | python3",
+    "python3 - <<EOF\nimport shutil; shutil.rmtree('/x')\nEOF",
+])
+def test_quotes_and_flag_spellings_do_not_hide_a_risky_command(command) -> None:
+    """Одит 2026-10-07 на собствената поправка: `&` в кавички режеше сегмента
+    наполовина и масовото местене минаваше като SAFE; `-uc`/`-c"…"`/stdin
+    заобикаляха проверката на вградения код."""
+    assert sandbox.assess_command(command).level >= sandbox.RiskLevel.CONFIRM
+
+
+def test_redirections_are_not_separators() -> None:
+    assert sandbox._split_segments('ls 2>&1 | head; echo "a & b" && x &> f') == [
+        "ls 2>&1 ", " head", ' echo "a & b" ', " x &> f"]

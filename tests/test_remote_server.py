@@ -202,6 +202,24 @@ def test_confirm_is_answered_from_the_phone() -> None:
     assert "allowed=True" in texts
 
 
+def test_the_first_answer_to_a_confirm_wins() -> None:
+    """Две бързи докосвания („Откажи“, после „Изпълни“) не обръщат отказа."""
+    import threading
+    session, _ = _session()
+    result: list[bool] = []
+    t = threading.Thread(target=lambda: result.append(session.confirm("rm -rf build", ["риск"], timeout=5)))
+    t.start()
+    deadline = time.time() + 5
+    while not session._pending:
+        assert time.time() < deadline
+        time.sleep(0.01)
+    cid = next(iter(session._pending))
+    assert session.answer(cid, False) is True
+    assert session.answer(cid, True) is False
+    t.join(5)
+    assert result == [False]
+
+
 def test_unanswered_confirm_is_a_no() -> None:
     session, _ = _session()
     assert session.confirm("rm -rf /tmp/x", ["риск"], timeout=0.05) is False
@@ -374,3 +392,19 @@ def test_run_turn_stops_before_the_next_tool(monkeypatch, tmp_path) -> None:
     assert ran == [], "a tool ran after stop"
     assert ui.warnings == ["Спряно от оператора."]
     assert "tool_calls" not in list(messages)[-1], "history left with unanswered tool_calls"
+
+
+def test_a_replay_is_still_rejected_after_a_restart(tmp_path) -> None:
+    """Одит 2026-10-07: видяното беше само в паметта — след рестарт на
+    `genesis serve` записано съобщение се изпълняваше пак."""
+    path = tmp_path / "remote_seen.json"
+    payload = _request("send", text="rm -rf build && deploy")
+    rs.ReplayGuard(path=path).check(payload)
+    with pytest.raises(rs.ProtocolError, match="replayed"):
+        rs.ReplayGuard(path=path).check(payload)          # нов процес, същият файл
+
+
+def test_a_broken_seen_file_does_not_stop_the_server(tmp_path) -> None:
+    path = tmp_path / "remote_seen.json"
+    path.write_text("{not json", encoding="utf-8")
+    rs.ReplayGuard(path=path).check(_request("status"))

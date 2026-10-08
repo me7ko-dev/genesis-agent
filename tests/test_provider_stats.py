@@ -98,3 +98,23 @@ def test_fresh_failures_still_demote(tmp_path, monkeypatch) -> None:
         provider_stats.record_call("ollama_cloud", 0.3, False)
     chain = [{"provider": "ollama_cloud", "model": "a"}, {"provider": "nvidia", "model": "b"}]
     assert [c["provider"] for c in provider_stats.deprioritize_flaky(chain)] == ["nvidia", "ollama_cloud"]
+
+
+def test_concurrent_processes_do_not_erase_each_other(tmp_path) -> None:
+    """Одит 2026-10-07: 4 процеса × 30 записа → оставаха 1–4 извадки."""
+    import subprocess
+    import sys
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    stats = str(tmp_path / "s.json")
+    code = (f"import sys; sys.path.insert(0, {str(root)!r})\n"
+            "from pathlib import Path\n"
+            "import genesis_agent.provider_stats as ps\n"
+            f"ps._STATS_PATH = Path({stats!r})\n"
+            "for _ in range(30): ps.record_call(sys.argv[1], 0.1, True)\n")
+    procs = [subprocess.Popen([sys.executable, "-c", code, f"p{i}"]) for i in range(4)]
+    for p in procs:
+        assert p.wait(60) == 0
+    import json
+    data = json.loads((tmp_path / "s.json").read_text(encoding="utf-8"))
+    assert {k: len(v["samples"]) for k, v in data.items()} == {f"p{i}": 30 for i in range(4)}

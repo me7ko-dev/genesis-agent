@@ -129,6 +129,14 @@ _LIVE_INFO = re.compile(
     r"vremeto|navan|navun|navyn|prognoz|novin|kurs|cen[ai]\b|bors|rezultat|dneshn|sega\b|"
     r"weather|forecast|news|prices?\b|stock|latest|today|current|score)",
     re.IGNORECASE)
+# Въпрос за ТАЗИ машина или файл: отговорът е там, не в знанието на модела.
+# Малкият модел без инструменти отговаряше „Имаш 16 GB RAM.“ наслуки (одит
+# 2026-10-07) — и ескалация нямаше, защото не беше поискал инструмент.
+_MACHINE = re.compile(
+    r"(\bram\b|паметта|процесор|видеокарт|компютър|лаптоп|свободн|място|версия|инсталир|\bip\b|"
+    r"ip-то|readme|имам\b|\bmoq\b|\bmoya\b|kompjut|kompyut|laptop|svobodn|mqsto|versiq|versi[aq]\b|"
+    r"\b(cpu|gpu|memory|disk|space|version|installed|my|mine|machine|computer|pc)\b)",
+    re.IGNORECASE)
 _TECHNICAL = re.compile(r"```|`|https?://|[\\/~]\w|\b\w+\.(py|js|ts|json|ya?ml|md|txt|sh|ps1|exe|zip)\b|[{}<>=;]")
 
 LIGHT_MAX_CHARS = 160
@@ -140,7 +148,7 @@ def is_light_request(text: str) -> bool:
     if not t or len(t) > LIGHT_MAX_CHARS or t.count("\n") > 1:
         return False
     return not (_TECHNICAL.search(t) or _ACTION.search(t) or _WORK_NOUN.search(t)
-                or _LIVE_INFO.search(t) or _CONFIRM.search(t))
+                or _LIVE_INFO.search(t) or _CONFIRM.search(t) or _MACHINE.search(t))
 
 
 def is_light_turn(messages: list[dict]) -> bool:
@@ -209,14 +217,19 @@ _COMMAND_INTENTS = [(cmd, re.compile(rx)) for cmd, rx in (
         r"|(нов разговор|нов чат|nov razgovor|nov chat|new chat|new conversation)")),
     ("/tasks",
         _SHOW + r" (задачите|нишките|zadachite|nishkite|tasks|the tasks|open tasks)"),
+    ("/export", (
+        r"(предай|експортирай|опаковай|predai|eksportiraj|eksportirai|opakovai|opakovaj|export|package)"
+        r"( ми| mi)? (проекта|proekta|the project|project)( за клиента| za klienta)?"
+        r"|(направи|napravi|make)( ми| mi)? (zip|зип)( на| na| of)?( проекта| proekta| the project)?")),
     ("/help", (
         r"помощ|pomosht|pomosh|help"
         r"|(какви|kakvi) (команди|komandi) (има|имаш|ima|imash)"
         r"|what commands (are there|do you have)"
         r"|" + _SHOW + r" (командите|komandite|commands|the commands)")),
 )]
-# Тези променят нещо (архив с --delete в целта; изгубена история) — питат.
-CONFIRM_COMMANDS = frozenset({"/backup", "/clear"})
+# Тези променят нещо (архив с --delete в целта; изгубена история; пуснати
+# тестове на проекта и нов zip) — питат.
+CONFIRM_COMMANDS = frozenset({"/backup", "/clear", "/export"})
 
 
 def command_for_request(text: str) -> str | None:

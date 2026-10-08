@@ -27,6 +27,7 @@ import json
 import re
 import sys
 import threading
+import urllib.parse
 from pathlib import Path
 
 # Всичко за един изглед; Python решава кое е находка.
@@ -167,7 +168,31 @@ _UTF8_TYPES = {".html": "text/html; charset=utf-8", ".htm": "text/html; charset=
                ".mjs": "text/javascript; charset=utf-8", ".svg": "image/svg+xml"}
 
 
+# Какво сървърът НЕ дава на страницата (одит 2026-10-07): папката на сайта
+# често е коренът на проекта (Vite), до index.html стои `.env` — и всеки скрипт
+# на страницата, включително от CDN, можеше да го вземе с fetch('/.env').
+# `node_modules/` остава достъпен: страница без бъндлър го реферира законно
+# (`/node_modules/chart.js/dist/chart.umd.js`), а 404 там е фалшива находка.
+_PRIVATE = re.compile(r"(^|/)(\.[^/]*|__pycache__|venv|env)(/|$)"
+                      r"|\.(pem|key|p12|pfx|jks|keystore|sqlite3?|db|env|sql)$|(^|/)(id_rsa|id_ed25519)"
+                      r"|(^|/)(credentials|service[-_]?account|client_secret)[^/]*\.json$",
+                      re.IGNORECASE)
+
+
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):
+    def send_head(self):  # type: ignore[no-untyped-def]
+        path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
+        local = Path(self.translate_path(self.path))
+        root = Path(self.directory).resolve()
+        try:
+            inside = local.resolve().is_relative_to(root)
+        except OSError:
+            inside = False
+        if _PRIVATE.search(path) or not inside:
+            self.send_error(404)
+            return None
+        return super().send_head()
+
     def __init__(self, *args, **kwargs) -> None:
         # Без charset браузърът чете страница без <meta charset> като windows-1252 —
         # кирилицата става „Ð”Ð¾Ð±…“. Хостингите (Pages, Vercel) пращат utf-8.

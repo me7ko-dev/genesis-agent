@@ -131,9 +131,12 @@ _BLOCK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 # 2026-09-28: `Get-Content ~/.genesis/private_key.pem`, `cat ~/.genesis/remote.json`
 # (ключът за сдвояване с телефона — с него някой управлява агента) и
 # `gh/hosts.yml` (GitHub токенът) минаваха като SAFE, а READ_FILE ги четеше
-# без въпрос.
+# без въпрос. Папките (`.ssh`, `.aws`, `.gnupg`) — и без наклонена черта след
+# тях (2026-10-07): `grep -r SECRET ~/.ssh ~/.aws` и `tar cz ~/.ssh` минаваха
+# като SAFE и печатаха ключовете, макар `cat ~/.ssh/id_rsa` да беше спрян.
 _SECRET_PATHS = (
-    r"\.ssh[/\\]|\.aws[/\\]|\.gnupg[/\\]|id_rsa|id_ed25519|\.env\b|credentials\b"
+    r"\.ssh(?:[/\\]|\b)|\.aws(?:[/\\]|\b)|\.gnupg(?:[/\\]|\b)|id_rsa|id_ed25519|id_ecdsa|id_dsa"
+    r"|\bid_[*?\[]|\.env\b|credentials\b"
     r"|\.pem\b|\.p12\b|\.pfx\b|\.genesis[/\\]remote\.json|gh[/\\]hosts\.yml"
     r"|\.npmrc\b|\.pypirc\b|\.netrc\b|\.docker[/\\]config\.json|\.kube[/\\]config\b"
     r"|Login Data\b"
@@ -333,39 +336,83 @@ _PY_CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 # не суров текст за regex над цяла команда. ПАРОЛИ/ПЛАЩАНИЯ са BLOCKED винаги
 # (независимо от mode="allow" в 24/7/маратон режим) — категорично не се
 # автоматизират, дори при изрично поискване (виж genesis_agent/browser.py коментар).
+# Без `\b`: в него `_` е буква и `user_password`, `cc_number` минаваха (одит
+# 2026-10-07). Граница тук е „не латинска буква“ отляво/отдясно.
+_L = r"(?<![a-z])"
+_R = r"(?![a-z])"
 _SENSITIVE_FIELD_PATTERNS: list[re.Pattern[str]] = [
-    _c(r"\bpass(wo?rd)?\b"), _c(r"\bpwd\b"), _c(r"\bpasскод\b"),
-    _c(r"\bcard[_\s-]?(number|num|no)?\b"), _c(r"\bcvv\b"), _c(r"\bcvc\b"),
-    _c(r"\bexp(iry|iration)?[_\s-]?(date|month|year)?\b"),
-    _c(r"\bssn\b"), _c(r"\bsocial[_\s-]?security\b"),
-    _c(r"\biban\b"), _c(r"\brouting[_\s-]?number\b"), _c(r"\baccount[_\s-]?number\b"),
-    _c(r"\bprivate[_\s-]?key\b"), _c(r"\bseed[_\s-]?phrase\b"), _c(r"\bmnemonic\b"),
-    _c(r"\bsecret[_\s-]?key\b"), _c(r"\bapi[_\s-]?key\b"),
+    _c(r"pass(wo?r?d|phrase|code)|passwd|" + _L + r"pass" + _R + "|" + _L + r"pwd" + _R),
+    _c(r"парол|пин\s*код|" + r"(?<![а-я])пин(?![а-я])"),
+    _c(r"card.?(number|num|no|holder|cvv|cvc|code|exp)|" + _L + r"card" + _R
+       + r"|" + _L + r"cc.?(num|number|csc|exp|cvv|cvc|name|type)|ccnum"),
+    _c(_L + r"(cvv\d?|cvc|csc)" + _R + r"|security.?code"),
+    _c(r"(номер|данни)\s+(на|от)\s+(банков\w*\s+)?карта|банкова\s+карта|срок\s+на\s+валидност"),
+    _c(_L + r"exp(iry|iration)?.?(date|month|year)" + _R + "|" + _L + r"expiry" + _R),
+    _c(_L + r"ssn" + _R + r"|social.?security|егн"),
+    _c(_L + r"iban" + _R + r"|routing.?number|account.?number"),
+    _c(r"private.?key|seed.?phrase|mnemonic|secret.?key|api.?key|one.?time.?code|" + _L + r"otp" + _R),
 ]
+# Стойности на autocomplete, които са категорични сами по себе си.
+_SENSITIVE_AUTOCOMPLETE = re.compile(r"(^|\s)(cc-[\w-]+|current-password|new-password|one-time-code)(\s|$)",
+                                     re.IGNORECASE)
+# Етикетите на елемента идват съединени с „ | “ (текст, aria-label, value,
+# title, name, id, <label>), затова „начало на етикет“ е `^` или `|`.
+_SEG = r"(^|\|)\W*"
+# Думи след „pay/buy/checkout“, които правят връзката информация, не плащане.
+_INFO_AFTER = (r"(?!\s*-?\s*(history|attention|as-you-go|docs?|documentation|guide|faq|status|details"
+               r"|tracking|methods?|options?|policy|terms|info|later\s+info)\b)"
+               r"(?!\s+(the|our|this|these|more|how)\b)")
 _SENSITIVE_CLICK_PATTERNS: list[re.Pattern[str]] = [
-    _c(r"\b(buy|purchase|checkout|pay)\s*now\b"), _c(r"\bplace\s+order\b"),
-    _c(r"\bconfirm\s+(order|purchase|payment)\b"), _c(r"\bcomplete\s+purchase\b"),
-    _c(r"\bsubscribe\b"), _c(r"\badd\s+to\s+cart\b.*\bcheckout\b"),
-    _c(r"\b(купи|плати|поръчай|потвърди\s+поръчка)\b"),
+    # Етикет, който ЗАПОЧВА с глагола за плащане: „Pay with card“, „Buy It Now“,
+    # „Check out“, „Checkout ($19.99)“, „Buy – $9“. Посред текст („How to buy“)
+    # или със съществително след него („Purchase history“, „Pay attention“) —
+    # навигация (прегледи 2026-10-07: BLOCKED не може да се одобри).
+    _c(_SEG + r"(buy|purchase|checkout|check\s+out|pay|pre-?order|donate)(?![a-z])" + _INFO_AFTER),
+    _c(r"(place|submit|complete|confirm|finish)\s+(your\s+|my\s+|the\s+)?(order|purchase|payment|booking)"
+       r"(?!\s*(feedback|history|status|details))"),
+    _c(r"confirm\s+and\s+pay|proceed\s+to\s+(checkout|payment)|(buy|order|pay|checkout)\s+now"
+       + r"|" + _L + r"(go\s+to|continue\s+to|secure|complete)\s+checkout" + _R
+       + r"|" + _L + r"subscribe" + _R),
+    # Имена/id на бутони: pay_now, buy-now, place_order, btn-checkout.
+    _c(_L + r"(pay[-_]?now|buy[-_]?now|place[-_]?order|(btn|button)[-_]?check[-_]?out"
+       r"|check[-_]?out[-_]?(btn|button))" + _R),
+    # Български — глаголите, не съществителните („Плащане и доставка“, „Моите
+    # поръчки“ са информация, не плащане).
+    _c(r"(?<![а-я])(купи|купете|купувам|поръчай|поръчайте|поръчвам|плати|платете|плащам|заплати|заплатете)"
+       r"(?![а-я])"),
+    _c(r"(завърши|завършете|потвърди|потвърдете|изпрати|изпратете|направи|направете|финализирай|"
+       r"финализирайте|приключи|приключете|оформи|оформете)\s+(поръчка|покупка|плащане)\w*"),
+    _c(r"към\s+(плащане|касата|поръчката)|(^|\|)\W*плащане(\s+с\s+(карта|paypal))?\W*($|\|)"),
+    # Немски, испански, френски, италиански.
+    _c(r"(?<![a-zà-ü])(kaufen|bestellen|bezahlen|zahlungspflichtig|comprar|pagar|acheter|payer|commander"
+       r"|acquista|paga)(?![a-zà-ü])"),
+    _c(r"zur\s+kasse|valider\s+(la\s+)?commande|confirmer\s+le\s+paiement|finalizar\s+(la\s+)?compra"),
 ]
 
 
-def assess_browser_field(field_type: str, field_name: str) -> RiskVerdict:
+def assess_browser_field(field_type: str, field_name: str, autocomplete: str = "") -> RiskVerdict:
     """Оценява риска на попълване на поле в браузър формуляр.
     field_type: HTML input type ('password', 'text', 'email', ...).
-    field_name: name/id/placeholder/aria-label на полето (каквото е налично)."""
+    field_name: ВСИЧКИ етикети на полето заедно — name, id, placeholder,
+    aria-label, <label>; безсмислено name („field_7“) не бива да скрие
+    „Номер на карта“ (одит 2026-10-07).
+    autocomplete: атрибутът — `cc-number`, `current-password` решават сами."""
     if field_type.lower() == "password":
         return RiskVerdict(RiskLevel.BLOCKED, ["парола (input type=password)"])
+    if autocomplete and _SENSITIVE_AUTOCOMPLETE.search(autocomplete):
+        return RiskVerdict(RiskLevel.BLOCKED, [f"чувствително поле (autocomplete={autocomplete})"])
     for rx in _SENSITIVE_FIELD_PATTERNS:
         if rx.search(field_name):
-            return RiskVerdict(RiskLevel.BLOCKED, [f"чувствително поле: {field_name}"])
+            return RiskVerdict(RiskLevel.BLOCKED, [f"чувствително поле: {field_name[:80]}"])
     return RiskVerdict(RiskLevel.CONFIRM, ["попълване на браузър поле"])
 
 
 def assess_browser_click(label: str, is_submit_near_password: bool = False) -> RiskVerdict:
-    """Оценява риска на клик върху браузър елемент по видимия му текст/label."""
+    """Оценява риска на клик върху браузър елемент по ВСИЧКИ негови етикети
+    (видим текст, aria-label, value, title, name) — бутон „🔒“ с aria-label
+    „Pay now“ е бутон за плащане."""
     if is_submit_near_password:
-        return RiskVerdict(RiskLevel.BLOCKED, ["submit бутон в/до форма с парола (логин/регистрация)"])
+        return RiskVerdict(RiskLevel.BLOCKED, ["submit бутон във форма с парола или карта"])
     for rx in _SENSITIVE_CLICK_PATTERNS:
         if rx.search(label):
             return RiskVerdict(RiskLevel.BLOCKED, [f"плащане/поръчка: \"{label.strip()[:60]}\""])
@@ -376,7 +423,84 @@ def _split_segments(command: str) -> list[str]:
     """Реже съставна команда на отделни сегменти (`&&`, `||`, `;`, `|`), за да
     се оцени всеки поотделно. Груб разрез — не пълен shell парсър; целта е да
     не пропуснем `ls && mv *.jpg /другаде`, чиято опасна част е втора."""
-    return [s for s in re.split(r"&&|\|\||[;|]", command) if s.strip()]
+    # Нов ред и единичен `&` също делят команди (2026-10-07): `cd photos\nmv
+    # *.jpg /другаде` минаваше като SAFE, защото вторият ред не беше сегмент.
+    # Само ИЗВЪН кавички и без `\`: `mv *.jpg "/mnt/Tom & Jerry"` иначе се
+    # режеше на две половини с незатворени кавички, shlex падаше, сегментът се
+    # пропускаше — и масовото местене минаваше като SAFE. `2>&1`, `&>`, `>&`
+    # са пренасочване, не разделител.
+    out: list[str] = []
+    buf: list[str] = []
+    quote = ""
+    heredocs: list[str] = []            # разделители, чиито тела следват след този ред
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote:
+            buf.append(ch)
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                buf.append(command[i + 1])
+                i += 1
+            elif ch == quote:
+                quote = ""
+        elif ch == "\\" and i + 1 < n:
+            buf += [ch, command[i + 1]]
+            i += 1
+        elif ch == "#" and (not buf or buf[-1] in " \t;&|("):
+            # Коментар до края на реда: `# don't` не отваря кавичка.
+            while i + 1 < n and command[i + 1] != "\n":
+                i += 1
+        elif ch == "$" and command.startswith("$'", i):
+            # ANSI-C низ: `\'` вътре е буквален апостроф, не край.
+            j = i + 2
+            while j < n and command[j] != "'":
+                j += 2 if command[j] == "\\" else 1
+            buf.append(command[i:j + 1])
+            i = j
+        elif ch in "'\"":
+            quote = ch
+            buf.append(ch)
+        elif command.startswith("<<", i) and not command.startswith("<<<", i):
+            m = re.match(r"<<-?\s*(['\"]?)([A-Za-z_][\w-]*)\1", command[i:])
+            if m:
+                heredocs.append(m.group(2))
+                buf.append(m.group(0))
+                i += len(m.group(0))
+                continue
+            buf.append(ch)
+        elif command.startswith(("&&", "||"), i):
+            out.append("".join(buf))
+            buf = []
+            i += 1
+        elif ch == "&" and ((i and command[i - 1] in "<>") or (i + 1 < n and command[i + 1] == ">")):
+            buf.append(ch)
+        elif ch == "\n" and heredocs:
+            # Телата на heredoc-овете са данни, не команди: апостроф в
+            # „Don't touch“ не бива да отваря кавичка до края на командата.
+            out.append("".join(buf))
+            buf = []
+            lines = command[i + 1:].split("\n")
+            consumed = 0
+            for delim in heredocs:
+                while consumed < len(lines) and lines[consumed].strip() != delim:
+                    consumed += 1
+                consumed += 1
+            heredocs = []
+            skip = sum(len(line) + 1 for line in lines[:consumed])
+            i += skip
+        elif ch in ";|&\n":
+            out.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    out.append("".join(buf))
+    segments = [s for s in out if s.strip()]
+    if quote:
+        # Незатворена кавичка: не знаем къде свършва — оценяваме И грубия
+        # разрез, за да не стане опасна команда SAFE (затваряне при съмнение).
+        segments += [s for s in re.split(r"&&|\|\||[;|&\n]", command) if s.strip()]
+    return segments
 
 
 def _expand_targets(tokens: list[str], cwd: Path | None) -> tuple[list[Path], bool]:
@@ -444,6 +568,8 @@ def _assess_file_ops(command: str, cwd: Path | None = None) -> RiskVerdict:
             argv = _shlex_split_for_classification(seg)
         except ValueError:  # неуравновесени кавички — не гадаем
             continue
+        # `nohup mv *.jpg …`, `time mv …` — обвивката не прави местенето по-малко масово.
+        argv = _strip_wrappers(argv)
         if not argv:
             continue
         cmd = os.path.basename(argv[0])
@@ -713,6 +839,13 @@ def _critical_root_reason(target: str) -> str | None:
     norm = _normalise_target(target)
     if norm in _CATASTROPHIC_ROOTS:
         return f"критичен корен ({target})"
+    # `/etc/*` трие същото като `/etc`, `/home/ivan/*` — същото като
+    # `/home/ivan` (2026-10-07: двете бяха само CONFIRM, а в режим „allow“
+    # CONFIRM се изпълнява сам).
+    if norm.endswith("/*"):
+        norm = norm[:-2] or "/"
+        if norm in _CATASTROPHIC_ROOTS:
+            return f"критичен корен ({target})"
     for parent in _HOME_PARENTS:
         if norm.startswith(parent) and norm.count("/") == parent.count("/"):
             return f"цяла home директория ({target})"
@@ -785,6 +918,89 @@ def _catastrophic_rm_reason(command: str) -> str | None:
     return None
 
 
+_INTERPRETERS = re.compile(r"^(python[\d.]*|py|pypy[\d.]*|perl|ruby|node|deno|bun)(\.exe)?$",
+                           re.IGNORECASE)
+_INLINE_FLAGS = frozenset({"-c", "-e", "-E", "--eval", "-p", "--print"})
+# Кратки флагове на python без аргумент, слепени с `-c`: `-uc`, `-Bc`, `-c"…"`.
+_PY_SHORT_C = re.compile(r"^-[bBdEhiIOPqRsSuvx]*c(.*)$", re.DOTALL)
+# perl/ruby/node: `-e`, слепен с други флагове (`perl -le`, `perl -ne`).
+_OTHER_SHORT_E = re.compile(r"^-[a-zA-Z]*[eE]$")
+# perl/ruby/node: триене и пускане на процеси с техните имена.
+_OTHER_LANG_RISK = re.compile(
+    r"\b(unlink|rmtree|rm_rf|rm_r|rmSync|rmdirSync|unlinkSync|File\.delete|FileUtils\.rm\w*"
+    r"|system|exec|execSync|spawnSync|child_process|`)", re.IGNORECASE)
+_RF_FLAG = re.compile(r"^(-[a-zA-Z]*[rRfF][a-zA-Z]*|--recursive|--force)$")
+
+
+def _inline_code_reasons(command: str) -> list[str]:
+    """Кодът в `python -c "…"` (и perl/ruby/node -e) получава Python образците.
+
+    2026-10-07: `python3 -c "import shutil; shutil.rmtree(…)"` минаваше като
+    SAFE и триеше в режим „deny“, а същото като `rm -rf` се спираше —
+    _PY_CONFIRM_PATTERNS се прилагаха само в assess_code. Изчислена командна
+    дума с флагове за рекурсия/сила (`$(echo rm) -rf ~`, `$x -rf ~`) не може да
+    се оцени статично — тя също пита; `$PY -m pytest` не.
+    """
+    reasons: list[str] = []
+    for seg in _split_segments(command):
+        try:
+            argv = _strip_wrappers(_shlex_split_for_classification(seg))
+        except ValueError:
+            continue
+        if not argv:
+            continue
+        head = argv[0]
+        if head.startswith(("$", "`")) or "$(" in head:
+            if any(_RF_FLAG.match(a) for a in argv[1:]):
+                reasons.append(f"изчислена команда с -r/-f ({head[:40]}) — не може да се оцени")
+            continue
+    # Кодът след `-c` е в кавички и носи `;` — сегментите отгоре го режат по
+    # средата, затова тук цялата команда се чете с кавичките.
+    try:
+        tokens = _shlex_split_for_classification(command)
+    except ValueError:
+        tokens = command.split()
+    for i, tok in enumerate(tokens):
+        name = os.path.basename(tok)
+        if not _INTERPRETERS.match(name):
+            continue
+        is_python = name.lower().startswith("py")
+        code, j, script = "", i + 1, False
+        while j < len(tokens):              # флаговете на интерпретатора до кода
+            t = tokens[j]
+            m = _PY_SHORT_C.match(t) if is_python else None
+            inline = (t == "-c" or m) if is_python else (t in _INLINE_FLAGS or _OTHER_SHORT_E.match(t))
+            if t.startswith("<<") or t == "<":
+                break                       # кодът идва от heredoc/файл на stdin
+            if inline:
+                # `-c code`, `-uc code`, `-c"code"` (shlex го слепва в `-ccode`)
+                attached = m.group(1) if m else ""
+                code = attached or (tokens[j + 1] if j + 1 < len(tokens) else "")
+                break
+            if t in ("-X", "-W"):           # `python -X utf8 -c …`
+                j += 2
+            elif t == "-m":
+                script = True
+                break
+            elif t.startswith("-") and t != "-":
+                j += 1
+            else:
+                script = t != "-" and not t.startswith(("<", "|", ";", "&"))
+                break
+        if not code and not script and ("|" in command[:command.find(tok)] or "<<" in command
+                                        or (j < len(tokens) and tokens[j] == "-")):
+            # Кодът идва от stdin: `echo "…" | python3`, `python3 - <<EOF`.
+            code = command
+        if not code:
+            continue
+        if is_python:
+            reasons += [f"{why} — в код на командния ред"
+                        for rx, why in _PY_CONFIRM_PATTERNS if rx.search(code)]
+        elif _OTHER_LANG_RISK.search(code):
+            reasons.append("триене/пускане на процес — в код на командния ред")
+    return reasons
+
+
 def assess_command(command: str, cwd: Path | None = None) -> RiskVerdict:
     """Оценява риска на shell команда.
 
@@ -817,6 +1033,10 @@ def assess_command(command: str, cwd: Path | None = None) -> RiskVerdict:
         if rx.search(command):
             reasons.append(why)
             level = RiskLevel.CONFIRM
+    inline = _inline_code_reasons(command)
+    if inline:
+        reasons.extend(inline)
+        level = RiskLevel(max(level, RiskLevel.CONFIRM))
     verdict = RiskVerdict(level, reasons)
     try:
         return verdict.merge(_assess_file_ops(command, cwd))
@@ -867,34 +1087,78 @@ def sensitive_path_reason(path: str | os.PathLike[str]) -> str | None:
     # sandbox._split_segment вече прави точно тази нормализация, и то по
     # същата причина.
     text = str(path).replace("\\", "/")
-    if _SENSITIVE_PATH_EXEMPT_RE.search(text):
-        return None
-    match = _SENSITIVE_PATH_RE.search(text)
-    return f"достъп до чувствителен файл ({match.group(0)})" if match else None
+    if not _SENSITIVE_PATH_EXEMPT_RE.search(text):
+        match = _SENSITIVE_PATH_RE.search(text)
+        if match:
+            return f"достъп до чувствителен файл ({match.group(0)})"
+    # Символна връзка в workspace-а към ключ (2026-10-07): `notes.txt → ~/.ssh/id_rsa`
+    # се четеше без въпрос — образецът гледаше само името, което моделът написа.
+    # Само за абсолютни пътища: относителният се разрешава спрямо cwd на
+    # процеса, а не спрямо папката, за която пита извикващият.
+    raw = os.fspath(path)
+    if os.path.isabs(raw):
+        try:
+            real = os.path.realpath(raw)
+        except (OSError, ValueError):
+            return None
+        if os.path.normcase(real) != os.path.normcase(os.path.abspath(raw)):
+            real_text = real.replace("\\", "/")
+            if not _SENSITIVE_PATH_EXEMPT_RE.search(real_text):
+                match = _SENSITIVE_PATH_RE.search(real_text)
+                if match:
+                    return f"достъп до чувствителен файл ({match.group(0)}, през символна връзка)"
+    return None
+
+
+# Където споменаването на чувствителен път е само сравнение/филтър, не четене:
+# `if name.startswith(".env")`, `re.search(r"\.pem$", f)`, `print("пази .env")`.
+_BENIGN_STR_CALLS = {"startswith", "endswith", "match", "fullmatch", "search", "compile",
+                     "sub", "findall", "fnmatch", "print"}
 
 
 def _python_reads_sensitive_path(code: str) -> bool:
-    """True ако код реално ЧЕТЕ чувствителен път (не само го споменава/сравнява).
-    При SyntaxError или друга несигурност връща True (консервативно — не
-    сваляме предупреждение за код, който не можем уверено да разберем)."""
+    """True ако код може да ЧЕТЕ чувствителен път (не само го сравнява).
+
+    Всеки низ с такъв път брои, освен ако е в сравнение (`in`, `==`), в
+    шаблон/филтър (startswith, re.search, fnmatch), в print или е голо
+    изречение (docstring). Одит 2026-10-07: проверката гледаше само низ,
+    подаден ПРЯКО на open()/read_text(), и `Path.home().joinpath(".ssh",
+    "id_rsa").read_text()` минаваше без въпрос в USE_SKILL, докато RUN_CMD
+    отказваше същото. При SyntaxError → True (консервативно)."""
     try:
         tree = ast.parse(code)
     except SyntaxError:
         return True
+    parents: dict[int, ast.AST] = {}
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        name = func.attr if isinstance(func, ast.Attribute) else (
-            func.id if isinstance(func, ast.Name) else None)
-        if name not in _FILE_READ_CALL_NAMES and not (
-                isinstance(func, ast.Attribute) and func.attr == "open" and
-                isinstance(func.value, ast.Name) and func.value.id == "os"):
-            continue
-        for arg in list(node.args) + [kw.value for kw in node.keywords]:
-            if (isinstance(arg, ast.Constant) and isinstance(arg.value, str)
-                    and _SENSITIVE_PATH_RE.search(arg.value)):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+
+    def benign(node: ast.AST) -> bool:
+        cur: ast.AST | None = node
+        while cur is not None and not isinstance(cur, ast.stmt):
+            parent = parents.get(id(cur))
+            if isinstance(parent, ast.Compare):
                 return True
+            if isinstance(parent, ast.Call):
+                if cur is parent.func:
+                    return False  # `(home / ".env").read_text()` — метод върху пътя
+                func = parent.func
+                name = func.attr if isinstance(func, ast.Attribute) else (
+                    func.id if isinstance(func, ast.Name) else None)
+                # подаден на друго извикване — може да е четене
+                return name in _BENIGN_STR_CALLS
+            if isinstance(parent, ast.Expr):
+                return True       # docstring / голо изречение
+            cur = parent
+        return False
+
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and _SENSITIVE_PATH_RE.search(node.value)
+                and not _SENSITIVE_PATH_EXEMPT_RE.search(node.value)
+                and not benign(node)):
+            return True
     return False
 
 

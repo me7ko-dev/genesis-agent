@@ -6,6 +6,7 @@ genesis_agent.cli — the `genesis` command.
     genesis setup           configure API keys
     genesis mission "..."   run one autonomous mission and print the result
     genesis fix PATH "..."  fix a bug in an existing project (tests + diff)
+    genesis export [PATH]   zip the project + a hand-over report (tests run now)
     genesis skills          library status
     genesis models          the model chain; `--refresh` re-scans, `--check` probes each
     genesis update          is there a newer commit on the installed branch
@@ -249,6 +250,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if cmd == "fix":
         return _fix(argv[1:])
+
+    if cmd == "export":
+        from genesis_agent.deliver import main as export_main
+        return export_main(argv[1:])
 
     if cmd in ("gui", "voice"):
         # Махнати на 2026-09-23 — Genesis е само терминален. Изрично съобщение,

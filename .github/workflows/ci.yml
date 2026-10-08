@@ -12,7 +12,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.10", "3.12"]
+        python-version: ["3.10", "3.12", "3.13"]
         include:
           # One Windows leg is enough to catch platform regressions (path
           # handling, console encoding, permission-model assumptions) — the

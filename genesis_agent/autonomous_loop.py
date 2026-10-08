@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import re
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -174,20 +177,47 @@ class LoopOutcome:
     reused_existing: bool = False
 
 
+# Краен срок на мисията за ТАЗИ нишка (DELEGATE). Одит 2026-10-07: wait_all
+# казваше „таймаут“, а нишката продължаваше и по-късно записваше умение.
+_CTX = threading.local()
+
+
+def _past_deadline() -> bool:
+    deadline = getattr(_CTX, "deadline", None)
+    return deadline is not None and time.time() > deadline
+
+
 def run_autonomous_loop(
     goal: str,
     *,
     max_rounds: int | None = None,
     skill_slug: str | None = None,
     operator_id: str | None = None,
+    deadline: float | None = None,
 ) -> LoopOutcome:
     """
     Публична обвивка: изпълнява мисията и известява резултата през notifier
     (ако са конфигурирани). Известията никога не чупят цикъла.
+
+    `deadline` (time.time()): след него нов рунд не започва и нищо не се записва.
     """
+    _CTX.deadline = deadline
+    try:
+        return _run_and_report(goal, max_rounds=max_rounds, skill_slug=skill_slug,
+                               operator_id=operator_id)
+    finally:
+        _CTX.deadline = None
+
+
+def _run_and_report(goal: str, *, max_rounds: int | None, skill_slug: str | None,
+                    operator_id: str | None) -> LoopOutcome:
     outcome = _run_autonomous_loop_impl(
         goal, max_rounds=max_rounds, skill_slug=skill_slug, operator_id=operator_id
     )
+    if _past_deadline() and not outcome.success:
+        # Изтекло време не е провал на мисията: без урок от стар traceback и
+        # без „❌ не успя“ (преглед 2026-10-07).
+        return outcome
     # Мета-обучение: запиши изхода, за да се учи от грешките си.
     try:
         from genesis_agent.reflection import record_mission
@@ -340,6 +370,9 @@ def _run_autonomous_loop_impl(
     last_stdout = ""
     last_stderr = ""
     for round_i in range(max_rounds):
+        if _past_deadline():
+            report_thought("⏰ Времето на делегираната задача изтече — спирам, нищо не записвам.")
+            break
         try:
             from genesis_agent.config import stop_event
             if stop_event.is_set():
@@ -589,7 +622,10 @@ def _run_autonomous_loop_impl(
                     writer_pair = (w_provider, w_model)
             critic_eval = brain.complete(critic_msg, avoid=writer_pair).raw_text.strip()
 
-            if critic_eval.upper().startswith("NO"):
+            # Одобрение е само изрично „YES“ (одит 2026-10-07): провалена верига
+            # („Error: цялата верига е изчерпана…“), „**NO**:“ и „Answer: NO“
+            # минаваха за одобрение, защото проверката беше startswith("NO").
+            if not re.match(r"\W*YES\b", critic_eval, re.IGNORECASE):
                 _quality_failures = _note_quality_failure(brain, _quality_failures, _quality_escalate_after)
                 report_thought(f"🔍 Критикът отхвърли резултата: {critic_eval}")
                 messages.append({"role": "assistant", "content": reply.raw_text})
@@ -603,6 +639,8 @@ def _run_autonomous_loop_impl(
                 continue
 
             report_thought("✅ Тест-гейт + критик одобриха резултата.")
+            if _past_deadline():
+                break  # викащият вече е казал „таймаут“ — умение след това е изненада
             slug = skill_slug or slugify(goal)
             ex: dict[str, Any] = {"rounds": round_i + 1, "test_gated": True}
             ex.update(audit)
@@ -679,7 +717,7 @@ def _run_autonomous_loop_impl(
     except ImportError:
         is_stopped = False
 
-    if last_generated_code and last_stderr and not is_stopped:
+    if last_generated_code and last_stderr and not is_stopped and not _past_deadline():
         print("\n" + "\u2550" * 55)
         print("  [\u26a0\ufe0f  \u0410\u0412\u0410\u0420\u0418\u0415\u041d \u0420\u0415\u041c\u041e\u041d\u0422] Brain \u0435 \u043d\u0435\u0434\u043e\u0441\u0442\u044a\u043f\u0435\u043d. \u0410\u043a\u0442\u0438\u0432\u0438\u0440\u0430\u043c LocalRepairAgent...")
         print("  [\u041c\u0410\u041b\u042a\u041a \u041c\u041e\u0414\u0415\u041b] \u041f\u0430\u0442\u0435\u0440\u043d \u0430\u043d\u0430\u043b\u0438\u0437 + 1-3B \u043c\u043e\u0434\u0435\u043b")
@@ -700,7 +738,10 @@ def _run_autonomous_loop_impl(
         repair_vres = None
         if repair.fixed:
             repair_vres = verify_skill(repair.code)
-            repair_verified = repair_vres.verified
+            # Същият гейт като основния път: САМО минал самотест. `verified` е
+            # True и за `runs_clean` (без никакъв тест) — така маскиращата
+            # поправка `d.get('total')` се записваше (одит 2026-10-07).
+            repair_verified = repair_vres.method == "self_test_passed"
             if not repair_verified:
                 print(f"  [РЕМОНТ ОТХВЪРЛЕН] Поправеният код не мина verify_skill "
                       f"({repair_vres.method}) - вероятно маскира грешката вместо да я "

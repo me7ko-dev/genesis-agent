@@ -234,7 +234,11 @@ def check_update(*, timeout: int = _TIMEOUT) -> UpdateCheck:
     elif src.ref == LATEST_RELEASE:
         latest = latest_release_commit(src.owner_repo, timeout=timeout)
     else:
-        latest = latest_commit(src.owner_repo, src.ref, timeout=timeout)
+        # Инсталация с командата от README (`pipx install git+https://…`, без
+        # `@клон`) не записва ref — питаме за HEAD, тоест клона по подразбиране.
+        # Дотук `ref == ""` връщаше None без заявка и `/update` никога не
+        # намираше нова версия (одит 2026-10-07).
+        latest = latest_commit(src.owner_repo, src.ref or "HEAD", timeout=timeout)
     return UpdateCheck(src=src, latest=latest)
 
 

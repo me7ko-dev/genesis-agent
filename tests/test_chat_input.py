@@ -38,3 +38,12 @@ def test_a_block_is_one_message_and_keeps_blank_lines():
 
 def test_eof_inside_a_block_ends_the_block_not_the_chat():
     assert read_message(lambda: '"""', _feed(["едно", "две"]), pending=lambda: False) == "едно\nдве"
+
+
+def test_bom_crlf_and_indentation(monkeypatch) -> None:
+    """Одит 2026-10-07: BOM не отваряше блока, CRLF оставяше `\r`, а
+    `.strip()` махаше отстъпа само на първия ред на поставен код."""
+    from genesis_agent.chat_input import read_message
+    lines = iter(["    def f():\r", "        return 1\r", '"""'])
+    out = read_message(lambda: '﻿"""', more=lambda: next(lines), pending=lambda: False)
+    assert out == "    def f():\n        return 1"

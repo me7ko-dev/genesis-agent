@@ -266,6 +266,7 @@ def main() -> int:
     ap.add_argument("--only", default="", help="comma-separated project names")
     ap.add_argument("--model", default="", help="provider/model to pin (default: the configured chain)")
     ap.add_argument("--rounds", type=int, default=6)
+    ap.add_argument("--out", type=Path, help="папка за results.json (същият формат като bench_projects)")
     args = ap.parse_args()
 
     if args.model:
@@ -300,7 +301,30 @@ def main() -> int:
     print(f"\nПоправени: {fixed}/{n} ({round(100 * fixed / n)}%)  |  "
           f"средно {secs / n:.1f}s и {toks // n} токена на задача  |  "
           f"фалшиво „поправено“: {false_claims}")
+    if args.out:
+        write_results(args.out, results, args.model)
     return 0
+
+
+def summarize(results: list[dict]) -> dict[str, dict]:
+    """Като bench_projects.summarize — за да ги сравнява scripts/bench_all.py."""
+    return {r["name"]: {"runs": 1, "ok": int(r["fixed"]), "tests": float(r["fixed"]),
+                        "seconds": r["sec"], "tokens": r["prompt"] + r["completion"],
+                        "false_claim": bool(r["reported"] and not r["fixed"]),
+                        "test_touched": r["test_touched"]}
+            for r in results}
+
+
+def write_results(out: Path, results: list[dict], model: str) -> Path:
+    import json
+    from datetime import datetime
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / "results.json"
+    path.write_text(json.dumps({"date": datetime.now().isoformat(timespec="seconds"),
+                                "model": model or "chain", "summary": summarize(results),
+                                "runs": results}, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"Резултати: {path}")
+    return path
 
 
 if __name__ == "__main__":

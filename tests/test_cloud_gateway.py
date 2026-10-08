@@ -272,7 +272,7 @@ class _Proc:
         gw.Ledger(usage).add(name, "groq", "m", {"prompt_tokens": 90, "completion_tokens": 10})
         claim = {"kind": "done", "ok": True, "error": "", "seconds": 1.0,
                  "tokens": {"total_tokens": 1}}   # контейнерът лъже, че е 1 токен
-        self.stdout = io.StringIO(json.dumps(claim) + "\n")
+        self.stdout = io.BytesIO((json.dumps(claim) + "\n").encode())
         self.stderr = io.StringIO("")
 
     def wait(self) -> int:
@@ -302,3 +302,51 @@ def test_the_token_lives_as_long_as_the_task(monkeypatch, tmp_path) -> None:
     grant = gw.check_token(SECRET, seen["token"])
     assert grant is not None and grant.job == seen["name"] and grant.budget == g.budget
     assert gw.check_token(SECRET, seen["token"], now=grant.expires + 1) is None
+
+
+# ── 2026-10-07: таванът не се заобикаля ──────────────────────────────────────
+
+def _gw_for(upstream, tmp_path) -> gw.Gateway:
+    return gw.Gateway(SECRET, {"GROQ_API_KEY": "k"}, gw.Ledger(tmp_path / "u.jsonl"), opener=upstream)
+
+
+def _grant(budget: int) -> gw.Grant:
+    return gw.check_token(SECRET, gw.make_token(SECRET, "job1", budget=budget, ttl=60))  # type: ignore[return-value]
+
+
+def test_streaming_is_refused_so_usage_cannot_vanish(tmp_path) -> None:
+    up = FakeUpstream([])
+    g = _gw_for(up, tmp_path)
+    status, _ = g.forward("groq", json.dumps({"model": "m", "stream": True}).encode(), _grant(1000))
+    assert status == 400 and up.seen == []
+
+
+def test_a_reply_without_usage_is_charged_the_estimate(tmp_path) -> None:
+    g = _gw_for(FakeUpstream([(200, None)]), tmp_path)
+    status, _ = g.forward("groq", json.dumps({"model": "m", "max_tokens": 500}).encode(), _grant(10_000))
+    assert status == 200
+    assert g.ledger.used("job1") >= 500
+
+
+def test_parallel_requests_cannot_overspend(tmp_path) -> None:
+    gate = threading.Event()
+
+    class Slow(FakeUpstream):
+        def __call__(self, req, timeout=0):
+            gate.wait(5)
+            return super().__call__(req, timeout)
+
+    g = _gw_for(Slow([(200, {"total_tokens": 1000})] * 30), tmp_path)
+    grant = _grant(1000)
+    results: list[int] = []
+    body = json.dumps({"model": "m", "max_tokens": 1000}).encode()
+    threads = [threading.Thread(target=lambda: results.append(g.forward("groq", body, grant)[0]))
+               for _ in range(30)]
+    for t in threads:
+        t.start()
+    gate.set()
+    for t in threads:
+        t.join(10)
+    assert results.count(200) == 1
+    assert results.count(429) == 29
+    assert g.ledger.reserved == {}

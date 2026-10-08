@@ -31,13 +31,22 @@ _TIMEOUT = 150
 _WEB = {".html", ".htm", ".css", ".js", ".mjs"}
 _WRITTEN = re.compile(r"^\[(?:WRITE_FILE|EDIT_FILE): ([^\]\n]+)\] ✓", re.MULTILINE)
 # Средата на проверката: без ключовете на Genesis — страницата изпълнява чужд JS.
-_SECRET_ENV = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL", re.IGNORECASE)
+_SECRET_ENV = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|DSN|COOKIE|SESSION"
+                         r"|_PAT$|^PAT$|_SK$|DATABASE_URL", re.IGNORECASE)
 
 _python_cache: dict[str, str] = {}
 
 
+# Стойност с вградени данни за вход (`postgres://u:парола@…`) е тайна, каквото
+# и да е името ѝ (DATABASE_URL, SENTRY_DSN). Проксито остава — без него страница
+# зад корпоративен прокси не зарежда нищо от CDN.
+_CREDENTIAL_URL = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
+_KEEP = re.compile(r"^(https?_proxy|no_proxy|all_proxy)$", re.IGNORECASE)
+
+
 def _clean_env() -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if not _SECRET_ENV.search(k)}
+    env = {k: v for k, v in os.environ.items()
+           if _KEEP.match(k) or not (_SECRET_ENV.search(k) or _CREDENTIAL_URL.search(v))}
     env["PYTHONIOENCODING"] = "utf-8"
     return env
 

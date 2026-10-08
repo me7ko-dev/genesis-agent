@@ -36,22 +36,40 @@ def read_message(first_line: Callable[[], str],
                  more: Callable[[], str] = input,
                  pending: Callable[[], bool] = pending_console_input) -> str:
     """The whole message; EOF inside a block ends the block, not the chat."""
-    line = first_line()
+    line = _clean(first_line())
     if line.strip() == BLOCK:
         lines: list[str] = []
         while True:
             try:
-                nxt = more()
+                nxt = _clean(more())
             except EOFError:
                 break
             if nxt.strip() == BLOCK:
                 break
             lines.append(nxt)
-        return "\n".join(lines).strip()
+        return _join(lines)
     lines = [line]
     while pending():
         try:
-            lines.append(more())
+            lines.append(_clean(more()))
         except EOFError:
             break
-    return "\n".join(lines).strip()
+    return _join(lines)
+
+
+def _clean(line: str) -> str:
+    """BOM от PowerShell pipe и `\r` от CRLF не са част от текста (одит
+    2026-10-07: `\ufeff\"\"\"` не отваряше блок и всеки ред ставаше съобщение)."""
+    return line.lstrip("\ufeff").rstrip("\r")
+
+
+def _join(lines: list[str]) -> str:
+    """Празните редове отпред и отзад се махат, отстъпът на първия ред остава —
+    `.strip()` чупеше относителния отстъп на поставен код."""
+    while lines and not lines[0].strip():
+        lines = lines[1:]
+    while lines and not lines[-1].strip():
+        lines = lines[:-1]
+    if len(lines) == 1:
+        return lines[0].strip()
+    return "\n".join(line.rstrip() for line in lines)

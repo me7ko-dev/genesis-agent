@@ -144,9 +144,31 @@ class Ledger:
                 n += 1
         return n
 
+    # Запазено за заявки, които още са при доставчика. Без това таванът се
+    # проверяваше преди заявката, а се таксуваше след нея: 30 паралелни заявки
+    # по 1 000 токена при бюджет 1 000 минаваха 24 (2026-10-07).
+    reserved: dict[str, int] = field(default_factory=dict)
+
     def used(self, job: str) -> int:
         with self.lock:
             return self.jobs.get(job, Usage()).total_tokens
+
+    def reserve(self, job: str, budget: int, amount: int) -> bool:
+        """Запазва `amount` токена, ако разходът + запазеното още е под тавана."""
+        with self.lock:
+            spent = self.jobs.get(job, Usage()).total_tokens + self.reserved.get(job, 0)
+            if spent >= budget:
+                return False
+            self.reserved[job] = self.reserved.get(job, 0) + amount
+            return True
+
+    def release(self, job: str, amount: int) -> None:
+        with self.lock:
+            left = self.reserved.get(job, 0) - amount
+            if left > 0:
+                self.reserved[job] = left
+            else:
+                self.reserved.pop(job, None)
 
     def add(self, job: str, provider: str, model: str, usage: dict[str, Any]) -> None:
         p = int(usage.get("prompt_tokens") or 0)
@@ -221,9 +243,24 @@ class Gateway:
         if not keys:
             return 404, _err(f"няма ключ за {provider}")
         try:
-            model = str(json.loads(body).get("model", ""))
+            request = json.loads(body)
+            model = str(request.get("model", ""))
         except (ValueError, AttributeError):
             return 400, _err("невалиден JSON")
+        # Поточен отговор не е JSON — `usage` се губеше и задачата харчеше без
+        # таван и без сметка (2026-10-07). Genesis не ползва stream.
+        if request.get("stream"):
+            return 400, _err("stream не се поддържа през шлюза")
+        estimate = _estimate(request, body)
+        if not self.ledger.reserve(grant.job, grant.budget, estimate):
+            return 429, _err(f"бюджетът на задачата ({grant.budget} токена) е изчерпан")
+        try:
+            return self._forward(provider, base, keys, body, model, grant, estimate)
+        finally:
+            self.ledger.release(grant.job, estimate)
+
+    def _forward(self, provider: str, base: str, keys: list[str], body: bytes, model: str,
+                 grant: Grant, estimate: int) -> tuple[int, bytes]:
         status, data = 502, _err("няма отговор")
         for key in keys:
             req = urllib.request.Request(
@@ -243,8 +280,22 @@ class Gateway:
                 usage = json.loads(data).get("usage") or {}
             except (ValueError, AttributeError):
                 usage = {}
+            if not isinstance(usage, dict) or not any(
+                    usage.get(k) for k in ("total_tokens", "prompt_tokens", "completion_tokens")):
+                # Отговор без usage не е безплатен отговор: таксува се оценката.
+                usage = {"total_tokens": estimate, "estimated": True}
             self.ledger.add(grant.job, provider, model, usage)
         return status, data
+
+
+def _estimate(request: dict, body: bytes) -> int:
+    """Горна оценка на заявката: промптът (~3 байта на токен) + таванът на
+    отговора (`max_tokens`, иначе 4 096)."""
+    try:
+        cap = int(request.get("max_tokens") or request.get("max_completion_tokens") or 4096)
+    except (TypeError, ValueError):
+        cap = 4096
+    return len(body) // 3 + max(1, min(cap, 64_000))
 
 
 def _err(message: str) -> bytes:

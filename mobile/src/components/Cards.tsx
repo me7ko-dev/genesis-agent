@@ -62,9 +62,20 @@ export function Note({ item }: { item: Item<'note'> }) {
   return <Text selectable style={[styles.note, { color }]}>{icon ? `${icon} ` : ''}{item.text}</Text>;
 }
 
-export function ConfirmCard({ item, onAnswer }: { item: Item<'confirm'>; onAnswer: (allow: boolean) => void }) {
+export function ConfirmCard({ item, onAnswer }: {
+  item: Item<'confirm'>;
+  onAnswer: (allow: boolean) => Promise<boolean>;
+}) {
   const theme = useTheme();
-  const pending = item.state === 'pending';
+  // One tap answers: the buttons go away at once, not when the server's
+  // confirm_done arrives — a second tap could change the answer.
+  const [sent, setSent] = useState(false);
+  const pending = item.state === 'pending' && !sent;
+  const answer = async (allow: boolean) => {
+    setSent(true);
+    // Didn't reach the computer (offline) → the buttons come back to retry.
+    if (!(await onAnswer(allow))) setSent(false);
+  };
   return (
     <View style={[styles.confirm, { backgroundColor: theme.surface, borderColor: pending ? theme.warn : theme.border }]}>
       <Text style={[styles.confirmTitle, { color: theme.warn }]}>⚠️ Изисква потвърждение</Text>
@@ -76,20 +87,21 @@ export function ConfirmCard({ item, onAnswer }: { item: Item<'confirm'>; onAnswe
         <View style={styles.row}>
           <Pressable
             accessibilityRole="button"
-            onPress={() => onAnswer(false)}
+            onPress={() => answer(false)}
             style={[styles.btn, { borderColor: theme.border }]}>
             <Text style={[styles.btnText, { color: theme.text }]}>Откажи</Text>
           </Pressable>
           <Pressable
             accessibilityRole="button"
-            onPress={() => onAnswer(true)}
+            onPress={() => answer(true)}
             style={[styles.btn, { backgroundColor: theme.danger, borderColor: theme.danger }]}>
             <Text style={[styles.btnText, { color: '#fff' }]}>Изпълни</Text>
           </Pressable>
         </View>
       ) : (
         <Text style={[styles.small, { color: item.state === 'allowed' ? theme.ok : theme.muted }]}>
-          {item.state === 'allowed' ? '✓ Разрешено' : '✕ Отказано'}{item.note ? ` — ${item.note}` : ''}
+          {item.state === 'pending' ? '… изпратено'
+            : item.state === 'allowed' ? '✓ Разрешено' : '✕ Отказано'}{item.note ? ` — ${item.note}` : ''}
         </Text>
       )}
     </View>

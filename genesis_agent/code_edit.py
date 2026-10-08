@@ -145,7 +145,9 @@ def _syntax_error(path: Path, text: str) -> str:
     if path.suffix != ".py":
         return ""
     try:
-        ast.parse(text)
+        # UTF-8 BOM (Notepad на Windows): Python го приема във файл, ast.parse в
+        # низ — не; без това всяка редакция се отказваше като „чупи синтаксиса“.
+        ast.parse(text.removeprefix("\ufeff"))
     except SyntaxError as e:
         return f"{e.msg} (ред {e.lineno})"
     return ""
