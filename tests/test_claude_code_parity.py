@@ -322,8 +322,11 @@ FAKE_MCP = Path(__file__).parent / "fake_mcp_server.py"
 @pytest.fixture
 def mcp(repo, monkeypatch):
     from genesis_agent import mcp_client
+    # cp1252 на stdin — както Python сървър на Windows (CI, 2026-10-08): кирилица
+    # в аргументите трябва да стигне цяла.
     (_home() / "mcp.json").write_text(json.dumps({"mcpServers": {
-        "fake": {"command": sys.executable, "args": [str(FAKE_MCP)]}}}), encoding="utf-8")
+        "fake": {"command": sys.executable, "args": [str(FAKE_MCP)],
+                 "env": {"PYTHONIOENCODING": "cp1252"}}}}), encoding="utf-8")
     lines = mcp_client.start_all()
     assert any("2 инструмента" in line for line in lines), lines
     yield mcp_client

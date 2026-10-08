@@ -131,7 +131,9 @@ class Server:
     def _send(self, msg: dict) -> None:
         if self.proc is None or self.proc.stdin is None or self.proc.poll() is not None:
             raise MCPError("сървърът не работи")
-        data = (json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8")
+        # Само ASCII (кирилицата като \uXXXX): сървър на Windows, който чете
+        # stdin с cp1252, иначе получаваше „Ð·Ð´…“ вместо „здравей“ (CI, 2026-10-08).
+        data = (json.dumps(msg, ensure_ascii=True) + "\n").encode("ascii")
         try:
             self.proc.stdin.write(data)
             self.proc.stdin.flush()
