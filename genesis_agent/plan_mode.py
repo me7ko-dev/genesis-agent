@@ -12,7 +12,7 @@ from __future__ import annotations
 # Only what looks: files, the code, the web, the operator, the task list.
 READ_ONLY_TOOLS = frozenset({
     "READ_FILE", "LIST_DIR", "GLOB", "SEARCH_CODE", "REPO_MAP",
-    "WEB_SEARCH", "RESEARCH", "ASK_USER", "TASK_LIST",
+    "WEB_SEARCH", "RESEARCH", "ASK_USER", "TASK_LIST", "EXPLORE",
 })
 
 _on = False
@@ -41,10 +41,15 @@ def toggle() -> bool:
     return _on
 
 
-def refusal(tool: str) -> str | None:
+def refusal(tool: str, args: dict | None = None) -> str | None:
     """A refusal for a tool that would change something, while plan mode is on."""
     if not _on or tool in READ_ONLY_TOOLS:
         return None
+    from genesis_agent import mcp_client
+    if mcp_client.is_mcp_tool(tool):
+        name = tool if tool != "MCP" else str((args or {}).get("arg", "")).split("|", 1)[0].strip()
+        if mcp_client.is_read_only(name):
+            return None  # сървърът го обявява за само четене (readOnlyHint)
     return (f"[{tool}] ⏸ Режим план: нищо не се променя, докато операторът не одобри "
             "плана (/plan). Довърши плана — какво ще направиш и как ще го провериш.")
 

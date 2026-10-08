@@ -312,3 +312,131 @@ class TestBackground:
     def test_the_sandbox_gate_still_applies(self, repo) -> None:
         out = gs.parse_and_execute_tools("[RUN_BG: rm -rf /]")[0]
         assert "BLOCKED" in out or "отказ" in out.lower()
+
+
+# ── MCP ─────────────────────────────────────────────────────────────────────
+
+FAKE_MCP = Path(__file__).parent / "fake_mcp_server.py"
+
+
+@pytest.fixture
+def mcp(repo, monkeypatch):
+    from genesis_agent import mcp_client
+    (_home() / "mcp.json").write_text(json.dumps({"mcpServers": {
+        "fake": {"command": sys.executable, "args": [str(FAKE_MCP)]}}}), encoding="utf-8")
+    lines = mcp_client.start_all()
+    assert any("2 инструмента" in line for line in lines), lines
+    yield mcp_client
+    mcp_client.stop_all()
+
+
+class TestMCP:
+    def test_tools_are_offered_with_their_schema(self, mcp) -> None:
+        names = {s["function"]["name"] for s in mcp.schemas()}
+        assert names == {"mcp__fake__echo", "mcp__fake__create_issue"}
+        assert "fake.echo(text)" in mcp.prompt_section()
+
+    def test_a_read_only_tool_runs_both_ways(self, mcp) -> None:
+        assert gs.dispatch_tool_call("mcp__fake__echo", {"text": "здравей"}) == \
+            "[MCP fake.echo] echo: здравей"
+        assert gs.parse_and_execute_tools('[MCP: fake.echo | {"text": "hi"}]') == \
+            ["[MCP fake.echo] echo: hi"]
+
+    def test_a_changing_tool_asks_and_is_refused_unattended(self, mcp, monkeypatch) -> None:
+        from genesis_agent import sandbox
+        monkeypatch.setattr(sandbox._POLICY, "mode", "deny")
+        out = gs.dispatch_tool_call("mcp__fake__create_issue", {"title": "bug"})
+        assert "SANDBOX DENIED" in out and "created" not in out
+        monkeypatch.setattr(sandbox._POLICY, "mode", "allow")
+        assert "created #7 bug" in gs.dispatch_tool_call("mcp__fake__create_issue", {"title": "bug"})
+
+    def test_auto_approve_skips_the_question(self, repo, monkeypatch) -> None:
+        from genesis_agent import mcp_client, sandbox
+        (_home() / "mcp.json").write_text(json.dumps({"mcpServers": {"fake": {
+            "command": sys.executable, "args": [str(FAKE_MCP)],
+            "autoApprove": ["create_issue"]}}}), encoding="utf-8")
+        mcp_client.start_all()
+        monkeypatch.setattr(sandbox._POLICY, "mode", "deny")
+        assert "created #7" in gs.dispatch_tool_call("mcp__fake__create_issue", {"title": "x"})
+
+    def test_plan_mode_keeps_only_read_only_mcp_tools(self, mcp) -> None:
+        plan_mode.set_active(True)
+        assert {s["function"]["name"] for s in mcp.schemas(read_only_only=True)} == {"mcp__fake__echo"}
+        assert "echo: a" in gs.dispatch_tool_call("mcp__fake__echo", {"text": "a"})
+        assert "Режим план" in gs.dispatch_tool_call("mcp__fake__create_issue", {"title": "x"})
+        assert "Режим план" in gs.parse_and_execute_tools('[MCP: fake.create_issue | {"title": "x"}]')[0]
+
+    def test_project_servers_need_trust(self, repo) -> None:
+        from genesis_agent import mcp_client
+        root, ws = repo
+        (root / ".mcp.json").write_text(json.dumps({"mcpServers": {
+            "proj": {"command": sys.executable, "args": [str(FAKE_MCP)]}}}), encoding="utf-8")
+        lines = mcp_client.start_all()
+        assert any("не е доверен" in line for line in lines) and not mcp_client.tools()
+        chat_commands.handle("/mcp trust", messages=None, workspace=ws,
+                             out=lambda s: None, ask=lambda q: "да")
+        assert any("proj" in line for line in mcp_client.start_all())
+        assert mcp_client.tools()
+
+    def test_a_server_that_does_not_start_is_reported(self, repo) -> None:
+        from genesis_agent import mcp_client
+        (_home() / "mcp.json").write_text(json.dumps({"mcpServers": {
+            "broken": {"command": "definitely-not-a-command-xyz"}}}), encoding="utf-8")
+        assert any("broken" in line and "не тръгна" in line for line in mcp_client.start_all())
+        assert "Няма такъв" in gs.dispatch_tool_call("mcp__broken__x", {})
+
+
+# ── EXPLORE ─────────────────────────────────────────────────────────────────
+
+class _Reply:
+    def __init__(self, text: str = "", calls: list | None = None) -> None:
+        self.raw_text = text
+        self.tool_calls = calls
+
+
+def _call(name: str, args: dict, cid: str = "c1") -> dict:
+    return {"id": cid, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+
+
+class TestExplore:
+    def test_it_searches_reads_and_returns_only_the_answer(self, repo) -> None:
+        from genesis_agent import explore
+        _, ws = repo
+        (ws / "price.py").write_text("def total(x):\n    return x * 1.2\n", encoding="utf-8")
+        seen_tools: list[list[str]] = []
+        script = iter([
+            _Reply(calls=[_call("SEARCH_CODE", {"pattern": "def total"})]),
+            _Reply(calls=[_call("READ_FILE", {"path": "price.py"}, "c2"),
+                          _call("WRITE_FILE", {"path": "x.py", "content": "1"}, "c3")]),
+            _Reply("total() е в price.py:1 и добавя 20% ДДС."),
+        ])
+
+        def fake(messages, tools=None):
+            seen_tools.append([t["function"]["name"] for t in tools or []])
+            return next(script)
+        out = explore.explore("къде се смята ДДС?", str(ws), complete=fake)
+        assert out.endswith("total() е в price.py:1 и добавя 20% ДДС.")
+        assert "2 прегледа" in out  # отказаният WRITE_FILE не е преглед
+        assert not (ws / "x.py").exists()
+        assert set(seen_tools[0]) == set(explore.TOOLS)
+
+    def test_text_tag_models_work_too(self, repo) -> None:
+        from genesis_agent import explore
+        _, ws = repo
+        (ws / "a.py").write_text("X = 1\n", encoding="utf-8")
+        script = iter([_Reply("[SEARCH_CODE: X = 1]"), _Reply("X е в a.py:1")])
+        out = explore.explore("къде е X?", str(ws), complete=lambda m, tools=None: next(script))
+        assert out.endswith("X е в a.py:1")
+
+    def test_rounds_are_capped(self, repo) -> None:
+        from genesis_agent import explore
+        _, ws = repo
+        out = explore.explore("?", str(ws), max_rounds=3,
+                              complete=lambda m, tools=None: _Reply(calls=[_call("LIST_DIR", {"path": "."})]))
+        assert "спря след 3 рунда" in out
+
+    def test_explore_is_allowed_in_plan_mode(self, repo, monkeypatch) -> None:
+        import genesis_skills
+        plan_mode.set_active(True)
+        monkeypatch.setattr(genesis_skills, "_tool_explore", lambda q: f"answer to {q}")
+        assert gs.dispatch_tool_call("EXPLORE", {"question": "q"}) == "answer to q"

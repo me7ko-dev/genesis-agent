@@ -1215,6 +1215,17 @@ def build_system_prompt() -> tuple[str, str]:
     except Exception:
         pass
 
+    # MCP сървърите на оператора (и на проекта, ако е доверен) — пускат се
+    # веднъж; инструментите им стигат до модела (виж mcp_client).
+    try:
+        from genesis_agent import mcp_client
+        mcp_client.ensure_started(Path(WORKSPACE))
+        mcp_text = mcp_client.prompt_section()
+        if mcp_text:
+            SYSTEM_PROMPT += "\n\n" + mcp_text
+    except Exception:
+        pass
+
     # GENESIS.md / AGENTS.md / CLAUDE.md на проекта — постоянните инструкции на
     # оператора, всяка сесия, преди първата дума (виж project_instructions).
     try:
@@ -1253,9 +1264,11 @@ def build_system_prompt() -> tuple[str, str]:
 
 
 def _turn_tools():
-    """Инструментите за модела: в режим план — само тези, които гледат."""
-    from genesis_agent import plan_mode
-    return plan_mode.filter_tools(TERMINAL_TOOL_SCHEMAS)
+    """Инструментите за модела: вградените + MCP; в режим план — само тези, които гледат."""
+    from genesis_agent import mcp_client, plan_mode
+    tools = plan_mode.filter_tools(TERMINAL_TOOL_SCHEMAS) or []
+    extra = mcp_client.schemas(read_only_only=plan_mode.active())
+    return [*tools, *extra] if extra else tools
 
 
 _STOP_HOOK_ROUNDS = 2
@@ -1607,6 +1620,12 @@ def main():
     except Exception:
         pass
     SYSTEM_PROMPT, briefing_text = build_system_prompt()
+    try:
+        from genesis_agent import mcp_client as _mcp_client
+        for _line in _mcp_client.last_start:
+            console.print(f"[dim]{_line}[/]", highlight=False)
+    except Exception:
+        pass
 
     # Проактивно отваряне: потребителят вижда веднага какво е отворено и кое е
     # следващото, вместо да се сеща сам или да пита.
@@ -1839,6 +1858,7 @@ def main():
                 help_table.add_row("/hooks [trust]", "Твоите команди около работата (hooks.json)")
                 help_table.add_row("/commands", "Твоите команди от .genesis/commands/*.md")
                 help_table.add_row("/bg", "Фоновите команди (dev сървъри) — състояние")
+                help_table.add_row("/mcp [trust|restart]", "MCP сървърите (~/.genesis/mcp.json, .mcp.json) и инструментите им")
                 help_table.add_row('"""', "Съобщение на много редове: \"\"\" … \"\"\" (поставеният текст е едно съобщение и без това)")
                 help_table.add_row("exit / quit", "Изход")
                 console.print(Panel(help_table, title="[bold cyan]◈ GENESIS КОМАНДИ ◈[/]", border_style="cyan"))

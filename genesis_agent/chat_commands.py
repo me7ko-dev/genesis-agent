@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-BUILTIN = ("/init", "/memory", "/plan", "/undo", "/compact", "/hooks", "/commands", "/bg")
+BUILTIN = ("/init", "/memory", "/plan", "/undo", "/compact", "/hooks", "/commands", "/bg", "/mcp")
 _NAME = re.compile(r"^/([A-Za-z0-9][\w-]{0,40})(?:\s+(.*))?$", re.DOTALL)
 _YES = ("", "да", "д", "d", "da", "y", "yes")
 
@@ -157,6 +157,9 @@ def handle(text: str, *, messages: Any, workspace: Path,
             out(f"/{name} — {_description(path)}  [dim]({path})[/]")
         return Result()
 
+    if cmd == "/mcp":
+        return _mcp(rest, workspace, out, ask)
+
     if cmd == "/bg":
         from genesis_agent import background
         out(background.summary())
@@ -195,4 +198,29 @@ def _hooks(rest: str, workspace: Path, out: Callable[[str], None],
         out(f"{h.event:<17} {h.matcher or '*':<22} {h.command}")
     if untrusted:
         out(f"⚠ {untrusted} съществува, но не е доверен — не се пуска. Прегледай го и /hooks trust.")
+    return Result()
+
+
+def _mcp(rest: str, workspace: Path, out: Callable[[str], None],
+         ask: Callable[[str], str]) -> Result:
+    from genesis_agent import hooks, mcp_client
+    if rest.lower() == "trust":
+        target = mcp_client.project_file(workspace)
+        if not target.is_file():
+            out(f"Няма {target}.")
+            return Result()
+        out(f"{target}:\n{target.read_text(encoding='utf-8', errors='replace')[:3000]}")
+        if ask("Тези програми ще се пускат на тази машина като MCP сървъри. "
+               "Доверяваш ли им се? (да / Enter = не) > ").strip().lower() in ("да", "д", "y", "yes"):
+            hooks.trust(target)
+            out("✓ Доверени (до следващата промяна на файла). /mcp restart ги пуска.")
+        else:
+            out("Не са доверени — няма да се пускат.")
+        return Result()
+    if rest.lower() == "restart":
+        for line in mcp_client.start_all(workspace) or ["Няма описани MCP сървъри."]:
+            out(line)
+        out("Новите инструменти важат от следващата реплика; за текстовите модели — след /clear.")
+        return Result()
+    out(mcp_client.summary())
     return Result()

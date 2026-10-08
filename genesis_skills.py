@@ -945,7 +945,7 @@ _SIMPLE_RE = re.compile(
     r"\[(?P<tool>READ_FILE|RUN_CMD|WEB_SEARCH|LIST_DIR|DELEGATE|RESEARCH|BROWSE|ASK_USER|"
     r"SEARCH_CODE|REPO_MAP|GLOB|"
     r"BROWSER_CLICK|BROWSER_TYPE|REMEMBER|TASK_ADD|TASK_UPDATE|TASK_LIST|"
-    r"RUN_BG|BG_OUTPUT|BG_KILL):"
+    r"RUN_BG|BG_OUTPUT|BG_KILL|MCP|EXPLORE):"
     r"\s*(?P<arg>(?:[^\[\]]|" + _BRACKETS + r")+)\]"
 )
 # REPO_MAP без аргумент = текущият workspace (както BROWSER_READ/TASK_LIST).
@@ -976,7 +976,20 @@ _SIMPLE_DISPATCH: dict[str, Callable[..., str]] = {
     "RUN_BG": lambda arg: _tool_run_bg(arg),
     "BG_OUTPUT": lambda arg="": _background().output(arg),
     "BG_KILL": lambda arg: _background().kill(arg),
+    "MCP": lambda arg: _mcp().call_text_tag(arg),
+    "EXPLORE": lambda arg: _tool_explore(arg),
 }
+
+
+def _tool_explore(question: str) -> str:
+    """Под-агент, който само чете — отговорът без файловете в историята."""
+    from genesis_agent.explore import explore
+    return explore(question, str(_WORKSPACE))
+
+
+def _mcp():
+    from genesis_agent import mcp_client
+    return mcp_client
 
 
 def _background():
@@ -1042,7 +1055,7 @@ def _before_tool(name: str, args: dict) -> str | None:
     change. Never raises."""
     try:
         from genesis_agent import plan_mode
-        refusal = plan_mode.refusal(name)
+        refusal = plan_mode.refusal(name, args)
         if refusal:
             return refusal
         from genesis_agent import hooks
@@ -1271,6 +1284,10 @@ def _dispatch(name: str, arguments: dict) -> str:
             if arguments.get("background"):
                 return _tool_run_bg(arguments.get("command", ""))
             return _tool_run_cmd(arguments.get("command", ""))
+        if name == "EXPLORE":
+            return _tool_explore(str(arguments.get("question", "") or ""))
+        if name.startswith("mcp__"):
+            return _mcp().call(name, arguments)
         if name == "BG_OUTPUT":
             return _background().output(str(arguments.get("id", "") or ""))
         if name == "BG_KILL":

@@ -139,3 +139,5 @@ def _isolated_operator_settings(monkeypatch, tmp_path):
     yield
     plan_mode.set_active(False)
     edit_history.clear()
+    from genesis_agent import mcp_client
+    mcp_client.stop_all()
