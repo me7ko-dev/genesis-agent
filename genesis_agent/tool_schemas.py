@@ -138,9 +138,34 @@ FULL_TOOLS: list[dict] = [
                            "dangerous ones ask the operator or are blocked).",
             "parameters": {
                 "type": "object",
-                "properties": {"command": {"type": "string", "description": "Shell command"}},
+                "properties": {
+                    "command": {"type": "string", "description": "Shell command"},
+                    "background": {"type": "boolean",
+                                   "description": "true = keep it running in the background "
+                                                  "(dev server, watcher) and return an id at once; "
+                                                  "read it with BG_OUTPUT, stop it with BG_KILL"},
+                },
                 "required": ["command"],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "BG_OUTPUT",
+            "description": "What a background command printed since the last look, and whether "
+                           "it still runs. Without id: the list of background commands.",
+            "parameters": {"type": "object",
+                           "properties": {"id": {"type": "string", "description": "e.g. bg1"}}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "BG_KILL",
+            "description": "Stop a background command (and its children).",
+            "parameters": {"type": "object",
+                           "properties": {"id": {"type": "string"}}, "required": ["id"]},
         },
     },
     # ── Питане при неяснота (design note, 2026-07-27) ──────────────────────────────

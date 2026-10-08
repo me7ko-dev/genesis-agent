@@ -1,0 +1,314 @@
+"""What Claude Code gives its operator, in Genesis: project instructions
+(GENESIS.md / AGENTS.md / CLAUDE.md), plan mode, /undo, hooks, own commands,
+background commands."""
+from __future__ import annotations
+
+import contextlib
+import json
+import sys
+import time
+from collections import deque
+from pathlib import Path
+
+import pytest
+
+import genesis_skills as gs
+from genesis_agent import (
+    background,
+    chat_commands,
+    edit_history,
+    hooks,
+    plan_mode,
+    project_instructions,
+)
+from genesis_agent.paths import GENESIS_HOME  # noqa: F401  (patched per test)
+
+
+def _home() -> Path:
+    from genesis_agent import paths
+    return Path(paths.GENESIS_HOME)
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    root = tmp_path / "proj"
+    (root / ".git").mkdir(parents=True)
+    ws = root / "app"
+    ws.mkdir()
+    monkeypatch.setattr(gs, "_WORKSPACE", ws)
+    gs._SEEN_PATHS.clear()
+    hooks.workspace = ws
+    yield root, ws
+    hooks.workspace = None
+
+
+# ── project instructions ────────────────────────────────────────────────────
+
+class TestProjectInstructions:
+    def test_user_root_and_workspace_files_in_order(self, repo) -> None:
+        root, ws = repo
+        _home().joinpath("GENESIS.md").write_text("Отговаряй на български.", encoding="utf-8")
+        (root / "AGENTS.md").write_text("Тестове: make test", encoding="utf-8")
+        (ws / "GENESIS.md").write_text("Не пипай migrations/", encoding="utf-8")
+        (ws / "GENESIS.local.md").write_text("Моят порт е 8001", encoding="utf-8")
+        texts = [s.text for s in project_instructions.load(ws)]
+        assert texts == ["Отговаряй на български.", "Тестове: make test",
+                         "Не пипай migrations/", "Моят порт е 8001"]
+        section = project_instructions.prompt_section(ws)
+        assert section.index("make test") < section.index("migrations/")
+
+    def test_one_file_per_folder_genesis_first(self, repo) -> None:
+        root, _ = repo
+        (root / "GENESIS.md").write_text("G", encoding="utf-8")
+        (root / "CLAUDE.md").write_text("C", encoding="utf-8")
+        assert [s.text for s in project_instructions.load(root)] == ["G"]
+
+    def test_claude_md_is_read_when_it_is_the_only_one(self, repo) -> None:
+        root, _ = repo
+        (root / "CLAUDE.md").write_text("Use pnpm.", encoding="utf-8")
+        assert "Use pnpm." in project_instructions.prompt_section(root)
+
+    def test_nothing_above_the_repository_root(self, repo) -> None:
+        root, ws = repo
+        (root.parent / "GENESIS.md").write_text("чужд", encoding="utf-8")
+        assert "чужд" not in project_instructions.prompt_section(ws)
+
+    def test_imports_inside_the_project(self, repo) -> None:
+        root, _ = repo
+        (root / "docs").mkdir()
+        (root / "docs" / "style.md").write_text("Табулации, не интервали.", encoding="utf-8")
+        (root / "GENESIS.md").write_text("Стил: @docs/style.md\nmail: a@b.com", encoding="utf-8")
+        text = project_instructions.prompt_section(root)
+        assert "Табулации" in text and "### @docs/style.md" in text
+        assert "### @b.com" not in text
+
+    def test_imports_never_reach_secrets_or_outside(self, repo, tmp_path) -> None:
+        root, _ = repo
+        (root / ".env").write_text("API_KEY=sk-secret", encoding="utf-8")
+        outside = tmp_path / "other.md"
+        outside.write_text("извън проекта", encoding="utf-8")
+        (root / "GENESIS.md").write_text(f"@.env @../other.md @{outside}", encoding="utf-8")
+        text = project_instructions.prompt_section(root)
+        assert "sk-secret" not in text and "извън проекта" not in text
+
+    def test_size_is_capped(self, repo) -> None:
+        root, _ = repo
+        (root / "GENESIS.md").write_text("x" * 50_000, encoding="utf-8")
+        assert len(project_instructions.prompt_section(root)) < project_instructions._MAX_TOTAL + 500
+
+
+# ── plan mode ───────────────────────────────────────────────────────────────
+
+class TestPlanMode:
+    def test_changes_are_refused_reads_are_not(self, repo) -> None:
+        _, ws = repo
+        (ws / "a.py").write_text("x = 1\n", encoding="utf-8")
+        plan_mode.set_active(True)
+        assert "Режим план" in gs.dispatch_tool_call("WRITE_FILE", {"path": "b.py", "content": "y"})
+        assert "Режим план" in gs.dispatch_tool_call("RUN_CMD", {"command": "echo hi"})
+        assert "Режим план" in gs.parse_and_execute_tools("[RUN_CMD: echo hi]")[0]
+        assert not (ws / "b.py").exists()
+        assert "x = 1" in gs.dispatch_tool_call("READ_FILE", {"path": "a.py"})
+
+    def test_only_read_tools_are_offered(self) -> None:
+        from genesis_agent.tool_schemas import FULL_TOOLS
+        plan_mode.set_active(True)
+        names = {t["function"]["name"] for t in plan_mode.filter_tools(FULL_TOOLS)}
+        assert "READ_FILE" in names and not names & {"WRITE_FILE", "EDIT_FILE", "RUN_CMD"}
+        plan_mode.set_active(False)
+        assert plan_mode.filter_tools(FULL_TOOLS) is FULL_TOOLS
+
+    def test_plan_command_toggles_and_runs_the_plan(self, repo) -> None:
+        _, ws = repo
+        seen: list[str] = []
+        res = chat_commands.handle("/plan добави вход", messages=deque(), workspace=ws,
+                                   out=seen.append, ask=lambda q: "")
+        assert plan_mode.active() and res.prompt == "добави вход"
+        res = chat_commands.handle("/plan", messages=deque(), workspace=ws,
+                                   out=seen.append, ask=lambda q: "")
+        assert not plan_mode.active() and "Изпълни" in res.prompt
+
+
+# ── /undo ───────────────────────────────────────────────────────────────────
+
+class TestUndo:
+    def test_a_turn_of_writes_and_edits_goes_back(self, repo) -> None:
+        _, ws = repo
+        f = ws / "app.py"
+        f.write_text("old\n", encoding="utf-8")
+        edit_history.begin_turn("промени app")
+        gs.dispatch_tool_call("READ_FILE", {"path": "app.py"})
+        gs.dispatch_tool_call("EDIT_FILE", {"path": "app.py", "old": "old", "new": "new"})
+        gs.dispatch_tool_call("WRITE_FILE", {"path": "new.py", "content": "print(1)\n"})
+        edit_history.end_turn()
+        assert f.read_text(encoding="utf-8") == "new\n" and (ws / "new.py").exists()
+        out: list[str] = []
+        res = chat_commands.handle("/undo", messages=deque(), workspace=ws,
+                                   out=out.append, ask=lambda q: "")
+        assert f.read_text(encoding="utf-8") == "old\n"
+        assert not (ws / "new.py").exists()
+        assert "отпреди" in res.messages[-1]["content"]
+
+    def test_saying_no_changes_nothing(self, repo) -> None:
+        _, ws = repo
+        edit_history.begin_turn("x")
+        gs.dispatch_tool_call("WRITE_FILE", {"path": "n.py", "content": "1"})
+        edit_history.end_turn()
+        chat_commands.handle("/undo", messages=deque(), workspace=ws,
+                             out=lambda s: None, ask=lambda q: "не")
+        assert (ws / "n.py").exists()
+
+    def test_turns_go_back_one_at_a_time(self, repo) -> None:
+        _, ws = repo
+        f = ws / "v.txt"
+        for v in ("1", "2"):
+            edit_history.begin_turn(v)
+            gs._SEEN_PATHS.add(f.resolve()) if f.exists() else None
+            gs.dispatch_tool_call("WRITE_FILE", {"path": "v.txt", "content": v})
+            edit_history.end_turn()
+        edit_history.undo()
+        assert f.read_text(encoding="utf-8") == "1"
+        edit_history.undo()
+        assert not f.exists()
+
+
+# ── hooks ───────────────────────────────────────────────────────────────────
+
+_BLOCK = "Спряно от hook"
+
+
+def _py(code: str) -> str:
+    return f'"{sys.executable}" -c "{code}"'
+
+
+def _write_hooks(path: Path, table: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"hooks": table}), encoding="utf-8")
+
+
+class TestHooks:
+    def test_pre_tool_exit_2_blocks_and_tells_the_model(self, repo) -> None:
+        _, ws = repo
+        _write_hooks(_home() / "hooks.json", {"PreToolUse": [{
+            "matcher": "WRITE_FILE",
+            "command": _py("import sys; sys.stderr.write('no writes in app/'); sys.exit(2)")}]})
+        out = gs.dispatch_tool_call("WRITE_FILE", {"path": "x.py", "content": "1"})
+        assert "no writes in app/" in out and not (ws / "x.py").exists()
+        assert "Грешка" not in gs.dispatch_tool_call("LIST_DIR", {"path": "."})
+
+    def test_post_tool_feedback_and_the_file_variable(self, repo) -> None:
+        _, ws = repo
+        _write_hooks(_home() / "hooks.json", {"PostToolUse": [{
+            "matcher": "WRITE_FILE|EDIT_FILE",
+            "command": _py("import os, sys; sys.stderr.write('lint: ' + os.environ['GENESIS_FILE']); "
+                           "sys.exit(2)")}]})
+        out = gs.dispatch_tool_call("WRITE_FILE", {"path": "y.py", "content": "1"})
+        assert "lint: y.py" in out and (ws / "y.py").exists()
+
+    def test_claude_code_nested_form_is_read(self, repo) -> None:
+        _write_hooks(_home() / "hooks.json", {"PreToolUse": [{
+            "matcher": "RUN_CMD", "hooks": [{"type": "command",
+                                             "command": _py("import sys; sys.exit(2)")}]}]})
+        assert _BLOCK in gs.dispatch_tool_call("RUN_CMD", {"command": "echo hi"})
+
+    def test_project_hooks_need_trust_for_their_exact_content(self, repo) -> None:
+        root, ws = repo
+        project = root / ".genesis" / "hooks.json"
+        _write_hooks(project, {"PreToolUse": [{"command": _py("import sys; sys.exit(2)")}]})
+        assert _BLOCK not in gs.dispatch_tool_call("LIST_DIR", {"path": "."})
+        res = chat_commands.handle("/hooks trust", messages=None, workspace=ws,
+                                   out=lambda s: None, ask=lambda q: "да")
+        assert res is not None
+        assert _BLOCK in gs.dispatch_tool_call("LIST_DIR", {"path": "."})
+        _write_hooks(project, {"PreToolUse": [{"command": _py("import sys; sys.exit(2)")}],
+                               "Stop": []})
+        assert _BLOCK not in gs.dispatch_tool_call("LIST_DIR", {"path": "."})
+
+    def test_prompt_and_stop_hooks_around_a_turn(self, repo, monkeypatch) -> None:
+        import genesis_terminal_agent as gta
+        _write_hooks(_home() / "hooks.json", {
+            "UserPromptSubmit": [{"command": _py("print('branch: main')")}],
+            "Stop": [{"command": _py(
+                "import json, sys; d = json.load(sys.stdin); "
+                "sys.exit(0 if 'tests pass' in d['last_assistant_message'] else 2)")}],
+        })
+        replies = iter(["готово", "tests pass"])
+        seen: list[str] = []
+
+        def fake(messages, tools=None):
+            seen.append(messages[-1]["content"])
+            return next(replies), None
+        monkeypatch.setattr(gta, "ask_genesis", fake)
+        out = gta.run_turn(deque([{"role": "system", "content": "s"}]), "направи го", _ui(gta))
+        assert "branch: main" in seen[0]
+        assert "hook Stop" in seen[1]
+        assert out[-1]["content"] == "tests pass"
+
+
+def _ui(gta):
+    class UI(gta.TurnUI):
+        def thinking(self, label, spinner="dots"):
+            return contextlib.nullcontext()
+        def assistant(self, text): pass
+        def tool(self, name, result): pass
+        def asked(self, question): pass
+        def spinning(self, note): pass
+        def warn(self, text): pass
+        def info(self, text): pass
+        def cancelled(self): return False
+    return UI()
+
+
+# ── own commands ────────────────────────────────────────────────────────────
+
+class TestOwnCommands:
+    def test_project_command_with_arguments(self, repo) -> None:
+        root, ws = repo
+        cmds = root / ".genesis" / "commands"
+        cmds.mkdir(parents=True)
+        (cmds / "review.md").write_text(
+            "---\ndescription: Преглед на файл\n---\nПрегледай $ARGUMENTS за грешки.", encoding="utf-8")
+        res = chat_commands.handle("/review app.py", messages=deque(), workspace=ws,
+                                   out=lambda s: None, ask=lambda q: "")
+        assert res.prompt == "Прегледай app.py за грешки."
+        listed: list[str] = []
+        chat_commands.handle("/commands", messages=deque(), workspace=ws,
+                             out=listed.append, ask=lambda q: "")
+        assert any("Преглед на файл" in line for line in listed)
+
+    def test_positional_arguments_and_no_placeholder(self, tmp_path) -> None:
+        f = tmp_path / "c.md"
+        f.write_text("Сравни $1 с $2", encoding="utf-8")
+        assert chat_commands.expand_command(f, "a.py b.py") == "Сравни a.py с b.py"
+        f.write_text("Обясни кода", encoding="utf-8")
+        assert chat_commands.expand_command(f, "utils.py") == "Обясни кода\n\nutils.py"
+
+    def test_unknown_slash_text_goes_to_the_model(self, repo) -> None:
+        _, ws = repo
+        assert chat_commands.handle("/nonexistent x", messages=deque(), workspace=ws,
+                                    out=lambda s: None, ask=lambda q: "") is None
+
+    def test_init_asks_the_model_to_write_genesis_md(self, repo) -> None:
+        _, ws = repo
+        res = chat_commands.handle("/init", messages=deque(), workspace=ws,
+                                   out=lambda s: None, ask=lambda q: "")
+        assert "GENESIS.md" in res.prompt
+
+
+# ── background commands ─────────────────────────────────────────────────────
+
+class TestBackground:
+    def test_start_read_and_stop(self, repo) -> None:
+        loop = _py("import time; [print('tick', i, flush=True) or time.sleep(0.2) for i in range(100)]")
+        started = gs.dispatch_tool_call("RUN_CMD", {"command": loop, "background": True})
+        assert "bg" in started, started
+        job_id = started.split("като ", 1)[1].split(".", 1)[0]
+        time.sleep(0.6)
+        assert "tick" in gs.dispatch_tool_call("BG_OUTPUT", {"id": job_id})
+        assert "върви" in background.summary()
+        assert "спряна" in gs.dispatch_tool_call("BG_KILL", {"id": job_id})
+        assert "върви" not in background.output(job_id).splitlines()[0]
+
+    def test_the_sandbox_gate_still_applies(self, repo) -> None:
+        out = gs.parse_and_execute_tools("[RUN_BG: rm -rf /]")[0]
+        assert "BLOCKED" in out or "отказ" in out.lower()

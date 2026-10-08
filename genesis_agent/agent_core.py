@@ -181,6 +181,13 @@ class Core:
                 "system_prompt", "You are Genesis, an autonomous AI coding agent."
             ))
             self.system_prompt += "\n\n" + env_facts(workspace)
+            try:
+                from genesis_agent.project_instructions import prompt_section
+                instructions = prompt_section(workspace)
+                if instructions:
+                    self.system_prompt += "\n\n" + instructions
+            except Exception:
+                pass
             self.provider = cfg.get("models", {}).get("default_provider", "")
             self.model = ""
 
