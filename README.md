@@ -172,6 +172,8 @@ The habits that make Claude Code pleasant to work with, in the Genesis chat:
 | `/name args` | Your own commands: `.genesis/commands/name.md` in the project or `~/.genesis/commands/`, `$ARGUMENTS` / `$1` replaced. `/commands` lists them. |
 | background | `RUN_CMD` with `background: true` (`[RUN_BG: …]`) keeps a dev server running while it works; `BG_OUTPUT` / `BG_KILL`, `/bg` in the chat. |
 | `/compact` | Summarise the history now instead of waiting for the threshold. |
+| MCP | Tools from any MCP server (GitHub, databases, Slack, …): `~/.genesis/mcp.json` in Claude Code's `.mcp.json` format (a project's `.mcp.json` only after `/mcp trust`). Read-only tools run at once; any other asks first, like a risky command (or list it in `autoApprove`). `/mcp` shows servers and tools. |
+| `EXPLORE` | A read-only sub-agent: "where is the price computed and who calls it?" is searched and read in its own conversation, and only the answer (with `path:line`) comes back — the main conversation stays small. |
 
 ```json
 {"hooks": {

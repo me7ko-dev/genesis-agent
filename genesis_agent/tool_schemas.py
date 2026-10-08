@@ -152,6 +152,20 @@ FULL_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "EXPLORE",
+            "description": ("Ask a read-only sub-agent a question about the codebase (where is X, "
+                            "how does Y flow, who calls Z). It searches and reads in its OWN "
+                            "context and returns only the answer with path:line references — use "
+                            "it instead of many SEARCH_CODE/READ_FILE calls on code you have not "
+                            "seen, to keep this conversation small."),
+            "parameters": {"type": "object", "properties": {
+                "question": {"type": "string", "description": "One concrete question"}},
+                "required": ["question"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "BG_OUTPUT",
             "description": "What a background command printed since the last look, and whether "
                            "it still runs. Without id: the list of background commands.",

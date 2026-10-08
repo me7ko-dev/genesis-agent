@@ -45,10 +45,12 @@ def end_turn() -> None:
 
 
 def record(path: Path) -> None:
-    """Keep `path` as it is now, once per turn, before it is changed."""
-    global _current
+    """Keep `path` as it is now, once per turn, before it is changed. Only
+    inside a chat turn: `genesis fix`, missions and the orchestrator use the
+    same tools, and their snapshots piled up for the life of the process with
+    nothing to undo them (audit 2026-10-08)."""
     if _current is None:
-        _current = _Turn(label="")
+        return
     try:
         path = Path(path).resolve()
     except OSError:
@@ -67,6 +69,27 @@ def record(path: Path) -> None:
         _current.before[path] = path.read_bytes()
     except OSError:
         return
+
+
+def forget_if_unchanged(path: Path) -> None:
+    """After the tool: a refused or failed write changed nothing — it is not
+    a change for /undo (an undo of such a turn did nothing and the operator
+    had to /undo again)."""
+    if _current is None:
+        return
+    try:
+        path = Path(path).resolve()
+    except OSError:
+        return
+    if path not in _current.before:
+        return
+    before = _current.before[path]
+    try:
+        now = path.read_bytes() if path.is_file() else None
+    except OSError:
+        return
+    if now == before:
+        del _current.before[path]
 
 
 def pending() -> list[str]:

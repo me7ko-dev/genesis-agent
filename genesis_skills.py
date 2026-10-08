@@ -945,7 +945,7 @@ _SIMPLE_RE = re.compile(
     r"\[(?P<tool>READ_FILE|RUN_CMD|WEB_SEARCH|LIST_DIR|DELEGATE|RESEARCH|BROWSE|ASK_USER|"
     r"SEARCH_CODE|REPO_MAP|GLOB|"
     r"BROWSER_CLICK|BROWSER_TYPE|REMEMBER|TASK_ADD|TASK_UPDATE|TASK_LIST|"
-    r"RUN_BG|BG_OUTPUT|BG_KILL):"
+    r"RUN_BG|BG_OUTPUT|BG_KILL|MCP|EXPLORE):"
     r"\s*(?P<arg>(?:[^\[\]]|" + _BRACKETS + r")+)\]"
 )
 # REPO_MAP без аргумент = текущият workspace (както BROWSER_READ/TASK_LIST).
@@ -976,7 +976,20 @@ _SIMPLE_DISPATCH: dict[str, Callable[..., str]] = {
     "RUN_BG": lambda arg: _tool_run_bg(arg),
     "BG_OUTPUT": lambda arg="": _background().output(arg),
     "BG_KILL": lambda arg: _background().kill(arg),
+    "MCP": lambda arg: _mcp().call_text_tag(arg),
+    "EXPLORE": lambda arg: _tool_explore(arg),
 }
+
+
+def _tool_explore(question: str) -> str:
+    """Под-агент, който само чете — отговорът без файловете в историята."""
+    from genesis_agent.explore import explore
+    return explore(question, str(_WORKSPACE))
+
+
+def _mcp():
+    from genesis_agent import mcp_client
+    return mcp_client
 
 
 def _background():
@@ -1028,39 +1041,79 @@ def _safe_tool(name: str, fn: Callable[..., str], *args) -> str:
 
 def _text_args(name: str, args: tuple) -> dict:
     """The text-tag arguments in the shape the native path has (for hooks)."""
+    if name == "EDIT_FILE" and len(args) >= 3:
+        return {"path": str(args[0]).strip(), "old": args[1], "new": args[2]}
     if name in ("WRITE_FILE", "EDIT_FILE", "READ_FILE", "LIST_DIR") and args:
         return {"path": str(args[0]).strip(), **({"content": args[1]} if name == "WRITE_FILE"
                                                   and len(args) > 1 else {})}
-    if name == "RUN_CMD" and args:
+    if name in ("RUN_CMD", "RUN_BG") and args:
         return {"command": str(args[0])}
     return {"arg": " | ".join(str(a) for a in args)}
+
+
+def _hook_view(name: str, args: dict) -> tuple[str, dict]:
+    """Как hooks виждат извикването: `[RUN_BG: …]` е RUN_CMD във фона —
+    hook с matcher RUN_CMD не бива да се заобикаля с другото име (одит 2026-10-08)."""
+    if name == "RUN_BG":
+        return "RUN_CMD", {"command": args.get("arg", args.get("command", "")), "background": True}
+    if name == "MCP":
+        # `[MCP: github.create_issue | {...}]` — за hooks същото като native
+        # `mcp__github__create_issue`: matcher mcp__github__.* се заобикаляше
+        # с текстовия таг (одит 2026-10-08).
+        head, _, raw = str(args.get("arg", "")).partition("|")
+        from genesis_agent import mcp_client
+        found = mcp_client._find(head.strip())
+        server, _, tool = head.strip().partition(".")
+        qualified = found[1].qualified if found else \
+            f"mcp__{mcp_client._safe(server)}__{mcp_client._safe(tool)}"
+        try:
+            parsed = load_tool_arguments(raw.strip()) if raw.strip() else {}
+        except (ValueError, TypeError):
+            parsed = {"arg": raw.strip()}
+        return qualified, parsed if isinstance(parsed, dict) else {"arg": raw.strip()}
+    if name == "EXPLORE" and "arg" in args:
+        return name, {"question": args["arg"]}
+    return name, args
 
 
 def _before_tool(name: str, args: dict) -> str | None:
     """One gate for both paths (text tags and native calls): plan mode, the
     operator's PreToolUse hooks, and the /undo snapshot of a file about to
-    change. Never raises."""
+    change. Never raises — and fails CLOSED: an error in the gate refuses the
+    tool (it used to be swallowed and the tool ran past a hook that had
+    just blocked it — audit 2026-10-08)."""
     try:
         from genesis_agent import plan_mode
-        refusal = plan_mode.refusal(name)
+        refusal = plan_mode.refusal(name, args)
         if refusal:
             return refusal
         from genesis_agent import hooks
-        blocked = hooks.pre_tool(name, args)
+        hook_name, hook_args = _hook_view(name, args)
+        blocked = hooks.pre_tool(hook_name, hook_args)
         if blocked:
             return blocked
-        if name in ("WRITE_FILE", "EDIT_FILE") and args.get("path"):
+    except Exception as e:
+        return f"[{name}] ⛔ Проверката преди инструмента се провали ({e}) — не е изпълнен."
+    if name in ("WRITE_FILE", "EDIT_FILE") and args.get("path"):
+        try:
             from genesis_agent import edit_history
             edit_history.record(_resolve_noted(str(args["path"]), redirect=False)[0])
-    except Exception:
-        pass
+        except Exception:
+            pass
     return None
 
 
 def _after_tool(name: str, args: dict, result: str) -> str:
+    if name in ("WRITE_FILE", "EDIT_FILE") and args.get("path"):
+        try:  # отказан/неуспешен запис не е промяна за /undo
+            from genesis_agent import edit_history
+            edit_history.forget_if_unchanged(_resolve_noted(str(args["path"]), redirect=False)[0])
+        except Exception:
+            pass
     try:
         from genesis_agent import hooks
-        return hooks.post_tool(name, args, result)
+        hook_name, hook_args = _hook_view(name, args)
+        return hooks.post_tool(hook_name, hook_args, result)
     except Exception:
         return result
 
@@ -1268,9 +1321,14 @@ def _dispatch(name: str, arguments: dict) -> str:
             path = arguments.get("path", "") or ""
             return _tool_glob(f"{pattern} | {path}" if path else pattern)
         if name == "RUN_CMD":
-            if arguments.get("background"):
+            # „false“ като низ е истина в Python — фонът само при изрично да (одит 2026-10-08)
+            if str(arguments.get("background", "")).strip().lower() in ("true", "1", "yes"):
                 return _tool_run_bg(arguments.get("command", ""))
             return _tool_run_cmd(arguments.get("command", ""))
+        if name == "EXPLORE":
+            return _tool_explore(str(arguments.get("question", "") or ""))
+        if name.startswith("mcp__"):
+            return _mcp().call(name, arguments)
         if name == "BG_OUTPUT":
             return _background().output(str(arguments.get("id", "") or ""))
         if name == "BG_KILL":

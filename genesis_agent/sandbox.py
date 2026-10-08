@@ -1260,6 +1260,13 @@ def _decide(operation: str, verdict: RiskVerdict, policy: SandboxPolicy) -> tupl
     return False, "[SANDBOX DECLINED] Операторът отказа изпълнението."
 
 
+def confirm(operation: str, reasons: list[str]) -> tuple[bool, str]:
+    """Действие извън shell-а (MCP инструмент, външна система), което иска
+    съгласие: същото правило като за CONFIRM команда — пита в терминала,
+    отказва в автономен режим. (позволено, причина за отказ)."""
+    return _decide(operation, RiskVerdict(RiskLevel.CONFIRM, list(reasons)), _POLICY)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Изпълнение с реални граници
 # ─────────────────────────────────────────────────────────────────────────────

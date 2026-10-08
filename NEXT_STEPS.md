@@ -38,8 +38,12 @@
 `/compact`. Модули: project_instructions, plan_mode, edit_history, hooks,
 chat_commands, background. Неизмерено наживо: дали моделите ползват
 RUN_BG за сървъри вместо RUN_CMD, и дали `/init` пише полезен GENESIS.md —
-да се пробва на лаптопа върху 2–3 истински проекта. Не е направено: MCP клиент,
-под-агенти с отделни роли (Explore/Plan), чекпойнти и за RUN_CMD.
+да се пробва на лаптопа върху 2–3 истински проекта.
+Добавено след това: MCP клиент (stdio; `~/.genesis/mcp.json`, `.mcp.json` на проекта
+след `/mcp trust`, read-only инструментите без питане, останалите през sandbox.confirm)
+и EXPLORE — под-агент, който само чете в отделен контекст. Наживо да се пробва: един
+истински MCP сървър (напр. `@modelcontextprotocol/server-filesystem`) и дали моделът
+вика EXPLORE сам. Не е направено: MCP по HTTP, чекпойнти и за RUN_CMD.
 
 ## Решения на оператора
 

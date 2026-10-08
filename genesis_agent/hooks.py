@@ -110,16 +110,32 @@ def _trusted() -> dict[str, str]:
         return {}
 
 
+def _key(path: Path) -> str:
+    # Пътят, както е в проекта — НЕ разрешен през символни връзки: иначе
+    # доверието за проект A важеше и за B с `.genesis/hooks.json -> A/...`,
+    # а командите (`sh ./check.sh`) се пускаха в B (одит 2026-10-08).
+    return str(Path(os.path.abspath(path)))
+
+
+def stays_in_project(path: Path, root: Path) -> bool:
+    """The file is really inside the project (no symlink out of it)."""
+    try:
+        real, top = path.resolve(), root.resolve()
+    except OSError:
+        return False
+    return top in real.parents and not path.is_symlink() and not path.parent.is_symlink()
+
+
 def is_trusted(path: Path) -> bool:
     try:
-        return _trusted().get(str(path.resolve())) == _digest(path)
+        return _trusted().get(_key(path)) == _digest(path)
     except OSError:
         return False
 
 
 def trust(path: Path) -> None:
     data = _trusted()
-    data[str(path.resolve())] = _digest(path)
+    data[_key(path)] = _digest(path)
     target = _trust_file()
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(target.name + ".tmp")
@@ -127,12 +143,22 @@ def trust(path: Path) -> None:
     os.replace(tmp, target)
 
 
+def _say(text: str) -> None:
+    """notify, който никога не прекъсва работата: съобщение с `[` в Rich
+    хвърляше MarkupError, а повикващият го гълташе — и PreToolUse блокът
+    изчезваше (одит 2026-10-08)."""
+    try:
+        notify(text)
+    except Exception:
+        pass
+
+
 def _parse(path: Path) -> list[Hook]:
     try:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as e:
         if path.exists():
-            notify(f"⚠ hooks: {path} не се чете ({e}) — пропуснат")
+            _say(f"⚠ hooks: {path} не се чете ({e}) — пропуснат")
         return []
     table = data.get("hooks", data) if isinstance(data, dict) else {}
     out: list[Hook] = []
@@ -156,11 +182,13 @@ def _parse(path: Path) -> list[Hook]:
 
 def configured(ws: Path | None = None) -> tuple[list[Hook], Path | None]:
     """The hooks in force, and the project file when it exists but is not trusted."""
+    from genesis_agent.project_instructions import _project_root
     hooks = _parse(_home() / "hooks.json")
     project = project_file(ws)
     untrusted = None
     if project.is_file():
-        if is_trusted(project):
+        root = _project_root(Path(ws or _ws()).resolve())
+        if stays_in_project(project, root) and is_trusted(project):
             hooks += _parse(project)
         else:
             untrusted = project
@@ -177,17 +205,27 @@ def _matches(hook: Hook, tool: str) -> bool:
 
 
 def _run(hook: Hook, payload: dict, env_extra: dict[str, str]) -> subprocess.CompletedProcess | None:
+    """Runs the hook in its own process group: on a timeout the whole tree
+    goes (subprocess.run killed only the shell — `sleep 77` lived on; on
+    Windows it could hang in communicate() — audit 2026-10-08)."""
+    from genesis_agent import sandbox
     env = dict(os.environ, GENESIS_WORKSPACE=str(_ws()), GENESIS_HOOK_EVENT=hook.event, **env_extra)
     try:
-        return subprocess.run(hook.command, shell=True, cwd=str(_ws()), env=env,
-                              input=json.dumps(payload, ensure_ascii=False),
-                              capture_output=True, text=True, encoding="utf-8",
-                              errors="replace", timeout=hook.timeout, check=False)
-    except subprocess.TimeoutExpired:
-        notify(f"⚠ hook ({hook.event}) спрян след {hook.timeout} s: {hook.command}")
+        proc = subprocess.Popen(
+            hook.command, shell=True, cwd=str(_ws()), env=env, stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+            errors="replace", start_new_session=(os.name == "posix"),
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
     except OSError as e:
-        notify(f"⚠ hook ({hook.event}) не тръгна: {e}")
-    return None
+        _say(f"⚠ hook ({hook.event}) не тръгна: {e}")
+        return None
+    try:
+        out, err = proc.communicate(json.dumps(payload, ensure_ascii=False), timeout=hook.timeout)
+    except subprocess.TimeoutExpired:
+        sandbox.stop_process(proc)
+        _say(f"⚠ hook ({hook.event}) спрян след {hook.timeout} s: {hook.command}")
+        return None
+    return subprocess.CompletedProcess(hook.command, proc.returncode, out or "", err or "")
 
 
 def fire(event: str, payload: dict, tool: str = "", file: str = "") -> Outcome:
@@ -207,7 +245,7 @@ def fire(event: str, payload: dict, tool: str = "", file: str = "") -> Outcome:
             if done.stdout.strip():
                 result.context += done.stdout.strip()[:_MAX_OUT] + "\n"
         else:
-            notify(f"⚠ hook ({event}) върна {done.returncode}: "
+            _say(f"⚠ hook ({event}) върна {done.returncode}: "
                    f"{(done.stderr or done.stdout).strip()[:300]}")
     result.message, result.context = result.message.strip(), result.context.strip()
     return result
