@@ -29,6 +29,18 @@
   в QR + обработка в `mobile/src/app/pair.tsx` (проверка в Expo SDK 57 документацията
   първо, по mobile/AGENTS.md) и уеб сдвояване само от localhost/HTTPS.
 
+## Като Claude Code (2026-10-08)
+
+В чата: `GENESIS.md`/`AGENTS.md`/`CLAUDE.md` (+ `~/.genesis/GENESIS.md`, `@импорти`),
+`/init`, `/memory`, `/plan`, `/undo`, hooks (`~/.genesis/hooks.json`; на проекта —
+само след `/hooks trust`), собствени команди `.genesis/commands/*.md`, фонови
+команди (`RUN_CMD background` / `[RUN_BG: …]`, `BG_OUTPUT`, `BG_KILL`, `/bg`),
+`/compact`. Модули: project_instructions, plan_mode, edit_history, hooks,
+chat_commands, background. Неизмерено наживо: дали моделите ползват
+RUN_BG за сървъри вместо RUN_CMD, и дали `/init` пише полезен GENESIS.md —
+да се пробва на лаптопа върху 2–3 истински проекта. Не е направено: MCP клиент,
+под-агенти с отделни роли (Explore/Plan), чекпойнти и за RUN_CMD.
+
 ## Решения на оператора
 
 - **Само терминал.** Гласът, зрението и 24/7 режимът са махнати (PR #2).

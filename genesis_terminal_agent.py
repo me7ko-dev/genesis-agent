@@ -873,6 +873,13 @@ def _compact_messages(messages: "deque") -> "deque":
     )
 
 
+def _force_compact(messages: "deque") -> "deque":
+    """/compact: обобщава всичко освен последните няколко съобщения, сега."""
+    from genesis_agent.brain import Brain
+    keep = 4
+    return Brain.compact_chat_history(messages, threshold=keep + 1, keep_recent=keep)
+
+
 # ── Tools ─────────────────────────────────────────────────────────────────────
 def parse_and_execute_tools(response_text):
     try:
@@ -1208,6 +1215,16 @@ def build_system_prompt() -> tuple[str, str]:
     except Exception:
         pass
 
+    # GENESIS.md / AGENTS.md / CLAUDE.md на проекта — постоянните инструкции на
+    # оператора, всяка сесия, преди първата дума (виж project_instructions).
+    try:
+        from genesis_agent.project_instructions import prompt_section
+        instructions = prompt_section(WORKSPACE)
+        if instructions:
+            SYSTEM_PROMPT += "\n\n" + instructions
+    except Exception:
+        pass
+
     # ── Брифинг за състоянието на РАБОТАТА (design note, 2026-07-25) ──────────────
     # Досега тук се инжектираха последните 8 епизода — на практика лог от
     # `RUN_CMD echo ...` извиквания, който не носеше никаква информация за
@@ -1235,6 +1252,15 @@ def build_system_prompt() -> tuple[str, str]:
     return SYSTEM_PROMPT, briefing_text
 
 
+def _turn_tools():
+    """Инструментите за модела: в режим план — само тези, които гледат."""
+    from genesis_agent import plan_mode
+    return plan_mode.filter_tools(TERMINAL_TOOL_SCHEMAS)
+
+
+_STOP_HOOK_ROUNDS = 2
+
+
 def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     """Една реплика на оператора: модел → инструменти → … → отговор.
 
@@ -1242,7 +1268,46 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     КАК се показва (`ui`), не какво се случва — същият tool цикъл, същата
     проверка на твърденията, същият пазач срещу въртене на място. Връща
     историята, която може да е НОВ deque след компресия.
+
+    Около хода (както в Claude Code): hooks на оператора (UserPromptSubmit
+    преди, Stop след — код 2 връща хода на модела), режим план, и снимка на
+    файловете, които ходът променя, за /undo.
     """
+    from genesis_agent import edit_history, hooks, plan_mode
+    hooks.notify = ui.warn
+    extra = ""
+    try:
+        before = hooks.fire("UserPromptSubmit", {"prompt": user_input})
+    except Exception:
+        before = hooks.Outcome()
+    if before.blocked:
+        ui.warn(f"⛔ hook на оператора спря съобщението: {before.message or '(без обяснение)'}")
+        return messages
+    if before.context:
+        extra += f"\n\n[контекст от hook на оператора]\n{before.context}"
+    if plan_mode.active():
+        extra += "\n\n" + plan_mode.PROMPT_NOTE
+    edit_history.begin_turn(user_input)
+    try:
+        messages = _run_turn_once(messages, user_input, ui, extra)
+        for _ in range(_STOP_HOOK_ROUNDS):
+            last = next((str(m.get("content") or "") for m in reversed(messages)
+                         if m.get("role") == "assistant"), "")
+            try:
+                stop = hooks.fire("Stop", {"last_assistant_message": last[:4000]})
+            except Exception:
+                break
+            if not stop.blocked:
+                break
+            ui.warn("↻ hook Stop на оператора върна хода на модела")
+            messages = _run_turn_once(
+                messages, f"[hook Stop на оператора — довърши, преди да спреш]\n{stop.message}", ui, "")
+    finally:
+        edit_history.end_turn()
+    return messages
+
+
+def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str = "") -> "deque":
     content = user_input
     try:
         from genesis_agent.skill_loader import domain_context
@@ -1259,6 +1324,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     if knowledge:
         content = f"{user_input}\n\n{knowledge}"
         ui.info(f"📚 проверено знание: {head.split(': ', 1)[-1]}")
+    content += extra
     # Без таван до края на хода: deque(maxlen) изхвърляше посред задачата
     # системния промпт и самата заявка (виж agent_core.bounded_history).
     limit = getattr(messages, "maxlen", None)
@@ -1296,7 +1362,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     _guard = _RepeatGuard()
     _spinning = ""
     with ui.thinking("Genesis мисли...", "dots2"):
-        response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
+        response, tool_calls = ask_genesis(messages, tools=_turn_tools())
 
     while True:
         ui.assistant(response)
@@ -1369,7 +1435,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
                         "за това съобщение — спирам тук, продължи с ново съобщение.")
                 break
             with ui.thinking("Анализирам...", "aesthetic"):
-                response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
+                response, tool_calls = ask_genesis(messages, tools=_turn_tools())
             continue
 
         # Стар text-tag режим — моделът не поддържа native tool-calling
@@ -1398,7 +1464,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
                                "отговор БЕЗ скоби във формàт на таг.",
                 })
                 with ui.thinking("Анализирам...", "aesthetic"):
-                    response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
+                    response, tool_calls = ask_genesis(messages, tools=_turn_tools())
                 continue
             if _page_check.due():
                 with ui.thinking("Проверявам страницата в браузър…", "dots2"):
@@ -1410,13 +1476,13 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
                 if _page_note:
                     messages.append({"role": "system", "content": _page_note})
                     with ui.thinking("Оправям според браузъра…", "aesthetic"):
-                        response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
+                        response, tool_calls = ask_genesis(messages, tools=_turn_tools())
                     continue
             if _run_check.due():
                 ui.warn("Написа код — казвам му да го пробва и извън примерите.")
                 messages.append({"role": "system", "content": _run_check.note()})
                 with ui.thinking("Пробвам кода…", "aesthetic"):
-                    response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
+                    response, tool_calls = ask_genesis(messages, tools=_turn_tools())
                 continue
             if _accept.due():
                 with ui.thinking("Приемни тестове само от заявката…", "dots2"):
@@ -1426,7 +1492,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
                 if _acc_note:
                     messages.append({"role": "system", "content": _acc_note})
                     with ui.thinking("Сверявам със заявката…", "aesthetic"):
-                        response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
+                        response, tool_calls = ask_genesis(messages, tools=_turn_tools())
                     continue
             _promise = claim_check.unfinished_promise(response)
             if _promise and _promise_retries < 1:
@@ -1434,7 +1500,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
                 ui.warn("Обещава работа и спира — казвам му да я направи.")
                 messages.append({"role": "system", "content": claim_check.promise_nudge(_promise)})
                 with ui.thinking("Продължавам…", "aesthetic"):
-                    response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
+                    response, tool_calls = ask_genesis(messages, tools=_turn_tools())
                 continue
             _unsupported = claim_check.unsupported_claims(response, _executed)
             if _unsupported and _claim_retries < 1:
@@ -1444,7 +1510,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
                 messages.append({"role": "system",
                                   "content": claim_check.nudge_text(_unsupported)})
                 with ui.thinking("Проверявам…", "aesthetic"):
-                    response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
+                    response, tool_calls = ask_genesis(messages, tools=_turn_tools())
                 continue
             break
         _text_note = ""
@@ -1481,7 +1547,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
                           "командата вече работи правилно) — не настоявай за отказаната команда, "
                           "просто отчети успех с наличните доказателства."})
         with ui.thinking("Анализирам...", "aesthetic"):
-            response, tool_calls = ask_genesis(messages, tools=TERMINAL_TOOL_SCHEMAS)
+            response, tool_calls = ask_genesis(messages, tools=_turn_tools())
 
     # Превантивна компресия на историята — преди cutoff-а на deque(maxlen=30),
     # не при него. Пести токени в дълги разговори, "помни" повече чрез резюме.
@@ -1765,6 +1831,14 @@ def main():
                 help_table.add_row("/skills", "Списък с уменията (без модел, мигновено)")
                 help_table.add_row("/tasks", "Състояние на работата — отворени нишки, решения")
                 help_table.add_row("/done <id>", "Затвори нишка като готова (/drop <id> = изхвърли)")
+                help_table.add_row("/init", "Напиши GENESIS.md — инструкциите за проекта, четени всяка сесия")
+                help_table.add_row("/memory", "Кои инструкции за проекта важат (GENESIS.md/AGENTS.md/CLAUDE.md)")
+                help_table.add_row("/plan [задача]", "Режим план: само чете и планира; /plan пак = изпълни")
+                help_table.add_row("/undo", "Върни файловете от последния ход, който ги промени")
+                help_table.add_row("/compact", "Компресирай историята сега")
+                help_table.add_row("/hooks [trust]", "Твоите команди около работата (hooks.json)")
+                help_table.add_row("/commands", "Твоите команди от .genesis/commands/*.md")
+                help_table.add_row("/bg", "Фоновите команди (dev сървъри) — състояние")
                 help_table.add_row('"""', "Съобщение на много редове: \"\"\" … \"\"\" (поставеният текст е едно съобщение и без това)")
                 help_table.add_row("exit / quit", "Изход")
                 console.print(Panel(help_table, title="[bold cyan]◈ GENESIS КОМАНДИ ◈[/]", border_style="cyan"))
@@ -1865,6 +1939,20 @@ def main():
                     console.print("[red]Невалиден избор.[/]")
                 continue
 
+
+            # Командите, които управляват агента като в Claude Code (/init,
+            # /memory, /plan, /undo, /compact, /hooks, /commands, /bg) и
+            # собствените на оператора от .genesis/commands/*.md.
+            from genesis_agent import chat_commands as _chat_commands
+            _res = _chat_commands.handle(
+                user_input, messages=messages, workspace=Path(WORKSPACE),
+                out=console.print, ask=console.input, compact=_force_compact)
+            if _res is not None:
+                if _res.messages is not None:
+                    messages = _res.messages
+                if not _res.prompt:
+                    continue
+                user_input = _res.prompt
 
             messages = run_turn(messages, user_input, RICH_UI)
 

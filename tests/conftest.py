@@ -122,3 +122,20 @@ def _isolated_persisted_state(monkeypatch, tmp_path):
     import genesis_agent.episodic_memory as _em
     _em._init_db()
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolated_operator_settings(monkeypatch, tmp_path):
+    """~/.genesis на оператора (GENESIS.md, hooks.json, commands/) не стига до
+    тестовете: истински hooks.json би пускал командите на оператора при всеки
+    WRITE_FILE в тестовете. И режимът план / историята за /undo са на модула —
+    всеки тест започва без тях."""
+    home = tmp_path / "genesis_home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setattr("genesis_agent.paths.GENESIS_HOME", home)
+    from genesis_agent import edit_history, plan_mode
+    plan_mode.set_active(False)
+    edit_history.clear()
+    yield
+    plan_mode.set_active(False)
+    edit_history.clear()

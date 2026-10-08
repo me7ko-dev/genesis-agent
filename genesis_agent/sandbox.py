@@ -36,7 +36,7 @@ import subprocess
 import sys
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import IntEnum
 from pathlib import Path
 
@@ -1581,6 +1581,62 @@ def run_shell(command: str, *, cwd: Path | None = None,
                timeout=timeout or policy.cpu_seconds)
     res.verdict = verdict
     return res
+
+
+def start_shell(command: str, *, cwd: Path | None = None, log: Path,
+                policy: SandboxPolicy | None = None) -> tuple[subprocess.Popen | None, str]:
+    """Пуска shell команда във фона — през СЪЩАТА бариера като run_shell.
+
+    Изходът отива във файл (`log`), не в pipe: dev сървър, който пише часове,
+    би напълнил pipe буфера и би спрял. Процесът е в своя група (POSIX), за да
+    може да се спре цялото дърво. Таван на процесорното време — час, не
+    cpu_seconds: сървърът чака, не смята. (процес, отказ) — едното е празно."""
+    policy = policy or _POLICY
+    work = cwd if (cwd and cwd.is_dir()) else _sandbox_dir()
+    verdict = assess_command(command, cwd=work)
+    allowed, reason = _decide(command, verdict, policy)
+    if not allowed:
+        return None, reason
+    long_policy = replace(policy, cpu_seconds=max(policy.cpu_seconds, 3600))
+    nproc_cap = (_count_user_processes() + policy.max_processes) if policy.max_processes > 0 else 0
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with open(log, "wb") as fh:
+            proc = subprocess.Popen(
+                _shell_argv(command), cwd=str(work), stdout=fh, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL, env=_build_env(policy),
+                preexec_fn=(lambda: _preexec(long_policy, nproc_cap)) if os.name == "posix" else None,  # noqa: PLW1509
+                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+            )
+    except Exception as e:
+        return None, f"[sandbox] стартът се провали: {e}"
+    return proc, ""
+
+
+def stop_process(proc: subprocess.Popen) -> None:
+    """Спира процес, пуснат с start_shell, заедно с децата му."""
+    if proc.poll() is not None:
+        return
+    try:
+        if sys.platform != "win32":
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            try:
+                proc.wait(timeout=5)
+                return
+            except subprocess.TimeoutExpired:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        else:
+            _kill_tree_win32(proc.pid)
+            proc.kill()
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def run_python(code: str, *, cwd: Path | None = None,

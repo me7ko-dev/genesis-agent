@@ -944,7 +944,8 @@ _BRACKETS = r"\[(?:[^\[\]]|\[[^\[\]]*\])*\]"
 _SIMPLE_RE = re.compile(
     r"\[(?P<tool>READ_FILE|RUN_CMD|WEB_SEARCH|LIST_DIR|DELEGATE|RESEARCH|BROWSE|ASK_USER|"
     r"SEARCH_CODE|REPO_MAP|GLOB|"
-    r"BROWSER_CLICK|BROWSER_TYPE|REMEMBER|TASK_ADD|TASK_UPDATE|TASK_LIST):"
+    r"BROWSER_CLICK|BROWSER_TYPE|REMEMBER|TASK_ADD|TASK_UPDATE|TASK_LIST|"
+    r"RUN_BG|BG_OUTPUT|BG_KILL):"
     r"\s*(?P<arg>(?:[^\[\]]|" + _BRACKETS + r")+)\]"
 )
 # REPO_MAP без аргумент = текущият workspace (както BROWSER_READ/TASK_LIST).
@@ -972,7 +973,20 @@ _SIMPLE_DISPATCH: dict[str, Callable[..., str]] = {
     "TASK_ADD": _tool_task_add,
     "TASK_UPDATE": _tool_task_update,
     "TASK_LIST": _tool_task_list,
+    "RUN_BG": lambda arg: _tool_run_bg(arg),
+    "BG_OUTPUT": lambda arg="": _background().output(arg),
+    "BG_KILL": lambda arg: _background().kill(arg),
 }
+
+
+def _background():
+    from genesis_agent import background
+    return background
+
+
+def _tool_run_bg(arg: str) -> str:
+    """Фонова команда (dev сървър, watcher) — същата бариера като RUN_CMD."""
+    return _background().start(arg, cwd=Path(_WORKSPACE))
 
 
 _READONLY_RE = re.compile(
@@ -1001,10 +1015,54 @@ def _safe_tool(name: str, fn: Callable[..., str], *args) -> str:
     native function-calling, тоест на слабия/локалния резервен слой — точно там,
     където устойчивостта трябва да е по-голяма, а не по-малка.
     """
+    payload = _text_args(name, args)
+    blocked = _before_tool(name, payload)
+    if blocked:
+        return blocked
     try:
-        return fn(*args)
+        out = fn(*args)
     except Exception as e:
-        return f"[{name}] Грешка при изпълнение: {e}"
+        out = f"[{name}] Грешка при изпълнение: {e}"
+    return _after_tool(name, payload, out)
+
+
+def _text_args(name: str, args: tuple) -> dict:
+    """The text-tag arguments in the shape the native path has (for hooks)."""
+    if name in ("WRITE_FILE", "EDIT_FILE", "READ_FILE", "LIST_DIR") and args:
+        return {"path": str(args[0]).strip(), **({"content": args[1]} if name == "WRITE_FILE"
+                                                  and len(args) > 1 else {})}
+    if name == "RUN_CMD" and args:
+        return {"command": str(args[0])}
+    return {"arg": " | ".join(str(a) for a in args)}
+
+
+def _before_tool(name: str, args: dict) -> str | None:
+    """One gate for both paths (text tags and native calls): plan mode, the
+    operator's PreToolUse hooks, and the /undo snapshot of a file about to
+    change. Never raises."""
+    try:
+        from genesis_agent import plan_mode
+        refusal = plan_mode.refusal(name)
+        if refusal:
+            return refusal
+        from genesis_agent import hooks
+        blocked = hooks.pre_tool(name, args)
+        if blocked:
+            return blocked
+        if name in ("WRITE_FILE", "EDIT_FILE") and args.get("path"):
+            from genesis_agent import edit_history
+            edit_history.record(_resolve_noted(str(args["path"]), redirect=False)[0])
+    except Exception:
+        pass
+    return None
+
+
+def _after_tool(name: str, args: dict, result: str) -> str:
+    try:
+        from genesis_agent import hooks
+        return hooks.post_tool(name, args, result)
+    except Exception:
+        return result
 
 
 def parse_and_execute_readonly_tools(response_text: str) -> list[str]:
@@ -1181,6 +1239,13 @@ def dispatch_tool_call(name: str, arguments) -> str:
             return f"[{name}] Невалидни аргументи (не са валиден JSON): {arguments[:200]}"
     if not isinstance(arguments, dict):
         arguments = {}
+    blocked = _before_tool(name, arguments)
+    if blocked:
+        return blocked
+    return _after_tool(name, arguments, _dispatch(name, arguments))
+
+
+def _dispatch(name: str, arguments: dict) -> str:
     try:
         if name == "READ_FILE":
             return _tool_read_file(arguments.get("path", ""),
@@ -1203,7 +1268,13 @@ def dispatch_tool_call(name: str, arguments) -> str:
             path = arguments.get("path", "") or ""
             return _tool_glob(f"{pattern} | {path}" if path else pattern)
         if name == "RUN_CMD":
+            if arguments.get("background"):
+                return _tool_run_bg(arguments.get("command", ""))
             return _tool_run_cmd(arguments.get("command", ""))
+        if name == "BG_OUTPUT":
+            return _background().output(str(arguments.get("id", "") or ""))
+        if name == "BG_KILL":
+            return _background().kill(str(arguments.get("id", "") or ""))
         if name == "ASK_USER":
             return _tool_ask_user(arguments.get("question", ""),
                                   arguments.get("options"))

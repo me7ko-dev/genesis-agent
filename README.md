@@ -158,6 +158,28 @@ genesis mission "write a retry decorator with exponential backoff"
 genesis fix ~/code/theirs "median() is wrong for even-length input"
 ```
 
+## Steering it like Claude Code
+
+The habits that make Claude Code pleasant to work with, in the Genesis chat:
+
+| | What it does |
+|---|---|
+| `GENESIS.md` | Standing instructions for a project, read at the start of every session: how to test, what not to touch, the house style. `AGENTS.md` or `CLAUDE.md` is read when there is no `GENESIS.md`; `~/.genesis/GENESIS.md` holds yours for every project; `GENESIS.local.md` is personal and stays out of git. `@docs/style.md` inside one pulls that file in (only from the project, never a key). |
+| `/init` | Genesis looks at the project and writes (or improves) its `GENESIS.md`. `/memory` shows which files are in force. |
+| `/plan [task]` | Plan mode: it reads, searches and asks, and every tool that would change something is refused in code. `/plan` again approves the plan and it is carried out. |
+| `/undo` | Puts back the files the last turn changed (created files are removed). Again → the turn before. Commands run with RUN_CMD are not tracked. |
+| hooks | Your commands around its work: `~/.genesis/hooks.json` (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Stop`; exit code 2 blocks or sends stderr back to the model — Claude Code's format is read too). A project's `.genesis/hooks.json` runs only after `/hooks trust`, and only while the file is unchanged. |
+| `/name args` | Your own commands: `.genesis/commands/name.md` in the project or `~/.genesis/commands/`, `$ARGUMENTS` / `$1` replaced. `/commands` lists them. |
+| background | `RUN_CMD` with `background: true` (`[RUN_BG: …]`) keeps a dev server running while it works; `BG_OUTPUT` / `BG_KILL`, `/bg` in the chat. |
+| `/compact` | Summarise the history now instead of waiting for the threshold. |
+
+```json
+{"hooks": {
+  "PostToolUse": [{"matcher": "WRITE_FILE|EDIT_FILE", "command": "ruff format \"$GENESIS_FILE\""}],
+  "Stop": [{"command": "python -m pytest -q || (echo 'tests fail' >&2; exit 2)"}]
+}}
+```
+
 ## Fixing an existing project
 
 `genesis mission` writes new code, which it owns. `genesis fix` changes code

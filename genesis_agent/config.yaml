@@ -471,6 +471,9 @@ tool_tag_prompt: |
     git status. Call this first on an unfamiliar codebase.
   - [RUN_CMD: command here] — this is ALSO how you install packages (pip install ..., npm
     install ..., apt-get ...). There is no separate INSTALL tag; do not invent one.
+  - [RUN_BG: command] — start something that keeps running (dev server, watcher) in the
+    background; returns an id at once. [BG_OUTPUT: id] shows what it printed since the last
+    look, [BG_KILL: id] stops it. Never start a server with plain RUN_CMD — it never returns.
   - [WEB_SEARCH: search query]
   - [RESEARCH: question] — cross-checked answer from several sources
   - [LIST_DIR: /path]
