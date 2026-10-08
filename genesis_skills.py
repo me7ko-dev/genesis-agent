@@ -1056,6 +1056,23 @@ def _hook_view(name: str, args: dict) -> tuple[str, dict]:
     hook с matcher RUN_CMD не бива да се заобикаля с другото име (одит 2026-10-08)."""
     if name == "RUN_BG":
         return "RUN_CMD", {"command": args.get("arg", args.get("command", "")), "background": True}
+    if name == "MCP":
+        # `[MCP: github.create_issue | {...}]` — за hooks същото като native
+        # `mcp__github__create_issue`: matcher mcp__github__.* се заобикаляше
+        # с текстовия таг (одит 2026-10-08).
+        head, _, raw = str(args.get("arg", "")).partition("|")
+        from genesis_agent import mcp_client
+        found = mcp_client._find(head.strip())
+        server, _, tool = head.strip().partition(".")
+        qualified = found[1].qualified if found else \
+            f"mcp__{mcp_client._safe(server)}__{mcp_client._safe(tool)}"
+        try:
+            parsed = load_tool_arguments(raw.strip()) if raw.strip() else {}
+        except (ValueError, TypeError):
+            parsed = {"arg": raw.strip()}
+        return qualified, parsed if isinstance(parsed, dict) else {"arg": raw.strip()}
+    if name == "EXPLORE" and "arg" in args:
+        return name, {"question": args["arg"]}
     return name, args
 
 

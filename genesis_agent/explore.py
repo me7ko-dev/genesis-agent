@@ -29,9 +29,16 @@ question about the project in the workspace by searching and reading the code.
 - Stop as soon as you can answer. Then reply with the answer only: concrete,
   with `path:line` references for every claim, the relevant snippets kept
   short. Say plainly what you could not find. No preamble, no plan.
-- Answer in the language of the question."""
+- Answer in the language of the question.
+- Your ONLY tools are READ_FILE, GLOB, SEARCH_CODE, REPO_MAP and LIST_DIR. Any
+  other tool or tag you may see described (RUN_CMD, WRITE_FILE, …) is not
+  yours and is ignored."""
 
-_TAG = re.compile(r"\[(READ_FILE|GLOB|SEARCH_CODE|REPO_MAP|LIST_DIR)(?::\s*([^\]]*))?\]")
+# Аргументът носи скоби до две нива (`app/[id]/page.tsx`) — като _SIMPLE_RE.
+_BRACKETS = r"\[(?:[^\[\]]|\[[^\[\]]*\])*\]"
+_TAG = re.compile(r"\[(READ_FILE|GLOB|SEARCH_CODE|REPO_MAP|LIST_DIR)(?::\s*((?:[^\[\]]|"
+                  + _BRACKETS + r")*))?\]")
+_MAX_CALLS = 8
 
 
 def _schemas() -> list[dict]:
@@ -66,17 +73,37 @@ def explore(question: str, workspace: str = "", *,
         pass
     messages: list[dict] = [{"role": "system", "content": system},
                             {"role": "user", "content": question}]
+    # Какво е „видял“ главният агент не се мени от прочетеното тук: иначе след
+    # EXPLORE WRITE_FILE презаписваше файл, който главният никога не е чел
+    # (одит 2026-10-08).
+    seen_before = set(gs._SEEN_PATHS)
+    try:
+        return _loop(question, messages, complete, max_rounds, gs)
+    finally:
+        gs._SEEN_PATHS.clear()
+        gs._SEEN_PATHS.update(seen_before)
+
+
+def _loop(question: str, messages: list[dict], complete: Callable[..., Any],
+          max_rounds: int, gs: Any) -> str:
     schemas = _schemas()
     reads = 0
     last = ""
-    for _ in range(max_rounds):
-        reply = complete(messages, tools=schemas)
+    for round_i in range(max_rounds):
+        final = round_i == max_rounds - 1
+        if final:  # последният рунд — без инструменти: отговор с каквото е намерено
+            messages.append({"role": "user", "content":
+                             "Стига търсене. Отговори сега с каквото намери (с път:ред)."})
+        reply = complete(messages, tools=None if final else schemas)
         text = (getattr(reply, "raw_text", "") or "").strip()
         if text.startswith("Error:"):
             return f"[EXPLORE] ❌ {text[:300]}"
         last = text or last
-        calls = getattr(reply, "tool_calls", None) or []
+        if final and not text:
+            break
+        calls = [] if final else (getattr(reply, "tool_calls", None) or [])
         if calls:
+            calls = calls[:_MAX_CALLS]
             messages.append({"role": "assistant", "content": text, "tool_calls": calls})
             for tc in calls:
                 fn = tc.get("function") or {}
@@ -89,10 +116,10 @@ def explore(question: str, workspace: str = "", *,
                 messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                                  "name": name, "content": _clip(result)})
             continue
-        tags = list(_TAG.finditer(text))
+        tags = [] if final else list(_TAG.finditer(text))
         if tags:
             outs = []
-            for m in tags[:8]:
+            for m in tags[:_MAX_CALLS]:
                 args = _text_args(m.group(1), (m.group(2) or "").strip())
                 outs.append(_clip(gs.dispatch_tool_call(m.group(1), args)))
                 reads += 1

@@ -1730,6 +1730,12 @@ def main():
                 continue
 
             if user_input.lower() == "/clear":
+                # Наново: GENESIS.md, MCP инструментите (/mcp restart) и паметта
+                # важат от новия разговор — както /memory и /mcp обещават.
+                try:
+                    SYSTEM_PROMPT, _ = build_system_prompt()
+                except Exception as e:
+                    console.print(Text(f"⚠ системният промпт не се обнови: {e}", style="yellow"))
                 messages = deque([{"role": "system", "content": SYSTEM_PROMPT}], maxlen=_HISTORY_MAXLEN)
                 reset_usage()
                 _new_session()

@@ -34,9 +34,10 @@ import json
 import os
 import queue
 import re
-import shutil
+import signal
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -60,15 +61,61 @@ class Tool:
     description: str
     schema: dict
     read_only: bool
-
-    @property
-    def qualified(self) -> str:
-        """`mcp__server__tool`, within OpenAI's 64-character name limit."""
-        return f"mcp__{_safe(self.server)}__{_safe(self.name)}"[:64]
+    # `mcp__server__tool` — уникално за сесията (виж _assign_names): `get.item` и
+    # `get_item` ставаха едно и също име и вторият инструмент беше недостъпен.
+    qualified: str = ""
 
 
 def _safe(name: str) -> str:
     return _NAME_OK.sub("_", name)
+
+
+# Средата на MCP сървъра: колкото да тръгне (като MCP SDK-тата), без API
+# ключовете на Genesis — сървърът получава своите от `env` в конфигурацията
+# (одит 2026-10-08: всеки сървър виждаше ANTHROPIC/OPENAI/AWS ключовете).
+_ENV_KEEP = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LC_ALL", "LC_CTYPE",
+             "TMPDIR", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "USERNAME",
+             "HOMEDRIVE", "HOMEPATH", "SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC", "PATHEXT",
+             "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMDATA", "PROCESSOR_ARCHITECTURE",
+             "WINDIR", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
+             "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy")
+_MAX_LINE = 8_000_000
+
+
+def _server_env(extra: dict[str, str]) -> dict[str, str]:
+    env = {k: os.environ[k] for k in _ENV_KEEP if k in os.environ}
+    env.update(extra)
+    return env
+
+
+def _resolve_command(command: str, env: dict[str, str], forbidden: list[Path]) -> str:
+    """The program to start, found ONLY on PATH — never in the current folder.
+
+    On Windows shutil.which looks in the current directory first: a cloned
+    repository with its own `npx.cmd` replaced the operator's `npx` and ran
+    as the chat started (audit 2026-10-08). PATH entries inside the project
+    are skipped for the same reason."""
+    if os.path.isabs(command):
+        return command
+    if os.sep in command or (os.altsep and os.altsep in command):
+        raise MCPError(f"относителен път към програма ({command}) — дай абсолютен път")
+    exts = [""]
+    if os.name == "nt":
+        exts = [""] + [e.lower() for e in env.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if e]
+    for folder in env.get("PATH", "").split(os.pathsep):
+        if not folder or folder in (".", "./"):
+            continue
+        try:
+            real_folder = Path(folder).resolve()
+        except OSError:
+            continue
+        if any(real_folder == f or f in real_folder.parents for f in forbidden):
+            continue
+        for ext in exts:
+            candidate = Path(folder) / (command + ext)
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+    raise MCPError(f"„{command}“ не е намерен в PATH")
 
 
 @dataclass
@@ -87,29 +134,46 @@ class Server:
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     # ── transport ─────────────────────────────────────────────────────────
-    def start(self) -> None:
-        env = dict(os.environ)
-        env.update({k: str(v) for k, v in self.env.items()})
-        # `npx` на Windows е npx.cmd — Popen със списък не го намира сам.
-        exe = shutil.which(self.command, path=env.get("PATH")) or self.command
+    def alive(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
+
+    def start(self, forbidden: list[Path] | None = None) -> None:
+        env = _server_env(self.env)
+        exe = _resolve_command(self.command, env, forbidden or [])
         try:
             self.proc = subprocess.Popen(
                 [exe, *self.args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, env=env, cwd=str(_workspace()),
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                start_new_session=(os.name == "posix"),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
         except OSError as e:
             raise MCPError(f"не тръгна ({self.command}): {e}") from e
         threading.Thread(target=self._read, daemon=True).start()
         threading.Thread(target=self._drain_stderr, daemon=True).start()
+        # Целият старт (initialize + tools/list) — в един срок: сървър, който
+        # праща известия всяка секунда, иначе никога не изтичаше и чатът не
+        # тръгваше (одит 2026-10-08).
+        deadline = time.monotonic() + _START_TIMEOUT
         self.request("initialize", {
             "protocolVersion": PROTOCOL_VERSION, "capabilities": {},
-            "clientInfo": {"name": "genesis", "version": _version()}}, timeout=_START_TIMEOUT)
+            "clientInfo": {"name": "genesis", "version": _version()}}, deadline=deadline)
         self.notify("notifications/initialized")
-        self.tools = self._list_tools()
+        self.tools = self._list_tools(deadline)
 
     def _read(self) -> None:
-        assert self.proc is not None and self.proc.stdout is not None
-        for raw in self.proc.stdout:
+        proc = self.proc
+        assert proc is not None and proc.stdout is not None
+        while True:
+            raw = proc.stdout.readline(_MAX_LINE)
+            if not raw:
+                break
+            if not raw.endswith(b"\n") and len(raw) >= _MAX_LINE:
+                while True:  # прекалено дълъг ред — изхвърля се до края му
+                    rest = proc.stdout.readline(_MAX_LINE)
+                    if not rest or rest.endswith(b"\n"):
+                        break
+                continue
             line = raw.decode("utf-8", errors="replace").strip()
             if not line:
                 continue
@@ -124,21 +188,38 @@ class Server:
         self._inbox.put({"_closed": True})
 
     def _drain_stderr(self) -> None:
-        assert self.proc is not None and self.proc.stderr is not None
-        for _ in self.proc.stderr:  # иначе пълен буфер спира сървъра
+        proc = self.proc
+        assert proc is not None and proc.stderr is not None
+        for _ in proc.stderr:  # иначе пълен буфер спира сървъра
             pass
 
-    def _send(self, msg: dict) -> None:
-        if self.proc is None or self.proc.stdin is None or self.proc.poll() is not None:
+    def _send(self, msg: dict, timeout: float = 10.0) -> None:
+        proc = self.proc
+        if proc is None or proc.stdin is None or proc.poll() is not None:
             raise MCPError("сървърът не работи")
         # Само ASCII (кирилицата като \uXXXX): сървър на Windows, който чете
         # stdin с cp1252, иначе получаваше „Ð·Ð´…“ вместо „здравей“ (CI, 2026-10-08).
         data = (json.dumps(msg, ensure_ascii=True) + "\n").encode("ascii")
-        try:
-            self.proc.stdin.write(data)
-            self.proc.stdin.flush()
-        except OSError as e:
-            raise MCPError(f"връзката прекъсна: {e}") from e
+        failed: list[BaseException] = []
+
+        def write() -> None:
+            try:
+                assert proc.stdin is not None
+                proc.stdin.write(data)
+                proc.stdin.flush()
+            except (OSError, ValueError) as e:
+                failed.append(e)
+        # Записът в нишка със срок: сървър, който не чете stdin, блокираше
+        # write() завинаги — и с него всяко следващо извикване (одит 2026-10-08).
+        writer = threading.Thread(target=write, daemon=True)
+        writer.start()
+        writer.join(max(0.1, timeout))
+        if writer.is_alive():
+            self.error = "не чете входа си — спрян"
+            self.stop()
+            raise MCPError(self.error)
+        if failed:
+            raise MCPError(f"връзката прекъсна: {failed[0]}")
 
     def _answer_server_request(self, msg: dict) -> None:
         """Сървърът пита клиента (ping, roots/list…): отговаряме, за да не чака."""
@@ -159,39 +240,54 @@ class Server:
         self._send({"jsonrpc": "2.0", "method": method, **({"params": params} if params else {})})
 
     def request(self, method: str, params: dict | None = None,
-                timeout: float = _CALL_TIMEOUT) -> dict:
-        with self._lock:
+                timeout: float | None = None, deadline: float | None = None) -> dict:
+        if deadline is None:
+            deadline = time.monotonic() + (_CALL_TIMEOUT if timeout is None else timeout)
+        if not self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            raise MCPError(f"сървърът е зает с друго извикване ({method})")
+        try:
             rid = next(self._ids)
-            self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}})
+            self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}},
+                       timeout=max(0.1, deadline - time.monotonic()))
             while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise MCPError(f"няма отговор навреме ({method})")
                 try:
-                    msg = self._inbox.get(timeout=timeout)
+                    msg = self._inbox.get(timeout=left)
                 except queue.Empty:
-                    raise MCPError(f"няма отговор за {timeout:.0f} s ({method})") from None
+                    raise MCPError(f"няма отговор навреме ({method})") from None
                 if msg.get("_closed"):
                     raise MCPError("сървърът спря")
                 if msg.get("id") != rid:
                     continue  # известие или закъснял отговор
                 if "error" in msg:
-                    err = msg["error"] or {}
-                    raise MCPError(str(err.get("message") or err)[:500])
+                    err = msg["error"]
+                    text = err.get("message") if isinstance(err, dict) else None
+                    raise MCPError(str(text or err)[:500])
                 result = msg.get("result")
                 return result if isinstance(result, dict) else {}
+        finally:
+            self._lock.release()
 
-    def _list_tools(self) -> list[Tool]:
+    def _list_tools(self, deadline: float) -> list[Tool]:
         tools: list[Tool] = []
         cursor = None
         for _ in range(20):  # страници
-            result = self.request("tools/list", {"cursor": cursor} if cursor else {})
-            for t in result.get("tools") or []:
+            result = self.request("tools/list", {"cursor": cursor} if cursor else {},
+                                  deadline=deadline)
+            items = result.get("tools")
+            for t in items if isinstance(items, list) else []:
                 if not isinstance(t, dict) or not t.get("name"):
                     continue
-                notes = t.get("annotations") or {}
+                notes = t.get("annotations")
                 schema = t.get("inputSchema")
+                if not isinstance(schema, dict) or not isinstance(schema.get("properties", {}), dict):
+                    schema = {"type": "object", "properties": {}}
                 tools.append(Tool(
                     server=self.name, name=str(t["name"]),
-                    description=str(t.get("description") or "")[:_MAX_DESCRIPTION],
-                    schema=schema if isinstance(schema, dict) else {"type": "object", "properties": {}},
+                    description=" ".join(str(t.get("description") or "").split())[:_MAX_DESCRIPTION],
+                    schema=schema,
                     read_only=bool(notes.get("readOnlyHint")) if isinstance(notes, dict) else False))
             cursor = result.get("nextCursor")
             if not cursor:
@@ -199,15 +295,40 @@ class Server:
         return tools
 
     def stop(self) -> None:
-        if self.proc is None:
+        """Спира сървъра с цялото му дърво (npx → node): само прекият процес
+        оставяше истинския сървър сирак и нишките му живи (одит 2026-10-08)."""
+        proc, self.proc = self.proc, None
+        if proc is None:
             return
+
+        def close_stdin() -> None:
+            try:
+                if proc.stdin:
+                    proc.stdin.close()
+            except (OSError, ValueError):
+                pass
+        # close() чака блокиран write() в друга нишка (сървър, който не чете) —
+        # в своя нишка и със срок; убиването по-долу го освобождава.
+        closer = threading.Thread(target=close_stdin, daemon=True)
+        closer.start()
+        closer.join(1)
         try:
-            if self.proc.stdin:
-                self.proc.stdin.close()
-            self.proc.wait(timeout=3)
-        except (OSError, subprocess.TimeoutExpired):
-            self.proc.kill()
-        self.proc = None
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        from genesis_agent import sandbox
+        sandbox.stop_process(proc)
+        if os.name == "posix" and proc.returncode is not None:
+            try:  # децата в групата, ако прекият процес вече е излязъл
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        for stream in (proc.stdout, proc.stderr):
+            try:
+                if stream:
+                    stream.close()
+            except OSError:
+                pass
 
 
 # ── registry ──────────────────────────────────────────────────────────────
@@ -246,6 +367,9 @@ def project_file(ws: Path | None = None) -> Path:
 
 
 def _parse(path: Path) -> list[Server]:
+    """Servers from one file. Every field is checked: one wrong value
+    (`"autoApprove": true`, `"args": "foo"`) used to raise and silently
+    switch off every server (audit 2026-10-08)."""
     try:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
     except FileNotFoundError:
@@ -256,20 +380,33 @@ def _parse(path: Path) -> list[Server]:
     table = data.get("mcpServers", {}) if isinstance(data, dict) else {}
     out = []
     for name, spec in (table.items() if isinstance(table, dict) else []):
-        if not isinstance(spec, dict):
+        if not isinstance(spec, dict) or spec.get("disabled") is True:
             continue
-        if spec.get("disabled"):
+
+        def bad(why: str, name: str = str(name)) -> Server:
+            return Server(name=name, command="", args=[], env={}, auto_approve=set(),
+                          source=path, error=why)
+        command = spec.get("command")
+        if not isinstance(command, str) or not command.strip():
+            out.append(bad("няма command (само stdio сървъри се поддържат)"))
             continue
-        command = str(spec.get("command") or "")
-        if not command:
-            out.append(Server(name=str(name), command="", args=[], env={}, auto_approve=set(),
-                              source=path, error="няма command (само stdio сървъри се поддържат)"))
+        args = spec.get("args", [])
+        if isinstance(args, str):
+            args = [args]
+        if not isinstance(args, list) or not all(isinstance(a, (str, int, float)) for a in args):
+            out.append(bad("args трябва да е списък от низове"))
             continue
-        args = [str(a) for a in spec.get("args") or [] if isinstance(a, (str, int, float))]
-        env = {str(k): str(v) for k, v in (spec.get("env") or {}).items()} \
-            if isinstance(spec.get("env"), dict) else {}
-        approve = {str(x) for x in spec.get("autoApprove") or spec.get("alwaysAllow") or []}
-        out.append(Server(str(name), command, args, env, approve, path))
+        env = spec.get("env", {})
+        if not isinstance(env, dict):
+            out.append(bad("env трябва да е обект"))
+            continue
+        approve = spec.get("autoApprove", spec.get("alwaysAllow", []))
+        if not isinstance(approve, list):
+            out.append(bad("autoApprove трябва да е списък с имена на инструменти"))
+            continue
+        out.append(Server(str(name), command.strip(), [str(a) for a in args],
+                          {str(k): str(v) for k, v in env.items()},
+                          {str(x) for x in approve}, path))
     return out
 
 
@@ -294,28 +431,64 @@ last_start: list[str] = []
 
 
 def start_all(ws: Path | None = None) -> list[str]:
-    """Start every configured server once; returns lines for the operator."""
+    """Start every configured server, all at once (a dead server cost every
+    chat start its 20 s, one after another — audit 2026-10-08); returns lines
+    for the operator."""
     global _started, last_start
     stop_all()
     _started = True
-    lines = []
+    lines: list[str] = []
     servers, untrusted = configured(ws)
+    from genesis_agent.project_instructions import _project_root
+    root = _project_root(Path(ws or _workspace()).resolve())
+    forbidden = [root, Path(ws or _workspace()).resolve()]
+
+    def run(srv: Server) -> None:
+        try:
+            # Програма от проекта — само ако сървърът е от доверения .mcp.json.
+            srv.start([] if srv.source == project_file(ws) else forbidden)
+        except Exception as e:  # всеки сървър сам за себе си
+            srv.error = str(e) or type(e).__name__
+            srv.stop()
+
+    threads = []
     for srv in servers:
         _servers[srv.name] = srv
+        if not srv.error:
+            t = threading.Thread(target=run, args=(srv,), daemon=True)
+            t.start()
+            threads.append(t)
+    for t in threads:
+        t.join(_START_TIMEOUT + 15)
+    _assign_names()
+    for srv in servers:
         if srv.error:
             lines.append(f"⚠ MCP {srv.name}: {srv.error}")
-            continue
-        try:
-            srv.start()
+        else:
             lines.append(f"🔌 MCP {srv.name}: {len(srv.tools)} инструмента")
-        except MCPError as e:
-            srv.error = str(e)
-            srv.stop()
-            lines.append(f"⚠ MCP {srv.name}: {e}")
     if untrusted:
         lines.append(f"⚠ {untrusted} има MCP сървъри, но не е доверен — прегледай го и /mcp trust.")
     last_start = lines
     return lines
+
+
+_by_name: dict[str, tuple[Server, Tool]] = {}
+_MAX_SCHEMAS = 80  # заедно с вградените под тавана от 128 инструмента на OpenAI-съвместимите
+
+
+def _assign_names() -> None:
+    """Unique `mcp__server__tool` names within 64 characters."""
+    _by_name.clear()
+    import hashlib
+    for srv in _servers.values():
+        for t in srv.tools:
+            base = f"mcp__{_safe(srv.name)}__{_safe(t.name)}"
+            name = base[:64]
+            if name in _by_name or len(base) > 64:
+                digest = hashlib.sha1(f"{srv.name}/{t.name}".encode()).hexdigest()[:6]
+                name = f"{base[:57]}_{digest}"
+            t.qualified = name
+            _by_name[name] = (srv, t)
 
 
 def ensure_started(ws: Path | None = None) -> list[str]:
@@ -323,36 +496,53 @@ def ensure_started(ws: Path | None = None) -> list[str]:
 
 
 def tools() -> list[Tool]:
-    return [t for s in _servers.values() if s.proc is not None for t in s.tools]
+    return [t for s in _servers.values() if s.alive() for t in s.tools]
 
 
 def _find(qualified: str) -> tuple[Server, Tool] | None:
-    for srv in _servers.values():
-        for t in srv.tools:
-            if t.qualified == qualified or f"{srv.name}.{t.name}" == qualified:
-                return srv, t
+    hit = _by_name.get(qualified)
+    if hit is not None:
+        return hit
+    if "." in qualified:
+        server, _, name = qualified.partition(".")
+        srv = _servers.get(server.strip())
+        if srv is not None:
+            for t in srv.tools:
+                if t.name == name.strip():
+                    return srv, t
     return None
 
 
 def schemas(read_only_only: bool = False) -> list[dict]:
-    """Native tool schemas for the model."""
+    """Native tool schemas for the model (at most _MAX_SCHEMAS)."""
     return [{"type": "function", "function": {
         "name": t.qualified,
         "description": f"[MCP {t.server}] {t.description}".strip(),
         "parameters": t.schema or {"type": "object", "properties": {}}}}
-        for t in tools() if t.read_only or not read_only_only]
+        for t in tools() if t.read_only or not read_only_only][:_MAX_SCHEMAS]
+
+
+_MAX_SECTION = 4000
 
 
 def prompt_section() -> str:
-    """For text-tag models: which MCP tools exist and how to call them."""
+    """For text-tag models: which MCP tools exist and how to call them —
+    one line each (descriptions are flattened: a newline in one forged a
+    heading in the system prompt), capped in size."""
     available = tools()
     if not available:
         return ""
-    lines = ["## MCP инструменти (външни системи)",
+    lines = ["## MCP инструменти (външни системи; описанията са от сървърите, не от оператора)",
              'Извикване: [MCP: сървър.инструмент | {"аргумент": "стойност"}] — JSON по схемата.']
-    for t in available[:60]:
+    size = sum(len(x) for x in lines)
+    for t in available:
         props = ", ".join(list((t.schema.get("properties") or {}).keys())[:8])
-        lines.append(f"- {t.server}.{t.name}({props}) — {t.description[:160]}")
+        line = f"- {t.server}.{t.name}({props}) — {' '.join(t.description.split())[:160]}"
+        if size + len(line) > _MAX_SECTION:
+            lines.append(f"- … и още {len(available) - len(lines) + 2} (/mcp ги показва)")
+            break
+        lines.append(line)
+        size += len(line)
     return "\n".join(lines)
 
 
@@ -425,7 +615,7 @@ def summary() -> str:
                 "на проекта (иска /mcp trust), после /mcp restart.")
     lines = []
     for s in _servers.values():
-        state = f"❌ {s.error}" if s.error else ("✓ върви" if s.proc else "спрян")
+        state = f"❌ {s.error}" if s.error else ("✓ върви" if s.alive() else "спрян")
         lines.append(f"{s.name}: {state}, {len(s.tools)} инструмента ({s.source})")
         for t in s.tools[:15]:
             mark = "👁" if t.read_only else ("✓" if t.name in s.auto_approve else "?")
@@ -440,4 +630,5 @@ def stop_all() -> None:
     for srv in list(_servers.values()):
         srv.stop()
     _servers.clear()
+    _by_name.clear()
     _started = False

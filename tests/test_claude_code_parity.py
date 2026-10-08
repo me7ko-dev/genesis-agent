@@ -349,9 +349,9 @@ class TestMCP:
         from genesis_agent import sandbox
         monkeypatch.setattr(sandbox._POLICY, "mode", "deny")
         out = gs.dispatch_tool_call("mcp__fake__create_issue", {"title": "bug"})
-        assert "SANDBOX DENIED" in out and "created" not in out
+        assert "SANDBOX DENIED" in out and "done" not in out
         monkeypatch.setattr(sandbox._POLICY, "mode", "allow")
-        assert "created #7 bug" in gs.dispatch_tool_call("mcp__fake__create_issue", {"title": "bug"})
+        assert "create_issue done bug" in gs.dispatch_tool_call("mcp__fake__create_issue", {"title": "bug"})
 
     def test_auto_approve_skips_the_question(self, repo, monkeypatch) -> None:
         from genesis_agent import mcp_client, sandbox
@@ -360,7 +360,7 @@ class TestMCP:
             "autoApprove": ["create_issue"]}}}), encoding="utf-8")
         mcp_client.start_all()
         monkeypatch.setattr(sandbox._POLICY, "mode", "deny")
-        assert "created #7" in gs.dispatch_tool_call("mcp__fake__create_issue", {"title": "x"})
+        assert "create_issue done x" in gs.dispatch_tool_call("mcp__fake__create_issue", {"title": "x"})
 
     def test_plan_mode_keeps_only_read_only_mcp_tools(self, mcp) -> None:
         plan_mode.set_active(True)
@@ -385,7 +385,7 @@ class TestMCP:
         from genesis_agent import mcp_client
         (_home() / "mcp.json").write_text(json.dumps({"mcpServers": {
             "broken": {"command": "definitely-not-a-command-xyz"}}}), encoding="utf-8")
-        assert any("broken" in line and "не тръгна" in line for line in mcp_client.start_all())
+        assert any("broken" in line and "не е намерен" in line for line in mcp_client.start_all())
         assert "Няма такъв" in gs.dispatch_tool_call("mcp__broken__x", {})
 
 
@@ -642,3 +642,148 @@ def test_a_hook_that_times_out_takes_its_children_with_it(repo, tmp_path) -> Non
     if alive and status.exists():  # убит, но неприбран от init (контейнер) — зомби
         alive = "\nState:\tZ" not in status.read_text()
     assert not alive
+
+
+# ── одит 2026-10-08 (2): MCP и EXPLORE ──────────────────────────────────────
+
+def _mcp_config(servers: dict) -> None:
+    spec = {}
+    for name, value in servers.items():
+        spec[name] = value if isinstance(value, dict) else {
+            "command": sys.executable, "args": [str(FAKE_MCP), *([value] if value else [])]}
+    (_home() / "mcp.json").write_text(json.dumps({"mcpServers": spec}), encoding="utf-8")
+
+
+class TestMCPAudit:
+    def test_a_program_in_the_project_never_replaces_one_on_path(self, repo, monkeypatch) -> None:
+        from genesis_agent import mcp_client
+        root, ws = repo
+        fake = root / ("npx.cmd" if sys.platform == "win32" else "npx")
+        fake.write_text("echo PWNED", encoding="utf-8")
+        fake.chmod(0o755)
+        monkeypatch.chdir(root)
+        env = {"PATH": f"{root}{__import__('os').pathsep}.", "PATHEXT": ".CMD;.EXE"}
+        with pytest.raises(mcp_client.MCPError, match="не е намерен"):
+            mcp_client._resolve_command("npx", env, [root, ws])
+
+    def test_the_text_tag_meets_mcp_hooks(self, repo) -> None:
+        from genesis_agent import mcp_client
+        _mcp_config({"fake": ""})
+        mcp_client.start_all()
+        _write_hooks(_home() / "hooks.json", {"PreToolUse": [
+            {"matcher": "mcp__fake__.*", "command": _py("import sys; sys.exit(2)")}]})
+        assert _BLOCK in gs.dispatch_tool_call("mcp__fake__echo", {"text": "a"})
+        assert _BLOCK in gs.parse_and_execute_tools('[MCP: fake.echo | {"text": "a"}]')[0]
+
+    def test_a_chatty_server_cannot_hold_the_start(self, repo, monkeypatch) -> None:
+        from genesis_agent import mcp_client
+        monkeypatch.setattr(mcp_client, "_START_TIMEOUT", 1.5)
+        _mcp_config({"chatty": "chatty", "ok": ""})
+        started = time.monotonic()
+        lines = mcp_client.start_all()
+        assert time.monotonic() - started < 8
+        assert any(line.startswith("⚠ MCP chatty") for line in lines)
+        assert any("ok: 2 инструмента" in line for line in lines)
+
+    def test_one_bad_server_or_field_does_not_switch_off_the_rest(self, repo) -> None:
+        from genesis_agent import mcp_client
+        _mcp_config({"strerr": "strerr", "ok": "",
+                     "weird": {"command": sys.executable, "autoApprove": True}})
+        lines = mcp_client.start_all()
+        assert any("strerr" in line and "boom" in line for line in lines)
+        assert any("weird" in line and "autoApprove" in line for line in lines)
+        assert any("ok: 2 инструмента" in line for line in lines)
+
+    def test_genesis_keys_do_not_reach_the_server(self, repo, monkeypatch) -> None:
+        from genesis_agent import mcp_client
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-should-not-leak")
+        _mcp_config({"env": {"command": sys.executable, "args": [str(FAKE_MCP), "env"],
+                             "env": {"MY_SERVER_KEY": "mine"}}})
+        mcp_client.start_all()
+        description = mcp_client.tools()[0].description
+        assert "OPENAI_API_KEY" not in description and "MY_SERVER_KEY" in description
+
+    def test_names_that_sanitise_alike_stay_distinct(self, repo, monkeypatch) -> None:
+        from genesis_agent import mcp_client, sandbox
+        monkeypatch.setattr(sandbox._POLICY, "mode", "allow")
+        _mcp_config({"collide": "collide"})
+        mcp_client.start_all()
+        names = [s["function"]["name"] for s in mcp_client.schemas()]
+        assert len(names) == len(set(names)) == 2
+        outs = {gs.dispatch_tool_call(n, {}) for n in names}
+        assert any("get.item done" in o for o in outs) and any("get_item done" in o for o in outs)
+
+    def test_odd_schemas_and_descriptions_do_not_break_the_prompt(self, repo) -> None:
+        from genesis_agent import mcp_client
+        _mcp_config({"badschema": "badschema", "inject": "inject"})
+        mcp_client.start_all()
+        section = mcp_client.prompt_section()
+        assert "badschema.odd()" in section
+        assert not any(line.startswith("## ПРАВИЛА") for line in section.splitlines())
+
+    def test_a_crashed_server_offers_no_tools(self, repo) -> None:
+        from genesis_agent import mcp_client
+        _mcp_config({"crash": "crash"})
+        mcp_client.start_all()
+        deadline = time.monotonic() + 5
+        while mcp_client.tools() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert mcp_client.tools() == []
+
+    def test_a_server_that_stops_reading_does_not_block_the_next_call(self, repo, monkeypatch) -> None:
+        from genesis_agent import mcp_client
+        monkeypatch.setattr(mcp_client, "_CALL_TIMEOUT", 1.5)
+        _mcp_config({"noread": "noread"})
+        mcp_client.start_all()
+        started = time.monotonic()
+        out = mcp_client.call("mcp__noread__echo", {"text": "x" * 3_000_000})
+        assert "❌" in out
+        assert "❌" in mcp_client.call("mcp__noread__echo", {"text": "y"})
+        assert time.monotonic() - started < 10
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+    def test_stop_takes_the_whole_server_tree(self, repo, tmp_path) -> None:
+        import os
+
+        from genesis_agent import mcp_client
+        pid_file = tmp_path / "srv.pid"
+        # sh остава родител (`; true`), истинският сървър е негово дете — като npx → node
+        _mcp_config({"wrapped": {"command": "/bin/sh", "args": [
+            "-c", f'"{sys.executable}" "{FAKE_MCP}" ignore_eof; true'],
+            "env": {"FAKE_MCP_PID_FILE": str(pid_file)}}})
+        assert any("wrapped: 2 инструмента" in line for line in mcp_client.start_all())
+        pid = int(pid_file.read_text())
+        mcp_client.stop_all()
+        time.sleep(0.3)
+        status = Path(f"/proc/{pid}/status")
+        try:
+            os.kill(pid, 0)
+            alive = not (status.exists() and "\nState:\tZ" in status.read_text())
+        except ProcessLookupError:
+            alive = False
+        assert not alive
+
+    def test_explore_does_not_count_as_the_main_agent_reading(self, repo) -> None:
+        from genesis_agent import explore
+        _, ws = repo
+        (ws / "config.py").write_text("SECRET_SETTING = 1\n", encoding="utf-8")
+        gs._SEEN_PATHS.clear()
+        script = iter([_Reply(calls=[_call("READ_FILE", {"path": "config.py"})]), _Reply("done")])
+        explore.explore("?", str(ws), complete=lambda m, tools=None: next(script))
+        assert "не си го чел" in gs.dispatch_tool_call("WRITE_FILE", {"path": "config.py", "content": "x"})
+
+    def test_explore_reads_paths_with_brackets(self, repo) -> None:
+        from genesis_agent import explore
+        _, ws = repo
+        page = ws / "app" / "[id]"
+        page.mkdir(parents=True)
+        (page / "page.tsx").write_text("export default 42\n", encoding="utf-8")
+        seen: list[str] = []
+
+        def fake(messages, tools=None):
+            if len(messages) == 2:
+                return _Reply("[READ_FILE: app/[id]/page.tsx]")
+            seen.append(messages[-1]["content"])
+            return _Reply("ok")
+        explore.explore("?", str(ws), complete=fake)
+        assert "export default 42" in seen[0]
