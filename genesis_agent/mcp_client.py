@@ -36,6 +36,7 @@ import queue
 import re
 import signal
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -318,7 +319,7 @@ class Server:
             pass
         from genesis_agent import sandbox
         sandbox.stop_process(proc)
-        if os.name == "posix" and proc.returncode is not None:
+        if sys.platform != "win32" and proc.returncode is not None:
             try:  # децата в групата, ако прекият процес вече е излязъл
                 os.killpg(proc.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError, OSError):
