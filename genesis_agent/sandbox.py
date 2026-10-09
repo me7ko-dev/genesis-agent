@@ -326,6 +326,12 @@ _PY_CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # shutil/os, които СА покрити по-горе.
     (_c(r"\bos\.system\b"), "os.system (shell изпълнение)"),
     (_c(r"\bsubprocess\.(run|call|Popen|check_output|check_call)\b"), "стартиране на подпроцес"),
+    # И другите изписвания: py_guard отказва всеки процес без одобрение, а без
+    # въпрос тук `from subprocess import run` просто падаше (преглед 2026-10-09).
+    (_c(r"\bfrom\s+subprocess\s+import\b|\bimport\s+subprocess\s+as\b"
+        r"|\bsubprocess\.(getoutput|getstatusoutput)\b|\bmultiprocessing\b"
+        r"|\bProcessPoolExecutor\b|\basyncio\.create_subprocess_|\bos\.(posix_spawn\w*|fork|"
+        r"forkpty|startfile)\b|\bpty\.spawn\b"), "стартиране на подпроцес"),
     (_c(r"\bos\.(popen|execv|execve|execvp|spawn\w*)\b"), "стартиране на процес"),
     (_c(r"\bsocket\.socket\b"), "суров мрежов сокет"),
     (_c(r"\b__import__\s*\(\s*['\"]os['\"]"), "динамичен импорт на os"),
@@ -1696,10 +1702,13 @@ def run_python(code: str, *, cwd: Path | None = None,
     root = _sandbox_dir()
     # Нова папка за всяко пускане: тя е sys.path[0] на скрипта и на пазача, а
     # `runpy.py`, оставен там от предишен скрипт, тръгваше преди hook-а (одит).
+    # Работната папка остава постоянната папка на sandbox-а (`report.csv` от
+    # драйвер трябва да остане след края); новата папка е само sys.path[0].
+    # Името — не `main.py`: засенчваше `main` модула на проекта (преглед).
     run_dir = root / f"run_{uuid.uuid4().hex[:12]}"
     run_dir.mkdir(parents=True)
-    work = cwd if (cwd and cwd.is_dir()) else run_dir
-    script = run_dir / "main.py"
+    work = cwd if (cwd and cwd.is_dir()) else root
+    script = run_dir / f"{run_dir.name}.py"
     script.write_text(code, encoding="utf-8")
     argv = [sys.executable, str(script)]
     # Пазачът (py_guard): отказва тайните и по сглобен път, който assess_code
@@ -1714,7 +1723,7 @@ def run_python(code: str, *, cwd: Path | None = None,
             argv = [sys.executable, str(guard), str(script)]
             procs = any(r in verdict.reasons for r in _PROC_REASONS)
             env_extra = {**(env_extra or {}),
-                         **_guard_env([run_dir, work, *(allow or [])], procs)}
+                         **_guard_env([run_dir, root, work, *(allow or [])], procs)}
     try:
         res = _run(argv, cwd=work, policy=policy,
                    timeout=timeout or policy.cpu_seconds, env_extra=env_extra)

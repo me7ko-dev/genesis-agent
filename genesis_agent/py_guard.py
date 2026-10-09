@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+from collections.abc import Callable
 
 _EVENTS_READ = {"open", "os.listdir", "os.scandir", "os.chdir", "sqlite3.connect",
                 "shutil.copyfile", "shutil.copytree"}
@@ -97,15 +99,17 @@ def _install() -> None:
         if text in ("", ":memory:"):
             return
         path = real(os.path.abspath(os.path.expanduser(text)))
-        if under(path, libs):
+        ok_dir = under(path, allowed)
+        if under(path, libs) and not ok_dir:
+            # Работна папка в /usr/src/app (Docker, системен Python) е позволена.
             if write:   # `.pth` в user site тръгва преди hook-а следващия път
                 raise PermissionError(f"[SANDBOX] запис в библиотеките на Python отказан: {text}")
             return
-        if secret(text) or secret(path) or (under(path, blocked) and not under(path, allowed)):
+        if secret(text) or secret(path) or (under(path, blocked) and not ok_dir):
             raise PermissionError(f"[SANDBOX] достъп до чувствителен път отказан: {text}")
 
     def is_write(event: str, args: tuple) -> bool:
-        if event in _EVENTS_WRITE or event in ("shutil.copyfile", "shutil.copytree"):
+        if event in _EVENTS_WRITE:
             return True
         if event == "open" and len(args) >= 3:
             mode, flags = args[1], args[2]
@@ -121,16 +125,18 @@ def _install() -> None:
         if busy:
             return
         if event in _EVENTS_PROC:
-            if not procs:
-                raise PermissionError("[SANDBOX] пускане на процес без одобрение — отказано")
-            # Одобрен процес: поне командният ред не сочи тайна (детето е без hook).
             parts: list[object] = []
             for a in args[:2]:
                 parts.extend(a if isinstance(a, (list, tuple)) else [a])
-            line = " ".join(os.fsdecode(x) for x in parts if isinstance(x, (str, bytes, os.PathLike)))
+            words = [os.fsdecode(x) for x in parts if isinstance(x, (str, bytes, os.PathLike))]
+            line = " ".join(words)
+            # Детето е без hook: поне командният ред не сочи тайна.
             if secret(line) or any(b and b in line for b in blocked):
                 raise PermissionError("[SANDBOX] команда към чувствителен път отказана")
-            return
+            if procs or _system_tool(words):
+                _cleared.ok = True     # този Popen може до fork_exec/CreateProcess
+                return
+            raise PermissionError("[SANDBOX] пускане на процес без одобрение — отказано")
         if event not in _EVENTS_READ and event not in _EVENTS_WRITE:
             return
         busy = True
@@ -139,41 +145,84 @@ def _install() -> None:
             targets = args[:1] if event not in ("shutil.copyfile", "shutil.copytree",
                                                 "os.rename", "os.replace", "os.symlink",
                                                 "os.link") else args[:2]
-            for raw in targets:
+            for i, raw in enumerate(targets):
                 if isinstance(raw, (str, bytes, os.PathLike, int)) or raw is None:
-                    check(raw, write, event)
+                    # copyfile/copytree: изходът се чете, само целта е запис —
+                    # копие от /usr/share се смяташе за запис в /usr (преглед).
+                    copy = event in ("shutil.copyfile", "shutil.copytree")
+                    check(raw, (write or copy and i == 1) and not (copy and i == 0), event)
         finally:
             busy = False
 
     sys.addaudithook(hook)
+    global _check
+    _check = check
+
+
+# Само за четене на сведения за системата: stdlib ги пуска сама (platform.
+# processor → uname, ctypes.util.find_library → ldconfig/gcc). Без тях тихо
+# връщаше '' и None (преглед 2026-10-09). Аргументите пак се проверяват горе.
+_SYSTEM_TOOLS = {"uname", "ldconfig", "gcc", "cc", "ld", "objdump", "sw_vers", "sysctl",
+                 "lsb_release", "getconf", "nproc"}
+
+
+def _system_tool(words: list[str]) -> bool:
+    if not words:
+        return False
+    first = os.path.basename(words[0]).lower()
+    if first in ("sh", "/bin/sh", "bash") and len(words) >= 3 and words[1] == "-c":
+        first = os.path.basename(words[2].split()[0]).lower() if words[2].split() else ""
+    return first.removesuffix(".exe") in _SYSTEM_TOOLS
+
+
+_check: Callable[[object, bool, str], None] | None = None
+_cleared = threading.local()
 
 
 def _no_dir_fd() -> None:
     """os.open(име, dir_fd=…): името е спрямо чужда папка, а събитието „open“
-    не носи dir_fd — относителното име се вижда като спрямо cwd (одит)."""
+    не носи dir_fd — относителното име се вижда като спрямо cwd (одит). Папката
+    на dir_fd се намира през /proc и се проверява целият път (така fwalk и
+    rmtree работят); без /proc — отказ."""
     real_open = os.open
 
     def guarded_open(path, flags, mode=0o777, *, dir_fd=None):  # type: ignore[no-untyped-def]
         if dir_fd is not None:
-            raise PermissionError("[SANDBOX] os.open с dir_fd е изключен")
+            try:
+                base = os.readlink(f"/proc/self/fd/{dir_fd}")
+            except OSError:
+                raise PermissionError("[SANDBOX] os.open с dir_fd е изключен") from None
+            if _check is not None:
+                write = bool(flags & _WRITE_FLAGS)
+                _check(os.path.join(base, os.fsdecode(path)), write, "")
+            return real_open(path, flags, mode, dir_fd=dir_fd)
         return real_open(path, flags, mode)
     os.open = guarded_open  # type: ignore[assignment]
     backend = sys.modules.get("posix") or sys.modules.get("nt")
     if backend is not None:
         backend.open = guarded_open  # type: ignore[attr-defined]
+    if "shutil" in sys.modules and not os.path.isdir("/proc/self/fd"):
+        sys.modules["shutil"]._use_fd_functions = False  # type: ignore[attr-defined]
 
 
 def _no_raw_spawn() -> None:
     """multiprocessing („spawn“) и всичко, което стига до създаването на
     процес покрай subprocess.Popen — без събитие за hook-а."""
-    def refuse(*_a: object, **_k: object) -> None:
-        raise PermissionError("[SANDBOX] пускане на процес без одобрение — отказано")
     for name, attr in (("_posixsubprocess", "fork_exec"), ("_winapi", "CreateProcess")):
         try:
             mod = __import__(name)
-            setattr(mod, attr, refuse)
-        except Exception:
-            pass
+            real = getattr(mod, attr)
+        except (ImportError, AttributeError):   # няма го на тази платформа
+            continue
+
+        def gate(*a: object, _real: object = real, **k: object) -> object:
+            # Само Popen, който hook-ът е пропуснал (системен инструмент) —
+            # multiprocessing стига тук без събитие и остава отказан.
+            if not getattr(_cleared, "ok", False):
+                raise PermissionError("[SANDBOX] пускане на процес без одобрение — отказано")
+            _cleared.ok = False
+            return _real(*a, **k)  # type: ignore[operator]
+        setattr(mod, attr, gate)
 
 
 def main() -> None:

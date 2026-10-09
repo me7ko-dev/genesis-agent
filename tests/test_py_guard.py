@@ -20,7 +20,9 @@ def secret(tmp_path) -> Path:
 
 
 def _run(code: str, policy=None):
-    return sandbox.run_python(code, timeout=60, policy=policy)
+    # Изрично „deny“ (автономен режим): глобалната политика може да е оставена
+    # от друг тест — тук мерим пазача, не нея.
+    return sandbox.run_python(code, timeout=60, policy=policy or sandbox.SandboxPolicy(mode="deny"))
 
 
 def test_a_secret_on_an_assembled_path_is_refused(secret) -> None:
@@ -148,9 +150,12 @@ def test_writing_into_the_user_site_is_refused(tmp_path) -> None:
 
 
 def test_a_file_left_by_one_run_is_not_in_the_next(tmp_path) -> None:
-    first = _run("open('runpy.py', 'w').write('print(\"PLANTED\")')\nprint('ok')\n")
+    # Работната папка е постоянна, но не е в sys.path: там е само новата
+    # папка на пускането.
+    first = sandbox.run_python("open('runpy.py', 'w').write('print(\"PLANTED\")')\nprint('ok')\n",
+                               timeout=60, cwd=tmp_path)
     assert first.ok, first.stderr
-    second = _run("print('innocent')\n")
+    second = sandbox.run_python("print('innocent')\n", timeout=60, cwd=tmp_path)
     assert second.stdout.strip() == "innocent"
 
 
@@ -181,3 +186,83 @@ def test_wrapping_an_already_open_descriptor_works(tmp_path) -> None:
             "with os.fdopen(fd, 'w') as f:\n    f.write('ok')\nprint(open(p).read())\n")
     res = sandbox.run_python(code, timeout=60)
     assert res.ok and res.stdout.strip() == "ok", res.stderr
+
+
+# ── преглед за регресии 2026-10-09 ───────────────────────────────────────────
+
+def _approve(_op, _verdict) -> bool:
+    return True
+
+
+_ASKING = sandbox.SandboxPolicy(mode="interactive", confirm_fn=_approve)
+
+
+@pytest.mark.parametrize("code", [
+    "from subprocess import run\nimport sys\nrun([sys.executable, '-c', 'print(7)'])\n",
+    "import subprocess as sp, sys\nprint(sp.check_output([sys.executable, '-c', 'print(7)'], text=True))\n",
+    ("from concurrent.futures import ProcessPoolExecutor\n"
+     "def sq(x):\n    return x * x\n"
+     "if __name__ == '__main__':\n"
+     "    with ProcessPoolExecutor(1) as ex:\n        print(sum(ex.map(sq, [1, 2])) + 2)\n"),
+])
+def test_other_ways_to_start_a_process_are_asked_not_silently_refused(code) -> None:
+    asked: list[str] = []
+
+    def approve(_op, verdict) -> bool:
+        asked.extend(verdict.reasons)
+        return True
+    res = _run(code, policy=sandbox.SandboxPolicy(mode="interactive", confirm_fn=approve))
+    assert "стартиране на подпроцес" in asked
+    assert res.ok and "7" in res.stdout, res.stderr
+
+
+@pytest.mark.skipif(not os.path.exists("/bin/sh"), reason="POSIX")
+def test_the_stdlib_may_ask_the_system_about_itself() -> None:
+    import platform
+    res = _run("import platform\nprint(repr(platform.processor()))\n")
+    assert res.ok and res.stdout.strip() == repr(platform.processor()), res.stderr
+
+
+def test_copying_out_of_the_python_install_is_a_read(tmp_path) -> None:
+    res = sandbox.run_python("import json, shutil\nshutil.copy(json.__file__, 'json_copy.py')\n"
+                             "print('copied')\n", timeout=60, cwd=tmp_path)
+    assert res.ok and (tmp_path / "json_copy.py").is_file(), res.stderr
+
+
+def test_a_workspace_inside_the_python_prefix_can_be_written(tmp_path, monkeypatch) -> None:
+    import sys as _sys
+    ws = Path(_sys.prefix) / "genesis-test-ws-not-real"
+    # Без да пишем в истинския prefix: пускаме с позволена папка в tmp и
+    # проверяваме само реда на правилата — позволеното печели пред библиотеките.
+    work = tmp_path / "app"
+    work.mkdir()
+    res = sandbox.run_python("open('out.txt', 'w').write('ok')\nprint('ok')\n", timeout=60,
+                             cwd=work, allow=[work, ws])
+    assert res.ok and (work / "out.txt").read_text() == "ok", res.stderr
+
+
+def test_relative_output_without_cwd_survives_the_run() -> None:
+    first = _run("import os\nopen('state.json', 'w').write('{\"n\": 1}')\nprint(os.path.abspath('state.json'))\n")
+    path = Path(first.stdout.strip())
+    try:
+        assert first.ok and path.is_file(), first.stderr
+        second = _run("print(open('state.json').read())\n")
+        assert '"n": 1' in second.stdout, second.stderr
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_the_script_does_not_shadow_a_project_main_module(tmp_path) -> None:
+    (tmp_path / "main.py").write_text("def greet():\n    return 'hi from project'\n", encoding="utf-8")
+    res = _run(f"import sys\nsys.path.append({str(tmp_path)!r})\nfrom main import greet\nprint(greet())\n")
+    assert res.ok and "hi from project" in res.stdout, res.stderr
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="fwalk — Linux")
+def test_fwalk_and_rmtree_see_the_whole_tree(tmp_path) -> None:
+    (tmp_path / "d" / "e").mkdir(parents=True)
+    (tmp_path / "d" / "e" / "f.txt").write_text("x", encoding="utf-8")
+    res = sandbox.run_python("import os, shutil\nprint(sorted(r for r, _d, _f, _fd in os.fwalk('d')))\n"
+                             "shutil.rmtree('d')\nprint(os.path.exists('d'))\n", timeout=60, cwd=tmp_path,
+                             policy=_ASKING)
+    assert res.ok and "'d/e'" in res.stdout and "False" in res.stdout, res.stderr

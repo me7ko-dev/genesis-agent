@@ -345,13 +345,18 @@ def _expand(text: str) -> str:
 def _static_auth(headers: dict[str, str]) -> bool:
     """mcp.json вече дава вход (Authorization, X-API-Key, Cookie, …-Token)? Тогава
     401 значи „провери headers“; иначе — OAuth. `X-Tenant` не е вход (одити)."""
-    # Цели думи от името (X-Api-Key → x, api, key), не поднизове: X-Session-Id,
-    # X-Bypass-Cache, X-Compass-Region не са вход (одит 2026-10-09).
-    login = {"authorization", "auth", "cookie", "key", "apikey", "token", "secret",
-             "password", "passwd", "credential", "credentials", "signature", "bearer"}
+    # Цели думи от името (X-Api-Key → x, api, key; AccessKey → access, key), не
+    # поднизове: X-Session-Id, X-Bypass-Cache, X-Compass-Region не са вход (одит).
+    login = {"authorization", "authorisation", "authentication", "auth", "cookie", "key",
+             "apikey", "token", "secret", "password", "passwd", "pass", "passcode",
+             "credential", "credentials", "signature", "bearer"}
     for name in headers:
-        parts = set(re.split(r"[-_\s]+", name.lower()))
-        if parts & login or ("session" in parts and parts & {"token", "key", "cookie"}):
+        spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", name).lower()
+        parts = {p for p in re.split(r"[-_\s]+", spaced) if p}
+        if parts & login or any(p.endswith(("key", "token", "secret")) or p.startswith("auth")
+                                for p in parts):
+            return True
+        if "session" in parts and parts & {"token", "key", "cookie"}:
             return True
     return False
 
