@@ -123,3 +123,22 @@ def test_empty_arguments_are_an_empty_dict_but_a_non_object_is_an_error() -> Non
     # Списък не е „без аргументи“: с {} TODO_WRITE триеше списъка (одит 2026-10-09).
     with pytest.raises(json.JSONDecodeError):
         tool_schemas.load_tool_arguments("[1, 2]")
+
+
+def test_the_schemas_stay_small_and_keep_their_rules() -> None:
+    """Схемите се плащат на всяко обръщение. 2026-10-09: 9 400 знака JSON след
+    петте нови инструмента (+21% на заявката) → 7 466 след съкращаване на
+    описанията. Таванът пази от тихо надуване; правилата, които движат
+    поведението, трябва да останат."""
+    import json
+    tools = [t for t in tool_schemas.FULL_TOOLS
+             if t["function"]["name"] not in tool_schemas._BROWSER_TOOLS]
+    assert len(json.dumps(tools, ensure_ascii=False)) <= 7600
+    desc = {t["function"]["name"]: t["function"]["description"] for t in tools}
+    assert "once" in desc["EDIT_FILE"] and "WRITE_FILE" in desc["EDIT_FILE"]
+    assert "read" in desc["WRITE_FILE"] and "EDIT_FILE" in desc["WRITE_FILE"]
+    assert "in_progress" in desc["TODO_WRITE"] and "3+" in desc["TODO_WRITE"]
+    assert "driver_code" in desc["USE_SKILL"]
+    assert "why" in desc["REMEMBER"] and "preference" in desc["REMEMBER"]
+    assert "BEFORE" in desc["ASK_USER"]
+    assert "BG_KILL" in json.dumps(next(t for t in tools if t["function"]["name"] == "RUN_CMD"))
