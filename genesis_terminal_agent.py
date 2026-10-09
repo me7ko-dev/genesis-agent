@@ -53,9 +53,14 @@ except Exception:
     _memory_context: Any = None  # type: ignore[no-redef]
 
 
+# `genesis -p` (headless) го изключва: еднократен ход от скрипт не е разговор,
+# който да се появи в /history или в паметта на чата (одит 2026-10-09).
+PERSIST_HISTORY = True
+
+
 def _remember(role: str, content: str) -> None:
     """Записва реплика в споделената conversation_memory (никога не хвърля)."""
-    if _conv_mem is None or not content:
+    if _conv_mem is None or not content or not PERSIST_HISTORY:
         return
     try:
         _conv_mem.add_message(role, content)
@@ -1335,6 +1340,23 @@ _PARALLEL_SAFE = frozenset({"READ_FILE", "GLOB", "SEARCH_CODE", "REPO_MAP", "LIS
 _PARALLEL_MAX = 8
 
 
+def _may_ask(name: str, args: dict) -> bool:
+    if name in ("WEB_SEARCH", "WEB_FETCH"):
+        return False
+    from genesis_agent import sandbox
+    raw = str(args.get("path") or "") or ("." if name in ("LIST_DIR", "REPO_MAP", "GLOB",
+                                                          "SEARCH_CODE") else "")
+    if not raw:
+        return True
+    try:
+        target = genesis_skills._resolve_noted(raw, redirect=False)[0].resolve()
+        workspace = Path(genesis_skills._WORKSPACE).resolve()
+    except (OSError, ValueError):
+        return True
+    inside = target == workspace or workspace in target.parents
+    return not inside or bool(sandbox.sensitive_path_reason(target))
+
+
 def _parallel_reads(tool_calls: list[dict]) -> dict[int, str]:
     """Results by index when the whole batch is safe to run at once; else {}."""
     calls = []
@@ -1346,6 +1368,11 @@ def _parallel_reads(tool_calls: list[dict]) -> dict[int, str]:
             return {}
         calls.append((fn.get("name", ""), args))
     if len(calls) < 2 or any(name not in _PARALLEL_SAFE for name, _ in calls):
+        return {}
+    # Четене, което може да поиска „да“ от оператора (ключ, файл извън папката),
+    # върви последователно: input() в нишка не получава Ctrl-C и чатът увисваше,
+    # а после свършваше (одит 2026-10-09).
+    if any(_may_ask(name, args) for name, args in calls):
         return {}
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=min(_PARALLEL_MAX, len(calls))) as pool:
@@ -1668,9 +1695,10 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
             pass
 
     # Save session history — convert deque to list for JSON serialization!
-    session_file = _session_file()
-    with open(session_file, "w", encoding="utf-8") as f:
-        json.dump(list(messages), f, ensure_ascii=False, indent=None, separators=(',', ':'))
+    if PERSIST_HISTORY:
+        session_file = _session_file()
+        with open(session_file, "w", encoding="utf-8", errors="replace") as f:
+            json.dump(list(messages), f, ensure_ascii=False, indent=None, separators=(',', ':'))
     from genesis_agent.agent_core import bounded_history
     return bounded_history(messages, limit)
 

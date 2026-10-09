@@ -1054,6 +1054,8 @@ def _text_args(name: str, args: tuple) -> dict:
                                                   and len(args) > 1 else {})}
     if name in ("RUN_CMD", "RUN_BG") and args:
         return {"command": str(args[0])}
+    if name == "WEB_FETCH" and args:  # hooks виждат {url} и по двата пътя
+        return {"url": str(args[0]).strip()}
     return {"arg": " | ".join(str(a) for a in args)}
 
 

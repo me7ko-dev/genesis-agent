@@ -110,3 +110,70 @@ def test_a_batch_with_a_write_stays_sequential(monkeypatch) -> None:
     calls = [_call("READ_FILE", {"path": "a.py"}), _call("WRITE_FILE", {"path": "b.py", "content": ""}, "c2")]
     assert gta._parallel_reads(calls) == {}
     assert gta._parallel_reads([_call("READ_FILE", {"path": "a.py"})]) == {}
+
+
+# ── одит 2026-10-09 ─────────────────────────────────────────────────────────
+
+def test_a_turn_cut_by_the_round_cap_is_not_a_success(ws, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(gta, "_TOOL_ROUND_CAP", 2)
+    _script(monkeypatch, [("Ще прочета app.py.", [_call("READ_FILE", {"path": "app.py"}, f"c{i}")])
+                          for i in range(5)])
+    code = headless.run(["оправи", "--json", "--cwd", str(ws)])
+    data = json.loads(capsys.readouterr().out)
+    assert code == 1 and data["ok"] is False and "таван" in data["error"]
+
+
+def test_a_question_has_its_own_exit_code(ws, monkeypatch, capsys) -> None:
+    _script(monkeypatch, [("", [_call("ASK_USER", {"question": "Кой файл?"})])])
+    code = headless.run(["оправи", "--json", "--cwd", str(ws)])
+    data = json.loads(capsys.readouterr().out)
+    assert code == 3 and "Кой файл?" in data["question"]
+
+
+def test_an_error_in_the_turn_still_gives_json(ws, monkeypatch, capsys) -> None:
+    def boom(messages, tools=None):
+        raise RuntimeError("provider exploded")
+    monkeypatch.setattr(gta, "ask_genesis", boom)
+    assert headless.run(["x", "--json", "--cwd", str(ws)]) == 1
+    data = json.loads(capsys.readouterr().out)
+    assert data["ok"] is False and "provider exploded" in data["error"]
+
+
+@pytest.mark.parametrize("stdin", [None, "bytes"])
+def test_closed_or_odd_stdin_does_not_crash(ws, monkeypatch, capsys, stdin) -> None:
+    if stdin is None:
+        monkeypatch.setattr("sys.stdin", None)
+    else:
+        monkeypatch.setattr("sys.stdin", io.TextIOWrapper(io.BytesIO(b"log \xff\xfe end")))
+    seen = _script(monkeypatch, [("ok", None)])
+    assert headless.run(["обясни", "--cwd", str(ws)]) == 0
+    if stdin:
+        user = next(m["content"] for m in seen[0] if m.get("role") == "user")
+        assert "log" in user and "end" in user
+
+
+def test_the_chat_state_is_left_as_it_was(ws, monkeypatch, capsys) -> None:
+    remembered: list[str] = []
+
+    class Mem:
+        def add_message(self, role, content):
+            remembered.append(content)
+    monkeypatch.setattr(gta, "_conv_mem", Mem())
+    before = (gta.console, sandbox.get_policy(), gta.WORKSPACE)
+    _script(monkeypatch, [("ok", None)])
+    headless.run(["x", "--plan", "--cwd", str(ws)])
+    assert (gta.console, sandbox.get_policy(), gta.WORKSPACE) == before
+    assert plan_mode.active() is False and gta.PERSIST_HISTORY is True
+    assert remembered == []
+
+
+def test_reads_that_may_ask_stay_sequential(ws, monkeypatch) -> None:
+    monkeypatch.setattr(gs, "_WORKSPACE", ws)
+    (ws / ".env").write_text("KEY=1", encoding="utf-8")
+    safe = [_call("READ_FILE", {"path": "app.py"}), _call("READ_FILE", {"path": "app.py"}, "c2")]
+    monkeypatch.setattr(gs, "dispatch_tool_call", lambda n, a: "ok")
+    assert gta._parallel_reads(safe) != {}
+    risky = [_call("READ_FILE", {"path": ".env"}), _call("READ_FILE", {"path": "app.py"}, "c2")]
+    assert gta._parallel_reads(risky) == {}
+    outside = [_call("READ_FILE", {"path": "/etc/hostname"}), _call("GLOB", {"pattern": "*"}, "c2")]
+    assert gta._parallel_reads(outside) == {}
