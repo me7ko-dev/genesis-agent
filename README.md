@@ -176,6 +176,9 @@ The habits that make Claude Code pleasant to work with, in the Genesis chat:
 | `genesis -p "…"` | One turn without the chat, for scripts and CI: the answer alone on stdout (`--json` for one JSON object), piped stdin added to the task (`git diff \| genesis -p "review"`), `--plan` to change nothing, `--cwd` for the folder. Nobody can say yes, so anything risky is refused unless `--dangerously-allow`. |
 | `WEB_FETCH` | Reads one page by its address as text (headings, lists, links, code) without a browser. Internal-network addresses are refused, also after a redirect; localhost is allowed for your dev server. |
 | parallel reads | Several independent reads in one round (READ_FILE, SEARCH_CODE, GLOB, WEB_FETCH…) run at once. |
+| `!command` | You run a command yourself, without the model (`!git status`, `!pytest -q`). The output shows at once and goes to the model with your next message, so "why does this fail?" needs no copying. |
+| `@path` | Attaches a file (or a folder's listing) to your message: `why does @tests/test_api.py fail against @src/api/`. Works in `genesis -p` too. `.env` and keys are never attached. |
+| `genesis -c` | Continues the last conversation in this folder (`/history` picks any older one). |
 | `EXPLORE` | A read-only sub-agent: "where is the price computed and who calls it?" is searched and read in its own conversation, and only the answer (with `path:line`) comes back — the main conversation stays small. |
 
 ```json

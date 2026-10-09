@@ -27,6 +27,7 @@ from typing import Any, cast
 
 USAGE = """Употреба: genesis -p "задача" [--json] [--plan] [--cwd ПАПКА] [--dangerously-allow]
   stdin, ако е подаден (`cat лог | genesis -p "обясни"`), се добавя към задачата.
+  `@път` в задачата прикача файла (или списъка на папката).
   --json               един JSON обект на stdout: result, tools, warnings, seconds
   --plan               режим план: само чете и планира, нищо не променя
   --cwd ПАПКА          работната папка (по подразбиране текущата)
@@ -147,15 +148,21 @@ def run(argv: list[str]) -> int:
         print(opts, file=sys.stderr)
         return 0 if opts == USAGE else 2
     prompt = " ".join(opts["prompt"]).strip()
+    cwd = Path(opts["cwd"] or ".").expanduser().resolve()
+    if not cwd.is_dir():
+        print(f"Няма такава папка: {cwd}", file=sys.stderr)
+        return 2
+    # `@файл` — само в задачата; подаденото на stdin е данни, не молба за прикачване.
+    if prompt:
+        from genesis_agent import mentions
+        prompt, notes = mentions.expand(prompt, cwd)
+        for note in notes:
+            print(f"📎 {note}", file=sys.stderr)
     piped = _read_stdin()
     if piped.strip():
         prompt = f"{prompt}\n\n```\n{piped.rstrip()}\n```" if prompt else piped
     if not prompt:
         print(USAGE, file=sys.stderr)
-        return 2
-    cwd = Path(opts["cwd"] or ".").expanduser().resolve()
-    if not cwd.is_dir():
-        print(f"Няма такава папка: {cwd}", file=sys.stderr)
         return 2
 
     from rich.console import Console
