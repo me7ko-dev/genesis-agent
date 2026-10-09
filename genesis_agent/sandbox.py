@@ -1696,8 +1696,18 @@ def run_python(code: str, *, cwd: Path | None = None,
     work = cwd if (cwd and cwd.is_dir()) else root
     script = root / f"run_{uuid.uuid4().hex[:12]}.py"
     script.write_text(code, encoding="utf-8")
+    argv = [sys.executable, str(script)]
+    # Пазачът (py_guard): отказва тайните и по сглобен път, който assess_code
+    # не вижда. Само ако операторът изрично е одобрил достъп до тайна, кодът
+    # тече без него (2026-10-09).
+    approved = verdict.level == RiskLevel.CONFIRM and bool(re.search(_SECRET_PATHS, code, re.IGNORECASE))
+    if not approved:
+        guard = _guard_script(root)
+        if guard is not None:
+            argv = [sys.executable, str(guard), str(script)]
+            env_extra = {**(env_extra or {}), **_guard_env(root)}
     try:
-        res = _run([sys.executable, str(script)], cwd=work, policy=policy,
+        res = _run(argv, cwd=work, policy=policy,
                    timeout=timeout or policy.cpu_seconds, env_extra=env_extra)
         res.verdict = verdict
         return res
@@ -1706,6 +1716,25 @@ def run_python(code: str, *, cwd: Path | None = None,
             script.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def _guard_script(root: Path) -> Path | None:
+    """py_guard.py до скриптовете: пуснат от genesis_agent/, папката му щеше
+    да е първа в sys.path и config.py/memory.py там засенчваха модули."""
+    try:
+        src = (Path(__file__).resolve().parent / "py_guard.py").read_text(encoding="utf-8")
+        target = root / "_genesis_guard.py"
+        if not target.is_file() or target.read_text(encoding="utf-8") != src:
+            target.write_text(src, encoding="utf-8")
+        return target
+    except OSError:
+        return None
+
+
+def _guard_env(root: Path) -> dict[str, str]:
+    from genesis_agent.paths import GENESIS_HOME
+    return {"GENESIS_GUARD_RX": _SECRET_PATHS, "GENESIS_GUARD_BLOCK": str(GENESIS_HOME),
+            "GENESIS_GUARD_ALLOW": str(root)}
 
 
 def _sandbox_dir() -> Path:
