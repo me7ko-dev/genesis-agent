@@ -70,7 +70,9 @@ def _read(path: Path) -> str | None:
         return None
     if b"\x00" in raw[:8192]:
         return None
-    text = raw[:_MAX_FILE].decode("utf-8", errors="replace")
+    # CRLF → LF: файл от Windows иначе носи `\r` във всеки ред към модела
+    # (CI на Windows, 2026-10-09) и харчи от тавана за нищо.
+    text = raw[:_MAX_FILE].decode("utf-8", errors="replace").replace("\r\n", "\n")
     if len(raw) > _MAX_FILE:
         text += f"\n… [отрязано на {_MAX_FILE} байта — за останалото READ_FILE с offset]"
     return text

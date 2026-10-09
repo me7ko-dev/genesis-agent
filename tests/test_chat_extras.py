@@ -120,6 +120,12 @@ def test_attachment_cannot_close_its_fence(proj) -> None:
     assert "\n````\n```\nкод" in text
 
 
+def test_windows_line_endings_are_normalised(proj) -> None:
+    (proj / "win.py").write_bytes(b"a = 1\r\nb = 2\r\n")
+    text, _ = mentions.expand("@win.py", proj)
+    assert "a = 1\nb = 2\n" in text and "\r" not in text
+
+
 def test_total_attachment_cap(proj, monkeypatch) -> None:
     monkeypatch.setattr(mentions, "_MAX_TOTAL", 30)
     text, notes = mentions.expand("@src/api.py @src/util.py", proj)
