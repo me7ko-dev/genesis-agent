@@ -88,3 +88,25 @@ def test_git_identity_and_pip_config_reach_the_skill(skills, monkeypatch) -> Non
                                               "PIP_CONFIG_FILE": "/etc/pip.conf"})
     env = sl.skill_env()
     assert env["GIT_AUTHOR_EMAIL"] == "op@example.com" and env["PIP_CONFIG_FILE"] == "/etc/pip.conf"
+
+
+
+def test_a_tmpdir_inside_the_home_is_not_used(skills, monkeypatch, tmp_path) -> None:
+    # TMPDIR под HOME връщаше истинския HOME сред родителите (втори одит).
+    fake_home = tmp_path / "home"
+    (fake_home / "tmp").mkdir(parents=True)
+    monkeypatch.setattr(sl, "SKILL_HOME_ROOT", None)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+    import tempfile
+    monkeypatch.setattr(tempfile, "tempdir", str(fake_home / "tmp"))
+    roots = sl._home_roots()
+    assert all(fake_home.resolve() not in r.resolve().parents for r in roots[:1]) or os.name == "nt"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink — POSIX")
+def test_a_planted_name_falls_back_to_a_stable_name_in_the_same_place(skills, tmp_path) -> None:
+    root = Path(sl.SKILL_HOME_ROOT)
+    root.mkdir(parents=True, exist_ok=True)
+    os.symlink(tmp_path, root / f"genesis-skill-home-{os.getuid()}")
+    first, second = sl.skill_home(), sl.skill_home()
+    assert first == second and first.parent == root               # стабилно, не в /tmp

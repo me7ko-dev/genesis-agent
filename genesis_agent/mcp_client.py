@@ -342,6 +342,13 @@ def _expand(text: str) -> str:
     return _VAR.sub(lambda m: os.environ.get(m.group(1), m.group(2) or ""), text)
 
 
+def _static_auth(headers: dict[str, str]) -> bool:
+    """mcp.json вече дава вход (Authorization, X-API-Key, …-Token)? Тогава 401
+    значи „провери headers“; иначе — OAuth. `X-Tenant` не е вход (втори одит)."""
+    return any(k.lower() == "authorization" or any(w in k.lower() for w in ("key", "token", "auth"))
+               for k in headers)
+
+
 @dataclass
 class HttpServer(Server):
     """MCP по HTTP (Streamable HTTP, 2025-06-18): всяко съобщение е POST към
@@ -400,7 +407,7 @@ class HttpServer(Server):
         challenge = resp.headers.get("WWW-Authenticate", "")
         # OAuth (2026-10-09) само ако mcp.json не дава свои headers: с X-API-Key
         # „/mcp login“ беше грешен съвет (одит) — там остава „провери headers“.
-        if resp.status_code == 401 and not self.headers:
+        if resp.status_code == 401 and not _static_auth(self.headers):
             self.www_authenticate = challenge
             resp.close()
             from genesis_agent import mcp_oauth

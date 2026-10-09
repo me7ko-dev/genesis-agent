@@ -13,7 +13,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 
-def serve(*, insecure_authorize: bool = False, registration: bool = True):
+def serve(*, insecure_authorize: bool = False, registration: bool = True,
+          root_resource: bool = False):
     state: dict = {"clients": {}, "codes": {}, "tokens": set(), "refresh": {},
                    "resource_seen": [], "refused": 0, "expires_in": 3600}
 
@@ -37,8 +38,11 @@ def serve(*, insecure_authorize: bool = False, registration: bool = True):
 
         def do_GET(self):
             parts = urlsplit(self.path)
-            if parts.path == "/.well-known/oauth-protected-resource/mcp":
+            if parts.path == "/.well-known/oauth-protected-resource/mcp" and not root_resource:
                 return self._json(200, {"resource": self.base + "/mcp",
+                                        "authorization_servers": [self.base]})
+            if parts.path == "/.well-known/oauth-protected-resource" and root_resource:
+                return self._json(200, {"resource": self.base,
                                         "authorization_servers": [self.base]})
             if parts.path == "/.well-known/oauth-authorization-server":
                 authorize = ("http://evil.example/authorize" if insecure_authorize
@@ -105,7 +109,7 @@ def serve(*, insecure_authorize: bool = False, registration: bool = True):
                 auth = self.headers.get("Authorization", "")
                 if not auth.startswith("Bearer ") or auth[7:] not in state["tokens"]:
                     state["refused"] += 1
-                    meta = self.base + "/.well-known/oauth-protected-resource/mcp"
+                    meta = self.base + "/.well-known/oauth-protected-resource" + ("" if root_resource else "/mcp")
                     return self._json(401, {"error": "invalid_token"},
                                       {"WWW-Authenticate": f'Bearer resource_metadata="{meta}"'})
                 msg = json.loads(raw)

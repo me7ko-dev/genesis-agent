@@ -25,6 +25,7 @@ import json
 import os
 import re
 import secrets
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -91,38 +92,64 @@ _memory: dict[str, dict] = {}
 class _FileLock:
     """Между процесите (`genesis` и `genesis serve` с общ ~/.genesis): прочети →
     поднови → запиши е едно цяло, иначе завъртян refresh токен се губеше
-    и единият процес искаше нов вход (одит 2026-10-09: 5 от 10)."""
+    и единият процес искаше нов вход (одит 2026-10-09: 5 от 10).
+
+    flock / msvcrt: ключалката е на отворения файл и пада сама, ако процесът
+    умре — без „кражба“ по възраст, която пускаше двама вътре (втори одит)."""
 
     def __enter__(self) -> None:
         _lock.acquire()
-        path = _store_path().with_suffix(".lock")
-        self.path = path
-        self.held = False
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            try:
-                path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
-                self.held = True
-                break
-            except FileExistsError:
+        self.fh = None
+        try:
+            path = _store_path().with_suffix(".lock")
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fh = open(path, "a+b")
+            deadline = time.monotonic() + 60
+            while True:
                 try:
-                    if time.time() - path.stat().st_mtime > 30:
-                        path.unlink()      # изоставена от убит процес
-                        continue
+                    _lock_file(fh)
+                    self.fh = fh
+                    return
                 except OSError:
-                    pass
-                time.sleep(0.05)
-            except OSError:
-                break                      # без ключалка — поне в процеса е заключено
+                    if time.monotonic() > deadline:
+                        fh.close()
+                        raise OAuthError("файлът с токените е зает от друг процес") from None
+                    time.sleep(0.05)
+        except BaseException:
+            # Ctrl-C в чакането: без това _lock оставаше взета завинаги (одит).
+            _lock.release()
+            raise
 
     def __exit__(self, *exc: object) -> None:
-        if self.held:
-            try:
-                self.path.unlink()
-            except OSError:
-                pass
-        _lock.release()
+        try:
+            if self.fh is not None:
+                _unlock_file(self.fh)
+                self.fh.close()
+        finally:
+            _lock.release()
+
+
+def _lock_file(fh: Any) -> None:
+    if sys.platform == "win32":
+        import msvcrt
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_file(fh: Any) -> None:
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
 
 
 def saved(url: str) -> dict | None:
@@ -156,6 +183,17 @@ def forget(url: str) -> bool:
 
 
 # ── откриване ──────────────────────────────────────────────────────────────
+
+def _covers(resource: str, server_url: str) -> bool:
+    """Ресурсът е този сървър или негов „родител“ на същия адрес: метаданни в
+    корена на домейна дават `resource` = `https://host` за `https://host/mcp`
+    (RFC 9728 §3.1, както MCP SDK-то; втори одит). Друг хост — никога."""
+    r, s = urlsplit(_key(resource)), urlsplit(_key(server_url))
+    if (r.scheme, r.netloc) != (s.scheme, s.netloc):
+        return False
+    rp, sp = r.path.rstrip("/"), s.path.rstrip("/")
+    return sp == rp or sp.startswith(rp + "/")
+
 
 def _safe_url(url: str, what: str) -> str:
     """HTTPS, или http само към този компютър: токенът и кодът не тръгват
@@ -243,7 +281,7 @@ def discover(server_url: str, www_authenticate: str = "") -> dict:
     # сочи чужд (`resource` = жертвата) и получава нейния токен: операторът
     # вижда истинската страница за вход, а токенът отива при злия (одит
     # 2026-10-09, възпроизведено).
-    if _key(resource) != _key(server_url):
+    if not _covers(resource, server_url):
         raise OAuthError(f"сървърът иска токен за {resource!r}, а е {server_url!r} — отказано")
     return {
         "issuer": issuer,
@@ -408,7 +446,7 @@ def _expired(entry: dict) -> bool:
 
 
 def _for_this_server(entry: dict, server_url: str) -> bool:
-    return not entry.get("resource") or _key(str(entry["resource"])) == _key(server_url)
+    return not entry.get("resource") or _covers(str(entry["resource"]), server_url)
 
 
 def access_token(server_url: str) -> str:

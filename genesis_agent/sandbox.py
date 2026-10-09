@@ -1356,8 +1356,21 @@ def _preexec(policy: SandboxPolicy, nproc_cap: int):  # изпълнява се 
             pass
 
 
+# Вика се точно преди процесът да тръгне — СЛЕД одобрението на оператора.
+# edit_history прави тук снимката за /undo: снимка преди въпроса „Да се
+# изпълни ли?“ приписваше на командата и каквото операторът запише, докато
+# мисли (одит 2026-10-09).
+before_exec: Callable[[], None] | None = None
+
+
 def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
          env_extra: dict[str, str] | None = None) -> SandboxResult:
+    hook = before_exec
+    if hook is not None:
+        try:
+            hook()
+        except Exception:
+            pass
     env = _build_env(policy, env_extra)
     # Ако NPROC е включен, капът е headroom над текущото натоварване.
     nproc_cap = (_count_user_processes() + policy.max_processes) if policy.max_processes > 0 else 0

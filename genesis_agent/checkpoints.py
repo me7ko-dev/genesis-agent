@@ -107,10 +107,16 @@ def _store(workspace: Path) -> Path:
     return Path(paths.GENESIS_HOME) / "checkpoints" / key
 
 
-def _git(workspace: Path, *args: str) -> bytes:
+def _index(store: Path) -> Path:
+    """Свой index на процес: `genesis` и `genesis serve` върху една папка си
+    пречеха на index.lock и снимката тихо не ставаше (одит 2026-10-09)."""
+    return store / f"index-{os.getpid()}"
+
+
+def _git(workspace: Path, *args: str, input: bytes | None = None) -> bytes:
     store = _store(workspace)
     env = {**os.environ, "GIT_DIR": str(store), "GIT_WORK_TREE": str(workspace),
-           "GIT_INDEX_FILE": str(store / "index"), "GIT_TERMINAL_PROMPT": "0",
+           "GIT_INDEX_FILE": str(_index(store)), "GIT_TERMINAL_PROMPT": "0",
            "GIT_CONFIG_NOSYSTEM": "1", "GIT_ATTR_NOSYSTEM": "1",
            "GIT_CONFIG_GLOBAL": os.devnull}
     for var in ("GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR"):
@@ -120,12 +126,13 @@ def _git(workspace: Path, *args: str) -> bytes:
             ["git", "-c", "core.autocrlf=false", "-c", "core.safecrlf=false",
              "-c", "core.quotepath=off", "-c", "core.fsmonitor=false", "-c", "gc.auto=0",
              "-c", "core.hooksPath=" + os.devnull, *args],
-            cwd=str(workspace), env=env, capture_output=True, timeout=_TIMEOUT, check=False)
+            cwd=str(workspace), env=env, input=input, capture_output=True,
+            timeout=_TIMEOUT, check=False)
     except subprocess.TimeoutExpired:
-        # Убитият git оставя index.lock и всяка следваща снимка на папката
+        # Убитият git оставя ключалката и всяка следваща снимка на папката
         # пада завинаги (одит 2026-10-09). Ключалката е наша — махаме я.
         try:
-            (store / "index.lock").unlink()
+            Path(str(_index(store)) + ".lock").unlink()
         except OSError:
             pass
         raise
@@ -167,20 +174,68 @@ def _prepare(workspace: Path, big: list[str]) -> None:
     lines += [_escape(rel) for rel in big]   # над MAX_FILE_MB — не се пази
     (store / "info" / "exclude").write_text("\n".join(lines) + "\n", encoding="utf-8")
     (store / "info" / "attributes").write_text(_ATTRIBUTES, encoding="utf-8")
-    lock = store / "index.lock"
+    lock = Path(str(_index(store)) + ".lock")
     try:
         if lock.exists() and time.time() - lock.stat().st_mtime > 2 * _TIMEOUT:
             lock.unlink()
     except OSError:
         pass
     if store not in _pruned:
-        # Историята за /undo е само в паметта на процеса: всичко отпреди него
-        # в хранилището е боклук (5 хода по 50 MB → +250 MB, нищо не чистеше).
         _pruned.add(store)
-        try:
-            _git(workspace, "prune", "--expire=now")
-        except (OSError, subprocess.SubprocessError):
-            pass
+        _cleanup(workspace, store)
+
+
+def _alive(pid: int) -> bool:
+    if pid == os.getpid():
+        return True
+    if os.name == "nt":
+        import ctypes
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # type: ignore[attr-defined]
+        if not handle:
+            return False
+        ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _cleanup(workspace: Path, store: Path) -> None:
+    """Веднъж на процес: историята за /undo живее в паметта на процеса, затова
+    версиите на мъртвите процеси са боклук (5 хода по 50 MB → +250 MB, нищо не
+    чистеше). Живите си пазят своите с refs/genesis/<pid>/ — prune на един
+    процес триеше нужното на друг (одит 2026-10-09). `--expire=1.hour.ago`:
+    обектите на снимка, която тъкмо се прави, още нямат ref."""
+    try:
+        refs = _git(workspace, "for-each-ref", "--format=%(refname)", "refs/genesis/")
+        for ref in refs.decode("utf-8", "replace").split():
+            parts = ref.split("/")
+            if len(parts) > 2 and parts[2].isdigit() and not _alive(int(parts[2])):
+                _git(workspace, "update-ref", "-d", ref)
+        for old in store.glob("index-*"):
+            pid = old.name.split("-", 1)[1].split(".", 1)[0]
+            if pid.isdigit() and not _alive(int(pid)):
+                old.unlink()
+        _git(workspace, "prune", "--expire=1.hour.ago")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+
+
+_kept = 0
+
+
+def keep(workspace: Path, tree: str) -> None:
+    """Пази снимката жива за prune-а на други процеси, докато този процес живее."""
+    global _kept
+    _kept += 1
+    try:
+        _git(Path(workspace).resolve(), "update-ref", f"refs/genesis/{os.getpid()}/{_kept}", tree)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def snapshot(workspace: Path, big: list[str] | None = None) -> str | None:
@@ -188,11 +243,21 @@ def snapshot(workspace: Path, big: list[str] | None = None) -> str | None:
     ws = Path(workspace).resolve()
     try:
         _prepare(ws, big or [])
+        if big:
+            # exclude не важи за вече пазен файл: app.db, пораснал до 100 MB,
+            # пак влизаше в хранилището (одит 2026-10-09). Вън от index-а.
+            _git(ws, "rm", "--cached", "-r", "-q", "--ignore-unmatch",
+                 "--pathspec-from-file=-", "--pathspec-file-nul",
+                 input=b"\0".join((":(literal)" + rel).encode("utf-8", "surrogateescape")
+                                   for rel in big))
         try:
             _git(ws, "add", "-A", "--ignore-errors", ".")
         except OSError:
             pass   # нечетим файл: --ignore-errors пак записва останалите
-        return _git(ws, "write-tree").decode("ascii").strip() or None
+        tree = _git(ws, "write-tree").decode("ascii").strip() or None
+        if tree:
+            keep(ws, tree)
+        return tree
     except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
         return None
 

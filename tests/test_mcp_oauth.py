@@ -327,3 +327,55 @@ def test_the_token_file_is_a_secret_for_the_sandbox() -> None:
     assert sandbox.assess_command("cat ~/.genesis/mcp_tokens.json").level.name == "CONFIRM"
     assert sandbox.sensitive_path_reason(Path(paths.GENESIS_HOME) / "mcp_tokens.json")
     assert sandbox.assess_command("cat ~/.genesis/checkpoints/abc/objects/x").level.name == "CONFIRM"
+
+
+# ── втори кръг одит 2026-10-09 ───────────────────────────────────────────────
+
+def test_metadata_at_the_root_of_the_host_is_accepted(oauth) -> None:
+    url, state = oauth(root_resource=True)
+    _login(url)
+    assert state["resource_seen"] == [url.rsplit("/", 1)[0]]     # каквото сървърът иска
+    assert any("linear: 1 инструмента" in ln for ln in mcp_client.start_all())
+
+
+def test_a_non_auth_header_does_not_turn_off_oauth(oauth) -> None:
+    url, state = oauth(headers={"X-Tenant": "acme"})
+    token = _login(url)["access_token"]
+    state["tokens"].discard(token)                                # отнет → подновяване
+    assert any("linear: 1 инструмента" in ln for ln in mcp_client.start_all())
+
+
+def test_the_token_file_lock_is_held_across_processes(tmp_path) -> None:
+    import subprocess
+    import textwrap
+    script = textwrap.dedent("""
+        import sys, time
+        from pathlib import Path
+        from genesis_agent import mcp_oauth, paths
+        paths.GENESIS_HOME = Path(sys.argv[1])
+        with mcp_oauth._FileLock():
+            print("held", flush=True)
+            time.sleep(1.5)
+    """)
+    child = subprocess.Popen([sys.executable, "-c", script, str(paths.GENESIS_HOME)],
+                             stdout=subprocess.PIPE, text=True,
+                             cwd=str(Path(__file__).resolve().parents[1]))
+    assert child.stdout is not None and child.stdout.readline().strip() == "held"
+    # Дълго държана ключалка не се „краде“ по възраст, докато държащият е жив.
+    lock = mcp_oauth._store_path().with_suffix(".lock")
+    old = time.time() - 600
+    os.utime(lock, (old, old))
+    start = time.monotonic()
+    with mcp_oauth._FileLock():
+        waited = time.monotonic() - start
+    child.wait(10)
+    assert waited > 0.5                                           # чакахме другия процес
+
+
+def test_ctrl_c_while_waiting_for_the_lock_does_not_freeze_the_process(monkeypatch) -> None:
+    def interrupted(_fh):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(mcp_oauth, "_lock_file", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        mcp_oauth.forget("http://127.0.0.1:1/mcp")
+    assert not mcp_oauth._lock.locked()

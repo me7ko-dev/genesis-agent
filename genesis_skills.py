@@ -1169,7 +1169,10 @@ def _before_tool(name: str, args: dict) -> str | None:
         # снимка на проекта преди и след тях, за /undo (2026-10-09).
         try:
             from genesis_agent import edit_history
-            edit_history.before_command(Path(_WORKSPACE))
+            # Командите и уменията минават през sandbox: снимката — когато
+            # процесът тръгне, след одобрението (одит 2026-10-09).
+            edit_history.before_command(Path(_WORKSPACE),
+                                        at_exec=name in ("RUN_CMD", "RUN_BG", "USE_SKILL"))
         except Exception:
             pass
     return None
@@ -1192,6 +1195,14 @@ def _may_change_files(name: str, args: dict) -> bool:
 
 
 def _after_tool(name: str, args: dict, result: str) -> str:
+    try:
+        from genesis_agent import hooks
+        hook_name, hook_args = _hook_view(name, args)
+        out = hooks.post_tool(hook_name, hook_args, result)
+    except Exception:
+        out = result
+    # СЛЕД PostToolUse hooks: `ruff format` след EDIT_FILE иначе изглеждаше
+    # като чужда промяна и /undo оставяше файла (одит 2026-10-09).
     if name in ("WRITE_FILE", "EDIT_FILE") and args.get("path"):
         try:  # отказан/неуспешен запис не е промяна за /undo
             from genesis_agent import edit_history
@@ -1199,17 +1210,12 @@ def _after_tool(name: str, args: dict, result: str) -> str:
         except Exception:
             pass
     elif _may_change_files(name, args):
-        try:  # какво промени командата — само между двете снимки (одит 2026-10-09)
+        try:  # какво промени командата — само между двете снимки
             from genesis_agent import edit_history
             edit_history.after_command()
         except Exception:
             pass
-    try:
-        from genesis_agent import hooks
-        hook_name, hook_args = _hook_view(name, args)
-        return hooks.post_tool(hook_name, hook_args, result)
-    except Exception:
-        return result
+    return out
 
 
 def parse_and_execute_readonly_tools(response_text: str) -> list[str]:

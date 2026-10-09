@@ -141,7 +141,8 @@ def test_the_snapshot_lives_outside_the_project(ws) -> None:
 def test_only_tools_that_may_write_take_a_snapshot(ws, monkeypatch) -> None:
     monkeypatch.setattr(gs, "_WORKSPACE", ws)
     taken: list[Path] = []
-    monkeypatch.setattr(edit_history, "before_command", taken.append)
+    monkeypatch.setattr(edit_history, "before_command",
+                        lambda ws, at_exec=False: taken.append(ws))
     for name in ("READ_FILE", "SEARCH_CODE", "TODO_WRITE", "WEB_FETCH", "BG_OUTPUT"):
         assert gs._before_tool(name, {"path": "x"}) is None
     assert taken == []
@@ -296,3 +297,147 @@ def test_a_file_git_could_not_read_is_never_deleted(ws) -> None:
         assert ledger.exists()
     finally:
         ledger.chmod(0o644)
+
+
+# ── втори кръг одит 2026-10-09 ───────────────────────────────────────────────
+
+def test_a_formatter_hook_after_an_edit_does_not_stop_undo(ws, monkeypatch) -> None:
+    import json
+
+    from genesis_agent import paths
+    monkeypatch.setattr(gs, "_WORKSPACE", ws)
+    py = Path(sys.executable).as_posix()
+    hook = f'"{py}" -c "import os;open(os.environ[\'GENESIS_FILE\'],\'a\').write(\'# fmt\\n\')"'
+    (Path(paths.GENESIS_HOME) / "hooks.json").write_text(json.dumps(
+        {"PostToolUse": [{"matcher": "EDIT_FILE", "command": hook}]}), encoding="utf-8")
+    app = ws / "src" / "app.py"
+    edit_history.begin_turn("редакция")
+    gs.dispatch_tool_call("READ_FILE", {"path": str(app)})
+    gs.dispatch_tool_call("EDIT_FILE", {"path": str(app), "old": "v1", "new": "edit"})
+    edit_history.end_turn()
+    assert app.read_text(encoding="utf-8").endswith("# fmt\n")      # hook-ът мина
+    edit_history.undo()
+    assert app.read_text(encoding="utf-8") == "print('v1')\n"
+
+
+def test_a_failed_snapshot_after_a_command_never_undoes_the_turn_before(ws, monkeypatch) -> None:
+    app = ws / "src" / "app.py"
+    edit_history.begin_turn("ход 1")
+    edit_history.record(ws / "keep.txt")
+    (ws / "keep.txt").write_text("ход 1\n", encoding="utf-8")
+    edit_history.end_turn()
+    real = checkpoints.snapshot
+    calls = {"n": 0}
+
+    def flaky(workspace, big=None):
+        calls["n"] += 1
+        return real(workspace, big) if calls["n"] == 1 else None   # след командата — не
+    monkeypatch.setattr(checkpoints, "snapshot", flaky)
+    _turn_with_command(ws, lambda: app.write_text("print('v2')\n", encoding="utf-8"))
+    assert any("не може" in ln for ln in edit_history.pending())
+    label, done = edit_history.undo()
+    assert label == "команда" and any("❌" in d for d in done)
+    assert (ws / "keep.txt").read_text(encoding="utf-8") == "ход 1\n"   # ход 1 — непипнат
+
+
+def test_a_file_that_grew_over_the_limit_leaves_the_store(ws, monkeypatch) -> None:
+    db = ws / "app.db"
+    db.write_bytes(b"x" * 100)
+    _turn_with_command(ws, lambda: None)                         # app.db — в index-а
+    monkeypatch.setattr(checkpoints, "MAX_FILE_MB", 0)            # вече е „голям“
+    grown = b"y" * 5000
+    _turn_with_command(ws, lambda: db.write_bytes(grown))
+    with pytest.raises(OSError):
+        checkpoints._git(ws.resolve(), "cat-file", "-e", checkpoints.blob_id(grown))
+    edit_history.undo()
+    assert db.read_bytes() == grown                              # голям — не се връща
+
+
+def test_a_big_file_a_command_creates_is_not_stored(ws, monkeypatch) -> None:
+    monkeypatch.setattr(checkpoints, "MAX_FILE_MB", 0)
+    data = b"z" * 4000
+    _turn_with_command(ws, lambda: (ws / "out.bin").write_bytes(data))
+    with pytest.raises(OSError):
+        checkpoints._git(ws.resolve(), "cat-file", "-e", checkpoints.blob_id(data))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="без изпълними битове на Windows")
+def test_a_mode_only_change_is_undone(ws) -> None:
+    script = ws / "run.sh"
+    script.write_text("echo 1\n", encoding="utf-8")
+    script.chmod(0o644)
+    _turn_with_command(ws, lambda: script.chmod(0o755))
+    edit_history.undo()
+    assert not os.access(script, os.X_OK)
+
+
+def test_another_processs_prune_keeps_what_this_one_needs(ws) -> None:
+    _turn_with_command(ws, lambda: _command(ws))
+    checkpoints._git(ws.resolve(), "prune", "--expire=now")      # най-лошото от друг процес
+    edit_history.undo()
+    assert (ws / "src" / "app.py").read_text(encoding="utf-8") == "print('v1')\n"
+    assert (ws / "gone.txt").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="rm -rf през bash")
+def test_what_the_operator_saves_while_approving_stays(ws, monkeypatch) -> None:
+    from genesis_agent import sandbox
+    monkeypatch.setattr(gs, "_WORKSPACE", ws)
+    notes = ws / "NOTES.md"
+    notes.write_text("old\n", encoding="utf-8")
+    (ws / "out").mkdir()
+    (ws / "out" / "x.txt").write_text("x", encoding="utf-8")
+
+    def approve(_op, _verdict) -> bool:
+        notes.write_text("записано, докато питаше\n", encoding="utf-8")   # операторът
+        return True
+    monkeypatch.setattr(sandbox, "_POLICY", sandbox.SandboxPolicy(mode="interactive",
+                                                                 confirm_fn=approve))
+    edit_history.begin_turn("чистене")
+    gs.dispatch_tool_call("RUN_CMD", {"command": "rm -rf out"})
+    edit_history.end_turn()
+    assert not (ws / "out").exists()
+    edit_history.undo()
+    assert notes.read_text(encoding="utf-8") == "записано, докато питаше\n"
+    assert (ws / "out" / "x.txt").read_text(encoding="utf-8") == "x"
+
+
+def test_writes_inside_delegate_outside_the_snapshot_are_undone(ws, tmp_path) -> None:
+    (ws / ".gitignore").write_text("local.py\n", encoding="utf-8")
+    local = ws / "local.py"
+    local.write_text("SECRET = 1\n", encoding="utf-8")
+    other = tmp_path / "other.md"
+    other.write_text("извън\n", encoding="utf-8")
+    edit_history.begin_turn("делегирано")
+    edit_history.before_command(ws)                               # DELEGATE
+    for f in (local, other, ws / "src" / "app.py"):
+        edit_history.record(f)
+        f.write_text("променен\n", encoding="utf-8")
+        edit_history.forget_if_unchanged(f)
+    edit_history.after_command()
+    edit_history.end_turn()
+    edit_history.undo()
+    assert local.read_text(encoding="utf-8") == "SECRET = 1\n"
+    assert other.read_text(encoding="utf-8") == "извън\n"
+    assert (ws / "src" / "app.py").read_text(encoding="utf-8") == "print('v1')\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="символни връзки на Windows искат права")
+def test_undo_of_an_edit_never_writes_through_a_link_out(ws, tmp_path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    app = ws / "src" / "app.py"
+    edit_history.begin_turn("редакция, после връзка")
+    edit_history.record(app)
+    app.write_text("print('edit')\n", encoding="utf-8")
+    edit_history.forget_if_unchanged(app)
+
+    def swap() -> None:
+        (ws / "src").rename(ws / "src_old")
+        os.symlink(outside, ws / "src")
+    edit_history.before_command(ws)
+    swap()
+    edit_history.after_command()
+    edit_history.end_turn()
+    edit_history.undo()
+    assert list(outside.iterdir()) == []

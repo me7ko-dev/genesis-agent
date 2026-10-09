@@ -517,30 +517,62 @@ SKILL_HOME_ROOT: Path | None = None
 _operator_env: dict[str, str] | None = None
 
 
+def _home_roots() -> list[Path]:
+    import os
+    import tempfile
+    if SKILL_HOME_ROOT is not None:
+        return [Path(SKILL_HOME_ROOT)]
+    roots = [Path(tempfile.gettempdir())]
+    if os.name != "nt":
+        roots += [Path("/tmp"), Path("/var/tmp")]
+    try:
+        real = Path.home().resolve()
+        # TMPDIR в домашната папка връщаше точно това, което се маха: истинския
+        # HOME сред родителите (втори одит 2026-10-09). На Windows няма друго.
+        outside = [r for r in roots if r.is_dir() and real not in r.resolve().parents]
+        return outside or roots
+    except (OSError, RuntimeError):
+        return roots
+
+
+def _ours(path: Path) -> bool:
+    import os
+    import stat
+    try:
+        path.mkdir(mode=0o700, exist_ok=True)
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        return False
+    if hasattr(os, "getuid"):
+        if st.st_uid != os.getuid():
+            return False
+        os.chmod(path, 0o700)
+    return True
+
+
 def skill_home() -> Path:
     """Домашната папка на кода на уменията: във временната папка на системата,
     по една на потребител, 0700 и наша. Не в ~/.genesis: оттам
     `Path.home().parent` беше точно .env, ключовете и mcp_tokens.json, а
     `.parents[1]` — истинската домашна папка (одит 2026-10-09)."""
     import os
-    import stat
     import tempfile
-    root = Path(SKILL_HOME_ROOT) if SKILL_HOME_ROOT is not None else Path(tempfile.gettempdir())
+    root = _home_roots()[0]
     uid = os.getuid() if hasattr(os, "getuid") else 0
-    home = root / f"genesis-skill-home-{uid}"
     try:
         root.mkdir(parents=True, exist_ok=True)
-        home.mkdir(mode=0o700, exist_ok=True)
-        st = os.lstat(home)
-        # Чужда или подменена (символна връзка в споделения /tmp) — не я ползваме.
-        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode) or \
-                (hasattr(os, "getuid") and st.st_uid != os.getuid()):
-            raise OSError("not ours")
-        if hasattr(os, "getuid"):
-            os.chmod(home, 0o700)
     except OSError:
-        home = Path(tempfile.mkdtemp(prefix="genesis-skill-home-"))
-    return home
+        pass
+    # Чужда/подменена папка с това име (споделен /tmp): следващото стабилно
+    # име, не нова случайна папка при всяко извикване — кешът студен и папки
+    # изтичаха в /tmp (втори одит 2026-10-09).
+    for n in range(10):
+        home = root / (f"genesis-skill-home-{uid}" + (f"-{n}" if n else ""))
+        if _ours(home):
+            return home
+    return Path(tempfile.mkdtemp(prefix="genesis-skill-home-", dir=str(root)))
 
 
 def _operator_settings() -> dict[str, str]:
