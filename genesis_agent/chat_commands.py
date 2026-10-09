@@ -15,7 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-BUILTIN = ("/init", "/memory", "/plan", "/undo", "/compact", "/hooks", "/commands", "/bg", "/mcp")
+BUILTIN = ("/init", "/memory", "/plan", "/undo", "/compact", "/hooks", "/commands", "/bg", "/mcp",
+           "/agents", "/todos")
 _NAME = re.compile(r"^/([A-Za-z0-9][\w-]{0,40})(?:\s+(.*))?$", re.DOTALL)
 _YES = ("", "да", "д", "d", "da", "y", "yes")
 
@@ -183,6 +184,16 @@ def handle(text: str, *, messages: Any, workspace: Path,
     if cmd == "/bg":
         from genesis_agent import background
         out(background.summary())
+        return Result()
+
+    if cmd == "/agents":
+        from genesis_agent import agents
+        out(agents.summary(workspace))
+        return Result()
+
+    if cmd == "/todos":
+        from genesis_agent import todos
+        out(todos.render())
         return Result()
 
     m = _NAME.match(stripped)

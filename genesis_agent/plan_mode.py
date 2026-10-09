@@ -13,7 +13,10 @@ from __future__ import annotations
 READ_ONLY_TOOLS = frozenset({
     "READ_FILE", "LIST_DIR", "GLOB", "SEARCH_CODE", "REPO_MAP",
     "WEB_SEARCH", "RESEARCH", "ASK_USER", "TASK_LIST", "EXPLORE", "BG_OUTPUT",
-    "WEB_FETCH",
+    "WEB_FETCH", "TODO_WRITE",
+    # Под-агентът сам не променя нищо — всеки негов инструмент минава пак през
+    # тази проверка (genesis_skills._before_tool), така че в план той само чете.
+    "AGENT",
 })
 
 _on = False

@@ -179,6 +179,8 @@ The habits that make Claude Code pleasant to work with, in the Genesis chat:
 | `!command` | You run a command yourself, without the model (`!git status`, `!pytest -q`). The output shows at once and goes to the model with your next message, so "why does this fail?" needs no copying. |
 | `@path` | Attaches a file (or a folder's listing) to your message: `why does @tests/test_api.py fail against @src/api/`. Works in `genesis -p` too. `.env` and keys are never attached. |
 | `genesis -c` | Continues the last conversation in this folder (`/history` picks any older one). |
+| sub-agents | Your own specialists: `.genesis/agents/reviewer.md` (or `~/.genesis/agents/`, or Claude Code's `.claude/agents/` as is) with `description`, `tools` and a role. Genesis hands them a task with `AGENT`; each works in its own conversation with only its tools and returns the report. Their tools pass the same gate as the main agent's (plan mode, hooks, sandbox, `/undo`). `/agents` lists them. |
+| task list | For work with several steps Genesis writes its plan with `TODO_WRITE` and ticks it off as it goes, so you see where it is. `/todos` shows it. |
 | `EXPLORE` | A read-only sub-agent: "where is the price computed and who calls it?" is searched and read in its own conversation, and only the answer (with `path:line`) comes back — the main conversation stays small. |
 
 ```json

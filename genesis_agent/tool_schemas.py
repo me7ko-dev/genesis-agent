@@ -179,6 +179,23 @@ FULL_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "TODO_WRITE",
+            "description": ("Your task list for this work, shown to the operator. For any task "
+                            "with 3+ steps: write the whole list first, then rewrite it as you "
+                            "go — exactly one item in_progress, mark each completed as soon as "
+                            "it is done (not in batches). Skip it for one-step requests."),
+            "parameters": {"type": "object", "properties": {
+                "todos": {"type": "array", "items": {"type": "object", "properties": {
+                    "content": {"type": "string", "description": "What to do, imperative"},
+                    "status": {"type": "string",
+                               "enum": ["pending", "in_progress", "completed"]}},
+                    "required": ["content", "status"]}}},
+                "required": ["todos"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "BG_OUTPUT",
             "description": "What a background command printed since the last look, and whether "
                            "it still runs. Without id: the list of background commands.",
