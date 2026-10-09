@@ -26,7 +26,10 @@ _items: list[dict[str, str]] = []
 
 
 def items() -> list[dict[str, str]]:
-    return [dict(i) for i in _items]
+    # Първо копие на списъка (атомарно), после на елементите: телефонът чете
+    # от HTTP нишката, докато ходът пише — обхождането на живия списък
+    # смесваше стария и новия (67 от 221 608 четения, одит 2026-10-09).
+    return [dict(i) for i in _items[:]]
 
 
 def clear() -> None:

@@ -95,6 +95,12 @@ def _description(path: Path) -> str:
     return first[:80]
 
 
+def _split(text: str) -> tuple[str, str]:
+    """`/команда` и останалото — делени от първия празен знак (и нов ред)."""
+    parts = text.strip().split(None, 1)
+    return (parts[0] if parts else "", parts[1].strip() if len(parts) > 1 else "")
+
+
 def handle(text: str, *, messages: Any, workspace: Path,
            out: Callable[[str], None], ask: Callable[[str], str],
            compact: Callable[[Any], Any] | None = None) -> Result | None:
@@ -102,8 +108,11 @@ def handle(text: str, *, messages: Any, workspace: Path,
     stripped = text.strip()
     if not stripped.startswith("/"):
         return None
-    head, _, rest = stripped.partition(" ")
-    cmd, rest = head.lower(), rest.strip()
+    # Всеки празен знак дели: `/plan` + Enter + задачата (многоредовото поле на
+    # телефона, `"""` в терминала) иначе отиваше при модела без режим план —
+    # с разрешен запис (одит 2026-10-09).
+    head, rest = _split(stripped)
+    cmd = head.lower()
 
     if cmd == "/init":
         from genesis_agent.project_instructions import INIT_PROMPT

@@ -168,3 +168,45 @@ def test_sub_agent_progress_reaches_the_phone() -> None:
     agents._say("↳ reviewer: прегледай diff-а")
     events = session.events_after(0)["events"]
     assert events[-1]["type"] == "progress" and "reviewer" in events[-1]["text"]
+
+
+# ── одит 2026-10-09 ──────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("text", ["/plan\nоправи входа", "/plan\tоправи входа", "/PLAN\n\n оправи входа"])
+def test_plan_then_a_new_line_still_turns_plan_mode_on(tmp_path, text) -> None:
+    # Многоредовото поле на телефона: `/plan`, Enter, задачата. Отиваше при
+    # модела като текст, без режим план — с разрешен запис.
+    _, _, prompt = _phone(text, tmp_path)
+    assert plan_mode.active() and prompt == "оправи входа"
+
+
+def test_plan_then_a_new_line_in_the_terminal_too(tmp_path) -> None:
+    from genesis_agent import chat_commands
+    res = chat_commands.handle('/plan\nоправи входа', messages=None, workspace=tmp_path,
+                               out=lambda _t: None, ask=lambda _q: "")
+    assert res is not None and res.prompt == "оправи входа" and plan_mode.active()
+
+
+@pytest.mark.parametrize("text", ["/hooks\ntrust", "/hooks\ttrust", "/mcp\n TRUST"])
+def test_trust_split_by_a_new_line_is_still_refused(tmp_path, text) -> None:
+    session = _session()
+    ui, _, prompt = _phone(text, tmp_path, session)
+    assert prompt is None and "терминала" in ui.warns[0]
+    assert not [e for e in session.events_after(0)["events"] if e["type"] == "confirm"]
+
+
+def test_the_todo_list_is_never_read_half_old_half_new() -> None:
+    # Телефонът чете списъка от HTTP нишката, докато ходът го подменя. Тук
+    # подмяната става точно насред копирането — както при превключване на нишка.
+    class Switching(dict):
+        # Свой __iter__ изключва бързия път на dict(): тогава той вика keys().
+        def __iter__(self):
+            return iter(self.keys())
+
+        def keys(self):
+            todos.write([{"content": "ново", "status": "pending"}])
+            return super().keys()
+
+    todos._items[:] = [Switching(content="старо 1", status="pending"),
+                       {"content": "старо 2", "status": "pending"}]
+    assert [i["content"] for i in todos.items()] == ["старо 1", "старо 2"]

@@ -434,8 +434,10 @@ def phone_command(text: str, ui: Any, session: RemoteSession, *, messages: Any,
     Командите са същите като в терминала (chat_commands) — досега телефонът
     пращаше `/plan` и `/undo` на модела като обикновен текст (2026-10-09).
     """
+    from genesis_agent import chat_commands
     stripped = text.strip()
-    head, _, rest = stripped.partition(" ")
+    # Същото делене като chat_commands: `/hooks\ntrust` е /hooks trust и тук.
+    head, rest = chat_commands._split(stripped)
     cmd = head.lower()
     if stripped.startswith("/"):
         if cmd == "/help":
@@ -459,7 +461,6 @@ def phone_command(text: str, ui: Any, session: RemoteSession, *, messages: Any,
             ui.info(_wm.briefing(max_threads=20, max_decisions=10) or "Още нищо не е записано.")
             return messages, None
 
-        from genesis_agent import chat_commands
         said: list[str] = []
 
         def out(line: str) -> None:
