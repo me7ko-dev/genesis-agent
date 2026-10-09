@@ -144,8 +144,9 @@ def _fix(args: list[str]) -> int:
         if len(args) < 2:
             print("Кой проект да върна? `genesis fix --revert <път>`")
             return 2
-        print(restore_checkpoint(args[1]))
-        return 0
+        result = restore_checkpoint(args[1])
+        print(result)
+        return 1 if result.startswith("❌") else 0
 
     project, rest = args[0], args[1:]
     task_parts: list[str] = []
@@ -214,6 +215,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if cmd == "mission":
         goal = " ".join(argv[1:]).strip()
+        # `--help` не е цел: пускаше истинска мисия с цел „--help“ (одит 2026-10-09).
+        if goal in ("-h", "--help", "help"):
+            print('Употреба: genesis mission "напиши функция, която ..." — една автономна '
+                  "мисия: пише код, пуска го, проверява го и го пази като умение.")
+            return 0
         if not goal:
             print('Употреба: genesis mission "напиши функция, която ..."')
             return 2

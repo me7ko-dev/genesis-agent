@@ -243,7 +243,9 @@ class TestSnapshotOnlyOnRequest:
         assert "--revert" in repo_agent._undo_hint(tmp_path, tmp_path / "x.tar.gz")
         assert "връщане няма" in repo_agent._undo_hint(tmp_path, None)
         (tmp_path / ".git").mkdir()
-        assert "git checkout" in repo_agent._undo_hint(tmp_path, None)
+        hint = repo_agent._undo_hint(tmp_path, None, ["calc.py"])
+        # Само пипнатите файлове — никога `git checkout .` (одит 2026-10-09).
+        assert 'git checkout -- "calc.py"' in hint and "checkout ." not in hint
 
 
 class TestTouchedTracksRealChanges:

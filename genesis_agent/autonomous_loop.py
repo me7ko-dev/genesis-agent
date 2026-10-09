@@ -369,6 +369,10 @@ def _run_autonomous_loop_impl(
     last_generated_code = ""
     last_stdout = ""
     last_stderr = ""
+    # Аварийният ремонт е за код, който ПАДА при изпълнение. Код, който е
+    # тръгнал, но е отхвърлен от критика/проверката, не се „ремонтира“ покрай
+    # тях: ремонтът записваше отхвърлено умение като успех (одит 2026-10-09).
+    last_exec_failed = False
     for round_i in range(max_rounds):
         if _past_deadline():
             report_thought("⏰ Времето на делегираната задача изтече — спирам, нищо не записвам.")
@@ -551,6 +555,7 @@ def _run_autonomous_loop_impl(
         result = run_python_subprocess(reply.code)
         last_stdout = result.stdout
         last_stderr = result.stderr
+        last_exec_failed = not result.ok
 
         if result.ok:
             # ─── ТЕСТ-ГЕЙТ (реална проверка, не само мнение на LLM) ───
@@ -718,7 +723,8 @@ def _run_autonomous_loop_impl(
     except ImportError:
         is_stopped = False
 
-    if last_generated_code and last_stderr and not is_stopped and not _past_deadline():
+    if (last_generated_code and last_stderr and last_exec_failed
+            and not is_stopped and not _past_deadline()):
         print("\n" + "\u2550" * 55)
         print("  [\u26a0\ufe0f  \u0410\u0412\u0410\u0420\u0418\u0415\u041d \u0420\u0415\u041c\u041e\u041d\u0422] Brain \u0435 \u043d\u0435\u0434\u043e\u0441\u0442\u044a\u043f\u0435\u043d. \u0410\u043a\u0442\u0438\u0432\u0438\u0440\u0430\u043c LocalRepairAgent...")
         print("  [\u041c\u0410\u041b\u042a\u041a \u041c\u041e\u0414\u0415\u041b] \u041f\u0430\u0442\u0435\u0440\u043d \u0430\u043d\u0430\u043b\u0438\u0437 + 1-3B \u043c\u043e\u0434\u0435\u043b")

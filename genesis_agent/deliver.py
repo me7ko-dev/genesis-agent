@@ -29,10 +29,24 @@ REPORT_NAME = "GENESIS_REPORT.md"
 _MAX_INPUT_MB = 200
 
 _SKIP_DIRS = {
-    ".git", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache",
+    ".git", ".hg", ".svn", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache",
     ".ruff_cache", ".venv", "venv", "env", "dist", "build", "target",
-    ".next", ".tox", ".gradle", ".verify_libs", ".idea", ".vscode",
+    ".next", ".tox", ".gradle", ".verify_libs", ".idea", ".vscode", ".terraform",
 }
+# Имена, които са и обичайни папки с код (`mypkg/build/builder.py`): само в
+# корена са артефакт; по-навътре — само ако си личи (venv, кеш, Cargo target).
+# Пропускани на всяка дълбочина, те липсваха от архива без дума (одит 2026-10-09).
+_SKIP_ONLY_AT_TOP = {"build", "dist", "env", "target"}
+
+
+def _skip_dir(parent: Path, name: str, depth: int) -> bool:
+    if name not in _SKIP_DIRS:
+        return False
+    if depth == 0 or name not in _SKIP_ONLY_AT_TOP:
+        return True
+    here = parent / name
+    return ((here / "pyvenv.cfg").is_file() or (here / "CACHEDIR.TAG").is_file()
+            or (name == "target" and (parent / "Cargo.toml").is_file()))
 _SKIP_SUFFIXES = {".pyc", ".pyo"}
 _SKIP_NAMES = {".DS_Store", "Thumbs.db"}
 
@@ -41,7 +55,8 @@ _SKIP_NAMES = {".DS_Store", "Thumbs.db"}
 # `certs/server.key`, `token.json`, `client_secret_*.json`, `master.key`,
 # `service-account.json`, `.htpasswd` влизаха в архива.
 _EXPORT_SECRETS = re.compile(
-    r"(^|/)(\.envrc|\.htpasswd|token\.json|master\.key|credentials\.json|\.git-credentials)$"
+    r"(^|/)(\.envrc|\.htpasswd|token\.json|master\.key|credentials\.json|\.git-credentials"
+    r"|\.pgpass|\.dockercfg|terraform\.tfstate(\.backup)?)$"
     r"|\.(key|jks|keystore|kdbx|ppk|p8|ovpn)$"
     r"|(^|/)secrets?\.[a-z]+$|(^|/)client_secret[^/]*\.json$|service[-_]?account[^/]*\.json$",
     re.IGNORECASE)
@@ -85,15 +100,34 @@ def project_files(root: Path, *, exclude: Path | None = None) -> tuple[list[Path
     keep: list[Path] = []
     withheld: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames
-                             if d not in _SKIP_DIRS and not (Path(dirpath) / d).is_symlink())
+        depth = len(Path(dirpath).relative_to(root).parts)
+        kept_dirs = []
+        for d in sorted(dirnames):
+            if _skip_dir(Path(dirpath), d, depth):
+                continue
+            if (Path(dirpath) / d).is_symlink():
+                withheld.append(f"{(Path(dirpath) / d).relative_to(root).as_posix()}/ "
+                                "(символна връзка — не е включена)")
+                continue
+            kept_dirs.append(d)
+        dirnames[:] = kept_dirs
         for name in sorted(filenames):
             p = Path(dirpath) / name
-            if name in _SKIP_NAMES or p.suffix in _SKIP_SUFFIXES or p.is_symlink():
+            if name in _SKIP_NAMES or p.suffix in _SKIP_SUFFIXES:
                 continue
             if exclude is not None and p.resolve() == exclude:
                 continue
             rel = p.relative_to(root).as_posix()
+            # Казва се какво липсва: връзките и имената, които не са UTF-8,
+            # изпадаха без дума, а едно такова име сриваше целия export.
+            if p.is_symlink():
+                withheld.append(f"{rel} (символна връзка — не е включена)")
+                continue
+            try:
+                rel.encode("utf-8")
+            except UnicodeEncodeError:
+                withheld.append(f"{rel.encode('utf-8', 'replace').decode()} (името не е UTF-8)")
+                continue
             if name == REPORT_NAME and p.parent == root:
                 continue  # regenerated below; an old one would be stale
             if _secret_file(p, rel):
@@ -367,7 +401,8 @@ def build_report(root: Path, files: list[Path], withheld: list[str], *,
 
     if withheld:
         lines += ["## Нарочно извън архива", "",
-                  "Файлове с ключове или тайни — получателят слага своите:", ""]
+                  ("Файлове с ключове или тайни (получателят слага своите), символни връзки "
+                   "и имена, които не стават в zip:"), ""]
         lines += [f"- `{w}`" for w in withheld]
         lines.append("")
     return "\n".join(lines).rstrip() + "\n", passed
@@ -394,14 +429,28 @@ def export(project: str | Path, out: str | Path | None = None, *,
         raise ValueError(f"Проектът е {total // (1024 * 1024)} MB (таван {_MAX_INPUT_MB} MB) — "
                          "това не е предаване, а образ на диска. Изчисти данните/артефактите.")
 
-    report, passed = build_report(root, files, withheld, run_tests=run_tests)
     zip_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = zip_path.with_name(zip_path.name + ".part")
-    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr(f"{root.name}/{REPORT_NAME}", report)
-        for f in files:
-            z.write(f, f"{root.name}/{f.relative_to(root).as_posix()}")
-    tmp.replace(zip_path)
+    # Файловете влизат в архива ПРЕДИ тестовете: тест, който пипа или трие файл,
+    # иначе сриваше export-а (оставяйки .part) или пращаше състоянието след
+    # теста (одит 2026-10-09). Докладът се добавя след тях.
+    try:
+        shipped: list[Path] = []
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+            for f in files:
+                try:
+                    z.write(f, f"{root.name}/{f.relative_to(root).as_posix()}")
+                except FileNotFoundError:
+                    continue
+                shipped.append(f)
+        files = shipped
+        report, passed = build_report(root, files, withheld, run_tests=run_tests)
+        with zipfile.ZipFile(tmp, "a", zipfile.ZIP_DEFLATED) as z:
+            z.writestr(f"{root.name}/{REPORT_NAME}", report)
+        tmp.replace(zip_path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     return Delivery(zip_path, report, [f.relative_to(root).as_posix() for f in files],
                     withheld, passed)
 
@@ -412,7 +461,7 @@ def summary(d: Delivery) -> str:
              None: "без пуснати тестове"}[d.tests_passed]
     out = [f"📦 {d.zip_path}", f"   {len(d.files)} файла + {REPORT_NAME}, {tests}"]
     if d.withheld:
-        out.append(f"   🔒 извън архива (тайни): {', '.join(d.withheld[:5])}"
+        out.append(f"   🔒 извън архива: {', '.join(d.withheld[:5])}"
                    + (" …" if len(d.withheld) > 5 else ""))
     return "\n".join(out)
 
