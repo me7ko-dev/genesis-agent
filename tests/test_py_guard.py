@@ -280,3 +280,15 @@ def test_windows_needs_reach_the_child(monkeypatch) -> None:
 def test_the_guard_settings_are_not_left_in_the_environment() -> None:
     res = _run("import os\nprint(sorted(k for k in os.environ if k.startswith('GENESIS_GUARD')))\n")
     assert res.ok and res.stdout.strip() == "[]", res.stderr
+
+
+def test_approved_multiprocessing_with_spawn_works() -> None:
+    # Windows CI 2026-10-09: одобреното пускане на процеси пак се спираше при
+    # CreateProcess/fork_exec („spawn“ — по подразбиране на Windows и macOS).
+    code = ("import multiprocessing as mp\n"
+            "def sq(x):\n    return x * x\n"
+            "if __name__ == '__main__':\n"
+            "    with mp.get_context('spawn').Pool(1) as pool:\n"
+            "        print(sum(pool.map(sq, [1, 2])))\n")
+    res = _run(code, policy=_ASKING)
+    assert res.ok and res.stdout.strip() == "5", res.stderr

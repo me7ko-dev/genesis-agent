@@ -239,9 +239,12 @@ def main() -> None:
     script = sys.argv[1]
     sys.argv = sys.argv[1:]
     sys.path[0] = os.path.dirname(os.path.abspath(script))
+    # Преди _install: той маха GENESIS_GUARD_* от средата (Windows CI: одобрен
+    # ProcessPoolExecutor падаше, защото флагът вече го нямаше).
+    procs = os.environ.get("GENESIS_GUARD_PROCS") == "1"
     _install()
     _no_dir_fd()
-    if os.environ.get("GENESIS_GUARD_PROCS") != "1":
+    if not procs:
         _no_raw_spawn()
     import runpy
     try:
