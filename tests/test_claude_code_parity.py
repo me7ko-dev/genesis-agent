@@ -309,6 +309,18 @@ class TestBackground:
         assert "спряна" in gs.dispatch_tool_call("BG_KILL", {"id": job_id})
         assert "върви" not in background.output(job_id).splitlines()[0]
 
+    def test_the_log_folder_is_removed_at_exit(self, repo) -> None:
+        """2026-10-09: папката с логовете оставаше в /tmp след всяка сесия."""
+        started = gs.dispatch_tool_call("RUN_CMD", {"command": _py("print('x')"), "background": True})
+        assert "bg" in started, started
+        folder = background._dir
+        assert folder is not None and folder.is_dir()
+        deadline = time.monotonic() + 10   # на Windows жив процес държи лога отворен
+        while background._running() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        background.stop_all()
+        assert not folder.exists() and background._dir is None
+
     def test_the_sandbox_gate_still_applies(self, repo) -> None:
         out = gs.parse_and_execute_tools("[RUN_BG: rm -rf /]")[0]
         assert "BLOCKED" in out or "отказ" in out.lower()

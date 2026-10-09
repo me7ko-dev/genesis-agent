@@ -817,3 +817,40 @@ def test_models_found_dead_are_left_out_of_the_coding_and_light_chains(monkeypat
     monkeypatch.setattr(brain_mod, "_dead_models", lambda: {("groq", "dead")})
     assert [c["model"] for c in brain_mod._load_coding_chain()] == ["ok"]
     assert [c["model"] for c in brain_mod._load_light_chain()] == ["ok"]
+
+
+def test_no_keys_at_all_fails_at_once_without_retry_rounds(monkeypatch) -> None:
+    """2026-10-09: на чиста инсталация (нито един ключ) всяко съобщение чакаше
+    16 s — три кръга по веригата с пауза от 8 s, а ключ от паузата не идва."""
+    brain = Brain(use_local=False)
+    brain.chain = [{"provider": "groq", "model": "m1"}, {"provider": "nvidia", "model": "m2"}]
+    brain.local = None
+    calls: list[str] = []
+
+    def fake_call(prov, model, msgs, tools=None):
+        calls.append(model)
+        raise RuntimeError(f"skip: no {prov.upper()}_API_KEY configured")
+    sleeps: list[float] = []
+    monkeypatch.setattr(brain, "_call", fake_call)
+    monkeypatch.setattr(brain_mod.time, "sleep", sleeps.append)
+    out = brain.complete([{"role": "user", "content": "x"}]).raw_text
+    assert calls == ["m1", "m2"] and sleeps == []
+    assert "genesis setup" in out
+
+
+def test_a_real_failure_still_gets_the_retry_rounds(monkeypatch) -> None:
+    brain = Brain(use_local=False)
+    brain.chain = [{"provider": "groq", "model": "m1"}, {"provider": "nvidia", "model": "m2"}]
+    brain.local = None
+    outcomes = iter([RuntimeError("skip: no GROQ_API_KEY configured"), RuntimeError("HTTP_400: bad"),
+                     RuntimeError("skip: no GROQ_API_KEY configured"), "ok"])
+
+    def fake_call(prov, model, msgs, tools=None):
+        r = next(outcomes)
+        if isinstance(r, Exception):
+            raise r
+        return r, None
+    monkeypatch.setattr(brain, "_call", fake_call)
+    monkeypatch.setattr(brain, "_record_stat", lambda *a: None)
+    monkeypatch.setattr(brain_mod.time, "sleep", lambda s: None)
+    assert brain.complete([{"role": "user", "content": "x"}]).raw_text == "ok"

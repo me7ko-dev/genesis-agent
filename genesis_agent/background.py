@@ -124,6 +124,14 @@ def stop_all() -> None:
     from genesis_agent import sandbox
     for job in _running():
         sandbox.stop_process(job.proc)
+    # Логовете са за BG_OUTPUT в тази сесия — след изхода папката оставаше в
+    # /tmp завинаги, по една на всяка сесия с фонова команда (2026-10-09).
+    global _dir
+    if _dir is not None:
+        import shutil
+        shutil.rmtree(_dir, ignore_errors=True)
+        _dir = None
+        _jobs.clear()
 
 
 _handlers_installed = False

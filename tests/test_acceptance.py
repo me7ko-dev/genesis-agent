@@ -98,3 +98,19 @@ def test_a_crashing_model_never_stops_the_turn(ws) -> None:
     c = acceptance.AcceptanceCheck("x", ws, complete=boom, on=True)
     c.observe(f"[WRITE_FILE: {ws / 'calc.py'}] ✓ записани 30 символа")
     assert c.check() == ("", "приемни тестове: пропуснати (down)")
+
+
+def test_temporary_folders_do_not_pile_up(ws) -> None:
+    """2026-10-09: всяка проверка оставяше папка в /tmp завинаги."""
+    from genesis_agent import acceptance
+    passed = _check(ws, _GOOD)
+    passed.check()
+    assert passed.test_file is not None and not passed.test_file.parent.exists()
+    failed = _check(ws, _BAD)
+    failed.check()
+    assert failed.test_file is not None and failed.test_file.is_file()   # пътят е казан на модела
+    again = _check(ws, _BAD)
+    again.check()
+    assert not failed.test_file.parent.exists() and again.test_file.is_file()
+    acceptance._cleanup()
+    assert not again.test_file.parent.exists()
