@@ -651,6 +651,8 @@ def serve(args: list[str]) -> int:
         # Нов разговор от телефона = нова сесия и за брояча (NEXT_STEPS В.8):
         # иначе статус редът на компютъра носеше Σ на стария разговор.
         gta.reset_usage()
+        from genesis_agent import todos
+        todos.clear()   # както /clear в терминала
 
     def status() -> dict:
         return {"model": f"{gta.current_provider}/{gta.current_model_id}",

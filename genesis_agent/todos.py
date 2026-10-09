@@ -18,6 +18,7 @@ _MARK = {"pending": "☐", "in_progress": "▶", "completed": "☑"}
 _MAX_ITEMS = 50
 _MAX_TEXT = 300
 _LINE = re.compile(r"^\s*(?:[-*•]\s*)?(?:\[(?P<mark>[ xX✓~>\-])\]\s*)?(?P<text>.+?)\s*$")
+_SPLIT = re.compile(r";\s*(?=(?:[-*•]\s*)?\[[ xX✓~>\-]\])")
 _FROM_MARK = {" ": "pending", "x": "completed", "X": "completed", "✓": "completed",
               "~": "in_progress", ">": "in_progress", "-": "in_progress"}
 
@@ -49,8 +50,10 @@ def parse_text(arg: str) -> list[dict[str, str]]:
     except ValueError:
         pass
     lines = [ln for ln in arg.splitlines() if ln.strip()]
-    if len(lines) == 1 and ";" in lines[0]:
-        lines = [part for part in lines[0].split(";") if part.strip()]
+    if len(lines) == 1:
+        # Само `;` пред следваща отметка дели: `[~] пусни pytest -q; ruff check`
+        # е една стъпка, не две (одит 2026-10-09).
+        lines = [part for part in _SPLIT.split(lines[0]) if part.strip()]
     out = []
     for line in lines:
         m = _LINE.match(line)

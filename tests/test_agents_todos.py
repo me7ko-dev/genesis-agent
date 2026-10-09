@@ -92,7 +92,106 @@ def test_without_frontmatter_and_bad_names(ws) -> None:
     found = agents.load(ws)
     assert found["plain"].description == "Пише тестове за всичко." and found["plain"].tools is None
     assert "../../x" not in found and "bad" not in found
-    assert "broken" in found   # счупен YAML → името от файла, не срив
+    assert "broken" not in found   # счупен YAML с невалидно име — пропуснат, не срив
+
+
+# ── одит 2026-10-09 ────────────────────────────────────────────────────────
+
+def test_broken_yaml_header_keeps_the_tool_limit(ws) -> None:
+    _agent(ws / ".claude" / "agents", "rev", "---\nname: rev\ndescription: Use this agent when: "
+           "the user finished a change. Examples: review PR\ntools: Read, Grep, Glob\n"
+           "model: haiku\n---\nReview.\n")
+    a = agents.load(ws)["rev"]
+    assert a.tools == frozenset({"READ_FILE", "SEARCH_CODE", "GLOB"}) and a.model == "haiku"
+    assert a.description.startswith("Use this agent when:")
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "symlink"), reason="symlinks")
+def test_symlinked_agent_files_are_not_read(ws, tmp_path) -> None:
+    import os
+    secret = tmp_path / "outside" / ".env"
+    secret.parent.mkdir()
+    secret.write_text("ANTHROPIC_API_KEY=sk-ant-SECRET123\n", encoding="utf-8")
+    folder = ws / ".genesis" / "agents"
+    folder.mkdir(parents=True)
+    try:
+        os.symlink(secret, folder / "helper.md")
+        os.symlink(Path(paths.GENESIS_HOME) / ".env", folder / "home.md")
+    except OSError:
+        pytest.skip("symlinks not allowed")
+    (Path(paths.GENESIS_HOME) / ".env").write_text("KEY=sk-SECRET456\n", encoding="utf-8")
+    assert agents.load(ws) == {}
+    assert "SECRET" not in agents.prompt_section(ws)
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "mkfifo"), reason="POSIX")
+def test_a_fifo_agent_file_does_not_block(ws) -> None:
+    import os
+    from concurrent.futures import ThreadPoolExecutor
+    folder = ws / ".genesis" / "agents"
+    folder.mkdir(parents=True)
+    os.mkfifo(folder / "pipe.md")
+    pool = ThreadPoolExecutor(1)
+    try:
+        assert pool.submit(agents.load, ws).result(timeout=5) == {}
+    finally:
+        pool.shutdown(wait=False)
+
+
+def test_yaml_alias_bomb_does_not_hang(ws) -> None:
+    import time
+    levels = ["a: &a [x, x, x, x, x, x, x, x, x]"]
+    for prev, cur in zip("abcdefg", "bcdefgh"):
+        levels.append(f"{cur}: &{cur} [{', '.join(['*' + prev] * 9)}]")
+    _agent(ws / ".genesis" / "agents", "bomb",
+           "---\n" + "\n".join(levels) + "\nname: *h\ndescription: *h\ntools: *h\n---\nx")
+    started = time.monotonic()
+    found = agents.load(ws)
+    agents.prompt_section(ws)
+    assert time.monotonic() - started < 5
+    assert found["bomb"].description == "x" and found["bomb"].tools == frozenset()
+
+
+def test_repo_agents_cannot_crowd_out_the_operators(ws) -> None:
+    for i in range(40):
+        _agent(ws / ".genesis" / "agents", f"r{i:02d}", f"---\ndescription: {'д' * 250}\n---\nx")
+    _agent(Path(paths.GENESIS_HOME) / "agents", "mine", "---\ndescription: моят\n---\ny")
+    assert "mine" in agents.load(ws)
+    assert len(agents.prompt_section(ws)) <= agents._MAX_SECTION + 200
+
+
+def test_a_file_the_sub_agent_changed_must_be_read_again(ws) -> None:
+    _agent(ws / ".genesis" / "agents", "fixer", "---\ndescription: оправя\ntools: READ_FILE, EDIT_FILE\n---\nx")
+    gs.dispatch_tool_call("READ_FILE", {"path": "app.py"})
+    fake = _script(_Reply(calls=[_call("READ_FILE", {"path": "app.py"}, "a")]),
+                   _Reply(calls=[_call("EDIT_FILE", {"path": "app.py", "old": "42", "new": "43"}, "b")]),
+                   _Reply("оправено"))
+    agents.run("fixer", "оправи цената", ws, complete=fake)
+    assert (ws / "app.py").read_text(encoding="utf-8") == "PRICE = 43\n"
+    out = gs.dispatch_tool_call("WRITE_FILE", {"path": "app.py", "content": "PRICE = 42\nTAX = 1\n"})
+    assert (ws / "app.py").read_text(encoding="utf-8") == "PRICE = 43\n", out
+
+
+def test_ctrl_c_in_the_progress_line_does_not_leave_the_scope(ws, monkeypatch) -> None:
+    _agent(ws / ".genesis" / "agents", "reader", READER)
+
+    def interrupt(_text: str) -> None:
+        raise KeyboardInterrupt
+    monkeypatch.setattr(agents, "progress", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        agents.run("reader", "x", ws, complete=_script(_Reply("ок")))
+    assert gs._agent_scope() is None
+
+
+def test_an_empty_reply_is_reported_as_such(ws) -> None:
+    _agent(ws / ".genesis" / "agents", "reader", READER)
+    out = agents.run("reader", "x", ws, complete=_script(_Reply("")))
+    assert "Празен отговор" in out and "1 рунда" in out
+
+
+def test_semicolons_inside_a_step_do_not_split_it() -> None:
+    items = todos.parse_text("[x] read app.py; [~] run `pytest -q; ruff check`; [ ] commit")
+    assert [i["content"] for i in items] == ["read app.py", "run `pytest -q; ruff check`", "commit"]
 
 
 def test_no_tools_means_all_but_nesting_and_the_main_conversation_state(ws) -> None:

@@ -31,7 +31,8 @@ MAX_ROUNDS = 15
 _MAX_CALLS = 8
 _MAX_ANSWER = 8000
 _MAX_PROMPT = 20_000
-_MAX_AGENTS = 30
+_MAX_AGENTS = 30        # на папка
+_MAX_SECTION = 4000     # знака в системния промпт (като MCP)
 _NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
 
 # Имената от Claude Code → инструментите на Genesis: файл от `.claude/agents/`
@@ -61,8 +62,9 @@ class Agent:
     dropped: tuple[str, ...] = ()    # непознати инструменти от файла
 
 
-def agent_dirs(workspace: Path) -> list[Path]:
-    """Проектът преди оператора — по-близкото печели при едно и също име."""
+def _sources(workspace: Path) -> list[tuple[Path, list[Path]]]:
+    """(папка, откъдето файловете ѝ може да идват). Проектът преди оператора —
+    по-близкото печели при едно и също име (както в Claude Code)."""
     from genesis_agent.paths import GENESIS_HOME
     from genesis_agent.project_instructions import _project_root
     try:
@@ -70,10 +72,19 @@ def agent_dirs(workspace: Path) -> list[Path]:
     except OSError:
         ws = Path(workspace)
     root = _project_root(ws)
-    dirs = [ws / ".genesis" / "agents", ws / ".claude" / "agents"]
+    project = [ws, root] if root != ws else [ws]
+    folders = [ws / ".genesis" / "agents", ws / ".claude" / "agents"]
     if root != ws:
-        dirs += [root / ".genesis" / "agents", root / ".claude" / "agents"]
-    return [*dirs, Path(GENESIS_HOME) / "agents"]
+        folders += [root / ".genesis" / "agents", root / ".claude" / "agents"]
+    try:
+        home = Path(GENESIS_HOME).resolve()
+    except OSError:
+        home = Path(GENESIS_HOME)
+    return [*((f, project) for f in folders), (home / "agents", [home])]
+
+
+def agent_dirs(workspace: Path) -> list[Path]:
+    return [folder for folder, _ in _sources(workspace)]
 
 
 def _known_tools() -> set[str]:
@@ -84,7 +95,13 @@ def _known_tools() -> set[str]:
 def _tools(raw: Any) -> tuple[frozenset[str] | None, tuple[str, ...]]:
     if raw is None or raw == "" or raw == []:
         return None, ()
-    items = raw if isinstance(raw, list) else str(raw).replace(";", ",").split(",")
+    if isinstance(raw, list) and all(isinstance(i, str) for i in raw):
+        items: list[str] = raw
+    elif isinstance(raw, str):
+        items = raw.replace(";", ",").split(",")
+    else:
+        # Нещо странно (речник, вложени списъци) — нито един инструмент, не всички.
+        return frozenset(), ("(неразбираемо поле tools)",)
     known = _known_tools()
     picked: set[str] = set()
     dropped: list[str] = []
@@ -102,48 +119,85 @@ def _tools(raw: Any) -> tuple[frozenset[str] | None, tuple[str, ...]]:
     return frozenset(picked), tuple(dropped)
 
 
-def _parse(path: Path) -> Agent | None:
+def _header(raw: str) -> dict[str, Any]:
+    """Полетата от заглавката. YAML, а ако не се чете — ред по ред `ключ: стойност`.
+
+    Счупен YAML (най-често `description: Use this agent when: …` без кавички, както
+    в много файлове за Claude Code) даваше празна заглавка — и агентът оставаше без
+    ограничение на инструментите (одит 2026-10-09)."""
+    import yaml
     try:
-        text = path.read_text(encoding="utf-8-sig", errors="replace")[:_MAX_PROMPT + 4000]
+        loaded = yaml.safe_load(raw)
+    except yaml.YAMLError:
+        loaded = None
+    if isinstance(loaded, dict):
+        return loaded
+    meta: dict[str, Any] = {}
+    for line in raw.splitlines():
+        key, sep, value = line.partition(":")
+        if sep and key.strip().lower() in ("name", "description", "tools", "model"):
+            meta[key.strip().lower()] = value.strip().strip("'\"")
+    return meta
+
+
+def _text(value: Any) -> str:
+    # Само низ: YAML псевдоними (`&a [*a, …]`) правят от 299 байта списък с
+    # милиони елементи и str() върху него замразяваше чата (одит 2026-10-09).
+    return value if isinstance(value, str) else ""
+
+
+def _read(path: Path, roots: list[Path]) -> str | None:
+    """Текстът на файла — само обикновен файл в своята папка (не връзка към
+    `.env`, `/proc/self/environ` или FIFO) и не повече, отколкото ни трябва."""
+    from genesis_agent.project_instructions import _allowed
+    real = _allowed(path, roots)
+    if real is None:
+        return None
+    try:
+        with open(real, encoding="utf-8-sig", errors="replace") as fh:
+            return fh.read(_MAX_PROMPT + 4000)
     except OSError:
+        return None
+
+
+def _parse(path: Path, roots: list[Path]) -> Agent | None:
+    text = _read(path, roots)
+    if text is None:
         return None
     meta: dict[str, Any] = {}
     body = text
     if text.startswith("---"):
         end = text.find("\n---", 3)
         if end != -1:
-            import yaml
-            try:
-                loaded = yaml.safe_load(text[3:end])
-            except yaml.YAMLError:
-                loaded = None
-            meta = loaded if isinstance(loaded, dict) else {}
+            meta = _header(text[3:end])
             body = text[end + 4:]
-    name = str(meta.get("name") or path.stem).strip().lower()
+    name = (_text(meta.get("name")) or path.stem).strip().lower()
     if not _NAME.match(name):
         return None
     prompt = body.strip()[:_MAX_PROMPT]
-    description = " ".join(str(meta.get("description") or "").split())[:300]
+    description = " ".join(_text(meta.get("description")).split())[:300]
     if not description:
         description = " ".join((prompt.splitlines() or [""])[0].split())[:200]
     if not prompt and not description:
         return None
     tools, dropped = _tools(meta.get("tools"))
     return Agent(name=name, description=description, prompt=prompt, tools=tools,
-                 model=str(meta.get("model") or "").strip().lower(), source=path,
+                 model=_text(meta.get("model")).strip().lower(), source=path,
                  dropped=dropped)
 
 
 def load(workspace: Path) -> dict[str, Agent]:
     found: dict[str, Agent] = {}
-    for folder in agent_dirs(workspace):
+    for folder, roots in _sources(workspace):
         try:
-            files = sorted(folder.glob("*.md")) if folder.is_dir() else []
+            files = sorted(folder.glob("*.md"))[:_MAX_AGENTS] if folder.is_dir() else []
         except OSError:
             continue
+        # Таванът е за всяка папка: клонирано repo с 40 агента не изтласква
+        # агентите на оператора (одит 2026-10-09).
         for f in files:
-            agent = _parse(f)
-            if agent is not None and agent.name not in found and len(found) < _MAX_AGENTS:
+            agent = _parse(f, roots)
+            if agent is not None and agent.name not in found:
                 found[agent.name] = agent
     return found
 
@@ -156,7 +210,14 @@ def prompt_section(workspace: Path) -> str:
     lines = ["## Под-агенти (от .genesis/agents/ — описанията са от файловете им)",
              ("Възложи им задача с AGENT {agent, task} или [AGENT: име | задача]. Работят в "
               "свой контекст и връщат само доклада — ползвай ги за това, за което са описани.")]
-    lines += [f"- {a.name} — {a.description}" for a in agents.values()]
+    size = sum(len(x) for x in lines)
+    for a in agents.values():
+        line = f"- {a.name} — {a.description}"
+        if size + len(line) > _MAX_SECTION:
+            lines.append("- … и още (/agents ги показва всички)")
+            break
+        lines.append(line)
+        size += len(line)
     return "\n".join(lines)
 
 
@@ -242,15 +303,25 @@ def run(name: str, task: str, workspace: Path, *,
     allowed = allowed_tools(agent)
     # Прочетеното от под-агента не е „видяно“ от главния: иначе след него
     # WRITE_FILE на главния презаписва файл, който той не е чел (както EXPLORE).
-    seen_before = set(gs._SEEN_PATHS)
-    gs._set_agent_scope((agent.name, allowed))
+    # А файл, който под-агентът ПРОМЕНИ, вече не е „видян“ и от главния: старото
+    # му копие иначе тихо връщаше поправката (одит 2026-10-09).
+    seen_before = {p: _stamp(p) for p in gs._SEEN_PATHS}
     _say(f"↳ {agent.name}: {task[:100]}")
     try:
+        gs._set_agent_scope((agent.name, allowed))
         return _loop(agent, messages, complete, max_rounds, gs)
     finally:
         gs._set_agent_scope(None)
         gs._SEEN_PATHS.clear()
-        gs._SEEN_PATHS.update(seen_before)
+        gs._SEEN_PATHS.update(p for p, stamp in seen_before.items() if _stamp(p) == stamp)
+
+
+def _stamp(path: Path) -> tuple[int, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size
 
 
 def _loop(agent: Agent, messages: list[dict], complete: Callable[..., Any],
@@ -290,7 +361,8 @@ def _loop(agent: Agent, messages: list[dict], complete: Callable[..., Any],
                              "\n\n".join(_clip(o) for o in outs[:_MAX_CALLS])})
             continue
         if not text:
-            break
+            return (f"[AGENT: {agent.name}] ❌ Празен отговор от модела след {round_i + 1} "
+                    f"рунда ({used} инструмента).{' Последно: ' + last[:_MAX_ANSWER] if last else ''}")
         return f"[AGENT: {agent.name}] ({used} инструмента)\n{text[:_MAX_ANSWER]}"
     return (f"[AGENT: {agent.name}] спря след {max_rounds} рунда ({used} инструмента) без "
             f"окончателен доклад. Последно:\n{last[:_MAX_ANSWER]}")
