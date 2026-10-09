@@ -139,6 +139,8 @@ _SECRET_PATHS = (
     r"\.ssh(?:[/\\]|\b)|\.aws(?:[/\\]|\b)|\.gnupg(?:[/\\]|\b)|id_rsa|id_ed25519|id_ecdsa|id_dsa"
     r"|\bid_[*?\[]|\.env\b|credentials\b"
     r"|\.pem\b|\.p12\b|\.pfx\b|\.genesis[/\\]remote\.json|gh[/\\]hosts\.yml"
+    # OAuth токените за MCP и копията на проекта за /undo (2026-10-09).
+    r"|mcp_tokens\.json\b|\.genesis[/\\]checkpoints\b"
     r"|\.npmrc\b|\.pypirc\b|\.netrc\b|\.docker[/\\]config\.json|\.kube[/\\]config\b"
     r"|Login Data\b"
 )

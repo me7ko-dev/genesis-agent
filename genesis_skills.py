@@ -1164,7 +1164,31 @@ def _before_tool(name: str, args: dict) -> str | None:
             edit_history.record(_resolve_noted(str(args["path"]), redirect=False)[0])
         except Exception:
             pass
+    elif _may_change_files(name, args):
+        # Команда, умение, MCP: пипат файлове, които никой не е назовал —
+        # снимка на проекта преди и след тях, за /undo (2026-10-09).
+        try:
+            from genesis_agent import edit_history
+            edit_history.before_command(Path(_WORKSPACE))
+        except Exception:
+            pass
     return None
+
+
+def _may_change_files(name: str, args: dict) -> bool:
+    from genesis_agent import plan_mode
+    if name in plan_mode.READ_ONLY_TOOLS or name in ("BG_KILL", "REMEMBER", "TASK_ADD",
+                                                     "TASK_UPDATE", "TODO_WRITE"):
+        return False
+    if name.startswith(("BROWSE", "BROWSER_")):
+        return False
+    if name.startswith("mcp__"):
+        try:
+            from genesis_agent import mcp_client
+            return not mcp_client.is_read_only(name)
+        except Exception:
+            return True
+    return True
 
 
 def _after_tool(name: str, args: dict, result: str) -> str:
@@ -1172,6 +1196,12 @@ def _after_tool(name: str, args: dict, result: str) -> str:
         try:  # отказан/неуспешен запис не е промяна за /undo
             from genesis_agent import edit_history
             edit_history.forget_if_unchanged(_resolve_noted(str(args["path"]), redirect=False)[0])
+        except Exception:
+            pass
+    elif _may_change_files(name, args):
+        try:  # какво промени командата — само между двете снимки (одит 2026-10-09)
+            from genesis_agent import edit_history
+            edit_history.after_command()
         except Exception:
             pass
     try:
