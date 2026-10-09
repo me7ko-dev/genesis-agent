@@ -200,7 +200,7 @@ def test_export_zips_the_files_before_the_tests_touch_them(tmp_path):
     root = tmp_path / "app"
     root.mkdir()
     (root / "report.py").write_text("def make(p):\n    open(p, 'w').write('r')\n", encoding="utf-8")
-    (root / "out.txt").write_bytes("истинският изход\n".encode("utf-8"))
+    (root / "out.txt").write_bytes("истинският изход\n".encode())
     (root / "test_report.py").write_text(
         "import os\nfrom report import make\n\n"
         "def test_make():\n    make('out.txt')\n    os.remove('out.txt')\n", encoding="utf-8")
