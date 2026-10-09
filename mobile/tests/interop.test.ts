@@ -95,6 +95,28 @@ test('a whole conversation with the real server', async () => {
   }
 });
 
+test('chat commands and sub-agent progress reach the phone', async () => {
+  const { info, stop } = await startServer();
+  try {
+    const client = new GenesisClient(parsePairingUrl(info.url)!, random);
+    assert.equal((await client.events(0, 0)).state?.plan, false);
+
+    assert.equal((await client.send('/plan')).ok, true);
+    const { hit: note, after } = await waitFor(client, (e) => e.type === 'info');
+    assert.match(note.text ?? '', /Режим план/);
+    const idle = await waitFor(client, (e) => e.type === 'busy' && e.busy === false, after - 1);
+    // /plan never reached the model: no assistant reply, and plan mode is on.
+    assert.equal(idle.seen.some((e) => e.type === 'assistant'), false);
+    assert.equal((await client.events(0, 0)).state?.plan, true);
+
+    assert.equal((await client.send('агент')).ok, true);
+    const { hit: step } = await waitFor(client, (e) => e.type === 'progress', idle.after);
+    assert.equal(step.text, '↳ reviewer: чета diff-а');
+  } finally {
+    stop();
+  }
+});
+
 test('a wrong key is refused, not misread', async () => {
   const { info, stop } = await startServer();
   try {

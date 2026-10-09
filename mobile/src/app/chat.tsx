@@ -5,7 +5,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { AssistantMessage, ConfirmCard, Note, ToolCard, UserBubble } from '../components/Cards';
+import { AssistantMessage, ConfirmCard, Note, TodoPanel, ToolCard, UserBubble } from '../components/Cards';
 import type { ChatItem } from '../lib/chat';
 import { usePairing } from '../lib/pairing';
 import type { Pairing } from '../lib/protocol';
@@ -53,6 +53,12 @@ function Chat({ pairing }: { pairing: Pairing }) {
   };
 
   const [menuOpen, setMenuOpen] = useState(false);
+  // The chat's own commands (remote_server.phone_command), one tap away.
+  const command = (text: string) => {
+    setMenuOpen(false);
+    atBottom.current = true;
+    g.send(text);
+  };
   const doUnpair = async () => {
     setMenuOpen(false);
     await unpair();
@@ -65,7 +71,13 @@ function Chat({ pairing }: { pairing: Pairing }) {
     <SafeAreaView style={[styles.flex, { backgroundColor: theme.bg }]} edges={['top', 'left', 'right', 'bottom']}>
       <View style={[styles.header, { borderColor: theme.border }]}>
         <View style={styles.flex}>
-          <Text style={[styles.hTitle, { color: theme.text }]} numberOfLines={1}>{pairing.name}</Text>
+          <View style={styles.hRow}>
+            <Text style={[styles.hTitle, styles.flexShrink, { color: theme.text }]} numberOfLines={1}>{pairing.name}</Text>
+            {g.plan ? (
+              <Text accessibilityLabel="Режим план: нищо не се променя"
+                style={[styles.badge, { color: theme.warn, borderColor: theme.warn }]}>⏸ план</Text>
+            ) : null}
+          </View>
           <View style={styles.hSub}>
             <View style={[styles.dot, { backgroundColor: dot }]} />
             <Text style={[styles.hSubText, { color: theme.muted }]} numberOfLines={1}>
@@ -84,6 +96,15 @@ function Chat({ pairing }: { pairing: Pairing }) {
             <Text style={[styles.menuInfo, { color: theme.muted }]} numberOfLines={2}>📁 {g.status.workspace}</Text>
           ) : null}
           <MenuItem label="Нов разговор" onPress={() => { setMenuOpen(false); g.clear(); }} />
+          {g.busy ? null : (
+            <>
+              <MenuItem label={g.plan ? 'Изпълни плана (/plan)' : 'Режим план (/plan)'} onPress={() => command('/plan')} />
+              <MenuItem label="Върни последните промени (/undo)" onPress={() => command('/undo')} />
+              <MenuItem label="Задачи (/todos)" onPress={() => command('/todos')} />
+              <MenuItem label="Под-агенти (/agents)" onPress={() => command('/agents')} />
+              <MenuItem label="Команди (/help)" onPress={() => command('/help')} />
+            </>
+          )}
           <MenuItem label="Отдвои този телефон" danger onPress={doUnpair} />
         </View>
       ) : null}
@@ -133,6 +154,8 @@ function Chat({ pairing }: { pairing: Pairing }) {
         />
 
         {g.error ? <Text style={[styles.error, { color: theme.danger }]}>{g.error}</Text> : null}
+
+        <TodoPanel todos={g.todos} />
 
         <View style={[styles.composer, { borderColor: theme.border, backgroundColor: theme.surface }]}>
           <TextInput
@@ -192,6 +215,9 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth },
   hTitle: { fontSize: 17, fontWeight: '700' },
+  hRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  flexShrink: { flexShrink: 1 },
+  badge: { fontSize: 12, fontWeight: '700', borderWidth: 1, borderRadius: 8, paddingHorizontal: 6, paddingVertical: 1 },
   hSub: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2 },
   hSubText: { fontSize: 12, flexShrink: 1 },
   dot: { width: 8, height: 8, borderRadius: 4 },

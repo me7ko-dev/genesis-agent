@@ -181,6 +181,12 @@ export type GenesisEvent = {
   label?: string;
 };
 
+export type Todo = { content: string; status: 'pending' | 'in_progress' | 'completed' };
+
+/** What the phone shows all the time, not as an event: plan mode and the
+ *  agent's task list (remote_server.phone_state). Older servers omit it. */
+export type PhoneState = { plan: boolean; todos: Todo[] };
+
 export type EventsReply = {
   ok: boolean;
   events: GenesisEvent[];
@@ -188,6 +194,7 @@ export type EventsReply = {
   reset: boolean;
   busy: boolean;
   epoch: string;
+  state?: PhoneState;
 };
 
 export type StatusReply = {
