@@ -945,7 +945,7 @@ _SIMPLE_RE = re.compile(
     r"\[(?P<tool>READ_FILE|RUN_CMD|WEB_SEARCH|LIST_DIR|DELEGATE|RESEARCH|BROWSE|ASK_USER|"
     r"SEARCH_CODE|REPO_MAP|GLOB|"
     r"BROWSER_CLICK|BROWSER_TYPE|REMEMBER|TASK_ADD|TASK_UPDATE|TASK_LIST|"
-    r"RUN_BG|BG_OUTPUT|BG_KILL|MCP|EXPLORE):"
+    r"RUN_BG|BG_OUTPUT|BG_KILL|MCP|EXPLORE|WEB_FETCH):"
     r"\s*(?P<arg>(?:[^\[\]]|" + _BRACKETS + r")+)\]"
 )
 # REPO_MAP без аргумент = текущият workspace (както BROWSER_READ/TASK_LIST).
@@ -978,7 +978,13 @@ _SIMPLE_DISPATCH: dict[str, Callable[..., str]] = {
     "BG_KILL": lambda arg: _background().kill(arg),
     "MCP": lambda arg: _mcp().call_text_tag(arg),
     "EXPLORE": lambda arg: _tool_explore(arg),
+    "WEB_FETCH": lambda arg: _tool_web_fetch(arg),
 }
+
+
+def _tool_web_fetch(url: str) -> str:
+    from genesis_agent.web_fetch import web_fetch
+    return web_fetch(url)
 
 
 def _tool_explore(question: str) -> str:
@@ -1327,6 +1333,8 @@ def _dispatch(name: str, arguments: dict) -> str:
             return _tool_run_cmd(arguments.get("command", ""))
         if name == "EXPLORE":
             return _tool_explore(str(arguments.get("question", "") or ""))
+        if name == "WEB_FETCH":
+            return _tool_web_fetch(str(arguments.get("url", "") or ""))
         if name.startswith("mcp__"):
             return _mcp().call(name, arguments)
         if name == "BG_OUTPUT":

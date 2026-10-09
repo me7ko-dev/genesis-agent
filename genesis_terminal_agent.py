@@ -1326,6 +1326,32 @@ def _turn_tools():
 
 _STOP_HOOK_ROUNDS = 2
 
+# Само гледащи и независими един от друг: няколко такива в един рунд вървят
+# едновременно (както в Claude Code) — четири SEARCH_CODE/READ_FILE/WEB_FETCH
+# не чакат един след друг. Всичко друго (запис, команди, ASK_USER, EXPLORE,
+# който пипа общото „прочетено“) остава последователно.
+_PARALLEL_SAFE = frozenset({"READ_FILE", "GLOB", "SEARCH_CODE", "REPO_MAP", "LIST_DIR",
+                            "WEB_SEARCH", "WEB_FETCH"})
+_PARALLEL_MAX = 8
+
+
+def _parallel_reads(tool_calls: list[dict]) -> dict[int, str]:
+    """Results by index when the whole batch is safe to run at once; else {}."""
+    calls = []
+    for tc in tool_calls:
+        fn = tc.get("function", {}) or {}
+        try:
+            args = load_tool_arguments(fn.get("arguments"))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return {}
+        calls.append((fn.get("name", ""), args))
+    if len(calls) < 2 or any(name not in _PARALLEL_SAFE for name, _ in calls):
+        return {}
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(_PARALLEL_MAX, len(calls))) as pool:
+        results = list(pool.map(lambda c: genesis_skills.dispatch_tool_call(c[0], c[1]), calls))
+    return dict(enumerate(results))
+
 
 def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     """Една реплика на оператора: модел → инструменти → … → отговор.
@@ -1457,14 +1483,16 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
             # но без риск от грешно написан таг/синтаксис.
             asked = ""
             _repeat_note = ""
-            for tc in tool_calls:
+            _prefetched = _parallel_reads(tool_calls)
+            for _tc_i, tc in enumerate(tool_calls):
                 fn = tc.get("function", {}) or {}
                 name = fn.get("name", "")
                 try:
                     args = load_tool_arguments(fn.get("arguments"))
                 except (json.JSONDecodeError, TypeError):
                     args = {}
-                result = genesis_skills.dispatch_tool_call(name, args)
+                result = (_prefetched[_tc_i] if _tc_i in _prefetched
+                          else genesis_skills.dispatch_tool_call(name, args))
                 _page_check.observe(result)
                 _run_check.observe(result)
                 _accept.observe(result)

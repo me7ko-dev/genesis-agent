@@ -13,6 +13,7 @@ from __future__ import annotations
 READ_ONLY_TOOLS = frozenset({
     "READ_FILE", "LIST_DIR", "GLOB", "SEARCH_CODE", "REPO_MAP",
     "WEB_SEARCH", "RESEARCH", "ASK_USER", "TASK_LIST", "EXPLORE", "BG_OUTPUT",
+    "WEB_FETCH",
 })
 
 _on = False

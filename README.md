@@ -173,6 +173,9 @@ The habits that make Claude Code pleasant to work with, in the Genesis chat:
 | background | `RUN_CMD` with `background: true` (`[RUN_BG: …]`) keeps a dev server running while it works; `BG_OUTPUT` / `BG_KILL`, `/bg` in the chat. |
 | `/compact` | Summarise the history now instead of waiting for the threshold. |
 | MCP | Tools from any MCP server (GitHub, databases, Slack, …): `~/.genesis/mcp.json` in Claude Code's `.mcp.json` format (a project's `.mcp.json` only after `/mcp trust`). Read-only tools run at once; any other asks first, like a risky command (or list it in `autoApprove`). `/mcp` shows servers and tools. |
+| `genesis -p "…"` | One turn without the chat, for scripts and CI: the answer alone on stdout (`--json` for one JSON object), piped stdin added to the task (`git diff \| genesis -p "review"`), `--plan` to change nothing, `--cwd` for the folder. Nobody can say yes, so anything risky is refused unless `--dangerously-allow`. |
+| `WEB_FETCH` | Reads one page by its address as text (headings, lists, links, code) without a browser. Internal-network addresses are refused, also after a redirect; localhost is allowed for your dev server. |
+| parallel reads | Several independent reads in one round (READ_FILE, SEARCH_CODE, GLOB, WEB_FETCH…) run at once. |
 | `EXPLORE` | A read-only sub-agent: "where is the price computed and who calls it?" is searched and read in its own conversation, and only the answer (with `path:line`) comes back — the main conversation stays small. |
 
 ```json
