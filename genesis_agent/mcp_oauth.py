@@ -385,11 +385,31 @@ def _entry(info: dict, client_id: str, tokens: dict, old: dict | None = None) ->
     }
 
 
+def no_browser() -> bool:
+    """По SSH или без графична среда браузър на тази машина няма."""
+    if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"):
+        return True
+    return sys.platform.startswith("linux") and not (
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def _from_pasted(text: str) -> dict[str, str]:
+    """Адресът, на който браузърът стигна (`…/callback?code=…&state=…`)."""
+    query = urlsplit(text.strip()).query or text.strip().lstrip("?")
+    return {k: v[0] for k, v in parse_qs(query).items()}
+
+
 def login(server_url: str, *, www_authenticate: str = "",
           open_browser: Callable[[str], Any] | None = None,
-          say: Callable[[str], None] = print, timeout: float = LOGIN_TIMEOUT) -> dict:
+          say: Callable[[str], None] = print, timeout: float = LOGIN_TIMEOUT,
+          paste: Callable[[str], str] | None = None) -> dict:
     """Целият вход. `open_browser` по подразбиране е webbrowser.open; адресът
-    се казва и на оператора — ако браузърът не се отвори, го копира сам."""
+    се казва и на оператора — ако браузърът не се отвори, го копира сам.
+
+    `paste` (2026-10-09): без браузър тук (SSH) — операторът отваря адреса
+    където има браузър и поставя адреса, на който е стигнал; кодът и `state`
+    се взимат от него. Обратният адрес на 127.0.0.1 там не отговаря — това е
+    очаквано."""
     info = discover(server_url, www_authenticate)
     srv = _callback_server()
     redirect_uri = f"http://127.0.0.1:{srv.server_address[1]}/callback"
@@ -407,12 +427,22 @@ def login(server_url: str, *, www_authenticate: str = "",
             params["scope"] = " ".join(str(s) for s in info["scopes"])
         sep = "&" if "?" in info["authorization_endpoint"] else "?"
         url = info["authorization_endpoint"] + sep + urlencode(params)
-        say(f"Вход в браузъра (ако не се отвори, копирай адреса):\n{url}")
-        threading.Thread(target=open_browser or _open, args=(url,), daemon=True).start()
-        deadline = time.monotonic() + timeout
-        while not srv.result and time.monotonic() < deadline:
-            srv.handle_request()
-        result = srv.result
+        if paste is not None:
+            say("Отвори този адрес в браузър (на който и да е компютър) и влез:\n" + url)
+            result = _from_pasted(paste(
+                "После постави тук адреса, на който те прати браузърът "
+                "(http://127.0.0.1:…/callback?code=…, страницата може да не се отвори): "))
+            if not result:
+                raise OAuthError("не е поставен адрес с код")
+            if result.get("state") != srv.state:
+                raise OAuthError("поставеният адрес не е от този вход (state не съвпада)")
+        else:
+            say(f"Вход в браузъра (ако не се отвори, копирай адреса):\n{url}")
+            threading.Thread(target=open_browser or _open, args=(url,), daemon=True).start()
+            deadline = time.monotonic() + timeout
+            while not srv.result and time.monotonic() < deadline:
+                srv.handle_request()
+            result = srv.result
     finally:
         srv.server_close()
     if not result:

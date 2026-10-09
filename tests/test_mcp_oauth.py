@@ -128,6 +128,7 @@ def test_a_callback_with_the_wrong_state_is_ignored(oauth, monkeypatch) -> None:
 def test_mcp_login_and_logout_from_the_chat(oauth, monkeypatch, tmp_path) -> None:
     url, _ = oauth()
     monkeypatch.setattr(mcp_oauth, "_open", _browser)
+    monkeypatch.setattr(mcp_oauth, "no_browser", lambda: False)   # CI е без DISPLAY
     seen: list[str] = []
     chat_commands.handle("/mcp login linear", messages=deque(), workspace=tmp_path,
                          out=seen.append, ask=lambda q: "")
@@ -379,3 +380,56 @@ def test_ctrl_c_while_waiting_for_the_lock_does_not_freeze_the_process(monkeypat
     with pytest.raises(KeyboardInterrupt):
         mcp_oauth.forget("http://127.0.0.1:1/mcp")
     assert not mcp_oauth._lock.locked()
+
+
+# ── вход по SSH без браузър (2026-10-09) ─────────────────────────────────────
+
+def _browser_elsewhere(auth_url: str) -> str:
+    """Браузър на друг компютър: влиза, сървърът го праща към 127.0.0.1, който
+    там не отговаря — операторът копира адреса от лентата."""
+    import requests
+    resp = requests.get(auth_url, timeout=10, allow_redirects=False)
+    return resp.headers["Location"]
+
+
+def test_login_by_pasting_the_address_over_ssh(oauth) -> None:
+    url, state = oauth()
+    asked: list[str] = []
+    shown: list[str] = []
+
+    def paste(question: str) -> str:
+        asked.append(question)
+        auth_url = next(s for s in shown if "/authorize?" in s).split("\n")[-1]
+        return _browser_elsewhere(auth_url)
+    entry = mcp_oauth.login(url, say=shown.append, paste=paste, timeout=5)
+    assert asked and entry["access_token"] in state["tokens"]
+
+
+def test_a_pasted_address_from_another_login_is_refused(oauth) -> None:
+    url, _ = oauth()
+    with pytest.raises(mcp_oauth.OAuthError, match="state"):
+        mcp_oauth.login(url, say=lambda _t: None,
+                        paste=lambda _q: "http://127.0.0.1:1/callback?code=x&state=forged")
+
+
+def test_mcp_login_paste_from_the_chat(oauth, tmp_path) -> None:
+    oauth()
+    seen: list[str] = []
+
+    def ask(_q: str) -> str:
+        auth_url = next(s for s in seen if "/authorize?" in s).split("\n")[-1]
+        return _browser_elsewhere(auth_url)
+    chat_commands.handle("/mcp login linear --paste", messages=deque(), workspace=tmp_path,
+                         out=seen.append, ask=ask)
+    assert any("✓ Вход в linear" in s for s in seen), seen
+
+
+def test_ssh_means_no_browser(monkeypatch) -> None:
+    monkeypatch.setenv("SSH_CONNECTION", "10.0.0.2 5000 10.0.0.1 22")
+    assert mcp_oauth.no_browser()
+
+
+def test_an_empty_paste_says_what_is_missing(oauth) -> None:
+    url, _ = oauth()
+    with pytest.raises(mcp_oauth.OAuthError, match="поставен"):
+        mcp_oauth.login(url, say=lambda _t: None, paste=lambda _q: "")
