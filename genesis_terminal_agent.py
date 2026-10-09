@@ -53,9 +53,14 @@ except Exception:
     _memory_context: Any = None  # type: ignore[no-redef]
 
 
+# `genesis -p` (headless) го изключва: еднократен ход от скрипт не е разговор,
+# който да се появи в /history или в паметта на чата (одит 2026-10-09).
+PERSIST_HISTORY = True
+
+
 def _remember(role: str, content: str) -> None:
     """Записва реплика в споделената conversation_memory (никога не хвърля)."""
-    if _conv_mem is None or not content:
+    if _conv_mem is None or not content or not PERSIST_HISTORY:
         return
     try:
         _conv_mem.add_message(role, content)
@@ -1326,6 +1331,54 @@ def _turn_tools():
 
 _STOP_HOOK_ROUNDS = 2
 
+# Само гледащи и независими един от друг: няколко такива в един рунд вървят
+# едновременно (както в Claude Code) — четири SEARCH_CODE/READ_FILE/WEB_FETCH
+# не чакат един след друг. Всичко друго (запис, команди, ASK_USER, EXPLORE,
+# който пипа общото „прочетено“) остава последователно.
+_PARALLEL_SAFE = frozenset({"READ_FILE", "GLOB", "SEARCH_CODE", "REPO_MAP", "LIST_DIR",
+                            "WEB_SEARCH", "WEB_FETCH"})
+_PARALLEL_MAX = 8
+
+
+def _may_ask(name: str, args: dict) -> bool:
+    if name in ("WEB_SEARCH", "WEB_FETCH"):
+        return False
+    from genesis_agent import sandbox
+    raw = str(args.get("path") or "") or ("." if name in ("LIST_DIR", "REPO_MAP", "GLOB",
+                                                          "SEARCH_CODE") else "")
+    if not raw:
+        return True
+    try:
+        target = genesis_skills._resolve_noted(raw, redirect=False)[0].resolve()
+        workspace = Path(genesis_skills._WORKSPACE).resolve()
+    except (OSError, ValueError):
+        return True
+    inside = target == workspace or workspace in target.parents
+    return not inside or bool(sandbox.sensitive_path_reason(target))
+
+
+def _parallel_reads(tool_calls: list[dict]) -> dict[int, str]:
+    """Results by index when the whole batch is safe to run at once; else {}."""
+    calls = []
+    for tc in tool_calls:
+        fn = tc.get("function", {}) or {}
+        try:
+            args = load_tool_arguments(fn.get("arguments"))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return {}
+        calls.append((fn.get("name", ""), args))
+    if len(calls) < 2 or any(name not in _PARALLEL_SAFE for name, _ in calls):
+        return {}
+    # Четене, което може да поиска „да“ от оператора (ключ, файл извън папката),
+    # върви последователно: input() в нишка не получава Ctrl-C и чатът увисваше,
+    # а после свършваше (одит 2026-10-09).
+    if any(_may_ask(name, args) for name, args in calls):
+        return {}
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(_PARALLEL_MAX, len(calls))) as pool:
+        results = list(pool.map(lambda c: genesis_skills.dispatch_tool_call(c[0], c[1]), calls))
+    return dict(enumerate(results))
+
 
 def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     """Една реплика на оператора: модел → инструменти → … → отговор.
@@ -1457,14 +1510,16 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
             # но без риск от грешно написан таг/синтаксис.
             asked = ""
             _repeat_note = ""
-            for tc in tool_calls:
+            _prefetched = _parallel_reads(tool_calls)
+            for _tc_i, tc in enumerate(tool_calls):
                 fn = tc.get("function", {}) or {}
                 name = fn.get("name", "")
                 try:
                     args = load_tool_arguments(fn.get("arguments"))
                 except (json.JSONDecodeError, TypeError):
                     args = {}
-                result = genesis_skills.dispatch_tool_call(name, args)
+                result = (_prefetched[_tc_i] if _tc_i in _prefetched
+                          else genesis_skills.dispatch_tool_call(name, args))
                 _page_check.observe(result)
                 _run_check.observe(result)
                 _accept.observe(result)
@@ -1640,9 +1695,10 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
             pass
 
     # Save session history — convert deque to list for JSON serialization!
-    session_file = _session_file()
-    with open(session_file, "w", encoding="utf-8") as f:
-        json.dump(list(messages), f, ensure_ascii=False, indent=None, separators=(',', ':'))
+    if PERSIST_HISTORY:
+        session_file = _session_file()
+        with open(session_file, "w", encoding="utf-8", errors="replace") as f:
+            json.dump(list(messages), f, ensure_ascii=False, indent=None, separators=(',', ':'))
     from genesis_agent.agent_core import bounded_history
     return bounded_history(messages, limit)
 

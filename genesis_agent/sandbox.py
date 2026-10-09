@@ -34,6 +34,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -1230,6 +1231,7 @@ class SandboxPolicy:
 
 # Глобална, заменяема политика. Терминалният агент подменя confirm_fn със своя UI.
 _POLICY = SandboxPolicy()
+_CONFIRM_LOCK = threading.Lock()
 
 
 def set_policy(policy: SandboxPolicy) -> None:
@@ -1254,8 +1256,11 @@ def _decide(operation: str, verdict: RiskVerdict, policy: SandboxPolicy) -> tupl
     if mode == "deny":
         return False, ("[SANDBOX DENIED] Операцията изисква потвърждение, но режимът е "
                        "неинтерактивен (autonomous). Причини: " + "; ".join(verdict.reasons))
-    # interactive
-    if policy.confirm_fn(operation, verdict):
+    # interactive — по един въпрос: паралелните четения (виж _parallel_reads в
+    # чата) иначе питаха едновременно и отговорът отиваше към грешния въпрос.
+    with _CONFIRM_LOCK:
+        allowed = policy.confirm_fn(operation, verdict)
+    if allowed:
         return True, ""
     return False, "[SANDBOX DECLINED] Операторът отказа изпълнението."
 

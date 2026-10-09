@@ -317,6 +317,7 @@ class TestBackground:
 # ── MCP ─────────────────────────────────────────────────────────────────────
 
 FAKE_MCP = Path(__file__).parent / "fake_mcp_server.py"
+sys.path.insert(0, str(Path(__file__).parent))
 
 
 @pytest.fixture
@@ -787,3 +788,51 @@ class TestMCPAudit:
             return _Reply("ok")
         explore.explore("?", str(ws), complete=fake)
         assert "export default 42" in seen[0]
+
+
+# ── MCP по HTTP ─────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def http_mcp(repo, monkeypatch):
+    import fake_mcp_http
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    servers = []
+
+    def start(mode="json", token="", headers=None):
+        url, httpd, state = fake_mcp_http.serve(mode, token)
+        servers.append(httpd)
+        _mcp_config({"remote": {"type": "http", "url": url, **({"headers": headers} if headers else {})}})
+        return state
+    yield start
+    for h in servers:
+        h.shutdown()
+
+
+class TestMCPOverHTTP:
+    @pytest.mark.parametrize("mode", ["json", "sse"])
+    def test_tools_list_and_call(self, http_mcp, mode) -> None:
+        from genesis_agent import mcp_client
+        state = http_mcp(mode)
+        assert any("remote: 1 инструмента" in line for line in mcp_client.start_all())
+        assert gs.dispatch_tool_call("mcp__remote__echo", {"text": "здравей"}) == "[MCP remote.echo] echo: здравей"
+        if mode == "sse":
+            assert state["pings_answered"] >= 1
+        mcp_client.stop_all()
+        assert state["deleted"]
+
+    def test_a_token_from_the_environment(self, http_mcp, monkeypatch) -> None:
+        from genesis_agent import mcp_client
+        monkeypatch.setenv("FAKE_MCP_TOKEN", "s3cret")
+        http_mcp("json", token="s3cret", headers={"Authorization": "Bearer ${FAKE_MCP_TOKEN}"})
+        assert any("remote: 1 инструмента" in line for line in mcp_client.start_all())
+
+    def test_a_wrong_token_is_reported(self, http_mcp) -> None:
+        from genesis_agent import mcp_client
+        http_mcp("json", token="s3cret", headers={"Authorization": "Bearer wrong"})
+        assert any("401" in line for line in mcp_client.start_all())
+
+    def test_old_sse_transport_is_explained(self, repo) -> None:
+        from genesis_agent import mcp_client
+        _mcp_config({"old": {"type": "sse", "url": "https://x.example/sse"}})
+        assert any("старият транспорт" in line for line in mcp_client.start_all())

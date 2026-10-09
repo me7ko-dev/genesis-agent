@@ -478,6 +478,8 @@ tool_tag_prompt: |
     background; returns an id at once. [BG_OUTPUT: id] shows what it printed since the last
     look, [BG_KILL: id] stops it. Never start a server with plain RUN_CMD — it never returns.
   - [WEB_SEARCH: search query]
+  - [WEB_FETCH: https://…] — read one page by its address as text (docs, changelog, API
+    reference); WEB_SEARCH finds pages, WEB_FETCH reads the one you need.
   - [RESEARCH: question] — cross-checked answer from several sources
   - [LIST_DIR: /path]
   - [USE_SKILL: skill_name_or_description]optional Python driver code[END_USE_SKILL] — loads a

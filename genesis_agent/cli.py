@@ -3,6 +3,7 @@
 genesis_agent.cli — the `genesis` command.
 
     genesis                 start the terminal chat (default)
+    genesis -p "..."        one turn without the chat, answer on stdout (--json, --plan)
     genesis setup           configure API keys
     genesis mission "..."   run one autonomous mission and print the result
     genesis fix PATH "..."  fix a bug in an existing project (tests + diff)
@@ -200,6 +201,11 @@ def main(argv: list[str] | None = None) -> int:
         from genesis_agent.version_info import describe
         print(describe(__version__))
         return 0
+
+    if cmd in ("-p", "--print"):
+        sys.path.insert(0, str(_project_root()))
+        from genesis_agent.headless import run as headless_run
+        return headless_run(argv[1:])
 
     if cmd == "setup":
         from genesis_agent.setup_wizard import run

@@ -152,6 +152,19 @@ FULL_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "WEB_FETCH",
+            "description": ("Read one web page by its URL as text (headings, lists, links, code "
+                            "kept; scripts and navigation dropped). For docs, changelogs, API "
+                            "references the user linked — WEB_SEARCH finds pages, this reads one. "
+                            "No browser needed; internal network addresses are refused."),
+            "parameters": {"type": "object", "properties": {
+                "url": {"type": "string", "description": "http(s) address"}},
+                "required": ["url"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "EXPLORE",
             "description": ("Ask a read-only sub-agent a question about the codebase (where is X, "
                             "how does Y flow, who calls Z). It searches and reads in its OWN "
