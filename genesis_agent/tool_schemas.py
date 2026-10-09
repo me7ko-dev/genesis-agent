@@ -520,4 +520,8 @@ def load_tool_arguments(raw) -> dict:
             value = json.loads(fixed)
         except json.JSONDecodeError:
             raise first from None
-    return value if isinstance(value, dict) else {}
+    if not isinstance(value, dict):
+        # Списък/число не е „празни аргументи“: с {} TODO_WRITE триеше списъка
+        # (одит 2026-10-09). JSONDecodeError, за да го хващат всички callers.
+        raise json.JSONDecodeError("аргументите не са JSON обект", text, 0)
+    return value

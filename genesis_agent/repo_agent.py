@@ -590,7 +590,7 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
                     except (ValueError, TypeError):
                         args = {}
                     say(f"  ⚙️  {name} {str(args.get('path') or args.get('pattern') or args.get('command') or '')[:70]}")
-                    result = genesis_skills.dispatch_tool_call(name, args)
+                    result = genesis_skills.dispatch_tool_call(name, args or fn.get("arguments") or {})
                     if _edit_succeeded(result):
                         touched += [_relative(root, p) for p in _tool_call_paths(name, args)]
                         edited_now = True

@@ -114,7 +114,12 @@ def test_unrepairable_arguments_still_raise() -> None:
         tool_schemas.load_tool_arguments('{"path": "a.py", "content": ')
 
 
-def test_empty_or_non_object_arguments_are_an_empty_dict() -> None:
+def test_empty_arguments_are_an_empty_dict_but_a_non_object_is_an_error() -> None:
+    import json
+
+    import pytest
     assert tool_schemas.load_tool_arguments(None) == {}
-    assert tool_schemas.load_tool_arguments("[1, 2]") == {}
     assert tool_schemas.load_tool_arguments({"path": "x"}) == {"path": "x"}
+    # Списък не е „без аргументи“: с {} TODO_WRITE триеше списъка (одит 2026-10-09).
+    with pytest.raises(json.JSONDecodeError):
+        tool_schemas.load_tool_arguments("[1, 2]")

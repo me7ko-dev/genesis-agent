@@ -148,9 +148,14 @@ def handle(text: str, *, messages: Any, workspace: Path,
         label, done = edit_history.undo()
         out(f"↶ Върнат ходът „{label}“:\n  " + "\n  ".join(done or ["(без разлика)"]))
         if messages is not None:
-            messages.append({"role": "user", "content":
+            # bounded_history, не append: пълен deque(maxlen) иначе изхвърляше
+            # системния промпт завинаги (одит 2026-10-09).
+            from genesis_agent.agent_core import bounded_history
+            messages = bounded_history(
+                [*messages, {"role": "user", "content":
                              "[оператор] /undo върна файловете от предния ход към състоянието "
-                             "отпреди него. Не разчитай на онези промени."})
+                             "отпреди него. Не разчитай на онези промени."}],
+                getattr(messages, "maxlen", None))
         return Result(messages=messages)
 
     if cmd == "/compact":

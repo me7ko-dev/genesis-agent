@@ -37,6 +37,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import secrets
 import socket
 import threading
@@ -191,7 +192,9 @@ class ReplayGuard:
     def check(self, payload: dict, now_ms: float | None = None) -> str:
         now_ms = time.time() * 1000 if now_ms is None else now_ms
         rid, ts = payload.get("rid"), payload.get("ts")
-        if not isinstance(rid, str) or not (8 <= len(rid) <= 64):
+        # Само латиница/цифри: rid влиза в AAD на отговора като ASCII — кирилица
+        # гърмеше в seal() СЛЕД като операцията вече е изпълнена (одит 2026-10-09).
+        if not isinstance(rid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", rid):
             raise ProtocolError("bad rid")
         if not isinstance(ts, (int, float)) or abs(now_ms - ts) > self._max_skew_ms:
             raise ProtocolError("stale request (check the phone's clock)")
@@ -314,9 +317,20 @@ class RemoteSession:
 
     # -- потвърждения от sandbox-а --
     def confirm(self, operation: str, reasons: list[str], timeout: float = _CONFIRM_TIMEOUT_S) -> bool:
+        # След „Стоп“ нищо не чака отговор: иначе всеки следващ въпрос държеше
+        # хода до 5 минути и пак се отказваше (одит 2026-10-09).
+        if self._stop.is_set():
+            return False
+        from genesis_agent import sandbox
         cid = secrets.token_hex(6)
+        if sandbox.too_long_to_confirm(operation):
+            self.emit("confirm_done", id=cid, allow=False,
+                      note=f"операция от {len(operation)} знака — твърде дълга за одобрение")
+            return False
         pending = self._pending[cid] = _Pending()
-        self.emit("confirm", id=cid, operation=operation[:1000], reasons=list(reasons)[:10])
+        # Цялата операция: отрязана на 1000 знака без знак, краят ѝ (`&& rm -r src`)
+        # се одобряваше невидян (одит 2026-10-09).
+        self.emit("confirm", id=cid, operation=operation, reasons=list(reasons)[:10])
         answered = pending.event.wait(timeout)
         self._pending.pop(cid, None)
         allow = answered and pending.allow and not self._stop.is_set()
@@ -423,7 +437,7 @@ class RemoteServer:
             try:
                 after = int(p.get("after") or 0)
                 wait = float(p.get("wait") or 0)
-            except (TypeError, ValueError) as e:
+            except (TypeError, ValueError, OverflowError) as e:   # "after": Infinity
                 raise ProtocolError("bad events args") from e
             return {"ok": True, **s.events_after(after, wait)}
         if op == "confirm":
@@ -461,6 +475,10 @@ class RemoteServer:
         class Handler(BaseHTTPRequestHandler):
             server_version = "genesis"
             sys_version = ""
+            # Без таймаут клиент, който не праща тялото, държеше нишка завинаги —
+            # 200 такива = 200 нишки, без нито един „провал“ за спирачката (одит
+            # 2026-10-09). Чакането на събития е след четенето — не го засяга.
+            timeout = 30
 
             def log_message(self, fmt: str, *args: Any) -> None:  # тихо: дисплеят е събитията
                 return
@@ -498,9 +516,14 @@ class RemoteServer:
                     self._send(200, _LANDING.encode("utf-8"), "text/html; charset=utf-8")
                     return
                 rel = path.lstrip("/") or "index.html"
-                target = (root / rel).resolve()
-                if root.resolve() not in target.parents or not target.is_file():
-                    target = root / "index.html"  # едностранично приложение
+                try:
+                    target = (root / rel).resolve()
+                    if root.resolve() not in target.parents or not target.is_file():
+                        target = root / "index.html"  # едностранично приложение
+                except (OSError, ValueError):
+                    # NUL в пътя, твърде дълго име — без отговор и с traceback в
+                    # терминала на оператора (одит 2026-10-09).
+                    target = root / "index.html"
                 ctype = _CONTENT_TYPES.get(target.suffix.lower(), "application/octet-stream")
                 self._send(200, target.read_bytes(), ctype)
 
@@ -520,7 +543,12 @@ class RemoteServer:
                     self._json(413, {"error": "size"})
                     return
                 try:
-                    envelope = json.loads(self.rfile.read(length).decode("utf-8"))
+                    body = self.rfile.read(length)
+                except OSError:   # таймаут — броим го като провал за спирачката
+                    server.record_failure(ip)
+                    return
+                try:
+                    envelope = json.loads(body.decode("utf-8"))
                     response, rid = server.handle(envelope)
                 except (ProtocolError, ValueError, UnicodeDecodeError) as e:
                     server.record_failure(ip)
@@ -538,7 +566,32 @@ class RemoteServer:
 
 class _QuietServer(ThreadingHTTPServer):
     """Телефон, който заспи или смени мрежата насред дългото чакане, затваря
-    връзката — това е нормално, не грешка за печатане в терминала."""
+    връзката — това е нормално, не грешка за печатане в терминала.
+
+    Най-много _MAX_CONNECTIONS връзки наведнъж: над тях новата се затваря
+    веднага, вместо да ражда още една нишка (одит 2026-10-09)."""
+
+    _MAX_CONNECTIONS = 64
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._slots = threading.BoundedSemaphore(self._MAX_CONNECTIONS)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         import sys
@@ -646,6 +699,15 @@ def serve(args: list[str]) -> int:
         state["messages"] = gta.run_turn(state["messages"], text, ui)
 
     def clear() -> None:
+        # Както /clear в терминала: нов файл за историята (иначе следващият
+        # разговор презаписваше файла на предишния — одит 2026-10-09) и
+        # системният промпт наново (GENESIS.md, агентите, MCP).
+        nonlocal system_prompt
+        try:
+            system_prompt, _ = gta.build_system_prompt()
+        except Exception:
+            pass
+        gta._new_session()
         state["messages"] = deque([{"role": "system", "content": system_prompt}],
                                   maxlen=gta._HISTORY_MAXLEN)
         # Нов разговор от телефона = нова сесия и за брояча (NEXT_STEPS В.8):
@@ -658,20 +720,25 @@ def serve(args: list[str]) -> int:
         return {"model": f"{gta.current_provider}/{gta.current_model_id}",
                 "workspace": str(gta.WORKSPACE)}
 
+    # Текстът от телефона и от модела — като текст, не като Rich разметка: `[/]`
+    # изтриваше реда, а `rm -r [bold]build[/bold] src` се показваше като
+    # `rm -r build src` в записа на одобреното (одит 2026-10-09).
     def show(event: dict) -> None:
         kind = event["type"]
         if kind == "user":
-            console.print(f"\n[bold green]📱 ❯[/] {event['text']}")
+            console.print(Text.assemble("\n", ("📱 ❯ ", "bold green"), str(event["text"])))
         elif kind == "assistant":
             gta.RICH_UI.assistant(event["text"])
         elif kind == "tool":
             gta.RICH_UI.tool(event["name"], event["result"])
         elif kind in ("warn", "asked", "error"):
-            console.print(f"[yellow]⚠ {event['text']}[/]")
+            console.print(Text(f"⚠ {event['text']}", style="yellow"))
         elif kind == "confirm":
-            console.print(f"[bold yellow]📱 Чака потвърждение от телефона:[/] {event['operation'][:200]}")
+            console.print(Text.assemble(("📱 Чака потвърждение от телефона: ", "bold yellow"),
+                                        str(event["operation"])))
         elif kind == "confirm_done":
-            console.print(f"[dim]   → {'разрешено' if event['allow'] else 'отказано'} {event.get('note', '')}[/]")
+            console.print(Text(f"   → {'разрешено' if event['allow'] else 'отказано'} "
+                               f"{event.get('note', '')}", style="dim"))
 
     session = RemoteSession(runner, on_event=show)
 

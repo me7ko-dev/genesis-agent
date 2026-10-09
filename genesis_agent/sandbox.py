@@ -1185,12 +1185,27 @@ def assess_code(code: str) -> RiskVerdict:
 # Политика
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Потвърждава се само каквото се вижда ЦЯЛО. Операцията се режеше (300 знака в
+# терминала, 1000 на телефона) без знак за отрязване — `rm -r build && echo
+# "…" && rm -r src` се одобряваше, без краят да се вижда (одит 2026-10-09).
+# По-дълга от това не се показва за одобрение — отказва се.
+MAX_SHOWN_OPERATION = 20_000
+
+
+def too_long_to_confirm(operation: str) -> bool:
+    return len(operation) > MAX_SHOWN_OPERATION
+
+
 def _default_confirm(prompt: str, verdict: RiskVerdict) -> bool:
     """Терминален confirmation prompt (само в интерактивен режим)."""
+    if too_long_to_confirm(prompt):
+        print(f"\n⛔ Операция от {len(prompt)} знака — твърде дълга, за да се одобри "
+              "наведнъж; отказана.", file=sys.stderr)
+        return False
     print("\n⚠️  GENESIS SANDBOX — изисква потвърждение", file=sys.stderr)
     for r in verdict.reasons:
         print(f"    • {r}", file=sys.stderr)
-    print(f"    Операция: {prompt[:300]}", file=sys.stderr)
+    print(f"    Операция ({len(prompt)} знака):\n{prompt}", file=sys.stderr)
     try:
         ans = input("    Да се изпълни ли? [y/N] ").strip().lower()
     except (EOFError, KeyboardInterrupt):

@@ -56,9 +56,14 @@ def restored_history(saved: list[dict], system_prompt: str,
     # Резюмето от компресията е system съобщение, но е ПАМЕТТА на разговора, не
     # старият промпт — пази се (одит 2026-10-07: всяка сесия над 16 съобщения е
     # компресирана, и възстановяването ѝ губеше целия по-ранен контекст).
-    summaries = [m for m in saved if m.get("role") == "system"
+    # Старият системен промпт е само първото съобщение. Другите system съобщения
+    # (`[Резултат]` от текстовите тагове, бележки на пазачите) са част от
+    # разговора — махаха се и `/history`, `genesis -c` губеха прочетеното и
+    # изпълненото (одит 2026-10-09).
+    rest = saved[1:] if saved and saved[0].get("role") == "system" else list(saved)
+    summaries = [m for m in rest if m.get("role") == "system"
                  and str(m.get("content", "")).startswith("## Резюме на по-ранния разговор")][-1:]
-    body = [m for m in saved if m.get("role") != "system"]
+    body = [m for m in rest if not any(m is x for x in summaries)]
     tail = body[-(maxlen - 1 - len(summaries)):]
     while tail and tail[0].get("role") == "tool":
         tail = tail[1:]       # резултат без извикването си е невалидна история
@@ -461,7 +466,7 @@ def run_tool_loop(
                 except (json.JSONDecodeError, TypeError):
                     args = {}
                 diff = _diff_for_write(core.skills, args) if name == "WRITE_FILE" else None
-                result = core.skills.dispatch_tool_call(name, args)
+                result = core.skills.dispatch_tool_call(name, args or fn.get("arguments") or {})
                 page_check.observe(result)
                 run_check.observe(result)
                 entry = claim_check.counts_as_executed(
