@@ -172,3 +172,12 @@ def test_a_workspace_inside_the_genesis_home_is_allowed() -> None:
     res = sandbox.run_python(f"print(open({str(ws / 'data.csv')!r}).read())", timeout=60,
                              allow=[ws])
     assert res.ok and "a,b" in res.stdout, res.stderr
+
+
+def test_wrapping_an_already_open_descriptor_works(tmp_path) -> None:
+    # Windows CI 2026-10-09: open(fd) се отказваше (няма /proc) — и така всяко
+    # tempfile.mkstemp + os.fdopen, и subprocess отвътре.
+    code = (f"import os, tempfile\nfd, p = tempfile.mkstemp(dir={str(tmp_path)!r})\n"
+            "with os.fdopen(fd, 'w') as f:\n    f.write('ok')\nprint(open(p).read())\n")
+    res = sandbox.run_python(code, timeout=60)
+    assert res.ok and res.stdout.strip() == "ok", res.stderr

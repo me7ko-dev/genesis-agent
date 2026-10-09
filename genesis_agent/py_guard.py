@@ -74,8 +74,13 @@ def _install() -> None:
         flat = text.replace("\\", "/")
         return bool(rx.search(flat)) and not exempt.search(flat)
 
-    def check(raw: object, write: bool) -> None:
+    def check(raw: object, write: bool, event: str = "") -> None:
         if isinstance(raw, int):
+            if event == "open":
+                # open(fd)/os.fdopen: вече отворен дескриптор (mkstemp…) — самото
+                # отваряне е минало през проверката. На Windows без /proc това
+                # спираше всяко fdopen и всеки subprocess (CI 2026-10-09).
+                return
             # listdir/scandir/chdir по отворена папка: какво е тя (Linux) — иначе не.
             try:
                 raw = os.readlink(f"/proc/self/fd/{raw}")
@@ -136,7 +141,7 @@ def _install() -> None:
                                                 "os.link") else args[:2]
             for raw in targets:
                 if isinstance(raw, (str, bytes, os.PathLike, int)) or raw is None:
-                    check(raw, write)
+                    check(raw, write, event)
         finally:
             busy = False
 
