@@ -110,3 +110,13 @@ def test_a_planted_name_falls_back_to_a_stable_name_in_the_same_place(skills, tm
     os.symlink(tmp_path, root / f"genesis-skill-home-{os.getuid()}")
     first, second = sl.skill_home(), sl.skill_home()
     assert first == second and first.parent == root               # стабилно, не в /tmp
+
+
+def test_a_tmpdir_that_is_the_home_is_not_used(skills, monkeypatch, tmp_path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(sl, "SKILL_HOME_ROOT", None)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+    import tempfile
+    monkeypatch.setattr(tempfile, "tempdir", str(fake_home))
+    assert sl._home_roots()[0].resolve() != fake_home.resolve() or os.name == "nt"

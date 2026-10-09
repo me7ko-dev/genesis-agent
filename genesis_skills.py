@@ -1169,10 +1169,16 @@ def _before_tool(name: str, args: dict) -> str | None:
         # снимка на проекта преди и след тях, за /undo (2026-10-09).
         try:
             from genesis_agent import edit_history
-            # Командите и уменията минават през sandbox: снимката — когато
-            # процесът тръгне, след одобрението (одит 2026-10-09).
-            edit_history.before_command(Path(_WORKSPACE),
-                                        at_exec=name in ("RUN_CMD", "RUN_BG", "USE_SKILL"))
+            if name == "RUN_BG" or (name == "RUN_CMD" and str(args.get("background", "")).strip()
+                                    .lower() in ("true", "1", "yes")):
+                # Фонова: пише и след края на хода — снимка не помага. Ходът
+                # пак е „с промени“, иначе /undo връщаше предишния (одит).
+                edit_history.background_command()
+            else:
+                # Командите и уменията минават през sandbox: снимката — когато
+                # процесът тръгне, след одобрението (одит 2026-10-09).
+                edit_history.before_command(Path(_WORKSPACE),
+                                            at_exec=name in ("RUN_CMD", "USE_SKILL"))
         except Exception:
             pass
     return None
@@ -1209,7 +1215,9 @@ def _after_tool(name: str, args: dict, result: str) -> str:
             edit_history.forget_if_unchanged(_resolve_noted(str(args["path"]), redirect=False)[0])
         except Exception:
             pass
-    elif _may_change_files(name, args):
+    elif _may_change_files(name, args) and not (
+            name == "RUN_BG" or (name == "RUN_CMD" and str(args.get("background", "")).strip()
+                                 .lower() in ("true", "1", "yes"))):
         try:  # какво промени командата — само между двете снимки
             from genesis_agent import edit_history
             edit_history.after_command()

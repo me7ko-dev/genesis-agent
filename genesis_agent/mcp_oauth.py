@@ -102,8 +102,13 @@ class _FileLock:
         self.fh = None
         try:
             path = _store_path().with_suffix(".lock")
-            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            fh = open(path, "a+b")
+            try:
+                path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                fh = open(path, "a+b")
+            except OSError:
+                # ~/.genesis само за четене: поне в процеса е заключено, а
+                # токенът остава в _memory (както преди — трети одит).
+                return
             deadline = time.monotonic() + 60
             while True:
                 try:
@@ -281,8 +286,9 @@ def discover(server_url: str, www_authenticate: str = "") -> dict:
     # сочи чужд (`resource` = жертвата) и получава нейния токен: операторът
     # вижда истинската страница за вход, а токенът отива при злия (одит
     # 2026-10-09, възпроизведено).
-    if not _covers(resource, server_url):
+    if not _covers(resource, server_url) or urlsplit(resource).query or urlsplit(resource).fragment:
         raise OAuthError(f"сървърът иска токен за {resource!r}, а е {server_url!r} — отказано")
+    resource = _key(resource).rstrip("/") if urlsplit(resource).path in ("", "/") else _key(resource)
     return {
         "issuer": issuer,
         "authorization_endpoint": _safe_url(meta["authorization_endpoint"], "адресът за вход"),

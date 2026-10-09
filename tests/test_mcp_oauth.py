@@ -433,3 +433,26 @@ def test_an_empty_paste_says_what_is_missing(oauth) -> None:
     url, _ = oauth()
     with pytest.raises(mcp_oauth.OAuthError, match="поставен"):
         mcp_oauth.login(url, say=lambda _t: None, paste=lambda _q: "")
+
+
+# ── трети одит 2026-10-09 ────────────────────────────────────────────────────
+
+def test_a_read_only_genesis_home_still_refreshes_in_memory(oauth, monkeypatch) -> None:
+    url, _ = oauth()
+    _login(url)
+    data = json.loads((Path(paths.GENESIS_HOME) / "mcp_tokens.json").read_text(encoding="utf-8"))
+    for entry in data.values():
+        entry["expires_at"] = time.time() - 10
+    (Path(paths.GENESIS_HOME) / "mcp_tokens.json").write_text(json.dumps(data), encoding="utf-8")
+
+    def read_only(*_a, **_k):
+        raise OSError(30, "Read-only file system")
+    monkeypatch.setattr(mcp_oauth, "open", read_only, raising=False)
+    monkeypatch.setattr(mcp_oauth, "_save_all", read_only)
+    assert mcp_oauth.access_token(url)
+
+
+def test_a_cookie_header_means_check_the_headers(oauth) -> None:
+    oauth(headers={"Cookie": "session=old"})
+    lines = mcp_client.start_all()
+    assert any("провери headers" in ln for ln in lines) and not any("нужен е вход" in ln for ln in lines)

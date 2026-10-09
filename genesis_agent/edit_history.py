@@ -128,6 +128,15 @@ def before_command(workspace: Path, *, at_exec: bool = False) -> None:
     _open_window(turn, ws)
 
 
+def background_command() -> None:
+    """RUN_BG / RUN_CMD background: процесът пише и след хода, затова не се
+    снима. Ходът пак е „с промени“ — /undo казва, че фоновите промени не се
+    връщат, вместо тихо да върне предишния ход (трети одит 2026-10-09)."""
+    turn = _current
+    if turn is not None and not turn.lost:
+        turn.lost = "фонова команда — каквото промени, не се връща"
+
+
 def _exec_starts() -> None:
     turn = _current
     if turn is not None and turn.waiting is not None and turn.window is None:
@@ -171,12 +180,13 @@ def after_command() -> None:
     from genesis_agent import checkpoints
     try:
         # Наново: какво командата създаде над границите (300 MB файл влизаше
-        # в хранилището за 12 s — одит 2026-10-09).
+        # в хранилището за 12 s — одит 2026-10-09). Над границата на папката —
+        # поне вече пазените файлове (`add -u`), не загуба на целия ход.
         now = checkpoints.survey(turn.workspace)
-        tree = None if now.over else checkpoints.snapshot(
-            turn.workspace, sorted(set(window.survey.big) | set(now.big)))
+        tree = checkpoints.snapshot(turn.workspace, sorted(set(window.survey.big) | set(now.big)),
+                                    tracked_only=bool(now.over))
         if tree is None:
-            raise OSError(now.over or "снимката след командата не стана")
+            raise OSError("снимката след командата не стана")
         found = checkpoints.changes(turn.workspace, window.before, tree)
     except Exception as e:
         turn.note = turn.lost = f"промените от команда не могат да се върнат ({e})"
@@ -185,11 +195,36 @@ def after_command() -> None:
     for ch in found:
         path = turn.workspace / ch.path
         if path in recorded:
-            turn.before.pop(path, None)   # снимката отпреди командата е по-рано
+            # Снимката отпреди командата е по-рано от записа вътре в нея.
+            turn.before.pop(path, None)
+            if path in turn.too_big:
+                turn.too_big.remove(path)
         if path not in turn.before and path not in turn.too_big and path not in turn.commands:
             turn.commands[path] = _FromCommand(
                 ch.old, ch.old_mode, existed=ch.status != "A" or ch.path in existed)
         turn.after[path] = None if ch.new == checkpoints.ZERO or ch.status == "D" else ch.new
+    # Над 20 MB не се пази съдържание, но създаденият от командата файл пак
+    # се трие при /undo, а промененият — казва се. Без това ходът оставаше
+    # „без промени“ и /undo връщаше ПРЕДИШНИЯ ход (одит 2026-10-09).
+    for rel in sorted(set(now.big) - set(window.survey.big)):
+        path = turn.workspace / rel
+        if path in turn.before or path in turn.commands or path in turn.too_big:
+            continue
+        if rel in existed:
+            turn.too_big.append(path)
+        else:
+            turn.commands[path] = _FromCommand(checkpoints.ZERO, "100644", existed=False)
+            turn.after[path] = _big_id(path)
+
+
+def _big_id(path: Path) -> str | None:
+    """Отпечатък на голям файл без да се чете целият в паметта — за „пипнат
+    след хода?“ при /undo: размер и време на промяна."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return f"big:{st.st_size}:{st.st_mtime_ns}"
 
 
 def record(path: Path) -> None:
@@ -284,9 +319,12 @@ def _moved_since(turn: _Turn, path: Path) -> bool:
     """Someone changed the file after the turn — its change stays."""
     if path not in turn.after:
         return False
+    expected = turn.after[path]
+    if expected is not None and expected.startswith("big:"):
+        return _big_id(path) != expected
     from genesis_agent import checkpoints
     try:
-        return checkpoints.current_id(path) != turn.after[path]
+        return checkpoints.current_id(path) != expected
     except OSError:
         return True
 

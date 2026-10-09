@@ -441,3 +441,85 @@ def test_undo_of_an_edit_never_writes_through_a_link_out(ws, tmp_path) -> None:
     edit_history.end_turn()
     edit_history.undo()
     assert list(outside.iterdir()) == []
+
+
+# ── трети одит 2026-10-09 ────────────────────────────────────────────────────
+
+def test_a_background_command_never_makes_undo_hit_the_turn_before(ws, monkeypatch) -> None:
+    monkeypatch.setattr(gs, "_WORKSPACE", ws)
+    edit_history.begin_turn("ход 1")
+    edit_history.record(ws / "keep.txt")
+    (ws / "keep.txt").write_text("ход 1\n", encoding="utf-8")
+    edit_history.end_turn()
+    edit_history.begin_turn("сървър")
+    gs._before_tool("RUN_CMD", {"command": "python -m http.server", "background": True})
+    gs._after_tool("RUN_CMD", {"command": "python -m http.server", "background": True}, "bg1")
+    edit_history.end_turn()
+    label, done = edit_history.undo()
+    assert label == "сървър" and any("фонова" in d for d in done)
+    assert (ws / "keep.txt").read_text(encoding="utf-8") == "ход 1\n"
+
+
+def test_a_big_file_a_command_creates_is_deleted_by_undo(ws, monkeypatch) -> None:
+    monkeypatch.setattr(checkpoints, "MAX_FILE_MB", 0)
+    (ws / "empty.txt").write_text("", encoding="utf-8")
+    model = ws / "model.bin"
+    _turn_with_command(ws, lambda: model.write_bytes(b"w" * 5000))
+    assert any("model.bin" in ln and ln.startswith("изтрий") for ln in edit_history.pending())
+    edit_history.undo()
+    assert not model.exists()
+
+
+def test_a_big_write_inside_delegate_is_undone(ws, monkeypatch) -> None:
+    monkeypatch.setattr(edit_history, "_MAX_BYTES", 10)
+    data = ws / "data.json"
+    data.write_text('{"a": [1, 2, 3, 4, 5]}', encoding="utf-8")
+    edit_history.begin_turn("делегирано")
+    edit_history.before_command(ws)                               # DELEGATE
+    edit_history.record(data)                                     # → too_big (над 10 байта)
+    data.write_text("[]", encoding="utf-8")
+    edit_history.after_command()
+    edit_history.end_turn()
+    edit_history.undo()
+    assert data.read_text(encoding="utf-8") == '{"a": [1, 2, 3, 4, 5]}'
+
+
+def test_a_command_that_crosses_the_file_limit_still_undoes_tracked_files(ws, monkeypatch) -> None:
+    app = ws / "src" / "app.py"
+
+    def flood() -> None:
+        monkeypatch.setattr(checkpoints, "MAX_FILES", 10)       # „над границата“ след командата
+        app.write_text("print('v2')\n", encoding="utf-8")
+        (ws / "data").mkdir()
+        for i in range(30):
+            (ws / "data" / f"{i}.txt").write_text("x", encoding="utf-8")
+    _turn_with_command(ws, flood)
+    edit_history.undo()
+    assert app.read_text(encoding="utf-8") == "print('v1')\n"
+
+
+def test_another_process_in_another_pid_namespace_keeps_its_refs(ws) -> None:
+    _turn_with_command(ws, lambda: None)
+    ws_r = ws.resolve()
+    store = checkpoints._store(ws_r)
+    tree = checkpoints._git(ws_r, "write-tree").decode().strip()
+    other = "1-abcdef"                                            # pid 1 в друг контейнер
+    checkpoints._git(ws_r, "update-ref", f"refs/genesis/{other}/1", tree)
+    (store / f"index-{other}").write_bytes(b"")                   # пипнат току-що
+    checkpoints._cleanup(ws_r, store)
+    refs = checkpoints._git(ws_r, "for-each-ref", "--format=%(refname)", "refs/genesis/").decode()
+    assert f"refs/genesis/{other}/1" in refs
+    old = time.time() - 2 * 24 * 3600                             # мълчи от два дни
+    os.utime(store / f"index-{other}", (old, old))
+    checkpoints._cleanup(ws_r, store)
+    refs = checkpoints._git(ws_r, "for-each-ref", "--format=%(refname)", "refs/genesis/").decode()
+    assert f"refs/genesis/{other}/1" not in refs
+
+
+def test_a_new_process_starts_from_the_newest_index(ws, monkeypatch) -> None:
+    _turn_with_command(ws, lambda: None)
+    store = checkpoints._store(ws.resolve())
+    monkeypatch.setattr(checkpoints, "_TAG", "99999-fresh0")
+    monkeypatch.setattr(checkpoints, "_pruned", set())
+    _turn_with_command(ws, lambda: None)
+    assert (store / "index-99999-fresh0").stat().st_size > 0

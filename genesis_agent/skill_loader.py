@@ -529,7 +529,8 @@ def _home_roots() -> list[Path]:
         real = Path.home().resolve()
         # TMPDIR в домашната папка връщаше точно това, което се маха: истинския
         # HOME сред родителите (втори одит 2026-10-09). На Windows няма друго.
-        outside = [r for r in roots if r.is_dir() and real not in r.resolve().parents]
+        outside = [r for r in roots if r.is_dir() and r.resolve() != real
+                   and real not in r.resolve().parents]
         return outside or roots
     except (OSError, RuntimeError):
         return roots

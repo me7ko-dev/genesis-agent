@@ -343,10 +343,11 @@ def _expand(text: str) -> str:
 
 
 def _static_auth(headers: dict[str, str]) -> bool:
-    """mcp.json вече дава вход (Authorization, X-API-Key, …-Token)? Тогава 401
-    значи „провери headers“; иначе — OAuth. `X-Tenant` не е вход (втори одит)."""
-    return any(k.lower() == "authorization" or any(w in k.lower() for w in ("key", "token", "auth"))
-               for k in headers)
+    """mcp.json вече дава вход (Authorization, X-API-Key, Cookie, …-Token)? Тогава
+    401 значи „провери headers“; иначе — OAuth. `X-Tenant` не е вход (одити)."""
+    words = ("key", "token", "auth", "cookie", "secret", "pass", "session", "credential",
+             "signature")
+    return any(any(w in k.lower() for w in words) for k in headers)
 
 
 @dataclass
