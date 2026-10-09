@@ -228,3 +228,94 @@ def test_cli_continue_opens_the_chat(monkeypatch) -> None:
     called = []
     monkeypatch.setattr(cli, "_chat", lambda: called.append(1) or 0)
     assert cli.main(["-c"]) == 0 and called
+
+
+# ── одит 2026-10-09 ────────────────────────────────────────────────────────
+
+posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX обвивка и групи процеси")
+
+
+@posix_only
+def test_bang_background_child_does_not_freeze_the_chat(tmp_path) -> None:
+    import os
+    import time
+    started = time.monotonic()
+    ctx = shell_mode.run("echo hi; sleep 30 & echo $! > bg.pid", tmp_path, lambda _: None, timeout=60)
+    assert time.monotonic() - started < 10
+    assert "hi" in ctx
+    pid = int((tmp_path / "bg.pid").read_text())
+    time.sleep(0.3)
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)   # фоновото дете е спряно, не остава сираче
+
+
+@posix_only
+def test_bang_ctrl_c_with_a_background_child_returns_at_once(tmp_path) -> None:
+    import time
+
+    fired: list[str] = []
+
+    def interrupt(line: str) -> None:
+        if not fired:   # като оператор: веднъж Ctrl-C, на първия ред
+            fired.append(line)
+            raise KeyboardInterrupt
+    started = time.monotonic()
+    ctx = shell_mode.run("echo hi; sleep 30 &", tmp_path, interrupt, timeout=60)
+    assert time.monotonic() - started < 10 and "прекъсната" in ctx
+
+
+def test_bang_output_without_newlines_is_shown_in_chunks(tmp_path) -> None:
+    shown: list[str] = []
+    shell_mode.run(_py("import sys; sys.stdout.write('a' * 100000); sys.stdout.flush()"),
+                   tmp_path, shown.append)
+    body = [s for s in shown if s.startswith("a")]
+    assert body and max(len(s) for s in body) <= shell_mode._CHUNK
+
+
+def test_bang_progress_with_carriage_returns_shows_each_update(tmp_path) -> None:
+    shown: list[str] = []
+    shell_mode.run(_py("print('p1', end=chr(13), flush=True); print('p2')"), tmp_path, shown.append)
+    assert "p1" in shown and "p2" in shown
+
+
+def test_bang_python_children_write_utf8(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("PYTHONIOENCODING", "cp1251")   # като Python на българска Windows
+    shown: list[str] = []
+    shell_mode.run(_py("print(chr(1043) + chr(1088))"), tmp_path, shown.append)
+    assert "Гр" in shown
+
+
+@posix_only
+def test_mention_of_a_fifo_does_not_block(proj) -> None:
+    import os
+    from concurrent.futures import ThreadPoolExecutor
+    os.mkfifo(proj / "pipe")
+    pool = ThreadPoolExecutor(1)
+    try:
+        text, notes = pool.submit(mentions.expand, "виж @pipe", proj).result(timeout=5)
+        assert "@pipe" in text
+    finally:
+        pool.shutdown(wait=False)
+    assert "не обикновен" in notes[0]
+
+
+def test_unknown_home_does_not_drop_the_other_attachments(proj) -> None:
+    text, _ = mentions.expand("виж @src/util.py и @~nosuchuser_genesis_xyz/notes", proj)
+    assert "X = 1" in text
+
+
+def test_decorators_do_not_use_up_the_mention_cap(proj) -> None:
+    decorators = " ".join(f"@deco{i}" for i in range(12))
+    text, _ = mentions.expand(f"{decorators} @src/util.py", proj)
+    assert "X = 1" in text
+
+
+@pytest.mark.parametrize("content", ['{"role": "user"}', "null", "[1, 2]", '"text"'])
+def test_continue_with_a_malformed_session_starts_fresh(tmp_path, monkeypatch, content) -> None:
+    monkeypatch.setattr(gta, "HISTORY_DIR", tmp_path)
+    monkeypatch.setattr(gta, "WORKSPACE", tmp_path)
+    bad = tmp_path / "session_bad.json"
+    bad.write_text(content, encoding="utf-8")
+    session_index.record(tmp_path, tmp_path, bad)
+    start = deque([{"role": "system", "content": "s"}])
+    assert gta._continue_session(start, "s") is start

@@ -1734,13 +1734,17 @@ def _continue_session(messages: "deque", system_prompt: str) -> "deque":
         return messages
     try:
         with open(path, encoding="utf-8") as f:
-            restored = _restore_session(json.load(f), system_prompt)
-    except (OSError, ValueError) as e:
+            data = json.load(f)
+        # Валиден JSON, но не списък от съобщения, сриваше старта (одит 2026-10-09).
+        if not isinstance(data, list) or not all(isinstance(m, dict) for m in data):
+            raise ValueError("не е списък от съобщения")
+        restored = _restore_session(data, system_prompt)
+    except (OSError, ValueError, TypeError, AttributeError) as e:
         console.print(Text(f"⚠ {path.name} не се зарежда: {e} — започвам нов.", style="yellow"))
         return messages
     _new_session()   # продължението — в нов файл, старият остава (както /history)
-    last = next((str(m.get("content") or "") for m in reversed(restored)
-                 if m.get("role") == "assistant" and m.get("content")), "")
+    last = next((m["content"] for m in reversed(restored) if m.get("role") == "assistant"
+                 and isinstance(m.get("content"), str) and m["content"]), "")
     console.print(f"[green]✓ Продължавам разговора от {path.name} ({len(restored)} съобщения)[/]")
     if last:
         console.print(Panel(Text(last[:600] + ("…" if len(last) > 600 else "")),
@@ -1816,9 +1820,13 @@ def main():
             # `!команда` — операторът пуска сам, без модела (като в Claude Code).
             from genesis_agent import shell_mode
             if shell_mode.is_bang(user_input):
-                pending_shell.append(shell_mode.run(
-                    user_input[1:].strip(), Path(WORKSPACE),
-                    lambda line: console.print(line, markup=False, highlight=False)))
+                try:
+                    pending_shell.append(shell_mode.run(
+                        user_input[1:].strip(), Path(WORKSPACE),
+                        lambda line: console.print(line, markup=False, highlight=False)))
+                except KeyboardInterrupt:
+                    # Второ Ctrl-C докато командата се спира — спира нея, не чата.
+                    console.print("[yellow]прекъснато[/]")
                 continue
 
             # Заявка, която е точно вградена команда („направи бекъп"), не

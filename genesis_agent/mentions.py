@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 from pathlib import Path
 
 _MENTION = re.compile(r"(?<![\w@`])@(\"[^\"\n]+\"|[^\s`'\"]+)")
@@ -41,12 +42,13 @@ def _mentions(text: str) -> list[str]:
 
 
 def _target(raw: str, workspace: Path) -> Path | None:
-    path = Path(raw).expanduser() if raw.startswith("~") else Path(raw)
-    if not path.is_absolute():
-        path = workspace / path
+    # `@~непознат` хвърляше RuntimeError и сваляше `genesis -p` (одит 2026-10-09).
     try:
+        path = Path(raw).expanduser() if raw.startswith("~") else Path(raw)
+        if not path.is_absolute():
+            path = workspace / path
         return path if path.exists() else None
-    except (OSError, ValueError):
+    except (OSError, ValueError, RuntimeError):
         return None
 
 
@@ -62,8 +64,12 @@ def _listing(folder: Path) -> str:
 
 
 def _read(path: Path) -> str | None:
-    """Текстът на файла или None, ако е двоичен."""
+    """Текстът на файла или None, ако е двоичен или не е обикновен файл."""
     try:
+        # FIFO, /dev/tty и подобни: open() чакаше вечно, а единственият изход —
+        # Ctrl-C — затваряше чата (одит 2026-10-09).
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            return None
         with open(path, "rb") as fh:
             raw = fh.read(_MAX_FILE + 1)
     except OSError:
@@ -84,10 +90,15 @@ def expand(text: str, workspace: Path) -> tuple[str, list[str]]:
     parts: list[str] = []
     notes: list[str] = []
     total = 0
-    for raw in _mentions(text)[:_MAX_MENTIONS]:
+    attached = 0
+    for raw in _mentions(text):
         path = _target(raw, workspace)
         if path is None:
+            continue   # @property, имейл, несъществуващ път — не се броят
+        if attached >= _MAX_MENTIONS:
+            notes.append(f"@{raw}: не е прикачен — най-много {_MAX_MENTIONS} наведнъж")
             continue
+        attached += 1
         real = Path(os.path.realpath(path))
         if sensitive_path_reason(str(real)):
             notes.append(f"@{raw}: чувствителен файл — не е прикачен")
@@ -97,7 +108,7 @@ def expand(text: str, workspace: Path) -> tuple[str, list[str]]:
         else:
             content = _read(real)
             if content is None:
-                notes.append(f"@{raw}: двоичен или нечетим файл — не е прикачен")
+                notes.append(f"@{raw}: двоичен, нечетим или не обикновен файл — не е прикачен")
                 continue
             body, kind = content, "файл"
         if total + len(body) > _MAX_TOTAL:
