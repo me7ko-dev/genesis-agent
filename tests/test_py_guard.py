@@ -275,3 +275,8 @@ def test_windows_needs_reach_the_child(monkeypatch) -> None:
     monkeypatch.setenv("COMSPEC", r"C:\Windows\system32\cmd.exe")
     env = sandbox._build_env(sandbox.SandboxPolicy())
     assert env["SYSTEMROOT"] == r"C:\Windows" and env["COMSPEC"].endswith("cmd.exe")
+
+
+def test_the_guard_settings_are_not_left_in_the_environment() -> None:
+    res = _run("import os\nprint(sorted(k for k in os.environ if k.startswith('GENESIS_GUARD')))\n")
+    assert res.ok and res.stdout.strip() == "[]", res.stderr

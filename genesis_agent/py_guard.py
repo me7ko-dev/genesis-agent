@@ -61,6 +61,10 @@ def _install() -> None:
         return [real(d) for d in (os.environ.get(name) or "").split(os.pathsep) if d]
 
     blocked, allowed = paths("GENESIS_GUARD_BLOCK"), paths("GENESIS_GUARD_ALLOW")
+    # Прочетено — вън от средата: скриптът и децата му не виждат настройките
+    # на пазача (и средата остава шепа променливи — Windows CI 2026-10-09).
+    for name in [k for k in os.environ if k.startswith("GENESIS_GUARD_")]:
+        del os.environ[name]
     import site
     libs = {real(p) for p in (sys.prefix, sys.base_prefix, sys.exec_prefix)}
     try:
