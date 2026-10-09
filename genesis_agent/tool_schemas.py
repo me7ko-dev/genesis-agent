@@ -24,7 +24,7 @@ FULL_TOOLS: list[dict] = [
         "function": {
             "name": "READ_FILE",
             "description": "Read a file: the first 8000 chars, or a numbered range with offset "
-                           "(1-indexed line) + limit — needed past ~150 lines and before editing there.",
+                           "(1-indexed line) + limit (lines) — needed past ~150 lines and before editing there.",
             "parameters": {
                 "type": "object",
                 "properties": {

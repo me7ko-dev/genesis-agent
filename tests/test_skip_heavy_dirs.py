@@ -91,3 +91,26 @@ def test_tree_size_still_counts_a_nested_build_folder_with_code(tmp_path) -> Non
     (tmp_path / "pkg" / "build").mkdir(parents=True)
     (tmp_path / "pkg" / "build" / "builder.py").write_bytes(b"x" * 2048)
     assert repo_agent._tree_size_mb(tmp_path) * 1024 * 1024 >= 2048
+
+
+# ── одит 2026-10-09: шаблони с `/` минаваха по стария път (rglob) ─────────────
+
+@pytest.mark.parametrize("pattern", ["**/lib/*.py", "*/*.py", "src/*.py", "**/src/**/*.py"])
+def test_path_patterns_do_not_enter_node_modules_either(project, scanned, pattern) -> None:
+    repo_map.find_files(pattern, project)
+    list(repo_map._iter_files(project, pattern))
+    assert _heavy(scanned) == []
+
+
+def test_path_patterns_match_like_rglob(project) -> None:
+    (project / "src" / "sub").mkdir()
+    (project / "src" / "sub" / "deep.py").write_text("", encoding="utf-8")
+    find = repo_map.find_files
+    j = os.path.join
+    assert find("src/*.py", project) == [j("src", "app.py")]
+    assert find("src/**/*.py", project) == [j("src", "app.py"), j("src", "sub", "deep.py")]
+    assert find("**/sub/*.py", project) == [j("src", "sub", "deep.py")]
+    # rglob слага `**/` отпред: `*/*.py` хваща и по-дълбоките.
+    assert find("*/*.py", project) == [j("src", "app.py"), j("src", "sub", "deep.py"),
+                                       j("tests", "test_app.py")]
+    assert find("node_modules/**/*.py", project) == []     # пропуснатото — както преди
