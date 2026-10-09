@@ -76,6 +76,21 @@ _WORKSPACE = _PROJECT_ROOT
 # гаранцията точно за случая, в който тя има значение.
 _SEEN_PATHS: set[Path] = set()
 
+# Докато работи под-агент (genesis_agent.agents): името му и инструментите,
+# които има. Проверява се в общата бариера _before_tool — и за текстовите
+# тагове, и за native извикванията, — а не само в списъка схеми, който моделът
+# вижда: модел, който напише таг извън списъка си, иначе би го изпълнил.
+_AGENT_SCOPE: tuple[str, frozenset[str]] | None = None
+
+
+def _agent_scope() -> tuple[str, frozenset[str]] | None:
+    return _AGENT_SCOPE
+
+
+def _set_agent_scope(scope: tuple[str, frozenset[str]] | None) -> None:
+    global _AGENT_SCOPE
+    _AGENT_SCOPE = scope
+
 
 def set_workspace(path) -> None:
     """Задава работната директория (вика се от genesis_terminal_agent.py)."""
@@ -945,7 +960,7 @@ _SIMPLE_RE = re.compile(
     r"\[(?P<tool>READ_FILE|RUN_CMD|WEB_SEARCH|LIST_DIR|DELEGATE|RESEARCH|BROWSE|ASK_USER|"
     r"SEARCH_CODE|REPO_MAP|GLOB|"
     r"BROWSER_CLICK|BROWSER_TYPE|REMEMBER|TASK_ADD|TASK_UPDATE|TASK_LIST|"
-    r"RUN_BG|BG_OUTPUT|BG_KILL|MCP|EXPLORE|WEB_FETCH):"
+    r"RUN_BG|BG_OUTPUT|BG_KILL|MCP|EXPLORE|WEB_FETCH|AGENT|TODO_WRITE):"
     r"\s*(?P<arg>(?:[^\[\]]|" + _BRACKETS + r")+)\]"
 )
 # REPO_MAP без аргумент = текущият workspace (както BROWSER_READ/TASK_LIST).
@@ -979,7 +994,20 @@ _SIMPLE_DISPATCH: dict[str, Callable[..., str]] = {
     "MCP": lambda arg: _mcp().call_text_tag(arg),
     "EXPLORE": lambda arg: _tool_explore(arg),
     "WEB_FETCH": lambda arg: _tool_web_fetch(arg),
+    "AGENT": lambda arg: _tool_agent(*(part.strip() for part in arg.partition("|")[::2])),
+    "TODO_WRITE": lambda arg: _todos().write(arg),
 }
+
+
+def _tool_agent(name: str, task: str) -> str:
+    """Собствен под-агент от .genesis/agents/ — задачата в отделен разговор."""
+    from genesis_agent import agents
+    return agents.run(name, task, Path(_WORKSPACE))
+
+
+def _todos():
+    from genesis_agent import todos
+    return todos
 
 
 def _tool_web_fetch(url: str) -> str:
@@ -1081,6 +1109,9 @@ def _hook_view(name: str, args: dict) -> tuple[str, dict]:
         return qualified, parsed if isinstance(parsed, dict) else {"arg": raw.strip()}
     if name == "EXPLORE" and "arg" in args:
         return name, {"question": args["arg"]}
+    if name == "AGENT" and "arg" in args:
+        agent, _, task = str(args["arg"]).partition("|")
+        return name, {"agent": agent.strip(), "task": task.strip()}
     return name, args
 
 
@@ -1091,12 +1122,16 @@ def _before_tool(name: str, args: dict) -> str | None:
     tool (it used to be swallowed and the tool ran past a hook that had
     just blocked it — audit 2026-10-08)."""
     try:
+        hook_name, hook_args = _hook_view(name, args)
+        scope = _AGENT_SCOPE
+        if scope is not None and hook_name not in scope[1] and name not in scope[1]:
+            return (f"[{name}] ⛔ Под-агентът „{scope[0]}“ няма този инструмент. "
+                    f"Има: {', '.join(sorted(scope[1])) or 'никакви'}.")
         from genesis_agent import plan_mode
         refusal = plan_mode.refusal(name, args)
         if refusal:
             return refusal
         from genesis_agent import hooks
-        hook_name, hook_args = _hook_view(name, args)
         blocked = hooks.pre_tool(hook_name, hook_args)
         if blocked:
             return blocked
@@ -1335,6 +1370,11 @@ def _dispatch(name: str, arguments: dict) -> str:
             return _tool_run_cmd(arguments.get("command", ""))
         if name == "EXPLORE":
             return _tool_explore(str(arguments.get("question", "") or ""))
+        if name == "AGENT":
+            return _tool_agent(str(arguments.get("agent", "") or ""),
+                               str(arguments.get("task", "") or ""))
+        if name == "TODO_WRITE":
+            return _todos().write(arguments.get("todos", []))
         if name == "WEB_FETCH":
             return _tool_web_fetch(str(arguments.get("url", "") or ""))
         if name.startswith("mcp__"):

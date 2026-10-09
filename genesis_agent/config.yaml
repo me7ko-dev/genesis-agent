@@ -474,6 +474,9 @@ tool_tag_prompt: |
   - [EXPLORE: question about the code] — a read-only sub-agent searches and reads in its own
     context and returns only the answer with path:line references. Use it on code you have not
     seen instead of a dozen SEARCH_CODE/READ_FILE calls — it keeps this conversation small.
+  - [TODO_WRITE: [x] done step; [~] current step; [ ] next step] — your task list, shown to
+    the operator. For any task with 3+ steps write the whole list first, then rewrite it as you
+    go: exactly one [~] in progress, mark each [x] as soon as it is done.
   - [RUN_BG: command] — start something that keeps running (dev server, watcher) in the
     background; returns an id at once. [BG_OUTPUT: id] shows what it printed since the last
     look, [BG_KILL: id] stops it. Never start a server with plain RUN_CMD — it never returns.

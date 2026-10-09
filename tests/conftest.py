@@ -133,11 +133,14 @@ def _isolated_operator_settings(monkeypatch, tmp_path):
     home = tmp_path / "genesis_home"
     home.mkdir(exist_ok=True)
     monkeypatch.setattr("genesis_agent.paths.GENESIS_HOME", home)
-    from genesis_agent import edit_history, plan_mode
+    from genesis_agent import agents, edit_history, plan_mode, todos
     plan_mode.set_active(False)
     edit_history.clear()
+    todos.clear()
     yield
     plan_mode.set_active(False)
     edit_history.clear()
+    todos.clear()
+    agents.progress = None
     from genesis_agent import mcp_client
     mcp_client.stop_all()

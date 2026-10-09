@@ -1284,6 +1284,15 @@ def build_system_prompt() -> tuple[str, str]:
     except Exception:
         pass
 
+    # Собствените под-агенти (.genesis/agents/*.md) — кога да им се възлага.
+    try:
+        from genesis_agent import agents as _agents
+        agents_text = _agents.prompt_section(Path(WORKSPACE))
+        if agents_text:
+            SYSTEM_PROMPT += "\n\n" + agents_text
+    except Exception:
+        pass
+
     # GENESIS.md / AGENTS.md / CLAUDE.md на проекта — постоянните инструкции на
     # оператора, всяка сесия, преди първата дума (виж project_instructions).
     try:
@@ -1322,10 +1331,17 @@ def build_system_prompt() -> tuple[str, str]:
 
 
 def _turn_tools():
-    """Инструментите за модела: вградените + MCP; в режим план — само тези, които гледат."""
-    from genesis_agent import mcp_client, plan_mode
+    """Инструментите за модела: вградените + MCP + AGENT (ако има под-агенти);
+    в режим план — само тези, които гледат."""
+    from genesis_agent import agents, mcp_client, plan_mode
     tools = plan_mode.filter_tools(TERMINAL_TOOL_SCHEMAS) or []
     extra = mcp_client.schemas(read_only_only=plan_mode.active())
+    try:
+        agent_schema = agents.schema(Path(WORKSPACE))
+    except Exception:
+        agent_schema = None
+    if agent_schema is not None:
+        extra = [*extra, agent_schema]
     return [*tools, *extra] if extra else tools
 
 
@@ -1796,6 +1812,9 @@ def main():
                             border_style="cyan", padding=(1, 2)))
 
     messages = deque([{"role": "system", "content": SYSTEM_PROMPT}], maxlen=_HISTORY_MAXLEN)
+    # Под-агентите показват в конзолата какво правят, докато работят.
+    from genesis_agent import agents as _agents
+    _agents.progress = lambda text: console.print(Text(text, style="dim"))
     if any(a in ("-c", "--continue") for a in sys.argv[1:]):
         messages = _continue_session(messages, SYSTEM_PROMPT)
     # Изходът на `!команда` чака следващото съобщение — моделът го вижда с него.
@@ -1859,6 +1878,8 @@ def main():
                     console.print(Text(f"⚠ системният промпт не се обнови: {e}", style="yellow"))
                 messages = deque([{"role": "system", "content": SYSTEM_PROMPT}], maxlen=_HISTORY_MAXLEN)
                 pending_shell.clear()
+                from genesis_agent import todos as _todos
+                _todos.clear()
                 reset_usage()
                 _new_session()
                 print_minimal_banner()
@@ -2039,6 +2060,8 @@ def main():
                 help_table.add_row("/plan [задача]", "Режим план: само чете и планира; /plan пак = изпълни")
                 help_table.add_row("/undo", "Върни файловете от последния ход, който ги промени")
                 help_table.add_row("/compact", "Компресирай историята сега")
+                help_table.add_row("/agents", "Собствените под-агенти (.genesis/agents/*.md)")
+                help_table.add_row("/todos", "Списъкът със задачи, който агентът води")
                 help_table.add_row("!команда", "Пусни команда сам (без модела); изходът отива при модела със следващото съобщение")
                 help_table.add_row("@път", "Прикачи файл или списък на папка към съобщението")
                 help_table.add_row("/hooks [trust]", "Твоите команди около работата (hooks.json)")
