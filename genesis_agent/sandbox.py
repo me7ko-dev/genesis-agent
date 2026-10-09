@@ -1236,6 +1236,10 @@ class SandboxPolicy:
     env_passthrough: tuple[str, ...] = (
         "PATH", "HOME", "USER", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR",
         "PYTHONPATH", "PYTHONIOENCODING",
+        # Windows: без тях одобрен подпроцес от умение падаше с „shell not
+        # found: neither %ComSpec% nor %SystemRoot%“, а Python в детето — без
+        # random/сокети (Windows CI 2026-10-09). Не са тайни.
+        "SYSTEMROOT", "COMSPEC", "PATHEXT", "WINDIR", "TEMP", "TMP",
     )
     cpu_seconds: int = 120
     max_memory_mb: int = 2048

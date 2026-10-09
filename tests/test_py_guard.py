@@ -267,3 +267,11 @@ def test_fwalk_and_rmtree_see_the_whole_tree(tmp_path) -> None:
                              policy=_ASKING)
     assert res.ok and "'d/e'" in res.stdout and "False" in res.stdout, res.stderr
 
+
+
+def test_windows_needs_reach_the_child(monkeypatch) -> None:
+    # Windows CI: subprocess от одобрено умение — „neither %ComSpec% nor %SystemRoot% is set“.
+    monkeypatch.setenv("SYSTEMROOT", r"C:\Windows")
+    monkeypatch.setenv("COMSPEC", r"C:\Windows\system32\cmd.exe")
+    env = sandbox._build_env(sandbox.SandboxPolicy())
+    assert env["SYSTEMROOT"] == r"C:\Windows" and env["COMSPEC"].endswith("cmd.exe")
