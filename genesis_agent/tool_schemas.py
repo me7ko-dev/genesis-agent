@@ -23,16 +23,14 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "READ_FILE",
-            "description": "Read a file (absolute or workspace-relative). Returns the first "
-                           "8000 chars; pass offset (1-indexed line) + limit for a numbered range — "
-                           "needed past ~150 lines and before editing there. Several files → "
-                           "several READ_FILE calls in the same turn.",
+            "description": "Read a file: the first 8000 chars, or a numbered range with offset "
+                           "(1-indexed line) + limit (lines) — needed past ~150 lines and before editing there.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Path to read"},
-                    "offset": {"type": "integer", "description": "1-indexed line to start from"},
-                    "limit": {"type": "integer", "description": "Max lines to return"},
+                    "path": {"type": "string"},
+                    "offset": {"type": "integer"},
+                    "limit": {"type": "integer"},
                 },
                 "required": ["path"],
             },
@@ -42,13 +40,12 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "GLOB",
-            "description": "Find files by name pattern, e.g. '**/*.py'. "
-                           "For file contents use SEARCH_CODE.",
+            "description": "Find files by name, e.g. '**/*.py' (contents: SEARCH_CODE).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string", "description": "Glob pattern, e.g. '**/*.py'"},
-                    "path": {"type": "string", "description": "Directory to search (default: workspace)"},
+                    "pattern": {"type": "string"},
+                    "path": {"type": "string", "description": "default: workspace"},
                 },
                 "required": ["pattern"],
             },
@@ -58,14 +55,13 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "WRITE_FILE",
-            "description": "Create or overwrite a file. An existing file must have been read "
-                           "in this session first, or the call is refused. For a partial change "
-                           "use EDIT_FILE.",
+            "description": "Create or overwrite a whole file. An existing file must be read "
+                           "first in this session, or it is refused. Partial change: EDIT_FILE.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Path to write"},
-                    "content": {"type": "string", "description": "Full file content"},
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
                 },
                 "required": ["path", "content"],
             },
@@ -81,19 +77,17 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "EDIT_FILE",
-            "description": "Replace an exact snippet in an existing file; returns the diff. "
-                           "'old' must occur exactly once (whitespace counts) — add context lines "
-                           "to make it unique. An edit that would break Python syntax is refused "
-                           "and the file is untouched. Prefer over WRITE_FILE for files you "
-                           "didn't just write.",
+            "description": "Replace an exact snippet of an existing file; returns the diff. "
+                           "'old' must occur once, whitespace included (add context lines). An "
+                           "edit breaking Python syntax is refused. Prefer over WRITE_FILE for "
+                           "files you didn't just write.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "File to edit"},
-                    "old": {"type": "string", "description": "Exact existing text to replace"},
-                    "new": {"type": "string", "description": "Replacement text"},
-                    "replace_all": {"type": "boolean",
-                                    "description": "Replace every occurrence (default false)"},
+                    "path": {"type": "string"},
+                    "old": {"type": "string"},
+                    "new": {"type": "string"},
+                    "replace_all": {"type": "boolean"},
                 },
                 "required": ["path", "old", "new"],
             },
@@ -103,14 +97,13 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "SEARCH_CODE",
-            "description": "Regex search in file contents (grep -rn). Locate code with this "
-                           "before reading files.",
+            "description": "Regex search in file contents (grep -rn) — find code before reading.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string", "description": "Regular expression"},
-                    "path": {"type": "string", "description": "Directory to search (default: workspace)"},
-                    "glob": {"type": "string", "description": "Optional filename filter, e.g. *.py"},
+                    "pattern": {"type": "string"},
+                    "path": {"type": "string", "description": "default: workspace"},
+                    "glob": {"type": "string", "description": "e.g. *.py"},
                 },
                 "required": ["pattern"],
             },
@@ -125,7 +118,7 @@ FULL_TOOLS: list[dict] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Project root (default: workspace)"},
+                    "path": {"type": "string", "description": "default: workspace"},
                 },
             },
         },
@@ -134,16 +127,15 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "RUN_CMD",
-            "description": "Run a real shell command through the sandbox (SAFE auto-runs, "
-                           "dangerous ones ask the operator or are blocked).",
+            "description": "Run a shell command through the sandbox (dangerous ones ask the "
+                           "operator or are blocked).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "Shell command"},
+                    "command": {"type": "string"},
                     "background": {"type": "boolean",
-                                   "description": "true = keep it running in the background "
-                                                  "(dev server, watcher) and return an id at once; "
-                                                  "read it with BG_OUTPUT, stop it with BG_KILL"},
+                                   "description": "true for a dev server/watcher: returns an id "
+                                                  "at once; BG_OUTPUT reads it, BG_KILL stops it"},
                 },
                 "required": ["command"],
             },
@@ -153,12 +145,10 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "WEB_FETCH",
-            "description": ("Read one web page by its URL as text (headings, lists, links, code "
-                            "kept; scripts and navigation dropped). For docs, changelogs, API "
-                            "references the user linked — WEB_SEARCH finds pages, this reads one. "
-                            "No browser needed; internal network addresses are refused."),
+            "description": ("Read one web page as text (docs, changelogs, API references). "
+                            "WEB_SEARCH finds pages, this reads one. Internal addresses are refused."),
             "parameters": {"type": "object", "properties": {
-                "url": {"type": "string", "description": "http(s) address"}},
+                "url": {"type": "string"}},
                 "required": ["url"]},
         },
     },
@@ -166,13 +156,11 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "EXPLORE",
-            "description": ("Ask a read-only sub-agent a question about the codebase (where is X, "
-                            "how does Y flow, who calls Z). It searches and reads in its OWN "
-                            "context and returns only the answer with path:line references — use "
-                            "it instead of many SEARCH_CODE/READ_FILE calls on code you have not "
-                            "seen, to keep this conversation small."),
+            "description": ("A read-only sub-agent answers a question about the code (where is X, "
+                            "who calls Y) from its OWN context, with path:line references. Use it "
+                            "instead of many SEARCH_CODE/READ_FILE calls on code you haven't seen."),
             "parameters": {"type": "object", "properties": {
-                "question": {"type": "string", "description": "One concrete question"}},
+                "question": {"type": "string"}},
                 "required": ["question"]},
         },
     },
@@ -180,13 +168,12 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "TODO_WRITE",
-            "description": ("Your task list for this work, shown to the operator. For any task "
-                            "with 3+ steps: write the whole list first, then rewrite it as you "
-                            "go — exactly one item in_progress, mark each completed as soon as "
-                            "it is done (not in batches). Skip it for one-step requests."),
+            "description": ("Task list shown to the operator, for work with 3+ steps: write it "
+                            "all first, then rewrite as you go — one item in_progress, each "
+                            "completed as soon as done."),
             "parameters": {"type": "object", "properties": {
                 "todos": {"type": "array", "items": {"type": "object", "properties": {
-                    "content": {"type": "string", "description": "What to do, imperative"},
+                    "content": {"type": "string"},
                     "status": {"type": "string",
                                "enum": ["pending", "in_progress", "completed"]}},
                     "required": ["content", "status"]}}},
@@ -197,10 +184,10 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "BG_OUTPUT",
-            "description": "What a background command printed since the last look, and whether "
-                           "it still runs. Without id: the list of background commands.",
+            "description": "New output of a background command and whether it still runs; "
+                           "without id, the list of them.",
             "parameters": {"type": "object",
-                           "properties": {"id": {"type": "string", "description": "e.g. bg1"}}},
+                           "properties": {"id": {"type": "string"}}},
         },
     },
     {
@@ -223,19 +210,14 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "ASK_USER",
-            "description": "Ask the user and wait for the answer. Use BEFORE acting when it is "
-                           "unclear which files, from/to where, or overwrite vs keep — never "
-                           "guess on a bulk or destructive operation. Asking is not handing "
-                           "work back.",
+            "description": "Ask the user and wait. Use BEFORE acting when it is unclear which "
+                           "files, from/to where, or overwrite vs keep — never guess on a bulk "
+                           "or destructive operation.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "question": {"type": "string", "description": "The specific question, in the user's language."},
-                    "options": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Optional choices, so the user can answer in one word.",
-                    },
+                    "question": {"type": "string", "description": "in the user's language"},
+                    "options": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["question"],
             },
@@ -282,15 +264,14 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "USE_SKILL",
-            "description": "Run a verified skill from the library (name or description, "
-                           "fuzzy-matched). Empty driver_code lists its functions; driver_code "
-                           "calls them by name (no import) and returns the real result. Try "
-                           "before writing a common utility yourself.",
+            "description": "Run a verified library skill (name or description). Without "
+                           "driver_code: lists its functions; driver_code is Python calling them "
+                           "by name (no import). Try before writing a common utility.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name_or_query": {"type": "string", "description": "Exact skill name or a free-text description"},
-                    "driver_code": {"type": "string", "description": "Optional Python that calls the skill's functions/classes directly by name"},
+                    "name_or_query": {"type": "string"},
+                    "driver_code": {"type": "string"},
                 },
                 "required": ["name_or_query"],
             },
@@ -367,17 +348,15 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "REMEMBER",
-            "description": "Save a decision (with why) or a user preference. Shown at the "
-                           "start of every future session — record it as soon as it is clear.",
+            "description": "Save a decision (value + why) or a user preference (topic + "
+                           "value) for every future session, as soon as it is clear.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "kind": {"type": "string", "enum": ["decision", "preference"]},
-                    "topic": {"type": "string",
-                              "description": "For a preference: the topic (e.g. 'commit style')."},
-                    "value": {"type": "string",
-                              "description": "The decision itself, or the preference value."},
-                    "why": {"type": "string", "description": "For a decision: the reason."},
+                    "topic": {"type": "string"},
+                    "value": {"type": "string"},
+                    "why": {"type": "string"},
                 },
                 "required": ["kind", "value"],
             },
@@ -393,7 +372,7 @@ FULL_TOOLS: list[dict] = [
                 "type": "object",
                 "properties": {
                     "title": {"type": "string"},
-                    "next_step": {"type": "string", "description": "Concrete next action."},
+                    "next_step": {"type": "string"},
                 },
                 "required": ["title"],
             },
@@ -403,12 +382,11 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "TASK_UPDATE",
-            "description": "Update a thread: status or next step. Mark done as soon as "
-                           "it is finished.",
+            "description": "Update a thread's status or next step; done as soon as finished.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "id": {"type": "string", "description": "Thread id from TASK_LIST."},
+                    "id": {"type": "string", "description": "from TASK_LIST"},
                     "status": {"type": "string", "enum": ["open", "blocked", "done"]},
                     "next_step": {"type": "string"},
                 },

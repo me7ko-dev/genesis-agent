@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import type { ChatItem } from '../lib/chat';
+import { todoSummary, type ChatItem } from '../lib/chat';
+import type { Todo } from '../lib/protocol';
 import { mono, useTheme } from '../lib/theme';
 import { RichText } from './RichText';
 
@@ -49,7 +50,8 @@ export function ToolCard({ item }: { item: Item<'tool'> }) {
 
 export function Note({ item }: { item: Item<'note'> }) {
   const theme = useTheme();
-  const color = item.tone === 'error' ? theme.danger : item.tone === 'info' ? theme.muted : theme.warn;
+  const color = item.tone === 'error' ? theme.danger
+    : item.tone === 'info' || item.tone === 'progress' ? theme.muted : theme.warn;
   const icon = item.tone === 'asked' ? '❓' : item.tone === 'error' ? '⛔' : item.tone === 'warn' ? '⚠️' : '';
   if (item.tone === 'asked') {
     return (
@@ -59,7 +61,39 @@ export function Note({ item }: { item: Item<'note'> }) {
       </View>
     );
   }
+  if (item.tone === 'progress') {
+    return <Text selectable style={[mono, styles.progress, { color }]}>{item.text.trim()}</Text>;
+  }
   return <Text selectable style={[styles.note, { color }]}>{icon ? `${icon} ` : ''}{item.text}</Text>;
+}
+
+const TODO_MARK: Record<Todo['status'], string> = { pending: '☐', in_progress: '▶', completed: '☑' };
+
+/** The agent's task list (TODO_WRITE), above the composer: one line folded,
+ *  the whole list open. */
+export function TodoPanel({ todos }: { todos: Todo[] }) {
+  const theme = useTheme();
+  const [open, setOpen] = useState(false);
+  if (!todos.length) return null;
+  return (
+    <Pressable
+      onPress={() => setOpen((o) => !o)}
+      accessibilityRole="button"
+      accessibilityLabel={`Задачи ${todoSummary(todos)}, ${open ? 'свий' : 'разгъни'}`}
+      style={[styles.todos, { backgroundColor: theme.surfaceAlt, borderColor: theme.border }]}>
+      <Text style={[styles.toolName, { color: theme.muted }]} numberOfLines={open ? undefined : 1}>
+        {open ? '▾' : '▸'} 📋 {todoSummary(todos)}
+      </Text>
+      {open ? todos.map((t, i) => (
+        <Text key={i} style={[styles.todo, {
+          color: t.status === 'completed' ? theme.muted : theme.text,
+          fontWeight: t.status === 'in_progress' ? '600' : '400',
+        }]}>
+          {TODO_MARK[t.status] ?? '☐'} {t.content}
+        </Text>
+      )) : null}
+    </Pressable>
+  );
 }
 
 export function ConfirmCard({ item, onAnswer }: {
@@ -117,6 +151,9 @@ const styles = StyleSheet.create({
   toolBody: { fontSize: 12, lineHeight: 17 },
   small: { fontSize: 12 },
   note: { fontSize: 13, lineHeight: 18 },
+  progress: { fontSize: 12, lineHeight: 16 },
+  todos: { marginHorizontal: 10, marginBottom: 8, borderRadius: 10, borderWidth: StyleSheet.hairlineWidth, padding: 10, gap: 4 },
+  todo: { fontSize: 14, lineHeight: 20 },
   asked: { borderRadius: 12, borderWidth: 1, padding: 12, gap: 6 },
   askedTitle: { fontWeight: '700' },
   confirm: { borderRadius: 12, borderWidth: 1, padding: 12, gap: 8 },

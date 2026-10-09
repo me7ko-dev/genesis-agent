@@ -68,12 +68,61 @@ def _skipped(p: Path, root: Path) -> bool:
     return any(part in _SKIP_DIRS for part in parts)
 
 
+def _walk(root: Path, match=None):
+    """Файловете под `root`, без да се слиза в _SKIP_DIRS. rglob влизаше в
+    node_modules и чак после ги отхвърляше: 2026-10-09, 100k файла там →
+    detect_project 3.3 s, REPO_MAP 3.1 s, търсенето 2.9 s на всяко извикване.
+    `match(части на пътя спрямо root)` избира файловете (виж _matcher)."""
+    import os
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
+        rel = Path(dirpath).relative_to(root).parts
+        for name in sorted(filenames):
+            if match is None or match((*rel, name)):
+                yield Path(dirpath) / name
+
+
+def _segments_match(parts: tuple[str, ...], segs: tuple[str, ...]) -> bool:
+    import fnmatch
+    if not segs:
+        return not parts
+    if segs[0] == "**":
+        return any(_segments_match(parts[i:], segs[1:]) for i in range(len(parts) + 1))
+    return bool(parts) and fnmatch.fnmatch(parts[0], segs[0]) and _segments_match(parts[1:], segs[1:])
+
+
+def _matcher(pattern: str):
+    """Шаблонът като rglob (`**/` отпред), но върху вече подрязания обход.
+    Одит 2026-10-09: `**/components/*.tsx` минаваше по стария път и пак
+    обхождаше node_modules (1.1 s на 40k файла). Сравнява сегмент по сегмент
+    с fnmatch — `*` не минава през `/`, а `**` е нула или повече папки.
+    None = необичаен шаблон (абсолютен, `..`, `\\`, завършващ на `/`) → rglob."""
+    if (not pattern or pattern.startswith("/") or pattern.endswith("/") or "\\" in pattern
+            or ".." in pattern.split("/") or ":" in pattern):
+        return None
+    segs: list[str] = ["**"]
+    for seg in pattern.split("/"):
+        if seg in ("", "."):
+            continue
+        if seg == "**" and segs[-1] == "**":
+            continue
+        segs.append(seg)
+    if segs[-1] == "**":
+        return None
+    frozen = tuple(segs)
+    return lambda parts: _segments_match(tuple(parts), frozen)
+
+
+def _files(root: Path, pattern: str):
+    """Файловете по шаблон — подрязаният обход, или rglob за необичайния."""
+    match = _matcher(pattern)
+    if match is not None:
+        return _walk(root, match)
+    return (p for p in root.rglob(pattern) if not p.is_dir() and not _skipped(p, root))
+
+
 def _iter_files(root: Path, glob: str | None = None):
-    for p in root.rglob(glob or "*"):
-        if p.is_dir():
-            continue
-        if _skipped(p, root):
-            continue
+    for p in (_walk(root) if glob is None else _files(root, glob)):
         if glob is None and p.suffix.lower() not in _TEXT_SUFFIXES:
             continue
         try:
@@ -182,11 +231,7 @@ def find_files(pattern: str, path: str | Path = ".",
     if not root.exists():
         raise FileNotFoundError(f"няма такъв път: {root}")
     out: list[str] = []
-    for p in root.rglob(pattern):
-        if p.is_dir():
-            continue
-        if _skipped(p, root):
-            continue
+    for p in _files(root, pattern):
         try:
             out.append(str(p.relative_to(root)))
         except ValueError:

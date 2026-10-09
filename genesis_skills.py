@@ -1373,7 +1373,10 @@ def _dispatch(name: str, arguments: dict) -> str:
             return _tool_edit_file(arguments.get("path", ""),
                                    arguments.get("old", ""),
                                    arguments.get("new", ""),
-                                   bool(arguments.get("replace_all", False)))
+                                   # „false“ като низ е истина в Python: заменяше
+                                   # всички съвпадения вместо отказ (одит 2026-10-09)
+                                   str(arguments.get("replace_all", "")).strip().lower()
+                                   in ("true", "1", "yes"))
         if name == "SEARCH_CODE":
             return _tool_search_code(arguments.get("pattern", ""),
                                      arguments.get("path", "") or "",

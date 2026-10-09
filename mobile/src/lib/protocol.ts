@@ -96,19 +96,65 @@ export type Pairing = {
   name: string;
 };
 
+// Only scheme://host[:port] — no user@, no backslash, no path or query
+// (audit 2026-10-07: `http://pc@evil:1/#k=…` showed "pc" and talked to "evil").
+const BASE = /^https?:\/\/(?:[a-z0-9-]+(?:\.[a-z0-9-]+)*|\[[0-9a-f:.]+\])(?::\d{1,5})?$/i;
+
+/** The app's own link scheme (app.json "scheme"). */
+export const APP_LINK = 'genesisremote://pair';
+
 /**
- * What the QR code on the computer says:
- *   http://192.168.1.5:8765/#k=<key>&n=<name>
- * The key is in the fragment, which a browser never sends over the network.
+ * What the QR code on the computer says (2026-10-09):
+ *   genesisremote://pair#u=<http://192.168.1.5:8765>&k=<key>&n=<name>
+ * A phone camera hands it to this app, never to a browser: the old
+ * `http://…/#k=…` code opened the web build over plain HTTP in the LAN, where
+ * anyone on the same Wi-Fi who swapped the page could read the key. That code
+ * is now only `genesis serve --web` (the web build), and still accepted here.
  */
 export function parsePairingUrl(raw: string): Pairing | null {
   const text = raw.trim();
-  // Only scheme://host[:port]/#… — no user@, no backslash, no path or query
-  // (audit 2026-10-07: `http://pc@evil:1/#k=…` showed "pc" and talked to "evil").
-  const match = /^(https?:\/\/(?:[a-z0-9-]+(?:\.[a-z0-9-]+)*|\[[0-9a-f:.]+\])(?::\d{1,5})?)\/?#(.+)$/i.exec(text);
-  if (!match) return null;
+  let base: string;
+  let fragment: string;
+  const app = /^genesisremote:\/\/pair\/?#(.+)$/i.exec(text);
+  if (app) {
+    fragment = app[1];
+    const u = readParams(fragment)?.u;
+    if (!u || !BASE.test(u)) return null;
+    base = u;
+  } else {
+    const match = /^(https?:\/\/[^/?#\\]*)\/?#(.+)$/i.exec(text);
+    if (!match || !BASE.test(match[1])) return null;
+    base = match[1];
+    fragment = match[2];
+  }
+  const params = readParams(fragment);
+  if (!params?.k) return null;
+  let key: Uint8Array;
+  try {
+    key = b64urlDecode(params.k);
+  } catch {
+    return null;
+  }
+  if (key.length !== 32) return null;
+  return { base, key: params.k, name: cleanName(params.n) || base };
+}
+
+/** The computer's name as shown: no control or bidi characters, one line, at
+ *  most 40 characters — a link could otherwise push the real address off the
+ *  "Сдвои?" card with newlines or reverse it with U+202E (audit 2026-10-09). */
+export function cleanName(raw: string | undefined): string {
+  // Explicit ranges, not \p{…}: control, soft hyphen, bidi marks/overrides/
+  // isolates, zero-width, line/paragraph separators, BOM.
+  const flat = (raw ?? '')
+    .replace(/[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return [...flat].slice(0, 40).join('');
+}
+
+function readParams(fragment: string): Record<string, string> | null {
   const params: Record<string, string> = {};
-  for (const part of match[2].split('&')) {
+  for (const part of fragment.split('&')) {
     const eq = part.indexOf('=');
     if (eq > 0) {
       try {
@@ -118,15 +164,50 @@ export function parsePairingUrl(raw: string): Pairing | null {
       }
     }
   }
-  if (!params.k) return null;
-  let key: Uint8Array;
+  return params;
+}
+
+// ── a pairing link that opened the app ──────────────────────────────────────
+// genesisremote://pair#… waits here for the pair screen — not in the route, so
+// the key never enters the router's path or history.
+
+type Listener = () => void;
+
+// 'invalid': a genesisremote://pair link that is not a valid code — the pair
+// screen says so instead of opening silently (audit 2026-10-09).
+let pending: Pairing | 'invalid' | null = null;
+const listeners = new Set<Listener>();
+
+/** A link from the system: a pairing link (valid or not) → kept for the pair
+ *  screen, true. Any other link → false. */
+export function offerLink(url: string): boolean {
+  if (!/^genesisremote:\/\/pair\b/i.test(url.trim())) return false;
+  pending = parsePairingUrl(url) ?? 'invalid';
+  for (const l of listeners) l();
+  return true;
+}
+
+export function takeLink(): Pairing | 'invalid' | null {
+  const p = pending;
+  pending = null;
+  return p;
+}
+
+export function onLink(listener: Listener): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+/** Where a system link goes: a pairing → '/pair' (the key stays out of the
+ *  path), anything else unchanged. Used by app/+native-intent.tsx. */
+export function redirectFor(path: string): string {
   try {
-    key = b64urlDecode(params.k);
+    return offerLink(path) ? '/pair' : path;
   } catch {
-    return null;
+    return path;
   }
-  if (key.length !== 32) return null;
-  return { base: match[1].replace(/\/+$/, ''), key: params.k, name: params.n || match[1] };
 }
 
 // ── the envelope ────────────────────────────────────────────────────────────
@@ -181,6 +262,12 @@ export type GenesisEvent = {
   label?: string;
 };
 
+export type Todo = { content: string; status: 'pending' | 'in_progress' | 'completed' };
+
+/** What the phone shows all the time, not as an event: plan mode and the
+ *  agent's task list (remote_server.phone_state). Older servers omit it. */
+export type PhoneState = { plan: boolean; todos: Todo[] };
+
 export type EventsReply = {
   ok: boolean;
   events: GenesisEvent[];
@@ -188,6 +275,7 @@ export type EventsReply = {
   reset: boolean;
   busy: boolean;
   epoch: string;
+  state?: PhoneState;
 };
 
 export type StatusReply = {

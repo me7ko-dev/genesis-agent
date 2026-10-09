@@ -110,16 +110,23 @@ def _skip_in_snapshot(rel_parts: tuple[str, ...], root: Path | None = None) -> b
 
 
 def _tree_size_mb(root: Path) -> float:
+    # os.walk с подрязване, не rglob: rglob обхождаше целия node_modules и чак
+    # после го пропускаше — 2.4 s на 100k файла преди всеки `genesis fix`
+    # (2026-10-09). Пропуснатата папка значи пропуснато и всичко под нея.
     total = 0
-    for p in root.rglob("*"):
+    for dirpath, dirnames, filenames in os.walk(root):
         # Спрямо корена: проект в `~/build/app` иначе мереше 0 MB и минаваше тавана.
-        if _skip_in_snapshot(p.relative_to(root).parts, root):
-            continue
-        try:
-            if p.is_file():
-                total += p.stat().st_size
-        except OSError:
-            continue
+        rel = Path(dirpath).relative_to(root).parts
+        dirnames[:] = [d for d in dirnames if not _skip_in_snapshot((*rel, d), root)]
+        for name in filenames:
+            p = Path(dirpath) / name
+            if _skip_in_snapshot((*rel, name), root):
+                continue
+            try:
+                if p.is_file():
+                    total += p.stat().st_size
+            except OSError:
+                continue
     return total / (1024 * 1024)
 
 

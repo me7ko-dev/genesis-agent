@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 import threading
+from collections import deque
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -19,8 +21,18 @@ KEY = bytes(range(32))
 
 def main() -> None:
     session: rs.RemoteSession
+    workspace = Path(tempfile.mkdtemp(prefix="genesis-fake-"))
 
     def runner(text: str, ui) -> None:
+        # The chat's own commands (/plan …) the way `genesis serve` runs them.
+        _, prompt = rs.phone_command(text, ui, session, messages=deque(), workspace=workspace)
+        if prompt is None:
+            return
+        if text == "агент":
+            from genesis_agent import agents
+            agents._say("↳ reviewer: чета diff-а")
+            ui.assistant("Под-агентът свърши.")
+            return
         if text == "опасно":
             allowed = session.confirm("rm -rf build", ["изтрива папка"], timeout=10)
             ui.info(f"allowed={allowed}")
@@ -30,7 +42,8 @@ def main() -> None:
         ui.tool("RUN_CMD", "$ echo " + text + "\n" + text)
         ui.assistant(f"Получих: **{text}** ✅\n\n```python\nprint({text!r})\n```")
 
-    session = rs.RemoteSession(runner)
+    session = rs.RemoteSession(runner, state=rs.phone_state)
+    rs.show_agent_progress(session)
     web = Path(sys.argv[sys.argv.index("--web") + 1]) if "--web" in sys.argv else None
     server = rs.RemoteServer(KEY, session, name="тест-компютър",
                              status=lambda: {"model": "fake/model", "workspace": "/w"},

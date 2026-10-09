@@ -2,12 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 
 import { mergeEvents, thinkingLabel, toChatItems } from './chat';
-import { GenesisClient, ProtocolError, type GenesisEvent, type Pairing, type StatusReply } from './protocol';
+import {
+  GenesisClient, ProtocolError, type GenesisEvent, type Pairing, type PhoneState, type StatusReply,
+} from './protocol';
 import { random } from './random';
 
 export type Connection = 'connecting' | 'online' | 'offline' | 'unauthorized' | 'clock';
 
 const LONG_POLL_S = 20;
+const NO_STATE: PhoneState = { plan: false, todos: [] };
 const BACKOFF_MS = [1000, 2000, 5000, 10000];
 
 /**
@@ -21,6 +24,7 @@ export function useGenesis(pairing: Pairing) {
   const [status, setStatus] = useState<StatusReply | null>(null);
   const [events, setEvents] = useState<GenesisEvent[]>([]);
   const [busy, setBusy] = useState(false);
+  const [phone, setPhone] = useState<PhoneState>(NO_STATE);
   const [error, setError] = useState('');
   const [active, setActive] = useState(AppState.currentState === 'active');
   const lastSeq = useRef(0);
@@ -69,6 +73,7 @@ export function useGenesis(pairing: Pairing) {
             epoch.current = reply.epoch;
             lastSeq.current = 0;
             setEvents([]);
+            setPhone(NO_STATE);
             first = true;
             continue;
           }
@@ -77,6 +82,7 @@ export function useGenesis(pairing: Pairing) {
           lastSeq.current = reply.last;
           setEvents((cur) => mergeEvents(cur, reply.events, reset));
           setBusy(reply.busy);
+          if (reply.state) setPhone(reply.state);
           setConnection('online');
           attempt = 0;
         } catch (e) {
@@ -128,7 +134,8 @@ export function useGenesis(pairing: Pairing) {
   const items = useMemo(() => toChatItems(events), [events]);
   const label = useMemo(() => thinkingLabel(events), [events]);
 
-  return { connection, status, items, busy, label, error, send, confirm, stop, clear };
+  return { connection, status, items, busy, label, error, send, confirm, stop, clear,
+           plan: phone.plan, todos: phone.todos };
 }
 
 function sleep(ms: number) {

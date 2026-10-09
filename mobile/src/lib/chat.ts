@@ -1,10 +1,10 @@
-import type { GenesisEvent } from './protocol';
+import type { GenesisEvent, Todo } from './protocol';
 
 export type ChatItem =
   | { kind: 'user'; key: string; text: string }
   | { kind: 'assistant'; key: string; text: string }
   | { kind: 'tool'; key: string; name: string; result: string; clipped: boolean }
-  | { kind: 'note'; key: string; tone: 'info' | 'warn' | 'error' | 'asked'; text: string }
+  | { kind: 'note'; key: string; tone: 'info' | 'warn' | 'error' | 'asked' | 'progress'; text: string }
   | { kind: 'confirm'; key: string; id: string; operation: string; reasons: string[];
       state: 'pending' | 'allowed' | 'denied'; note: string };
 
@@ -32,6 +32,7 @@ export function toChatItems(events: GenesisEvent[]): ChatItem[] {
       case 'warn':
       case 'error':
       case 'asked':
+      case 'progress':
         items.push({ kind: 'note', key, tone: e.type, text: e.text ?? '' });
         break;
       case 'confirm':
@@ -62,12 +63,22 @@ export function mergeEvents(current: GenesisEvent[], incoming: GenesisEvent[], r
   return fresh.length ? [...current, ...fresh] : current;
 }
 
-/** What the busy row says: the latest "thinking" label of the running turn. */
+/** What the busy row says: the latest "thinking" label or sub-agent step of
+ *  the running turn — a sub-agent works for minutes, "thinking…" said nothing. */
 export function thinkingLabel(events: GenesisEvent[]): string {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
     if (e.type === 'thinking') return e.label ?? '';
+    if (e.type === 'progress') return (e.text ?? '').trim();
     if (e.type === 'user') break;
   }
   return 'Genesis мисли…';
+}
+
+/** The task list in one line: "2/5 · пусни тестовете" (the item in work). */
+export function todoSummary(todos: Todo[]): string {
+  const done = todos.filter((t) => t.status === 'completed').length;
+  const current = todos.find((t) => t.status === 'in_progress')
+    ?? todos.find((t) => t.status === 'pending');
+  return `${done}/${todos.length}${current ? ` · ${current.content}` : ''}`;
 }

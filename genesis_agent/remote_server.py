@@ -30,6 +30,10 @@ Code на телефона управлява сесия, която тече д
                        AAD "genesis/1/req"; открит текст:
                        {"ts":ms,"rid":"…","op":"status|send|events|confirm|stop|clear", …}
                      → {"v":1,"n":…,"c":…}, AAD "genesis/1/res:" + rid
+
+`events` носи и "state": {"plan": bool, "todos": [{content, status}]}; събитието
+"progress" е напредъкът на под-агент. `send` с "/plan", "/undo" … — командите на
+чата (phone_command), не текст за модела.
 """
 from __future__ import annotations
 
@@ -130,11 +134,23 @@ def lan_addresses() -> list[str]:
     return [a for a in found if not a.startswith(("127.", "169.254.", "0."))]
 
 
-def pairing_url(host: str, port: int, key: bytes, name: str) -> str:
-    """Какво носи QR кодът. Ключът е във фрагмента (след `#`): браузърът
-    не го праща към сървъра, а приложението го чете само от кода."""
+def pairing_url(host: str, port: int, key: bytes, name: str, *, web: bool = False) -> str:
+    """Какво носи QR кодът: `genesisremote://pair#u=<адрес>&k=<ключ>&n=<име>`.
+
+    Схемата на приложението, не `http://` (2026-10-09): камерата на телефона
+    отваряше `http://…/#k=…` в браузъра — уеб версията по обикновен HTTP в
+    LAN, където който подмени страницата, вижда ключа. Сега кодът отваря само
+    приложението. Ключът пак е във фрагмента (след `#`).
+
+    `web=True` (`genesis serve --web`) — старият `http://…/#k=…` за уеб
+    версията на iPhone без приложение: само по изричен избор и с предупреждение."""
     from urllib.parse import quote
-    return f"http://{host}:{port}/#k={_b64e(key)}&n={quote(name)}"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"   # IPv6 — без скоби приложението не четеше кода (одит 2026-10-09)
+    if web:
+        return f"http://{host}:{port}/#k={_b64e(key)}&n={quote(name)}"
+    base = quote(f"http://{host}:{port}", safe="")
+    return f"genesisremote://pair#u={base}&k={_b64e(key)}&n={quote(name)}"
 
 
 # ── криптиране ─────────────────────────────────────────────────────────────
@@ -234,9 +250,13 @@ class RemoteSession:
     N" (дълго чакане до 25 s) — ако е бил офлайн, получава пропуснатото.
     """
 
-    def __init__(self, runner: TurnRunner, *, on_event: Callable[[dict], None] | None = None) -> None:
+    def __init__(self, runner: TurnRunner, *, on_event: Callable[[dict], None] | None = None,
+                 state: Callable[[], dict] | None = None) -> None:
         self._runner = runner
         self._on_event = on_event
+        # Какво телефонът показва постоянно, не като събитие: режим план и
+        # списъкът със задачи. Идва с всеки отговор на `events` (2026-10-09).
+        self._state = state
         self._events: deque[dict] = deque(maxlen=_EVENT_LOG)
         self._seq = 0
         self._cond = threading.Condition()
@@ -272,8 +292,14 @@ class RemoteSession:
             # наличен дневник и знае, че трябва да го покаже наново.
             reset = after + 1 < first or after > self._seq
             items = list(self._events) if reset else [e for e in self._events if e["seq"] > after]
-            return {"events": items, "last": self._seq, "reset": reset,
-                    "busy": self._busy, "epoch": self.epoch}
+            reply = {"events": items, "last": self._seq, "reset": reset,
+                     "busy": self._busy, "epoch": self.epoch}
+        if self._state is not None:
+            try:
+                reply["state"] = self._state()
+            except Exception:
+                pass   # състоянието е украса — без него разговорът върви
+        return reply
 
     # -- ход --
     @property
@@ -387,6 +413,111 @@ class RemoteTurnUI:
 
     def cancelled(self) -> bool:
         return self._s.stopped()
+
+
+# ── командите от телефона ──────────────────────────────────────────────────
+
+# Командите на терминала, които телефонът не може да изпълни (менюта и въпроси
+# в конзолата, смяна на модела). Без този отказ стигаха до модела като текст и
+# той отговаряше наслуки (2026-10-09).
+_TERMINAL_ONLY = frozenset({"/model", "/models", "/agent", "/backup", "/status", "/history",
+                            "/export", "/предай", "/update", "/ъпдейт", "/done", "/drop",
+                            "/готово", "/maxcoding", "/макскод", "/local_model_max",
+                            "/local_model_normal", "/локален_макс", "/локален_нормал"})
+
+PHONE_HELP = """Команди от телефона:
+/plan — режим план: само чете и планира; /plan пак — изпълнява плана
+/plan <задача> — план за задачата
+/undo — връща файловете от последния ход (пита първо)
+/todos — списъкът със задачи на агента
+/agents — под-агентите (.genesis/agents/*.md)
+/compact — компресира историята
+/memory, /init, /bg, /hooks, /mcp, /commands, /skills, /tasks
+/clear — нов разговор
+@файл — прикача файл от работната папка
+Само в терминала: /model, /history, /backup, /export, /update и доверяването (/hooks trust, /mcp trust)."""
+
+
+def phone_command(text: str, ui: Any, session: RemoteSession, *, messages: Any,
+                  workspace: Path, compact: Callable[[Any], Any] | None = None) -> tuple[Any, str | None]:
+    """Съобщение от телефона, преди да стигне до модела.
+
+    Връща (историята, текст за модела); None за текста = ходът свършва тук.
+    Командите са същите като в терминала (chat_commands) — досега телефонът
+    пращаше `/plan` и `/undo` на модела като обикновен текст (2026-10-09).
+    """
+    from genesis_agent import chat_commands
+    stripped = text.strip()
+    # Същото делене като chat_commands: `/hooks\ntrust` е /hooks trust и тук.
+    head, rest = chat_commands._split(stripped)
+    cmd = head.lower()
+    if stripped.startswith("/"):
+        if cmd == "/help":
+            ui.info(PHONE_HELP)
+            return messages, None
+        if cmd in _TERMINAL_ONLY:
+            ui.warn(f"{head} е само в терминала на компютъра. /help — какво може оттук.")
+            return messages, None
+        # Доверяването пуска програми на компютъра при всеки следващ ход, без
+        # да пита. Решава се пред целия файл в терминала, не с едно докосване
+        # на телефон, който може да е в чужди ръце.
+        if cmd in ("/hooks", "/mcp") and rest.strip().lower() == "trust":
+            ui.warn(f"{cmd} trust е само в терминала на компютъра — там се вижда целият файл.")
+            return messages, None
+        if cmd in ("/skills", "/умения"):
+            from genesis_agent.skill_loader import format_skill_list
+            ui.info(format_skill_list())
+            return messages, None
+        if cmd in ("/tasks", "/задачи", "/state"):
+            from genesis_agent import workspace_memory as _wm
+            ui.info(_wm.briefing(max_threads=20, max_decisions=10) or "Още нищо не е записано.")
+            return messages, None
+
+        said: list[str] = []
+
+        def out(line: str) -> None:
+            said.append(line)
+            ui.info(line)
+
+        def ask(question: str) -> str:
+            # Въпросът на командата (/undo) става карта „Изпълни/Откажи“ на
+            # телефона; какво точно ще стане е последното, което командата каза.
+            reason = question.split("(", 1)[0].strip(" >") or question
+            return "да" if session.confirm(said[-1] if said else question, [reason]) else "не"
+
+        res = chat_commands.handle(stripped, messages=messages, workspace=workspace,
+                                   out=out, ask=ask, compact=compact)
+        if res is not None:
+            if res.messages is not None:
+                messages = res.messages
+            if not res.prompt:
+                return messages, None
+            stripped = res.prompt
+    from genesis_agent import mentions
+    try:
+        stripped, notes = mentions.expand(stripped, workspace)
+    except Exception as e:
+        notes = [f"@: {e}"]
+    for note in notes:
+        ui.info(f"📎 {note}")
+    return messages, stripped
+
+
+def show_agent_progress(session: RemoteSession) -> None:
+    """Под-агентите (AGENT) казват какво правят — на телефона като събития.
+    Без това там се виждаше само „мисли…“, докато под-агентът работи минути
+    наред (2026-10-09)."""
+    from genesis_agent import agents
+
+    def say(text: str) -> None:
+        session.emit("progress", text=text)
+    agents.progress = say
+
+
+def phone_state() -> dict:
+    """Режимът план и задачите — за постоянния ред на телефона."""
+    from genesis_agent import plan_mode, todos
+    return {"plan": plan_mode.active(), "todos": todos.items()}
 
 
 # ── HTTP ────────────────────────────────────────────────────────────────────
@@ -619,6 +750,16 @@ _LANDING = """<!doctype html><html lang="bg"><meta charset="utf-8">
 
 # ── `genesis serve` ─────────────────────────────────────────────────────────
 
+# Какво приложението приема за адрес (BASE в mobile/src/lib/protocol.ts).
+_HOST = re.compile(r"^(?:[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*|\[?[0-9A-Fa-f:.]+\]?)$")
+
+
+def valid_host(host: str) -> bool:
+    """Адрес, който телефонът ще прочете от кода. `PC_1.local` или `user@pc`
+    правеха код, който приложението тихо отхвърляше (одит 2026-10-09)."""
+    return bool(_HOST.match(host))
+
+
 def _print_qr(console: Any, url: str) -> None:
     try:
         import qrcode  # type: ignore[import-untyped]
@@ -653,14 +794,14 @@ def _web_root() -> Path | None:
 
 
 def serve(args: list[str]) -> int:
-    """`genesis serve [--port N] [--host IP] [--reset]`."""
+    """`genesis serve [--port N] [--host IP] [--reset] [--web]`."""
     try:
         import cryptography  # noqa: F401
     except ImportError:
         print("`genesis serve` иска cryptography:  pip install \"genesis-agent[mobile]\"")
         return 2
 
-    port, host_override, reset = DEFAULT_PORT, "", False
+    port, host_override, reset, web = DEFAULT_PORT, "", False, False
     i = 0
     while i < len(args):
         a = args[i]
@@ -676,6 +817,8 @@ def serve(args: list[str]) -> int:
             host_override = args[i]
         elif a == "--reset":
             reset = True
+        elif a == "--web":
+            web = True
         elif a in ("-h", "--help"):
             print(SERVE_USAGE)
             return 0
@@ -683,6 +826,16 @@ def serve(args: list[str]) -> int:
             print(f"Непозната опция: {a}\n\n{SERVE_USAGE}")
             return 2
         i += 1
+    if host_override and not valid_host(host_override):
+        print(f"--host {host_override!r}: телефонът не може да го прочете — IP адрес или име "
+              "от латиница, цифри, точки и тирета.")
+        return 2
+    if web and _web_root() is None:
+        # Уеб версията е само в Windows приложението; другаде кодът водеше до
+        # страница „не е включена“ (одит 2026-10-09).
+        print("--web: уеб версията не е в тази инсталация (идва с Windows приложението). "
+              "Пусни без --web и сдвои с приложението Genesis Remote.")
+        return 2
 
     key = load_or_create_key(reset=reset)
     from rich.panel import Panel
@@ -696,7 +849,11 @@ def serve(args: list[str]) -> int:
                                                maxlen=gta._HISTORY_MAXLEN)}
 
     def runner(text: str, ui: Any) -> None:
-        state["messages"] = gta.run_turn(state["messages"], text, ui)
+        messages, prompt = phone_command(text, ui, session, messages=state["messages"],
+                                         workspace=Path(gta.WORKSPACE), compact=gta._force_compact)
+        state["messages"] = messages
+        if prompt is not None:
+            state["messages"] = gta.run_turn(state["messages"], prompt, ui)
 
     def clear() -> None:
         # Както /clear в терминала: нов файл за историята (иначе следващият
@@ -733,6 +890,8 @@ def serve(args: list[str]) -> int:
             gta.RICH_UI.tool(event["name"], event["result"])
         elif kind in ("warn", "asked", "error"):
             console.print(Text(f"⚠ {event['text']}", style="yellow"))
+        elif kind in ("info", "progress"):
+            console.print(Text(str(event["text"]), style="dim"))
         elif kind == "confirm":
             console.print(Text.assemble(("📱 Чака потвърждение от телефона: ", "bold yellow"),
                                         str(event["operation"])))
@@ -740,7 +899,8 @@ def serve(args: list[str]) -> int:
             console.print(Text(f"   → {'разрешено' if event['allow'] else 'отказано'} "
                                f"{event.get('note', '')}", style="dim"))
 
-    session = RemoteSession(runner, on_event=show)
+    session = RemoteSession(runner, on_event=show, state=phone_state)
+    show_agent_progress(session)
 
     from genesis_agent import sandbox as _sandbox
     _sandbox.set_policy(_sandbox.SandboxPolicy(
@@ -757,14 +917,21 @@ def serve(args: list[str]) -> int:
         return 1
 
     hosts = [host_override] if host_override else (lan_addresses() or ["127.0.0.1"])
-    url = pairing_url(hosts[0], port, key, name)
+    url = pairing_url(hosts[0], port, key, name, web=web)
     console.print(Panel(Text.assemble(
-        ("Сканирай с телефона (приложението Genesis Remote или камерата):\n", "bold"),
+        (("Отвори кода с камерата на телефона — отваря уеб версията в браузъра:\n" if web else
+          "Сканирай с телефона (приложението Genesis Remote или камерата — отваря приложението):\n"),
+         "bold"),
         ("Работна папка: ", "dim"), (str(gta.WORKSPACE), ""),
         ("\nАдрес: ", "dim"), (f"http://{hosts[0]}:{port}", "cyan"),
         (("\nКлючът е само в QR кода. Нов ключ (отнема достъпа на всички телефони): "
           "genesis serve --reset"), "dim")),
         title="📱 Genesis за телефона", border_style="cyan"))
+    if web:
+        console.print(Text(
+            "⚠ --web: кодът отваря уеб версията по обикновен HTTP. Който е в същата мрежа, може "
+            "да подмени страницата и да види ключа — само вкъщи. С приложението: без --web.",
+            style="yellow"))
     _print_qr(console, url)
     # Същото като текст — за поставяне в приложението, ако камерата не
     # хване кода. Терминалът е на машината на оператора, не в мрежата.
@@ -795,11 +962,12 @@ def serve(args: list[str]) -> int:
     return 0
 
 
-SERVE_USAGE = """Употреба: genesis serve [--port N] [--host IP] [--reset]
+SERVE_USAGE = """Употреба: genesis serve [--port N] [--host IP] [--reset] [--web]
 
 Пуска Genesis за телефона (приложението Genesis Remote за Android и iOS):
 показва QR код, който сдвоява телефона с тази машина.
 
   --port N    порт (по подразбиране 8765)
   --host IP   адрес в QR кода — напр. Tailscale адрес за достъп извън дома
-  --reset     нов ключ; всички сдвоени телефони губят достъп"""
+  --reset     нов ключ; всички сдвоени телефони губят достъп
+  --web       QR код за уеб версията (iPhone без приложението) — по HTTP, само вкъщи"""

@@ -123,3 +123,39 @@ def test_empty_arguments_are_an_empty_dict_but_a_non_object_is_an_error() -> Non
     # Списък не е „без аргументи“: с {} TODO_WRITE триеше списъка (одит 2026-10-09).
     with pytest.raises(json.JSONDecodeError):
         tool_schemas.load_tool_arguments("[1, 2]")
+
+
+def test_the_schemas_stay_small_and_keep_their_rules() -> None:
+    """Схемите се плащат на всяко обръщение. 2026-10-09: 9 400 знака JSON след
+    петте нови инструмента (+21% на заявката) → 7 466 след съкращаване на
+    описанията. Таванът пази от тихо надуване; правилата, които движат
+    поведението, трябва да останат."""
+    import json
+    tools = [t for t in tool_schemas.FULL_TOOLS
+             if t["function"]["name"] not in tool_schemas._BROWSER_TOOLS]
+    assert len(json.dumps(tools, ensure_ascii=False)) <= 7600
+    desc = {t["function"]["name"]: t["function"]["description"] for t in tools}
+    assert "once" in desc["EDIT_FILE"] and "WRITE_FILE" in desc["EDIT_FILE"]
+    assert "read" in desc["WRITE_FILE"] and "EDIT_FILE" in desc["WRITE_FILE"]
+    assert "in_progress" in desc["TODO_WRITE"] and "3+" in desc["TODO_WRITE"]
+    assert "driver_code" in desc["USE_SKILL"]
+    assert "why" in desc["REMEMBER"] and "preference" in desc["REMEMBER"]
+    assert "BEFORE" in desc["ASK_USER"]
+    assert "BG_KILL" in json.dumps(next(t for t in tools if t["function"]["name"] == "RUN_CMD"))
+
+
+def test_replace_all_as_the_string_false_is_false(tmp_path, monkeypatch) -> None:
+    # Модел, който праща булевите като низове: „false“ заменяше ВСИЧКИ
+    # съвпадения вместо отказа „среща се 2 пъти“ (одит 2026-10-09).
+    import genesis_skills as gs
+    monkeypatch.setattr(gs, "_WORKSPACE", tmp_path)
+    gs._SEEN_PATHS.clear()
+    f = tmp_path / "a.py"
+    f.write_text("x = 1\nx = 1\n", encoding="utf-8")
+    gs.dispatch_tool_call("READ_FILE", {"path": "a.py"})
+    gs.dispatch_tool_call("EDIT_FILE", {"path": "a.py", "old": "x = 1", "new": "x = 2",
+                                        "replace_all": "false"})
+    assert f.read_text(encoding="utf-8") == "x = 1\nx = 1\n"
+    gs.dispatch_tool_call("EDIT_FILE", {"path": "a.py", "old": "x = 1", "new": "x = 2",
+                                        "replace_all": "true"})
+    assert f.read_text(encoding="utf-8") == "x = 2\nx = 2\n"
