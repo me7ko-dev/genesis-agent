@@ -1699,8 +1699,53 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
         session_file = _session_file()
         with open(session_file, "w", encoding="utf-8", errors="replace") as f:
             json.dump(list(messages), f, ensure_ascii=False, indent=None, separators=(',', ':'))
+        try:
+            from genesis_agent import session_index
+            session_index.record(HISTORY_DIR, Path(WORKSPACE), session_file)
+        except Exception:
+            pass
     from genesis_agent.agent_core import bounded_history
     return bounded_history(messages, limit)
+
+
+def _with_attachments(user_input: str, pending_shell: list[str]) -> str:
+    """Съобщението с прикачените `@файлове` и изхода от `!команди` преди него.
+
+    `@` се разгъва само в написаното от оператора — не и в изхода на командите,
+    където `@нещо` е текст от програма, не молба да се прикачи файл."""
+    from genesis_agent import mentions
+    try:
+        user_input, notes = mentions.expand(user_input, Path(WORKSPACE))
+    except Exception as e:
+        notes = [f"@: {e}"]
+    for note in notes:
+        console.print(Text(f"📎 {note}", style="dim"))
+    if pending_shell:
+        user_input = "\n\n".join([*pending_shell, user_input])
+    return user_input
+
+
+def _continue_session(messages: "deque", system_prompt: str) -> "deque":
+    """`genesis -c`: последният разговор в тази папка, ако има такъв."""
+    from genesis_agent import session_index
+    path = session_index.latest(HISTORY_DIR, Path(WORKSPACE))
+    if path is None:
+        console.print("[yellow]Няма предишен разговор в тази папка — започвам нов.[/]")
+        return messages
+    try:
+        with open(path, encoding="utf-8") as f:
+            restored = _restore_session(json.load(f), system_prompt)
+    except (OSError, ValueError) as e:
+        console.print(Text(f"⚠ {path.name} не се зарежда: {e} — започвам нов.", style="yellow"))
+        return messages
+    _new_session()   # продължението — в нов файл, старият остава (както /history)
+    last = next((str(m.get("content") or "") for m in reversed(restored)
+                 if m.get("role") == "assistant" and m.get("content")), "")
+    console.print(f"[green]✓ Продължавам разговора от {path.name} ({len(restored)} съобщения)[/]")
+    if last:
+        console.print(Panel(Text(last[:600] + ("…" if len(last) > 600 else "")),
+                            title="[dim]последният отговор[/]", border_style="dim"))
+    return restored
 
 
 def main():
@@ -1747,6 +1792,10 @@ def main():
                             border_style="cyan", padding=(1, 2)))
 
     messages = deque([{"role": "system", "content": SYSTEM_PROMPT}], maxlen=_HISTORY_MAXLEN)
+    if any(a in ("-c", "--continue") for a in sys.argv[1:]):
+        messages = _continue_session(messages, SYSTEM_PROMPT)
+    # Изходът на `!команда` чака следващото съобщение — моделът го вижда с него.
+    pending_shell = []
     from genesis_agent.chat_input import read_message
     from genesis_agent.model_router import CONFIRM_COMMANDS, command_for_request
 
@@ -1763,6 +1812,14 @@ def main():
 
             user_input = read_message(lambda: console.input("[bold green]❯[/] "))
             if not user_input: continue
+
+            # `!команда` — операторът пуска сам, без модела (като в Claude Code).
+            from genesis_agent import shell_mode
+            if shell_mode.is_bang(user_input):
+                pending_shell.append(shell_mode.run(
+                    user_input[1:].strip(), Path(WORKSPACE),
+                    lambda line: console.print(line, markup=False, highlight=False)))
+                continue
 
             # Заявка, която е точно вградена команда („направи бекъп"), не
             # стига до модела. Командите, които променят нещо, питат; „не" →
@@ -1793,6 +1850,7 @@ def main():
                 except Exception as e:
                     console.print(Text(f"⚠ системният промпт не се обнови: {e}", style="yellow"))
                 messages = deque([{"role": "system", "content": SYSTEM_PROMPT}], maxlen=_HISTORY_MAXLEN)
+                pending_shell.clear()
                 reset_usage()
                 _new_session()
                 print_minimal_banner()
@@ -1973,6 +2031,8 @@ def main():
                 help_table.add_row("/plan [задача]", "Режим план: само чете и планира; /plan пак = изпълни")
                 help_table.add_row("/undo", "Върни файловете от последния ход, който ги промени")
                 help_table.add_row("/compact", "Компресирай историята сега")
+                help_table.add_row("!команда", "Пусни команда сам (без модела); изходът отива при модела със следващото съобщение")
+                help_table.add_row("@път", "Прикачи файл или списък на папка към съобщението")
                 help_table.add_row("/hooks [trust]", "Твоите команди около работата (hooks.json)")
                 help_table.add_row("/commands", "Твоите команди от .genesis/commands/*.md")
                 help_table.add_row("/bg", "Фоновите команди (dev сървъри) — състояние")
@@ -2095,6 +2155,8 @@ def main():
                     continue
                 user_input = _res.prompt
 
+            user_input = _with_attachments(user_input, pending_shell)
+            pending_shell.clear()
             messages = run_turn(messages, user_input, RICH_UI)
 
         except (KeyboardInterrupt, EOFError):
