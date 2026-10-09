@@ -134,7 +134,10 @@ def _install() -> None:
             if secret(line) or any(b and b in line for b in blocked):
                 raise PermissionError("[SANDBOX] команда към чувствителен път отказана")
             if procs or _system_tool(words):
-                _cleared.ok = True     # този Popen може до fork_exec/CreateProcess
+                # Само Popen стига до fork_exec/CreateProcess; ако Python избере
+                # posix_spawn, отметката се сваля — иначе следващото пускане
+                # от multiprocessing минаваше веднъж.
+                _cleared.ok = event == "subprocess.Popen"
                 return
             raise PermissionError("[SANDBOX] пускане на процес без одобрение — отказано")
         if event not in _EVENTS_READ and event not in _EVENTS_WRITE:

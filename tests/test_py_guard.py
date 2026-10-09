@@ -266,3 +266,4 @@ def test_fwalk_and_rmtree_see_the_whole_tree(tmp_path) -> None:
                              "shutil.rmtree('d')\nprint(os.path.exists('d'))\n", timeout=60, cwd=tmp_path,
                              policy=_ASKING)
     assert res.ok and "'d/e'" in res.stdout and "False" in res.stdout, res.stderr
+
