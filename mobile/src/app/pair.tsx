@@ -7,22 +7,32 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { usePairing } from '../lib/pairing';
-import { GenesisClient, ProtocolError, parsePairingUrl } from '../lib/protocol';
+import {
+  GenesisClient, ProtocolError, onLink, parsePairingUrl, takeLink, type Pairing,
+} from '../lib/protocol';
 import { random } from '../lib/random';
 import { mono, useTheme } from '../lib/theme';
 
 export default function Pair() {
   const theme = useTheme();
-  const { pair } = usePairing();
+  const { pair, pairing: current } = usePairing();
   const [permission, requestPermission] = useCameraPermissions();
   const [manual, setManual] = useState('');
   const [error, setError] = useState('');
   const [checking, setChecking] = useState(false);
   const busy = useRef(false);
+  // A link that opened the app waits here for one tap: a web page can open
+  // genesisremote:// links too, and must not re-pair the phone on its own.
+  const [offered, setOffered] = useState<Pairing | null>(null);
 
-  const tryPair = useCallback(async (raw: string) => {
+  useEffect(() => {
+    setOffered(takeLink());
+    return onLink(() => setOffered(takeLink()));
+  }, []);
+
+  const tryPair = useCallback(async (raw: string | Pairing) => {
     if (busy.current) return;
-    const pairing = parsePairingUrl(raw);
+    const pairing = typeof raw === 'string' ? parsePairingUrl(raw) : raw;
     if (!pairing) {
       setError('Това не е код от „genesis serve".');
       return;
@@ -37,6 +47,7 @@ export default function Pair() {
         throw new ProtocolError('another computer', 'unauthorized');
       }
       await pair({ ...pairing, name: status.name || pairing.name });
+      setOffered(null);
       if (Platform.OS === 'web') window.history.replaceState(null, '', '/');
       router.replace('/chat');
     } catch (e) {
@@ -54,7 +65,8 @@ export default function Pair() {
     }
   }, [pair]);
 
-  // Web build opened from the QR code: the key is in the address itself.
+  // Web build opened from the `genesis serve --web` code: the key is in the
+  // address itself. (The default code opens the app, not a browser.)
   useEffect(() => {
     if (Platform.OS === 'web' && window.location.hash.includes('k=')) tryPair(window.location.href);
   }, [tryPair]);
@@ -70,6 +82,28 @@ export default function Pair() {
             Агентът работи на компютъра ти; телефонът е прозорец към него.
           </Text>
 
+          {offered ? (
+            <View style={[styles.step, { backgroundColor: theme.surface, borderColor: theme.accent }]}>
+              <Text style={[styles.stepTitle, { color: theme.text }]}>Сдвояване от връзка</Text>
+              <Text style={{ color: theme.text }}>
+                Компютър „{offered.name}“ на {offered.base}. Сдвои само ако току-що си сканирал кода от своя `genesis serve`.
+              </Text>
+              <View style={styles.row}>
+                <Pressable accessibilityRole="button" onPress={() => {
+                  setOffered(null);
+                  if (current) router.replace('/chat');   // already paired: back to it
+                }}
+                  style={[styles.secondary, { borderColor: theme.border }]}>
+                  <Text style={[styles.primaryText, { color: theme.text }]}>Не</Text>
+                </Pressable>
+                <Pressable accessibilityRole="button" disabled={checking} onPress={() => tryPair(offered)}
+                  style={[styles.primary, styles.flex, { backgroundColor: theme.accent }]}>
+                  <Text style={[styles.primaryText, { color: theme.accentText }]}>Сдвои</Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : null}
+
           <View style={[styles.step, { backgroundColor: theme.surface, borderColor: theme.border }]}>
             <Text style={[styles.stepTitle, { color: theme.text }]}>1. На компютъра</Text>
             <Text selectable style={[mono, styles.cmd, { backgroundColor: theme.code, color: theme.text }]}>genesis serve</Text>
@@ -78,7 +112,7 @@ export default function Pair() {
           <View style={[styles.step, { backgroundColor: theme.surface, borderColor: theme.border }]}>
             <Text style={[styles.stepTitle, { color: theme.text }]}>2. Сканирай QR кода</Text>
             {Platform.OS === 'web' ? (
-              <Text style={{ color: theme.muted }}>Отвори кода с камерата на телефона — връзката води направо тук.</Text>
+              <Text style={{ color: theme.muted }}>Пусни `genesis serve --web` и отвори кода с камерата — връзката води направо тук.</Text>
             ) : cameraOk ? (
               <View style={styles.cameraBox}>
                 <CameraView
@@ -103,7 +137,7 @@ export default function Pair() {
             <TextInput
               value={manual}
               onChangeText={setManual}
-              placeholder="http://192.168.1.5:8765/#k=…"
+              placeholder="genesisremote://pair#u=…&k=…"
               placeholderTextColor={theme.muted}
               autoCapitalize="none"
               autoCorrect={false}
@@ -141,6 +175,8 @@ const styles = StyleSheet.create({
   input: { borderWidth: 1, borderRadius: 10, padding: 10, fontSize: 13 },
   primary: { borderRadius: 12, paddingVertical: 13, alignItems: 'center' },
   primaryText: { fontWeight: '700', fontSize: 16 },
+  secondary: { borderRadius: 12, borderWidth: 1, paddingVertical: 13, paddingHorizontal: 20, alignItems: 'center' },
+  row: { flexDirection: 'row', gap: 10 },
   error: { fontSize: 14, lineHeight: 20 },
   foot: { fontSize: 12, lineHeight: 17 },
 });

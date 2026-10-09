@@ -134,11 +134,21 @@ def lan_addresses() -> list[str]:
     return [a for a in found if not a.startswith(("127.", "169.254.", "0."))]
 
 
-def pairing_url(host: str, port: int, key: bytes, name: str) -> str:
-    """Какво носи QR кодът. Ключът е във фрагмента (след `#`): браузърът
-    не го праща към сървъра, а приложението го чете само от кода."""
+def pairing_url(host: str, port: int, key: bytes, name: str, *, web: bool = False) -> str:
+    """Какво носи QR кодът: `genesisremote://pair#u=<адрес>&k=<ключ>&n=<име>`.
+
+    Схемата на приложението, не `http://` (2026-10-09): камерата на телефона
+    отваряше `http://…/#k=…` в браузъра — уеб версията по обикновен HTTP в
+    LAN, където който подмени страницата, вижда ключа. Сега кодът отваря само
+    приложението. Ключът пак е във фрагмента (след `#`).
+
+    `web=True` (`genesis serve --web`) — старият `http://…/#k=…` за уеб
+    версията на iPhone без приложение: само по изричен избор и с предупреждение."""
     from urllib.parse import quote
-    return f"http://{host}:{port}/#k={_b64e(key)}&n={quote(name)}"
+    if web:
+        return f"http://{host}:{port}/#k={_b64e(key)}&n={quote(name)}"
+    base = quote(f"http://{host}:{port}", safe="")
+    return f"genesisremote://pair#u={base}&k={_b64e(key)}&n={quote(name)}"
 
 
 # ── криптиране ─────────────────────────────────────────────────────────────
@@ -772,14 +782,14 @@ def _web_root() -> Path | None:
 
 
 def serve(args: list[str]) -> int:
-    """`genesis serve [--port N] [--host IP] [--reset]`."""
+    """`genesis serve [--port N] [--host IP] [--reset] [--web]`."""
     try:
         import cryptography  # noqa: F401
     except ImportError:
         print("`genesis serve` иска cryptography:  pip install \"genesis-agent[mobile]\"")
         return 2
 
-    port, host_override, reset = DEFAULT_PORT, "", False
+    port, host_override, reset, web = DEFAULT_PORT, "", False, False
     i = 0
     while i < len(args):
         a = args[i]
@@ -795,6 +805,8 @@ def serve(args: list[str]) -> int:
             host_override = args[i]
         elif a == "--reset":
             reset = True
+        elif a == "--web":
+            web = True
         elif a in ("-h", "--help"):
             print(SERVE_USAGE)
             return 0
@@ -883,14 +895,19 @@ def serve(args: list[str]) -> int:
         return 1
 
     hosts = [host_override] if host_override else (lan_addresses() or ["127.0.0.1"])
-    url = pairing_url(hosts[0], port, key, name)
+    url = pairing_url(hosts[0], port, key, name, web=web)
     console.print(Panel(Text.assemble(
-        ("Сканирай с телефона (приложението Genesis Remote или камерата):\n", "bold"),
+        ("Сканирай с телефона (приложението Genesis Remote или камерата — отваря приложението):\n", "bold"),
         ("Работна папка: ", "dim"), (str(gta.WORKSPACE), ""),
         ("\nАдрес: ", "dim"), (f"http://{hosts[0]}:{port}", "cyan"),
         (("\nКлючът е само в QR кода. Нов ключ (отнема достъпа на всички телефони): "
           "genesis serve --reset"), "dim")),
         title="📱 Genesis за телефона", border_style="cyan"))
+    if web:
+        console.print(Text(
+            "⚠ --web: кодът отваря уеб версията по обикновен HTTP. Който е в същата мрежа, може "
+            "да подмени страницата и да види ключа — само вкъщи. С приложението: без --web.",
+            style="yellow"))
     _print_qr(console, url)
     # Същото като текст — за поставяне в приложението, ако камерата не
     # хване кода. Терминалът е на машината на оператора, не в мрежата.
@@ -921,11 +938,12 @@ def serve(args: list[str]) -> int:
     return 0
 
 
-SERVE_USAGE = """Употреба: genesis serve [--port N] [--host IP] [--reset]
+SERVE_USAGE = """Употреба: genesis serve [--port N] [--host IP] [--reset] [--web]
 
 Пуска Genesis за телефона (приложението Genesis Remote за Android и iOS):
 показва QR код, който сдвоява телефона с тази машина.
 
   --port N    порт (по подразбиране 8765)
   --host IP   адрес в QR кода — напр. Tailscale адрес за достъп извън дома
-  --reset     нов ключ; всички сдвоени телефони губят достъп"""
+  --reset     нов ключ; всички сдвоени телефони губят достъп
+  --web       QR код за уеб версията (iPhone без приложението) — по HTTP, само вкъщи"""

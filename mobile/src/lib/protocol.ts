@@ -96,19 +96,52 @@ export type Pairing = {
   name: string;
 };
 
+// Only scheme://host[:port] — no user@, no backslash, no path or query
+// (audit 2026-10-07: `http://pc@evil:1/#k=…` showed "pc" and talked to "evil").
+const BASE = /^https?:\/\/(?:[a-z0-9-]+(?:\.[a-z0-9-]+)*|\[[0-9a-f:.]+\])(?::\d{1,5})?$/i;
+
+/** The app's own link scheme (app.json "scheme"). */
+export const APP_LINK = 'genesisremote://pair';
+
 /**
- * What the QR code on the computer says:
- *   http://192.168.1.5:8765/#k=<key>&n=<name>
- * The key is in the fragment, which a browser never sends over the network.
+ * What the QR code on the computer says (2026-10-09):
+ *   genesisremote://pair#u=<http://192.168.1.5:8765>&k=<key>&n=<name>
+ * A phone camera hands it to this app, never to a browser: the old
+ * `http://…/#k=…` code opened the web build over plain HTTP in the LAN, where
+ * anyone on the same Wi-Fi who swapped the page could read the key. That code
+ * is now only `genesis serve --web` (the web build), and still accepted here.
  */
 export function parsePairingUrl(raw: string): Pairing | null {
   const text = raw.trim();
-  // Only scheme://host[:port]/#… — no user@, no backslash, no path or query
-  // (audit 2026-10-07: `http://pc@evil:1/#k=…` showed "pc" and talked to "evil").
-  const match = /^(https?:\/\/(?:[a-z0-9-]+(?:\.[a-z0-9-]+)*|\[[0-9a-f:.]+\])(?::\d{1,5})?)\/?#(.+)$/i.exec(text);
-  if (!match) return null;
+  let base: string;
+  let fragment: string;
+  const app = /^genesisremote:\/\/pair\/?#(.+)$/i.exec(text);
+  if (app) {
+    fragment = app[1];
+    const u = readParams(fragment)?.u;
+    if (!u || !BASE.test(u)) return null;
+    base = u;
+  } else {
+    const match = /^(https?:\/\/[^/?#\\]*)\/?#(.+)$/i.exec(text);
+    if (!match || !BASE.test(match[1])) return null;
+    base = match[1];
+    fragment = match[2];
+  }
+  const params = readParams(fragment);
+  if (!params?.k) return null;
+  let key: Uint8Array;
+  try {
+    key = b64urlDecode(params.k);
+  } catch {
+    return null;
+  }
+  if (key.length !== 32) return null;
+  return { base, key: params.k, name: params.n || base };
+}
+
+function readParams(fragment: string): Record<string, string> | null {
   const params: Record<string, string> = {};
-  for (const part of match[2].split('&')) {
+  for (const part of fragment.split('&')) {
     const eq = part.indexOf('=');
     if (eq > 0) {
       try {
@@ -118,15 +151,48 @@ export function parsePairingUrl(raw: string): Pairing | null {
       }
     }
   }
-  if (!params.k) return null;
-  let key: Uint8Array;
+  return params;
+}
+
+// ── a pairing link that opened the app ──────────────────────────────────────
+// genesisremote://pair#… waits here for the pair screen — not in the route, so
+// the key never enters the router's path or history.
+
+type Listener = (p: Pairing) => void;
+
+let pending: Pairing | null = null;
+const listeners = new Set<Listener>();
+
+/** A link from the system: a pairing → kept for the pair screen, true. */
+export function offerLink(url: string): boolean {
+  const pairing = /^genesisremote:/i.test(url.trim()) ? parsePairingUrl(url) : null;
+  if (!pairing) return false;
+  pending = pairing;
+  for (const l of listeners) l(pairing);
+  return true;
+}
+
+export function takeLink(): Pairing | null {
+  const p = pending;
+  pending = null;
+  return p;
+}
+
+export function onLink(listener: Listener): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+/** Where a system link goes: a pairing → '/pair' (the key stays out of the
+ *  path), anything else unchanged. Used by app/+native-intent.tsx. */
+export function redirectFor(path: string): string {
   try {
-    key = b64urlDecode(params.k);
+    return offerLink(path) ? '/pair' : path;
   } catch {
-    return null;
+    return path;
   }
-  if (key.length !== 32) return null;
-  return { base: match[1].replace(/\/+$/, ''), key: params.k, name: params.n || match[1] };
 }
 
 // ── the envelope ────────────────────────────────────────────────────────────

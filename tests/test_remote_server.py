@@ -142,8 +142,18 @@ def test_pairing_url_keeps_the_key_in_the_fragment() -> None:
     url = rs.pairing_url("192.168.1.5", 8765, KEY, "my pc")
     before, _, fragment = url.partition("#")
     assert rs._b64e(KEY) not in before, "the key must never reach the server in a URL"
-    assert fragment.startswith("k=" + rs._b64e(KEY))
+    assert "k=" + rs._b64e(KEY) in fragment.split("&")
     assert "n=my%20pc" in fragment
+
+
+def test_the_qr_code_opens_the_app_not_a_browser() -> None:
+    # 2026-10-09: `http://…/#k=…` от камерата отваряше уеб версията по HTTP в LAN.
+    url = rs.pairing_url("192.168.1.5", 8765, KEY, "my pc")
+    assert url.startswith("genesisremote://pair#")
+    assert "u=http%3A%2F%2F192.168.1.5%3A8765" in url.split("#", 1)[1].split("&")
+    # Уеб версията (iPhone без приложението) — само при изрично --web.
+    web = rs.pairing_url("192.168.1.5", 8765, KEY, "my pc", web=True)
+    assert web.startswith("http://192.168.1.5:8765/#k=")
 
 
 # ── the session ────────────────────────────────────────────────────────────

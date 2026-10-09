@@ -10,8 +10,8 @@ import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { createInterface } from 'node:readline';
 import {
-  GenesisClient, ProtocolError, b64urlDecode, b64urlEncode, parsePairingUrl, utf8Decode, utf8Encode,
-  type GenesisEvent,
+  GenesisClient, ProtocolError, b64urlDecode, b64urlEncode, onLink, parsePairingUrl, redirectFor, takeLink,
+  utf8Decode, utf8Encode, type GenesisEvent,
 } from '../src/lib/protocol.ts';
 
 const random = (n: number) => new Uint8Array(randomBytes(n));
@@ -63,6 +63,37 @@ test('pairing URL: key only from the fragment', () => {
   }
   assert.equal(parsePairingUrl(`http://[fe80::1]:8765/#k=${k}`)?.base, 'http://[fe80::1]:8765');
   assert.equal(parsePairingUrl(`https://pc.local#k=${k}`)?.base, 'https://pc.local');
+});
+
+test('the QR code is an app link; its address must be a plain base', () => {
+  const k = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
+  const p = parsePairingUrl(`genesisremote://pair#u=http%3A%2F%2F192.168.1.5%3A8765&k=${k}&n=my%20pc`);
+  assert.deepEqual(p, { base: 'http://192.168.1.5:8765', key: k, name: 'my pc' });
+  for (const u of ['http%3A%2F%2Fpc%40evil%3A1', 'http%3A%2F%2Fpc%3A1%2Fx', 'javascript%3Aalert(1)', 'ftp%3A%2F%2Fpc']) {
+    assert.equal(parsePairingUrl(`genesisremote://pair#u=${u}&k=${k}`), null, u);
+  }
+  assert.equal(parsePairingUrl(`genesisremote://pair#k=${k}`), null, 'no address');
+  assert.equal(parsePairingUrl(`genesisremote://other#u=http%3A%2F%2Fpc&k=${k}`), null);
+});
+
+test('a pairing link reaches the pair screen without the key in the route', () => {
+  const k = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
+  const seen: string[] = [];
+  const off = onLink((p) => seen.push(p.base));
+  try {
+    assert.equal(redirectFor(`genesisremote://pair#u=http%3A%2F%2Fpc.local%3A8765&k=${k}&n=pc`), '/pair');
+    assert.deepEqual(seen, ['http://pc.local:8765']);
+    assert.equal(takeLink()?.key, k);
+    assert.equal(takeLink(), null, 'taken once');
+    // Other links and broken pairing links go on unchanged and leave nothing behind.
+    assert.equal(redirectFor('genesisremote://chat'), 'genesisremote://chat');
+    assert.equal(redirectFor(`genesisremote://pair#u=http%3A%2F%2Fpc&k=short`), `genesisremote://pair#u=http%3A%2F%2Fpc&k=short`);
+    // A plain http link is not taken from the system — only the app's own scheme.
+    assert.equal(redirectFor(`http://pc:1/#k=${k}`), `http://pc:1/#k=${k}`);
+    assert.equal(takeLink(), null);
+  } finally {
+    off();
+  }
 });
 
 test('a whole conversation with the real server', async () => {
