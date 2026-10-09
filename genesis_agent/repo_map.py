@@ -68,12 +68,33 @@ def _skipped(p: Path, root: Path) -> bool:
     return any(part in _SKIP_DIRS for part in parts)
 
 
+def _walk(root: Path, name_glob: str | None = None):
+    """Файловете под `root`, без да се слиза в _SKIP_DIRS. rglob влизаше в
+    node_modules и чак после ги отхвърляше: 2026-10-09, 100k файла там →
+    detect_project 3.3 s, REPO_MAP 3.1 s, търсенето 2.9 s на всяко извикване.
+    `name_glob` е шаблон за ИМЕТО (`*.py`) — като rglob с такъв шаблон."""
+    import fnmatch
+    import os
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
+        for name in sorted(filenames):
+            if name_glob is None or fnmatch.fnmatch(name, name_glob):
+                yield Path(dirpath) / name
+
+
+def _name_only(pattern: str) -> str | None:
+    """`*.py` и `**/*.py` → `*.py` (шаблон само за името); иначе None."""
+    while pattern.startswith("**/"):
+        pattern = pattern[3:]
+    return pattern if pattern and "/" not in pattern and "\\" not in pattern \
+        and pattern != "**" else None
+
+
 def _iter_files(root: Path, glob: str | None = None):
-    for p in root.rglob(glob or "*"):
-        if p.is_dir():
-            continue
-        if _skipped(p, root):
-            continue
+    name_glob = None if glob is None else _name_only(glob)
+    found = _walk(root, name_glob) if glob is None or name_glob is not None else (
+        p for p in root.rglob(glob) if not p.is_dir() and not _skipped(p, root))
+    for p in found:
         if glob is None and p.suffix.lower() not in _TEXT_SUFFIXES:
             continue
         try:
@@ -182,11 +203,10 @@ def find_files(pattern: str, path: str | Path = ".",
     if not root.exists():
         raise FileNotFoundError(f"няма такъв път: {root}")
     out: list[str] = []
-    for p in root.rglob(pattern):
-        if p.is_dir():
-            continue
-        if _skipped(p, root):
-            continue
+    name_glob = _name_only(pattern)
+    found = _walk(root, name_glob) if name_glob is not None else (
+        p for p in root.rglob(pattern) if not p.is_dir() and not _skipped(p, root))
+    for p in found:
         try:
             out.append(str(p.relative_to(root)))
         except ValueError:
