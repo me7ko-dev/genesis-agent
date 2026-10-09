@@ -287,7 +287,10 @@ def _package_json_has_test(root: Path) -> bool:
         data = json.loads((root / "package.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    return bool((data.get("scripts") or {}).get("test"))
+    test = str((data.get("scripts") or {}).get("test") or "")
+    # Заготовката на `npm init -y` („Error: no test specified“ && exit 1) не е
+    # тест — с нея всеки проект „падаше“ (одит 2026-10-09).
+    return bool(test) and "no test specified" not in test
 
 
 def _makefile_has_test(root: Path) -> bool:

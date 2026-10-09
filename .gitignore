@@ -47,3 +47,7 @@ cloud/.wheels/
 
 # wrangler (site/): локален кеш на акаунта
 .wrangler/
+
+# Заключването на индекса на уменията (genesis_agent/file_lock.py) — създава се при
+# всяко записано умение; не е промяна в проекта.
+*.json.lock

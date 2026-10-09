@@ -133,6 +133,16 @@ def _isolated_operator_settings(monkeypatch, tmp_path):
     home = tmp_path / "genesis_home"
     home.mkdir(exist_ok=True)
     monkeypatch.setattr("genesis_agent.paths.GENESIS_HOME", home)
+    # Историята на чата: тестове с run_turn пишеха session_*.json и
+    # by_workspace.json в истинската ~/.local/share/genesis-agent/history —
+    # `genesis -c` после продължаваше тестов разговор (одит 2026-10-09).
+    import sys as _sys
+    gta = _sys.modules.get("genesis_terminal_agent")
+    if gta is not None:
+        history = tmp_path / "history"
+        history.mkdir(exist_ok=True)
+        monkeypatch.setattr(gta, "HISTORY_DIR", history)
+        monkeypatch.setattr(gta, "_SESSION_FILE", None)
     from genesis_agent import agents, edit_history, plan_mode, todos
     plan_mode.set_active(False)
     edit_history.clear()

@@ -235,10 +235,13 @@ def _read_entries():
                 if not line:
                     continue
                 try:
-                    yield json.loads(line)
+                    entry = json.loads(line)
                 except Exception as e:
                     log.debug("budget: пропускам развален JSONL ред: %s", e)
                     continue
+                # Валиден JSON, но не запис (`7`, `[...]`) сриваше `genesis budget`.
+                if isinstance(entry, dict):
+                    yield entry
     except OSError as e:
         log.debug("budget: не мога да прочета %s: %s", LOG_PATH, e)
         return
@@ -284,6 +287,8 @@ def range_totals(days: int = 7) -> dict:
         "calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
         "cached_read_tokens": 0, "cached_write_tokens": 0,
         "by_provider": defaultdict(lambda: {"calls": 0, "total_tokens": 0})}
+    # Таван: `genesis budget 1000000` гърмеше с OverflowError (преди година 1).
+    days = max(1, min(int(days), 36_500))
     cutoff = datetime.now(timezone.utc).date() - timedelta(days=days - 1)
     for e in _read_entries():
         ts = e.get("ts", "")

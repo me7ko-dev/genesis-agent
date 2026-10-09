@@ -143,13 +143,27 @@ def create_checkpoint(root: Path) -> Path:
             f"(таван {_MAX_SNAPSHOT_MB}MB). Комитни в git преди поправката: "
             "тогава `git diff` и `git checkout .` вършат същата работа."
         )
-    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    # Снимката носи и .env на проекта: само за собственика (одит 2026-10-09 —
+    # ~/.genesis ставаше 0755, а архивът 0644, четим от всеки на машината).
+    try:
+        from genesis_agent.paths import ensure_genesis_home
+        ensure_genesis_home()
+    except Exception:
+        pass
+    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with _suppress_oserror():
+        os.chmod(CHECKPOINT_DIR, 0o700)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     dest = CHECKPOINT_DIR / f"{root.name}-{stamp}.tar.gz"
+    n = 2
+    while dest.exists():   # две снимки в една секунда (напр. преди --revert)
+        dest = CHECKPOINT_DIR / f"{root.name}-{stamp}-{n}.tar.gz"
+        n += 1
     global _SNAPSHOT_ROOT
     _SNAPSHOT_ROOT = root
     try:
-        with tarfile.open(dest, "w:gz") as tar:
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as raw, tarfile.open(fileobj=raw, mode="w:gz") as tar:
             tar.add(root, arcname=".", filter=_snapshot_filter)
     finally:
         _SNAPSHOT_ROOT = None
@@ -161,6 +175,60 @@ def create_checkpoint(root: Path) -> Path:
     }
     dest.with_suffix(".json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     return dest
+
+
+class _suppress_oserror:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, kind, *_rest) -> bool:
+        return kind is not None and issubclass(kind, OSError)
+
+
+_FINGERPRINT_MAX = 50_000
+
+
+def _fingerprint(root: Path) -> dict[str, tuple[int, int]]:
+    """{път: (mtime_ns, размер)} на файловете в проекта — без пропусканите папки.
+
+    Така се виждат и промените, направени с команда (`sed -i`, patch): само
+    EDIT_FILE/WRITE_FILE се броеха и такава поправка излизаше „няма промяна“
+    и провал, без тестовете да се пуснат пак (одит 2026-10-09)."""
+    out: dict[str, tuple[int, int]] = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        base = Path(dirpath)
+        rel_dir = base.relative_to(root).parts
+        dirnames[:] = [d for d in dirnames
+                       if d != "__pycache__" and not _skip_in_snapshot(rel_dir + (d,), root)]
+        for name in filenames:
+            if name.endswith((".pyc", ".pyo")):
+                continue
+            try:
+                st = (base / name).stat()
+            except OSError:
+                continue
+            out[(base / name).relative_to(root).as_posix()] = (st.st_mtime_ns, st.st_size)
+            if len(out) >= _FINGERPRINT_MAX:
+                return out
+    return out
+
+
+def _changed_since(root: Path, before: dict[str, tuple[int, int]]) -> list[str]:
+    now = _fingerprint(root)
+    return sorted(rel for rel, stamp in now.items() if before.get(rel) != stamp)
+
+
+def _drop_stale_bytecode(root: Path, rels: list[str]) -> None:
+    """Махa .pyc на току-що променените модули: две редакции с еднаква дължина
+    в една секунда караха pytest да внесе стария код и присъдата беше грешна."""
+    for rel in set(rels):
+        if not rel.endswith(".py"):
+            continue
+        cache = (root / rel).parent / "__pycache__"
+        if cache.is_dir():
+            for pyc in cache.glob(f"{Path(rel).stem}.*.pyc"):
+                with _suppress_oserror():
+                    pyc.unlink()
 
 
 def _git_raw(root: Path, *args: str) -> str:
@@ -198,10 +266,16 @@ def latest_checkpoint(root: Path) -> Path | None:
             # `.with_suffix` on `foo.tar.json` yields `foo.tar.gz` — the sidecar
             # is written next to the archive, so this is the archive's path.
             if tar_path.exists():
-                mine.append((meta.get("created", ""), tar_path))
+                # По време на файла, не по име: две снимки в една секунда
+                # (резервната преди --revert) иначе се подреждаха по азбука.
+                try:
+                    stamp = tar_path.stat().st_mtime_ns
+                except OSError:
+                    continue
+                mine.append((meta.get("created", ""), stamp, tar_path))
     if not mine:
         return None
-    return max(mine)[1]
+    return max(mine)[2]
 
 
 def restore_checkpoint(root: str | Path, checkpoint: str | Path | None = None) -> str:
@@ -210,6 +284,13 @@ def restore_checkpoint(root: str | Path, checkpoint: str | Path | None = None) -
     cp = Path(checkpoint) if checkpoint else latest_checkpoint(root)
     if not cp or not cp.exists():
         return f"❌ Няма намерена снимка за {root}."
+    # Каквото е направено след снимката (и от човека) се пази в нова снимка
+    # преди връщането: --revert презаписваше и по-късната ръчна работа, без
+    # връщане назад (одит 2026-10-09).
+    try:
+        backup: Path | None = create_checkpoint(root)
+    except (RuntimeError, OSError):
+        backup = None
     skipped: list[str] = []
     in_archive: set[str] = set()
     with tarfile.open(cp, "r:gz") as tar:
@@ -256,7 +337,14 @@ def restore_checkpoint(root: str | Path, checkpoint: str | Path | None = None) -
             except (tarfile.TarError, OSError) as e:
                 skipped.append(f"{rel} ({type(e).__name__})")
     created = _created_since(root, in_archive)
-    lines = [f"{'✓' if not skipped else '⚠️'} {root} е върнат към снимката {cp.name}"]
+    age = ""
+    with _suppress_oserror():
+        hours = (time.time() - cp.stat().st_mtime) / 3600
+        age = f" (отпреди {hours:.0f} ч)" if hours >= 1 else " (отпреди по-малко от час)"
+    lines = [f"{'✓' if not skipped else '⚠️'} {root} е върнат към снимката {cp.name}{age}"]
+    if backup is not None:
+        lines.append(f"  Състоянието отпреди връщането е в {backup.name} — "
+                     f"`genesis fix --revert` пак го връща.")
     if skipped:
         lines.append("  НЕ върнати: " + ", ".join(skipped[:10]) + (" …" if len(skipped) > 10 else ""))
     if created:
@@ -292,6 +380,9 @@ def run_tests(root: Path, command: str) -> TestRun:
     if res.blocked:
         return TestRun(False, False, f"sandbox отказа командата: {res.stderr}", command)
     out = ((res.stdout or "") + "\n" + (res.stderr or "")).strip()
+    if res.returncode == 5 and "pytest" in command:
+        # pytest: „не се събра нито един тест“ — няма тестове, не падащи тестове.
+        return TestRun(False, False, "pytest не намери нито един тест", command)
     if len(out) > _MAX_TEST_OUTPUT:
         # The tail carries the failure summary; the head carries collection
         # errors. Both matter, the middle rarely does.
@@ -334,7 +425,9 @@ def project_diff(root: Path, checkpoint: Path | None, files: list[str]) -> str:
     """
     root = Path(root)
     if (root / ".git").exists():
-        d = _git(root, "diff")
+        # Само пипнатите файлове: целият `git diff` показваше и некомитнатата
+        # работа на човека като част от поправката (одит 2026-10-09).
+        d = _git(root, "diff", "--", *files) if files else ""
         # `git diff` не вижда нови (неследени) файлове — помощен модул, нов
         # тест. Одит 2026-10-07: поправка САМО с нов файл даваше празен дифф.
         # Само новите файлове, които поправката е пипнала — не всеки неследен
@@ -534,18 +627,27 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
     say(f"🔎 {root.name}: {info.language}, тестове: {cmd or 'няма открити'}")
 
     snapshot: Path | None = None
+    # Некомитнати промени + поправка = смесени в един `git diff`, а съветът
+    # `git checkout .` триеше и работата на човека (одит 2026-10-09). Тогава
+    # снимка се прави винаги.
+    dirty = (root / ".git").exists() and bool(_git(root, "status", "--porcelain"))
+    if dirty and not checkpoint:
+        say("⚠️  Има некомитнати промени — правя снимка, за да не се смесят с поправката.")
+        checkpoint = True
     if checkpoint:
         try:
             snapshot = create_checkpoint(root)
         except (RuntimeError, OSError) as e:
-            return RepairOutcome(False, f"Снимката не успя, нищо не е променено: {e}")
+            extra = (" Комитни или `git stash` промените си и пусни пак." if dirty else "")
+            return RepairOutcome(False, f"Снимката не успя, нищо не е променено: {e}{extra}")
         say(f"📦 Снимка преди промените: {snapshot.name}")
     elif (root / ".git").exists():
-        say("↩️  Без снимка — връщане с `git checkout .` (или `--checkpoint` за снимка).")
+        say("↩️  Без снимка — промените се връщат с git (или `--checkpoint` за снимка).")
     else:
         say("⚠️  Без снимка и без git — промените НЯМА как да се върнат. "
             "Пусни с `--checkpoint`, ако искаш снимка.")
 
+    files_before = _fingerprint(root)
     before = run_tests(root, cmd)
     if before.ran:
         say(f"🧪 Преди: {'минават ✅' if before.passed else 'падат ❌'}")
@@ -590,7 +692,7 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
                     except (ValueError, TypeError):
                         args = {}
                     say(f"  ⚙️  {name} {str(args.get('path') or args.get('pattern') or args.get('command') or '')[:70]}")
-                    result = genesis_skills.dispatch_tool_call(name, args)
+                    result = genesis_skills.dispatch_tool_call(name, args or fn.get("arguments") or {})
                     if _edit_succeeded(result):
                         touched += [_relative(root, p) for p in _tool_call_paths(name, args)]
                         edited_now = True
@@ -598,6 +700,7 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
                                      "content": result[:_MAX_TOOL_OUTPUT]})
                 if edited_now:
                     edited_now = False
+                    _drop_stale_bytecode(root, touched)
                     verdict = _verify_after_edit(root, cmd, before, messages, say)
                     if verdict is not None:
                         after = verdict
@@ -619,6 +722,7 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
                                  "Резултати от инструментите:\n"
                                  + "\n".join(r[:_MAX_TOOL_OUTPUT] for r in tag_results)})
                 if edited:
+                    _drop_stale_bytecode(root, touched)
                     verdict = _verify_after_edit(root, cmd, before, messages, say)
                     if verdict is not None:
                         after = verdict
@@ -629,6 +733,9 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
                 continue
 
             # ── No tools: the model considers itself done ───────────────────
+            if not touched:
+                # Промяна с команда (`sed -i`, patch) също е промяна.
+                touched += _changed_since(root, files_before)
             if not touched:
                 # It answered in prose without changing anything. Usually that
                 # means it wrote the fixed code INTO the reply and asked the
@@ -652,6 +759,7 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
                     False, raw or "Моделът не направи нито една промяна.",
                     rounds, snapshot, [], "", before, before)
 
+            _drop_stale_bytecode(root, touched)
             after = run_tests(root, cmd)
             if not after.ran or after.passed:
                 break
@@ -678,18 +786,25 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
     # `--revert`, тоест да изхвърлиш работеща поправка. За подсистема, чийто
     # пръв принцип е „ТЕСТОВЕТЕ СА ПРИСЪДАТА", присъда по остарели данни е
     # по-лоша от липсваща.
+    # Промените с команди (RUN_CMD) не минават през touched — гледа се диска.
+    touched = sorted(set(touched) | set(_changed_since(root, files_before)))
     if touched and after is before and cmd:
         say("🧪 Рундовете свършиха — пускам тестовете за финална присъда…")
+        _drop_stale_bytecode(root, touched)
         after = run_tests(root, cmd)
 
     diff = project_diff(root, snapshot, touched)
     files = sorted(set(touched))
 
-    if after.ran and after.passed and not before.passed:
+    if not files:
+        # Зелени тестове без нито една промяна не са поправка (одит 2026-10-09:
+        # „Промените са направени“ при празен дифф и код 0).
+        ok, summary = False, "Не е направена нито една промяна — нищо не е поправено."
+    elif after.ran and after.passed and not before.passed:
         ok, summary = True, f"Поправено: тестовете вече минават ({cmd})."
     elif after.ran and not after.passed:
         ok, summary = False, (f"НЕ е поправено — тестовете още падат след {rounds} рунда. "
-                              f"Промените са запазени за преглед; {_undo_hint(root, snapshot)}")
+                              f"Промените са запазени за преглед; {_undo_hint(root, snapshot, files)}")
     elif not after.ran:
         ok, summary = False, ("Промените са направени, но НЕ са проверени — този проект няма "
                               "открита тестова команда. Прегледай диффа преди да му вярваш.")
@@ -700,12 +815,15 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
     return RepairOutcome(ok, summary, rounds, snapshot, files, diff, before, after)
 
 
-def _undo_hint(root: Path, snapshot: Path | None) -> str:
-    """Как се връщат промените — зависи от това какво има, не от надежда."""
+def _undo_hint(root: Path, snapshot: Path | None, files: list[str] | None = None) -> str:
+    """Как се връщат промените — зависи от това какво има, не от надежда.
+    Никога `git checkout .`: то връща и чужди (на човека) промени."""
     if snapshot:
         return f"върни ги с `genesis fix --revert {root}`."
     if (root / ".git").exists():
-        return "върни ги с `git checkout .` в проекта."
+        names = " ".join(f'"{f}"' for f in (files or [])[:20])
+        return (f"върни ги с `git checkout -- {names}` в проекта (новите файлове изтрий)."
+                if names else "няма какво да се връща.")
     return "снимка не е правена и проектът не е в git — връщане няма."
 
 

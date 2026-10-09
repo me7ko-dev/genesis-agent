@@ -14,6 +14,7 @@ End-to-end integration тест за свързаната Genesis система
 """
 from __future__ import annotations
 
+import atexit
 import sys
 from pathlib import Path
 
@@ -81,6 +82,23 @@ check("разговорът се пише в споделената база", w
 
 print("\n─── 6. skills_manager → skill_loader видимост ──────────")
 test_slug = "e2e_integration_probe_skill"
+bg_slug = "cleanup_temp_files"
+_skills_dir = ROOT / "genesis_agent" / "skills"
+_skills_json = _skills_dir / "skills.json"
+_index_before = _skills_json.read_bytes() if _skills_json.exists() else None
+
+
+def _restore_skills() -> None:
+    """Пробните умения се пишат в истинската библиотека — връща се байт по байт
+    каквото е било, и при провал по средата (2026-10-09: индексът оставаше
+    без последния нов ред, а пробните .md — при прекъсване)."""
+    if _index_before is not None:
+        _skills_json.write_bytes(_index_before)
+    for _name in (test_slug, bg_slug):
+        (_skills_dir / f"{_name}.md").unlink(missing_ok=True)
+
+
+atexit.register(_restore_skills)
 skills_manager.save_skill(
     slug=test_slug,
     code="print('e2e probe skill ran')",
@@ -110,7 +128,6 @@ skills_manager.save_skill(
 reload_skills_index()
 from genesis_agent.skill_loader import resolve_skill
 
-bg_slug = "cleanup_temp_files"
 check("умението е записано с английско име",
       bg_slug in [s["name"] for s in search_skills("cleanup temp files")],
       bg_slug)
@@ -120,16 +137,8 @@ unrelated, _ = resolve_skill("направи ми справка за прода
 check("несвързана заявка не резолвва нищо", unrelated is None, str(unrelated))
 
 # ── Почистване на тестовите артефакти ─────────────────────────────
-import json
-
 conversation_memory.clear_session() if n0 == 0 else None
-skills_json = ROOT / "genesis_agent" / "skills" / "skills.json"
-idx = json.loads(skills_json.read_text(encoding="utf-8"))
-_probe_names = {test_slug, bg_slug}
-idx["skills"] = [s for s in idx["skills"] if s["name"] not in _probe_names]
-skills_json.write_text(json.dumps(idx, indent=2, ensure_ascii=False), encoding="utf-8")
-for _name in _probe_names:
-    (ROOT / "genesis_agent" / "skills" / f"{_name}.md").unlink(missing_ok=True)
+_restore_skills()
 
 print("\n" + ("═" * 50))
 print("ВСИЧКО МИНАВА ✅" if _ok else "ИМА ПРОВАЛ ❌")

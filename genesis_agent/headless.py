@@ -211,6 +211,9 @@ def run(argv: list[str]) -> int:
     # Спрян по таван или въртене — отговорът е недовършен, не успех (одит 2026-10-09).
     if ui.question and ui.question not in answer:
         answer = f"{answer}\n\n{ui.question}".strip()
+    # Ctrl-C вече спира хода отвътре (историята се пази) — тук идва като предупреждение.
+    if not error and any(w.startswith("⏹ Прекъснато") for w in ui.warnings):
+        error = "прекъснато (Ctrl-C)"
     cut = next((w for w in ui.warnings if "таван" in w), "") or (ui.warnings[-1] if ui.spun else "")
     failed = bool(error or cut) or not answer.strip() or \
         answer.lstrip().startswith(("[Грешка", "Error:"))

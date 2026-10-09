@@ -92,6 +92,25 @@ def _set_agent_scope(scope: tuple[str, frozenset[str]] | None) -> None:
     _AGENT_SCOPE = scope
 
 
+# „Стоп“ на оператора (бутонът на телефона) за текущия ход. Проверява се преди
+# ВСЕКИ инструмент — и в под-агентите, и по двата пътя. Дотогава се гледаше
+# само веднъж на рунд: след „Стоп“ рундът довършваше всичките си записи, а
+# под-агентът — всичките си 15 рунда (одит 2026-10-09).
+_CANCEL: Callable[[], bool] | None = None
+
+
+def _set_cancel(check: Callable[[], bool] | None) -> None:
+    global _CANCEL
+    _CANCEL = check
+
+
+def _cancelled() -> bool:
+    try:
+        return bool(_CANCEL and _CANCEL())
+    except Exception:
+        return False
+
+
 def set_workspace(path) -> None:
     """Задава работната директория (вика се от genesis_terminal_agent.py)."""
     global _WORKSPACE
@@ -1121,6 +1140,8 @@ def _before_tool(name: str, args: dict) -> str | None:
     change. Never raises — and fails CLOSED: an error in the gate refuses the
     tool (it used to be swallowed and the tool ran past a hook that had
     just blocked it — audit 2026-10-08)."""
+    if _cancelled():
+        return f"[{name}] ⏹ Спряно от оператора — не е изпълнено."
     try:
         hook_name, hook_args = _hook_view(name, args)
         scope = _AGENT_SCOPE

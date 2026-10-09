@@ -23,7 +23,7 @@ import requests
 from genesis_agent.paths import ENV_FILE, ensure_genesis_home, read_env_files
 
 
-def _write_private(path: Path, text: str) -> None:
+def _write_private(path: Path, text: str | bytes) -> None:
     """
     Write a file that only its owner can read — private from the first byte.
 
@@ -33,8 +33,8 @@ def _write_private(path: Path, text: str) -> None:
     as "closed", and getting it right costs one extra argument.
     """
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(text)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(text if isinstance(text, bytes) else text.encode("utf-8"))
     path.chmod(0o600)  # an existing file keeps its old mode through O_CREAT
 
 
@@ -326,7 +326,9 @@ def run() -> int:
                 print("✅" if ok else "❌", why)
                 key = _prompt("    [Enter] запази · или въведи нов ключ: ")
                 if not key:
-                    collected[var] = current
+                    # Ключ от средата на шела не се копира тихо във файла — както
+                    # при безплатните (одит 2026-10-09).
+                    _keep(collected, var, current)
                     print()
                     continue
             else:
@@ -345,7 +347,7 @@ def run() -> int:
     else:
         # Съществуващ платен ключ се пренася, а не се трие мълчаливо.
         for var in existing_paid:
-            collected[var] = _existing(var)
+            _keep(collected, var, _existing(var))
         print()
 
     if not collected:
@@ -374,7 +376,9 @@ def run() -> int:
 
         # A dated copy before every write, so a mistake here is recoverable.
         backup = ENV_FILE.with_name(f".env.backup-{datetime.datetime.now():%Y%m%d-%H%M%S}")
-        _write_private(backup, ENV_FILE.read_text(encoding="utf-8"))
+        # Байт по байт: .env с коментар в cp1251 сриваше setup СЛЕД всички
+        # въпроси и нищо не се записваше (одит 2026-10-09).
+        _write_private(backup, ENV_FILE.read_bytes())
         _prune_backups(ENV_FILE.parent)
         print(f"  предишният файл е запазен като {backup.name}")
 

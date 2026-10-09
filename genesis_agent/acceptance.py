@@ -18,8 +18,10 @@ with and without it and keep it only if it catches more than it costs
 """
 from __future__ import annotations
 
+import atexit
 import os
 import re
+import shutil
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -27,6 +29,22 @@ from pathlib import Path
 _WRITTEN = re.compile(r"^\[(?:WRITE_FILE|EDIT_FILE): ([^\]\n]+)\] ✓", re.MULTILINE)
 _TIMEOUT = 120
 _MAX_OUTPUT = 2500
+
+# Временните папки с тестовете. Падналите остават до следващата проверка (на
+# модела е казан пътят им), останалите се трият веднага; при изход — всички.
+# Дотогава всяка проверка оставяше папка в /tmp завинаги (2026-10-09: 117 в
+# една сесия на тестовете).
+_FOLDERS: list[Path] = []
+
+
+def _cleanup(keep: Path | None = None) -> None:
+    for folder in list(_FOLDERS):
+        if folder != keep:
+            shutil.rmtree(folder, ignore_errors=True)
+            _FOLDERS.remove(folder)
+
+
+atexit.register(_cleanup)
 
 _PROMPT = """You write ACCEPTANCE TESTS for a request that another developer has just
 implemented. You do NOT see their code, on purpose: the tests must come from the
@@ -124,7 +142,9 @@ class AcceptanceCheck:
             return "", f"приемни тестове: пропуснати ({e})"
         if not code:
             return "", "приемни тестове: заявката не дава интерфейс за тест — пропуснати"
+        _cleanup()
         folder = Path(tempfile.mkdtemp(prefix="genesis-acceptance-"))
+        _FOLDERS.append(folder)
         self.test_file = folder / "test_acceptance.py"
         self.test_file.write_text(code, encoding="utf-8")
         ws = self.workspace.resolve()
@@ -139,14 +159,17 @@ class AcceptanceCheck:
                f'"{self.test_file}"')
         res = sandbox.run_shell(cmd, cwd=ws, timeout=_TIMEOUT)
         if res.blocked or res.returncode is None:
+            _cleanup()
             return "", "приемни тестове: не можаха да се пуснат — пропуснати"
         out = ((res.stdout or "") + "\n" + (res.stderr or "")).strip()
         summary = next((ln.strip(" =") for ln in reversed(out.splitlines())
                         if re.search(r"\d+ (passed|failed|error)", ln)), "")
         if res.returncode == 5:  # no tests collected
+            _cleanup()
             return "", "приемни тестове: нито един не се събра — пропуснати"
         if res.returncode == 0:
             self.passed = True
+            _cleanup()
             return "", f"приемни тестове от заявката: ✓ {summary}"
         self.passed = False
         if len(out) > _MAX_OUTPUT:

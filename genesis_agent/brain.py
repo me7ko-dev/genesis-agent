@@ -1742,11 +1742,17 @@ class Brain:
             # отговаря), и самолечение (щом cooldown-ът мине, се връщаме на
             # най-добрия наличен), без нищо да се помни между извикванията.
             for round_i in range(RETRY_ROUNDS):
+                # Кръг, в който НИТО един модел няма ключ, не се повтаря: паузата
+                # и новите кръгове не могат да добавят ключ. Без ключове всяко
+                # съобщение чакаше 16 s, преди да каже нещо (2026-10-09, `genesis -p`
+                # на чиста инсталация).
+                only_unconfigured = True
                 for step in range(n):
                     attempt = ordered_chain[step]
                     prov, model = attempt["provider"], attempt["model"]
                     key = f"{prov}::{model}"
                     if _is_exhausted(key):
+                        only_unconfigured = False
                         continue  # временно изчерпан → пропускаме
                     use_tools = tools if (tools and attempt.get("supports_tools")) else None
                     msgs = messages if use_tools else messages_notools
@@ -1784,6 +1790,7 @@ class Brain:
                         return type("Obj", (object,), {"raw_text": raw_text, "code": code,
                                                        "usage": self._last_usage, "tool_calls": tool_calls})
                     except requests.exceptions.RequestException as e:
+                        only_unconfigured = False
                         last_error = f"мрежа: {e}"
                         self._fail_count += 1
                         self._record_stat(prov, time.time() - t0, False)
@@ -1796,6 +1803,8 @@ class Brain:
                         # истински обръщения (одит 2026-10-07: 3 провала на groq
                         # за 1 заявка).
                         synthetic = last_error.startswith("skip:") or "cooling down" in last_error
+                        if not (last_error.startswith("skip:") and "configured" in last_error):
+                            only_unconfigured = False
                         if not synthetic:
                             self._fail_count += 1
                             self._record_stat(prov, time.time() - t0, False)
@@ -1816,6 +1825,9 @@ class Brain:
                             print(f"  [Brain] ⛔ {prov}/{model} е спрян от доставчика (410) — "
                                   "пропускам го; махни го от config.yaml")
                         continue
+                if only_unconfigured:
+                    last_error = "нито един модел няма API ключ — пусни `genesis setup`"
+                    break
                 if round_i + 1 < RETRY_ROUNDS:
                     print("  [Brain] Всички облачни модели заети/изчерпани, кратка пауза и нов кръг...")
                     time.sleep(8)

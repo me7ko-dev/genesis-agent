@@ -76,10 +76,17 @@ try:
     from genesis_agent import sandbox as _sandbox
 
     def _terminal_confirm(operation: str, verdict) -> bool:
+        # Цялата операция, като текст (без Rich разметка: `[bold]` в командата
+        # иначе изчезваше от показаното) — одит 2026-10-09.
+        if _sandbox.too_long_to_confirm(operation):
+            console.print(Text(f"⛔ Операция от {len(operation)} знака — твърде дълга, за да "
+                               "се одобри наведнъж; отказана.", style="red"))
+            return False
         console.print("\n[bold yellow]⚠️  GENESIS SANDBOX — изисква потвърждение[/]")
         for r in verdict.reasons:
-            console.print(f"    [yellow]• {r}[/]")
-        console.print(f"    [dim]Операция:[/] {operation[:300]}")
+            console.print(Text(f"    • {r}", style="yellow"))
+        console.print(Text(f"    Операция ({len(operation)} знака):", style="dim"))
+        console.print(Text(operation), soft_wrap=True)
         try:
             ans = console.input("    [bold]Да се изпълни ли? [y/N] [/]").strip().lower()
         except (EOFError, KeyboardInterrupt):
@@ -1359,6 +1366,14 @@ _PARALLEL_MAX = 8
 def _may_ask(name: str, args: dict) -> bool:
     if name in ("WEB_SEARCH", "WEB_FETCH"):
         return False
+    # SEARCH_CODE пита, когато съвпадение е в .env/credentials.json вътре в
+    # папката — разбира се чак след търсенето. Два такива наведнъж питаха от
+    # две нишки (одит 2026-10-09): при оператор, който може да бъде питан —
+    # последователно.
+    if name == "SEARCH_CODE":
+        from genesis_agent import sandbox
+        if sandbox.get_policy().mode == "interactive":
+            return True
     from genesis_agent import sandbox
     raw = str(args.get("path") or "") or ("." if name in ("LIST_DIR", "REPO_MAP", "GLOB",
                                                           "SEARCH_CODE") else "")
@@ -1396,6 +1411,11 @@ def _parallel_reads(tool_calls: list[dict]) -> dict[int, str]:
     return dict(enumerate(results))
 
 
+# Съобщението спряно ли е от hook UserPromptSubmit (тогава чакащият изход от
+# `!команди` не е стигнал до модела и не се изхвърля).
+LAST_TURN_BLOCKED = False
+
+
 def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     """Една реплика на оператора: модел → инструменти → … → отговор.
 
@@ -1415,6 +1435,8 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
         before = hooks.fire("UserPromptSubmit", {"prompt": user_input})
     except Exception:
         before = hooks.Outcome()
+    global LAST_TURN_BLOCKED
+    LAST_TURN_BLOCKED = before.blocked
     if before.blocked:
         ui.warn(f"⛔ hook на оператора спря съобщението: {before.message or '(без обяснение)'}")
         return messages
@@ -1424,6 +1446,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
         extra += "\n\n" + plan_mode.PROMPT_NOTE
     edit_history.begin_turn(user_input)
     watched = _WatchedUI(ui)
+    genesis_skills._set_cancel(watched.cancelled)
     try:
         messages = _run_turn_once(messages, user_input, watched, extra)
         for _ in range(_STOP_HOOK_ROUNDS):
@@ -1441,6 +1464,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
             messages = _run_turn_once(
                 messages, f"[hook Stop на оператора — довърши, преди да спреш]\n{stop.message}", watched, "")
     finally:
+        genesis_skills._set_cancel(None)
         edit_history.end_turn()
     return messages
 
@@ -1499,195 +1523,220 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
     # genesis_agent.repeat_guard.
     _guard = _RepeatGuard()
     _spinning = ""
-    with ui.thinking("Genesis мисли...", "dots2"):
-        response, tool_calls = ask_genesis(messages, tools=_turn_tools())
+    # Ctrl-C или грешка посред хода: свършеното (записани файлове, резултати)
+    # остава в историята и се запазва; Ctrl-C спира хода, не чата. Дотогава
+    # ходът изчезваше целия — файловете променени, а моделът не знаеше (одит 2026-10-09).
+    _failure: Exception | None = None
+    try:
+        with ui.thinking("Genesis мисли...", "dots2"):
+            response, tool_calls = ask_genesis(messages, tools=_turn_tools())
 
-    while True:
-        ui.assistant(response)
-        assistant_msg = {"role": "assistant", "content": response}
-        if tool_calls:
-            assistant_msg["tool_calls"] = tool_calls
-        messages.append(assistant_msg)
-        _remember("assistant", response if response.strip() else
-                  f"[повикани {len(tool_calls or [])} tool(-а)]")
-        if ui.cancelled():
-            # Преди следващия инструмент, не по средата му. Недовършените
-            # tool_calls остават без резултат — затова се махат, иначе
-            # следващото обръщение към модела е невалидна история.
+        while True:
+            ui.assistant(response)
+            assistant_msg = {"role": "assistant", "content": response}
             if tool_calls:
-                assistant_msg.pop("tool_calls", None)
-            ui.warn("Спряно от оператора.")
-            break
+                _unique_call_ids(tool_calls, round_i)
+                assistant_msg["tool_calls"] = tool_calls
+            messages.append(assistant_msg)
+            _remember("assistant", response if response.strip() else
+                      f"[повикани {len(tool_calls or [])} tool(-а)]")
+            if ui.cancelled():
+                # Преди следващия инструмент, не по средата му. Недовършените
+                # tool_calls остават без резултат — затова се махат, иначе
+                # следващото обръщение към модела е невалидна история.
+                if tool_calls:
+                    assistant_msg.pop("tool_calls", None)
+                ui.warn("Спряно от оператора.")
+                break
 
-        if tool_calls:
-            # Native tool-calling (design note, 2026-07-25): моделът поддържа
-            # структуриран function-calling — извикваме СЪЩИТЕ backend-и
-            # като regex-tag режима (genesis_skills.dispatch_tool_call),
-            # но без риск от грешно написан таг/синтаксис.
-            asked = ""
-            _repeat_note = ""
-            _prefetched = _parallel_reads(tool_calls)
-            for _tc_i, tc in enumerate(tool_calls):
-                fn = tc.get("function", {}) or {}
-                name = fn.get("name", "")
-                try:
-                    args = load_tool_arguments(fn.get("arguments"))
-                except (json.JSONDecodeError, TypeError):
-                    args = {}
-                result = (_prefetched[_tc_i] if _tc_i in _prefetched
-                          else genesis_skills.dispatch_tool_call(name, args))
-                _page_check.observe(result)
-                _run_check.observe(result)
-                _accept.observe(result)
-                _entry = claim_check.counts_as_executed(
-                    name, " ".join(str(v) for v in args.values()), result)
-                if _entry:
-                    _executed.append(_entry)
-                ui.tool(name, result)
-                messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
-                                  "name": name,
-                                  "content": clip_for_context(result)})
-                _v = _guard.observe(name, args, result)
+            if tool_calls:
+                # Native tool-calling (design note, 2026-07-25): моделът поддържа
+                # структуриран function-calling — извикваме СЪЩИТЕ backend-и
+                # като regex-tag режима (genesis_skills.dispatch_tool_call),
+                # но без риск от грешно написан таг/синтаксис.
+                asked = ""
+                _repeat_note = ""
+                _prefetched = _parallel_reads(tool_calls)
+                for _tc_i, tc in enumerate(tool_calls):
+                    fn = tc.get("function", {}) or {}
+                    name = fn.get("name", "")
+                    raw_args = fn.get("arguments")
+                    try:
+                        args = load_tool_arguments(raw_args)
+                        call_args: Any = args
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        # Счупен JSON не пуска инструмента с {} (TODO_WRITE триеше
+                        # списъка, WRITE_FILE казваше „няма име на файл“): моделът
+                        # получава „Невалидни аргументи“ и пише пак (одит 2026-10-09).
+                        args = {}
+                        call_args = raw_args if isinstance(raw_args, str) else json.dumps(raw_args)
+                    result = (_prefetched[_tc_i] if _tc_i in _prefetched
+                              else genesis_skills.dispatch_tool_call(name, call_args))
+                    _page_check.observe(result)
+                    _run_check.observe(result)
+                    _accept.observe(result)
+                    _entry = claim_check.counts_as_executed(
+                        name, " ".join(str(v) for v in args.values()), result)
+                    if _entry:
+                        _executed.append(_entry)
+                    ui.tool(name, result)
+                    messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
+                                      "name": name,
+                                      "content": clip_for_context(result)})
+                    _v = _guard.observe(name, args, result)
+                    if _v.stop:
+                        _spinning = _v.note
+                    elif _v.note:
+                        _repeat_note = _v.note
+                    if genesis_skills.ASK_USER_MARKER in result:
+                        asked = result
+                if asked:
+                    # ASK_USER (design note, 2026-07-27): агентът е попитал → цикълът
+                    # СПИРА и чака реален отговор. Без това инструментът е
+                    # безсмислен — моделът би задал въпроса и веднага сам би
+                    # продължил да гадае, точно поведението, което спираме.
+                    q = asked.replace(genesis_skills.ASK_USER_MARKER, "").strip()
+                    ui.asked(q)
+                    break
+                if _spinning:
+                    # Нищо ново не може да дойде от още рундове — спираме
+                    # СЕГА и казваме защо, вместо да догорим до тавана.
+                    ui.spinning(_spinning)
+                    break
+                if _repeat_note:
+                    messages.append({"role": "system", "content": _repeat_note})
+                round_i += 1
+                if round_i >= _TOOL_ROUND_CAP:
+                    ui.warn(f"Достигнат таван от {_TOOL_ROUND_CAP} инструмент-рунда "
+                            "за това съобщение — спирам тук, продължи с ново съобщение.")
+                    break
+                with ui.thinking("Анализирам...", "aesthetic"):
+                    response, tool_calls = ask_genesis(messages, tools=_turn_tools())
+                continue
+
+            # Стар text-tag режим — моделът не поддържа native tool-calling
+            # (или просто избра да не вика нищо тази реплика).
+            tool_results = parse_and_execute_tools(response)
+            _executed.extend(claim_check.executed_from_text_results(tool_results))
+            for _r in tool_results:
+                _page_check.observe(_r)
+                _run_check.observe(_r)
+                _accept.observe(_r)
+            if not tool_results:
+                # Празно ≠ непременно "приключи" — може да е объркан tool tag
+                # (виж agent_core.run_tool_loop, същият фикс, design note
+                # 2026-08-11: "Fix local model narrating tool use without
+                # ever executing" беше закърпен само тук частично, не в корена).
+                if (_malformed_tag_retries < 2
+                        and genesis_skills.looks_like_attempted_tool_tag(response)):
+                    _malformed_tag_retries += 1
+                    messages.append({
+                        "role": "system",
+                        "content": "[Система]: В последния отговор не намерих валиден tool "
+                                   "таг, но той изглежда като опит за такъв. Ако си искал да "
+                                   "викнеш инструмент — използвай точния синтаксис "
+                                   "`[TAG: аргумент]` (или `[WRITE_FILE: път]...[END_WRITE]` "
+                                   "за файлове). Ако вече си приключил — дай кратък финален "
+                                   "отговор БЕЗ скоби във формàт на таг.",
+                    })
+                    with ui.thinking("Анализирам...", "aesthetic"):
+                        response, tool_calls = ask_genesis(messages, tools=_turn_tools())
+                    continue
+                if _page_check.due():
+                    with ui.thinking("Проверявам страницата в браузър…", "dots2"):
+                        _page_note, _page_line = _page_check.check()
+                    if _page_line:
+                        ui.tool("проверка в браузър", _page_line)
+                    if _page_check.passed:
+                        _executed.append(("BROWSE", "page_check"))
+                    if _page_note:
+                        messages.append({"role": "system", "content": _page_note})
+                        with ui.thinking("Оправям според браузъра…", "aesthetic"):
+                            response, tool_calls = ask_genesis(messages, tools=_turn_tools())
+                        continue
+                if _run_check.due():
+                    ui.warn("Написа код — казвам му да го пробва и извън примерите.")
+                    messages.append({"role": "system", "content": _run_check.note()})
+                    with ui.thinking("Пробвам кода…", "aesthetic"):
+                        response, tool_calls = ask_genesis(messages, tools=_turn_tools())
+                    continue
+                if _accept.due():
+                    with ui.thinking("Приемни тестове само от заявката…", "dots2"):
+                        _acc_note, _acc_line = _accept.check()
+                    if _acc_line:
+                        ui.tool("приемни тестове", _acc_line)
+                    if _acc_note:
+                        messages.append({"role": "system", "content": _acc_note})
+                        with ui.thinking("Сверявам със заявката…", "aesthetic"):
+                            response, tool_calls = ask_genesis(messages, tools=_turn_tools())
+                        continue
+                _promise = claim_check.unfinished_promise(response)
+                if _promise and _promise_retries < 1:
+                    _promise_retries += 1
+                    ui.warn("Обещава работа и спира — казвам му да я направи.")
+                    messages.append({"role": "system", "content": claim_check.promise_nudge(_promise)})
+                    with ui.thinking("Продължавам…", "aesthetic"):
+                        response, tool_calls = ask_genesis(messages, tools=_turn_tools())
+                    continue
+                _unsupported = claim_check.unsupported_claims(response, _executed)
+                if _unsupported and _claim_retries < 1:
+                    _claim_retries += 1
+                    ui.warn("Твърди свършена работа, която никой "
+                            "изпълнен инструмент не доказва — питам пак.")
+                    messages.append({"role": "system",
+                                      "content": claim_check.nudge_text(_unsupported)})
+                    with ui.thinking("Проверявам…", "aesthetic"):
+                        response, tool_calls = ask_genesis(messages, tools=_turn_tools())
+                    continue
+                break
+            _text_note = ""
+            for _r in tool_results:
+                _v = _guard.observe_text_result(_r)
                 if _v.stop:
                     _spinning = _v.note
                 elif _v.note:
-                    _repeat_note = _v.note
-                if genesis_skills.ASK_USER_MARKER in result:
-                    asked = result
+                    _text_note = _v.note
+            asked = next((r for r in tool_results
+                          if genesis_skills.ASK_USER_MARKER in r), "")
+            # Спре ли ходът тук (въпрос, въртене, таван), резултатите от този рунд
+            # пак влизат в историята — както при native пътя. Губеха се: след
+            # [READ_FILE][ASK_USER] прочетеното го нямаше в следващия ход (одит 2026-10-09).
+            _last_results = {"role": "system", "content": "[Резултат]:\n" +
+                             "\n\n".join(clip_for_context(r) for r in tool_results)}
             if asked:
-                # ASK_USER (design note, 2026-07-27): агентът е попитал → цикълът
-                # СПИРА и чака реален отговор. Без това инструментът е
-                # безсмислен — моделът би задал въпроса и веднага сам би
-                # продължил да гадае, точно поведението, което спираме.
+                messages.append(_last_results)
                 q = asked.replace(genesis_skills.ASK_USER_MARKER, "").strip()
                 ui.asked(q)
                 break
             if _spinning:
-                # Нищо ново не може да дойде от още рундове — спираме
-                # СЕГА и казваме защо, вместо да догорим до тавана.
+                messages.append(_last_results)
                 ui.spinning(_spinning)
                 break
-            if _repeat_note:
-                messages.append({"role": "system", "content": _repeat_note})
+            if _text_note:
+                messages.append({"role": "system", "content": _text_note})
             round_i += 1
             if round_i >= _TOOL_ROUND_CAP:
+                messages.append(_last_results)
                 ui.warn(f"Достигнат таван от {_TOOL_ROUND_CAP} инструмент-рунда "
                         "за това съобщение — спирам тук, продължи с ново съобщение.")
                 break
+            messages.append({"role": "system",
+                              "content": "[Резултат]:\n" +
+                              "\n\n".join(clip_for_context(r) for r in tool_results) +
+                              "\n\nАко тези резултати вече изпълняват заявката на потребителя "
+                              "напълно — дай КРАТКО финално обобщение БЕЗ никакви нови tool тагове. "
+                              "Викай нов tool САМО ако наистина има следваща реална стъпка. "
+                              "ВАЖНО: ако някоя команда е отказана от оператора (SANDBOX DECLINED), "
+                              "но ДРУГ резултат по-горе вече доказва, че целта е постигната (напр. "
+                              "командата вече работи правилно) — не настоявай за отказаната команда, "
+                              "просто отчети успех с наличните доказателства."})
             with ui.thinking("Анализирам...", "aesthetic"):
                 response, tool_calls = ask_genesis(messages, tools=_turn_tools())
-            continue
-
-        # Стар text-tag режим — моделът не поддържа native tool-calling
-        # (или просто избра да не вика нищо тази реплика).
-        tool_results = parse_and_execute_tools(response)
-        _executed.extend(claim_check.executed_from_text_results(tool_results))
-        for _r in tool_results:
-            _page_check.observe(_r)
-            _run_check.observe(_r)
-            _accept.observe(_r)
-        if not tool_results:
-            # Празно ≠ непременно "приключи" — може да е объркан tool tag
-            # (виж agent_core.run_tool_loop, същият фикс, design note
-            # 2026-08-11: "Fix local model narrating tool use without
-            # ever executing" беше закърпен само тук частично, не в корена).
-            if (_malformed_tag_retries < 2
-                    and genesis_skills.looks_like_attempted_tool_tag(response)):
-                _malformed_tag_retries += 1
-                messages.append({
-                    "role": "system",
-                    "content": "[Система]: В последния отговор не намерих валиден tool "
-                               "таг, но той изглежда като опит за такъв. Ако си искал да "
-                               "викнеш инструмент — използвай точния синтаксис "
-                               "`[TAG: аргумент]` (или `[WRITE_FILE: път]...[END_WRITE]` "
-                               "за файлове). Ако вече си приключил — дай кратък финален "
-                               "отговор БЕЗ скоби във формàт на таг.",
-                })
-                with ui.thinking("Анализирам...", "aesthetic"):
-                    response, tool_calls = ask_genesis(messages, tools=_turn_tools())
-                continue
-            if _page_check.due():
-                with ui.thinking("Проверявам страницата в браузър…", "dots2"):
-                    _page_note, _page_line = _page_check.check()
-                if _page_line:
-                    ui.tool("проверка в браузър", _page_line)
-                if _page_check.passed:
-                    _executed.append(("BROWSE", "page_check"))
-                if _page_note:
-                    messages.append({"role": "system", "content": _page_note})
-                    with ui.thinking("Оправям според браузъра…", "aesthetic"):
-                        response, tool_calls = ask_genesis(messages, tools=_turn_tools())
-                    continue
-            if _run_check.due():
-                ui.warn("Написа код — казвам му да го пробва и извън примерите.")
-                messages.append({"role": "system", "content": _run_check.note()})
-                with ui.thinking("Пробвам кода…", "aesthetic"):
-                    response, tool_calls = ask_genesis(messages, tools=_turn_tools())
-                continue
-            if _accept.due():
-                with ui.thinking("Приемни тестове само от заявката…", "dots2"):
-                    _acc_note, _acc_line = _accept.check()
-                if _acc_line:
-                    ui.tool("приемни тестове", _acc_line)
-                if _acc_note:
-                    messages.append({"role": "system", "content": _acc_note})
-                    with ui.thinking("Сверявам със заявката…", "aesthetic"):
-                        response, tool_calls = ask_genesis(messages, tools=_turn_tools())
-                    continue
-            _promise = claim_check.unfinished_promise(response)
-            if _promise and _promise_retries < 1:
-                _promise_retries += 1
-                ui.warn("Обещава работа и спира — казвам му да я направи.")
-                messages.append({"role": "system", "content": claim_check.promise_nudge(_promise)})
-                with ui.thinking("Продължавам…", "aesthetic"):
-                    response, tool_calls = ask_genesis(messages, tools=_turn_tools())
-                continue
-            _unsupported = claim_check.unsupported_claims(response, _executed)
-            if _unsupported and _claim_retries < 1:
-                _claim_retries += 1
-                ui.warn("Твърди свършена работа, която никой "
-                        "изпълнен инструмент не доказва — питам пак.")
-                messages.append({"role": "system",
-                                  "content": claim_check.nudge_text(_unsupported)})
-                with ui.thinking("Проверявам…", "aesthetic"):
-                    response, tool_calls = ask_genesis(messages, tools=_turn_tools())
-                continue
-            break
-        _text_note = ""
-        for _r in tool_results:
-            _v = _guard.observe_text_result(_r)
-            if _v.stop:
-                _spinning = _v.note
-            elif _v.note:
-                _text_note = _v.note
-        asked = next((r for r in tool_results
-                      if genesis_skills.ASK_USER_MARKER in r), "")
-        if asked:
-            q = asked.replace(genesis_skills.ASK_USER_MARKER, "").strip()
-            ui.asked(q)
-            break
-        if _spinning:
-            ui.spinning(_spinning)
-            break
-        if _text_note:
-            messages.append({"role": "system", "content": _text_note})
-        round_i += 1
-        if round_i >= _TOOL_ROUND_CAP:
-            ui.warn(f"Достигнат таван от {_TOOL_ROUND_CAP} инструмент-рунда "
-                    "за това съобщение — спирам тук, продължи с ново съобщение.")
-            break
-        messages.append({"role": "system",
-                          "content": "[Резултат]:\n" +
-                          "\n\n".join(clip_for_context(r) for r in tool_results) +
-                          "\n\nАко тези резултати вече изпълняват заявката на потребителя "
-                          "напълно — дай КРАТКО финално обобщение БЕЗ никакви нови tool тагове. "
-                          "Викай нов tool САМО ако наистина има следваща реална стъпка. "
-                          "ВАЖНО: ако някоя команда е отказана от оператора (SANDBOX DECLINED), "
-                          "но ДРУГ резултат по-горе вече доказва, че целта е постигната (напр. "
-                          "командата вече работи правилно) — не настоявай за отказаната команда, "
-                          "просто отчети успех с наличните доказателства."})
-        with ui.thinking("Анализирам...", "aesthetic"):
-            response, tool_calls = ask_genesis(messages, tools=_turn_tools())
+    except KeyboardInterrupt:
+        ui.warn("⏹ Прекъснато (Ctrl-C) — ходът спря; свършеното дотук е в историята.")
+    except Exception as e:  # пази историята, после грешката продължава нагоре
+        _failure = e
+    _close_open_tool_calls(messages)
 
     # Превантивна компресия на историята — преди cutoff-а на deque(maxlen=30),
     # не при него. Пести токени в дълги разговори, "помни" повече чрез резюме.
@@ -1721,7 +1770,47 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
         except Exception:
             pass
     from genesis_agent.agent_core import bounded_history
+    if _failure is not None:
+        raise _failure
     return bounded_history(messages, limit)
+
+
+def _unique_call_ids(tool_calls: list, round_i: int) -> None:
+    """Еднакви или празни id на tool_calls → уникални (Anthropic API отказва
+    повторени tool_use id; резултатите се закачаха към грешното извикване)."""
+    seen: set[str] = set()
+    for i, tc in enumerate(tool_calls):
+        if not isinstance(tc, dict):
+            continue
+        cid = str(tc.get("id") or "")
+        if not cid or cid in seen:
+            cid = f"call_{round_i}_{i}"
+            tc["id"] = cid
+        seen.add(cid)
+
+
+def _close_open_tool_calls(messages: "deque") -> None:
+    """Извикванията от последния рунд без резултат (прекъснат ход) получават
+    резултат „[прекъснато]“ — иначе следващото обръщение е невалидна история."""
+    items = list(messages)
+    idx = next((i for i in range(len(items) - 1, -1, -1)
+                if items[i].get("role") == "assistant" and items[i].get("tool_calls")), None)
+    if idx is None:
+        return
+    j = idx + 1
+    answered = set()
+    while j < len(items) and items[j].get("role") == "tool":
+        answered.add(items[j].get("tool_call_id"))
+        j += 1
+    missing = [tc for tc in items[idx]["tool_calls"]
+               if isinstance(tc, dict) and tc.get("id") not in answered]
+    if not missing:
+        return
+    filler = [{"role": "tool", "tool_call_id": tc.get("id", ""),
+               "name": (tc.get("function") or {}).get("name", ""),
+               "content": "[прекъснато от оператора — не е изпълнено]"} for tc in missing]
+    messages.clear()
+    messages.extend(items[:j] + filler + items[j:])
 
 
 def _with_attachments(user_input: str, pending_shell: list[str]) -> str:
@@ -2186,9 +2275,10 @@ def main():
                     continue
                 user_input = _res.prompt
 
-            user_input = _with_attachments(user_input, pending_shell)
-            pending_shell.clear()
-            messages = run_turn(messages, user_input, RICH_UI)
+            turn_input = _with_attachments(user_input, pending_shell)
+            messages = run_turn(messages, turn_input, RICH_UI)
+            if not LAST_TURN_BLOCKED:   # спряно от hook → изходът чака следващото
+                pending_shell.clear()
 
         except (KeyboardInterrupt, EOFError):
             # EOF (Ctrl-D, or stdin closed when piped) used to fall through to

@@ -330,6 +330,9 @@ def _loop(agent: Agent, messages: list[dict], complete: Callable[..., Any],
     used = 0
     last = ""
     for round_i in range(max_rounds):
+        if gs._cancelled():   # „Стоп“ на оператора спира и под-агента
+            return (f"[AGENT: {agent.name}] ⏹ Спрян от оператора след {round_i} рунда "
+                    f"({used} инструмента).{' Последно: ' + last[:_MAX_ANSWER] if last else ''}")
         final = round_i == max_rounds - 1
         if final:  # последният рунд — без инструменти: доклад с каквото е свършено
             messages.append({"role": "user", "content":
@@ -357,8 +360,10 @@ def _loop(agent: Agent, messages: list[dict], complete: Callable[..., Any],
             used += len(outs)
             _say(f"  ↳ {agent.name}: {len(outs)} инструмента")
             messages.append({"role": "assistant", "content": text})
+            # Всички резултати: таговете вече са изпълнени — скрит резултат е
+            # действие, за което под-агентът не знае (одит 2026-10-09).
             messages.append({"role": "user", "content": "[резултати]\n" +
-                             "\n\n".join(_clip(o) for o in outs[:_MAX_CALLS])})
+                             "\n\n".join(_clip(o) for o in outs)})
             continue
         if not text:
             return (f"[AGENT: {agent.name}] ❌ Празен отговор от модела след {round_i + 1} "

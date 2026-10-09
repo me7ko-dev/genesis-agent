@@ -173,6 +173,55 @@ def third_party_imports(root: Path) -> dict[str, list[str]]:
 _REQ_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 
 
+_TOML_ARRAY = re.compile(r"^\s*(dependencies|[\w.-]+)\s*=\s*\[(.*?)\]", re.MULTILINE | re.DOTALL)
+_TOML_STRING = re.compile(r"""["']([^"'\n]+)["']""")
+
+
+def _toml_deps_fallback(text: str) -> dict:
+    """[project] dependencies / optional-dependencies и [tool.poetry.dependencies]
+    без парсер на TOML (за Python 3.10)."""
+    section = ""
+    project: dict = {}
+    poetry: dict = {}
+    optional: dict = {}
+    pos = 0
+    lines = text.splitlines(keepends=True)
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if stripped.startswith("[") and not stripped.startswith("[["):
+            section = stripped.strip("[]").strip()
+            if section == "project":
+                project.setdefault("dependencies", [])
+            i += 1
+            pos += len(line)
+            continue
+        m = _TOML_ARRAY.match(text, pos)
+        if m and section in ("project", "project.optional-dependencies"):
+            items = _TOML_STRING.findall(m.group(2))
+            if section == "project" and m.group(1) == "dependencies":
+                project["dependencies"] = items
+            elif section == "project.optional-dependencies":
+                optional[m.group(1)] = items
+            consumed = m.end() - pos
+            while consumed > 0 and i < len(lines):
+                consumed -= len(lines[i])
+                pos += len(lines[i])
+                i += 1
+            continue
+        if section == "tool.poetry.dependencies" and "=" in stripped and not stripped.startswith("#"):
+            poetry[stripped.split("=", 1)[0].strip().strip('"')] = True
+        i += 1
+        pos += len(line)
+    data: dict = {}
+    if project or optional:
+        data["project"] = {**project, **({"optional-dependencies": optional} if optional else {})}
+    if poetry:
+        data["tool"] = {"poetry": {"dependencies": poetry}}
+    return data
+
+
 def declared(root: Path) -> set[str] | None:
     """Normalized names from requirements*.txt and pyproject.toml, or None
     when the project declares its dependencies nowhere."""
@@ -198,7 +247,12 @@ def declared(root: Path) -> set[str] | None:
             import tomllib  # type: ignore[import-not-found]
             data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
         except ImportError:
-            data = None
+            # Python 3.10 няма tomllib: без него обявените зависимости „липсваха“
+            # и отчетът на export лъжеше (одит 2026-10-09). Груб, но достатъчен прочит.
+            try:
+                data = _toml_deps_fallback(pyproject.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                data = {}
         except (OSError, ValueError):
             data = {}
         if data is not None:

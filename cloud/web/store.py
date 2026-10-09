@@ -212,7 +212,9 @@ class Store:
         with self._db() as c:
             rows = c.execute("SELECT seq, data FROM events WHERE turn_id = ? AND seq > ? "
                              "ORDER BY seq", (turn_id, after)).fetchall()
-        return [{"seq": r["seq"], **json.loads(r["data"])} for r in rows]
+        # Номерът е на базата: `seq` от контейнера не бива да го подменя — иначе
+        # клиентът показваше събития два пъти или спираше да вижда нови (одит 2026-10-09).
+        return [{**json.loads(r["data"]), "seq": r["seq"]} for r in rows]
 
     def busy(self, *, user_id: int | None = None, chat_id: str | None = None) -> int:
         """Незавършени ходове (на човек, на разговор или общо)."""

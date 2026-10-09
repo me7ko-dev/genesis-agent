@@ -162,6 +162,11 @@ class Ledger:
             self.reserved[job] = self.reserved.get(job, 0) + amount
             return True
 
+    def left(self, job: str, budget: int) -> int:
+        """Колко още може да се похарчи (без вече запазеното от други заявки)."""
+        with self.lock:
+            return budget - self.jobs.get(job, Usage()).total_tokens - self.reserved.get(job, 0)
+
     def release(self, job: str, amount: int) -> None:
         with self.lock:
             left = self.reserved.get(job, 0) - amount
@@ -251,6 +256,14 @@ class Gateway:
         # таван и без сметка (2026-10-07). Genesis не ползва stream.
         if request.get("stream"):
             return 400, _err("stream не се поддържа през шлюза")
+        # Отговорът се ограничава до оставащото: проверяваше се само дали вече е
+        # похарчено — заявка от 1.9 MB с max_tokens 64k минаваше и струваше 1.8×
+        # бюджета (одит 2026-10-09). Промпт, по-голям от остатъка, не минава.
+        left = self.ledger.left(grant.job, grant.budget)
+        prompt_est = len(body) // 3
+        if prompt_est >= left:
+            return 429, _err(f"бюджетът на задачата ({grant.budget} токена) е изчерпан")
+        body = _cap_completion(request, body, left - prompt_est)
         estimate = _estimate(request, body)
         if not self.ledger.reserve(grant.job, grant.budget, estimate):
             return 429, _err(f"бюджетът на задачата ({grant.budget} токена) е изчерпан")
@@ -288,6 +301,19 @@ class Gateway:
         return status, data
 
 
+def _cap_completion(request: dict, body: bytes, allowed: int) -> bytes:
+    """`max_tokens` (или `max_completion_tokens`) не над `allowed`."""
+    key = "max_completion_tokens" if "max_completion_tokens" in request else "max_tokens"
+    try:
+        current = int(request.get(key) or 4096)
+    except (TypeError, ValueError):
+        current = 4096
+    if current <= allowed:
+        return body
+    request[key] = max(1, allowed)
+    return json.dumps(request).encode()
+
+
 def _estimate(request: dict, body: bytes) -> int:
     """Горна оценка на заявката: промптът (~3 байта на токен) + таванът на
     отговора (`max_tokens`, иначе 4 096)."""
@@ -305,6 +331,9 @@ def _err(message: str) -> bytes:
 class Handler(BaseHTTPRequestHandler):
     server_version = "genesis-gateway"
     sys_version = ""
+    # Без таймаут заявка без тяло държеше нишка завинаги: една задача можеше да
+    # задържи стотици и да спре обръщенията на всички (одит 2026-10-09).
+    timeout = 60
     gw: Gateway
 
     def log_message(self, format: str, *args: Any) -> None:

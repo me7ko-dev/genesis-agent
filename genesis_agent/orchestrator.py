@@ -156,7 +156,8 @@ def run_orchestrated(goal: str, *, max_rounds: int | None = None,
                         args = load_tool_arguments(fn.get("arguments"))
                     except (_json.JSONDecodeError, TypeError):
                         args = {}
-                    tool_out = genesis_skills.dispatch_tool_call(name, args)
+                    # Счупени аргументи → суровият низ: моделът получава „Невалидни аргументи“
+                    tool_out = genesis_skills.dispatch_tool_call(name, args or fn.get("arguments") or {})
                     messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                                       "name": name, "content": tool_out[:4000]})
             except Exception as _e:
