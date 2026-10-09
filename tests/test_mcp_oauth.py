@@ -456,3 +456,11 @@ def test_a_cookie_header_means_check_the_headers(oauth) -> None:
     oauth(headers={"Cookie": "session=old"})
     lines = mcp_client.start_all()
     assert any("провери headers" in ln for ln in lines) and not any("нужен е вход" in ln for ln in lines)
+
+
+def test_ordinary_headers_are_not_mistaken_for_login() -> None:
+    from genesis_agent.mcp_client import _static_auth
+    for header in ("X-Session-Id", "X-Bypass-Cache", "X-Compass-Region", "X-Tenant"):
+        assert not _static_auth({header: "v"}), header
+    for header in ("X-API-Key", "Cookie", "Api-Password", "Authorization", "X-Session-Token"):
+        assert _static_auth({header: "v"}), header

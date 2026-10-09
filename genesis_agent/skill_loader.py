@@ -608,6 +608,15 @@ def _operator_settings() -> dict[str, str]:
     return dict(out)
 
 
+def _workspace() -> list[Path]:
+    """Работната папка на чата: пазачът я пуска и когато е в ~/.genesis
+    (`~/.genesis/workspace` при старт от домашната папка — одит 2026-10-09)."""
+    import sys
+    gs = sys.modules.get("genesis_skills")
+    ws = getattr(gs, "_WORKSPACE", None) if gs is not None else None
+    return [Path(ws)] if ws else []
+
+
 def skill_env() -> dict[str, str]:
     """Средата на кода на умение: собствена домашна папка (skill_home).
 
@@ -688,7 +697,7 @@ def use_skill(name_or_query: str, driver_code: str = "") -> str:
     if driver_code.strip():
         script += "\n\n# --- USE_SKILL driver ---\n" + driver_code
 
-    res = sandbox.run_python(script, timeout=60, env_extra=skill_env())
+    res = sandbox.run_python(script, timeout=60, env_extra=skill_env(), allow=_workspace())
     if res.blocked:
         return "\n".join(header) + "\n" + res.stderr
 
@@ -722,6 +731,7 @@ def run_skill(name: str, **exec_kwargs) -> str:
         code,
         timeout=120,
         env_extra={**skill_env(), "SKILL_ARGS": _json.dumps(exec_kwargs)},
+        allow=_workspace(),
     )
     if res.blocked:
         raise RuntimeError(res.stderr)

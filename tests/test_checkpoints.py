@@ -446,18 +446,39 @@ def test_undo_of_an_edit_never_writes_through_a_link_out(ws, tmp_path) -> None:
 # ── трети одит 2026-10-09 ────────────────────────────────────────────────────
 
 def test_a_background_command_never_makes_undo_hit_the_turn_before(ws, monkeypatch) -> None:
+    from genesis_agent import background
     monkeypatch.setattr(gs, "_WORKSPACE", ws)
     edit_history.begin_turn("ход 1")
     edit_history.record(ws / "keep.txt")
     (ws / "keep.txt").write_text("ход 1\n", encoding="utf-8")
     edit_history.end_turn()
+    py = Path(sys.executable).as_posix()
     edit_history.begin_turn("сървър")
-    gs._before_tool("RUN_CMD", {"command": "python -m http.server", "background": True})
-    gs._after_tool("RUN_CMD", {"command": "python -m http.server", "background": True}, "bg1")
+    out = gs.dispatch_tool_call("RUN_CMD", {"command": f'"{py}" -c "import time; time.sleep(5)"',
+                                            "background": True})
     edit_history.end_turn()
-    label, done = edit_history.undo()
-    assert label == "сървър" and any("фонова" in d for d in done)
-    assert (ws / "keep.txt").read_text(encoding="utf-8") == "ход 1\n"
+    try:
+        assert "bg" in out, out
+        label, done = edit_history.undo()
+        assert label == "сървър" and any("фонова" in d for d in done)
+        assert (ws / "keep.txt").read_text(encoding="utf-8") == "ход 1\n"
+    finally:
+        background.stop_all()
+
+
+def test_a_refused_background_command_takes_no_undo_step(ws, monkeypatch) -> None:
+    monkeypatch.setattr(gs, "_WORKSPACE", ws)
+    edit_history.begin_turn("ход 1")
+    edit_history.record(ws / "keep.txt")
+    (ws / "keep.txt").write_text("ход 1\n", encoding="utf-8")
+    edit_history.end_turn()
+    edit_history.begin_turn("отказан сървър")
+    out = gs.dispatch_tool_call("RUN_CMD", {"command": "sudo python3 -m http.server",
+                                            "background": True})
+    edit_history.end_turn()
+    assert "SANDBOX" in out
+    label, _ = edit_history.undo()
+    assert label == "ход 1"
 
 
 def test_a_big_file_a_command_creates_is_deleted_by_undo(ws, monkeypatch) -> None:

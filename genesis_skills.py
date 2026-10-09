@@ -1171,9 +1171,9 @@ def _before_tool(name: str, args: dict) -> str | None:
             from genesis_agent import edit_history
             if name == "RUN_BG" or (name == "RUN_CMD" and str(args.get("background", "")).strip()
                                     .lower() in ("true", "1", "yes")):
-                # Фонова: пише и след края на хода — снимка не помага. Ходът
-                # пак е „с промени“, иначе /undo връщаше предишния (одит).
-                edit_history.background_command()
+                # Фонова: пише и след края на хода — снимка не помага. Ходът се
+                # маркира в background.start, когато процесът наистина тръгне.
+                pass
             else:
                 # Командите и уменията минават през sandbox: снимката — когато
                 # процесът тръгне, след одобрението (одит 2026-10-09).

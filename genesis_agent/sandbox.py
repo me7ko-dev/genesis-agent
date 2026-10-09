@@ -1684,7 +1684,8 @@ def stop_process(proc: subprocess.Popen) -> None:
 def run_python(code: str, *, cwd: Path | None = None,
                policy: SandboxPolicy | None = None,
                timeout: int | None = None,
-               env_extra: dict[str, str] | None = None) -> SandboxResult:
+               env_extra: dict[str, str] | None = None,
+               allow: list[Path] | None = None) -> SandboxResult:
     """Изпълнява Python код в отделен интерпретатор през защитната бариера."""
     policy = policy or _POLICY
     verdict = assess_code(code)
@@ -1693,48 +1694,64 @@ def run_python(code: str, *, cwd: Path | None = None,
         return SandboxResult(ok=False, stdout="", stderr=reason, returncode=None,
                              blocked=True, verdict=verdict)
     root = _sandbox_dir()
-    work = cwd if (cwd and cwd.is_dir()) else root
-    script = root / f"run_{uuid.uuid4().hex[:12]}.py"
+    # Нова папка за всяко пускане: тя е sys.path[0] на скрипта и на пазача, а
+    # `runpy.py`, оставен там от предишен скрипт, тръгваше преди hook-а (одит).
+    run_dir = root / f"run_{uuid.uuid4().hex[:12]}"
+    run_dir.mkdir(parents=True)
+    work = cwd if (cwd and cwd.is_dir()) else run_dir
+    script = run_dir / "main.py"
     script.write_text(code, encoding="utf-8")
     argv = [sys.executable, str(script)]
     # Пазачът (py_guard): отказва тайните и по сглобен път, който assess_code
-    # не вижда. Само ако операторът изрично е одобрил достъп до тайна, кодът
-    # тече без него (2026-10-09).
-    approved = verdict.level == RiskLevel.CONFIRM and bool(re.search(_SECRET_PATHS, code, re.IGNORECASE))
+    # не вижда. Без него — само ако операторът в интерактивен режим е видял и
+    # одобрил точно „достъп до чувствителни файлове“ (не коментар с „.env“ до
+    # друга одобрена операция, не режим allow — одит 2026-10-09).
+    mode = policy.resolve_mode()
+    approved = mode == "interactive" and _SECRET_REASON in verdict.reasons
     if not approved:
-        guard = _guard_script(root)
+        guard = _guard_script(run_dir)
         if guard is not None:
             argv = [sys.executable, str(guard), str(script)]
-            env_extra = {**(env_extra or {}), **_guard_env(root)}
+            procs = any(r in verdict.reasons for r in _PROC_REASONS)
+            env_extra = {**(env_extra or {}),
+                         **_guard_env([run_dir, work, *(allow or [])], procs)}
     try:
         res = _run(argv, cwd=work, policy=policy,
                    timeout=timeout or policy.cpu_seconds, env_extra=env_extra)
         res.verdict = verdict
         return res
     finally:
-        try:
-            script.unlink(missing_ok=True)
-        except OSError:
-            pass
+        import shutil
+        shutil.rmtree(run_dir, ignore_errors=True)
 
 
-def _guard_script(root: Path) -> Path | None:
-    """py_guard.py до скриптовете: пуснат от genesis_agent/, папката му щеше
-    да е първа в sys.path и config.py/memory.py там засенчваха модули."""
+_SECRET_REASON = "достъп до чувствителни файлове (ключове/тайни)"
+_PROC_REASONS = ("стартиране на подпроцес", "стартиране на процес", "os.system (shell изпълнение)")
+# За пазача `credentials` е име на файл (`credentials`, `credentials.json`), не
+# всеки път с думата — `tests/test_credentials.py` е код (одит 2026-10-09).
+_GUARD_RX = _SECRET_PATHS.replace(r"|credentials\b", r"|(?:^|/)credentials(?:\.\w+)?$")
+
+
+def _guard_script(run_dir: Path) -> Path | None:
+    """py_guard.py до скрипта, в новата папка на пускането: пуснат от
+    genesis_agent/, папката му щеше да е първа в sys.path и config.py/memory.py
+    там засенчваха модули."""
     try:
         src = (Path(__file__).resolve().parent / "py_guard.py").read_text(encoding="utf-8")
-        target = root / "_genesis_guard.py"
-        if not target.is_file() or target.read_text(encoding="utf-8") != src:
-            target.write_text(src, encoding="utf-8")
+        target = run_dir / "_genesis_guard.py"
+        target.write_text(src, encoding="utf-8")
         return target
     except OSError:
         return None
 
 
-def _guard_env(root: Path) -> dict[str, str]:
+def _guard_env(allow: list[Path], procs: bool) -> dict[str, str]:
     from genesis_agent.paths import GENESIS_HOME
-    return {"GENESIS_GUARD_RX": _SECRET_PATHS, "GENESIS_GUARD_BLOCK": str(GENESIS_HOME),
-            "GENESIS_GUARD_ALLOW": str(root)}
+    return {"GENESIS_GUARD_RX": _GUARD_RX,
+            "GENESIS_GUARD_EXEMPT": _SENSITIVE_PATH_EXEMPT_RE.pattern,
+            "GENESIS_GUARD_BLOCK": str(GENESIS_HOME),
+            "GENESIS_GUARD_ALLOW": os.pathsep.join(str(p) for p in allow),
+            "GENESIS_GUARD_PROCS": "1" if procs else "0"}
 
 
 def _sandbox_dir() -> Path:
