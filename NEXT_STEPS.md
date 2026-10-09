@@ -45,7 +45,8 @@ RUN_BG за сървъри вместо RUN_CMD, и дали `/init` пише п
 истински MCP сървър (напр. `@modelcontextprotocol/server-filesystem`) и дали моделът
 вика EXPLORE сам. После: `genesis -p` (един ход без чат, за скриптове/CI; рисковото —
 отказано без `--dangerously-allow`), WEB_FETCH (страница като текст, без вътрешни
-адреси), паралелни четения в един рунд. Не е направено: MCP по HTTP, чекпойнти и за RUN_CMD.
+адреси), паралелни четения в един рунд. MCP по HTTP (Streamable HTTP: JSON и SSE, сесия, `${VAR}` в headers). Не е направено:
+OAuth вход за MCP (само токен в headers), чекпойнти и за RUN_CMD.
 
 ## Решения на оператора
 

@@ -224,16 +224,8 @@ class Server:
 
     def _answer_server_request(self, msg: dict) -> None:
         """Сървърът пита клиента (ping, roots/list…): отговаряме, за да не чака."""
-        if msg.get("method") == "ping":
-            reply: dict = {"jsonrpc": "2.0", "id": msg["id"], "result": {}}
-        elif msg.get("method") == "roots/list":
-            reply = {"jsonrpc": "2.0", "id": msg["id"], "result": {"roots": [
-                {"uri": _workspace().resolve().as_uri(), "name": _workspace().name}]}}
-        else:
-            reply = {"jsonrpc": "2.0", "id": msg["id"],
-                     "error": {"code": -32601, "message": "not supported by Genesis"}}
         try:
-            self._send(reply)
+            self._send(_reply_for(msg))
         except MCPError:
             pass
 
@@ -332,6 +324,156 @@ class Server:
                 pass
 
 
+def _reply_for(msg: dict) -> dict:
+    if msg.get("method") == "ping":
+        return {"jsonrpc": "2.0", "id": msg["id"], "result": {}}
+    if msg.get("method") == "roots/list":
+        return {"jsonrpc": "2.0", "id": msg["id"], "result": {"roots": [
+            {"uri": _workspace().resolve().as_uri(), "name": _workspace().name}]}}
+    return {"jsonrpc": "2.0", "id": msg["id"],
+            "error": {"code": -32601, "message": "not supported by Genesis"}}
+
+
+_VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+
+def _expand(text: str) -> str:
+    """`${GITHUB_TOKEN}` / `${PORT:-8080}` от средата — както .mcp.json на Claude Code."""
+    return _VAR.sub(lambda m: os.environ.get(m.group(1), m.group(2) or ""), text)
+
+
+@dataclass
+class HttpServer(Server):
+    """MCP по HTTP (Streamable HTTP, 2025-06-18): всяко съобщение е POST към
+    един адрес; отговорът е JSON или SSE поток, в който може да има и въпроси
+    от сървъра (ping) преди самия отговор. Сесията идва в `Mcp-Session-Id` от
+    initialize и се праща при всяка следваща заявка. Хостнатите сървъри
+    (GitHub и др.) са такива — stdio е само за локални програми."""
+    url: str = ""
+    headers: dict[str, str] = field(default_factory=dict)
+    session_id: str = ""
+    _ready: bool = False
+
+    def alive(self) -> bool:
+        return self._ready and not self.error
+
+    def start(self, forbidden: list[Path] | None = None) -> None:
+        deadline = time.monotonic() + _START_TIMEOUT
+        self.request("initialize", {
+            "protocolVersion": PROTOCOL_VERSION, "capabilities": {},
+            "clientInfo": {"name": "genesis", "version": _version()}}, deadline=deadline)
+        self._ready = True
+        self.notify("notifications/initialized")
+        self.tools = self._list_tools(deadline)
+
+    def _headers(self) -> dict[str, str]:
+        h = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+             **{k: _expand(v) for k, v in self.headers.items()}}
+        if self.session_id:
+            h["Mcp-Session-Id"] = self.session_id
+        if self._ready:
+            h["MCP-Protocol-Version"] = PROTOCOL_VERSION
+        return h
+
+    def _post(self, msg: dict, deadline: float):
+        import requests
+        left = max(0.5, deadline - time.monotonic())
+        try:
+            resp = requests.post(_expand(self.url), data=json.dumps(msg, ensure_ascii=True),
+                                 headers=self._headers(), timeout=(min(10.0, left), left),
+                                 stream=True)
+        except requests.RequestException as e:
+            raise MCPError(f"не се свърза: {e}") from e
+        sid = resp.headers.get("Mcp-Session-Id") or resp.headers.get("mcp-session-id")
+        if sid:
+            self.session_id = sid
+        if resp.status_code == 404 and self.session_id and msg.get("method") != "initialize":
+            resp.close()
+            self.error = "сесията изтече — /mcp restart"
+            raise MCPError(self.error)
+        if resp.status_code in (401, 403):
+            resp.close()
+            raise MCPError(f"HTTP {resp.status_code} — провери headers (токена) в mcp.json")
+        if resp.status_code >= 400:
+            body = resp.text[:300]
+            resp.close()
+            raise MCPError(f"HTTP {resp.status_code}: {body}")
+        return resp
+
+    def notify(self, method: str, params: dict | None = None) -> None:
+        msg = {"jsonrpc": "2.0", "method": method, **({"params": params} if params else {})}
+        self._post(msg, time.monotonic() + 15).close()
+
+    def _messages(self, resp, deadline: float):
+        """JSON-RPC съобщенията от отговора: един JSON (или списък), или SSE поток."""
+        ctype = resp.headers.get("content-type", "")
+        if "text/event-stream" not in ctype:
+            try:
+                data = json.loads(resp.content.decode("utf-8", errors="replace") or "null")
+            except ValueError:
+                return
+            for item in data if isinstance(data, list) else [data]:
+                if isinstance(item, dict):
+                    yield item
+            return
+        buf: list[str] = []
+        for raw in resp.iter_lines(decode_unicode=False):
+            if time.monotonic() > deadline:
+                raise MCPError("няма отговор навреме")
+            line = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+            if line.startswith("data:"):
+                buf.append(line[5:].lstrip())
+            elif not line.strip() and buf:
+                try:
+                    item = json.loads("\n".join(buf))
+                except ValueError:
+                    item = None
+                buf = []
+                if isinstance(item, dict):
+                    yield item
+
+    def request(self, method: str, params: dict | None = None,
+                timeout: float | None = None, deadline: float | None = None) -> dict:
+        if deadline is None:
+            deadline = time.monotonic() + (_CALL_TIMEOUT if timeout is None else timeout)
+        if not self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            raise MCPError(f"сървърът е зает с друго извикване ({method})")
+        try:
+            rid = next(self._ids)
+            resp = self._post({"jsonrpc": "2.0", "id": rid, "method": method,
+                               "params": params or {}}, deadline)
+            try:
+                for msg in self._messages(resp, deadline):
+                    if "method" in msg and "id" in msg:   # въпрос от сървъра посред отговора
+                        try:
+                            self._post(_reply_for(msg), deadline).close()
+                        except MCPError:
+                            pass
+                        continue
+                    if msg.get("id") != rid:
+                        continue
+                    if "error" in msg:
+                        err = msg["error"]
+                        text = err.get("message") if isinstance(err, dict) else None
+                        raise MCPError(str(text or err)[:500])
+                    result = msg.get("result")
+                    return result if isinstance(result, dict) else {}
+            finally:
+                resp.close()
+            raise MCPError(f"сървърът не върна отговор ({method})")
+        finally:
+            self._lock.release()
+
+    def stop(self) -> None:
+        if self._ready and self.session_id:
+            try:
+                import requests
+                requests.delete(_expand(self.url), headers=self._headers(), timeout=3)
+            except Exception:
+                pass
+        self._ready = False
+
+
 # ── registry ──────────────────────────────────────────────────────────────
 
 _servers: dict[str, Server] = {}
@@ -387,9 +529,31 @@ def _parse(path: Path) -> list[Server]:
         def bad(why: str, name: str = str(name)) -> Server:
             return Server(name=name, command="", args=[], env={}, auto_approve=set(),
                           source=path, error=why)
+        kind = str(spec.get("type") or ("http" if spec.get("url") and not spec.get("command")
+                                        else "stdio")).lower()
+        if kind == "sse":
+            out.append(bad("SSE е старият транспорт — сървърът почти сигурно дава и "
+                           "\"type\": \"http\" на същия адрес (обикновено …/mcp)"))
+            continue
+        if kind in ("http", "streamable-http", "streamable_http"):
+            url, headers = spec.get("url"), spec.get("headers", {})
+            if not isinstance(url, str) or not url.strip().startswith(("http://", "https://")):
+                out.append(bad("url трябва да е http(s) адрес"))
+                continue
+            if not isinstance(headers, dict):
+                out.append(bad("headers трябва да е обект"))
+                continue
+            approve = spec.get("autoApprove", spec.get("alwaysAllow", []))
+            if not isinstance(approve, list):
+                out.append(bad("autoApprove трябва да е списък с имена на инструменти"))
+                continue
+            out.append(HttpServer(str(name), "", [], {}, {str(x) for x in approve}, path,
+                                  url=url.strip(),
+                                  headers={str(k): str(v) for k, v in headers.items()}))
+            continue
         command = spec.get("command")
         if not isinstance(command, str) or not command.strip():
-            out.append(bad("няма command (само stdio сървъри се поддържат)"))
+            out.append(bad("няма command (stdio) или url (\"type\": \"http\")"))
             continue
         args = spec.get("args", [])
         if isinstance(args, str):
