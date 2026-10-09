@@ -145,6 +145,8 @@ def pairing_url(host: str, port: int, key: bytes, name: str, *, web: bool = Fals
     `web=True` (`genesis serve --web`) — старият `http://…/#k=…` за уеб
     версията на iPhone без приложение: само по изричен избор и с предупреждение."""
     from urllib.parse import quote
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"   # IPv6 — без скоби приложението не четеше кода (одит 2026-10-09)
     if web:
         return f"http://{host}:{port}/#k={_b64e(key)}&n={quote(name)}"
     base = quote(f"http://{host}:{port}", safe="")
@@ -748,6 +750,16 @@ _LANDING = """<!doctype html><html lang="bg"><meta charset="utf-8">
 
 # ── `genesis serve` ─────────────────────────────────────────────────────────
 
+# Какво приложението приема за адрес (BASE в mobile/src/lib/protocol.ts).
+_HOST = re.compile(r"^(?:[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*|\[?[0-9A-Fa-f:.]+\]?)$")
+
+
+def valid_host(host: str) -> bool:
+    """Адрес, който телефонът ще прочете от кода. `PC_1.local` или `user@pc`
+    правеха код, който приложението тихо отхвърляше (одит 2026-10-09)."""
+    return bool(_HOST.match(host))
+
+
 def _print_qr(console: Any, url: str) -> None:
     try:
         import qrcode  # type: ignore[import-untyped]
@@ -814,6 +826,16 @@ def serve(args: list[str]) -> int:
             print(f"Непозната опция: {a}\n\n{SERVE_USAGE}")
             return 2
         i += 1
+    if host_override and not valid_host(host_override):
+        print(f"--host {host_override!r}: телефонът не може да го прочете — IP адрес или име "
+              "от латиница, цифри, точки и тирета.")
+        return 2
+    if web and _web_root() is None:
+        # Уеб версията е само в Windows приложението; другаде кодът водеше до
+        # страница „не е включена“ (одит 2026-10-09).
+        print("--web: уеб версията не е в тази инсталация (идва с Windows приложението). "
+              "Пусни без --web и сдвои с приложението Genesis Remote.")
+        return 2
 
     key = load_or_create_key(reset=reset)
     from rich.panel import Panel
@@ -897,7 +919,9 @@ def serve(args: list[str]) -> int:
     hosts = [host_override] if host_override else (lan_addresses() or ["127.0.0.1"])
     url = pairing_url(hosts[0], port, key, name, web=web)
     console.print(Panel(Text.assemble(
-        ("Сканирай с телефона (приложението Genesis Remote или камерата — отваря приложението):\n", "bold"),
+        (("Отвори кода с камерата на телефона — отваря уеб версията в браузъра:\n" if web else
+          "Сканирай с телефона (приложението Genesis Remote или камерата — отваря приложението):\n"),
+         "bold"),
         ("Работна папка: ", "dim"), (str(gta.WORKSPACE), ""),
         ("\nАдрес: ", "dim"), (f"http://{hosts[0]}:{port}", "cyan"),
         (("\nКлючът е само в QR кода. Нов ключ (отнема достъпа на всички телефони): "

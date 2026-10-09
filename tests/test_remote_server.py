@@ -418,3 +418,34 @@ def test_a_broken_seen_file_does_not_stop_the_server(tmp_path) -> None:
     path = tmp_path / "remote_seen.json"
     path.write_text("{not json", encoding="utf-8")
     rs.ReplayGuard(path=path).check(_request("status"))
+
+
+# ── одит на QR сдвояването (2026-10-09) ──────────────────────────────────────
+
+def test_an_ipv6_host_gets_brackets_in_the_code() -> None:
+    url = rs.pairing_url("fd7a:115c:a1e0::1", 8765, KEY, "pc")
+    assert "u=http%3A%2F%2F%5Bfd7a%3A115c%3Aa1e0%3A%3A1%5D%3A8765" in url
+
+
+@pytest.fixture
+def no_listen(monkeypatch):
+    """serve() никога не слуша и не пипа глобалния sandbox — ако проверката
+    липсва, тестът пада (код 1), вместо да виси на serve_forever."""
+    from genesis_agent import sandbox
+
+    def refuse(self, host, port):
+        raise OSError("тест: без слушане")
+    monkeypatch.setattr(rs.RemoteServer, "make_http", refuse)
+    monkeypatch.setattr(sandbox, "set_policy", lambda policy: None)
+
+
+@pytest.mark.parametrize("host", ["PC_1.local", "user@pc", "pc/x", "pc local"])
+def test_serve_refuses_a_host_the_phone_cannot_read(host, capsys, no_listen) -> None:
+    assert rs.serve(["--host", host]) == 2
+    assert "--host" in capsys.readouterr().out
+
+
+def test_serve_web_without_the_web_build_says_so(monkeypatch, capsys, no_listen) -> None:
+    monkeypatch.setattr(rs, "_web_root", lambda: None)
+    assert rs.serve(["--web"]) == 2
+    assert "--web" in capsys.readouterr().out

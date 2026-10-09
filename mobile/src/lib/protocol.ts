@@ -136,7 +136,20 @@ export function parsePairingUrl(raw: string): Pairing | null {
     return null;
   }
   if (key.length !== 32) return null;
-  return { base, key: params.k, name: params.n || base };
+  return { base, key: params.k, name: cleanName(params.n) || base };
+}
+
+/** The computer's name as shown: no control or bidi characters, one line, at
+ *  most 40 characters — a link could otherwise push the real address off the
+ *  "Сдвои?" card with newlines or reverse it with U+202E (audit 2026-10-09). */
+export function cleanName(raw: string | undefined): string {
+  // Explicit ranges, not \p{…}: control, soft hyphen, bidi marks/overrides/
+  // isolates, zero-width, line/paragraph separators, BOM.
+  const flat = (raw ?? '')
+    .replace(/[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return [...flat].slice(0, 40).join('');
 }
 
 function readParams(fragment: string): Record<string, string> | null {
@@ -158,21 +171,23 @@ function readParams(fragment: string): Record<string, string> | null {
 // genesisremote://pair#… waits here for the pair screen — not in the route, so
 // the key never enters the router's path or history.
 
-type Listener = (p: Pairing) => void;
+type Listener = () => void;
 
-let pending: Pairing | null = null;
+// 'invalid': a genesisremote://pair link that is not a valid code — the pair
+// screen says so instead of opening silently (audit 2026-10-09).
+let pending: Pairing | 'invalid' | null = null;
 const listeners = new Set<Listener>();
 
-/** A link from the system: a pairing → kept for the pair screen, true. */
+/** A link from the system: a pairing link (valid or not) → kept for the pair
+ *  screen, true. Any other link → false. */
 export function offerLink(url: string): boolean {
-  const pairing = /^genesisremote:/i.test(url.trim()) ? parsePairingUrl(url) : null;
-  if (!pairing) return false;
-  pending = pairing;
-  for (const l of listeners) l(pairing);
+  if (!/^genesisremote:\/\/pair\b/i.test(url.trim())) return false;
+  pending = parsePairingUrl(url) ?? 'invalid';
+  for (const l of listeners) l();
   return true;
 }
 
-export function takeLink(): Pairing | null {
+export function takeLink(): Pairing | 'invalid' | null {
   const p = pending;
   pending = null;
   return p;

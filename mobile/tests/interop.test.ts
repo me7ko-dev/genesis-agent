@@ -8,9 +8,11 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
+import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { createInterface } from 'node:readline';
 import {
-  GenesisClient, ProtocolError, b64urlDecode, b64urlEncode, onLink, parsePairingUrl, redirectFor, takeLink,
+  GenesisClient, ProtocolError, b64urlDecode, b64urlEncode, cleanName, onLink, parsePairingUrl, redirectFor, takeLink,
   utf8Decode, utf8Encode, type GenesisEvent,
 } from '../src/lib/protocol.ts';
 
@@ -78,22 +80,68 @@ test('the QR code is an app link; its address must be a plain base', () => {
 
 test('a pairing link reaches the pair screen without the key in the route', () => {
   const k = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
-  const seen: string[] = [];
-  const off = onLink((p) => seen.push(p.base));
+  let calls = 0;
+  const off = onLink(() => {
+    calls += 1;
+  });
   try {
     assert.equal(redirectFor(`genesisremote://pair#u=http%3A%2F%2Fpc.local%3A8765&k=${k}&n=pc`), '/pair');
-    assert.deepEqual(seen, ['http://pc.local:8765']);
-    assert.equal(takeLink()?.key, k);
+    assert.equal(calls, 1);
+    const taken = takeLink();
+    assert.ok(taken && taken !== 'invalid');
+    assert.equal(taken.key, k);
+    assert.equal(taken.base, 'http://pc.local:8765');
     assert.equal(takeLink(), null, 'taken once');
-    // Other links and broken pairing links go on unchanged and leave nothing behind.
+    // Other links go on unchanged and leave nothing behind (a broken pairing
+    // link: see the audit test below).
     assert.equal(redirectFor('genesisremote://chat'), 'genesisremote://chat');
-    assert.equal(redirectFor(`genesisremote://pair#u=http%3A%2F%2Fpc&k=short`), `genesisremote://pair#u=http%3A%2F%2Fpc&k=short`);
     // A plain http link is not taken from the system — only the app's own scheme.
     assert.equal(redirectFor(`http://pc:1/#k=${k}`), `http://pc:1/#k=${k}`);
     assert.equal(takeLink(), null);
   } finally {
     off();
   }
+});
+
+// ── audit 2026-10-09 ────────────────────────────────────────────────────────
+
+test('the name on the "Сдвои?" card cannot hide or reverse the address', () => {
+  assert.equal(cleanName('моят компютър\n\n\n\n на http://192.168.1.5'), 'моят компютър на http://192.168.1.5');
+  assert.equal(cleanName('a‮b​c d'), 'a b c d');
+  assert.equal([...cleanName('я'.repeat(500))].length, 40);
+  const k = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
+  const p = parsePairingUrl(`genesisremote://pair#u=http%3A%2F%2Fpc%3A1&k=${k}&n=${encodeURIComponent('x\n\n\ny')}`);
+  assert.equal(p?.name, 'x y');
+});
+
+test('a broken pairing link still opens the pair screen, which says so', () => {
+  assert.equal(redirectFor('genesisremote://pair#u=http%3A%2F%2FPC_1.local%3A1&k=short'), '/pair');
+  assert.equal(takeLink(), 'invalid');
+  assert.equal(takeLink(), null);
+});
+
+test('an IPv6 address from `genesis serve --host` is readable', () => {
+  const k = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
+  const p = parsePairingUrl(`genesisremote://pair#u=http%3A%2F%2F%5Bfd7a%3A%3A1%5D%3A8765&k=${k}`);
+  assert.equal(p?.base, 'http://[fd7a::1]:8765');
+});
+
+test('leaving the pair screen pops back to the one chat, never stacks a second', () => {
+  // The same router expo-router 57 runs: a link pushes /pair over /chat; the
+  // old router.replace('/chat') left [chat, chat] with two live poll loops.
+  const require = createRequire(import.meta.url);
+  const { StackRouter } = require('expo-router/build/react-navigation/routers/StackRouter.js');
+  const r = StackRouter({});
+  const o = { routeNames: ['index', 'chat', 'pair'], routeParamList: {}, routeGetIdList: {} };
+  let s = r.getStateForAction(r.getInitialState(o), { type: 'REPLACE', payload: { name: 'chat' } }, o);
+  s = r.getStateForAction(s, { type: 'NAVIGATE', payload: { name: 'pair' } }, o);
+  const names = (st: { routes: { name: string }[] }) => st.routes.map((x) => x.name);
+  assert.deepEqual(names(r.getStateForAction(s, { type: 'REPLACE', payload: { name: 'chat' } }, o)), ['chat', 'chat']);
+  assert.deepEqual(names(r.getStateForAction(s, { type: 'POP_TO', payload: { name: 'chat' } }, o)), ['chat']);
+  // …and the pair screen uses dismissTo (POP_TO), not replace.
+  const src = readFileSync(new URL('../src/app/pair.tsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(src, /router\.replace\('\/chat'\)/);
+  assert.match(src, /router\.dismissTo\('\/chat'\)/);
 });
 
 test('a whole conversation with the real server', async () => {

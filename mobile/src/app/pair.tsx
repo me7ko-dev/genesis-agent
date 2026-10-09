@@ -26,8 +26,13 @@ export default function Pair() {
   const [offered, setOffered] = useState<Pairing | null>(null);
 
   useEffect(() => {
-    setOffered(takeLink());
-    return onLink(() => setOffered(takeLink()));
+    const accept = () => {
+      const link = takeLink();
+      if (link === 'invalid') setError('Това не е код от „genesis serve".');
+      else if (link) setOffered(link);
+    };
+    accept();
+    return onLink(accept);
   }, []);
 
   const tryPair = useCallback(async (raw: string | Pairing) => {
@@ -49,7 +54,9 @@ export default function Pair() {
       await pair({ ...pairing, name: status.name || pairing.name });
       setOffered(null);
       if (Platform.OS === 'web') window.history.replaceState(null, '', '/');
-      router.replace('/chat');
+      // dismissTo, не replace: отворен от връзка, /pair е върху чата, и replace
+      // оставяше втори жив чат отдолу (одит 2026-10-09).
+      router.dismissTo('/chat');
     } catch (e) {
       const kind = e instanceof ProtocolError ? e.kind : 'network';
       setError(
@@ -72,6 +79,18 @@ export default function Pair() {
   }, [tryPair]);
 
   const cameraOk = Platform.OS !== 'web' && permission?.granted;
+  // Вече сдвоен телефон, стигнал дотук по връзка: камерата е включена и
+  // всеки код в кадър би подменил сдвояването. Затова и сканираното минава
+  // през „Сдвои?“, щом има текущо сдвояване (одит 2026-10-09).
+  const scanned = (data: string) => {
+    if (!current) {
+      tryPair(data);
+      return;
+    }
+    const p = parsePairingUrl(data);
+    if (p) setOffered(p);
+    else setError('Това не е код от „genesis serve".');
+  };
 
   return (
     <SafeAreaView style={[styles.flex, { backgroundColor: theme.bg }]}>
@@ -85,13 +104,19 @@ export default function Pair() {
           {offered ? (
             <View style={[styles.step, { backgroundColor: theme.surface, borderColor: theme.accent }]}>
               <Text style={[styles.stepTitle, { color: theme.text }]}>Сдвояване от връзка</Text>
+              <Text selectable style={[mono, { color: theme.text, fontSize: 15 }]}>{offered.base}</Text>
               <Text style={{ color: theme.text }}>
-                Компютър „{offered.name}“ на {offered.base}. Сдвои само ако току-що си сканирал кода от своя `genesis serve`.
+                „{offered.name}“. Сдвои само ако току-що си сканирал кода от своя `genesis serve`.
               </Text>
+              {current && (current.base !== offered.base || current.key !== offered.key) ? (
+                <Text style={{ color: theme.warn }}>
+                  Ще замени сдвояването с „{current.name}“ ({current.base}).
+                </Text>
+              ) : null}
               <View style={styles.row}>
                 <Pressable accessibilityRole="button" onPress={() => {
                   setOffered(null);
-                  if (current) router.replace('/chat');   // already paired: back to it
+                  if (current) router.dismissTo('/chat');   // already paired: back to it
                 }}
                   style={[styles.secondary, { borderColor: theme.border }]}>
                   <Text style={[styles.primaryText, { color: theme.text }]}>Не</Text>
@@ -119,7 +144,7 @@ export default function Pair() {
                   style={StyleSheet.absoluteFill}
                   facing="back"
                   barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
-                  onBarcodeScanned={checking ? undefined : ({ data }) => tryPair(data)}
+                  onBarcodeScanned={checking || offered ? undefined : ({ data }) => scanned(data)}
                 />
               </View>
             ) : (
