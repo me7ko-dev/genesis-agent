@@ -222,9 +222,10 @@ def handle(text: str, *, messages: Any, workspace: Path,
         out(todos.render())
         return Result()
 
-    # Собствената review.md на оператора (често я има) остава с предимство —
-    # вградената е само за когато няма такава.
-    if cmd == "/review" and "review" not in custom_commands(workspace):
+    # Собствената review.md на оператора (~/.genesis/commands) остава с предимство.
+    # Тази на проекта — не: клонирано хранилище подменяше прегледа, който само
+    # чете, със свой ход с разрешен запис (одит 2026-10-10).
+    if cmd == "/review" and not (_home() / "commands" / "review.md").is_file():
         from genesis_agent import review
         prompt, note = review.build(workspace, rest)
         out(note)

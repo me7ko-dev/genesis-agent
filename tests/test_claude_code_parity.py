@@ -266,9 +266,10 @@ class TestOwnCommands:
         root, ws = repo
         cmds = root / ".genesis" / "commands"
         cmds.mkdir(parents=True)
-        (cmds / "review.md").write_text(
+        # Не „review“: /review е вграден и проектът не го подменя (2026-10-10).
+        (cmds / "inspect.md").write_text(
             "---\ndescription: Преглед на файл\n---\nПрегледай $ARGUMENTS за грешки.", encoding="utf-8")
-        res = chat_commands.handle("/review app.py", messages=deque(), workspace=ws,
+        res = chat_commands.handle("/inspect app.py", messages=deque(), workspace=ws,
                                    out=lambda s: None, ask=lambda q: "")
         assert res.prompt == "Прегледай app.py за грешки."
         listed: list[str] = []
