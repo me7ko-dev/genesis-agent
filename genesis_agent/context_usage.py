@@ -16,9 +16,12 @@ import re
 from typing import Any
 
 _CHARS_PER_TOKEN = 4
-# Разделите на Genesis са с главни букви („## СРЕДАТА …“); заглавията вътре в
-# CLAUDE.md/GENESIS.md („## What this is“) остават в раздела на инструкциите.
-_SECTION = re.compile(r"^## (.+)$", re.MULTILINE)
+# Разделите, които build_system_prompt слага — точен списък. Одит 2026-10-10:
+# по „главни букви“ „## Под-агенти“ и „## MCP инструменти“ се сливаха с горния
+# раздел, а „## ПРАВИЛА“ от GENESIS.md на оператора се броеше за раздел на Genesis.
+_SECTIONS = ("СРЕДАТА", "ИНСТРУКЦИИ ЗА ПРОЕКТА", "Под-агенти", "MCP инструменти",
+             "СЪСТОЯНИЕ НА РАБОТАТА", "Скорошна активност", "ЗНАНИЕВ ГРАФ")
+_SECTION = re.compile(r"^## (" + "|".join(map(re.escape, _SECTIONS)) + r")\b.*$", re.MULTILINE)
 
 
 def _chars(value: Any) -> int:
@@ -41,8 +44,7 @@ def _title(heading: str) -> str:
 
 def system_sections(prompt: str) -> list[tuple[str, int]]:
     """(име, знаци) за всеки раздел на системния промпт, в реда им."""
-    starts = [m for m in _SECTION.finditer(prompt)
-              if (t := _title(m.group(1))) == t.upper() and re.search(r"[A-ZА-Я]", t)]
+    starts = list(_SECTION.finditer(prompt))
     parts: list[tuple[str, int]] = []
     first = starts[0].start() if starts else len(prompt)
     if first:
@@ -72,12 +74,15 @@ def _text(content: Any) -> int:
 def report(messages: Any, tools: list | None = None, window: int = 0,
            last_tokens: int = 0) -> str:
     msgs = [m for m in list(messages or []) if isinstance(m, dict)]
-    system = "".join(str(m.get("content") or "") for m in msgs if m.get("role") == "system")
-    rest = [m for m in msgs if m.get("role") != "system"]
+    # Промптът е само първото съобщение. По-късните „system“ са от хода:
+    # изходи на инструменти в текстов режим („[Резултат]:“), бележките на цикъла
+    # и резюмето от /compact — броени бяха като инструкции за проекта (одит 2026-10-10).
+    system = str(msgs[0].get("content") or "") if msgs and msgs[0].get("role") == "system" else ""
+    rest = msgs[1:] if msgs and msgs[0].get("role") == "system" else msgs
 
     names: dict[str, str] = {}
-    user = assistant = results = 0
-    n_user = n_assistant = n_results = 0
+    user = assistant = results = notes = 0
+    n_user = n_assistant = n_results = n_notes = 0
     biggest = ("", 0)
     for m in rest:
         role = m.get("role")
@@ -88,12 +93,16 @@ def report(messages: Any, tools: list | None = None, window: int = 0,
                 if isinstance(call, dict):
                     fn = call.get("function") or {}
                     names[str(call.get("id"))] = str(fn.get("name") or "?")
-        elif role == "tool":
+        elif role == "tool" or (role == "system" and str(m.get("content") or "").startswith("[Резултат")):
             n_results += 1
             size = _text(m.get("content"))
             results += size
             if size > biggest[1]:
-                biggest = (m.get("name") or names.get(str(m.get("tool_call_id")), "?"), size)
+                biggest = (m.get("name") or names.get(str(m.get("tool_call_id")))
+                           or ("[Резултат]" if role == "system" else "?"), size)
+        elif role == "system":
+            n_notes += 1
+            notes += _text(m.get("content"))
         else:
             n_user += 1
             user += _text(m.get("content"))
@@ -103,7 +112,7 @@ def report(messages: Any, tools: list | None = None, window: int = 0,
     mcp = [t for t in tools if _tool_name(t).startswith("mcp__")]
     agent = [t for t in tools if _tool_name(t) == "AGENT"]
     tool_chars = _chars(tools) if tools else 0
-    talk = user + assistant + results
+    talk = user + assistant + results + notes
     total = len(system) + tool_chars + talk
 
     lines = []
@@ -134,9 +143,12 @@ def report(messages: Any, tools: list | None = None, window: int = 0,
     if n_results:
         lines.append(f"    изходи на инструменти {n_results} {_k(results)}"
                      f" (най-голям: {biggest[0]} {_k(biggest[1])})")
+    if n_notes:
+        lines.append(f"    резюме и бележки {n_notes} {_k(notes)}")
     if window:
         free = max(0, window - total // _CHARS_PER_TOKEN)
         lines.append(f"  Свободно          {f'~{free / 1000:.1f}K':>7}")
-        if total // _CHARS_PER_TOKEN * 100 >= window * 60 and talk:
+        # /compact свива само разговора — при огромен CLAUDE.md не помага.
+        if total // _CHARS_PER_TOKEN * 100 >= window * 60 and talk * 4 >= total:
             lines.append("Над 60% — /compact свива разговора до резюме.")
     return "\n".join(lines)

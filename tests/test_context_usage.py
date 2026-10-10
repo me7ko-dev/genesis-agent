@@ -16,15 +16,44 @@ def _tool(name: str, desc: str = "x") -> dict:
 SYSTEM = ("Ти си Genesis.\n" + "правило\n" * 50
           + "## СРЕДАТА (реални пътища — НЕ ги отгатвай)\nработна папка: /w\n"
           + "## ИНСТРУКЦИИ ЗА ПРОЕКТА (от оператора)\n### CLAUDE.md\n# Проект\n"
-          + "## What this is\nтерминален агент\n## Checks\nruff\n")
+          + "## What this is\nтерминален агент\n## ПРАВИЛА\nruff\n## API\nREST\n"
+          + "## Под-агенти (от .genesis/agents/)\n- reviewer\n")
 
 
 def test_system_prompt_is_split_by_genesis_sections_only() -> None:
     parts = dict(context_usage.system_sections(SYSTEM))
-    assert list(parts) == ["основни правила", "СРЕДАТА", "ИНСТРУКЦИИ ЗА ПРОЕКТА"]
-    # Заглавията на CLAUDE.md остават в инструкциите — не са раздели на Genesis.
-    assert parts["ИНСТРУКЦИИ ЗА ПРОЕКТА"] == len(SYSTEM) - SYSTEM.index("## ИНСТРУКЦИИ")
+    # Одит 2026-10-10: по „главни букви“ „## ПРАВИЛА“ и „## API“ от CLAUDE.md
+    # ставаха раздели, а „## Под-агенти“ потъваше в инструкциите.
+    assert list(parts) == ["основни правила", "СРЕДАТА", "ИНСТРУКЦИИ ЗА ПРОЕКТА", "Под-агенти"]
+    assert parts["ИНСТРУКЦИИ ЗА ПРОЕКТА"] == SYSTEM.index("## Под-агенти") - SYSTEM.index("## ИНСТРУКЦИИ")
     assert sum(parts.values()) == len(SYSTEM)
+
+
+def test_the_real_prompt_shows_its_sections(tmp_path, monkeypatch) -> None:
+    import genesis_terminal_agent as gta
+    (tmp_path / ".genesis" / "agents").mkdir(parents=True)
+    (tmp_path / ".genesis" / "agents" / "reviewer.md").write_text(
+        "---\nname: reviewer\ndescription: преглед\n---\nПрегледай.", encoding="utf-8")
+    (tmp_path / "GENESIS.md").write_text("# Проект\n## ПРАВИЛА\nтестове първо\n", encoding="utf-8")
+    monkeypatch.setattr(gta, "WORKSPACE", str(tmp_path))
+    prompt, _ = gta.build_system_prompt()
+    names = [n for n, _ in context_usage.system_sections(prompt)]
+    assert {"СРЕДАТА", "ИНСТРУКЦИИ ЗА ПРОЕКТА", "Под-агенти"} <= set(names)
+    assert "ПРАВИЛА" not in names
+
+
+def test_later_system_messages_are_conversation_not_prompt() -> None:
+    # Текстов режим: изходите на инструментите са „system“ „[Резултат]:“, а
+    # резюмето от /compact — „system“ „## Резюме…“. Броени бяха в промпта.
+    msgs = [{"role": "system", "content": SYSTEM},
+            {"role": "system", "content": "## Резюме на по-ранния разговор:\n" + "р" * 4000},
+            {"role": "user", "content": "дай"},
+            {"role": "system", "content": "[Резултат]:\n" + "x" * 20000}]
+    text = context_usage.report(msgs, [], window=128000)
+    prompt_line = next(ln for ln in text.splitlines() if "Системен промпт" in ln)
+    assert prompt_line.split()[2] == f"~{len(SYSTEM) // 4}"
+    assert "изходи на инструменти 1 ~5.0K (най-голям: [Резултат]" in text
+    assert "резюме и бележки 1 ~1.0K" in text
 
 
 def test_report_names_the_biggest_tool_output_and_splits_the_tools() -> None:
@@ -53,6 +82,9 @@ def test_a_full_context_suggests_compact() -> None:
     text = context_usage.report(msgs, [], window=12000)
     assert "/compact" in text
     assert "(83%)" in text
+    # Пълно от огромен CLAUDE.md — /compact не би помогнал, не се съветва.
+    msgs = [{"role": "system", "content": "s" * 40000}, {"role": "user", "content": "я" * 100}]
+    assert "/compact" not in context_usage.report(msgs, [], window=12000)
 
 
 def test_the_chat_command_asks_the_caller_for_tools_and_window(tmp_path) -> None:
