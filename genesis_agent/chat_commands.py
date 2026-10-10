@@ -1,7 +1,7 @@
 """
 genesis_agent.chat_commands — the chat commands that steer the agent the way
 Claude Code's do: /init, /memory, /plan, /undo, /compact, /hooks, /commands,
-/bg, and the operator's own commands from .genesis/commands/*.md.
+/bg, /context, and the operator's own commands from .genesis/commands/*.md.
 
 Kept out of genesis_terminal_agent.main() (already a long if-chain) and free
 of rich/console: `out` prints, `ask` asks a yes/no question, so the same code
@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 BUILTIN = ("/init", "/memory", "/plan", "/undo", "/compact", "/hooks", "/commands", "/bg", "/mcp",
-           "/agents", "/todos")
+           "/agents", "/todos", "/context")
 _NAME = re.compile(r"^/([A-Za-z0-9][\w-]{0,40})(?:\s+(.*))?$", re.DOTALL)
 _YES = ("", "да", "д", "d", "da", "y", "yes")
 
@@ -103,8 +103,13 @@ def _split(text: str) -> tuple[str, str]:
 
 def handle(text: str, *, messages: Any, workspace: Path,
            out: Callable[[str], None], ask: Callable[[str], str],
-           compact: Callable[[Any], Any] | None = None) -> Result | None:
-    """None = not one of these commands (the caller goes on as before)."""
+           compact: Callable[[Any], Any] | None = None,
+           context: Callable[[], dict] | None = None) -> Result | None:
+    """None = not one of these commands (the caller goes on as before).
+
+    `context` gives /context what only the caller knows: {"tools": the schemas
+    of this turn, "window": the context window, "last": tokens of the last
+    request as the provider counted them}."""
     stripped = text.strip()
     if not stripped.startswith("/"):
         return None
@@ -215,6 +220,13 @@ def handle(text: str, *, messages: Any, workspace: Path,
     if cmd == "/todos":
         from genesis_agent import todos
         out(todos.render())
+        return Result()
+
+    if cmd == "/context":
+        from genesis_agent import context_usage
+        info = context() if context is not None else {}
+        out(context_usage.report(messages, info.get("tools"), int(info.get("window") or 0),
+                                 int(info.get("last") or 0)))
         return Result()
 
     m = _NAME.match(stripped)

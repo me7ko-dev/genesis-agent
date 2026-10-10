@@ -1352,6 +1352,11 @@ def _turn_tools():
     return [*tools, *extra] if extra else tools
 
 
+def context_info() -> dict:
+    """За /context: схемите на този ход, прозорецът и последната заявка."""
+    return {"tools": _turn_tools(), "window": DEFAULT_CONTEXT_WINDOW, "last": last_context_tokens}
+
+
 _STOP_HOOK_ROUNDS = 2
 
 # Само гледащи и независими един от друг: няколко такива в един рунд вървят
@@ -2149,6 +2154,7 @@ def main():
                 help_table.add_row("/plan [задача]", "Режим план: само чете и планира; /plan пак = изпълни")
                 help_table.add_row("/undo", "Върни файловете от последния ход, който ги промени")
                 help_table.add_row("/compact", "Компресирай историята сега")
+                help_table.add_row("/context", "С какво е пълен контекстът: промпт, инструменти, разговор")
                 help_table.add_row("/agents", "Собствените под-агенти (.genesis/agents/*.md)")
                 help_table.add_row("/todos", "Списъкът със задачи, който агентът води")
                 help_table.add_row("!команда", "Пусни команда сам (без модела); изходът отива при модела със следващото съобщение")
@@ -2267,7 +2273,7 @@ def main():
                 # Без Rich разметка: `[a;touch PWNED;:]` в hooks.json изчезваше от
                 # прегледа преди /hooks trust (одит 2026-10-08).
                 out=lambda text: console.print(text, markup=False, highlight=False),
-                ask=console.input, compact=_force_compact)
+                ask=console.input, compact=_force_compact, context=context_info)
             if _res is not None:
                 if _res.messages is not None:
                     messages = _res.messages

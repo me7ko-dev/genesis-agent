@@ -143,6 +143,12 @@ def _isolated_operator_settings(monkeypatch, tmp_path):
         history.mkdir(exist_ok=True)
         monkeypatch.setattr(gta, "HISTORY_DIR", history)
         monkeypatch.setattr(gta, "_SESSION_FILE", None)
+    # Глобалната политика на sandbox-а и куката преди изпълнение: `rs.serve`
+    # в тест оставяше „интерактивна, пита телефона“ и следващите тестове
+    # получаваха SANDBOX DECLINED (2026-10-09).
+    from genesis_agent import sandbox as _sandbox
+    monkeypatch.setattr(_sandbox, "_POLICY", _sandbox._POLICY)
+    monkeypatch.setattr(_sandbox, "before_exec", None)
     # Домашната папка на уменията е в системната временна папка (2026-10-09).
     from genesis_agent import skill_loader
     monkeypatch.setattr(skill_loader, "SKILL_HOME_ROOT", tmp_path / "skill_tmp")

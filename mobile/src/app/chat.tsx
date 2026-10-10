@@ -102,6 +102,7 @@ function Chat({ pairing }: { pairing: Pairing }) {
               <MenuItem label="Върни последните промени (/undo)" onPress={() => command('/undo')} />
               <MenuItem label="Задачи (/todos)" onPress={() => command('/todos')} />
               <MenuItem label="Под-агенти (/agents)" onPress={() => command('/agents')} />
+              <MenuItem label="Контекстът (/context)" onPress={() => command('/context')} />
               <MenuItem label="Команди (/help)" onPress={() => command('/help')} />
             </>
           )}

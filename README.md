@@ -181,6 +181,7 @@ The habits that make Claude Code pleasant to work with, in the Genesis chat:
 | `genesis -c` | Continues the last conversation in this folder (`/history` picks any older one). |
 | sub-agents | Your own specialists: `.genesis/agents/reviewer.md` (or `~/.genesis/agents/`, or Claude Code's `.claude/agents/` as is) with `description`, `tools` and a role. Genesis hands them a task with `AGENT`; each works in its own conversation with only its tools and returns the report. Their tools pass the same gate as the main agent's (plan mode, hooks, sandbox, `/undo`). `/agents` lists them. |
 | task list | For work with several steps Genesis writes its plan with `TODO_WRITE` and ticks it off as it goes, so you see where it is. `/todos` shows it. |
+| `/context` | What fills the context: the system prompt by section, the tool schemas (built-in, MCP, AGENT), the conversation and the biggest tool output, and how much is left. |
 | `EXPLORE` | A read-only sub-agent: "where is the price computed and who calls it?" is searched and read in its own conversation, and only the answer (with `path:line`) comes back — the main conversation stays small. |
 
 ```json
