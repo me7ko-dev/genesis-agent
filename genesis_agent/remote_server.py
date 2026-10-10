@@ -432,6 +432,7 @@ PHONE_HELP = """Команди от телефона:
 /todos — списъкът със задачи на агента
 /agents — под-агентите (.genesis/agents/*.md)
 /compact — компресира историята
+/context — с какво е пълен контекстът
 /memory, /init, /bg, /hooks, /mcp, /commands, /skills, /tasks
 /clear — нов разговор
 @файл — прикача файл от работната папка
@@ -439,7 +440,8 @@ PHONE_HELP = """Команди от телефона:
 
 
 def phone_command(text: str, ui: Any, session: RemoteSession, *, messages: Any,
-                  workspace: Path, compact: Callable[[Any], Any] | None = None) -> tuple[Any, str | None]:
+                  workspace: Path, compact: Callable[[Any], Any] | None = None,
+                  context: Callable[[], dict] | None = None) -> tuple[Any, str | None]:
     """Съобщение от телефона, преди да стигне до модела.
 
     Връща (историята, текст за модела); None за текста = ходът свършва тук.
@@ -490,7 +492,7 @@ def phone_command(text: str, ui: Any, session: RemoteSession, *, messages: Any,
             return "да" if session.confirm(said[-1] if said else question, [reason]) else "не"
 
         res = chat_commands.handle(stripped, messages=messages, workspace=workspace,
-                                   out=out, ask=ask, compact=compact)
+                                   out=out, ask=ask, compact=compact, context=context)
         if res is not None:
             if res.messages is not None:
                 messages = res.messages
@@ -854,7 +856,8 @@ def serve(args: list[str]) -> int:
 
     def runner(text: str, ui: Any) -> None:
         messages, prompt = phone_command(text, ui, session, messages=state["messages"],
-                                         workspace=Path(gta.WORKSPACE), compact=gta._force_compact)
+                                         workspace=Path(gta.WORKSPACE), compact=gta._force_compact,
+                                         context=gta.context_info)
         state["messages"] = messages
         if prompt is not None:
             state["messages"] = gta.run_turn(state["messages"], prompt, ui)
