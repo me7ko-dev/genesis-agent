@@ -2154,6 +2154,7 @@ def main():
                 help_table.add_row("/plan [задача]", "Режим план: само чете и планира; /plan пак = изпълни")
                 help_table.add_row("/undo", "Върни файловете от последния ход, който ги промени")
                 help_table.add_row("/compact", "Компресирай историята сега")
+                help_table.add_row("/review [клон]", "Прегледай промените за грешки (незаписаните или спрямо клона)")
                 help_table.add_row("/context", "С какво е пълен контекстът: промпт, инструменти, разговор")
                 help_table.add_row("/agents", "Собствените под-агенти (.genesis/agents/*.md)")
                 help_table.add_row("/todos", "Списъкът със задачи, който агентът води")
