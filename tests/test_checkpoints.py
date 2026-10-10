@@ -467,7 +467,9 @@ def test_a_background_command_never_makes_undo_hit_the_turn_before(ws, monkeypat
 
 
 def test_a_refused_background_command_takes_no_undo_step(ws, monkeypatch) -> None:
+    from genesis_agent import sandbox
     monkeypatch.setattr(gs, "_WORKSPACE", ws)
+    monkeypatch.setattr(sandbox, "_POLICY", sandbox.SandboxPolicy(mode="deny"))   # автономно
     edit_history.begin_turn("ход 1")
     edit_history.record(ws / "keep.txt")
     (ws / "keep.txt").write_text("ход 1\n", encoding="utf-8")
