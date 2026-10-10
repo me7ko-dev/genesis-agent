@@ -139,6 +139,8 @@ _SECRET_PATHS = (
     r"\.ssh(?:[/\\]|\b)|\.aws(?:[/\\]|\b)|\.gnupg(?:[/\\]|\b)|id_rsa|id_ed25519|id_ecdsa|id_dsa"
     r"|\bid_[*?\[]|\.env\b|credentials\b"
     r"|\.pem\b|\.p12\b|\.pfx\b|\.genesis[/\\]remote\.json|gh[/\\]hosts\.yml"
+    # OAuth токените за MCP и копията на проекта за /undo (2026-10-09).
+    r"|mcp_tokens\.json\b|\.genesis[/\\]checkpoints\b"
     r"|\.npmrc\b|\.pypirc\b|\.netrc\b|\.docker[/\\]config\.json|\.kube[/\\]config\b"
     r"|Login Data\b"
 )
@@ -324,6 +326,12 @@ _PY_CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # shutil/os, които СА покрити по-горе.
     (_c(r"\bos\.system\b"), "os.system (shell изпълнение)"),
     (_c(r"\bsubprocess\.(run|call|Popen|check_output|check_call)\b"), "стартиране на подпроцес"),
+    # И другите изписвания: py_guard отказва всеки процес без одобрение, а без
+    # въпрос тук `from subprocess import run` просто падаше (преглед 2026-10-09).
+    (_c(r"\bfrom\s+subprocess\s+import\b|\bimport\s+subprocess\s+as\b"
+        r"|\bsubprocess\.(getoutput|getstatusoutput)\b|\bmultiprocessing\b"
+        r"|\bProcessPoolExecutor\b|\basyncio\.create_subprocess_|\bos\.(posix_spawn\w*|fork|"
+        r"forkpty|startfile)\b|\bpty\.spawn\b"), "стартиране на подпроцес"),
     (_c(r"\bos\.(popen|execv|execve|execvp|spawn\w*)\b"), "стартиране на процес"),
     (_c(r"\bsocket\.socket\b"), "суров мрежов сокет"),
     (_c(r"\b__import__\s*\(\s*['\"]os['\"]"), "динамичен импорт на os"),
@@ -1228,6 +1236,10 @@ class SandboxPolicy:
     env_passthrough: tuple[str, ...] = (
         "PATH", "HOME", "USER", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR",
         "PYTHONPATH", "PYTHONIOENCODING",
+        # Windows: без тях одобрен подпроцес от умение падаше с „shell not
+        # found: neither %ComSpec% nor %SystemRoot%“, а Python в детето — без
+        # random/сокети (Windows CI 2026-10-09). Не са тайни.
+        "SYSTEMROOT", "COMSPEC", "PATHEXT", "WINDIR", "TEMP", "TMP",
     )
     cpu_seconds: int = 120
     max_memory_mb: int = 2048
@@ -1354,8 +1366,21 @@ def _preexec(policy: SandboxPolicy, nproc_cap: int):  # изпълнява се 
             pass
 
 
+# Вика се точно преди процесът да тръгне — СЛЕД одобрението на оператора.
+# edit_history прави тук снимката за /undo: снимка преди въпроса „Да се
+# изпълни ли?“ приписваше на командата и каквото операторът запише, докато
+# мисли (одит 2026-10-09).
+before_exec: Callable[[], None] | None = None
+
+
 def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
          env_extra: dict[str, str] | None = None) -> SandboxResult:
+    hook = before_exec
+    if hook is not None:
+        try:
+            hook()
+        except Exception:
+            pass
     env = _build_env(policy, env_extra)
     # Ако NPROC е включен, капът е headroom над текущото натоварване.
     nproc_cap = (_count_user_processes() + policy.max_processes) if policy.max_processes > 0 else 0
@@ -1669,7 +1694,8 @@ def stop_process(proc: subprocess.Popen) -> None:
 def run_python(code: str, *, cwd: Path | None = None,
                policy: SandboxPolicy | None = None,
                timeout: int | None = None,
-               env_extra: dict[str, str] | None = None) -> SandboxResult:
+               env_extra: dict[str, str] | None = None,
+               allow: list[Path] | None = None) -> SandboxResult:
     """Изпълнява Python код в отделен интерпретатор през защитната бариера."""
     policy = policy or _POLICY
     verdict = assess_code(code)
@@ -1678,19 +1704,67 @@ def run_python(code: str, *, cwd: Path | None = None,
         return SandboxResult(ok=False, stdout="", stderr=reason, returncode=None,
                              blocked=True, verdict=verdict)
     root = _sandbox_dir()
+    # Нова папка за всяко пускане: тя е sys.path[0] на скрипта и на пазача, а
+    # `runpy.py`, оставен там от предишен скрипт, тръгваше преди hook-а (одит).
+    # Работната папка остава постоянната папка на sandbox-а (`report.csv` от
+    # драйвер трябва да остане след края); новата папка е само sys.path[0].
+    # Името — не `main.py`: засенчваше `main` модула на проекта (преглед).
+    run_dir = root / f"run_{uuid.uuid4().hex[:12]}"
+    run_dir.mkdir(parents=True)
     work = cwd if (cwd and cwd.is_dir()) else root
-    script = root / f"run_{uuid.uuid4().hex[:12]}.py"
+    script = run_dir / f"{run_dir.name}.py"
     script.write_text(code, encoding="utf-8")
+    argv = [sys.executable, str(script)]
+    # Пазачът (py_guard): отказва тайните и по сглобен път, който assess_code
+    # не вижда. Без него — само ако операторът в интерактивен режим е видял и
+    # одобрил точно „достъп до чувствителни файлове“ (не коментар с „.env“ до
+    # друга одобрена операция, не режим allow — одит 2026-10-09).
+    mode = policy.resolve_mode()
+    approved = mode == "interactive" and _SECRET_REASON in verdict.reasons
+    if not approved:
+        guard = _guard_script(run_dir)
+        if guard is not None:
+            argv = [sys.executable, str(guard), str(script)]
+            procs = any(r in verdict.reasons for r in _PROC_REASONS)
+            env_extra = {**(env_extra or {}),
+                         **_guard_env([run_dir, root, work, *(allow or [])], procs)}
     try:
-        res = _run([sys.executable, str(script)], cwd=work, policy=policy,
+        res = _run(argv, cwd=work, policy=policy,
                    timeout=timeout or policy.cpu_seconds, env_extra=env_extra)
         res.verdict = verdict
         return res
     finally:
-        try:
-            script.unlink(missing_ok=True)
-        except OSError:
-            pass
+        import shutil
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+
+_SECRET_REASON = "достъп до чувствителни файлове (ключове/тайни)"
+_PROC_REASONS = ("стартиране на подпроцес", "стартиране на процес", "os.system (shell изпълнение)")
+# За пазача `credentials` е име на файл (`credentials`, `credentials.json`), не
+# всеки път с думата — `tests/test_credentials.py` е код (одит 2026-10-09).
+_GUARD_RX = _SECRET_PATHS.replace(r"|credentials\b", r"|(?:^|/)credentials(?:\.\w+)?$")
+
+
+def _guard_script(run_dir: Path) -> Path | None:
+    """py_guard.py до скрипта, в новата папка на пускането: пуснат от
+    genesis_agent/, папката му щеше да е първа в sys.path и config.py/memory.py
+    там засенчваха модули."""
+    try:
+        src = (Path(__file__).resolve().parent / "py_guard.py").read_text(encoding="utf-8")
+        target = run_dir / "_genesis_guard.py"
+        target.write_text(src, encoding="utf-8")
+        return target
+    except OSError:
+        return None
+
+
+def _guard_env(allow: list[Path], procs: bool) -> dict[str, str]:
+    from genesis_agent.paths import GENESIS_HOME
+    return {"GENESIS_GUARD_RX": _GUARD_RX,
+            "GENESIS_GUARD_EXEMPT": _SENSITIVE_PATH_EXEMPT_RE.pattern,
+            "GENESIS_GUARD_BLOCK": str(GENESIS_HOME),
+            "GENESIS_GUARD_ALLOW": os.pathsep.join(str(p) for p in allow),
+            "GENESIS_GUARD_PROCS": "1" if procs else "0"}
 
 
 def _sandbox_dir() -> Path:

@@ -143,6 +143,9 @@ def _isolated_operator_settings(monkeypatch, tmp_path):
         history.mkdir(exist_ok=True)
         monkeypatch.setattr(gta, "HISTORY_DIR", history)
         monkeypatch.setattr(gta, "_SESSION_FILE", None)
+    # Домашната папка на уменията е в системната временна папка (2026-10-09).
+    from genesis_agent import skill_loader
+    monkeypatch.setattr(skill_loader, "SKILL_HOME_ROOT", tmp_path / "skill_tmp")
     from genesis_agent import agents, edit_history, plan_mode, todos
     plan_mode.set_active(False)
     edit_history.clear()

@@ -67,6 +67,10 @@ def start(command: str, cwd: Path | None = None) -> str:
     if proc is None:
         return f"[RUN_BG: {command}] {refusal}"
     _jobs[job_id] = Job(job_id, command, proc, log)
+    # Само тръгнал процес прави хода „с промени, които не се връщат“ — отказан
+    # (sandbox, оператор, hook) изяждаше едно /undo (одит 2026-10-09).
+    from genesis_agent import edit_history
+    edit_history.background_command()
     _install_signal_handlers()
     time.sleep(1.0)  # грешка при старта (порт зает, липсваща команда) се вижда веднага
     first = output(job_id)

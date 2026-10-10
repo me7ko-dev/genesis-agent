@@ -342,6 +342,25 @@ def _expand(text: str) -> str:
     return _VAR.sub(lambda m: os.environ.get(m.group(1), m.group(2) or ""), text)
 
 
+def _static_auth(headers: dict[str, str]) -> bool:
+    """mcp.json вече дава вход (Authorization, X-API-Key, Cookie, …-Token)? Тогава
+    401 значи „провери headers“; иначе — OAuth. `X-Tenant` не е вход (одити)."""
+    # Цели думи от името (X-Api-Key → x, api, key; AccessKey → access, key), не
+    # поднизове: X-Session-Id, X-Bypass-Cache, X-Compass-Region не са вход (одит).
+    login = {"authorization", "authorisation", "authentication", "auth", "cookie", "key",
+             "apikey", "token", "secret", "password", "passwd", "pass", "passcode",
+             "credential", "credentials", "signature", "bearer"}
+    for name in headers:
+        spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", name).lower()
+        parts = {p for p in re.split(r"[-_\s]+", spaced) if p}
+        if parts & login or any(p.endswith(("key", "token", "secret")) or p.startswith("auth")
+                                for p in parts):
+            return True
+        if "session" in parts and parts & {"token", "key", "cookie"}:
+            return True
+    return False
+
+
 @dataclass
 class HttpServer(Server):
     """MCP по HTTP (Streamable HTTP, 2025-06-18): всяко съобщение е POST към
@@ -353,6 +372,9 @@ class HttpServer(Server):
     headers: dict[str, str] = field(default_factory=dict)
     session_id: str = ""
     _ready: bool = False
+    # 401 без токен: какво каза сървърът (за /mcp login — mcp_oauth.discover).
+    www_authenticate: str = ""
+    needs_login: bool = False
 
     def alive(self) -> bool:
         return self._ready and not self.error
@@ -369,21 +391,48 @@ class HttpServer(Server):
     def _headers(self) -> dict[str, str]:
         h = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
              **{k: _expand(v) for k, v in self.headers.items()}}
+        # Токен от /mcp login (mcp_oauth) — освен ако mcp.json не дава свой.
+        if not any(k.lower() == "authorization" for k in h):
+            from genesis_agent import mcp_oauth
+            try:
+                token = mcp_oauth.access_token(_expand(self.url))
+            except Exception:   # „никога не хвърля“ — без токен, сървърът ще каже 401
+                token = ""
+            if token:
+                h["Authorization"] = f"Bearer {token}"
         if self.session_id:
             h["Mcp-Session-Id"] = self.session_id
         if self._ready:
             h["MCP-Protocol-Version"] = PROTOCOL_VERSION
         return h
 
-    def _post(self, msg: dict, deadline: float):
+    def _post(self, msg: dict, deadline: float, *, retried: bool = False):
         import requests
         left = max(0.5, deadline - time.monotonic())
+        headers = self._headers()
         try:
             resp = requests.post(_expand(self.url), data=json.dumps(msg, ensure_ascii=True),
-                                 headers=self._headers(), timeout=(min(10.0, left), left),
+                                 headers=headers, timeout=(min(10.0, left), left),
                                  stream=True)
         except requests.RequestException as e:
             raise MCPError(f"не се свърза: {e}") from e
+        challenge = resp.headers.get("WWW-Authenticate", "")
+        # OAuth (2026-10-09) само ако mcp.json не дава свои headers: с X-API-Key
+        # „/mcp login“ беше грешен съвет (одит) — там остава „провери headers“.
+        if resp.status_code == 401 and not _static_auth(self.headers):
+            self.www_authenticate = challenge
+            resp.close()
+            from genesis_agent import mcp_oauth
+            try:
+                fresh = (not retried and "Authorization" in headers
+                         and mcp_oauth.refresh(_expand(self.url),
+                                               stale=headers["Authorization"][7:]))
+            except Exception:
+                fresh = None
+            if fresh:
+                return self._post(msg, deadline, retried=True)
+            self.needs_login = True
+            raise MCPError(f"нужен е вход — /mcp login {self.name}")
         sid = resp.headers.get("Mcp-Session-Id") or resp.headers.get("mcp-session-id")
         if sid:
             self.session_id = sid
@@ -393,7 +442,9 @@ class HttpServer(Server):
             raise MCPError(self.error)
         if resp.status_code in (401, 403):
             resp.close()
-            raise MCPError(f"HTTP {resp.status_code} — провери headers (токена) в mcp.json")
+            login = (f" (или ги махни и /mcp login {self.name})"
+                     if challenge.lower().startswith("bearer") else "")
+            raise MCPError(f"HTTP {resp.status_code} — провери headers (токена) в mcp.json{login}")
         if resp.status_code >= 400:
             body = resp.text[:300]
             resp.close()

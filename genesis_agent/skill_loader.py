@@ -512,6 +512,143 @@ def resolve_skill(name_or_query: str) -> tuple[str | None, list[dict[str, Any]]]
     return None, candidates
 
 
+# Тестовете (conftest) я пренасочват; иначе — системната временна папка.
+SKILL_HOME_ROOT: Path | None = None
+_operator_env: dict[str, str] | None = None
+
+
+def _home_roots() -> list[Path]:
+    import os
+    import tempfile
+    if SKILL_HOME_ROOT is not None:
+        return [Path(SKILL_HOME_ROOT)]
+    roots = [Path(tempfile.gettempdir())]
+    if os.name != "nt":
+        roots += [Path("/tmp"), Path("/var/tmp")]
+    try:
+        real = Path.home().resolve()
+        # TMPDIR в домашната папка връщаше точно това, което се маха: истинския
+        # HOME сред родителите (втори одит 2026-10-09). На Windows няма друго.
+        outside = [r for r in roots if r.is_dir() and r.resolve() != real
+                   and real not in r.resolve().parents]
+        return outside or roots
+    except (OSError, RuntimeError):
+        return roots
+
+
+def _ours(path: Path) -> bool:
+    import os
+    import stat
+    try:
+        path.mkdir(mode=0o700, exist_ok=True)
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        return False
+    if hasattr(os, "getuid"):
+        if st.st_uid != os.getuid():
+            return False
+        os.chmod(path, 0o700)
+    return True
+
+
+def skill_home() -> Path:
+    """Домашната папка на кода на уменията: във временната папка на системата,
+    по една на потребител, 0700 и наша. Не в ~/.genesis: оттам
+    `Path.home().parent` беше точно .env, ключовете и mcp_tokens.json, а
+    `.parents[1]` — истинската домашна папка (одит 2026-10-09)."""
+    import os
+    import tempfile
+    root = _home_roots()[0]
+    uid = os.getuid() if hasattr(os, "getuid") else 0
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    # Чужда/подменена папка с това име (споделен /tmp): следващото стабилно
+    # име, не нова случайна папка при всяко извикване — кешът студен и папки
+    # изтичаха в /tmp (втори одит 2026-10-09).
+    for n in range(10):
+        home = root / (f"genesis-skill-home-{uid}" + (f"-{n}" if n else ""))
+        if _ours(home):
+            return home
+    return Path(tempfile.mkdtemp(prefix="genesis-skill-home-", dir=str(root)))
+
+
+def _operator_settings() -> dict[str, str]:
+    """Каквото уменията губят с нова домашна папка и наистина им трябва:
+    кой подписва git комитите и откъде pip тегли (корпоративен индекс).
+    Само тези стойности, не файловете (одит 2026-10-09)."""
+    global _operator_env
+    if _operator_env is not None:
+        return dict(_operator_env)
+    import os
+    import subprocess
+    out: dict[str, str] = {}
+    for key, names in (("user.name", ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME")),
+                       ("user.email", ("GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"))):
+        try:
+            value = subprocess.run(["git", "config", "--get", key], capture_output=True,
+                                   text=True, timeout=5, check=False).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            value = ""
+        if value:
+            out.update({n: value for n in names})
+    home = Path.home()
+    appdata = os.environ.get("APPDATA", "")
+    for conf in (os.environ.get("PIP_CONFIG_FILE", ""), str(home / ".config" / "pip" / "pip.conf"),
+                 str(home / ".pip" / "pip.conf"),
+                 str(Path(appdata) / "pip" / "pip.ini") if appdata else "",
+                 str(home / "Library" / "Application Support" / "pip" / "pip.conf")):
+        if conf and Path(conf).is_file():
+            out["PIP_CONFIG_FILE"] = conf
+            break
+    _operator_env = out
+    return dict(out)
+
+
+def _workspace() -> list[Path]:
+    """Работната папка на чата: пазачът я пуска и когато е в ~/.genesis
+    (`~/.genesis/workspace` при старт от домашната папка — одит 2026-10-09)."""
+    import sys
+    gs = sys.modules.get("genesis_skills")
+    ws = getattr(gs, "_WORKSPACE", None) if gs is not None else None
+    return [Path(ws)] if ws else []
+
+
+def skill_env() -> dict[str, str]:
+    """Средата на кода на умение: собствена домашна папка (skill_home).
+
+    Драйверът на USE_SKILL е код от модела. С HOME на оператора
+    `Path.home() / ".ssh"` или `expanduser("~/.aws")` стигаха до тайните без
+    нито един буквален път, който sandbox-ът да види (NEXT_STEPS, одит
+    2026-10-07). Папката е постоянна, затова кешовете на pip/matplotlib в нея
+    остават топли — заради тях досега HOME не беше сменян. PYTHONUSERBASE
+    сочи истинския user site: пакет от `pip install --user` пак се внася
+    (2026-10-09).
+
+    Не е стена: `pwd.getpwuid()`, а и RUN_CMD знаят истинската папка —
+    истинската граница е отделен потребител/контейнер."""
+    import os
+    import site
+    home = skill_home()
+    for sub in (".cache", ".config", ".local/share", "AppData/Roaming", "AppData/Local"):
+        (home / sub).mkdir(mode=0o700, parents=True, exist_ok=True)
+    env = {"HOME": str(home), "USERPROFILE": str(home),
+           "XDG_CACHE_HOME": str(home / ".cache"), "XDG_CONFIG_HOME": str(home / ".config"),
+           "XDG_DATA_HOME": str(home / ".local" / "share"),
+           "MPLCONFIGDIR": str(home / ".config" / "matplotlib"),
+           "APPDATA": str(home / "AppData" / "Roaming"),
+           "LOCALAPPDATA": str(home / "AppData" / "Local"),
+           **_operator_settings()}
+    try:
+        env["PYTHONUSERBASE"] = os.environ.get("PYTHONUSERBASE") or site.getuserbase()
+    except Exception:
+        pass
+    return env
+
+
 def use_skill(name_or_query: str, driver_code: str = "") -> str:
     """
     Намира умение (по точно име или свободна заявка) и го изпълнява РЕАЛНО —
@@ -560,7 +697,7 @@ def use_skill(name_or_query: str, driver_code: str = "") -> str:
     if driver_code.strip():
         script += "\n\n# --- USE_SKILL driver ---\n" + driver_code
 
-    res = sandbox.run_python(script, timeout=60)
+    res = sandbox.run_python(script, timeout=60, env_extra=skill_env(), allow=_workspace())
     if res.blocked:
         return "\n".join(header) + "\n" + res.stderr
 
@@ -593,7 +730,8 @@ def run_skill(name: str, **exec_kwargs) -> str:
     res = sandbox.run_python(
         code,
         timeout=120,
-        env_extra={"SKILL_ARGS": _json.dumps(exec_kwargs)},
+        env_extra={**skill_env(), "SKILL_ARGS": _json.dumps(exec_kwargs)},
+        allow=_workspace(),
     )
     if res.blocked:
         raise RuntimeError(res.stderr)

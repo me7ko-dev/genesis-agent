@@ -464,6 +464,10 @@ def phone_command(text: str, ui: Any, session: RemoteSession, *, messages: Any,
         if cmd in ("/hooks", "/mcp") and rest.strip().lower() == "trust":
             ui.warn(f"{cmd} trust е само в терминала на компютъра — там се вижда целият файл.")
             return messages, None
+        # Входът в MCP сървър отваря браузър на компютъра и чака там (2026-10-09).
+        if cmd == "/mcp" and chat_commands._split(rest)[0].lower() in ("login", "logout"):
+            ui.warn("/mcp login и /mcp logout са само в терминала на компютъра — браузърът е там.")
+            return messages, None
         if cmd in ("/skills", "/умения"):
             from genesis_agent.skill_loader import format_skill_list
             ui.info(format_skill_list())

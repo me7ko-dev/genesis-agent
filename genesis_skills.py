@@ -1164,22 +1164,66 @@ def _before_tool(name: str, args: dict) -> str | None:
             edit_history.record(_resolve_noted(str(args["path"]), redirect=False)[0])
         except Exception:
             pass
+    elif _may_change_files(name, args):
+        # Команда, умение, MCP: пипат файлове, които никой не е назовал —
+        # снимка на проекта преди и след тях, за /undo (2026-10-09).
+        try:
+            from genesis_agent import edit_history
+            if name == "RUN_BG" or (name == "RUN_CMD" and str(args.get("background", "")).strip()
+                                    .lower() in ("true", "1", "yes")):
+                # Фонова: пише и след края на хода — снимка не помага. Ходът се
+                # маркира в background.start, когато процесът наистина тръгне.
+                pass
+            else:
+                # Командите и уменията минават през sandbox: снимката — когато
+                # процесът тръгне, след одобрението (одит 2026-10-09).
+                edit_history.before_command(Path(_WORKSPACE),
+                                            at_exec=name in ("RUN_CMD", "USE_SKILL"))
+        except Exception:
+            pass
     return None
 
 
+def _may_change_files(name: str, args: dict) -> bool:
+    from genesis_agent import plan_mode
+    if name in plan_mode.READ_ONLY_TOOLS or name in ("BG_KILL", "REMEMBER", "TASK_ADD",
+                                                     "TASK_UPDATE", "TODO_WRITE"):
+        return False
+    if name.startswith(("BROWSE", "BROWSER_")):
+        return False
+    if name.startswith("mcp__"):
+        try:
+            from genesis_agent import mcp_client
+            return not mcp_client.is_read_only(name)
+        except Exception:
+            return True
+    return True
+
+
 def _after_tool(name: str, args: dict, result: str) -> str:
+    try:
+        from genesis_agent import hooks
+        hook_name, hook_args = _hook_view(name, args)
+        out = hooks.post_tool(hook_name, hook_args, result)
+    except Exception:
+        out = result
+    # СЛЕД PostToolUse hooks: `ruff format` след EDIT_FILE иначе изглеждаше
+    # като чужда промяна и /undo оставяше файла (одит 2026-10-09).
     if name in ("WRITE_FILE", "EDIT_FILE") and args.get("path"):
         try:  # отказан/неуспешен запис не е промяна за /undo
             from genesis_agent import edit_history
             edit_history.forget_if_unchanged(_resolve_noted(str(args["path"]), redirect=False)[0])
         except Exception:
             pass
-    try:
-        from genesis_agent import hooks
-        hook_name, hook_args = _hook_view(name, args)
-        return hooks.post_tool(hook_name, hook_args, result)
-    except Exception:
-        return result
+    elif _may_change_files(name, args) and not (
+            name == "RUN_BG" or (name == "RUN_CMD" and str(args.get("background", "")).strip()
+                                 .lower() in ("true", "1", "yes"))):
+        try:  # какво промени командата — само между двете снимки
+            from genesis_agent import edit_history
+            edit_history.after_command()
+        except Exception:
+            pass
+    return out
 
 
 def parse_and_execute_readonly_tools(response_text: str) -> list[str]:

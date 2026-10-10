@@ -146,11 +146,18 @@ def handle(text: str, *, messages: Any, workspace: Path,
     if cmd == "/undo":
         from genesis_agent import edit_history
         plan = edit_history.pending()
+        note = edit_history.untracked_note()
+        # Командите вече се следят в папката на проекта (checkpoints.py) — освен
+        # ако снимката не е станала; тогава казваме защо (2026-10-09).
+        why = (f" Командите на последния ход не са проследени: {note}." if note else
+               " Командите се следят само в папката на проекта — без node_modules, .venv, "
+               "кешовете, build/dist/target/vendor/env в корена, игнорираното от "
+               ".gitignore и файловете над 20 MB.")
         if not plan:
-            out("Няма промени по файлове за връщане (в този разговор). Каквото е правено с "
-                "RUN_CMD (команди), не се следи.")
+            out("Няма промени по файлове за връщане (в този разговор)." + why)
             return Result()
-        out("Ще върна последния ход, който промени файлове:\n  " + "\n  ".join(plan))
+        out("Ще върна последния ход, който промени файлове:\n  " + "\n  ".join(plan)
+            + (f"\n⚠ Командите на хода не са проследени: {note}." if note else ""))
         if ask("Да върна ли? (Enter = да / не) > ").strip().lower() not in _YES:
             out("Нищо не е върнато.")
             return Result()
@@ -259,7 +266,42 @@ def _mcp(rest: str, workspace: Path, out: Callable[[str], None],
             out(line)
         out("Новите инструменти важат от следващата реплика; за текстовите модели — след /clear.")
         return Result()
+    verb, name = _split(rest)
+    if verb.lower() in ("login", "logout"):
+        return _mcp_login(verb.lower(), name, workspace, out, ask)
     out(mcp_client.summary())
+    return Result()
+
+
+def _mcp_login(verb: str, name: str, workspace: Path, out: Callable[[str], None],
+               ask: Callable[[str], str]) -> Result:
+    """`/mcp login <име>`: OAuth вход в браузъра за MCP сървър по HTTP
+    (mcp_oauth); `/mcp logout <име>` забравя токена (2026-10-09).
+    `--paste` (или по SSH/без графична среда): адресът се поставя на ръка."""
+    from genesis_agent import mcp_client, mcp_oauth
+    manual = "--paste" in name.split()
+    name = " ".join(w for w in name.split() if w != "--paste")
+    servers = [s for s in mcp_client.configured(workspace)[0] if isinstance(s, mcp_client.HttpServer)]
+    srv = next((s for s in servers if s.name == name), None)
+    if srv is None:
+        names = ", ".join(s.name for s in servers) or "няма MCP сървъри по HTTP"
+        out(f"/mcp {verb} <име> — {names}.")
+        return Result()
+    url = mcp_client._expand(srv.url)
+    if verb == "logout":
+        out(f"✓ Токенът за {name} е забравен." if mcp_oauth.forget(url) else f"Няма вход за {name}.")
+        return Result()
+    running = mcp_client._servers.get(name)
+    hint = running.www_authenticate if isinstance(running, mcp_client.HttpServer) else ""
+    try:
+        mcp_oauth.login(url, www_authenticate=hint, say=out,
+                        paste=ask if manual or mcp_oauth.no_browser() else None)
+    except mcp_oauth.OAuthError as e:
+        out(f"❌ Входът в {name} не стана: {e}")
+        return Result()
+    out(f"✓ Вход в {name}. Пускам MCP сървърите наново…")
+    for line in mcp_client.start_all(workspace):
+        out(line)
     return Result()
 
 
