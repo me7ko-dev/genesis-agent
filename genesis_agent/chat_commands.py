@@ -1,7 +1,7 @@
 """
 genesis_agent.chat_commands — the chat commands that steer the agent the way
 Claude Code's do: /init, /memory, /plan, /undo, /compact, /hooks, /commands,
-/bg, /context, and the operator's own commands from .genesis/commands/*.md.
+/bg, /context, /review, and the operator's own commands from .genesis/commands/*.md.
 
 Kept out of genesis_terminal_agent.main() (already a long if-chain) and free
 of rich/console: `out` prints, `ask` asks a yes/no question, so the same code
@@ -221,6 +221,14 @@ def handle(text: str, *, messages: Any, workspace: Path,
         from genesis_agent import todos
         out(todos.render())
         return Result()
+
+    # Собствената review.md на оператора (често я има) остава с предимство —
+    # вградената е само за когато няма такава.
+    if cmd == "/review" and "review" not in custom_commands(workspace):
+        from genesis_agent import review
+        prompt, note = review.build(workspace, rest)
+        out(note)
+        return Result(prompt=prompt)
 
     if cmd == "/context":
         from genesis_agent import context_usage

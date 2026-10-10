@@ -433,6 +433,7 @@ PHONE_HELP = """Команди от телефона:
 /agents — под-агентите (.genesis/agents/*.md)
 /compact — компресира историята
 /context — с какво е пълен контекстът
+/review [клон] — преглед на промените за грешки
 /memory, /init, /bg, /hooks, /mcp, /commands, /skills, /tasks
 /clear — нов разговор
 @файл — прикача файл от работната папка
