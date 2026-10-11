@@ -398,3 +398,21 @@ def test_code_check_needs_the_code_actually_run(result):
     c.observe("[WRITE_FILE: /ws/solution.py] ✓ записани 120 символа")
     c.observe(result)
     assert "НЕ пуснат" in c.note()
+
+
+# ── A12: [TODO_WRITE: {"todos": [...]}] — формата на native схемата ────────
+
+def test_todo_write_accepts_the_object_form_in_text_mode():
+    from genesis_agent import todos
+    todos.clear()
+    try:
+        out = todos.write('{"todos": [{"content": "пиши тест", "status": "in_progress"}, '
+                          '{"content": "поправи", "status": "pending"}]}')
+        assert todos.items() == [{"content": "пиши тест", "status": "in_progress"},
+                                 {"content": "поправи", "status": "pending"}]
+        assert "0/2" in out
+        before = todos.items()
+        refused = todos.write('{"content": "нещо", "status": "pending"}')
+        assert refused.startswith("[TODO_WRITE] ❌") and todos.items() == before
+    finally:
+        todos.clear()
