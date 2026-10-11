@@ -7,10 +7,11 @@ import json
 import os
 import subprocess
 import sys
+import zipfile
 
 import pytest
 
-from genesis_agent import repo_agent
+from genesis_agent import deliver, repo_agent
 
 PY = f'"{sys.executable}" -m pytest -q -p no:cacheprovider'
 
@@ -129,3 +130,37 @@ def test_fix_diff_does_not_show_human_work_in_the_same_file(proj, monkeypatch):
     out = repo_agent.repair(proj, "fix add", test_command=PY, max_rounds=3, on_status=lambda m: None)
     assert out.success and out.checkpoint is not None
     assert "+    return a + b" in out.diff and "+def HUMAN_WORK_IN_PROGRESS" not in out.diff
+
+
+# ── genesis export: каквото git пази само локално, остава локално ───────────
+
+def _shop(tmp_path):
+    root = tmp_path / "shop"
+    (root / "uploads").mkdir(parents=True)
+    (root / "htmlcov").mkdir()
+    (root / "manage.py").write_text("print('hi')\n", encoding="utf-8")
+    (root / ".gitignore").write_text("# локални\ndb.sqlite3\n*.log\nuploads/\n.coverage\nhtmlcov/\n",
+                                     encoding="utf-8")
+    (root / "db.sqlite3").write_bytes(b"SQLite format 3\x00 EGN 8001011234")
+    (root / "server.log").write_text("user@x.bg token=abc\n", encoding="utf-8")
+    (root / "uploads" / "passport_scan.jpg").write_bytes(b"\xff\xd8\xff")
+    (root / ".coverage").write_bytes(b"x")
+    (root / "htmlcov" / "index.html").write_text("<html></html>\n", encoding="utf-8")
+    return root
+
+
+def test_export_leaves_out_what_gitignore_ignores(tmp_path):
+    root = _shop(tmp_path)
+    _git(root, "init", "-q")
+    d = deliver.export(root, tmp_path / "out.zip", run_tests=False)
+    names = sorted(n.split("/", 1)[1] for n in zipfile.ZipFile(d.zip_path).namelist())
+    assert names == [".gitignore", "GENESIS_REPORT.md", "manage.py"]
+    for gone in ("db.sqlite3", "server.log", "uploads/", ".coverage", "htmlcov/"):
+        assert gone in d.report, gone
+
+
+def test_export_reads_gitignore_without_git(tmp_path):
+    root = _shop(tmp_path)
+    keep, withheld = deliver.project_files(root)
+    assert sorted(p.relative_to(root).as_posix() for p in keep) == [".gitignore", "manage.py"]
+    assert any(w.startswith("uploads/") for w in withheld)
