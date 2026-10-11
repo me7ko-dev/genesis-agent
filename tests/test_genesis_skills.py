@@ -264,6 +264,18 @@ def test_dispatch_invalid_json_string_does_not_raise(_workspace) -> None:
     assert "Невалидни аргументи" in out
 
 
+def test_dispatch_names_arguments_cut_mid_write_as_cut(_workspace) -> None:
+    """Ревю 2026-10-11: WRITE_FILE, отрязан на тавана при всеки модел, стига
+    до цикъла — моделът трябва да разбере, че файлът е твърде голям за един
+    запис, а не че е сбъркал JSON-а."""
+    import json
+    cut = json.dumps({"path": "big.py", "content": "x = 1\n" * 50})[:120]
+    out = gs.dispatch_tool_call("WRITE_FILE", cut)
+    assert "Невалидни аргументи" in out and "отрязан" in out
+    assert not (_workspace / "big.py").exists()
+    assert "отрязан" not in gs.dispatch_tool_call("READ_FILE", "{not json}")
+
+
 def test_dispatch_unknown_tool_name_does_not_raise(_workspace) -> None:
     out = gs.dispatch_tool_call("NOT_A_REAL_TOOL", {})
     assert "Непознат tool" in out

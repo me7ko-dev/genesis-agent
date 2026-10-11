@@ -25,6 +25,13 @@ def test_parse_log_counts_drop_reasons():
     assert bp.parse_log(LOG) == {"HTTP_429": 2, "timeout": 1}
 
 
+def test_parse_log_keeps_429s_with_a_retry_hint_in_one_bucket():
+    # Brain пише `HTTP_429[retry=N]` от 2026-10-11 — всяко N беше отделен ключ.
+    log = (LOG + "  [Brain] ✗ groq/a след 0.2s: HTTP_429[retry=2]: {} → следващ\n"
+                 "  [Brain] ✗ groq/b след 0.2s: HTTP_429[retry=61]: {} → следващ\n")
+    assert bp.parse_log(log) == {"HTTP_429": 4, "timeout": 1}
+
+
 def test_usage_since_counts_every_call_including_the_pinned_model():
     lines = [
         '{"provider": "groq", "model": "openai/gpt-oss-120b", "total_tokens": 3000}',

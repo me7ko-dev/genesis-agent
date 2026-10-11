@@ -48,6 +48,7 @@ from genesis_agent.paths import (
     ENV_FILES,
     env_value,
 )
+from genesis_agent.tool_schemas import load_tool_arguments
 
 # Extra ollama_cloud keys an operator may add THEMSELVES to their own
 # gitignored ~/.genesis/.env — OLLAMA_API_KEY_2 through _10. Not suggested,
@@ -320,13 +321,16 @@ def _local_available(model: str) -> bool:
     return any(_same_ollama_model(model, n) for n in _ollama_installed())
 
 
-def _installed_local_tier() -> str | None:
-    """Първото инсталирано ниво от model_router.LOCAL_TIERS (от бързо към мощно)."""
+def _installed_local_tier(names: list[str] | None = None) -> str | None:
+    """Първото инсталирано ниво от model_router.LOCAL_TIERS (от бързо към мощно).
+
+    `names` — вече прочетеният /api/tags, за да не се пита Ollama втори път."""
     try:
         from genesis_agent.model_router import LOCAL_TIERS
     except Exception:
         return None
-    names = _ollama_installed()
+    if names is None:
+        names = _ollama_installed()
     return next((t for t in LOCAL_TIERS if any(_same_ollama_model(t, n) for n in names)), None)
 # Грешки, при които минаваме към следващия модел (вкл. остарял/невалиден модел).
 _FALLBACK_CODES = {400, 401, 402, 403, 404, 408, 429, 500, 502, 503}
@@ -464,13 +468,17 @@ def _is_truncated(text: str) -> bool:
 
 
 def _has_cut_tool_arguments(tool_calls: Any) -> bool:
-    """True ако аргументите на някой tool_call не са цял JSON (отрязани)."""
+    """True ако аргументите на някой tool_call не са цял JSON (отрязани).
+
+    Със същия парсер като цикъла (ревю 2026-10-11): plain json.loads отхвърляше
+    `"\\d{4}"` от регекс код, който load_tool_arguments поправя — цял call с
+    finish_reason=length падаше като HTTP_TRUNCATED към следващия модел."""
     for tc in tool_calls or []:
         fn = tc.get("function") if isinstance(tc, dict) else None
         args = fn.get("arguments") if isinstance(fn, dict) else None
         if isinstance(args, str) and args.strip():
             try:
-                json.loads(args)
+                load_tool_arguments(args)
             except ValueError:
                 return True
     return False
@@ -707,6 +715,7 @@ class Brain:
         self._fail_count = 0
         self._last_usage: dict | None = None
         self._last_local_error: str | None = None
+        self._cut_reply: tuple[str, list | None] | None = None  # виж _http, HTTP_TRUNCATED
         # min_size_b (design note, 2026-07-25): филтрира облачната верига по размер —
         # различни контексти искат различно качество/скорост:
         # терминален чат ≥32B, умения/самонадграждане ≥120B (виж config.yaml
@@ -783,13 +792,19 @@ class Brain:
             # откаже. use_local=False изрично го изключва напълно (за
             # self-modification — виж genesis_agent/self_modify.py).
             self.local = None
-            if use_local and _local_available(LOCAL_MODEL):
+            # ЕДНА проба на /api/tags (ревю 2026-10-11): _local_available и
+            # _installed_local_tier питаха поотделно, а ask_genesis строи силен
+            # Brain всеки ход — при висящ Ollama 4 s на ход вместо 2 s.
+            installed = _ollama_installed() if use_local else []
+            if any(_same_ollama_model(LOCAL_MODEL, n) for n in installed):
                 self.local = {"provider": "ollama_local", "model": LOCAL_MODEL}
-            elif use_local and os.environ.get("GENESIS_LOCAL_ONLY") != "1":
+            elif installed and os.environ.get("GENESIS_LOCAL_ONLY") != "1" \
+                    and not os.environ.get("GENESIS_LOCAL_MODEL"):
                 # Подразбиращият се модел липсва → инсталирано ниво вместо 404
-                # (одит 2026-10-11). Изрично избраният офлайн модел не се
-                # подменя: там честата грешка е по-добра от тиха смяна.
-                tier = _installed_local_tier()
+                # (одит 2026-10-11). Изрично избраният модел (офлайн режим или
+                # GENESIS_LOCAL_MODEL) не се подменя: там честата грешка е
+                # по-добра от тиха смяна.
+                tier = _installed_local_tier(installed)
                 if tier:
                     self.local = {"provider": "ollama_local", "model": tier}
 
@@ -1293,10 +1308,13 @@ class Brain:
         # Същото за аргументите на tool_call (одит 2026-10-11): WRITE_FILE,
         # отрязан на 4096, стигаше до цикъла като „невалидни аргументи“ и
         # моделът пренаписваше същия голям файл в същия таван рунд след рунд.
-        if finish_reason == "length" and (_is_truncated(content or "")
-                                          or _has_cut_tool_arguments(tool_calls)):
+        cut_args = finish_reason == "length" and _has_cut_tool_arguments(tool_calls)
+        if cut_args or (finish_reason == "length" and _is_truncated(content or "")):
             self._last_usage = _openai_usage(data.get("usage"))
             self._usage_attempt = getattr(self, "_attempt_id", None)
+            # Отрязаният call се пази: ако го отреже ВСЕКИ модел, complete() го
+            # връща на цикъла вместо „Error“ (ревю 2026-10-11, виж там).
+            self._cut_reply = ((content or "").strip(), tool_calls) if cut_args else None
             raise RuntimeError(
                 f"HTTP_TRUNCATED: отговорът е отрязан на тавана от {_output_cap(model)} "
                 f"токена, посред код-ограда или tool_call (finish_reason=length). Вдигни го с "
@@ -1506,6 +1524,35 @@ class Brain:
                 f"(stop_reason=max_tokens)."
             )
         return text, (tool_calls or None)
+
+    def _cooldown_left(self, provider: str, model: str) -> float:
+        """Секунди, след които (provider, model) пак може да тръгне; 0 — веднага.
+
+        Огледало на проверките в _call/_call_rotating/_call_vertex: свободни
+        трябва да са моделът и поне един негов ключ (с двойката ключ::модел).
+        Ревю 2026-10-11: паузата между кръговете гледаше най-ранния край в
+        ЦЕЛИЯ _EXHAUSTED — чужд модел, лекият модел или чужд ключ#n даваха
+        8 s пауза и втори кръг без нито една заявка."""
+        now = time.time()
+
+        def left(k: str) -> float:
+            return max(0.0, _EXHAUSTED.get(k, now) - now)
+
+        key_env = _PROVIDERS.get(provider, ("", None))[1]
+        if provider == "vertex":
+            try:
+                from genesis_agent import vertex_auth
+                kids = [f"key::VERTEX#{i}" for i in range(1, len(vertex_auth.projects()) + 1)]
+            except Exception:
+                kids = []
+        elif not key_env:
+            kids = []
+        elif provider not in _NATIVE_PROVIDERS and len(self._numbered_keys(key_env)) > 1:
+            kids = [f"key::{key_env}#{i}" for i in range(1, len(self._numbered_keys(key_env)) + 1)]
+        else:
+            kids = [f"key::{key_env}"]
+        key_wait = min((max(left(k), left(f"{k}::{model}")) for k in kids), default=0.0)
+        return max(left(f"{provider}::{model}"), key_wait)
 
     def _call(self, provider: str, model: str, messages: list[dict],
              tools: list[dict] | None = None,
@@ -1915,6 +1962,7 @@ class Brain:
                              if (c["provider"], c["model"]) != avoid]
 
         n = len(ordered_chain)
+        cut_hit: tuple | None = None  # (отговор, usage, запис) на първия отрязан tool_call
         if n > 0:
             # ВИНАГИ отгоре надолу, прескачайки временно изчерпаните.
             #
@@ -1943,18 +1991,24 @@ class Brain:
                 # на чиста инсталация).
                 only_unconfigured = True
                 sent_any = False  # тръгнала ли е поне една истинска заявка
+                # Нов кръг има смисъл само след грешка, която може да мине:
+                # HTTP_TRUNCATED не слага cooldown и същата заявка се реже пак.
+                retry_useful = False
+                cooled: list[tuple[str, str]] = []  # пропуснати заради cooldown
                 for step in range(n):
                     attempt = ordered_chain[step]
                     prov, model = attempt["provider"], attempt["model"]
                     key = f"{prov}::{model}"
                     if _is_exhausted(key):
                         only_unconfigured = False
+                        cooled.append((prov, model))
                         continue  # временно изчерпан → пропускаме
                     use_tools = tools if (tools and attempt.get("supports_tools")) else None
                     msgs = messages if use_tools else messages_notools
                     t0 = time.time()
                     self._attempt_id = (prov, model)
                     self._usage_attempt = None
+                    self._cut_reply = None
                     try:
                         try:
                             raw_text, tool_calls = self._call(prov, model, msgs, tools=use_tools)
@@ -1989,6 +2043,7 @@ class Brain:
                     except requests.exceptions.RequestException as e:
                         only_unconfigured = False
                         sent_any = True
+                        retry_useful = True
                         last_error = f"мрежа: {e}"
                         self._fail_count += 1
                         self._record_stat(prov, time.time() - t0, False)
@@ -2003,8 +2058,14 @@ class Brain:
                         synthetic = last_error.startswith("skip:") or "cooling down" in last_error
                         if not (last_error.startswith("skip:") and "configured" in last_error):
                             only_unconfigured = False
+                        if "cooling down" in last_error:
+                            cooled.append((prov, model))
                         if not synthetic:
                             sent_any = True
+                            if "HTTP_TRUNCATED" not in last_error:
+                                retry_useful = True
+                            elif cut_hit is None and getattr(self, "_cut_reply", None):
+                                cut_hit = (self._cut_reply, self._last_usage, attempt)
                             self._fail_count += 1
                             self._record_stat(prov, time.time() - t0, False)
                             # Отрязан/отказан отговор е платен — разходът се записва.
@@ -2033,23 +2094,38 @@ class Brain:
                 if only_unconfigured:
                     last_error = "нито един модел няма API ключ — пусни `genesis setup`"
                     break
+                if sent_any and not retry_useful:
+                    # Всяка изпратена заявка е отрязана на тавана (ревю
+                    # 2026-10-11): втори кръг е още веднъж цялата верига,
+                    # платена, след 8 s — със същия сигурен провал.
+                    break
                 if not sent_any:
                     # Кръг без нито една заявка — всичко е в cooldown или без
                     # ключ. Нов кръг помага само ако някой cooldown свършва
                     # по време на паузата (одит 2026-10-11: всички модели с
                     # ~290 s оставащи → 0 заявки, 8 s чакане и „неизвестна
                     # грешка“).
-                    now = time.time()
-                    soonest = min((exp for exp in _EXHAUSTED.values() if exp > now), default=None)
-                    wait = None if soonest is None else soonest - now
+                    wait = min((self._cooldown_left(p, m) for p, m in cooled), default=None)
+                    if wait is not None:
+                        last_error = (f"всички модели са в cooldown "
+                                      f"(най-рано след {math.ceil(wait)} s)")
                     if wait is None or wait > _ROUND_PAUSE_S:
-                        if wait is not None:
-                            last_error = (f"всички модели са в cooldown "
-                                          f"(най-рано след {math.ceil(wait)} s)")
                         break
                 if round_i + 1 < rounds:
                     print("  [Brain] Всички облачни модели заети/изчерпани, кратка пауза и нов кръг...")
                     time.sleep(_ROUND_PAUSE_S)
+
+        if cut_hit is not None:
+            # Файл, по-голям от тавана на ВСЕКИ модел (ревю 2026-10-11): преди
+            # F4 отрязаният WRITE_FILE стигаше до цикъла с „Невалидни
+            # аргументи“ и моделът можеше да раздели записа; с HTTP_TRUNCATED
+            # ходът свършваше с „Error“ след 2 кръга × веригата. Връща се
+            # първият отрязан call — локалният модел (без native tools, по-малък
+            # таван) няма да напише същия файл цял.
+            (raw_text, tool_calls), usage, self.current = cut_hit
+            print("  [Brain] ✂ всеки модел отряза tool_call на тавана → към цикъла")
+            return type("Obj", (object,), {"raw_text": raw_text, "code": "",
+                                           "usage": usage, "tool_calls": tool_calls})
 
         # ПОСЛЕДНА РЕЗЕРВА: локалният собствен мозък — само ако облакът напълно
         # отказа (или изобщо няма конфигурирани облачни модели).

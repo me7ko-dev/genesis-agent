@@ -27,6 +27,7 @@ CONFIRM/BLOCKED бариерата) и се записва в genesis_agent.memo
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import stat
@@ -1558,8 +1559,17 @@ def dispatch_tool_call(name: str, arguments) -> str:
     if isinstance(arguments, str):
         try:
             arguments = load_tool_arguments(arguments)
-        except (ValueError, TypeError):
-            return f"[{name}] Невалидни аргументи (не са валиден JSON): {arguments[:200]}"
+        except (ValueError, TypeError) as e:
+            msg = f"[{name}] Невалидни аргументи (не са валиден JSON): {arguments[:200]}"
+            # JSON, свършил посред низ/обект, е отрязан на изходния таван
+            # (ревю 2026-10-11): Brain го връща, щом го отреже всеки модел, и
+            # без тази подсказка моделът пращаше същия голям запис пак.
+            if isinstance(e, json.JSONDecodeError) and (
+                    e.msg.startswith("Unterminated string") or e.pos >= len(arguments.rstrip())):
+                msg += ("\nАргументите са отрязани — по-дълги са от изходния таван на "
+                        "модела. Раздели записа: по-малки файлове или WRITE_FILE с "
+                        "началото и EDIT_FILE за останалото.")
+            return msg
     if not isinstance(arguments, dict):
         arguments = {}
     blocked = _before_tool(name, arguments)

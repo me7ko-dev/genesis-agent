@@ -237,6 +237,45 @@ def test_complete_tool_call_arguments_with_length_are_still_accepted(monkeypatch
     assert [m for m, _ in seen] == ["A"] and r.tool_calls
 
 
+def test_a_whole_call_with_a_regex_escape_and_length_is_accepted(monkeypatch) -> None:
+    """Ревю 2026-10-11: `"\\d{4}"` в регекс код е невалиден JSON escape, който
+    цикълът поправя (load_tool_arguments); с finish_reason=length plain
+    json.loads го обявяваше за отрязан и ходът падаше към следващия модел."""
+    monkeypatch.setattr(brain, "_load_chain", lambda: chain(("groq", "A"), ("nvidia", "C")))
+    monkeypatch.setenv("GROQ_API_KEY", "g")
+    monkeypatch.setenv("NVIDIA_API_KEY", " n")
+    args = '{"path": "a.py", "content": "import re\\nYEAR = re.compile(r\\"\\d{4}\\")\\n"}'
+    tc = [{"id": "c1", "type": "function", "function": {"name": "WRITE_FILE", "arguments": args}}]
+    seen = _route(monkeypatch, lambda p: ok(None, tool_calls=tc, finish="length"))
+    r = brain.Brain(use_local=False).complete([{"role": "user", "content": "x"}], tools=_TOOLS)
+    assert [m for m, _ in seen] == ["A"] and r.tool_calls
+
+
+def test_a_write_cut_on_every_model_reaches_the_loop_after_one_pass(monkeypatch) -> None:
+    """Ревю 2026-10-11: файл, по-голям от тавана на ВСИЧКИ модели, правеше
+    2 кръга × цялата верига (4 платени заявки), 8 s пауза и „Error: …
+    HTTP_TRUNCATED“. Отрязаният call стига до цикъла след един кръг."""
+    monkeypatch.setattr(brain, "_load_chain", lambda: chain(("groq", "A"), ("nvidia", "C")))
+    monkeypatch.setenv("GROQ_API_KEY", "g")
+    monkeypatch.setenv("NVIDIA_API_KEY", " n")
+    slept: list = []
+    monkeypatch.setattr(brain.time, "sleep", slept.append)
+    cut = json.dumps({"path": "big.py", "content": "x = 1\n" * 50})[:120]
+
+    def handler(p):
+        tc = [{"id": "c1", "type": "function", "function": {"name": "WRITE_FILE", "arguments": cut}}]
+        return ok(None, tool_calls=tc, finish="length",
+                  usage={"prompt_tokens": 3000, "completion_tokens": 4096})
+
+    seen = _route(monkeypatch, handler)
+    rows = _usage_rows(monkeypatch)
+    r = brain.Brain(use_local=False).complete([{"role": "user", "content": "напиши big.py"}], tools=_TOOLS)
+    assert [m for m, _ in seen] == ["A", "C"] and slept == []
+    assert r.tool_calls and r.tool_calls[0]["function"]["arguments"] == cut
+    assert not r.raw_text.startswith("Error:")
+    assert rows == [("A", 4096), ("C", 4096)]   # всеки отрязан отговор е платен веднъж
+
+
 def test_an_empty_but_paid_reply_is_recorded_in_the_budget(monkeypatch) -> None:
     monkeypatch.setattr(brain, "_load_chain", lambda: chain(("groq", "A"), ("nvidia", "C")))
     monkeypatch.setenv("GROQ_API_KEY", "g")
@@ -354,6 +393,48 @@ def test_a_cooldown_ending_within_the_pause_still_gets_the_second_round(monkeypa
     assert _slept == [8]
 
 
+@pytest.mark.parametrize("unrelated", ["openrouter::other", "groq::small",
+                                       "key::OPENROUTER_API_KEY#2::x", "key::GROQ_API_KEY#1::A"])
+def test_a_cooldown_outside_this_chain_does_not_buy_a_second_round(monkeypatch, _slept,
+                                                                   unrelated) -> None:
+    """Ревю 2026-10-11: „най-рано“ се смяташе по ЦЕЛИЯ _EXHAUSTED — чужд модел,
+    лекият модел или (ключ#n, модел), който веригата не ползва (тук ключът е
+    един), даваха 8 s пауза и празен втори кръг с „неизвестна грешка“."""
+    clock = [1_000_000.0]
+    monkeypatch.setattr(brain.time, "time", lambda: clock[0])
+    monkeypatch.setattr(brain.time, "sleep", lambda s: (_slept.append(s), clock.__setitem__(0, clock[0] + s)))
+    for k in ("groq::A", "nvidia::C"):
+        brain._EXHAUSTED[k] = clock[0] + 290
+    brain._EXHAUSTED[unrelated] = clock[0] + 3
+    seen = _route(monkeypatch, lambda p: ok("x"))
+    r = brain.Brain(use_local=False).complete([{"role": "user", "content": "hi"}])
+    assert seen == [] and _slept == []
+    assert "cooldown" in r.raw_text and "неизвестна грешка" not in r.raw_text
+
+
+def test_a_key_cooldown_ending_within_the_pause_gets_the_second_round(monkeypatch, _slept) -> None:
+    clock = [1_000_000.0]
+    monkeypatch.setattr(brain.time, "time", lambda: clock[0])
+    monkeypatch.setattr(brain.time, "sleep", lambda s: (_slept.append(s), clock.__setitem__(0, clock[0] + s)))
+    brain._EXHAUSTED["key::GROQ_API_KEY"] = clock[0] + 3
+    brain._EXHAUSTED["nvidia::C"] = clock[0] + 290
+    _route(monkeypatch, lambda p: ok("от " + p["model"]))
+    assert brain.Brain(use_local=False).complete([{"role": "user", "content": "hi"}]).raw_text == "от A"
+    assert _slept == [8]
+
+
+def test_a_short_key_cooldown_does_not_hide_a_long_model_cooldown(monkeypatch, _slept) -> None:
+    clock = [1_000_000.0]
+    monkeypatch.setattr(brain.time, "time", lambda: clock[0])
+    monkeypatch.setattr(brain.time, "sleep", lambda s: (_slept.append(s), clock.__setitem__(0, clock[0] + s)))
+    brain._EXHAUSTED["key::GROQ_API_KEY"] = clock[0] + 3
+    for k in ("groq::A", "nvidia::C"):
+        brain._EXHAUSTED[k] = clock[0] + 290
+    seen = _route(monkeypatch, lambda p: ok("x"))
+    r = brain.Brain(use_local=False).complete([{"role": "user", "content": "hi"}])
+    assert seen == [] and _slept == [] and "cooldown" in r.raw_text
+
+
 def test_the_light_route_walks_the_chain_once(monkeypatch, _slept) -> None:
     import requests
 
@@ -463,12 +544,15 @@ def _ollama_tags(monkeypatch):
     from genesis_agent import model_router
     tags = FakeResp(200, {"models": [{"name": "qwen2.5-coder:7b"}, {"name": "qwen3:4b"},
                                      {"name": "llama3:latest"}]})
-    monkeypatch.setattr(brain.requests, "get", lambda *a, **kw: tags)
-    monkeypatch.setattr(model_router.requests, "get", lambda *a, **kw: tags)
+    probes: list = []
+    # brain.requests и model_router.requests са един и същ модул — една подмяна.
+    monkeypatch.setattr(brain.requests, "get", lambda *a, **kw: (probes.append(a), tags)[1])
     monkeypatch.setattr(model_router, "LOCAL_TIERS",
                         ["qwen2.5-coder:3b", "qwen2.5-coder:7b", "qwen2.5-coder:14b"])
     monkeypatch.setattr(brain, "_local_available", _REAL_LOCAL_AVAILABLE)
     monkeypatch.delenv("GENESIS_LOCAL_ONLY", raising=False)
+    monkeypatch.delenv("GENESIS_LOCAL_MODEL", raising=False)
+    return probes
 
 
 def test_a_missing_tag_of_an_installed_family_is_not_available(_ollama_tags) -> None:
@@ -488,4 +572,20 @@ def test_the_last_resort_is_an_installed_tier_not_a_missing_default(monkeypatch,
 def test_an_explicit_local_only_model_is_never_swapped(monkeypatch, _ollama_tags) -> None:
     monkeypatch.setattr(brain, "LOCAL_MODEL", "qwen3:14b")
     monkeypatch.setenv("GENESIS_LOCAL_ONLY", "1")
+    assert brain.Brain().local is None
+
+
+def test_brain_probes_ollama_once_when_the_default_model_is_missing(monkeypatch, _ollama_tags) -> None:
+    """Ревю 2026-10-11: _local_available и _installed_local_tier питаха
+    /api/tags по веднъж — при висящ Ollama всеки ход в чата чакаше 4 s, не 2 s."""
+    monkeypatch.setattr(brain, "LOCAL_MODEL", "qwen2.5-coder:3b")
+    assert brain.Brain().local == {"provider": "ollama_local", "model": "qwen2.5-coder:7b"}
+    assert len(_ollama_tags) == 1
+
+
+def test_an_explicitly_set_local_model_is_never_swapped(monkeypatch, _ollama_tags) -> None:
+    """GENESIS_LOCAL_MODEL, зададен от оператора, не се подменя тихо и извън
+    LOCAL_ONLY (ревю 2026-10-11) — сменя се само подразбиращият се модел."""
+    monkeypatch.setenv("GENESIS_LOCAL_MODEL", "qwen2.5-coder:14b")
+    monkeypatch.setattr(brain, "LOCAL_MODEL", "qwen2.5-coder:14b")
     assert brain.Brain().local is None
