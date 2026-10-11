@@ -6,6 +6,8 @@ BOM в прегледа преди WRITE_FILE, `\\r` в SEARCH_CODE, latin-1 ф�
 е мярката, с която rg трябва да съвпадне."""
 from __future__ import annotations
 
+import os
+
 import pytest
 
 import genesis_skills as gs
@@ -89,3 +91,15 @@ def test_write_preview_of_bom_file_shows_only_the_changed_line(ws):
                                                "content": content.replace("b = 1", "b = 2")})
         assert diff is not None
         assert _changed(diff) == ["-b = 1", "+b = 2"], diff
+
+
+# ── `\r` в SEARCH_CODE ───────────────────────────────────────────────────────
+
+def test_search_finds_carriage_returns(ws, engine):
+    (ws / "win.bat").write_bytes(b"@echo off\r\nexit /b 0\r\n")
+    (ws / "unix.sh").write_bytes(b"echo hi\nexit 0\n")
+    hits = repo_map.search_code(r"\r$", ws)
+    assert sorted({os.path.basename(h.path) for h in hits}) == ["win.bat"]
+    assert [h.line for h in hits] == [1, 2]
+    # `$` пред CRLF продължава да работи (вълна 2).
+    assert [h.line for h in repo_map.search_code(r"off$", ws)] == [1]

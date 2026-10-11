@@ -148,6 +148,7 @@ def _search_python(root: Path, pattern: str, glob: str | None,
     except re.error as e:
         raise ValueError(f"невалиден regex: {e}") from e
     out: list[Match] = []
+    wants_cr = _wants_cr(pattern)
     # Без филтър по разширение — текст или двоичен се решава като при rg (NUL в
     # първите 8 KB). Одит 2026-10-11: без rg (обичайното на Windows лаптопа)
     # Dockerfile, Makefile, .ps1, .bat, .env.example, .xml, .mts, .cjs бяха
@@ -167,12 +168,28 @@ def _search_python(root: Path, pattern: str, glob: str | None,
             # `\r` от CRLF не е част от реда (ревю 2026-10-11): `return 1$`
             # не съвпадаше в CRLF файл и инструментът казваше „наистина го
             # няма“ — старият текстов режим го махаше. rg е с `--crlf`.
-            line = line.removesuffix("\r")
+            # Освен когато се търси самият `\r` (виж _wants_cr).
+            if not wants_cr:
+                line = line.removesuffix("\r")
             if rx.search(line):
                 out.append(Match(str(p), i, line.rstrip()[:_LINE_CLIP]))
                 if len(out) >= max_results:
                     return out
     return out
+
+
+def _wants_cr(pattern: str) -> bool:
+    r"""Търси ли шаблонът самия `\r` — напр. `\r$`, за да намери CRLF файловете.
+
+    Ревю 2026-10-11 (трета вълна), мерено с rg 14.1: с `--crlf` rg не
+    намира `\r` изобщо (и по средата на реда), а Python пътят го махаше от
+    края — `\r$` беше „няма съвпадения“ и в двата, а rg без флага го
+    намираше. За такъв шаблон `\r` остава част от реда и в двата пътя.
+    Широко нарочно: `\\r` (буквално `\` и `r`) също минава оттук — цената
+    е само, че в това търсене `$` пред CRLF е както преди вълна 2.
+    """
+    low = pattern.lower()
+    return "\r" in pattern or "\\r" in pattern or "\\x0d" in low or "\\015" in pattern
 
 
 def _search_ripgrep(root: Path, pattern: str, glob: str | None,
@@ -231,7 +248,7 @@ def _run_ripgrep(root: Path, pattern: str, glob: str | None,
                  max_results: int, encoding: str | None) -> list[Match] | None:
     cmd = ["rg", "--json", "--max-count", str(max_results),
            "--hidden", "--no-ignore", "--max-filesize", str(_MAX_FILE_BYTES),
-           "--crlf", "-e", pattern]
+           *([] if _wants_cr(pattern) else ["--crlf"]), "-e", pattern]
     if encoding:
         cmd += ["--encoding", encoding]
     for d in sorted(_SKIP_DIRS):
