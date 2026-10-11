@@ -1451,6 +1451,39 @@ def test_a_turn_through_app_run_task_and_the_gateway_lands_in_the_ledger(
     assert store.balance(1) == 100 * MICRO - first - late
 
 
+def test_settle_after_counts_from_the_real_token_not_from_before_the_network(
+        tmp_path, monkeypatch, fake_docker) -> None:
+    # Ревю 2026-10-11: settle_after се смяташе преди мрежата на задачата, а
+    # жетонът се прави след нея (network create + connect, до 60 s всяка).
+    # При 2×45 s бавен docker жетонът изтичаше 90 s след сметнатото — заявка,
+    # приета точно преди изтичането, пишеше разхода си след окончателната
+    # сметка и не се таксуваше (PoC: 0 реда :late вместо 1).
+    real = time.time
+    offset = [0.0]
+    monkeypatch.setattr(time, "time", lambda: real() + offset[0])
+
+    def slow_docker(*args: str, timeout: float = 60) -> Any:
+        if args[:2] in (("network", "create"), ("network", "connect")):
+            offset[0] += 45                    # под 60 s таймаута на _docker
+        return fake_docker(*args, timeout=timeout)
+    monkeypatch.setattr(launch, "_docker", slow_docker)
+    secret = "s" * 40
+    usage = tmp_path / "usage.jsonl"
+    shared = gw.Gateway(secret, {"GROQ_API_KEY": "k"}, gw.Ledger(usage), opener=_upstream([]))
+    container = _Container(shared, secret, [])
+    monkeypatch.setattr(launch.subprocess, "Popen", container)
+    store = Store(tmp_path / "web.db")
+    store.add_user("ana@example.com", PASSWORD)
+    store.add_entry(1, "admin:start", "grant", 100 * MICRO)
+    app = web.App(store, tmp_path / "jobs", secure_cookie=False, prices=_prices(),
+                  gateway=launch.Gateway(secret, usage, ("GROQ_API_KEY",)))
+    turn = app.start_turn(ANA, store.new_chat(1, "t"), "x")
+    _wait_turn(store, turn)
+    app.pool.shutdown(wait=True)
+    (row,) = store.unsettled()
+    assert row["settle_after"] >= container.seen["grant"].expires + billing.LATE_MARGIN
+
+
 def test_the_charge_reads_from_where_the_gateway_file_ended_before_the_turn(
         tmp_path, monkeypatch) -> None:
     # Деплоят чете разхода от usage_size() преди задачата (1M реда — 3.3 s →

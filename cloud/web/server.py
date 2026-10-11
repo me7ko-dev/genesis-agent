@@ -399,17 +399,24 @@ class App:
                                    error="сървърът спря по време на задачата — пусни я пак")
             return
         self.store.set_status(turn_id, "running")
+        on_token: Callable[[int], None] | None = None
         if prices is not None:
-            # Жетонът се прави сега (run_task) — оттук тече животът му.
+            # Жетонът се прави в run_task, след мрежата на задачата: дотогава —
+            # оценка оттук (не NULL: settle смята NULL за „не е тръгнал“), а
+            # on_token я сменя с истинското изтичане, преди контейнерът да
+            # тръгне (ревю 2026-10-11: бавен docker демон — до 2×60 s по-късно).
             self.store.job_started(turn_id, billing.settle_after(time.time(),
                                                                  launch.token_ttl(self.limits)))
+
+            def on_token(expires: int) -> None:
+                self.store.job_started(turn_id, expires + billing.LATE_MARGIN)
         ok, error, seconds = False, "", 0.0
         tokens: dict[str, int] = {}
         try:
             res = self.runner(text, workspace, limits=self.limits,
                               on_event=lambda e: self.store.add_event(turn_id, e),
                               env_file=self.env_file, runtime=self.runtime,
-                              gateway=gateway, name=job)
+                              gateway=gateway, name=job, on_token=on_token)
             ok, error, tokens, seconds = res.ok, res.error, res.tokens, res.seconds
             if not ok and self._stopping.is_set():
                 error = "сървърът спря по време на задачата — пусни я пак"

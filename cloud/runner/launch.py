@@ -299,7 +299,11 @@ def run_task(text: str, workspace: Path, *, limits: Limits | None = None,
              on_event: Callable[[dict[str, Any]], None] | None = None,
              env_file: str | None = None, runtime: str | None = None,
              image: str = IMAGE, gateway: Gateway | None = None,
-             egress_url: str = EGRESS_URL, name: str | None = None) -> Result:
+             egress_url: str = EGRESS_URL, name: str | None = None,
+             on_token: Callable[[int], None] | None = None) -> Result:
+    """`on_token(expires)` се вика с изтичането на жетона на шлюза, след като
+    е направен и преди контейнерът да тръгне — уеб сървърът смята от него кога
+    сметката на хода е окончателна (cloud/web/billing.settle_after)."""
     limits = limits or Limits()
     # Името може да дойде отвън: уеб сървърът го записва ПРЕДИ контейнера,
     # за да таксува хода и след срив посред него (2026-10-11). Мрежата е със
@@ -315,7 +319,7 @@ def run_task(text: str, workspace: Path, *, limits: Limits | None = None,
     try:
         res = _run_in(network, name, text, workspace, limits=limits, on_event=on_event,
                       env_file=env_file, runtime=runtime, image=image, gateway=gateway,
-                      egress_url=egress_url)
+                      egress_url=egress_url, on_token=on_token)
     finally:
         close_task_network(network, name, helper)
     res.container = name
@@ -325,13 +329,20 @@ def run_task(text: str, workspace: Path, *, limits: Limits | None = None,
 def _run_in(network: str, name: str, text: str, workspace: Path, *, limits: Limits,
             on_event: Callable[[dict[str, Any]], None] | None, env_file: str | None,
             runtime: str | None, image: str, gateway: Gateway | None,
-            egress_url: str) -> Result:
+            egress_url: str, on_token: Callable[[int], None] | None = None) -> Result:
     token = ""
     usage_start = 0
     if gateway is not None:
         usage_start = gw.usage_size(gateway.usage)
+        minted = time.time()
         token = gw.make_token(gateway.secret, name, budget=gateway.budget,
-                              ttl=token_ttl(limits))
+                              ttl=token_ttl(limits), now=minted)
+        if on_token is not None:
+            # Ревю 2026-10-11: уеб сървърът смяташе края на жетона от момента
+            # преди мрежата на задачата (две docker команди до 60 s всяка) —
+            # при 2×45 s жетонът изтичаше 90 s по-късно от сметнатото и късен
+            # разход оставаше нетаксуван. Сега — от истинското изтичане.
+            on_token(int(minted + token_ttl(limits)))
     argv = docker_args(name, workspace, text, limits=limits, env_file=env_file,
                        runtime=runtime, image=image, gateway=gateway, token=token,
                        network=network, egress_url=egress_url)
