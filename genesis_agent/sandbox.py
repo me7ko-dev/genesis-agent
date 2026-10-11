@@ -655,6 +655,15 @@ _CATASTROPHIC_ROOTS = frozenset({
 # не е. Затова се мери дълбочината, а не се изброяват имена.
 _HOME_PARENTS = ("/home/", "/users/", "/root/")
 
+# Нормализираните Windows корени (виж _normalise_target): `c:`, `c:/*`,
+# `c:/windows`, `c:/users`, `c:/program files (x86)`, `c:/users/<име>` и домът
+# през PowerShell/cmd (2026-10-11).
+_WIN_CRITICAL = re.compile(
+    r"^(?:[a-z]:(?:/\*?)?"
+    r"|[a-z]:/(?:windows|users|program files[^/]*|programdata)(?:/\*)?"
+    r"|[a-z]:/users/[^/]+(?:/\*)?"
+    r"|\$env:(?:userprofile|homepath|systemroot|windir)(?:/\*)?|%homedrive%%homepath%)$")
+
 _RECURSIVE_LONG = frozenset({"--recursive", "--force", "-R", "-r"})
 
 # Програми, които само подават командата нататък. Пропускат се, за да стигнем
@@ -717,6 +726,16 @@ def _normalise_target(token: str) -> str:
     """Токен от командния ред → сравним път. Маха кавичките и завършващия
     разделител; `~/` и `~` трябва да значат едно и също за проверката."""
     t = token.strip().strip("'\"")
+    # Дискът на Windows в четирите си изписвания — `C:\x`, `C:/x`, `/c/x` (Git
+    # Bash) и `/mnt/c/x` (WSL) — става едно: `c:/x`. Измерено 2026-10-11:
+    # `rm -rf /c/`, `rm -rf C:/` и `rm -rf /c/Users/ivan` бяха само CONFIRM, а
+    # RUN_CMD на Windows върви точно през Git Bash.
+    if re.match(r"^[A-Za-z]:(?:[\\/]|$)", t):
+        t = t.replace("\\", "/")
+    else:
+        drive = re.match(r"^/(?:mnt/)?([A-Za-z])(?=/|$)", t)
+        if drive:
+            t = f"{drive.group(1)}:{t[drive.end():] or '/'}"
     # `/home/./user` и `/home/user/../user` сочат същото място като
     # `/home/user`, но без канонизация се четат като по-дълбоки пътища и
     # проверката за дълбочина ги пропускаше.
@@ -858,6 +877,8 @@ def _critical_root_reason(target: str) -> str | None:
     for parent in _HOME_PARENTS:
         if norm.startswith(parent) and norm.count("/") == parent.count("/"):
             return f"цяла home директория ({target})"
+    if _WIN_CRITICAL.match(norm):
+        return f"критичен корен на Windows ({target})"
     return None
 
 
@@ -925,6 +946,69 @@ def _catastrophic_rm_reason(command: str) -> str | None:
                     return (f"рекурсивно триене на целите от тръбата, в която "
                             f"по-рано стои {upstream}")
     return None
+
+
+# ── Триене на Windows по смисъл, не по изписване (2026-10-11) ───────────────
+# Образците за Remove-Item искаха пълното име и пълните `-Recurse/-Force`
+# ПРЕДИ пътя, а del/rd — `/s` на cmd.exe. Измерено: `ri -r -fo C:\Users\ivan`,
+# `del -r -fo …`, `rd -r -fo C:\`, `erase -r -fo $env:USERPROFILE` и
+# `pwsh -c "ri -r -fo ~"` бяха SAFE — изпълняваха се и в режим „deny“.
+# PowerShell приема псевдонимите и всеки еднозначен префикс на параметъра,
+# затова глаголът тук е един, флаговете се четат по префикс където и да стоят,
+# а всяка цел минава през същата проверка за критичен корен като `rm`.
+_WIN_DELETE_VERBS = frozenset({"remove-item", "ri", "rm", "del", "erase", "rd", "rmdir"})
+_CMD_DELETE_VERBS = frozenset({"del", "erase", "rd", "rmdir"})
+_WIN_LAUNCHERS = frozenset({"powershell", "pwsh", "cmd"})
+_CMD_DELETE_FLAG = re.compile(r"^/[sqf]$", re.IGNORECASE)
+
+
+def _win_dangerous_flag(verb: str, flag: str) -> bool:
+    f = flag.lower()
+    if len(f) >= 2 and "-recurse".startswith(f):     # -r, -re, … -recurse
+        return True
+    if len(f) >= 3 and "-force".startswith(f):       # -fo … -force (`-f` е и -Filter)
+        return True
+    if f in ("--recursive", "--force"):
+        return True
+    if verb == "rm" and re.fullmatch(r"-[a-z]*[rf][a-z]*", f) is not None and len(f) <= 5:
+        return True                                   # `rm -rf` в Git Bash/PowerShell
+    return verb in _CMD_DELETE_VERBS and _CMD_DELETE_FLAG.match(f) is not None
+
+
+def _launcher_word(word: str) -> bool:
+    name = os.path.basename(word.replace("\\", "/")).lower()
+    return name.removesuffix(".exe") in _WIN_LAUNCHERS or word.startswith(("-", "/"))
+
+
+def _windows_delete_verdict(command: str) -> RiskVerdict:
+    """BLOCKED за рекурсивно/принудително триене на диск, системна папка или
+    дом; CONFIRM за всяко друго рекурсивно/принудително триене с тези глаголи."""
+    for statement in re.split(r"[;|&\n(){}]", command):
+        words = [w.strip("'\"`") for w in statement.split()]
+        words = [w for w in words if w]
+        for i, word in enumerate(words):
+            verb = word.lower()
+            if verb not in _WIN_DELETE_VERBS:
+                continue
+            # Глаголът е командата, не дума в текст: в началото на израза или
+            # след `powershell -c`, `cmd /c` и техните флагове.
+            before = words[:i]
+            if not all(_launcher_word(w) for w in before):
+                break
+            args = words[i + 1:]
+            if not any(a.startswith(("-", "/")) and _win_dangerous_flag(verb, a) for a in args):
+                break
+            for target in args:
+                if verb in _CMD_DELETE_VERBS and _CMD_DELETE_FLAG.match(target):
+                    continue
+                if target.startswith("-"):
+                    continue
+                reason = _critical_root_reason(target)
+                if reason:
+                    return RiskVerdict(RiskLevel.BLOCKED,
+                                       [f"рекурсивно/принудително триене ({word}) на {reason}"])
+            return RiskVerdict(RiskLevel.CONFIRM, [f"рекурсивно/принудително триене ({word})"])
+    return RiskVerdict(RiskLevel.SAFE, [])
 
 
 _INTERPRETERS = re.compile(r"^(python[\d.]*|py|pypy[\d.]*|perl|ruby|node|deno|bun)(\.exe)?$",
@@ -1031,6 +1115,9 @@ def assess_command(command: str, cwd: Path | None = None) -> RiskVerdict:
     structural = _catastrophic_rm_reason(command)
     if structural:
         return RiskVerdict(RiskLevel.BLOCKED, [structural])
+    windows_delete = _windows_delete_verdict(command)
+    if windows_delete.level == RiskLevel.BLOCKED:
+        return windows_delete
 
     for rx, why in _BLOCK_PATTERNS:
         if rx.search(command):
@@ -1042,6 +1129,9 @@ def assess_command(command: str, cwd: Path | None = None) -> RiskVerdict:
         if rx.search(command):
             reasons.append(why)
             level = RiskLevel.CONFIRM
+    if windows_delete.level == RiskLevel.CONFIRM and level < RiskLevel.CONFIRM:
+        reasons.extend(windows_delete.reasons)
+        level = RiskLevel.CONFIRM
     inline = _inline_code_reasons(command)
     if inline:
         reasons.extend(inline)
