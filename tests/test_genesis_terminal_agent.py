@@ -91,13 +91,14 @@ class TestRestoreSession:
 
     def test_system_message_survives_an_oversized_session(self) -> None:
         loaded = [{"role": "system", "content": "STALE PROMPT"}]
-        loaded += [{"role": "user", "content": f"msg{i}"} for i in range(100)]
+        n = gta._HISTORY_MAXLEN + 70
+        loaded += [{"role": "user", "content": f"msg{i}"} for i in range(n)]
         restored = gta._restore_session(loaded, "CURRENT PROMPT")
 
         assert len(restored) == gta._HISTORY_MAXLEN
         assert restored[0]["role"] == "system"
         # and it kept the most RECENT turns, not the oldest
-        assert restored[-1]["content"] == "msg99"
+        assert restored[-1]["content"] == f"msg{n - 1}"
 
     def test_the_current_prompt_replaces_the_saved_one(self) -> None:
         """Deliberate, and shared with the GUI via agent_core.restored_history:

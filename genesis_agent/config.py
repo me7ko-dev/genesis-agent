@@ -266,6 +266,17 @@ FRESH_TOOL_RESULTS: int = _int_env("GENESIS_FRESH_TOOL_RESULTS", 2)
 ELIDE_OLD_WRITES: int = _int_env("GENESIS_ELIDE_OLD_WRITES", 0)
 ELIDE_WRITE_ROUNDS: int = _int_env("GENESIS_ELIDE_WRITE_ROUNDS", 6, minimum=2)
 
+# Доставчик с prompt caching (Anthropic) получава историята САМО ДОПЪЛВАНА, като
+# Claude Code (2026-10-11): кешът е съвпадение по префикс, а свиването на още
+# един стар резултат и плъзгащият се с по едно прозорец сменяха префикса на
+# всеки рунд — bench egn-check с claude-opus-5: 218 849 от 315 468 входни токена
+# платени изцяло, $1.60 на пуск. Кеширан токен струва 0.1×, свит но изпратен
+# наново — 1×. Над CACHE_HISTORY_MAX_CHARS отпада наведнъж цяло парче от
+# CACHE_TRIM_CHUNK съобщения (не по едно), за да остане префиксът същият до
+# следващото парче.
+CACHE_HISTORY_MAX_CHARS: int = _int_env("GENESIS_CACHE_HISTORY_MAX_CHARS", 300_000)
+CACHE_TRIM_CHUNK: int = _int_env("GENESIS_CACHE_TRIM_CHUNK", 20, minimum=2)
+
 # Колко tool рунда има правото да направи агентът за ЕДНО съобщение, преди
 # цикълът да спре и да върне контрола. Това е предпазителят срещу зацикляне,
 # НЕ бюджет за работа — а на 8 беше точно бюджет: реална многостъпкова задача

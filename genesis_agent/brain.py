@@ -1455,8 +1455,17 @@ class Brain:
             # в средата на историята се променят между заявките. Кешът е
             # съвпадение по префикс — точка там щеше да се разминава почти
             # винаги и само да харчи запис в кеша.
+            # 1 час, не 5 минути (2026-10-11): между две съобщения на оператора
+            # минават повече от 5 минути, а записът за час струва 2× веднъж,
+            # не 1.25× при всяко връщане. По-дългият TTL трябва да е пред
+            # по-краткия — този е първият.
             params["system"] = [{"type": "text", "text": system,
-                                 "cache_control": {"type": "ephemeral"}}]
+                                 "cache_control": {"type": "ephemeral", "ttl": "1h"}}]
+        # Опашката на разговора — като Claude Code (2026-10-11): автоматичната
+        # точка стои на последния блок и се мести напред с всеки рунд, а
+        # complete() праща на native доставчика историята само допълвана
+        # (budget.cache_history) — следващият рунд чете от кеша всичко досегашно.
+        params["cache_control"] = {"type": "ephemeral"}
         if tools:
             params["tools"] = self._to_anthropic_tools(tools)
 
@@ -1884,7 +1893,11 @@ class Brain:
         # мисиите, ensemble, orchestrator. Историята на извикващия
         # остава пълна (budget_history не мутира входа); свива се само копието,
         # което тръгва по мрежата.
-        from genesis_agent.budget import budget_history
+        from genesis_agent.budget import budget_history, cache_history
+        # Native доставчикът (Anthropic) кешира по префикс: той получава
+        # историята само допълвана, без свиването на budget_history, което
+        # сменя средата ѝ на всеки рунд (виж config.CACHE_HISTORY_MAX_CHARS).
+        cache_messages = cache_history(messages)
         messages = budget_history(messages)
 
         last_error = "неизвестна грешка"
@@ -2028,6 +2041,8 @@ class Brain:
                         continue  # временно изчерпан → пропускаме
                     use_tools = tools if (tools and attempt.get("supports_tools")) else None
                     msgs = messages if use_tools else messages_notools
+                    if use_tools and prov in _NATIVE_PROVIDERS:
+                        msgs = cache_messages
                     t0 = time.time()
                     self._attempt_id = (prov, model)
                     self._usage_attempt = None

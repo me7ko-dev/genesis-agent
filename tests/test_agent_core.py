@@ -582,11 +582,12 @@ class TestRestoredHistory:
         assert out.maxlen == ac.HISTORY_MAXLEN
 
     def test_system_message_survives_an_oversized_session(self) -> None:
-        saved = [{"role": "user", "content": f"m{i}"} for i in range(100)]
+        n = ac.HISTORY_MAXLEN + 70
+        saved = [{"role": "user", "content": f"m{i}"} for i in range(n)]
         out = ac.restored_history(saved, "THE SYSTEM PROMPT")
         assert len(out) == ac.HISTORY_MAXLEN
         assert out[0] == {"role": "system", "content": "THE SYSTEM PROMPT"}
-        assert out[-1]["content"] == "m99"  # kept the most recent, not the oldest
+        assert out[-1]["content"] == f"m{n - 1}"  # kept the most recent, not the oldest
 
     def test_current_prompt_replaces_the_saved_one(self) -> None:
         """The system prompt is passed in rather than read from the file on
