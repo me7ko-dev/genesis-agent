@@ -14,7 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 
 import genesis_skills as gs
-from genesis_agent import chat_commands, mcp_client, mcp_oauth, paths
+from genesis_agent import chat_commands, hooks, mcp_client, mcp_oauth, paths
 
 
 def _browser(url: str) -> None:
@@ -37,6 +37,7 @@ def oauth(tmp_path, monkeypatch):
         spec = {"type": "http", "url": url, **({"headers": headers} if headers else {})}
         (Path(paths.GENESIS_HOME) / "mcp.json").write_text(
             json.dumps({"mcpServers": {"linear": spec}}), encoding="utf-8")
+        hooks.trust(Path(paths.GENESIS_HOME) / "mcp.json")  # операторът го е потвърдил
         return url, state
     yield start
     mcp_client.stop_all()

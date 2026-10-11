@@ -151,6 +151,7 @@ def test_a_home_mcp_server_does_not_import_a_module_planted_in_the_workspace(
         "planted": {"command": sys.executable, "args": ["-m", "planted_mcp_mod"]},
         "fake": {"command": sys.executable, "args": [str(_FAKE_MCP)]},
     }}), encoding="utf-8")
+    hooks.trust(home / "mcp.json")  # операторът го е потвърдил
     monkeypatch.setattr(gs, "_WORKSPACE", ws)
     mcp_client.workspace = ws
     lines = mcp_client.start_all(ws)
@@ -236,6 +237,7 @@ def test_a_read_only_mcp_tool_asks_before_a_secret_path(tmp_path, monkeypatch, c
     (home / "mcp.json").write_text(json.dumps({"mcpServers": {
         "fs": {"command": sys.executable, "args": [str(_FAKE_MCP), "fs"], "autoApprove": ["read_file"]},
     }}), encoding="utf-8")
+    hooks.trust(home / "mcp.json")  # операторът го е потвърдил
     monkeypatch.setattr(gs, "_WORKSPACE", ws)
     mcp_client.workspace = ws
     assert any("fs: 1 инструмента" in line for line in mcp_client.start_all(ws))

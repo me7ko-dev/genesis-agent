@@ -257,20 +257,23 @@ def handle(text: str, *, messages: Any, workspace: Path,
 def _hooks(rest: str, workspace: Path, out: Callable[[str], None],
            ask: Callable[[str], str]) -> Result:
     from genesis_agent import hooks
-    active, untrusted = hooks.configured(workspace)
     if rest.lower() == "trust":
-        target = hooks.project_file(workspace)
-        if not target.is_file():
-            out(f"Няма {target}.")
-            return Result()
-        _trust(target, workspace, [h.command for h in hooks._parse(target)],
-               "Тези команди ще се пускат на тази машина при работата на агента.", out, ask)
+        targets = _trust_targets(hooks.home_file(), hooks.project_file(workspace))
+        if not targets:
+            out(f"Няма {hooks.project_file(workspace)}.")
+        for target in targets:
+            _trust(target, workspace, [h.command for h in hooks._parse(target)],
+                   "Тези команди ще се пускат на тази машина при работата на агента.", out, ask)
         return Result()
+    active, untrusted = hooks.configured(workspace)
     if not active:
         out(f"Няма активни hooks. Файл: {_home() / 'hooks.json'} (твои, за всички проекти) или "
-            ".genesis/hooks.json в проекта (иска /hooks trust).")
+            ".genesis/hooks.json в проекта (и двата искат /hooks trust).")
     for h in active:
         out(f"{h.event:<17} {h.matcher or '*':<22} {h.command}")
+    home = hooks.home_file()
+    if home.is_file() and not hooks.is_trusted(home):
+        out(f"⚠ {home} не се пуска: {hooks.trust_problem(home)}. Прегледай го и /hooks trust.")
     if untrusted:
         out(f"⚠ {untrusted} съществува, но не е доверен — не се пуска. Прегледай го и /hooks trust.")
     return Result()
@@ -280,14 +283,15 @@ def _mcp(rest: str, workspace: Path, out: Callable[[str], None],
          ask: Callable[[str], str]) -> Result:
     from genesis_agent import mcp_client
     if rest.lower() == "trust":
-        target = mcp_client.project_file(workspace)
-        if not target.is_file():
-            out(f"Няма {target}.")
-            return Result()
-        if _trust(target, workspace,
-                  [f"{x.name}: {x.command} {' '.join(x.args)}".strip() for x in mcp_client._parse(target)],
-                  "Тези програми ще се пускат на тази машина като MCP сървъри.", out, ask):
-            out("/mcp restart ги пуска.")
+        targets = _trust_targets(mcp_client.home_file(), mcp_client.project_file(workspace))
+        if not targets:
+            out(f"Няма {mcp_client.project_file(workspace)}.")
+        for target in targets:
+            if _trust(target, workspace,
+                      [f"{x.name}: {x.command} {' '.join(x.args)}".strip()
+                       for x in mcp_client._parse(target)],
+                      "Тези програми ще се пускат на тази машина като MCP сървъри.", out, ask):
+                out("/mcp restart ги пуска.")
         return Result()
     if rest.lower() == "restart":
         for line in mcp_client.start_all(workspace) or ["Няма описани MCP сървъри."]:
@@ -336,6 +340,14 @@ def _mcp_login(verb: str, name: str, workspace: Path, out: Callable[[str], None]
 _MAX_TRUST_PREVIEW = 20000
 
 
+def _trust_targets(home: Path, project: Path) -> list[Path]:
+    """Какво да се потвърди: файлът на оператора, ако не е доверен (от
+    2026-10-11 и той иска подпис), и този на проекта, ако го има."""
+    from genesis_agent import hooks
+    targets = [home] if home.is_file() and not hooks.is_trusted(home) else []
+    return targets + ([project] if project.is_file() else [])
+
+
 def _trust(target: Path, workspace: Path, commands: list[str], warning: str,
            out: Callable[[str], None], ask: Callable[[str], str]) -> bool:
     """Shows the WHOLE file and what will run, then asks. Refuses a file that
@@ -343,7 +355,8 @@ def _trust(target: Path, workspace: Path, commands: list[str], warning: str,
     3000 characters and the last hook ran unseen (audit 2026-10-08)."""
     from genesis_agent import hooks
     from genesis_agent.project_instructions import _project_root
-    if not hooks.stays_in_project(target, _project_root(Path(workspace).resolve())):
+    if target.parent != _home() and not hooks.stays_in_project(
+            target, _project_root(Path(workspace).resolve())):
         out(f"❌ {target} води извън проекта (символна връзка) — не може да бъде доверен.")
         return False
     text = target.read_text(encoding="utf-8", errors="replace")

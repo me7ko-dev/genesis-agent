@@ -4,9 +4,11 @@ way Claude Code uses them: GitHub, databases, Slack, a browser, anything that
 ships an MCP server.
 
     ~/.genesis/mcp.json      — the operator's servers, every project
-    <project>/.mcp.json      — the project's (Claude Code's file, same format);
-                               only after `/mcp trust`, pinned to its content:
-                               starting a server is running a program.
+    <project>/.mcp.json      — the project's (Claude Code's file, same format)
+
+Both only after `/mcp trust`, pinned to the file's content: starting a server
+is running a program (the home file too since 2026-10-11 — a sandboxed
+command could write it).
 
     {"mcpServers": {
       "github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"],
@@ -578,6 +580,10 @@ def _neutral_cwd() -> Path:
     return _NEUTRAL
 
 
+def home_file() -> Path:
+    return _home() / "mcp.json"
+
+
 def project_file(ws: Path | None = None) -> Path:
     from genesis_agent.project_instructions import _project_root
     return _project_root(Path(ws or _workspace()).resolve()) / ".mcp.json"
@@ -652,7 +658,11 @@ def _parse(path: Path) -> list[Server]:
 def configured(ws: Path | None = None) -> tuple[list[Server], Path | None]:
     """The servers in force (not started), and the project file when it is not trusted."""
     from genesis_agent import hooks
-    servers = _parse(_home() / "mcp.json")
+    # И сървърите на оператора — само с подпис от /mcp trust (одит 2026-10-11):
+    # команда от sandbox-а записваше ~/.genesis/mcp.json и програмата ѝ
+    # тръгваше при следващия чат, извън sandbox-а.
+    home = home_file()
+    servers = _parse(home) if home.is_file() and hooks.is_trusted(home) else []
     project = project_file(ws)
     untrusted = None
     if project.is_file():
@@ -674,6 +684,7 @@ def start_all(ws: Path | None = None) -> list[str]:
     chat start its 20 s, one after another — audit 2026-10-08); returns lines
     for the operator."""
     global _started, last_start
+    from genesis_agent import hooks
     stop_all()
     _started = True
     lines: list[str] = []
@@ -705,6 +716,9 @@ def start_all(ws: Path | None = None) -> list[str]:
             lines.append(f"⚠ MCP {srv.name}: {srv.error}")
         else:
             lines.append(f"🔌 MCP {srv.name}: {len(srv.tools)} инструмента")
+    home = home_file()
+    if home.is_file() and not hooks.is_trusted(home):
+        lines.append(f"⚠ {home} не се пуска: {hooks.trust_problem(home)}. Прегледай го и /mcp trust.")
     if untrusted:
         lines.append(f"⚠ {untrusted} има MCP сървъри, но не е доверен — прегледай го и /mcp trust.")
     last_start = lines

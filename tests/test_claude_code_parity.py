@@ -184,6 +184,8 @@ def _py(code: str) -> str:
 def _write_hooks(path: Path, table: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"hooks": table}), encoding="utf-8")
+    if path == hooks.home_file():
+        hooks.trust(path)  # файлът на оператора — и той иска /hooks trust (2026-10-11)
 
 
 class TestHooks:
@@ -341,6 +343,7 @@ def mcp(repo, monkeypatch):
     (_home() / "mcp.json").write_text(json.dumps({"mcpServers": {
         "fake": {"command": sys.executable, "args": [str(FAKE_MCP)],
                  "env": {"PYTHONIOENCODING": "cp1252"}}}}), encoding="utf-8")
+    hooks.trust(_home() / "mcp.json")  # операторът го е потвърдил
     lines = mcp_client.start_all()
     assert any("2 инструмента" in line for line in lines), lines
     yield mcp_client
@@ -372,6 +375,7 @@ class TestMCP:
         (_home() / "mcp.json").write_text(json.dumps({"mcpServers": {"fake": {
             "command": sys.executable, "args": [str(FAKE_MCP)],
             "autoApprove": ["create_issue"]}}}), encoding="utf-8")
+        hooks.trust(_home() / "mcp.json")  # операторът го е потвърдил
         mcp_client.start_all()
         monkeypatch.setattr(sandbox._POLICY, "mode", "deny")
         assert "create_issue done x" in gs.dispatch_tool_call("mcp__fake__create_issue", {"title": "x"})
@@ -399,6 +403,7 @@ class TestMCP:
         from genesis_agent import mcp_client
         (_home() / "mcp.json").write_text(json.dumps({"mcpServers": {
             "broken": {"command": "definitely-not-a-command-xyz"}}}), encoding="utf-8")
+        hooks.trust(_home() / "mcp.json")  # операторът го е потвърдил
         assert any("broken" in line and "не е намерен" in line for line in mcp_client.start_all())
         assert "Няма такъв" in gs.dispatch_tool_call("mcp__broken__x", {})
 
@@ -666,6 +671,7 @@ def _mcp_config(servers: dict) -> None:
         spec[name] = value if isinstance(value, dict) else {
             "command": sys.executable, "args": [str(FAKE_MCP), *([value] if value else [])]}
     (_home() / "mcp.json").write_text(json.dumps({"mcpServers": spec}), encoding="utf-8")
+    hooks.trust(_home() / "mcp.json")  # операторът го е потвърдил
 
 
 class TestMCPAudit:
