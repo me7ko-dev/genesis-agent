@@ -81,6 +81,10 @@ class Result:
     tokens: dict[str, int] = field(default_factory=dict)
     error: str = ""
     events: list[dict[str, Any]] = field(default_factory=list)
+    # Името на задачата в шлюза и разходът по модели (с шлюз) — по тях
+    # cloud/web/billing смята цената (2026-10-11).
+    job: str = ""
+    usage: list[dict[str, Any]] = field(default_factory=list)
 
 # Най-дългият ред събитие от контейнера, който се чете (1 MiB).
 _MAX_EVENT_LINE = 1 << 20
@@ -189,9 +193,12 @@ def prepare_workspace(workspace: Path) -> None:
 def run_task(text: str, workspace: Path, *, limits: Limits | None = None,
              on_event: Callable[[dict[str, Any]], None] | None = None,
              env_file: str | None = None, runtime: str | None = None,
-             image: str = IMAGE, gateway: Gateway | None = None) -> Result:
+             image: str = IMAGE, gateway: Gateway | None = None,
+             name: str | None = None) -> Result:
     limits = limits or Limits()
-    name = f"genesis-task-{uuid.uuid4().hex[:12]}"
+    # Името може да дойде отвън: уеб сървърът го записва ПРЕДИ контейнера,
+    # за да таксува хода и след срив посред него (2026-10-11).
+    name = name or f"genesis-task-{uuid.uuid4().hex[:12]}"
     prepare_workspace(workspace)
     token = ""
     if gateway is not None:
@@ -275,16 +282,17 @@ def run_task(text: str, workspace: Path, *, limits: Limits | None = None,
     seconds = round(time.monotonic() - t0, 1)
     # С шлюз сметката е от шлюза — контейнерът може да каже каквото си иска.
     billed = gw.usage_for(gateway.usage, name) if gateway is not None else None
+    usage = gw.usage_lines(gateway.usage, name) if gateway is not None else []
     if timed_out.is_set():
         return Result(False, True, code, seconds, error=f"прекъснато след {limits.seconds} s",
-                      tokens=billed or {}, events=events)
+                      tokens=billed or {}, events=events, job=name, usage=usage)
     if done is None:
         return Result(False, False, code, seconds,
                       error=(stderr.strip().splitlines() or ["контейнерът спря без резултат"])[-1][:500],
-                      tokens=billed or {}, events=events)
+                      tokens=billed or {}, events=events, job=name, usage=usage)
     return Result(bool(done.get("ok")) and code == 0, False, code, seconds,
                   tokens=billed if billed is not None else dict(done.get("tokens") or {}),
-                  error=str(done.get("error") or ""), events=events)
+                  error=str(done.get("error") or ""), events=events, job=name, usage=usage)
 
 
 def main(argv: list[str] | None = None) -> int:

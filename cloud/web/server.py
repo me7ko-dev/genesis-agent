@@ -33,6 +33,7 @@ import stat
 import sys
 import threading
 import time
+import uuid
 import zipfile
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -42,7 +43,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
+from cloud.gateway import gateway as gw
 from cloud.runner import launch
+from cloud.web import billing
 from cloud.web.store import SESSION_SECONDS, Store
 
 STATIC = Path(__file__).with_name("static")
@@ -82,7 +85,11 @@ class App:
                  workers: int = 2, limits: launch.Limits | None = None,
                  env_file: str | None = None, runtime: str | None = None,
                  secure_cookie: bool = True, trust_proxy: bool | str = False,
-                 gateway: launch.Gateway | None = None) -> None:
+                 gateway: launch.Gateway | None = None,
+                 prices: billing.Prices | None = None) -> None:
+        if prices is not None and gateway is None:
+            # Без шлюза токените ги казва кодът в контейнера (2026-10-11).
+            raise ValueError("плащането иска шлюза (--gateway-usage)")
         self.store = store
         self.jobs_dir = jobs_dir
         self.runner = runner
@@ -92,11 +99,18 @@ class App:
         self.secure_cookie = secure_cookie
         self.trust_proxy = trust_proxy
         self.gateway = gateway
+        self.prices = prices          # None = без плащане
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="turn")
         self._failures: dict[str, list[float]] = {}
         self._lock = threading.Lock()
         self._downloading: set[str] = set()
         store.fail_unfinished("сървърът беше рестартиран по време на задачата")
+        if prices is not None and gateway is not None:
+            # Ходове без такса от предишния живот: срив между края и таксата,
+            # или прекъснати от рестарта (горе) — шлюзът ги е таксувал.
+            charged = billing.reconcile(store, prices, gateway.usage)
+            if charged:
+                print(f"сметка: таксувани {charged} хода от преди рестарта", file=sys.stderr)
 
     # ── вход ────────────────────────────────────────────────────────────────
     def _recent_failures(self, key: str) -> list[float]:
@@ -190,21 +204,39 @@ class App:
             if self.store.busy(user_id=user["id"]) or chat_id in self._downloading:
                 return None
             turn_id = self.store.add_turn(chat_id, text)
-        self.pool.submit(self._run, turn_id, text, self.workspace(user["id"], chat_id))
+            job = f"genesis-task-{uuid.uuid4().hex[:12]}"
+            if self.prices is not None:
+                # Името на задачата в шлюза — ПРЕДИ контейнера: срив посред хода
+                # не губи сметката, reconcile при старт я намира по него.
+                self.store.set_job(turn_id, job)
+        self.pool.submit(self._run, turn_id, user["id"], text,
+                         self.workspace(user["id"], chat_id), job, self.gateway)
         return turn_id
 
-    def _run(self, turn_id: int, text: str, workspace: Path) -> None:
+    def _run(self, turn_id: int, user_id: int, text: str, workspace: Path, job: str,
+             gateway: launch.Gateway | None) -> None:
         self.store.set_status(turn_id, "running")
         try:
             res = self.runner(text, workspace, limits=self.limits,
                               on_event=lambda e: self.store.add_event(turn_id, e),
                               env_file=self.env_file, runtime=self.runtime,
-                              gateway=self.gateway)
+                              gateway=gateway, name=job)
             self.store.finish_turn(turn_id, ok=res.ok, error=res.error,
                                    tokens=res.tokens, seconds=res.seconds)
         except Exception as e:
             self.store.finish_turn(turn_id, ok=False, error=f"{type(e).__name__}: {e}",
                                    tokens={}, seconds=0.0)
+        if self.prices is not None and gateway is not None:
+            # И провален ход се таксува: шлюзът вече е платил токените му.
+            # Сметката е от файла на шлюза по името на задачата — същият път
+            # като reconcile, независимо какво е върнал контейнерът. Грешка тук
+            # не проваля хода: reconcile при следващия старт го таксува.
+            try:
+                billing.charge_turn(self.store, self.prices, user_id, turn_id,
+                                    gw.usage_lines(gateway.usage, job))
+            except Exception as e:
+                print(f"сметка: ход {turn_id} не е таксуван: {type(e).__name__}: {e}",
+                      file=sys.stderr)
 
 
 # ── файлове: кодът в контейнера е чужд, всичко от /work е недоверено ────────
@@ -321,6 +353,14 @@ def zip_files(workspace: Path) -> bytes | None:
 
 
 # ── HTTP ─────────────────────────────────────────────────────────────────────
+
+def _with_cost(turn: dict[str, Any]) -> dict[str, Any]:
+    """`cost` (кредити като низ) само ако ходът е таксуван; µc не излизат."""
+    micro = turn.pop("cost_micro", None)
+    if micro is not None:
+        turn["cost"] = billing.fmt_credits(micro)
+    return turn
+
 
 _CHAT = re.compile(r"^/api/chats/([0-9a-f]{32})$")
 _TURNS = re.compile(r"^/api/chats/([0-9a-f]{32})/turns$")
@@ -452,6 +492,7 @@ class Handler(BaseHTTPRequestHandler):
             turns = store.turns(chat["id"])
             for t in turns:
                 t["events"] = store.events(t["id"])
+                _with_cost(t)
             self._json(200, {**chat, "turns": turns})
         elif m := _EVENTS.match(path):
             turn = store.turn(user["id"], int(m[1]))
@@ -462,9 +503,10 @@ class Handler(BaseHTTPRequestHandler):
                 after = int(parse_qs(url.query).get("after", ["0"])[0])
             except ValueError:
                 after = 0
-            self._json(200, {"status": turn["status"], "error": turn["error"],
-                             "tokens": turn["tokens"], "seconds": turn["seconds"],
-                             "events": store.events(turn["id"], after)})
+            self._json(200, _with_cost({
+                "status": turn["status"], "error": turn["error"], "tokens": turn["tokens"],
+                "seconds": turn["seconds"], "events": store.events(turn["id"], after),
+                "cost_micro": turn.get("cost_micro")}))
         elif (m := _FILES.match(path)) or (m := _ZIP.match(path)) or (m := _FILE.match(path)):
             self._files(user, m)
         else:
@@ -630,6 +672,10 @@ def main(argv: list[str] | None = None) -> int:
                      help="IP от последния адрес в X-Forwarded-For (зад Caddy/nginx)")
     srv.add_argument("--trust-cloudflare", action="store_true",
                      help="IP от CF-Connecting-IP (само зад Cloudflare Tunnel)")
+    srv.add_argument("--billing", action="store_true",
+                     help="плащане с кредити (иска --gateway-usage)")
+    srv.add_argument("--prices", type=Path, default=billing.PRICES,
+                     help="цените (JSON), по подразбиране cloud/web/prices.json")
     a = p.parse_args(argv)
     # README-то казва „никога и двете“, а кодът приемаше и вярваше на
     # CF-Connecting-IP — зад Caddy клиентът си го пише сам и спирачката на
@@ -648,6 +694,17 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"{a.email.strip().lower()}  парола: {password}")
         return 0
+    prices = None
+    if a.billing:
+        if not a.gateway_usage:
+            print("плащането иска --gateway-usage: без шлюза токените ги казва кодът в контейнера",
+                  file=sys.stderr)
+            return 2
+        try:
+            prices = billing.load_prices(a.prices)
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 2
     gateway = None
     if a.gateway_usage:
         if not a.env_file:
@@ -656,7 +713,8 @@ def main(argv: list[str] | None = None) -> int:
         gateway = launch.Gateway.from_keys_file(Path(a.env_file), a.gateway_usage)
     app = App(store, a.jobs, workers=a.workers, limits=launch.Limits(seconds=a.seconds),
               env_file=a.env_file, runtime=a.runtime, secure_cookie=not a.insecure_cookie,
-              trust_proxy="cloudflare" if a.trust_cloudflare else a.trust_proxy, gateway=gateway)
+              trust_proxy="cloudflare" if a.trust_cloudflare else a.trust_proxy, gateway=gateway,
+              prices=prices)
     server = make_server(app, a.host, a.port)
     print(f"genesis web: http://{a.host}:{server.server_address[1]}", flush=True)
     with contextlib.suppress(KeyboardInterrupt):

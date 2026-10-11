@@ -16,7 +16,9 @@ from typing import Any
 
 import pytest
 
+from cloud.gateway import gateway as gw
 from cloud.runner import launch
+from cloud.web import billing
 from cloud.web import server as web
 from cloud.web import store as store_mod
 from cloud.web.store import MICRO, Store
@@ -296,3 +298,294 @@ def test_signup_needs_same_origin(plain) -> None:
                                                      "password": PASSWORD},
                              headers={"Origin": "https://evil.example"})
     assert code_ == 403
+
+
+# ── S3: цени ─────────────────────────────────────────────────────────────────
+
+_PRICES: dict[str, Any] = {
+    "default": {"input": 300, "cached": 75, "output": 1200},
+    "models": {"groq/*": {"input": 80, "cached": 40, "output": 100},
+               "groq/exact": {"input": 10, "cached": 5, "output": 20}},
+    "per_turn": 2, "min_turn_tokens": 20000,
+    "packs": {"p5": {"credits": 500, "amount_cents": 500, "currency": "eur",
+                     "stripe_price": "price_p5"}},
+    "plans": {"basic": {"credits": 1500, "amount_cents": 1500, "currency": "EUR",
+                        "stripe_price": "price_basic"}},
+}
+
+
+def _prices(**over: Any) -> billing.Prices:
+    return billing.parse_prices({**json.loads(json.dumps(_PRICES)), **over})
+
+
+def test_the_shipped_prices_load_without_tomllib() -> None:
+    p = billing.load_prices()
+    assert p.max_rate == 1200 and p.per_turn == 2
+    # Измерената задача (5 536 токена, 2026-09-25) по default: ≈ 3.7 кредита ≈ 0.04 EUR.
+    cost = billing.turn_cost(p, [{"provider": "x", "model": "y", "prompt_tokens": 5536,
+                                  "completion_tokens": 0, "total_tokens": 5536}])
+    assert billing.fmt_credits(cost) == "3.66"
+
+
+@pytest.mark.parametrize("change", [
+    {"models": {"groq/*": {"input": 80, "cached": 40, "output": 1201}}},   # над default
+    {"default": {"input": 300.0, "cached": 75, "output": 1200}},           # float
+    {"default": {"input": True, "cached": 75, "output": 1200}},            # bool
+    {"default": {"input": -1, "cached": 75, "output": 1200}},
+    {"models": {"acme/*": {"input": 1, "cached": 1, "output": 1}}},        # непознат доставчик
+    {"models": {"groq": {"input": 1, "cached": 1, "output": 1}}},
+    {"packs": {"p5": {"credits": 0, "amount_cents": 500, "currency": "eur"}}},
+    {"plans": {"b": {"credits": 5, "amount_cents": 500, "currency": "euro"}}},
+    {"per_turn": 1.5},
+])
+def test_unsafe_price_files_are_refused(change) -> None:
+    with pytest.raises(ValueError):
+        _prices(**change)
+    with pytest.raises(ValueError):
+        billing.parse_prices({"models": {}})
+
+
+def test_lookup_order_and_unknown_names_fall_to_default() -> None:
+    p = _prices()
+    assert p.rate("groq", "exact").output == 20
+    assert p.rate("groq", "llama-3.3-70b").output == 100
+    assert p.rate("GROQ", "x") == p.default
+    assert p.rate("nvidia", "whatever") == p.default
+
+
+def test_an_invalid_prices_file_stops_serve(tmp_path, capsys) -> None:
+    bad = tmp_path / "prices.json"
+    bad.write_text('{"default": {"input": 1, "cached": 1, "output": 1}, '
+                   '"models": {"groq/*": {"input": 2, "cached": 1, "output": 1}}}', encoding="utf-8")
+    code = web.main(["serve", "--data", str(tmp_path), "--billing", "--prices", str(bad),
+                     "--gateway-usage", str(tmp_path / "u.jsonl"), "--env-file", "x"])
+    assert code == 2 and "default" in capsys.readouterr().err
+
+
+# ── S4: цена на ход ──────────────────────────────────────────────────────────
+
+def test_turn_cost_by_hand() -> None:
+    p = _prices()
+    line = {"provider": "groq", "model": "x", "prompt_tokens": 1000, "completion_tokens": 500,
+            "total_tokens": 1500, "cached_tokens": 200}
+    assert billing.turn_cost(p, [line]) == 2_000_000 + 800 * 80 + 200 * 40 + 500 * 100
+    # оценка без usage — целият сбор по най-скъпата тарифа на модела
+    est = {"provider": "groq", "model": "x", "total_tokens": 4000, "estimated": True}
+    assert billing.turn_cost(p, [est]) == 2_000_000 + 4000 * 100
+    # total над prompt + completion — разликата е изход (разсъждения)
+    hidden = {**line, "total_tokens": 2000, "cached_tokens": 0}
+    assert billing.turn_cost(p, [hidden]) == 2_000_000 + 1000 * 80 + 1000 * 100
+    # боклук не прави сметката отрицателна или дробна
+    junk = {"provider": "groq", "model": "x", "prompt_tokens": -5, "completion_tokens": 1.5,
+            "total_tokens": "9", "cached_tokens": 10**9}
+    assert billing.turn_cost(p, [junk]) == 2_000_000
+    assert billing.turn_cost(p, []) == 2_000_000
+
+
+def test_usage_lines_group_by_model_for_one_job(tmp_path) -> None:
+    path = tmp_path / "u.jsonl"
+    led = gw.Ledger(path)
+    led.add("j1", "groq", "a", {"prompt_tokens": 10, "completion_tokens": 1})
+    led.add("j1", "groq", "a", {"prompt_tokens": 20, "completion_tokens": 2})
+    led.add("j1", "nvidia", "b", {"total_tokens": 7})
+    led.add("j2", "groq", "a", {"prompt_tokens": 999})
+    with path.open("a", encoding="utf-8") as f:
+        f.write("{broken\n[1]\n")
+    lines = gw.usage_lines(path, "j1")
+    assert len(lines) == 2
+    a = next(x for x in lines if x["model"] == "a")
+    assert (a["prompt_tokens"], a["completion_tokens"], a["total_tokens"], a["calls"]) == (30, 3, 33, 2)
+    assert gw.usage_lines(tmp_path / "missing.jsonl", "j1") == []
+
+
+class _Resp:
+    status = 200
+
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    def read(self) -> bytes:
+        return self.body
+
+    def __enter__(self) -> Any:
+        return self
+
+    def __exit__(self, *a: object) -> None:
+        pass
+
+
+def test_the_estimated_flag_survives_in_the_gateway_file(tmp_path) -> None:
+    g = gw.Gateway("s" * 40, {"GROQ_API_KEY": "k"}, gw.Ledger(tmp_path / "u.jsonl"),
+                   opener=lambda req, timeout=0: _Resp(b'{"choices": []}'))
+    status, _ = g.forward("groq", b'{"model": "m", "max_tokens": 100}', gw.Grant("j", 10**12, 10**6))
+    assert status == 200
+    (line,) = gw.usage_lines(tmp_path / "u.jsonl", "j")
+    assert line["estimated"] is True and line["total_tokens"] > 0
+
+
+def test_run_task_uses_the_given_name_and_returns_usage_per_model(monkeypatch, tmp_path) -> None:
+    usage = tmp_path / "u.jsonl"
+    g = launch.Gateway("s" * 40, usage, ("GROQ_API_KEY",))
+
+    class Proc:
+        def __init__(self, argv: list[str], **kw: Any) -> None:
+            name = argv[argv.index("--name") + 1]
+            gw.Ledger(usage).add(name, "groq", "x", {"prompt_tokens": 9, "completion_tokens": 1})
+            import io
+            self.stdout = io.BytesIO(b'{"kind": "done", "ok": true, "tokens": {}}\n')
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(launch.subprocess, "Popen", Proc)
+    res = launch.run_task("x", tmp_path / "ws", gateway=g, name="genesis-task-fixed")
+    assert res.job == "genesis-task-fixed"
+    assert [(u["model"], u["total_tokens"]) for u in res.usage] == [("x", 10)]
+
+
+# ── S5: таксуване ────────────────────────────────────────────────────────────
+
+class BillRunner:
+    """Като контейнер през шлюза: шлюзът записва разхода под името на задачата,
+    а „done“ лъже, че токените са 0."""
+
+    def __init__(self, usage: Path) -> None:
+        self.usage = usage
+        self.gate = threading.Event()
+        self.gate.set()
+        self.kw: list[dict[str, Any]] = []
+
+    def __call__(self, text: str, workspace: Path, **kw: Any) -> launch.Result:
+        self.kw.append(kw)
+        gw.Ledger(self.usage).add(kw["name"], "groq", "x",
+                                  {"prompt_tokens": 1000, "completion_tokens": 500})
+        self.gate.wait(5)
+        if text == "boom":
+            raise RuntimeError("docker липсва")
+        return launch.Result(text != "fail", False, 0, 0.5, tokens={"total_tokens": 0},
+                             job=kw["name"])
+
+
+GROQ_TURN = 2_000_000 + 1000 * 80 + 500 * 100
+
+
+def _billing_app(tmp_path: Path, runner: Any = None, **kw: Any) -> tuple[web.App, Any]:
+    usage = tmp_path / "usage.jsonl"
+    runner = runner or BillRunner(usage)
+    store = Store(tmp_path / "web.db")
+    if store.user_by_email("ana@example.com") is None:
+        store.add_user("ana@example.com", PASSWORD)
+        store.add_user("bob@example.com", PASSWORD)
+    gateway = launch.Gateway("s" * 40, usage, ("GROQ_API_KEY",))
+    app = web.App(store, tmp_path / "jobs", runner=runner, secure_cookie=False,
+                  gateway=gateway, prices=kw.pop("prices", None) or _prices(), **kw)
+    return app, runner
+
+
+@pytest.fixture
+def paid(tmp_path):
+    app, runner = _billing_app(tmp_path)
+    app.store.add_entry(1, "admin:start", "grant", 100 * MICRO)
+    srv = _serve(app)
+    yield app, runner, lambda: Client(srv.server_address[1])
+    runner.gate.set()
+    srv.shutdown()
+    srv.server_close()
+    app.pool.shutdown(wait=True)
+
+
+def _turn(cl: Client, text: str = "направи CSV", chat: str | None = None) -> tuple[int, Any]:
+    if chat is None:
+        chat = cl.json("POST", "/api/chats", {"title": text})[1]["id"]
+    return cl.json("POST", f"/api/chats/{chat}/turns", {"text": text})
+
+
+def _wait(cl: Client, turn_id: int) -> dict[str, Any]:
+    for _ in range(300):
+        _code, data = cl.json("GET", f"/api/turns/{turn_id}/events")
+        if data.get("status") in ("ok", "failed") and "cost" in data:
+            return data
+        time.sleep(0.02)
+    raise AssertionError("ходът не завърши или не е таксуван")
+
+
+def test_a_turn_is_charged_from_the_gateway_not_the_container(paid) -> None:
+    app, _, client = paid
+    cl = client()
+    cl.login()
+    code, data = _turn(cl)
+    assert code == 202
+    done = _wait(cl, data["turn_id"])
+    assert done["tokens"] == {"total_tokens": 0}           # контейнерът казва 0
+    assert app.store.balance(1) == 100 * MICRO - GROQ_TURN
+    assert done["cost"] == billing.fmt_credits(GROQ_TURN) == "2.13"
+    assert "cost_micro" not in done
+    # reconcile след това не таксува нищо втори път
+    assert billing.reconcile(app.store, app.prices, app.gateway.usage) == 0  # type: ignore[arg-type, union-attr]
+    assert app.store.balance(1) == 100 * MICRO - GROQ_TURN
+
+
+def test_failed_turns_are_charged_too(paid) -> None:
+    app, _, client = paid
+    cl = client()
+    cl.login()
+    for text in ("fail", "boom"):
+        _, data = _turn(cl, text)
+        assert _wait(cl, data["turn_id"])["status"] == "failed"
+    assert app.store.balance(1) == 100 * MICRO - 2 * GROQ_TURN
+
+
+def test_a_crash_before_the_charge_is_billed_once_on_restart(tmp_path, monkeypatch) -> None:
+    app, _ = _billing_app(tmp_path)
+    real = billing.charge_turn
+
+    def broken(*a: Any, **k: Any) -> bool:
+        raise OSError("диск")
+
+    monkeypatch.setattr(billing, "charge_turn", broken)
+    chat = app.store.new_chat(1, "t")
+    turn = app.start_turn({"id": 1, "email": "ana@example.com"}, chat, "x")
+    app.pool.shutdown(wait=True)
+    assert app.store.turn(1, turn)["status"] == "ok"        # type: ignore[index]
+    assert app.store.balance(1) == 0
+    monkeypatch.setattr(billing, "charge_turn", real)
+    _billing_app(tmp_path)                                   # „рестарт“
+    _billing_app(tmp_path)                                   # и още един
+    assert app.store.balance(1) == -GROQ_TURN
+
+
+def test_a_turn_killed_by_a_restart_is_billed_from_the_gateway(tmp_path) -> None:
+    app, runner = _billing_app(tmp_path)
+    runner.gate.clear()
+    chat = app.store.new_chat(1, "t")
+    turn = app.start_turn({"id": 1, "email": "ana@example.com"}, chat, "x")
+    for _ in range(200):
+        if runner.kw:
+            break
+        time.sleep(0.01)
+    # сървърът „умира“ посред хода; новият го маркира failed и го таксува
+    app2, _ = _billing_app(tmp_path)
+    assert app2.store.turn(1, turn)["status"] == "failed"   # type: ignore[index]
+    assert app2.store.balance(1) == -GROQ_TURN
+    runner.gate.set()
+    app.pool.shutdown(wait=True)
+    assert app.store.balance(1) == -GROQ_TURN               # и после — пак веднъж
+
+
+def test_billing_without_the_gateway_is_refused(tmp_path, capsys) -> None:
+    assert web.main(["serve", "--data", str(tmp_path), "--billing"]) == 2
+    assert "--gateway-usage" in capsys.readouterr().err
+    with pytest.raises(ValueError):
+        web.App(Store(tmp_path / "db"), tmp_path / "jobs", runner=_NoRun(), prices=_prices())
+
+
+def test_turns_before_billing_was_on_are_never_charged(tmp_path) -> None:
+    usage = tmp_path / "usage.jsonl"
+    store = Store(tmp_path / "web.db")
+    store.add_user("ana@example.com", PASSWORD)
+    free = web.App(store, tmp_path / "jobs", runner=BillRunner(usage),
+                   gateway=launch.Gateway("s" * 40, usage, ("GROQ_API_KEY",)))
+    free.start_turn({"id": 1}, store.new_chat(1, "t"), "x")
+    free.pool.shutdown(wait=True)
+    _billing_app(tmp_path)
+    assert store.balance(1) == 0 and store.unbilled_turns() == []

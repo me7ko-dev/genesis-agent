@@ -181,8 +181,13 @@ class Ledger:
         t = int(usage.get("total_tokens") or 0) or p + c
         details = usage.get("prompt_tokens_details")
         cached = int((details.get("cached_tokens") if isinstance(details, dict) else 0) or 0)
-        entry = {"job": job, "provider": provider, "model": model, "prompt_tokens": p,
-                 "completion_tokens": c, "total_tokens": t, "cached_tokens": cached}
+        entry: dict[str, Any] = {
+            "job": job, "provider": provider, "model": model, "prompt_tokens": p,
+            "completion_tokens": c, "total_tokens": t, "cached_tokens": cached,
+            # Оценка без `usage` от доставчика (2026-10-11): сметката не знае
+            # колко е вход и колко изход, затова таксува целия сбор по най-
+            # скъпата тарифа — флагът трябва да стигне до файла.
+            **({"estimated": True} if usage.get("estimated") else {})}
         with self.lock:
             self.jobs.setdefault(job, Usage()).add(entry)
             if self.path is not None:
@@ -206,6 +211,45 @@ def usage_for(path: Path, job: str) -> dict[str, int]:
     except OSError:
         pass
     return u.as_dict()
+
+
+def _count(v: Any) -> int:
+    """Брой токени от реда, или 0 — никога отрицателен, никога float."""
+    return v if type(v) is int and v > 0 else 0
+
+
+def usage_lines_by_job(path: Path, jobs: set[str]) -> dict[str, list[dict[str, Any]]]:
+    """Разходът на всяка от `jobs` по (доставчик, модел, оценка) — за сметката.
+
+    Сборът на usage_for не стига за цена: моделите струват различно, а
+    кешираният вход — по-малко (2026-10-11). Файлът се чете веднъж за всички
+    задачи (reconcile при старт иска много наведнъж)."""
+    groups: dict[str, dict[tuple[str, str, bool], dict[str, Any]]] = {j: {} for j in jobs}
+    try:
+        with path.open(encoding="utf-8") as f:
+            for line in f:
+                try:
+                    e = json.loads(line)
+                except (ValueError, RecursionError):
+                    continue
+                if not isinstance(e, dict) or e.get("job") not in groups:
+                    continue
+                est = bool(e.get("estimated"))
+                key = (str(e.get("provider", "")), str(e.get("model", "")), est)
+                g = groups[str(e["job"])].setdefault(key, {
+                    "provider": key[0], "model": key[1], "prompt_tokens": 0,
+                    "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0,
+                    "calls": 0, **({"estimated": True} if est else {})})
+                for k in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens"):
+                    g[k] += _count(e.get(k))
+                g["calls"] += 1
+    except OSError:
+        pass
+    return {j: list(g.values()) for j, g in groups.items()}
+
+
+def usage_lines(path: Path, job: str) -> list[dict[str, Any]]:
+    return usage_lines_by_job(path, {job})[job]
 
 
 def read_keys(path: Path) -> dict[str, str]:
