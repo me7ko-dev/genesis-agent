@@ -2308,7 +2308,9 @@ def main():
                 continue
 
             # ── Затваряне/изхвърляне на нишка (хигиена) ──
-            if user_input.lower().startswith(("/done", "/drop", "/готово")):
+            # По първата дума, не по префикс: `/dropbox x` е собствена команда
+            # на оператора, не `/drop` (e2e 2026-10-11).
+            if user_input.lower().split(" ", 1)[0] in ("/done", "/drop", "/готово"):
                 parts_cmd = user_input.split()
                 if len(parts_cmd) < 2:
                     console.print("[yellow]Дай номер: `/done 3` (готово) или `/drop 3` (изхвърли)[/]")

@@ -190,6 +190,46 @@ def test_headless_fails_when_the_answer_insists_on_green_after_red(ws, monkeypat
     assert "червено" in (out["error"] or "")
 
 
+# ── F7: /commands показва само каквото наистина тръгва ──────────────────────
+
+_SHADOWED = ("задачи", "умения", "предай", "ъпдейт", "макскод", "готово",
+             "локален_макс", "локален_нормал")
+
+
+def test_custom_commands_named_like_a_cyrillic_builtin_are_not_listed(tmp_path):
+    from genesis_agent import chat_commands
+    cmds = tmp_path / "ws" / ".genesis" / "commands"
+    cmds.mkdir(parents=True)
+    (tmp_path / "ws" / ".git").mkdir()
+    for name in (*_SHADOWED, "dropbox"):
+        (cmds / f"{name}.md").write_text(f"Команда {name} $ARGUMENTS", encoding="utf-8")
+    assert sorted(chat_commands.custom_commands(tmp_path / "ws")) == ["dropbox"]
+
+
+def test_a_custom_command_starting_with_drop_runs(ws, monkeypatch, capsys):
+    from genesis_agent import brain, chat_input, model_check, workspace_memory
+    cmds = ws / ".genesis" / "commands"
+    cmds.mkdir(parents=True)
+    (cmds / "dropbox.md").write_text("Качи $ARGUMENTS в Dropbox.", encoding="utf-8")
+    monkeypatch.setattr(brain, "any_model_reachable", lambda: True, raising=False)
+    monkeypatch.setattr(gta, "print_minimal_banner", lambda: None)
+    monkeypatch.setattr(gta, "show_status_bar", lambda: None)
+    monkeypatch.setattr(gta, "build_system_prompt", lambda: ("system", ""))
+    monkeypatch.setattr(model_check, "needs_check", lambda: False)
+    monkeypatch.setattr(workspace_memory, "auto_capture", lambda convo: {})
+    closed: list = []
+    monkeypatch.setattr(workspace_memory, "close_thread",
+                        lambda ident, drop=False: closed.append((ident, drop)) or "ok")
+    lines = iter(["/dropbox x.txt", "/drop 3", "exit"])
+    monkeypatch.setattr(chat_input, "read_message", lambda read: next(lines))
+    turns: list[str] = []
+    monkeypatch.setattr(gta, "run_turn", lambda messages, text, ui: turns.append(text) or messages)
+    monkeypatch.setattr(gta.sys, "argv", ["genesis"])
+    gta.main()
+    assert turns == ["Качи x.txt в Dropbox."]
+    assert closed == [("3", True)]
+
+
 # ── F6: отговорът на текстов ASK_USER продължава задачата, не е лек въпрос ──
 
 @pytest.mark.parametrize("native", [False, True], ids=["text-tag", "native"])
