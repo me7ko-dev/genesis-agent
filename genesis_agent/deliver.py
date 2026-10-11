@@ -82,21 +82,40 @@ def _api_token_bytes() -> re.Pattern[bytes]:
 # `sk-your-api-key-here`, .env.example с `sk-your-key-here`, index.html и CSS
 # със SpinKit класове (`sk-fading-circle`, `sk-circle12`) и Firebase web
 # конфиг (`apiKey: "AIza…"`, публичен по замисъл) — всички задържани. Истински
-# ключ е случаен низ: има цифра, `sk-` ключът има и главна буква и поне 20
-# знака след `sk-`, и няма думи-образци.
+# ключ е случаен низ: има цифра, `sk-` ключът има поне 20 знака след `sk-`,
+# и няма думи-образци. Преглед 2026-10-11 (вълна 2): искането и за главна
+# буква пускаше към клиента DeepSeek ключа (`sk-` + 32 малки шестнадесетични
+# знака) — SpinKit класовете отпадат и без него (без цифра или под 20 знака).
 _PLACEHOLDER_WORDS = (b"your", b"here", b"example", b"xxxx", b"placeholder", b"dummy",
                       b"changeme", b"replace", b"insert", b"redacted", b"fake")
 
 
-def _real_key(tok: bytes, data: bytes) -> bool:
+def _real_key(m: re.Match[bytes], data: bytes) -> bool:
+    tok = m.group(0)
     low = tok.lower()
     if any(w in low for w in _PLACEHOLDER_WORDS) or not re.search(rb"[0-9]", tok):
         return False
     if tok.startswith(b"sk-"):
-        return len(tok) >= 23 and re.search(rb"[A-Z]", tok) is not None
+        return len(tok) >= 23
     if tok.startswith(b"AIza"):
-        return b"firebaseapp.com" not in data and b"authDomain" not in data
+        return not _firebase_web_key(m.start(), data)
     return True
+
+
+def _firebase_web_key(at: int, data: bytes) -> bool:
+    """`apiKey: "AIza…"` в обекта на Firebase web конфиг (заедно с authDomain).
+    Преглед 2026-10-11 (вълна 2): изключението важеше за целия файл, а Gemini
+    ключът започва със същото `AIza` — таен Gemini ключ във файл с Firebase
+    конфиг заминаваше. Сега минава само ключът на ред с `apiKey` вътре в
+    същите `{…}`, в които е и authDomain/firebaseapp.com."""
+    line_start = data.rfind(b"\n", 0, at) + 1
+    if b"apikey" not in data[line_start:at].lower():
+        return False
+    start, end = data.rfind(b"{", 0, at), data.find(b"}", at)
+    if start < 0 or end < 0 or data.rfind(b"}", 0, at) > start:
+        return False
+    block = data[start:end]
+    return b"authDomain" in block or b"firebaseapp.com" in block
 
 
 def _secret_file(p: Path, rel: str) -> str | None:
@@ -117,7 +136,7 @@ def _secret_file(p: Path, rel: str) -> str | None:
     # `ghp_…` в settings.json, `AKIA…` в aws.cfg). Одит 2026-10-11: и трите
     # заминаваха към клиента — пазеше се само блок PRIVATE KEY. Казва се къде
     # е ключът (без самия него), за да го изнесе човекът в .env.
-    m = next((m for m in _api_token_bytes().finditer(data) if _real_key(m.group(0), data)), None)
+    m = next((m for m in _api_token_bytes().finditer(data) if _real_key(m, data)), None)
     if m:
         line = data.count(b"\n", 0, m.start()) + 1
         return f"{rel} (съдържа ключ {m.group(0)[:4].decode('ascii', 'replace')}… на ред {line})"
@@ -144,10 +163,7 @@ class Delivery:
 _IGNORED = "игнориран от .gitignore"
 
 
-def _git_kept(root: Path) -> tuple[set[str], tuple[str, ...]] | None:
-    """Файловете, които git би запазил (следени + неследени неигнорирани),
-    спрямо `root`, и папките, приети цели (вложено хранилище: `sub/`).
-    None — проектът не е в git или git липсва."""
+def _git_ls(root: Path) -> list[str] | None:
     try:
         proc = subprocess.run(["git", "-C", str(root), "ls-files", "-co", "--exclude-standard", "-z"],
                               capture_output=True, timeout=30, check=False)
@@ -155,18 +171,41 @@ def _git_kept(root: Path) -> tuple[set[str], tuple[str, ...]] | None:
         return None
     if proc.returncode != 0:
         return None
-    entries = [e for e in proc.stdout.decode("utf-8", "replace").split("\0") if e]
+    return [e for e in proc.stdout.decode("utf-8", "replace").split("\0") if e]
+
+
+def _git_kept(root: Path) -> tuple[set[str], tuple[str, ...]] | None:
+    """Файловете, които git би запазил (следени + неследени неигнорирани),
+    спрямо `root`, и папките, приети цели (вложено хранилище, за което git
+    не казва нищо). None — проектът не е в git или git липсва."""
+    entries = _git_ls(root)
     if not entries:
         # Папка, която обхващащо хранилище игнорира цялата (dotfiles репо в
         # $HOME с `*` в .gitignore): git не казва нищо за проекта — тогава
         # решава собственият му .gitignore, а не „всичко е игнорирано“.
         return None
-    # Вложено хранилище, което е комитнато (gitlink/submodule), git изрежда
-    # като `lib` — без `/`. Преглед 2026-10-11: то не влизаше в приетите
-    # папки и цялото изпадаше от архива като „игнорирано“.
-    whole = {e for e in entries if e.endswith("/") or (root / e).is_dir()}
-    return ({e for e in entries if e not in whole},
-            tuple(e if e.endswith("/") else e + "/" for e in whole))
+    return _kept_from(root, entries, 0)
+
+
+def _kept_from(root: Path, entries: list[str], depth: int) -> tuple[set[str], tuple[str, ...]]:
+    # Вложено хранилище: неследено git го изрежда като `sub/`, комитнато
+    # (gitlink/submodule) — като `lib`, без `/`. Преглед 2026-10-11: `lib`
+    # изпадаше цяло като „игнорирано“; после (вълна 2) влизаше цяло — с
+    # неговите собствени игнорирани server.log и db.sqlite3. Сега за него
+    # решава неговият git; цяло се приема само ако той не каже нищо
+    # (неинициализиран submodule, счупено вложено хранилище).
+    files = {e for e in entries if not e.endswith("/") and not (root / e).is_dir()}
+    whole: list[str] = []
+    for e in sorted(set(entries) - files):
+        d = e.rstrip("/")
+        sub = _git_ls(root / d) if depth < 8 and (root / d / ".git").exists() else None
+        if sub is None:
+            whole.append(d + "/")
+            continue
+        inner = _kept_from(root / d, sub, depth + 1)
+        files.update(f"{d}/{f}" for f in inner[0])
+        whole.extend(f"{d}/{w}" for w in inner[1])
+    return files, tuple(whole)
 
 
 def _gitignore_rules(root: Path) -> list[tuple[str, bool, bool]]:
