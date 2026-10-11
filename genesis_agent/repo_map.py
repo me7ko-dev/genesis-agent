@@ -203,13 +203,28 @@ def _search_ripgrep(root: Path, pattern: str, glob: str | None,
     out = _run_ripgrep(root, pattern, glob, max_results, None)
     # rg търси байтовете на шаблона в UTF-8, а cp1251 файл ги няма (одит
     # 2026-10-11: „Грешка“ → „наистина го няма“). Шаблон с не-ASCII знаци се
-    # пуска втори път с windows-1251: UTF-8 файловете там стават „Р“СЂ…“ и не
-    # съвпадат, тоест вторият проход добавя само cp1251 попаденията.
+    # пуска втори път с windows-1251. От него се взимат само файловете, които
+    # decode_text (и Python пътят) смята за cp1251: ревю 2026-10-11 — UTF-8
+    # „мир“ там е „РјРёСЂ“ и търсене на „Р“ връщаше боклук, а Python — нищо.
     if out is not None and not pattern.isascii() and len(out) < max_results:
-        extra = _run_ripgrep(root, pattern, glob, max_results - len(out), "windows-1251")
+        extra = _run_ripgrep(root, pattern, glob, max_results, "windows-1251")
         seen = {(m.path, m.line) for m in out}
-        out += [m for m in extra or [] if (m.path, m.line) not in seen]
+        legacy: dict[str, bool] = {}
+        for m in extra or []:
+            if len(out) >= max_results:
+                break
+            if m.path not in legacy:
+                legacy[m.path] = _is_cp1251(m.path)
+            if legacy[m.path] and (m.path, m.line) not in seen:
+                out.append(m)
     return out
+
+
+def _is_cp1251(path: str) -> bool:
+    try:
+        return decode_text(Path(path).read_bytes())[1] == "cp1251"
+    except OSError:
+        return False
 
 
 def _run_ripgrep(root: Path, pattern: str, glob: str | None,

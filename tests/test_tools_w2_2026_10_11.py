@@ -76,3 +76,14 @@ def test_write_over_cp1251_file_with_char_outside_cp1251_becomes_utf8(ws):
     assert "✓ записани" in out, out
     assert "UTF-8" in out
     assert p.read_bytes() == "Здравей\nCafé ✓\n".encode()
+
+
+# ── втория проход на rg (windows-1251) ───────────────────────────────────────
+
+def test_cp1251_pass_does_not_hit_utf8_files(ws, engine):
+    # UTF-8 „мир“ (D0 BC D0 B8 D1 80) в cp1251 е „РјРёСЂ“ — главно „Р“.
+    (ws / "u.txt").write_text("мир\n", encoding="utf-8")
+    assert repo_map.search_code("Р", ws) == []
+    (ws / "c.txt").write_bytes("Рим\n".encode("cp1251"))
+    hits = repo_map.search_code("Р", ws)
+    assert _names(hits) == ["c.txt"] and hits[0].text == "Рим"
