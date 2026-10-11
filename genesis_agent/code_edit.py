@@ -111,6 +111,17 @@ def displayable(text: str) -> str:
     return _RAW_BYTE.sub("\ufffd", text)
 
 
+def read_text_any(path: str | Path) -> str:
+    """Текстът на файл за ЧЕТЕНЕ (не за запис обратно): без BOM, без сурогати.
+
+    Одит 2026-10-11: requirements.txt от `pip freeze >` в PowerShell 5.1 е
+    UTF-16 и export отчиташе „��r e q u e s t s“ като зависимост, а обявените
+    пакети — за липсващи; BOM пред pyproject.toml пък чупеше tomllib. pip
+    чете и двата файла без проблем.
+    """
+    return displayable(decode_text(Path(path).read_bytes())[0]).removeprefix("\ufeff")
+
+
 @dataclass
 class EditResult:
     ok: bool

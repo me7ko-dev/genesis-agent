@@ -34,7 +34,7 @@ def test_cp1251_read_is_readable_and_names_the_encoding(ws):
     out = gs._tool_read_file("legacy.txt")
     assert "Здравей, свят" in out
     assert "cp1251" in out.splitlines()[0]
-    assert "�" not in out
+    assert "\ufffd" not in out
 
 
 def test_cp1251_edit_keeps_the_encoding(ws):
@@ -71,7 +71,7 @@ def test_write_over_file_with_stray_bytes_refuses_replacement_chars(ws):
     raw = b"# (c) \xa9 Acme\nX = 1\n"
     p.write_bytes(raw)
     body = _body(gs._tool_read_file("m.py"))
-    assert "�" in body
+    assert "\ufffd" in body
     out = gs.dispatch_tool_call("WRITE_FILE", {"path": "m.py", "content": body.replace("X = 1", "X = 2")})
     assert "❌" in out
     assert p.read_bytes() == raw
@@ -223,3 +223,41 @@ def test_search_engines_see_the_same_files(ws, monkeypatch, engine):
     assert found == sorted(_NO_SUFFIX_OR_RARE)
     # Изрично подаден файл без разширение също се търси.
     assert len(repo_map.search_code("API_PORT", ws / "Dockerfile")) == 1
+
+
+# ── export-readme-fence ──────────────────────────────────────────────────────
+
+def test_readme_comment_inside_a_code_fence_is_not_a_heading(ws):
+    from genesis_agent import deliver
+    (ws / "README.md").write_text(
+        "# tool\n\n## How to run\n\n```bash\n# install deps\npip install -r requirements.txt\n"
+        "# start the server\npython main.py\n```\n\n## License\n\nMIT\n", encoding="utf-8")
+    sections = deliver.readme_sections(ws)
+    assert set(sections) == {"tool", "how to run", "license"}
+    body = sections["how to run"]
+    assert "pip install -r requirements.txt" in body and "python main.py" in body
+    assert body.count("```") == 2
+
+
+# ── deps-utf16-bom ───────────────────────────────────────────────────────────
+
+_APP = "import flask\nimport requests\n"
+
+
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-8-sig"])
+def test_requirements_with_a_bom_are_read(ws, encoding):
+    from genesis_agent import deliver, py_deps
+    (ws / "app.py").write_text(_APP, encoding="utf-8")
+    (ws / "requirements.txt").write_bytes("requests==2.32.3\r\nflask==3.0.0\r\n".encode(encoding))
+    assert py_deps.declared(ws) == {"requests", "flask"}
+    assert py_deps.undeclared(ws) == []
+    assert deliver._dependencies(ws, ["requirements.txt"]) == ["requests==2.32.3", "flask==3.0.0"]
+
+
+def test_pyproject_with_a_bom_is_read(ws):
+    from genesis_agent import py_deps
+    (ws / "app.py").write_text(_APP, encoding="utf-8")
+    (ws / "pyproject.toml").write_bytes(
+        b'\xef\xbb\xbf[project]\nname = "x"\ndependencies = ["requests", "flask>=3"]\n')
+    assert py_deps.declared(ws) == {"requests", "flask"}
+    assert py_deps.undeclared(ws) == []
