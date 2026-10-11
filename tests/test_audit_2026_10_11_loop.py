@@ -321,3 +321,24 @@ def test_recompaction_keeps_the_whole_previous_summary(monkeypatch, ordinary_len
     assert "PostgreSQL 16" in seen[0]
     assert len(seen[0]) <= 8000
     assert out[1]["content"].endswith("ново резюме")
+
+
+# ── A9: „Стоп“ спира и EXPLORE ─────────────────────────────────────────────
+
+def test_stop_reaches_explore(ws):
+    from types import SimpleNamespace
+
+    from genesis_agent import explore
+    n = {"calls": 0}
+
+    def complete(messages, tools=None):
+        n["calls"] += 1
+        return SimpleNamespace(raw_text="търся", tool_calls=[{"id": f"c{n['calls']}", "function": {
+            "name": "SEARCH_CODE", "arguments": json.dumps({"pattern": "PRICE"})}}])
+    gs._set_cancel(lambda: n["calls"] >= 1)   # операторът натиска „Стоп“ след първия рунд
+    try:
+        out = explore.explore("къде е цената?", str(ws), complete=complete)
+    finally:
+        gs._set_cancel(None)
+    assert n["calls"] == 1
+    assert "⏹ Спрян от оператора след 1 рунда" in out and "търся" in out
