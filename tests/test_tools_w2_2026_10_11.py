@@ -87,3 +87,17 @@ def test_cp1251_pass_does_not_hit_utf8_files(ws, engine):
     (ws / "c.txt").write_bytes("Рим\n".encode("cp1251"))
     hits = repo_map.search_code("Р", ws)
     assert _names(hits) == ["c.txt"] and hits[0].text == "Рим"
+
+
+# ── прегледът преди WRITE_FILE ───────────────────────────────────────────────
+
+def test_write_preview_of_cp1251_file_shows_only_the_changed_line(ws):
+    from genesis_agent import agent_core
+    (ws / "legacy.txt").write_bytes("Здравей\r\nсвят\r\nname = 1\r\n".encode("cp1251"))
+    body = _body(gs._tool_read_file("legacy.txt"))
+    diff = agent_core._diff_for_write(gs, {"path": "legacy.txt",
+                                           "content": body.replace("name = 1", "name = 2")})
+    assert diff is not None
+    changed = [ln for ln in diff.splitlines()
+               if ln[:1] in "+-" and not ln.startswith(("+++", "---"))]
+    assert changed == ["-name = 1", "+name = 2"], diff
