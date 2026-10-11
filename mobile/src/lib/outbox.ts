@@ -8,15 +8,27 @@
  * натискане пускаше хода пак. Сега второто докосване, докато първото е на
  * път, не прави нищо, а повторният опит със СЪЩИЯ текст носи същия `mid` —
  * сървърът отговаря с първия отговор, без втори ход.
+ *
+ * Преглед 2026-10-11: `mid` се пазеше без край — по-късно, нарочно изпратено
+ * „продължи“ или второ /plan (менюто вече предлага „Изпълни плана“) идваше
+ * със стария `mid` и сървърът го поглъщаше: 1 ход вместо 2. Сега `mid` се
+ * забравя, щом собственото балонче с този текст дойде в събитията (сървърът
+ * го е приел), и най-късно RETRY_WINDOW_MS след последния опит.
  */
+export const RETRY_WINDOW_MS = 2 * 60 * 1000;
+
+type Unsent = { text: string; mid: string; at: number };
+
 export class Outbox {
   private inFlight = false;
-  private unsent: { text: string; mid: string } | null = null;
+  private unsent: Unsent | null = null;
   private readonly newMid: () => string;
+  private readonly now: () => number;
 
   // Без „parameter property“: тестовете под Node само махат типовете.
-  constructor(newMid: () => string) {
+  constructor(newMid: () => string, now: () => number = Date.now) {
     this.newMid = newMid;
+    this.now = now;
   }
 
   get sending(): boolean {
@@ -28,8 +40,12 @@ export class Outbox {
   async send<T>(text: string, deliver: (text: string, mid: string) => Promise<T>): Promise<T | null> {
     if (this.inFlight) return null;
     this.inFlight = true;
-    const mid = this.unsent?.text === text ? this.unsent.mid : this.newMid();
-    this.unsent = { text, mid };
+    const last = this.unsent;
+    const retry = last !== null && last.text === text && this.now() - last.at < RETRY_WINDOW_MS;
+    const mid = retry ? last.mid : this.newMid();
+    // Прозорецът тече от последния опит: оператор, който натиска пак и пак
+    // без връзка, не получава нов `mid` насред повторенията.
+    this.unsent = { text, mid, at: this.now() };
     try {
       const reply = await deliver(text, mid);
       // Отговор има — сървърът е решил (прието, „busy“, „too_long“…).
@@ -38,5 +54,14 @@ export class Outbox {
     } finally {
       this.inFlight = false;
     }
+  }
+
+  /** Новите събития от сървъра: собственото балонче с неизпратения текст
+   *  значи, че сървърът го е приел — следващото изпращане е нов ход. */
+  seen(events: readonly { type: string; text?: string }[]): void {
+    const pending = this.unsent;
+    if (pending === null) return;
+    const text = pending.text.trim();
+    if (events.some((e) => e.type === 'user' && (e.text ?? '').trim() === text)) this.unsent = null;
   }
 }

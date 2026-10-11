@@ -88,6 +88,9 @@ export function useGenesis(pairing: Pairing) {
           epoch.current = reply.epoch;
           lastSeq.current = reply.last;
           setEvents((cur) => mergeEvents(cur, reply.events, reset));
+          // Своето балонче дойде → изпращането е прието, следващото със
+          // същия текст е нов ход, не повторен опит (преглед 2026-10-11).
+          outbox.seen(reply.events);
           setBusy(reply.busy);
           if (reply.state) setPhone(reply.state);
           setConnection('online');
@@ -105,7 +108,7 @@ export function useGenesis(pairing: Pairing) {
     return () => {
       stopped = true;
     };
-  }, [client, active, fail]);
+  }, [client, outbox, active, fail]);
 
   const act = useCallback(async <T,>(fn: () => Promise<T>): Promise<T | null> => {
     setError('');

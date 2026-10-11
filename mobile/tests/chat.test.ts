@@ -7,7 +7,7 @@ import {
 } from '../src/lib/chat.ts';
 import { splitBlocks, splitInline } from '../src/lib/markdown.ts';
 import { errorText, MAX_MESSAGE, messageLength, replyErrorText, trimDraft } from '../src/lib/messages.ts';
-import { Outbox } from '../src/lib/outbox.ts';
+import { Outbox, RETRY_WINDOW_MS } from '../src/lib/outbox.ts';
 import { ProtocolError, type GenesisEvent } from '../src/lib/protocol.ts';
 
 const ev = (seq: number, type: string, extra: Partial<GenesisEvent> = {}): GenesisEvent =>
@@ -156,6 +156,59 @@ test('one send at a time; a retry of the same text keeps its id', async () => {
   await assert.rejects(outbox.send('а', lost));
   await outbox.send('б', ok);
   assert.equal(ids[2], 'mid-5-xxxxxx');
+});
+
+test('a stale mid is forgotten: a later message with the same text is a new turn', async () => {
+  // Преглед 2026-10-11: сървърът приема „продължи“, отговорът се губи; по-късно
+  // операторът нарочно праща „продължи“ пак — със стария mid сървърът
+  // (RemoteServer._sent) го поглъщаше: 1 ход вместо 2.
+  let clock = 0;
+  let n = 0;
+  const box = new Outbox(() => `mid-${++n}-xxxxxx`, () => clock);
+  const sent = new Map<string, { ok: boolean }>();
+  let turns = 0;
+  let drop = false;
+  const server = async (_: string, mid: string) => {
+    let reply = sent.get(mid);
+    if (!reply) {
+      turns += 1;
+      reply = { ok: true };
+      sent.set(mid, reply);
+    }
+    if (drop) throw new Error('lost');
+    return reply;
+  };
+
+  // 1) Своето балонче дойде в събитията → следващото е нов ход.
+  drop = true;
+  await assert.rejects(box.send('продължи', server));
+  drop = false;
+  box.seen([{ type: 'assistant', text: 'продължи' }]);
+  box.seen([{ type: 'user', text: 'продължи' }]);
+  await box.send('продължи', server);
+  assert.equal(turns, 2);
+
+  // 2) Без събития (телефонът е без връзка) — след прозореца е нов ход.
+  drop = true;
+  await assert.rejects(box.send('/plan', server));
+  drop = false;
+  clock += RETRY_WINDOW_MS;
+  await box.send('/plan', server);
+  assert.equal(turns, 4);
+
+  // 3) Повторен опит в прозореца, без своето балонче — пак същият mid.
+  drop = true;
+  await assert.rejects(box.send('да', server));
+  clock += RETRY_WINDOW_MS - 1;
+  await assert.rejects(box.send('да', server));
+  clock += RETRY_WINDOW_MS - 1;   // прозорецът тече от последния опит
+  drop = false;
+  box.seen([{ type: 'user', text: 'друго' }]);
+  await box.send('да', server);
+  assert.equal(turns, 5);
+
+  const hook = readFileSync(new URL('../src/lib/useGenesis.ts', import.meta.url), 'utf8');
+  assert.match(hook, /outbox\.seen\(reply\.events\)/);
 });
 
 test('errors reach the operator in Bulgarian', () => {
