@@ -291,3 +291,41 @@ def test_the_header_comes_before_the_skipped_fcc_line(tmp_path, monkeypatch, cap
     ba.main(["--dry-run", "--steps", "fix,fcc", "--out", str(tmp_path / "out")])
     out = capsys.readouterr().out
     assert out.index("bench_all →") < out.index("пропусната")
+
+
+# ── преглед 2026-10-11: покритие на сегашното пускане ───────────────────────
+
+def test_projects_not_measured_now_are_named_in_the_report_and_verdict(tmp_path, monkeypatch) -> None:
+    """Пропуснат сега заради липсващ пакет (NEEDS) изчезваше от сравнението
+    без дума — „✅ Без регресия“, а покритието беше паднало от 4 на 1."""
+    base = _results(tmp_path / "home" / "old" / "results.json",
+                    {"a": _s(2), "booking-form": _s(2), "tasks-api": _s(2), "gone": _s(2)})
+    _fake_steps(monkeypatch, tmp_path, {"projects": ({"a": _s(2)}, base)},
+                projects={"skipped": {"booking-form": ["flask"], "tasks-api": ["flask"]}})
+    rc = ba.main(["--out", str(tmp_path / "out")])
+    report = (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
+    table, verdict = report.split("## Присъда", 1)
+    assert rc == 0 and "✅" in verdict
+    for text in (table, verdict):
+        assert "booking-form (няма flask)" in text and "tasks-api (няма flask)" in text
+        assert "gone" in text
+
+
+def test_nothing_run_is_not_a_first_baseline(tmp_path, monkeypatch, capsys) -> None:
+    """`--steps fcc` без задачите: нищо не се пусна, а присъдата беше „ℹ️ Без
+    база (). Това пускане става база за следващото.“ с код 0."""
+    assert ba.verdict_of([]).startswith("❌")
+    monkeypatch.setattr(ba, "plan", lambda args, out, home: [
+        ba.Step("fcc", [sys.executable, "-c", "pass"], out=out / "fcc", skip="няма задачите")])
+    monkeypatch.setattr(ba, "bench_home", lambda: tmp_path / "home")
+    assert ba.main(["--out", str(tmp_path / "out")]) == 1
+    out = capsys.readouterr().out
+    assert "Нищо не се пусна" in out and "става база" not in out
+
+
+def test_an_out_that_is_a_file_is_refused(tmp_path, monkeypatch, capsys) -> None:
+    out = tmp_path / "out.txt"
+    out.write_text("x", encoding="utf-8")
+    _fake_steps(monkeypatch, tmp_path, {"projects": (None, None)})
+    assert ba.main(["--out", str(out), "--dry-run"]) == 2
+    assert "дай нова --out" in capsys.readouterr().out

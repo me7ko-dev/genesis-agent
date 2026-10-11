@@ -439,6 +439,11 @@ def main(argv: list[str] | None = None) -> int:
         print(err)
     print("\n" + format_table(summary, before))
     print(f"\nРезултати: {out_dir / 'results.json'}")
+    if not summary:
+        # Всички избрани проекти пропуснати (NEEDS): „ОБЩО 0/0“ и код 0 казваше
+        # „успех“ на пускане, което не е мерило нищо (преглед 2026-10-11).
+        print("\n❌ Нищо не е мерено — всички избрани проекти са пропуснати (виж ⏭ горе).")
+        return 1
     infra_runs = sum(s["infra"] for s in summary.values())
     return 0 if not infra_runs and all(s["ok"] == s["runs"] for s in summary.values()) else 1
 

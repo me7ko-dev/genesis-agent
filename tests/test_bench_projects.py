@@ -285,3 +285,13 @@ def test_a_project_whose_hidden_tests_need_a_missing_package_is_skipped(tmp_path
 
 def test_needs_name_real_projects():
     assert set(bp.NEEDS) <= {p.name for p in bp.PROJECTS_DIR.iterdir() if p.is_dir()}
+
+
+def test_nothing_measured_is_not_success(tmp_path, monkeypatch, capsys):
+    """Всички избрани проекти пропуснати (NEEDS): „ОБЩО 0/0“ и код 0 —
+    пускане на ръка казваше „успех“, без да е мерило нищо (преглед 2026-10-11)."""
+    import sys
+    monkeypatch.setattr(bp, "NEEDS", {"sync-cli": ("no_such_pkg_xyz",)})
+    monkeypatch.setattr(bp, "run_genesis", _must_not_run)
+    rc = bp.main(["--only", "sync-cli", "--out", str(tmp_path / "out"), "--test-python", sys.executable])
+    assert rc == 1 and "Нищо не е мерено" in capsys.readouterr().out

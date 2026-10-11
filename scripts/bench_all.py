@@ -29,8 +29,9 @@ question it answers.
 Verdict per step: correct runs, seconds and tokens per run, against the
 baseline; a project correct in every baseline run and not now is a
 REGRESSION. Runs in which no model answered are counted apart, never as a
-regression. Exit code 1 when any step regressed, failed to run or is
-incomplete; 0 for no regression and for a first run without a baseline.
+regression. Projects measured in the baseline but not now (or skipped now
+for a missing package) are named in the report and the verdict. Exit code 1
+when any step regressed, failed to run or is incomplete, or nothing ran; 0 for no regression and for a first run without a baseline.
 
 Runs against the real providers with the operator's keys: it spends quota.
 """
@@ -297,7 +298,18 @@ def step_result(step: Step, code: int | None, seconds: float) -> dict:
         return {**base, "status": NO_ANSWER}
     return {**base, "status": "ok", "baseline": str(step.baseline) if step.baseline else "",
             "baseline_info": step.baseline_info, "note": step.note,
+            "skipped": {str(k): list(v) for k, v in (data.get("skipped") or {}).items()},
             "compare": compare(now, _load_summary(step.baseline))}
+
+
+def unmeasured(r: dict) -> list[str]:
+    """Проектите, които сега не са мерени: пропуснати заради липсващ пакет
+    (NEEDS) или ги има в базата, но не и сега. Сравнението гледа само общите,
+    така че без този списък покритието падаше тихо, с „✅ Без регресия“
+    (преглед 2026-10-11)."""
+    skipped = r.get("skipped") or {}
+    names = sorted(set(skipped) | set(r["compare"].get("gone") or []))
+    return [n + (f" (няма {', '.join(skipped[n])})" if skipped.get(n) else "") for n in names]
 
 
 # ── compare ──────────────────────────────────────────────────────────────────
@@ -325,7 +337,7 @@ def compare(now: dict[str, dict], before: dict[str, dict] | None) -> dict:
     Сравняват се само проектите, които ги има и в двете. Проект без нито един
     пуск с отговор от модел (runs == 0) не е нито регресия, нито подобрение."""
     out: dict = {"now": totals(now), "before": None, "regressed": [], "improved": [], "new": [],
-                 "infra": sorted(k for k, s in now.items() if s.get("infra"))}
+                 "gone": [], "infra": sorted(k for k, s in now.items() if s.get("infra"))}
     if not before:
         out["new"] = sorted(now)
         return out
@@ -341,6 +353,7 @@ def compare(now: dict[str, dict], before: dict[str, dict] | None) -> dict:
         elif b["ok"] < b["runs"] and n["ok"] == n["runs"]:
             out["improved"].append(name)
     out["new"] = sorted(set(now) - set(before))
+    out["gone"] = sorted(set(before) - set(now))
     return out
 
 
@@ -385,6 +398,8 @@ def report(results: list[dict], out: Path) -> str:
             bits.append(r["note"])
         if c.get("infra"):
             bits.append("⚠️ моделът не отговори (не са броени): " + ", ".join(c["infra"]))
+        if unmeasured(r):
+            bits.append("⚠️ не са мерени сега: " + ", ".join(unmeasured(r)))
         if c["improved"]:
             bits.append("поправени спрямо базата: " + ", ".join(c["improved"]))
         if c["new"] and c["before"] is not None:
@@ -416,6 +431,10 @@ def _acceptance_tail(results: list[dict]) -> str:
 def verdict_of(results: list[dict]) -> str:
     """❌ регресия или стъпка без резултат · ⚠️ непълно (моделът не отговори в
     някои пускове) · ℹ️ без база · ✅ без регресия. Само ✅ и ℹ️ дават код 0."""
+    if not results:
+        # `--steps fcc` без задачите: нищо не се пусна, а присъдата беше „ℹ️ Без
+        # база (). Това пускане става база…“ с код 0 (преглед 2026-10-11).
+        return "❌ Нищо не се пусна — всички стъпки са пропуснати; няма какво да се сравни."
     broken = [r["step"] + (" (моделът не отговори)" if r["status"] == NO_ANSWER else "")
               for r in results if r["status"] != "ok"]
     done = [r for r in results if r["status"] == "ok"]
@@ -423,7 +442,8 @@ def verdict_of(results: list[dict]) -> str:
                  if r["step"] != "acceptance" and r["compare"]["regressed"]}
     infra = {r["step"]: r["compare"]["infra"] for r in done if r["compare"].get("infra")}
     infra_s = "; ".join(f"{s}: {', '.join(v)}" for s, v in infra.items())
-    tail = _acceptance_tail(results)
+    gaps = "; ".join(f"{r['step']}: {', '.join(unmeasured(r))}" for r in done if unmeasured(r))
+    tail = (f" ⚠️ Не са мерени сега: {gaps}." if gaps else "") + _acceptance_tail(results)
     if broken or regressed:
         parts = []
         if regressed:
@@ -497,8 +517,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {'':<11} база: {st.baseline or 'няма'}" + (f" ({st.baseline_info})" if st.baseline else ""))
     # Стара папка: стъпка, паднала в нея, оставяше results.json от предишното
     # пускане и той се отчиташе като сегашен, с ✅ (одит 2026-10-11).
-    if out.exists() and any(out.iterdir()):
-        print(f"\n❌ {out} вече съществува и не е празна — дай нова --out.")
+    # Файл вместо папка даваше NotADirectoryError traceback (преглед 2026-10-11).
+    if out.exists() and (not out.is_dir() or any(out.iterdir())):
+        print(f"\n❌ {out} вече съществува и не е празна папка — дай нова --out.")
         return 2
     if args.dry_run:
         return 0
