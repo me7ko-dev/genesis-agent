@@ -1787,8 +1787,24 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
             pass
     from genesis_agent.agent_core import bounded_history
     if _failure is not None:
+        # Грешката продължава нагоре (headless и телефонът я показват), но
+        # носи историята със свършеното (bug fix, 2026-10-11). Измерено:
+        # WRITE_FILE made.py, после ReadTimeout → main() и телефонът пазеха
+        # СТАРАТА история (само системния промпт), моделът забравяше made.py,
+        # а следващият ход презаписваше файла на сесията без него.
+        try:
+            _failure.genesis_messages = bounded_history(messages, limit)  # type: ignore[attr-defined]
+        except Exception:
+            pass
         raise _failure
     return bounded_history(messages, limit)
+
+
+def history_after_error(error: BaseException, messages: "deque") -> "deque":
+    """Историята, с която чатът продължава след грешка в run_turn: тази със
+    свършеното в хода, ако грешката я носи, иначе досегашната."""
+    kept = getattr(error, "genesis_messages", None)
+    return kept if kept is not None else messages
 
 
 def _unique_call_ids(tool_calls: list, round_i: int) -> None:
@@ -2304,6 +2320,7 @@ def main():
             # forever, since the next read hit EOF again immediately.
             break
         except Exception as e:
+            messages = history_after_error(e, messages)
             console.print(f"[red]⚠ {e}[/]")
 
     try:

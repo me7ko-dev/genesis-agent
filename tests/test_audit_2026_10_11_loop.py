@@ -115,3 +115,65 @@ def test_text_tags_after_ask_user_wait_for_the_answer(ws, monkeypatch):
     gta.run_turn(_fresh(), "x", ui)
     assert [e for e in ui.log if e[0] == "asked"]
     assert not (ws / "notes.txt").exists()
+
+
+# ── A2: грешка посред хода не изтрива свършеното от живата история ─────────
+
+def _write_then_crash(monkeypatch):
+    return _script(monkeypatch, [
+        ("", [_call("WRITE_FILE", {"path": "made.py", "content": "x = 1\n"}, "w1")]),
+        RuntimeError("ReadTimeout от доставчика"),
+        ("ок", None),
+    ])
+
+
+def test_an_error_mid_turn_hands_back_the_work_done(ws, monkeypatch):
+    _write_then_crash(monkeypatch)
+    messages = _fresh()
+    # Точно както main(): `messages = run_turn(...)` в try / except Exception.
+    try:
+        messages = gta.run_turn(messages, "направи made.py", _UI())
+    except Exception as e:
+        assert "ReadTimeout" in str(e)
+        messages = gta.history_after_error(e, messages)
+    assert (ws / "made.py").exists()
+    assert any(m["role"] == "tool" and "made.py" in str(m["content"]) for m in messages)
+    assert getattr(messages, "maxlen", None) == gta._HISTORY_MAXLEN
+
+
+def test_the_phone_keeps_the_work_of_a_crashed_turn(ws, monkeypatch):
+    import time
+
+    from genesis_agent import remote_server as rs
+    monkeypatch.setattr(gta, "build_system_prompt", lambda: ("SYS", ""))
+    seen = _write_then_crash(monkeypatch)
+    monkeypatch.setattr(rs, "_print_qr", lambda *a: None)
+    cap: dict = {}
+    real_init = rs.RemoteServer.__init__
+
+    def init(self, *a, **k):
+        real_init(self, *a, **k)
+        cap["server"] = self
+
+    def wait(session):
+        deadline = time.time() + 15
+        time.sleep(0.05)
+        while session.busy and time.time() < deadline:
+            time.sleep(0.02)
+
+    class FakeHTTP:
+        def serve_forever(self, poll_interval=0.5):
+            srv = cap["server"]
+            srv.session.send("направи made.py")
+            wait(srv.session)
+            srv.session.send("какво направи?")
+            wait(srv.session)
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            pass
+    monkeypatch.setattr(rs.RemoteServer, "__init__", init)
+    monkeypatch.setattr(rs.RemoteServer, "make_http", lambda self, h, p: FakeHTTP())
+    assert rs.serve(["--port", "0"]) == 0
+    assert len(seen) == 3
+    assert any(m.get("role") == "tool" and "made.py" in str(m.get("content")) for m in seen[2])
