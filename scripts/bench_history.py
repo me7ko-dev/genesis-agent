@@ -4,6 +4,7 @@ What a long project turn costs, and what the model still sees at its end.
 
     python scripts/bench_history.py                 # 5 files, 24 rounds
     python scripts/bench_history.py --files 8 --rounds 40
+    python scripts/bench_history.py --elide --elide-rounds 6   # B.12 on
 
 NEXT_STEPS Г.12. Offline, no model: a scripted turn builds a project the way
 the chat does — WRITE_FILE per file (the content travels in the assistant's
@@ -171,12 +172,22 @@ def main() -> int:
     ap.add_argument("--rounds", type=int, default=24)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--json", action="store_true", help="print the full result as JSON")
+    ap.add_argument("--elide", action="store_true",
+                    help="B.12: elide old WRITE_FILE/EDIT_FILE args (GENESIS_ELIDE_OLD_WRITES=1)")
+    ap.add_argument("--elide-rounds", type=int, default=None,
+                    help="K for --elide (GENESIS_ELIDE_WRITE_ROUNDS, default 6)")
     a = ap.parse_args()
+    if a.elide:
+        budget.ELIDE_OLD_WRITES = 1
+    if a.elide_rounds is not None:
+        budget.ELIDE_WRITE_ROUNDS = max(2, a.elide_rounds)
     res = run(max(1, min(a.files, 10)), max(a.files, a.rounds), a.seed)
     if a.json:
         print(json.dumps(res, ensure_ascii=False, indent=2))
         return 0
-    print(f"{res['files']} файла, {res['rounds']} рунда в един ход")
+    print(f"{res['files']} файла, {res['rounds']} рунда в един ход"
+          + (f"; изпускане на стари записи, K={budget.ELIDE_WRITE_ROUNDS}"
+             if budget.ELIDE_OLD_WRITES else ""))
     for r in res["per_request"][:: max(1, len(res["per_request"]) // 8)]:
         print(f"  рунд {r['round']:>3}: {r['messages']:>3} съобщения, ~{r['tokens']:>6} токена "
               f"({r['in_tool_call_args']} в аргументите на извикванията), "

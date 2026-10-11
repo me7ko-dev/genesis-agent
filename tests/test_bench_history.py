@@ -57,6 +57,24 @@ def test_a_file_is_rewritten_later_in_the_turn() -> None:
         assert " v1\n" not in last.splitlines()[0] + "\n"
 
 
+def test_elide_saves_tokens_and_keeps_the_invariants(monkeypatch) -> None:
+    """B.12 (2026-10-11): с изпускане на старите записи ходът е по-евтин, а
+    системният промпт, задачата и последният pytest остават."""
+    from genesis_agent import budget
+    off = bh.run(files=5, rounds=24, seed=7)
+    monkeypatch.setattr(budget, "ELIDE_OLD_WRITES", 1)
+    monkeypatch.setattr(budget, "ELIDE_WRITE_ROUNDS", 6)
+    on = bh.run(files=5, rounds=24, seed=7)
+    assert on["total_prompt_tokens"] < off["total_prompt_tokens"] * 0.85
+    assert on["system_kept"] and on["task_kept"] and on["last_test_intact"]
+    s = bh.Session(5, 24, 7)
+    for i in range(24):
+        s.step(i)
+        sent = budget.budget_history(s.msgs)
+        asked = {tc["id"] for m in sent for tc in m.get("tool_calls") or []}
+        assert all(m["tool_call_id"] in asked for m in sent if m.get("role") == "tool")
+
+
 def test_visibility_is_reported_per_request() -> None:
     res = bh.run(files=5, rounds=15, seed=7)
     assert all("files_visible" in r for r in res["per_request"])

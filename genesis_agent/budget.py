@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import posixpath
 from collections import defaultdict
 from datetime import date, datetime, timezone
 from typing import Any
@@ -24,6 +25,8 @@ log = logging.getLogger("genesis.budget")
 
 from genesis_agent.config import (
     DATA_DIR,
+    ELIDE_OLD_WRITES,
+    ELIDE_WRITE_ROUNDS,
     FRESH_TOOL_RESULTS,
     STALE_TOOL_RESULT_MAX_CHARS,
     TOOL_RESULT_MAX_CHARS,
@@ -133,6 +136,97 @@ def _whole_rounds(tail: list[dict]) -> list[dict]:
     return tail
 
 
+# Маркерът за изпуснато съдържание (B.12, 2026-10-11). Сглобява се, вместо да
+# стои буквално: genesis_skills._before_tool отказва запис, който го съдържа
+# (слаб модел в текстов режим вижда WRITE_FILE({..., content: <маркер>}) и го
+# копира като „код“), а Genesis редактира и собствения си код — буквален низ
+# тук би блокирал всяко самопоправяне на този файл.
+ELIDED_TAG = "genesis:" + "elided"
+ELIDED_MARK = "⟦" + ELIDED_TAG
+_ELIDE_KEYS = ("content", "old", "new")
+_ELIDE_MIN_CHARS = 300
+
+
+def _norm_path(path: str) -> str:
+    p = posixpath.normpath(path.replace("\\", "/"))
+    return p.removeprefix("./")
+
+
+def _function_of(tc: Any) -> dict:
+    fn = tc.get("function") if isinstance(tc, dict) else None
+    return fn if isinstance(fn, dict) else {}
+
+
+def _parse_args(raw: Any) -> dict | None:
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str):
+        return None
+    try:
+        args = json.loads(raw)
+    except ValueError:  # отрязан JSON (виж brain._has_cut_tool_arguments) — не се пипа
+        return None
+    return args if isinstance(args, dict) else None
+
+
+def _elide_old_writes(messages: list[dict], k: int) -> list[dict]:
+    """Съдържанието на стари WRITE_FILE/EDIT_FILE аргументи → кратък маркер.
+
+    Защо: файлът, който моделът е написал, пътува в аргументите на неговото
+    извикване и се праща наново на всеки рунд, докато не изпадне от прозореца.
+    bench_history (2026-10-11, seed 7) до рунд ~15 — 48% от заявката. Изпуска
+    се, когато (а) по-късен WRITE_FILE пише същия път (старото вече не е
+    текущо), или (б) извикването е на ≥ k рунда назад. Пътища, различни само
+    по изписване, не се смятат за същия файл — безопасен пропуск.
+
+    Само в изпратеното копие: входът не се мутира; ролите, id-тата, броят
+    извиквания и tool съобщенията остават същите, тоест сдвояването при всеки
+    доставчик (OpenAI, Anthropic tool_use/tool_result, текстов режим) е
+    непокътнато. Текущият рунд не се пипа никога (k ≥ 2)."""
+    k = max(int(k), 2)
+    rounds = [i for i, m in enumerate(messages)
+              if isinstance(m, dict) and m.get("role") == "assistant"
+              and isinstance(m.get("tool_calls"), list) and m["tool_calls"]]
+    if len(rounds) < 2:
+        return list(messages)
+    # Последният индекс, на който се пише всеки път — „по-късен запис“.
+    last_write: dict[str, tuple[int, int]] = {}
+    for i in rounds:
+        for j, tc in enumerate(messages[i]["tool_calls"]):
+            fn = _function_of(tc)
+            args = _parse_args(fn.get("arguments"))
+            if fn.get("name") == "WRITE_FILE" and args and isinstance(args.get("path"), str):
+                last_write[_norm_path(args["path"])] = (i, j)
+    out = list(messages)
+    for age, i in enumerate(reversed(rounds)):
+        if age == 0:
+            continue
+        msg = messages[i]
+        calls = []
+        changed = False
+        for j, tc in enumerate(msg["tool_calls"]):
+            fn = _function_of(tc)
+            raw = fn.get("arguments")
+            args = _parse_args(raw)
+            path = args.get("path") if args else None
+            if (args and fn.get("name") in ("WRITE_FILE", "EDIT_FILE") and isinstance(path, str)
+                    and (age >= k or last_write.get(_norm_path(path), (i, j)) > (i, j))):
+                new_args = {key: (f"{ELIDED_MARK} {len(v)} символа — НЕ е съдържание; "
+                                  f"текущият вид: READ_FILE {path}⟧"
+                                  if key in _ELIDE_KEYS and isinstance(v, str)
+                                  and len(v) >= _ELIDE_MIN_CHARS else v)
+                            for key, v in args.items()}
+                if new_args != args:
+                    packed: Any = (new_args if isinstance(raw, dict)
+                                   else json.dumps(new_args, ensure_ascii=False))
+                    tc = {**tc, "function": {**fn, "arguments": packed}}
+                    changed = True
+            calls.append(tc)
+        if changed:
+            out[i] = {**msg, "tool_calls": calls}
+    return out
+
+
 def budget_history(messages, *, fresh: int | None = None,
                    stale_limit: int | None = None) -> list[dict]:
     """Свива СТАРИТЕ tool резултати точно преди заявката тръгне към модела.
@@ -158,6 +252,10 @@ def budget_history(messages, *, fresh: int | None = None,
     fresh = FRESH_TOOL_RESULTS if fresh is None else fresh
     stale_limit = STALE_TOOL_RESULT_MAX_CHARS if stale_limit is None else stale_limit
     msgs = list(messages)
+    # Първо, за да важи и за ранните изходи по-долу (B.12, изключено по
+    # подразбиране — виж config.ELIDE_OLD_WRITES).
+    if ELIDE_OLD_WRITES:
+        msgs = _elide_old_writes(msgs, ELIDE_WRITE_ROUNDS)
     if stale_limit <= 0:
         return request_window(msgs)
 

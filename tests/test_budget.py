@@ -405,3 +405,117 @@ def test_budget_history_sends_the_task_in_a_long_turn() -> None:
     from genesis_agent.budget import budget_history
     out = budget_history(_long_turn(40))
     assert out[1]["content"] == "ЗАДАЧАТА" and len(out) <= 30
+
+
+class TestElideOldWrites:
+    """B.12 (2026-10-11): старите WRITE_FILE/EDIT_FILE аргументи → маркер, само в
+    изпратеното копие и само с GENESIS_ELIDE_OLD_WRITES (по подразбиране OFF)."""
+
+    @staticmethod
+    def _call(cid: str, name: str, args: dict) -> list[dict]:
+        return [{"role": "assistant", "content": "", "tool_calls": [{
+                    "id": cid, "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}}]},
+                {"role": "tool", "tool_call_id": cid, "name": name, "content": "ok"}]
+
+    def _turn(self) -> list[dict]:
+        """Рундове (възраст в края): w1 4, e1 3, w2 2, w3 1, r1 0."""
+        msgs: list[dict] = [{"role": "system", "content": "SYS"}, {"role": "user", "content": "T"}]
+        msgs += self._call("w1", "WRITE_FILE", {"path": "app.py", "content": "A" * 1000})
+        msgs += self._call("e1", "EDIT_FILE", {"path": "app.py", "old": "B" * 400, "new": "C" * 400})
+        msgs += self._call("w2", "WRITE_FILE", {"path": "./app.py", "content": "D" * 1000})
+        msgs += self._call("w3", "WRITE_FILE", {"path": "lib.py", "content": "E" * 1000})
+        msgs += self._call("r1", "RUN_CMD", {"command": "pytest"})
+        return msgs
+
+    @staticmethod
+    def _args(out: list[dict], cid: str) -> dict:
+        for m in out:
+            for tc in m.get("tool_calls") or []:
+                if tc["id"] == cid:
+                    return json.loads(tc["function"]["arguments"])
+        raise AssertionError(cid)
+
+    def test_off_by_default_changes_nothing(self, monkeypatch) -> None:
+        from genesis_agent import config
+        assert config.ELIDE_OLD_WRITES == 0
+        monkeypatch.setattr(budget, "ELIDE_OLD_WRITES", 0)
+        msgs = self._turn()
+        assert budget.budget_history(msgs) == msgs
+
+    def test_a_superseded_write_is_elided_and_the_latest_kept(self, monkeypatch) -> None:
+        monkeypatch.setattr(budget, "ELIDE_OLD_WRITES", 1)
+        monkeypatch.setattr(budget, "ELIDE_WRITE_ROUNDS", 50)
+        out = budget.budget_history(self._turn())
+        w1, e1 = self._args(out, "w1"), self._args(out, "e1")
+        assert budget.ELIDED_MARK in w1["content"] and "READ_FILE app.py" in w1["content"]
+        assert budget.ELIDED_MARK in e1["old"] and budget.ELIDED_MARK in e1["new"]
+        assert self._args(out, "w2")["content"] == "D" * 1000, "последният запис остава"
+        assert self._args(out, "w3")["content"] == "E" * 1000, "друг файл, млад — остава"
+
+    def test_a_write_k_rounds_old_is_elided_even_without_a_rewrite(self) -> None:
+        out = budget._elide_old_writes(self._turn(), 2)
+        assert budget.ELIDED_MARK in self._args(out, "w2")["content"]      # възраст 2
+        assert self._args(out, "w3")["content"] == "E" * 1000              # възраст 1
+        out = budget._elide_old_writes(self._turn(), 3)
+        assert self._args(out, "w2")["content"] == "D" * 1000
+
+    def test_the_current_round_is_never_touched(self) -> None:
+        msgs = self._turn()
+        msgs += self._call("w9", "WRITE_FILE", {"path": "lib.py", "content": "F" * 1000})
+        msgs.append({"role": "assistant", "content": "", "tool_calls": [
+            {"id": "w10", "type": "function", "function": {
+                "name": "WRITE_FILE", "arguments": json.dumps({"path": "lib.py", "content": "G" * 1000})}},
+            {"id": "w11", "type": "function", "function": {
+                "name": "WRITE_FILE", "arguments": json.dumps({"path": "lib.py", "content": "H" * 1000})}}]})
+        out = budget._elide_old_writes(msgs, 0)                 # k се вдига до 2
+        assert self._args(out, "w10")["content"] == "G" * 1000
+        assert self._args(out, "w11")["content"] == "H" * 1000
+        assert budget.ELIDED_MARK in self._args(out, "w9")["content"]
+
+    def test_pairing_ids_and_json_survive_for_every_provider(self, monkeypatch) -> None:
+        from genesis_agent.brain import Brain
+        monkeypatch.setattr(budget, "ELIDE_OLD_WRITES", 1)
+        monkeypatch.setattr(budget, "ELIDE_WRITE_ROUNDS", 2)
+        msgs = self._turn()
+        out = budget.budget_history(msgs)
+        assert out != msgs
+        assert [m["role"] for m in out] == [m["role"] for m in msgs]
+        ids = [tc["id"] for m in out for tc in m.get("tool_calls") or []]
+        assert ids == [m["tool_call_id"] for m in out if m.get("role") == "tool"]
+        for m in out:
+            for tc in m.get("tool_calls") or []:
+                assert isinstance(json.loads(tc["function"]["arguments"]), dict)
+        _, anth = Brain._to_anthropic_messages(out)
+        uses = {b["id"] for m in anth if isinstance(m["content"], list)
+                for b in m["content"] if b.get("type") == "tool_use"}
+        results = {b["tool_use_id"] for m in anth if isinstance(m["content"], list)
+                   for b in m["content"] if b.get("type") == "tool_result"}
+        assert uses == results == set(ids)
+
+    def test_the_input_is_never_mutated(self) -> None:
+        msgs = self._turn()
+        before = json.dumps(msgs, ensure_ascii=False)
+        budget._elide_old_writes(msgs, 2)
+        assert json.dumps(msgs, ensure_ascii=False) == before
+
+    def test_short_values_and_cut_json_are_left_alone(self) -> None:
+        msgs = self._turn()
+        msgs += self._call("s1", "WRITE_FILE", {"path": "s.py", "content": "x = 1\n"})
+        cut_args = '{"path": "c.py", "content": "' + "z" * 500
+        msgs += [{"role": "assistant", "content": "", "tool_calls": [{
+                     "id": "cut", "type": "function",
+                     "function": {"name": "WRITE_FILE", "arguments": cut_args}}]},
+                 {"role": "tool", "tool_call_id": "cut", "content": "ok"}]
+        for i in range(4):
+            msgs += self._call(f"y{i}", "RUN_CMD", {"command": "ls"})
+        out = budget._elide_old_writes(msgs, 2)
+        assert self._args(out, "s1")["content"] == "x = 1\n"
+        cut = next(tc for m in out for tc in m.get("tool_calls") or [] if tc["id"] == "cut")
+        assert cut["function"]["arguments"] == cut_args
+
+    def test_it_runs_before_the_early_return_paths(self, monkeypatch) -> None:
+        monkeypatch.setattr(budget, "ELIDE_OLD_WRITES", 1)
+        monkeypatch.setattr(budget, "ELIDE_WRITE_ROUNDS", 2)
+        out = budget.budget_history(self._turn(), stale_limit=0)
+        assert budget.ELIDED_MARK in self._args(out, "w1")["content"]
