@@ -127,11 +127,17 @@ def _output_cap(model: str) -> int:
     return _OUTPUT_CAPS.get(model, MAX_OUTPUT_TOKENS)
 
 # Anthropic native (само при quality="max"). max_tokens покрива И размисъла, И
-# отговора — 16k стига за код без да изисква streaming (над ~16k SDK-то иска
-# stream, за да не удари HTTP timeout). `xhigh` е препоръчаното ниво за кодинг
-# и агентна работа; отделен запис в config.yaml може да го смени за конкретен модел.
-ANTHROPIC_MAX_TOKENS = 16000
+# отговора. `xhigh` е препоръчаното ниво за кодинг и агентна работа; отделен
+# запис в config.yaml може да го смени за конкретен модел.
 ANTHROPIC_EFFORT = "xhigh"
+# Заявката към Anthropic е поточна (2026-10-11): при `max` размисълът расте и
+# една заявка минава 90-те секунди на CLOUD_TIMEOUT (най-дългият отговор при
+# xhigh в bench egn-check — 6 919 токена) — тогава веригата тихо падаше на
+# по-слабия модел. Потокът държи връзката жива и позволява по-голям таван;
+# плаща се само генерираното.
+ANTHROPIC_STREAM_MAX_TOKENS = 64000
+# Операторът избира усилието без да пипа config.yaml: GENESIS_EFFORT=max.
+_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 # Не всеки модел на Anthropic приема тези два параметъра. `output_config.effort`
 # и adaptive thinking вървят от поколение 4.6 нагоре; на Haiku 4.5 и по-старите
@@ -1426,6 +1432,13 @@ class Brain:
             })
         return out
 
+    @staticmethod
+    def _anthropic_final(api: Any, params: dict[str, Any], **extra: Any) -> Any:
+        """Поточна заявка, върнат е само крайният отговор (виж
+        ANTHROPIC_STREAM_MAX_TOKENS) — за веригата същото като create()."""
+        with api.stream(**extra, **params) as stream:
+            return stream.get_final_message()
+
     def _call_anthropic(self, key: str, model: str, messages: list[dict],
                         tools: list[dict] | None, effort: str) -> tuple[str, list | None]:
         try:
@@ -1438,7 +1451,7 @@ class Brain:
             raise RuntimeError("няма съобщения за изпращане")
         params: dict[str, Any] = {
             "model": model,
-            "max_tokens": ANTHROPIC_MAX_TOKENS,
+            "max_tokens": ANTHROPIC_STREAM_MAX_TOKENS,
             "messages": msgs,
         }
         if _supports_adaptive_effort(model):
@@ -1446,7 +1459,9 @@ class Brain:
             # Точно това искаме тук — MAX режимът съществува заради трудните
             # случаи, а лесните не бива да плащат за размисъл, който не им трябва.
             params["thinking"] = {"type": "adaptive"}
-            params["output_config"] = {"effort": effort or ANTHROPIC_EFFORT}
+            chosen = os.environ.get("GENESIS_EFFORT", "").strip().lower()
+            params["output_config"] = {
+                "effort": chosen if chosen in _EFFORTS else (effort or ANTHROPIC_EFFORT)}
         if system:
             # Prompt caching (design note, 2026-09-20). Редът на рендиране е
             # tools → system → messages, затова една точка на последния
@@ -1479,14 +1494,15 @@ class Brain:
             # Класификаторите за безопасност могат да откажат заявка (връща се
             # 200 с stop_reason="refusal"). `fallbacks="default"` оставя сървъра
             # да я довърши на друг модел вместо да ни върне празен отговор.
-            resp = client.beta.messages.create(
-                betas=["server-side-fallback-2026-07-01"], fallbacks="default", **params)
+            resp = self._anthropic_final(client.beta.messages, params,
+                                         betas=["server-side-fallback-2026-07-01"],
+                                         fallbacks="default")
         except anthropic.BadRequestError as e:
             # Акаунт без достъп до тази beta (или SDK, който не я познава) —
             # същата заявка без нея. Нашата собствена верига поема отказа.
             if "fallback" not in str(e).lower() and "beta" not in str(e).lower():
                 raise RuntimeError(f"HTTP_400: {e}") from e
-            resp = client.messages.create(**params)
+            resp = self._anthropic_final(client.messages, params)
         except anthropic.AuthenticationError as e:
             raise RuntimeError(f"HTTP_401: {e}") from e
         except anthropic.PermissionDeniedError as e:
@@ -1544,7 +1560,7 @@ class Brain:
         if getattr(resp, "stop_reason", "") == "max_tokens" and _is_truncated(text):
             raise RuntimeError(
                 f"HTTP_TRUNCATED: отговорът е отрязан на тавана от "
-                f"{ANTHROPIC_MAX_TOKENS} токена, посред код-ограда "
+                f"{ANTHROPIC_STREAM_MAX_TOKENS} токена, посред код-ограда "
                 f"(stop_reason=max_tokens)."
             )
         return text, (tool_calls or None)

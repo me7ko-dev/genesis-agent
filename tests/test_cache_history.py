@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 from itertools import pairwise
 
 import pytest
@@ -91,7 +92,7 @@ class TestNativeProviderGetsTheAppendOnlyHistory:
         assert len(old_free["content"]) < 6000
 
 
-def test_the_request_caches_the_tail_and_the_system_for_an_hour(monkeypatch) -> None:
+def _fake_anthropic(monkeypatch) -> dict:
     import sys
     import types
 
@@ -105,9 +106,10 @@ def test_the_request_caches_the_tail_and_the_system_for_an_hour(monkeypatch) -> 
         type, text = "text", "ok"
 
     class _Messages:
-        def create(self, **params):
+        def stream(self, **params):
             sent.update(params)
-            return types.SimpleNamespace(stop_reason="end_turn", content=[_Text()], usage=_Usage())
+            reply = types.SimpleNamespace(stop_reason="end_turn", content=[_Text()], usage=_Usage())
+            return contextlib.nullcontext(types.SimpleNamespace(get_final_message=lambda: reply))
 
     fake = types.ModuleType("anthropic")
     for name in ("BadRequestError", "AuthenticationError", "PermissionDeniedError",
@@ -116,9 +118,29 @@ def test_the_request_caches_the_tail_and_the_system_for_an_hour(monkeypatch) -> 
     fake.Anthropic = lambda **_kw: types.SimpleNamespace(
         beta=types.SimpleNamespace(messages=_Messages()), messages=_Messages())
     monkeypatch.setitem(sys.modules, "anthropic", fake)
+    return sent
+
+
+def test_the_request_caches_the_tail_and_the_system_for_an_hour(monkeypatch) -> None:
+    sent = _fake_anthropic(monkeypatch)
     brain.Brain()._call_anthropic("k", "claude-opus-5", _rounds(3), None, "high")
     assert sent["cache_control"] == {"type": "ephemeral"}
     assert sent["system"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+
+
+def test_the_request_streams_with_room_for_long_thinking(monkeypatch) -> None:
+    """При max размисълът минаваше 90-те секунди на заявка без поток (2026-10-11)."""
+    sent = _fake_anthropic(monkeypatch)   # фалшивият клиент има само stream()
+    brain.Brain()._call_anthropic("k", "claude-opus-5", _rounds(3), None, "xhigh")
+    assert sent["max_tokens"] == brain.ANTHROPIC_STREAM_MAX_TOKENS > 16000
+
+
+@pytest.mark.parametrize("env,want", [("max", "max"), ("HIGH", "high"), ("бързо", "xhigh"), ("", "xhigh")])
+def test_genesis_effort_picks_the_effort_and_a_bad_value_is_ignored(monkeypatch, env, want) -> None:
+    sent = _fake_anthropic(monkeypatch)
+    monkeypatch.setenv("GENESIS_EFFORT", env)
+    brain.Brain()._call_anthropic("k", "claude-opus-5", _rounds(1), None, "xhigh")
+    assert sent["output_config"] == {"effort": want}
 
 
 def test_light_work_does_not_take_the_paid_chain_from_the_environment(monkeypatch) -> None:

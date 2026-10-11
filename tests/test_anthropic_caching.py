@@ -50,6 +50,23 @@ class _Recorder:
         self.params = params
         return _FakeResponse(self.usage)
 
+    def stream(self, **params):
+        """Заявката е поточна (2026-10-11) — същите параметри, краен отговор."""
+        self.params = params
+        response = _FakeResponse(self.usage)
+
+        class _Stream:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc) -> None:
+                return None
+
+            def get_final_message(self):
+                return response
+
+        return _Stream()
+
 
 @pytest.fixture
 def sent(monkeypatch):
