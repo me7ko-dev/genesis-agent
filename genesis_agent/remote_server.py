@@ -88,6 +88,13 @@ _MID = re.compile(r"[A-Za-z0-9_-]{8,64}")
 _ENVELOPE_SHAPE = re.compile(
     rb'\s*\{\s*"v"\s*:\s*\d{1,3}\s*,\s*"n"\s*:\s*"[A-Za-z0-9_=+/-]{1,64}"\s*,'
     rb'\s*"c"\s*:\s*"[A-Za-z0-9_=+/-]+"\s*\}\s*')
+# Началото на същия плик — първите _HEAD_BYTES байта на дълго тяло от спрян
+# адрес (вълна 5): `{"v":1,"n":"<до 64>","c":"` е под 100 байта и с интервали.
+_ENVELOPE_HEAD = re.compile(
+    rb'\s*\{\s*"v"\s*:\s*\d{1,3}\s*,\s*"n"\s*:\s*"[A-Za-z0-9_=+/-]{1,64}"\s*,'
+    rb'\s*"c"\s*:\s*"[A-Za-z0-9_=+/-]*')
+_HEAD_BYTES = 160
+_BRAKED_READ_S = 2.0
 
 
 class ProtocolError(Exception):
@@ -283,6 +290,23 @@ class _Pending:
 TurnRunner = Callable[[str, Any], None]
 
 
+_CLIPPED_NOTE = "\n…[отрязано — целият текст е в терминала]"
+
+
+def _fit_event(event: dict) -> dict:
+    """Копие на събитие, орязано до _REPLY_BYTES: дългите текстове (над 1 KiB)
+    делят тавана по равно, по 6 байта на знак (най-лошото в JSON — `\\u0001`),
+    с място за кратките полета."""
+    long = [k for k, v in event.items() if isinstance(v, str) and len(v) > 1024]
+    share = (_REPLY_BYTES // 6 - 4096) // max(1, len(long)) - len(_CLIPPED_NOTE)
+    out = dict(event)
+    for k in long:
+        if len(out[k]) > share:
+            out[k] = out[k][:share] + _CLIPPED_NOTE
+            out["clipped"] = True
+    return out
+
+
 class RemoteSession:
     """Един разговор, споделен от всички сдвоени телефони.
 
@@ -346,18 +370,25 @@ class RemoteSession:
         # 2026-10-11: 200 инструмента в заключен телефон — изчезваха 130
         # събития и собствените му съобщения).
         ordered = list(reversed(items)) if reset else items
-        kept, size = 0, 0
+        kept, size, head = 0, 0, 0
         for event in ordered:
             size += len(utf8_bytes(json.dumps(event, ensure_ascii=False)))
             if kept and size > _REPLY_BYTES:
                 break
             kept += 1
+            head = head or size
         if kept < len(items):
             if reset:
                 reply["events"] = items[-kept:]
             else:
                 reply["events"], reply["more"] = items[:kept], True
                 reply["last"] = items[kept - 1]["seq"]
+        if head > _REPLY_BYTES:
+            # Едно събитие над тавана влиза винаги (иначе телефонът не мърда)
+            # — значи таванът не важеше за него. Вълна 5, 2026-10-11:
+            # отговор от 600 000 знака при студен старт — 1.2 MB в един
+            # отговор. Сега дългите текстове се орязват до тавана.
+            reply["events"] = [_fit_event(ordered[0])]
         if self._state is not None:
             try:
                 reply["state"] = self._state()
@@ -761,6 +792,25 @@ class RemoteServer:
                 ctype = _CONTENT_TYPES.get(target.suffix.lower(), "application/octet-stream")
                 self._send(200, target.read_bytes(), ctype)
 
+            def _braked_head(self, length: int) -> bytes | None:
+                """Началото на тялото от спрян адрес, ако е началото на плик;
+                иначе None — 429, без да се чете останалото.
+
+                Вълна 5, 2026-10-11: над спирачката сървърът пак четеше цялото
+                тяло — клиент, обявил 200 KiB и пратил 1 KiB, държеше нишка и
+                едно от 16-те места на адреса 30 s на заявка (преди вълна 4:
+                429 без четене). Сега се четат най-много _HEAD_BYTES за
+                _BRAKED_READ_S; сдвоеният телефон праща плик и минава."""
+                want = min(length, _HEAD_BYTES)
+                self.connection.settimeout(_BRAKED_READ_S)
+                try:
+                    head = self.rfile.read(want)
+                finally:
+                    self.connection.settimeout(self.timeout)
+                whole = len(head) == length
+                shape = _ENVELOPE_SHAPE if whole else _ENVELOPE_HEAD
+                return head if len(head) == want and shape.fullmatch(head) else None
+
             def do_POST(self) -> None:
                 ip = self.client_address[0]
                 if self.path.split("?", 1)[0] != "/api/v1":
@@ -774,9 +824,19 @@ class RemoteServer:
                     self._json(413, {"error": "size"})
                     return
                 try:
-                    body = self.rfile.read(length)
+                    if server.too_many_failures(ip):
+                        head = self._braked_head(length)
+                        if head is None:
+                            server.record_failure(ip)
+                            self.close_connection = True
+                            self._json(429, {"error": "slow_down"})
+                            return
+                        body = head + self.rfile.read(length - len(head))
+                    else:
+                        body = self.rfile.read(length)
                 except OSError:   # таймаут — броим го като провал за спирачката
                     server.record_failure(ip)
+                    self.close_connection = True
                     return
                 # Спирачката е СЛЕД опита да отворим плика (одит 2026-10-11):
                 # преди беше първа и по адрес — страница в браузъра на самия

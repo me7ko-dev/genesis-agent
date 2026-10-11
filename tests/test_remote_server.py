@@ -718,3 +718,72 @@ def test_a_non_utf8_file_name_does_not_break_the_event_stream(live) -> None:
         tools = [e for e in got["events"] if e["type"] == "tool"]
         assert tools and "main.py" in tools[0]["result"] and ".txt" in tools[0]["result"]
         assert got["events"][-1]["text"] == "Готово."
+
+
+# ── Вълна 5 (2026-10-11): повторна проверка на вълна 4 ─────────────────────
+
+def test_a_single_huge_event_does_not_break_the_reply_cap() -> None:
+    """Едно събитие над тавана влизаше цяло: отговор от 600 000 знака даваше
+    1.2 MB при студен старт. Сега текстът се орязва и се белязва."""
+    for after in (0, 1):
+        session, _ = _session()
+        session.emit("user", text="кажи много")
+        session.emit("assistant", text="я" * 600_000)
+        got = session.events_after(after)
+        size = len(rs.utf8_bytes(json.dumps(got, ensure_ascii=False)))
+        assert size <= rs._REPLY_BYTES + 8 * 1024, (after, size)
+        last = got["events"][-1]
+        assert last["type"] == "assistant" and last["clipped"] is True
+        assert last["text"].startswith("яяя") and "терминала" in last["text"]
+        # Дневникът не се пипа: следващият отговор пак реже копие.
+        assert len(session._events[-1]["text"]) == 600_000
+    # Всяко поле от управляващи знаци (6 байта в JSON) също влиза.
+    session, _ = _session()
+    session.emit("assistant", text="\x01" * 300_000)
+    size = len(rs.utf8_bytes(json.dumps(session.events_after(0), ensure_ascii=False)))
+    assert size <= rs._REPLY_BYTES + 8 * 1024, size
+
+
+def _braked(base: str) -> None:
+    codes = [_post(base, b"x")[0] for _ in range(31)]
+    assert codes[-1] == 429
+
+
+def _raw_post(base: str, declared: int, sent: bytes, wait: float) -> tuple[bytes, float]:
+    """POST с обявена дължина `declared`, от която са пратени само `sent`."""
+    import socket
+    port = int(base.rsplit(":", 1)[1])
+    sock = socket.create_connection(("127.0.0.1", port), timeout=wait)
+    try:
+        sock.sendall(b"POST /api/v1 HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                     + f"Content-Length: {declared}\r\n\r\n".encode() + sent)
+        started = time.monotonic()
+        try:
+            got = sock.recv(4096)
+        except (TimeoutError, ConnectionError):
+            got = b""
+        return got, time.monotonic() - started
+    finally:
+        sock.close()
+
+
+def test_a_braked_address_is_refused_before_its_body_is_read(live) -> None:
+    """Преглед на вълна 4: над спирачката сървърът пак четеше цялото тяло
+    (до 256 KiB) — бавен клиент, който обяви 200 KiB и прати 1 KiB, държеше
+    нишка и място 30 s за всяка заявка. Преди вълна 4 спряният адрес получаваше
+    429 без четене. Сега стига началото на тялото: не е плик → 429 веднага."""
+    base, _, _ = live
+    _braked(base)
+    got, took = _raw_post(base, 200 * 1024, b"[" + b"1," * 512, wait=5)
+    assert got.startswith((b"HTTP/1.0 429", b"HTTP/1.1 429")), got[:40]
+    assert took < 2.0, took
+    # Сдвоеният телефон зад същия адрес пак минава.
+    assert _call(base, "status")["ok"]
+
+
+def test_a_braked_address_that_sends_no_body_is_dropped_fast(live) -> None:
+    base, _, _ = live
+    _braked(base)
+    _, took = _raw_post(base, 200 * 1024, b"", wait=10)
+    assert took < 5.0, took
+    assert _call(base, "status")["ok"]
