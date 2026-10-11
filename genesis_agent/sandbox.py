@@ -148,6 +148,10 @@ _SECRET_PATHS = (
     # Средата и паметта на друг процес (2026-10-11): `tr '\0' '\n' <
     # /proc/$PPID/environ` печаташе API ключа, махнат от средата на детето.
     r"|/proc/[^/\s]+/(?:environ|mem|maps)\b"
+    # Добре известни файлове с токени (2026-10-11): gcloud, Azure CLI, Vault,
+    # PostgreSQL. `.git-credentials` хваща `credentials\b` по-горе.
+    r"|\.config[/\\]gcloud\b|[/\\]Roaming[/\\]gcloud\b|\.azure(?:[/\\]|\b)"
+    r"|\.vault-token\b|\.pgpass\b|pgpass\.conf\b"
 )
 
 # Управляващите файлове на Genesis — пускат програми ИЗВЪН sandbox-а с целия
@@ -1877,7 +1881,12 @@ _SECRET_REASON = "достъп до чувствителни файлове (к�
 _PROC_REASONS = ("стартиране на подпроцес", "стартиране на процес", "os.system (shell изпълнение)")
 # За пазача `credentials` е име на файл (`credentials`, `credentials.json`), не
 # всеки път с думата — `tests/test_credentials.py` е код (одит 2026-10-09).
-_GUARD_RX = _SECRET_PATHS.replace(r"|credentials\b", r"|(?:^|/)credentials(?:\.\w+)?$")
+# Пред думата — и `.`/`-`/`_`, отзад — разширения за данни, не за код
+# (2026-10-11): `~/.git-credentials`, gcloud `application_default_credentials.json`
+# и terraform `credentials.tfrc.json` се четяха от USE_SKILL по сглобен път.
+_GUARD_RX = _SECRET_PATHS.replace(
+    r"|credentials\b",
+    r"|(?:^|[/._-])credentials(?:\.(?:json|tfrc|ya?ml|toml|ini|cfg|conf|xml|db|txt|enc))*$")
 
 
 def _guard_script(run_dir: Path) -> Path | None:
