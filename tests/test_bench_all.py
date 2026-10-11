@@ -231,6 +231,21 @@ def test_verdict_names_the_steps_without_a_baseline() -> None:
     assert ba.exit_code([ok, fresh]) == 0
 
 
+def test_a_first_run_is_no_baseline_even_with_the_acceptance_pass() -> None:
+    # 2026-10-11, първо bench_all с фалшив доставчик без бази: acceptance
+    # винаги има „база“ (projects от същото пускане) и присъдата беше
+    # „✅ Без регресия спрямо базата (acceptance)“ — нито projects, нито fix
+    # бяха сравнени с нещо.
+    fresh = {"step": "projects", "status": "ok", "compare": ba.compare({"a": _s(2)}, None)}
+    acc = {"step": "acceptance", "status": "ok", "compare": ba.compare({"a": _s(2)}, {"a": _s(2)})}
+    fix = {"step": "fix", "status": "ok", "compare": ba.compare({"m": _s(1, 1)}, None)}
+    v = ba.verdict_of([fresh, acc, fix])
+    assert v.startswith("ℹ️ Без база") and "(projects, fix)" in v, v
+    assert ba.exit_code([fresh, acc, fix]) == 0
+    # Само приемните тестове с изрична база — както досега.
+    assert ba.verdict_of([acc]).startswith("✅")
+
+
 def test_acceptance_noise_is_not_a_code_regression() -> None:
     ok = {"step": "projects", "status": "ok", "compare": ba.compare({"a": _s(2)}, {"a": _s(2)})}
     acc = {"step": "acceptance", "status": "ok", "compare": ba.compare({"a": _s(1)}, {"a": _s(2)})}

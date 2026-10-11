@@ -456,8 +456,13 @@ def verdict_of(results: list[dict]) -> str:
     if infra:
         return ("⚠️ Непълно — моделът не отговори в: " + infra_s
                 + ". Тези пускове не са броени; пусни ги пак, преди да вярваш на присъдата." + tail)
-    compared = [r["step"] for r in done if r["compare"]["before"] is not None]
-    no_base = [r["step"] for r in done if r["compare"]["before"] is None]
+    # acceptance не казва нищо за регресия на кода (виж _acceptance_tail), а
+    # „базата“ ѝ обикновено е projects от същото пускане: първото пускане без
+    # нито една база излизаше „✅ Без регресия спрямо базата (acceptance)“
+    # (измерено 2026-10-11 с фалшив доставчик). Брои се само ако е сама.
+    code_steps = [r for r in done if r["step"] != "acceptance"] or done
+    compared = [r["step"] for r in code_steps if r["compare"]["before"] is not None]
+    no_base = [r["step"] for r in code_steps if r["compare"]["before"] is None]
     if not compared:
         return ("ℹ️ Без база — няма с какво да се сравни (" + ", ".join(no_base)
                 + "). Това пускане става база за следващото." + tail)
