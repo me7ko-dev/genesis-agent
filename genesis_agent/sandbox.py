@@ -145,6 +145,9 @@ _SECRET_PATHS = (
     r"|Login Data\b"
     # Ключът, с който се подписва доверието за hooks/MCP (2026-10-11).
     r"|hooks_trust\.key\b"
+    # Средата и паметта на друг процес (2026-10-11): `tr '\0' '\n' <
+    # /proc/$PPID/environ` печаташе API ключа, махнат от средата на детето.
+    r"|/proc/[^/\s]+/(?:environ|mem|maps)\b"
 )
 
 # Управляващите файлове на Genesis — пускат програми ИЗВЪН sandbox-а с целия
@@ -1433,6 +1436,31 @@ def _windowsapps_last(path: str) -> str:
     return ";".join([p for p in parts if p not in apps] + apps)
 
 
+_ENVIRON_HIDDEN = False
+
+
+def _hide_own_environ() -> None:
+    """PR_SET_DUMPABLE=0 за процеса на Genesis (Linux), веднъж — преди първото дете.
+
+    Минималната среда на детето не значеше нищо, щом то чете средата на
+    родителя: `tr '\\0' '\\n' < /proc/$PPID/environ` печаташе API ключа
+    (одит 2026-10-11, възпроизведено). Недъмпваем процес има /proc/<pid>/
+    environ, mem и maps на root — дете със същия uid не ги отваря. При exec
+    детето отново е dumpable, така че инструментите му (gdb, py-spy върху
+    собствения му код) работят както преди. Образецът в _SECRET_PATHS е
+    вторият слой: той пита и за буквално изписан път."""
+    global _ENVIRON_HIDDEN
+    if _ENVIRON_HIDDEN or not sys.platform.startswith("linux"):
+        return
+    _ENVIRON_HIDDEN = True
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl(4, 0, 0, 0, 0)          # PR_SET_DUMPABLE = 4
+    except (OSError, AttributeError):
+        pass
+
+
 def _count_user_processes() -> int:
     """Груб брой на текущите процеси (за да не сваляме RLIMIT_NPROC под него)."""
     try:
@@ -1487,6 +1515,7 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
         except Exception:
             pass
     env = _build_env(policy, env_extra)
+    _hide_own_environ()
     # Ако NPROC е включен, капът е headroom над текущото натоварване.
     nproc_cap = (_count_user_processes() + policy.max_processes) if policy.max_processes > 0 else 0
     try:
@@ -1754,6 +1783,7 @@ def start_shell(command: str, *, cwd: Path | None = None, log: Path,
     allowed, reason = _decide(command, verdict, policy)
     if not allowed:
         return None, reason
+    _hide_own_environ()
     long_policy = replace(policy, cpu_seconds=max(policy.cpu_seconds, 3600))
     nproc_cap = (_count_user_processes() + policy.max_processes) if policy.max_processes > 0 else 0
     try:

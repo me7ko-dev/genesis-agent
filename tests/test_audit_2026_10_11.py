@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -62,3 +63,56 @@ def test_the_trust_key_is_a_secret_path(tmp_path) -> None:
     assert sandbox.sensitive_path_reason(key)
     assert sandbox.assess_command(f"cat {key}").level == RiskLevel.CONFIRM
 
+
+
+# ── API ключовете на родителя през /proc/<pid>/environ ──────────────────────
+
+@pytest.mark.parametrize("command", [
+    "tr '\\0' '\\n' < /proc/$PPID/environ | grep API_KEY",
+    "cat /proc/self/environ",
+    "strings /proc/1234/mem",
+])
+def test_reading_another_process_environment_asks(command) -> None:
+    assert sandbox.assess_command(command).level == RiskLevel.CONFIRM
+
+
+_HARNESS = r"""
+import os, sys
+from pathlib import Path
+from genesis_agent import sandbox
+sandbox.set_policy(sandbox.SandboxPolicy(mode="deny"))
+ws = Path(sys.argv[1])
+me = os.getpid()
+code = ("import sys\n"
+        "try:\n"
+        "    data = open('/proc/%d/env' + 'iron', 'rb').read()\n"
+        "    print('LEAK' if b'sk-fake-proc' in data else 'NOKEY')\n"
+        "except OSError as e:\n"
+        "    print('DENIED', type(e).__name__)\n") % me
+res = sandbox._run([sys.executable, "-c", code], cwd=ws, policy=sandbox.get_policy(), timeout=30)
+print("RAW:", res.stdout.strip())
+guarded = sandbox.run_python("import os\nprint(open(f'/proc/{os.getppid()}/environ').read())", cwd=ws)
+print("GUARD:", "sk-fake-proc" in guarded.stdout)
+"""
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc е само на Linux")
+def test_a_sandboxed_child_cannot_read_the_parents_environment(tmp_path) -> None:
+    """Одит 2026-10-11, възпроизведено: `tr '\\0' '\\n' < /proc/$PPID/environ`
+    беше SAFE и печаташе ключа, който sandbox-ът беше махнал от средата на
+    детето; py_guard пускаше `open(f'/proc/{os.getppid()}/environ')`."""
+    import os
+    import subprocess
+    harness = tmp_path / "harness.py"
+    harness.write_text(_HARNESS, encoding="utf-8")
+    root = Path(__file__).resolve().parent.parent
+    env = dict(os.environ, OPENAI_API_KEY="sk-fake-proc", PYTHONPATH=str(root),
+               GENESIS_HOME=str(tmp_path / "gh"), HOME=str(tmp_path),
+               GENESIS_SANDBOX_DIR=str(tmp_path / "sbx"))
+    out = subprocess.run([sys.executable, str(harness), str(tmp_path)], capture_output=True,
+                         text=True, env=env, timeout=120, cwd=str(tmp_path), check=False)
+    assert "RAW:" in out.stdout, out.stderr
+    assert "GUARD: False" in out.stdout
+    # root има CAP_SYS_PTRACE и чете всеки /proc въпреки PR_SET_DUMPABLE.
+    if os.geteuid() != 0:
+        assert "LEAK" not in out.stdout
