@@ -285,6 +285,64 @@ def test_export_keeps_an_mcp_json_that_only_references_variables(tmp_path):
     assert ".mcp.json" in _export(root, tmp_path / "o.zip")
 
 
+def _mcp(**server):
+    return json.dumps({"mcpServers": {"s": server}}).encode()
+
+
+# Ревю 2026-10-11 на F6: `${VAR:-тайна}` пращаше тайната (mcp_client._expand
+# ползва стойността по подразбиране, а проверката изтриваше целия `${…}`);
+# парола в адрес, токен в args и в query минаваха — обичайните начини за DB и
+# HTTP сървъри.
+@pytest.mark.parametrize(("server", "where"), [
+    ({"url": "https://mcp.example.com/mcp",
+      "headers": {"Authorization": "Bearer ${MCP_TOKEN:-9f8e7d6c5b4a3928}"}},
+     "s.headers.Authorization"),
+    ({"command": "db-mcp", "env": {"DB_PASSWORD": "${DB_PASSWORD:-Tr0ub4dor&3xyz}"}},
+     "s.env.DB_PASSWORD"),
+    ({"command": "db-mcp", "env": {"DATABASE_URL": "postgres://admin:S3cr3t@db/prod"}},
+     "s.env.DATABASE_URL"),
+    ({"command": "gh-mcp", "args": ["--token", "ghp_abcdefabcdef"]}, "s.args"),
+    ({"command": "gh-mcp", "args": ["--api-key=abcdef0123"]}, "s.args"),
+    ({"url": "https://mcp.x/mcp?api_key=abc123"}, "s.url"),
+])
+def test_mcp_literal_secret_in_defaults_urls_and_args(server, where):
+    assert deliver._mcp_literal_secret(_mcp(**server)) == where
+
+
+# Ревю 2026-10-11: всяка част AUTH/KEY/TOKEN/CREDENTIALS в името правеше
+# стойността тайна — път, сокет, режим и адрес спираха целия .mcp.json.
+@pytest.mark.parametrize("env", [
+    {"GOOGLE_APPLICATION_CREDENTIALS": "/home/u/sa.json"},
+    {"SSH_AUTH_SOCK": "/run/user/1000/ssh-agent"},
+    {"AUTH_MODE": "oauth"},
+    {"TOKEN_URL": "https://auth.example.com/token"},
+    {"API_KEY": "$API_KEY"},
+    {"DB_PASSWORD": "${DB_PASSWORD:-}"},
+    {"DATABASE_URL": "postgres://admin:${DB_PASS}@db/prod"},
+    {"PORT": "${PORT:-8080}"},
+])
+def test_mcp_env_that_is_not_a_secret(env):
+    assert deliver._mcp_literal_secret(_mcp(command="x", env=env)) is None
+
+
+@pytest.mark.parametrize("server", [
+    {"command": "gh-mcp", "args": ["--token", "${GH_TOKEN}", "--token-file", "/t", "--port", "80"]},
+    {"url": "https://mcp.x/mcp?api_key=${KEY}&region=eu"},
+])
+def test_mcp_args_and_url_that_only_reference_variables(server):
+    assert deliver._mcp_literal_secret(_mcp(**server)) is None
+
+
+def test_export_keeps_an_mcp_json_with_a_credentials_path(tmp_path):
+    root = tmp_path / "p"
+    root.mkdir()
+    (root / "app.py").write_text("print(1)\n", encoding="utf-8")
+    (root / ".mcp.json").write_text(json.dumps({"mcpServers": {"g": {
+        "command": "gdrive-mcp", "env": {"GOOGLE_APPLICATION_CREDENTIALS": "/home/u/sa.json"}}}}),
+        encoding="utf-8")
+    assert ".mcp.json" in _export(root, tmp_path / "o.zip")
+
+
 # ── F7: отказ от hook / режим план / оператора не доказва записа ────────────
 
 def test_a_write_blocked_by_an_operator_hook_is_not_proof_of_writing(ws, monkeypatch):

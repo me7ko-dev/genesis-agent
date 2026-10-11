@@ -196,31 +196,61 @@ def _find_key(data: bytes) -> re.Match[bytes] | None:
     return min(found, key=lambda m: m.start()) if found else None
 
 
-# Част от името на променлива, която носи тайна — цели части (`DB_PASSWORD`,
-# `GITHUB_TOKEN`, `APIKEY`), не поднизове: `PATH` и `COMPASS_URL` не са тайни.
-_SECRET_ENV_PARTS = frozenset({"KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASS", "PAT",
-                               "CREDENTIAL", "CREDENTIALS", "DSN", "AUTH"})
+# Последната част от името на променлива (флаг, параметър в адрес), която
+# носи тайна — цели части (`DB_PASSWORD`, `GITHUB_TOKEN`, `APIKEY`), не
+# поднизове: `PATH` и `COMPASS_URL` не са тайни. Ревю 2026-10-11: всяка част
+# от името спираше целия .mcp.json — `GOOGLE_APPLICATION_CREDENTIALS` (път),
+# `SSH_AUTH_SOCK`, `AUTH_MODE`, `TOKEN_URL`; затова само последната, а
+# CREDENTIALS вън — вписан JSON ключ хваща _SECRET_CONTENT.
+_SECRET_ENV_LAST = frozenset({"KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASS", "PAT",
+                              "DSN", "AUTH"})
 
 
 def _secret_env_name(name: str) -> bool:
     parts = [p for p in re.split(r"[^A-Za-z0-9]+", name.upper()) if p]
-    return any(p in _SECRET_ENV_PARTS or p.endswith(("KEY", "TOKEN", "SECRET")) for p in parts)
+    return bool(parts) and (parts[-1] in _SECRET_ENV_LAST
+                            or parts[-1].endswith(("KEY", "TOKEN", "SECRET")))
+
+
+def _mcp_literal(value: object) -> str:
+    """Каквото mcp_client ще прати буквално: `${VAR}` е препратка, но
+    `${VAR:-тайна}` праща тайната, ако VAR липсва (mcp_client._expand) — ревю
+    2026-10-11. Цялата стойност `$API_KEY` и самото `Bearer` не са тайни."""
+    from genesis_agent.mcp_client import _VAR
+    text = _VAR.sub(lambda m: m.group(2) or "", str(value or "")).strip()
+    if re.fullmatch(r"\$[A-Z_][A-Z0-9_]*", text) or text.lower() in ("bearer", "basic", "token"):
+        return ""
+    return text
+
+
+def _url_secret(text: str) -> bool:
+    """Парола в адреса (`postgres://admin:S3cr3t@db`) или `?api_key=…`."""
+    from urllib.parse import parse_qsl, urlsplit
+    if "://" not in text:
+        return False
+    try:
+        parts = urlsplit(text)
+        password = parts.password
+    except ValueError:
+        return False
+    return bool(password) or any(v and _secret_env_name(k) for k, v in parse_qsl(parts.query))
 
 
 def _mcp_literal_secret(data: bytes) -> str | None:
-    """`сървър.headers.Authorization` / `сървър.env.DB_PASSWORD`, ако
-    .mcp.json на проекта носи самата тайна, а не `${ПРОМЕНЛИВА}`.
+    """`сървър.headers.Authorization` / `сървър.env.DB_PASSWORD` / `сървър.args`
+    / `сървър.url`, ако .mcp.json на проекта носи самата тайна, а не `${ПРОМЕНЛИВА}`.
 
     E2e 2026-10-11: MCP сървърите на проекта (mcp_client) се описват в
     .mcp.json, а export го пращаше на клиента с `"Authorization": "Bearer
     9f8e…"` и `"DB_PASSWORD": "Tr0ub4dor&3xyz"` — ключовете нямат формата,
-    която _find_key познава. Стойност само от `${VAR}` е препратка, не тайна."""
+    която _find_key познава. Ревю 2026-10-11: и парола в DATABASE_URL, токен в
+    args (`--token ghp_…`) и в адреса (`?api_key=…`) минаваха."""
     import json
 
     from genesis_agent.code_edit import decode_text
     from genesis_agent.mcp_client import _static_auth
     try:
-        config = json.loads(decode_text(data)[0].lstrip("﻿"))
+        config = json.loads(decode_text(data)[0].lstrip("\ufeff"))
     except ValueError:
         return None
     servers = config.get("mcpServers") if isinstance(config, dict) else None
@@ -235,11 +265,22 @@ def _mcp_literal_secret(data: bytes) -> str | None:
             if not isinstance(table, dict):
                 continue
             for key, value in table.items():
-                # `Bearer ${TOKEN}` е препратка; `Bearer 9f8e…` — не.
-                literal = re.sub(r"\$\{[^}]*\}", "", str(value or "")).strip()
-                if literal and literal.lower() not in ("bearer", "basic", "token") \
-                        and is_secret(str(key)):
+                literal = _mcp_literal(value)
+                if literal and (is_secret(str(key)) or _url_secret(literal)):
                     return f"{name}.{field_name}.{key}"
+        if _url_secret(_mcp_literal(server.get("url"))):
+            return f"{name}.url"
+        args = server.get("args")
+        args = [str(a) for a in args] if isinstance(args, list) else []
+        for i, arg in enumerate(args):
+            # `--token X` и `--token=X`; `--token-file X` не е тайна.
+            flag, eq, value = arg.partition("=")
+            if not eq:
+                value = args[i + 1] if i + 1 < len(args) else ""
+                value = "" if value.startswith("-") else value
+            if (flag.startswith("-") and _secret_env_name(flag) and _mcp_literal(value)) \
+                    or _url_secret(_mcp_literal(arg)):
+                return f"{name}.args"
     return None
 
 
