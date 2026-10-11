@@ -258,6 +258,21 @@ def _git(root: Path, *args: str) -> str:
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
+def _in_git(root: Path) -> bool:
+    """Дали проектът е под git — и когато е ПОДПАПКА на хранилище.
+
+    Одит 2026-10-11: проверката беше `(root / ".git").exists()`, а `genesis fix
+    mono/backend` (monorepo) излизаше „без git“ — без принудителна снимка върху
+    некомитнатата работа, с празен дифф и с „връщане няма“. Брои се само
+    хранилище, което следи файлове ТУК: неследена папка в dotfiles репо в
+    $HOME не е „под git“ — `git checkout` нищо не би върнал."""
+    if (root / ".git").exists():
+        return True
+    if not _git(root, "rev-parse", "--show-toplevel"):
+        return False
+    return bool(_git(root, "ls-files", "--", "."))
+
+
 def latest_checkpoint(root: Path) -> Path | None:
     root = Path(root).resolve()
     if not CHECKPOINT_DIR.exists():
@@ -427,14 +442,20 @@ def _diff_from_checkpoint(root: Path, checkpoint: Path, files: list[str]) -> str
 
 def project_diff(root: Path, checkpoint: Path | None, files: list[str]) -> str:
     """
-    Git is authoritative when available: it also catches files changed by a
-    shell command, which tool-call tracking cannot see.
+    Със снимка дифът е спрямо снимката; без нея — от git (чисто хранилище,
+    тоест `git diff` == поправката).
     """
     root = Path(root)
-    if (root / ".git").exists():
+    # Снимката е точна: в мръсно хранилище `git diff` на същия файл смесваше
+    # некомитнатата работа на човека с поправката (одит 2026-10-11 — снимката
+    # се прави точно тогава, а дифът пак идваше от git).
+    if checkpoint:
+        return _diff_from_checkpoint(root, checkpoint, files)
+    if _in_git(root):
         # Само пипнатите файлове: целият `git diff` показваше и некомитнатата
         # работа на човека като част от поправката (одит 2026-10-09).
-        d = _git(root, "diff", "--", *files) if files else ""
+        # `--relative`: в подпапка на хранилище имената са спрямо проекта.
+        d = _git(root, "diff", "--relative", "--", *files) if files else ""
         # `git diff` не вижда нови (неследени) файлове — помощен модул, нов
         # тест. Одит 2026-10-07: поправка САМО с нов файл даваше празен дифф.
         # Само новите файлове, които поправката е пипнала — не всеки неследен
@@ -451,10 +472,7 @@ def project_diff(root: Path, checkpoint: Path | None, files: list[str]) -> str:
                 continue
             d += ("\n" if d and not d.endswith("\n") else "") + "".join(difflib.unified_diff(
                 [], after.splitlines(keepends=True), fromfile="/dev/null", tofile=f"b/{rel}"))
-        if d:
-            return d
-    if checkpoint:
-        return _diff_from_checkpoint(root, checkpoint, files)
+        return d
     return ""
 
 
@@ -637,7 +655,9 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
     # Некомитнати промени + поправка = смесени в един `git diff`, а съветът
     # `git checkout .` триеше и работата на човека (одит 2026-10-09). Тогава
     # снимка се прави винаги.
-    dirty = (root / ".git").exists() and bool(_git(root, "status", "--porcelain"))
+    in_git = _in_git(root)
+    # `-- .`: в monorepo мръсотията на съседна папка не е на този проект.
+    dirty = in_git and bool(_git(root, "status", "--porcelain", "--", "."))
     if dirty and not checkpoint:
         say("⚠️  Има некомитнати промени — правя снимка, за да не се смесят с поправката.")
         checkpoint = True
@@ -648,7 +668,7 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
             extra = (" Комитни или `git stash` промените си и пусни пак." if dirty else "")
             return RepairOutcome(False, f"Снимката не успя, нищо не е променено: {e}{extra}")
         say(f"📦 Снимка преди промените: {snapshot.name}")
-    elif (root / ".git").exists():
+    elif in_git:
         say("↩️  Без снимка — промените се връщат с git (или `--checkpoint` за снимка).")
     else:
         say("⚠️  Без снимка и без git — промените НЯМА как да се върнат. "
@@ -837,7 +857,7 @@ def _undo_hint(root: Path, snapshot: Path | None, files: list[str] | None = None
     Никога `git checkout .`: то връща и чужди (на човека) промени."""
     if snapshot:
         return f"върни ги с `genesis fix --revert {root}`."
-    if (root / ".git").exists():
+    if _in_git(root):
         names = " ".join(f'"{f}"' for f in (files or [])[:20])
         return (f"върни ги с `git checkout -- {names}` в проекта (новите файлове изтрий)."
                 if names else "няма какво да се връща.")

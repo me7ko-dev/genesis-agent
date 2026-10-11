@@ -76,3 +76,56 @@ def test_a_log_written_by_the_tests_is_not_a_fix(proj, monkeypatch):
     assert "last_run.log" not in out.files_touched
     assert any("описа промяна" in s for s in said), "моделът трябва да бъде върнат да действа"
     assert len(calls) == 3
+
+
+# ── genesis fix: подпапка на git хранилище (monorepo) ───────────────────────
+
+def _monorepo(tmp_path):
+    mono = tmp_path / "mono"
+    backend = mono / "backend"
+    backend.mkdir(parents=True)
+    (backend / "calc.py").write_text(CALC_BAD, encoding="utf-8")
+    (backend / "test_calc.py").write_text(TEST_CALC, encoding="utf-8")
+    (mono / "README.md").write_text("mono\n", encoding="utf-8")
+    _git(mono, "init", "-q")
+    _git(mono, "add", "-A")
+    _git(mono, "commit", "-qm", "init")
+    return mono, backend
+
+
+_HUMAN = CALC_BAD + "\n\ndef HUMAN_WORK_IN_PROGRESS():\n    pass\n"
+_EDIT = _Reply([_tc("EDIT_FILE", {"path": "calc.py", "old": "a - b", "new": "a + b"})])
+
+
+def test_fix_in_a_subfolder_of_a_git_repo_sees_git(proj, tmp_path, monkeypatch):
+    _, backend = _monorepo(tmp_path)
+    (backend / "calc.py").write_text(_HUMAN, encoding="utf-8")   # некомитната работа
+    _brain(monkeypatch, [_EDIT])
+    said: list[str] = []
+    out = repo_agent.repair(backend, "add is wrong", test_command=PY, max_rounds=3,
+                            on_status=said.append)
+    assert out.success and out.checkpoint is not None, "мръсно хранилище → снимка"
+    assert "+    return a + b" in out.diff
+    assert "+def HUMAN_WORK_IN_PROGRESS" not in out.diff   # контекст може, добавен ред — не
+    assert not any("без git" in s for s in said)
+
+
+def test_clean_subfolder_fix_diff_comes_from_git(proj, tmp_path, monkeypatch):
+    _, backend = _monorepo(tmp_path)
+    _brain(monkeypatch, [_EDIT])
+    out = repo_agent.repair(backend, "add is wrong", test_command=PY, max_rounds=3,
+                            on_status=lambda m: None)
+    assert out.success and out.checkpoint is None
+    assert "+    return a + b" in out.diff
+    assert "връщане няма" not in repo_agent._undo_hint(backend, None, ["calc.py"])
+
+
+def test_fix_diff_does_not_show_human_work_in_the_same_file(proj, monkeypatch):
+    _git(proj, "init", "-q")
+    _git(proj, "add", "-A")
+    _git(proj, "commit", "-qm", "init")
+    (proj / "calc.py").write_text(_HUMAN, encoding="utf-8")
+    _brain(monkeypatch, [_EDIT])
+    out = repo_agent.repair(proj, "fix add", test_command=PY, max_rounds=3, on_status=lambda m: None)
+    assert out.success and out.checkpoint is not None
+    assert "+    return a + b" in out.diff and "+def HUMAN_WORK_IN_PROGRESS" not in out.diff
