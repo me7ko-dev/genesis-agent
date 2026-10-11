@@ -664,6 +664,30 @@
       }
     },
     {
+      "name": "cli_settings_layers",
+      "category": "domain",
+      "min_score": 3,
+      "file_path": "skills/cli_settings_layers.md",
+      "description": "Настройки на CLI от файл (ini/json), средата и аргументите — по-късното печели; store_true/append/число с default=None, иначе смачкват файла; стойностите се връщат както са дошли (str(Path(\"/data/a\")) на Windows е \"\\data\\a\"); счупен файл → stderr и код 2.",
+      "triggers": [
+        "настройките идват от файл средата и аргументите",
+        "аргументите средата файла",
+        "аргументите > средата > файла",
+        "config.ini средата аргументите",
+        "config.json --config",
+        "командния ред --config",
+        "configparser argparse"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-10-12T01:40:00+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
+    },
+    {
       "name": "telegram_bot_updates",
       "category": "domain",
       "file_path": "skills/telegram_bot_updates.md",

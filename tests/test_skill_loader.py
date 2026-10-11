@@ -430,6 +430,7 @@ def test_an_unrelated_request_gets_nothing(_shipped_skills) -> None:
 # booking-form (2026-10-11): правилата за телефона, не уеб ръководството — 2/2
 # пуска паднаха само на „0898/123-456“, а ръководството е за оформление на сайт.
 # Второ знание идва само строго: clients-migrate — CSV-то и телефонът.
+# sync-cli / cli-config (2026-10-12): настройки от файл, средата и аргументите.
 _BENCH_KNOWLEDGE = {
     "booking-form": ["bg_contact_form_phone"], "egn-check": ["bg_egn_validate_and_decode"],
     "eik-check": ["bg_eik_bulstat_validate"], "euro-convert": ["bg_euro_bgn_conversion"],
@@ -438,9 +439,9 @@ _BENCH_KNOWLEDGE = {
     "booking-guesthouse": ["bg_contact_form_phone"], "contact-form": ["bg_contact_form_phone"],
     "clients-migrate": ["bg_excel_csv_import", "bg_contact_form_phone"],
     "csv-sqlite": ["bg_excel_csv_import"], "shop-scraper": ["bg_shop_scrape_prices"],
-    "cli-config": ["money_round_up_step"],
+    "cli-config": ["cli_settings_layers", "money_round_up_step"],
     "shop-bot": ["telegram_bot_updates"], "expense-bot": ["telegram_bot_updates"],
-    "library-pkg": ["isbn13_validate"],
+    "library-pkg": ["isbn13_validate"], "sync-cli": ["cli_settings_layers"],
 }
 
 
@@ -554,7 +555,8 @@ def test_a_csv_with_phones_gets_both_and_a_loose_second_match_stays_out(_shipped
     projects = sl.Path(__file__).resolve().parent.parent / "bench" / "projects"
     for task_file in sorted(projects.glob("*/task.txt")):
         got = sl.domain_context(task_file.read_text(encoding="utf-8"))
-        expected = 2 if task_file.parent.name == "clients-migrate" else 1  # задачата от по-горе
+        # clients-migrate — задачата от по-горе; cli-config — настройките и закръглянето (2026-10-12)
+        expected = 2 if task_file.parent.name in ("clients-migrate", "cli-config") else 1
         assert got.count("## Проверено знание от библиотеката:") <= expected, task_file.parent.name
 
 
@@ -741,3 +743,14 @@ def test_a_shared_stem_is_not_a_whole_trigger(_shipped_skills, query) -> None:
     """Одит 2026-10-07: „работи“ (глагол) ≈ „работни“ и „основните“ ≈ „основа“
     през пълната основа подаваха правилата за работни дни / фактури."""
     assert sl.domain_context(query) == ""
+
+
+@pytest.mark.parametrize("query,expected", [
+    ("CLI, който чете config.ini, променливите на средата и аргументите", True),
+    ("Аргументите > средата > файла, както при git", True),
+    ("Скрипт с argparse, който брои редовете във файл", False),
+    ("Прочети config.json и покажи ключовете", False),
+])
+def test_layered_settings_reach_only_a_layered_settings_request(
+        _shipped_skills, query, expected) -> None:
+    assert ("библиотеката: cli_settings_layers" in sl.domain_context(query)) is expected
