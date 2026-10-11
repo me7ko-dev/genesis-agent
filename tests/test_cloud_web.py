@@ -491,6 +491,18 @@ def test_add_user_command_prints_a_password(tmp_path, capsys) -> None:
 
 # ── историята на разговора (task.py) ──────────────────────────────────────────
 
+def test_both_proxy_flags_are_refused(tmp_path, monkeypatch, capsys) -> None:
+    """Одит 2026-10-11: --trust-proxy с --trust-cloudflare се приемаше и вярваше
+    на CF-Connecting-IP — зад Caddy клиентът си го пише сам и всяка заявка
+    получаваше нов брояч за входа (12 × 401, нито един 429)."""
+    started: list[bool] = []
+    monkeypatch.setattr(web, "make_server", lambda *a, **k: started.append(True))
+    code = web.main(["serve", "--data", str(tmp_path), "--jobs", str(tmp_path / "jobs"),
+                     "--trust-proxy", "--trust-cloudflare"])
+    assert code == 2 and started == []
+    assert "взаимно изключващи" in capsys.readouterr().err
+
+
 def test_history_round_trip_and_caps(tmp_path) -> None:
     msgs = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}"} for i in range(30)]
     task.save_history(tmp_path, msgs)

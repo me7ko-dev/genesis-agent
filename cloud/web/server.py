@@ -559,6 +559,13 @@ def main(argv: list[str] | None = None) -> int:
     srv.add_argument("--trust-cloudflare", action="store_true",
                      help="IP от CF-Connecting-IP (само зад Cloudflare Tunnel)")
     a = p.parse_args(argv)
+    # README-то казва „никога и двете“, а кодът приемаше и вярваше на
+    # CF-Connecting-IP — зад Caddy клиентът си го пише сам и спирачката на
+    # входа не спираше нищо (одит 2026-10-11: 12 × 401, нито един 429).
+    if a.cmd == "serve" and a.trust_proxy and a.trust_cloudflare:
+        print("--trust-proxy и --trust-cloudflare са взаимно изключващи се — избери едното",
+              file=sys.stderr)
+        return 2
     store = Store(a.data / "web.db")
     if a.cmd == "add-user":
         password = secrets.token_urlsafe(12)
