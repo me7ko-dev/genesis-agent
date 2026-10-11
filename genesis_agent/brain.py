@@ -707,6 +707,7 @@ class Brain:
         self._fail_count = 0
         self._last_usage: dict | None = None
         self._last_local_error: str | None = None
+        self._cut_reply: tuple[str, list | None] | None = None  # виж _http, HTTP_TRUNCATED
         # min_size_b (design note, 2026-07-25): филтрира облачната верига по размер —
         # различни контексти искат различно качество/скорост:
         # терминален чат ≥32B, умения/самонадграждане ≥120B (виж config.yaml
@@ -1293,10 +1294,13 @@ class Brain:
         # Същото за аргументите на tool_call (одит 2026-10-11): WRITE_FILE,
         # отрязан на 4096, стигаше до цикъла като „невалидни аргументи“ и
         # моделът пренаписваше същия голям файл в същия таван рунд след рунд.
-        if finish_reason == "length" and (_is_truncated(content or "")
-                                          or _has_cut_tool_arguments(tool_calls)):
+        cut_args = finish_reason == "length" and _has_cut_tool_arguments(tool_calls)
+        if cut_args or (finish_reason == "length" and _is_truncated(content or "")):
             self._last_usage = _openai_usage(data.get("usage"))
             self._usage_attempt = getattr(self, "_attempt_id", None)
+            # Отрязаният call се пази: ако го отреже ВСЕКИ модел, complete() го
+            # връща на цикъла вместо „Error“ (ревю 2026-10-11, виж там).
+            self._cut_reply = ((content or "").strip(), tool_calls) if cut_args else None
             raise RuntimeError(
                 f"HTTP_TRUNCATED: отговорът е отрязан на тавана от {_output_cap(model)} "
                 f"токена, посред код-ограда или tool_call (finish_reason=length). Вдигни го с "
@@ -1915,6 +1919,7 @@ class Brain:
                              if (c["provider"], c["model"]) != avoid]
 
         n = len(ordered_chain)
+        cut_hit: tuple | None = None  # (отговор, usage, запис) на първия отрязан tool_call
         if n > 0:
             # ВИНАГИ отгоре надолу, прескачайки временно изчерпаните.
             #
@@ -1943,6 +1948,9 @@ class Brain:
                 # на чиста инсталация).
                 only_unconfigured = True
                 sent_any = False  # тръгнала ли е поне една истинска заявка
+                # Нов кръг има смисъл само след грешка, която може да мине:
+                # HTTP_TRUNCATED не слага cooldown и същата заявка се реже пак.
+                retry_useful = False
                 for step in range(n):
                     attempt = ordered_chain[step]
                     prov, model = attempt["provider"], attempt["model"]
@@ -1955,6 +1963,7 @@ class Brain:
                     t0 = time.time()
                     self._attempt_id = (prov, model)
                     self._usage_attempt = None
+                    self._cut_reply = None
                     try:
                         try:
                             raw_text, tool_calls = self._call(prov, model, msgs, tools=use_tools)
@@ -1989,6 +1998,7 @@ class Brain:
                     except requests.exceptions.RequestException as e:
                         only_unconfigured = False
                         sent_any = True
+                        retry_useful = True
                         last_error = f"мрежа: {e}"
                         self._fail_count += 1
                         self._record_stat(prov, time.time() - t0, False)
@@ -2005,6 +2015,10 @@ class Brain:
                             only_unconfigured = False
                         if not synthetic:
                             sent_any = True
+                            if "HTTP_TRUNCATED" not in last_error:
+                                retry_useful = True
+                            elif cut_hit is None and getattr(self, "_cut_reply", None):
+                                cut_hit = (self._cut_reply, self._last_usage, attempt)
                             self._fail_count += 1
                             self._record_stat(prov, time.time() - t0, False)
                             # Отрязан/отказан отговор е платен — разходът се записва.
@@ -2033,6 +2047,11 @@ class Brain:
                 if only_unconfigured:
                     last_error = "нито един модел няма API ключ — пусни `genesis setup`"
                     break
+                if sent_any and not retry_useful:
+                    # Всяка изпратена заявка е отрязана на тавана (ревю
+                    # 2026-10-11): втори кръг е още веднъж цялата верига,
+                    # платена, след 8 s — със същия сигурен провал.
+                    break
                 if not sent_any:
                     # Кръг без нито една заявка — всичко е в cooldown или без
                     # ключ. Нов кръг помага само ако някой cooldown свършва
@@ -2050,6 +2069,18 @@ class Brain:
                 if round_i + 1 < rounds:
                     print("  [Brain] Всички облачни модели заети/изчерпани, кратка пауза и нов кръг...")
                     time.sleep(_ROUND_PAUSE_S)
+
+        if cut_hit is not None:
+            # Файл, по-голям от тавана на ВСЕКИ модел (ревю 2026-10-11): преди
+            # F4 отрязаният WRITE_FILE стигаше до цикъла с „Невалидни
+            # аргументи“ и моделът можеше да раздели записа; с HTTP_TRUNCATED
+            # ходът свършваше с „Error“ след 2 кръга × веригата. Връща се
+            # първият отрязан call — локалният модел (без native tools, по-малък
+            # таван) няма да напише същия файл цял.
+            (raw_text, tool_calls), usage, self.current = cut_hit
+            print("  [Brain] ✂ всеки модел отряза tool_call на тавана → към цикъла")
+            return type("Obj", (object,), {"raw_text": raw_text, "code": "",
+                                           "usage": usage, "tool_calls": tool_calls})
 
         # ПОСЛЕДНА РЕЗЕРВА: локалният собствен мозък — само ако облакът напълно
         # отказа (или изобщо няма конфигурирани облачни модели).

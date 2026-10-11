@@ -237,6 +237,31 @@ def test_complete_tool_call_arguments_with_length_are_still_accepted(monkeypatch
     assert [m for m, _ in seen] == ["A"] and r.tool_calls
 
 
+def test_a_write_cut_on_every_model_reaches_the_loop_after_one_pass(monkeypatch) -> None:
+    """Ревю 2026-10-11: файл, по-голям от тавана на ВСИЧКИ модели, правеше
+    2 кръга × цялата верига (4 платени заявки), 8 s пауза и „Error: …
+    HTTP_TRUNCATED“. Отрязаният call стига до цикъла след един кръг."""
+    monkeypatch.setattr(brain, "_load_chain", lambda: chain(("groq", "A"), ("nvidia", "C")))
+    monkeypatch.setenv("GROQ_API_KEY", "g")
+    monkeypatch.setenv("NVIDIA_API_KEY", " n")
+    slept: list = []
+    monkeypatch.setattr(brain.time, "sleep", slept.append)
+    cut = json.dumps({"path": "big.py", "content": "x = 1\n" * 50})[:120]
+
+    def handler(p):
+        tc = [{"id": "c1", "type": "function", "function": {"name": "WRITE_FILE", "arguments": cut}}]
+        return ok(None, tool_calls=tc, finish="length",
+                  usage={"prompt_tokens": 3000, "completion_tokens": 4096})
+
+    seen = _route(monkeypatch, handler)
+    rows = _usage_rows(monkeypatch)
+    r = brain.Brain(use_local=False).complete([{"role": "user", "content": "напиши big.py"}], tools=_TOOLS)
+    assert [m for m, _ in seen] == ["A", "C"] and slept == []
+    assert r.tool_calls and r.tool_calls[0]["function"]["arguments"] == cut
+    assert not r.raw_text.startswith("Error:")
+    assert rows == [("A", 4096), ("C", 4096)]   # всеки отрязан отговор е платен веднъж
+
+
 def test_an_empty_but_paid_reply_is_recorded_in_the_budget(monkeypatch) -> None:
     monkeypatch.setattr(brain, "_load_chain", lambda: chain(("groq", "A"), ("nvidia", "C")))
     monkeypatch.setenv("GROQ_API_KEY", "g")
