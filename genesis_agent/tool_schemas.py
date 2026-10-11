@@ -502,12 +502,27 @@ def _literal_path_escapes(text: str) -> str:
         # `C:\\proj` е правилно ескейпнат път: `\n` след него е нов ред.
         return raw if "\\\\" in raw else _repair_escapes(raw, _LITERAL_KEEP)
 
+    def in_command(raw: str) -> str:
+        # `cd C:\proj\nnpm test`: последното `\n` в думата е новият ред на
+        # многоредовата команда, а не папка — _RAW_WIN_PATH го поглъщаше заедно
+        # с `npm` и двата реда ставаха един път (2026-10-11, трета вълна; преди
+        # поправката тук JSON-ът се четеше правилно). Папка `\notes.txt` има
+        # разширение и остава буквална; по-ранните `\new\tests` — също.
+        head, _, last = raw.rpartition("\\")
+        if last[:1] != "n" or re.search(r"\.\w+$", last[1:]):
+            return literal(raw)
+        newline = "\\" + last
+        before, _, seg = head.rpartition("\\")
+        if seg == "r" and before:                    # `\r\n` — CRLF
+            head, newline = before, "\\r" + newline
+        return literal(head) + newline
+
     def member(m: re.Match[str]) -> str:
         key, body = m.group(1), m.group(3)
         if key in _PATH_KEYS:
             body = literal(body)
         else:
-            body = _RAW_WIN_PATH.sub(lambda r: literal(r.group(0)), body)
+            body = _RAW_WIN_PATH.sub(lambda r: in_command(r.group(0)), body)
         return f'"{key}"{m.group(2)}{body}"'
     return _JSON_MEMBER.sub(member, text)
 

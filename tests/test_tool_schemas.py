@@ -198,3 +198,19 @@ def test_newlines_outside_windows_paths_stay_newlines() -> None:
 def test_a_properly_escaped_path_before_a_newline_keeps_the_newline() -> None:
     got = tool_schemas.load_tool_arguments(r'{"command": "cd C:\\proj\nnpm test"}')
     assert got["command"] == "cd C:\\proj\nnpm test"
+
+
+def test_a_newline_right_after_a_raw_windows_path_stays_a_newline() -> None:
+    r"""`cd C:\Users\roika\proj\nnpm test`: последното `\n` е новият ред на
+    командата. Четенето на суровите `\` го поглъщаше в пътя и двата реда
+    ставаха един (2026-10-11, трета вълна); преди него поправката даваше
+    точно двата реда."""
+    load = tool_schemas.load_tool_arguments
+    assert load(r'{"command": "cd C:\Users\roika\proj\nnpm test"}')["command"] == \
+        "cd C:\\Users\\roika\\proj\nnpm test"
+    assert load(r'{"command": "type C:\Users\x\a.txt\nnpm test"}')["command"] == \
+        "type C:\\Users\\x\\a.txt\nnpm test"
+    assert load(r'{"command": "cd C:\Users\roika\new\tests\ngit status"}')["command"] == \
+        "cd C:\\Users\\roika\\new\\tests\ngit status"
+    assert load(r'{"command": "cd C:\Users\roika\r\nnpm test"}')["command"] == \
+        "cd C:\\Users\\roika\r\nnpm test"
