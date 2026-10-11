@@ -1,8 +1,10 @@
-"""Етап 2: вход, уеб чат и сваляне на файловете от задачата.
+"""Етап 2: вход, уеб чат и сваляне на файловете от задачата; етап 3: плащане.
 
     python -m cloud.web.server add-user ivan@example.com        # отпечатва парола
     python -m cloud.web.server serve --data /srv/genesis/web --jobs /srv/jobs \\
         --env-file /srv/genesis/keys.env                          # 127.0.0.1:8080
+    python -m cloud.web.server users | balance | grant | disable | enable |
+        limits | invite | reconcile                               # оператор, само локално
 
 Всяко съобщение в разговор е нов контейнер (cloud/runner/launch.py) върху
 СЪЩАТА папка — файловете остават, историята е в /work/.genesis (task.py).
@@ -18,12 +20,16 @@
   - по един ход на човек, общо най-много `--workers` контейнера наведнъж;
   - файловете се сваля само като прикачени (никога не се показват в нашия
     произход), без символни връзки (кодът в контейнера е чужд) и само докато
-    в разговора не върви ход.
+    в разговора не върви ход;
+  - етап 3 (2026-10-11): спрян профил няма сесия; таксата е от шлюза, не от
+    контейнера; webhook-ът на Stripe е единственият POST без вход — пази го
+    подписът; админ командите са само в командния ред.
 """
 from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import io
 import json
 import os
@@ -34,6 +40,7 @@ import stat
 import sys
 import threading
 import time
+import uuid
 import zipfile
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, wait
@@ -43,12 +50,15 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
+from cloud.gateway import gateway as gw
 from cloud.runner import launch
-from cloud.web.store import SESSION_SECONDS, Store
+from cloud.web import billing
+from cloud.web.store import MICRO, SESSION_SECONDS, Store
 
 STATIC = Path(__file__).with_name("static")
 COOKIE = "genesis_session"
 MAX_BODY = 64 * 1024
+MAX_WEBHOOK = 256 * 1024     # събитие от Stripe (сесия/фактура) е няколко KiB
 MAX_TEXT = 4000
 MAX_FILES = 1000
 # Архивът „сваля всичко“ — не спира на MAX_FILES (одит 2026-10-11: при 1500
@@ -57,6 +67,10 @@ MAX_ZIP_FILES = 20000
 MAX_ZIP_BYTES = 200 * 1024 * 1024
 LOGIN_WINDOW = 15 * 60
 LOGIN_FAILURES = 5
+# Подразбиранията за всеки човек (2026-10-11) — профилът може да ги смени
+# (`limits`). Ходовете на ден важат и без плащане: всеки ход е контейнер.
+TURNS_PER_DAY = 50
+MONTHLY_CAP = 2000 * MICRO
 HIDDEN = ".genesis"          # историята на разговора (task.py) — не е за сваляне
 # През колко секунди shutdown() почиства отново, докато чака живите ходове.
 SHUTDOWN_POLL = 1.0
@@ -78,6 +92,15 @@ class LoginBlocked(Exception):
     """Твърде много неуспешни опити — 429."""
 
 
+class TurnRefused(Exception):
+    """Ходът не започва: HTTP статус и обяснение за човека."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
 class App:
     """Всичко без HTTP: може да се тества и да се пусне с фалшив runner."""
 
@@ -86,7 +109,14 @@ class App:
                  env_file: str | None = None, runtime: str | None = None,
                  secure_cookie: bool = True, trust_proxy: bool | str = False,
                  gateway: launch.Gateway | None = None, recover: bool = True,
-                 cleanup: Callable[[], int] | None = None) -> None:
+                 cleanup: Callable[[], int] | None = None,
+                 prices: billing.Prices | None = None, turns_per_day: int = TURNS_PER_DAY,
+                 max_tokens_per_turn: int = launch.TASK_BUDGET,
+                 monthly_cap: int = MONTHLY_CAP, stripe: billing.StripeConfig | None = None,
+                 stripe_opener: billing.Opener | None = None) -> None:
+        if prices is not None and gateway is None:
+            # Без шлюза токените ги казва кодът в контейнера (2026-10-11).
+            raise ValueError("плащането иска шлюза (--gateway-usage)")
         self.store = store
         self.jobs_dir = jobs_dir
         self.runner = runner
@@ -96,6 +126,14 @@ class App:
         self.secure_cookie = secure_cookie
         self.trust_proxy = trust_proxy
         self.gateway = gateway
+        self.prices = prices          # None = без плащане
+        self.turns_per_day = turns_per_day
+        self.max_tokens_per_turn = max_tokens_per_turn
+        self.monthly_cap = monthly_cap  # µc
+        if stripe is not None and (prices is None or not stripe.public_url):
+            raise ValueError("Stripe иска плащане (--billing) и --public-url")
+        self.stripe = stripe
+        self.stripe_opener = stripe_opener
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="turn")
         self._failures: dict[str, list[float]] = {}
         self._lock = threading.Lock()
@@ -116,6 +154,12 @@ class App:
         already in use“, не пипа ходовете и контейнерите на живия сървър."""
         self._cleanup()
         self.store.fail_unfinished("сървърът беше рестартиран по време на задачата")
+        if self.prices is not None and self.gateway is not None:
+            # Ходове без такса от предишния живот: срив между края и таксата,
+            # или прекъснати от рестарта (горе) — шлюзът ги е таксувал.
+            charged = billing.reconcile(self.store, self.prices, self.gateway.usage)
+            if charged:
+                print(f"сметка: таксувани {charged} хода от преди рестарта", file=sys.stderr)
 
     def shutdown(self) -> None:
         """SIGTERM/Ctrl+C: текущите задачи се спират (контейнерите им се убиват),
@@ -178,6 +222,27 @@ class App:
                 ip_list.remove(stamp)
         return self.store.new_session(user_id)
 
+    def signup(self, code: str, email: str, password: str, ip: str) -> str:
+        """Регистрация с покана → жетон на сесия. ValueError с причината.
+
+        Същата спирачка като входа, на IP (2026-10-11): опитът се брои като
+        провал преди проверката и се маха само при успех — иначе поканите се
+        налучкваха без таван (6-ият грешен код от един IP е 429)."""
+        key = f"ip:{ip}"
+        stamp = time.time()
+        with self._lock:
+            now = time.time()
+            self._failures[key] = [t for t in self._failures.get(key, []) if now - t < LOGIN_WINDOW]
+            if len(self._failures[key]) >= LOGIN_FAILURES:
+                raise LoginBlocked
+            self._failures[key].append(stamp)
+        user_id = self.store.signup(code, email, password)
+        with self._lock:
+            ip_list = self._failures.get(key, [])
+            if stamp in ip_list:
+                ip_list.remove(stamp)
+        return self.store.new_session(user_id)
+
     # ── сваляне ─────────────────────────────────────────────────────────────
     def begin_download(self, chat_id: str) -> bool:
         """Сваляне само между ходовете — и ход не започва, докато трае.
@@ -199,13 +264,121 @@ class App:
     def workspace(self, user_id: int, chat_id: str) -> Path:
         return self.jobs_dir / str(user_id) / chat_id
 
-    def start_turn(self, user: dict[str, Any], chat_id: str, text: str) -> int | None:
-        """Нов ход, или None ако човекът вече чака отговор (по един на човек)."""
+    def limits_for(self, account: dict[str, Any]) -> tuple[int, int, int]:
+        """(ходове на ден, токени на ход, месечен таван в µc) за този профил."""
+        def pick(key: str, default: int) -> int:
+            return default if account[key] is None else int(account[key])
+        return (pick("turns_per_day", self.turns_per_day),
+                pick("max_tokens_per_turn", self.max_tokens_per_turn),
+                pick("monthly_cap", self.monthly_cap))
+
+    def account_view(self, user: dict[str, Any]) -> dict[str, Any]:
+        """Сметката на ТОЗИ човек за страницата „Сметка“. Без `ref` (Stripe
+        номера, разбивка по модели) — те са за оператора."""
+        uid = user["id"]
+        account = self.store.account(uid)
+        per_day, max_tokens, cap = self.limits_for(account)
+        balance = self.store.balance(uid)
+        spent = self.store.month_spent(uid)
+        prices = self.prices
+
+        def offers(items: Any) -> list[dict[str, Any]]:
+            # Само купуваемите: без price id бутонът би дал 400.
+            return [{"id": o.id, "credits": o.credits, "price": o.price}
+                    for o in items.values() if o.stripe_price]
+
+        fmt = billing.fmt_credits
+        return {
+            "email": user["email"], "balance": fmt(balance), "balance_micro": balance,
+            "held": fmt(self.held(uid)),
+            "month_spent": fmt(spent), "monthly_cap": fmt(cap),
+            "turns_today": self.store.turns_today(uid), "turns_per_day": per_day,
+            "max_tokens_per_turn": max_tokens, "plan": account["plan"],
+            "billing": prices is not None, "stripe": self.stripe is not None,
+            "packs": offers(prices.packs) if prices else [],
+            "plans": offers(prices.plans) if prices else [],
+            "history": [{"at": e["created"], "kind": e["kind"], "credits": fmt(e["amount"]),
+                         "turn_id": e["turn_id"]} for e in self.store.ledger_entries(uid, 50)],
+        }
+
+    def held(self, user_id: int) -> int:
+        """µc, задържани за ходове с още жив жетон (0 без плащане)."""
+        if self.prices is None:
+            return 0
+        return billing.held(self.store, self.prices, user_id)
+
+    def _affordable(self, user_id: int, cap: int, prices: billing.Prices, budget: int) -> int:
+        """Колко токена може да плати човекът за следващия ход — или TurnRefused.
+
+        Таванът на токените в шлюза (жетонът на задачата) става толкова: шлюзът
+        вече спира задачата на него, значи надхарчването е най-много грешката
+        в оценката на шлюза. Неизхарченото от жетоните, които още живеят, е
+        задържано (ревю 2026-10-11): иначе всеки ход харчеше и бюджета на
+        предишния — жетонът му, записан в /work, важи до 11 мин след края."""
+        assert self.gateway is not None   # prices без шлюз не тръгва (__init__)
+        # Ходовете с изтекъл жетон — окончателно, преди да се смята задържаното.
+        billing.settle(self.store, prices, self.gateway.usage, user_id=user_id)
+        spent = self.store.month_spent(user_id)
+        if spent >= cap:
+            raise TurnRefused(402, f"достигна месечния си таван от {billing.fmt_credits(cap)} "
+                                   "кредита — пиши ни, ако ти трябва повече")
+        balance = self.store.balance(user_id)
+        held = billing.held(self.store, prices, user_id)
+        room = min(balance, cap - spent) - held
+        left = room - prices.per_turn_micro
+        if prices.max_rate:
+            affordable = left // prices.max_rate
+        else:
+            affordable = budget if left >= 0 else -1
+        if affordable < prices.min_turn_tokens:
+            free = min(balance, cap - spent) - prices.per_turn_micro
+            if held and (free // prices.max_rate if prices.max_rate
+                         else (budget if free >= 0 else -1)) >= prices.min_turn_tokens:
+                minutes = -(-(launch.token_ttl(self.limits) + billing.LATE_MARGIN) // 60)
+                raise TurnRefused(402, f"{billing.fmt_credits(held)} кредита са задържани за "
+                                       "последните ти задачи, докато изтече достъпът им до "
+                                       f"моделите (до {minutes} мин след началото им) — опитай "
+                                       "след малко или зареди от „Сметка“.")
+            if cap - spent < balance:
+                raise TurnRefused(402, f"достигна месечния си таван от {billing.fmt_credits(cap)} "
+                                       "кредита — пиши ни, ако ти трябва повече")
+            need = prices.per_turn_micro + prices.min_turn_tokens * prices.max_rate
+            raise TurnRefused(402, f"балансът ти е {billing.fmt_credits(balance)} кредита — "
+                                   f"за нова задача трябват поне {billing.fmt_credits(need)}. "
+                                   "Зареди от „Сметка“.")
+        return affordable
+
+    def start_turn(self, user: dict[str, Any], chat_id: str, text: str) -> int:
+        """Нов ход — или TurnRefused. Всички проверки са под заключването: два
+        раздела не могат да минат едновременно покрай тях."""
+        uid = user["id"]
         with self._lock:
-            if self.store.busy(user_id=user["id"]) or chat_id in self._downloading:
-                return None
+            account = self.store.account(uid)
+            if account["disabled"]:
+                # Сесията вече е невалидна (session_user) — това е само втора стена.
+                raise TurnRefused(403, "профилът е спрян — пиши на поддръжката")
+            if self.store.busy(user_id=uid) or chat_id in self._downloading:
+                raise TurnRefused(409, "предишната ти задача още върви")
+            per_day, budget, cap = self.limits_for(account)
+            if self.store.turns_today(uid) >= per_day:
+                raise TurnRefused(429, f"днешният лимит от {per_day} задачи е изчерпан — "
+                                       "опитай пак утре")
+            if self.prices is not None:
+                budget = min(budget, self._affordable(uid, cap, self.prices, budget))
+            gateway = (dataclasses.replace(self.gateway, budget=min(self.gateway.budget, budget))
+                       if self.gateway is not None else None)
             turn_id = self.store.add_turn(chat_id, text)
-        fut = self.pool.submit(self._run, turn_id, text, self.workspace(user["id"], chat_id))
+            job = launch.new_task_name()
+            usage_start = gw.usage_size(gateway.usage) if gateway is not None else 0
+            if self.prices is not None and gateway is not None:
+                # Името на задачата в шлюза — ПРЕДИ контейнера: срив посред хода
+                # не губи сметката, reconcile при старт я намира по него. С
+                # бюджета на жетона — от него е задържаното (billing.held), и
+                # докъде е файлът на шлюза сега: по-рано редове на задачата
+                # няма, четенето на сметката почва оттам (както usage_for).
+                self.store.set_job(turn_id, job, gateway.budget, usage_start=usage_start)
+        fut = self.pool.submit(self._run, turn_id, uid, text, self.workspace(uid, chat_id),
+                               job, gateway, usage_start)
         with self._lock:
             self._futures.add(fut)
         fut.add_done_callback(self._forget)
@@ -215,26 +388,55 @@ class App:
         with self._lock:
             self._futures.discard(fut)
 
-    def _run(self, turn_id: int, text: str, workspace: Path) -> None:
+    def _run(self, turn_id: int, user_id: int, text: str, workspace: Path, job: str,
+             gateway: launch.Gateway | None, usage_start: int = 0) -> None:
+        prices = self.prices if gateway is not None else None
         if self._stopping.is_set():
             # Ход, тръгнал след shutdown(), би пуснал контейнер след почистването.
+            # Контейнер и жетон няма — няма и какво да се таксува (2026-10-11).
+            self.store.drop_job(turn_id)
             self.store.finish_turn(turn_id, ok=False, tokens={}, seconds=0.0,
                                    error="сървърът спря по време на задачата — пусни я пак")
             return
         self.store.set_status(turn_id, "running")
+        if prices is not None:
+            # Жетонът се прави сега (run_task) — оттук тече животът му.
+            self.store.job_started(turn_id, billing.settle_after(time.time(),
+                                                                 launch.token_ttl(self.limits)))
+        ok, error, seconds = False, "", 0.0
+        tokens: dict[str, int] = {}
         try:
             res = self.runner(text, workspace, limits=self.limits,
                               on_event=lambda e: self.store.add_event(turn_id, e),
                               env_file=self.env_file, runtime=self.runtime,
-                              gateway=self.gateway)
-            error = res.error
-            if not res.ok and self._stopping.is_set():
+                              gateway=gateway, name=job)
+            ok, error, tokens, seconds = res.ok, res.error, res.tokens, res.seconds
+            if not ok and self._stopping.is_set():
                 error = "сървърът спря по време на задачата — пусни я пак"
-            self.store.finish_turn(turn_id, ok=res.ok, error=error,
-                                   tokens=res.tokens, seconds=res.seconds)
         except Exception as e:
-            self.store.finish_turn(turn_id, ok=False, error=f"{type(e).__name__}: {e}",
-                                   tokens={}, seconds=0.0)
+            error = f"{type(e).__name__}: {e}"
+        if prices is not None and gateway is not None:
+            # Таксата ПРЕДИ края на хода (ревю 2026-10-11): докато е 'running',
+            # човекът е зает и нов ход не минава приема с баланс без нея. И
+            # провален ход се таксува: шлюзът вече е платил токените му.
+            # Сметката е от файла на шлюза по името на задачата — същият път
+            # като reconcile, независимо какво е върнал контейнерът. Грешка тук
+            # не проваля хода: reconcile при следващия старт го таксува.
+            try:
+                billing.charge_turn(self.store, prices, user_id, turn_id,
+                                    gw.usage_lines(gateway.usage, job, usage_start))
+            except Exception as e:
+                print(f"сметка: ход {turn_id} не е таксуван: {type(e).__name__}: {e}",
+                      file=sys.stderr)
+        self.store.finish_turn(turn_id, ok=ok, error=error, tokens=tokens, seconds=seconds)
+        if prices is not None and gateway is not None:
+            # Покрай всеки ход — окончателната сметка на ходовете с изтекъл жетон
+            # (и на хора, които не са пускали нищо оттогава).
+            try:
+                billing.settle(self.store, prices, gateway.usage)
+            except Exception as e:
+                print(f"сметка: окончателната сметка не мина: {type(e).__name__}: {e}",
+                      file=sys.stderr)
 
 
 # ── файлове: кодът в контейнера е чужд, всичко от /work е недоверено ────────
@@ -351,6 +553,14 @@ def zip_files(workspace: Path) -> bytes | None:
 
 
 # ── HTTP ─────────────────────────────────────────────────────────────────────
+
+def _with_cost(turn: dict[str, Any]) -> dict[str, Any]:
+    """`cost` (кредити като низ) само ако ходът е таксуван; µc не излизат."""
+    micro = turn.pop("cost_micro", None)
+    if micro is not None:
+        turn["cost"] = billing.fmt_credits(micro)
+    return turn
+
 
 _CHAT = re.compile(r"^/api/chats/([0-9a-f]{32})$")
 _TURNS = re.compile(r"^/api/chats/([0-9a-f]{32})/turns$")
@@ -471,7 +681,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         store = self.app.store
         if path == "/api/me":
-            self._json(200, {"email": user["email"]})
+            me = {"email": user["email"]}
+            if self.app.prices is not None:
+                me["balance"] = billing.fmt_credits(store.balance(user["id"]))
+            self._json(200, me)
+        elif path == "/api/account":
+            self._json(200, self.app.account_view(user))
         elif path == "/api/chats":
             self._json(200, {"chats": store.chats(user["id"])})
         elif m := _CHAT.match(path):
@@ -482,6 +697,7 @@ class Handler(BaseHTTPRequestHandler):
             turns = store.turns(chat["id"])
             for t in turns:
                 t["events"] = store.events(t["id"])
+                _with_cost(t)
             self._json(200, {**chat, "turns": turns})
         elif m := _EVENTS.match(path):
             turn = store.turn(user["id"], int(m[1]))
@@ -492,9 +708,10 @@ class Handler(BaseHTTPRequestHandler):
                 after = int(parse_qs(url.query).get("after", ["0"])[0])
             except ValueError:
                 after = 0
-            self._json(200, {"status": turn["status"], "error": turn["error"],
-                             "tokens": turn["tokens"], "seconds": turn["seconds"],
-                             "events": store.events(turn["id"], after)})
+            self._json(200, _with_cost({
+                "status": turn["status"], "error": turn["error"], "tokens": turn["tokens"],
+                "seconds": turn["seconds"], "events": store.events(turn["id"], after),
+                "cost_micro": turn.get("cost_micro")}))
         elif (m := _FILES.match(path)) or (m := _ZIP.match(path)) or (m := _FILE.match(path)):
             self._files(user, m)
         else:
@@ -573,6 +790,11 @@ class Handler(BaseHTTPRequestHandler):
     # ── POST ──
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
+        if path == "/api/stripe/webhook":
+            # Преди _body(): подписът е върху суровите байтове, а Stripe не
+            # праща Origin. Единственият POST без вход — пази го HMAC-ът.
+            self._stripe_webhook()
+            return
         body = self._body()
         if body is None:
             return
@@ -589,6 +811,18 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._json(200, {"ok": True}, {"Set-Cookie": self._cookie(token, SESSION_SECONDS)})
             return
+        if path == "/api/signup":
+            try:
+                token = self.app.signup(str(body.get("code", "")), str(body.get("email", "")),
+                                        str(body.get("password", "")), self._ip())
+            except LoginBlocked:
+                self._error(429, "твърде много опити — опитай пак след 15 минути")
+                return
+            except ValueError as e:
+                self._error(400, str(e))
+                return
+            self._json(201, {"ok": True}, {"Set-Cookie": self._cookie(token, SESSION_SECONDS)})
+            return
         user = self._user()
         if user is None:
             self._error(401, "нужен е вход")
@@ -597,6 +831,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/logout":
             store.end_session(self._token())
             self._json(200, {"ok": True}, {"Set-Cookie": self._cookie("", 0)})
+        elif path == "/api/checkout":
+            self._checkout(user, body)
         elif path == "/api/chats":
             title = str(body.get("title") or "Нов разговор").strip()
             self._json(201, {"id": store.new_chat(user["id"], title)})
@@ -609,13 +845,78 @@ class Handler(BaseHTTPRequestHandler):
             if not text or len(text) > MAX_TEXT:
                 self._error(400, f"съобщението трябва да е между 1 и {MAX_TEXT} знака")
                 return
-            turn_id = self.app.start_turn(user, chat["id"], text)
-            if turn_id is None:
-                self._error(409, "предишната ти задача още върви")
+            try:
+                turn_id = self.app.start_turn(user, chat["id"], text)
+            except TurnRefused as e:
+                self._error(e.status, e.message)
                 return
             self._json(202, {"turn_id": turn_id})
         else:
             self._error(404, "няма такъв адрес")
+
+
+    # ── плащане ──
+    def _stripe_webhook(self) -> None:
+        app = self.app
+        if app.stripe is None or app.prices is None:
+            self._error(404, "няма такъв адрес")
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        if length <= 0 or length > MAX_WEBHOOK:
+            self._error(413, "тялото липсва или е твърде голямо")
+            return
+        payload = self.rfile.read(length)
+        if not billing.verify_stripe_signature(payload, self.headers.get("Stripe-Signature", ""),
+                                               app.stripe.webhook_secret):
+            self._error(400, "невалиден подпис")
+            return
+        try:
+            event = json.loads(payload)
+        except (ValueError, RecursionError):
+            self._error(400, "невалиден JSON")
+            return
+        if not isinstance(event, dict):
+            self._error(400, "очаква се обект")
+            return
+        try:
+            status, note = billing.handle_event(app.store, app.prices, event, live=app.stripe.live)
+        except Exception as e:
+            # Всеки запис е един ред (или нищо) — Stripe ще опита пак.
+            print(f"stripe: {event.get('id')}: {type(e).__name__}: {e}", file=sys.stderr)
+            self._error(500, "грешка — ще се опита пак")
+            return
+        self._json(status, {"ok": status == 200, "note": note})
+
+    def _checkout(self, user: dict[str, Any], body: dict[str, Any]) -> None:
+        app = self.app
+        if app.prices is None:
+            self._error(404, "няма такъв адрес")
+            return
+        if app.stripe is None:
+            self._error(503, "плащането още не е включено")
+            return
+        if body.get("pack"):
+            offer, mode = app.prices.packs.get(str(body["pack"])), "payment"
+        else:
+            offer, mode = app.prices.plans.get(str(body.get("plan", ""))), "subscription"
+        if offer is None or not offer.stripe_price:
+            self._error(400, "няма такъв пакет или план")
+            return
+        account = app.store.account(user["id"])
+        if mode == "subscription" and account["plan"]:
+            self._error(409, "вече имаш абонамент")
+            return
+        kw = {"opener": app.stripe_opener} if app.stripe_opener is not None else {}
+        try:
+            url = billing.create_checkout(app.stripe, user_id=user["id"], email=user["email"],
+                                          offer=offer, mode=mode, **kw)
+        except billing.StripeError:
+            self._error(502, "плащането не отговаря — опитай пак след малко")
+            return
+        self._json(200, {"url": url})
 
 
 def make_server(app: App, host: str = "127.0.0.1", port: int = 8080) -> ThreadingHTTPServer:
@@ -625,12 +926,133 @@ def make_server(app: App, host: str = "127.0.0.1", port: int = 8080) -> Threadin
     return server
 
 
+# ── командите на оператора ───────────────────────────────────────────────────
+# Само от командния ред, без HTTP (2026-10-11): до сървъра се стига през shell,
+# който и без това е на оператора; админ адрес в уеба е още нещо за пазене.
+
+def _who(store: Store, email: str) -> dict[str, Any] | None:
+    user = store.user_by_email(email)
+    if user is None:
+        print(f"няма такъв човек: {email.strip().lower()}", file=sys.stderr)
+    return user
+
+
+def _admin(a: argparse.Namespace, store: Store) -> int:
+    if a.cmd == "users":
+        print(f"{'id':>4}  {'имейл':<32} {'спрян':<6} {'баланс':>10} {'месец':>10} "
+              f"{'днес':>5}  план")
+        for u in store.users():
+            acc = store.account(u["id"])
+            print(f"{u['id']:>4}  {u['email']:<32} {'да' if acc['disabled'] else '':<6} "
+                  f"{billing.fmt_credits(store.balance(u['id'])):>10} "
+                  f"{billing.fmt_credits(store.month_spent(u['id'])):>10} "
+                  f"{store.turns_today(u['id']):>5}  {acc['plan']}")
+        return 0
+    if a.cmd == "invite":
+        try:
+            credits = billing.parse_credits(a.credits)
+            if credits < 0:
+                raise ValueError("кредитите на покана не са отрицателни")
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 2
+        public = (a.public_url or os.environ.get("GENESIS_PUBLIC_URL", "")).strip().rstrip("/")
+        for code in store.new_invites(a.count, credits, a.note):
+            print(f"{code}  {public}/?invite={code}" if public else code)
+        return 0
+    if a.cmd == "reconcile":
+        try:
+            prices = billing.load_prices(a.prices)
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 2
+        n = billing.reconcile(store, prices, a.gateway_usage)
+        print(f"таксувани ходове: {n}")
+        return 0
+    user = _who(store, a.email)
+    if user is None:
+        return 1
+    uid = user["id"]
+    if a.cmd == "balance":
+        print(f"{user['email']}: {billing.fmt_credits(store.balance(uid))} кредита "
+              f"(този месец похарчени {billing.fmt_credits(store.month_spent(uid))})")
+        for row in store.ledger_entries(uid, 20):
+            when = time.strftime("%Y-%m-%d %H:%M", time.gmtime(row["created"]))
+            print(f"  {when}  {row['kind']:<12} {billing.fmt_credits(row['amount']):>10}  "
+                  f"{row['event_id']}  {row['ref'][:60] if row['kind'] != 'charge' else ''}")
+        return 0
+    if a.cmd == "grant":
+        try:
+            amount = billing.parse_credits(a.credits)
+            if amount == 0:
+                raise ValueError("нула кредита не е промяна")
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 2
+        store.add_entry(uid, f"admin:{uuid.uuid4()}", "grant" if amount > 0 else "adjust",
+                        amount, ref=a.note)
+        print(f"{user['email']}: {billing.fmt_credits(amount)} → баланс "
+              f"{billing.fmt_credits(store.balance(uid))} кредита")
+        return 0
+    if a.cmd in ("disable", "enable"):
+        store.set_disabled(uid, a.cmd == "disable")
+        print(f"{user['email']}: {'спрян, сесиите са затворени' if a.cmd == 'disable' else 'пуснат'}")
+        return 0
+    # limits
+    fields: dict[str, Any] = {}
+    if a.clear:
+        fields = {"turns_per_day": None, "max_tokens_per_turn": None, "monthly_cap": None}
+    if a.turns_per_day is not None:
+        fields["turns_per_day"] = a.turns_per_day
+    if a.max_tokens is not None:
+        fields["max_tokens_per_turn"] = a.max_tokens
+    if a.monthly_cap is not None:
+        try:
+            fields["monthly_cap"] = billing.parse_credits(a.monthly_cap)
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 2
+    store.set_account(uid, **fields)
+    acc = store.account(uid)
+    cap = acc["monthly_cap"]
+    print(f"{user['email']}: ходове на ден {acc['turns_per_day'] or 'подразбиране'}, "
+          f"токени на ход {acc['max_tokens_per_turn'] or 'подразбиране'}, "
+          f"месечен таван {billing.fmt_credits(cap) if cap is not None else 'подразбиране'}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Genesis онлайн — вход, чат, файлове.")
     sub = p.add_subparsers(dest="cmd", required=True)
     add = sub.add_parser("add-user", help="нов човек (бета — само ръчно)")
     add.add_argument("email")
     add.add_argument("--data", type=Path, default=Path("/srv/genesis/web"))
+    admin = {
+        "users": sub.add_parser("users", help="всички хора: баланс, месец, днес, план"),
+        "balance": sub.add_parser("balance", help="баланс и последните 20 реда"),
+        "grant": sub.add_parser("grant", help="кредити на човек (отрицателно = корекция)"),
+        "disable": sub.add_parser("disable", help="спира човека и затваря сесиите му"),
+        "enable": sub.add_parser("enable", help="пуска спрян човек"),
+        "limits": sub.add_parser("limits", help="лимити на един човек"),
+        "invite": sub.add_parser("invite", help="нови покани (кодове за еднократна регистрация)"),
+        "reconcile": sub.add_parser("reconcile", help="таксува ходовете без такса от шлюза"),
+    }
+    for name, sp in admin.items():
+        sp.add_argument("--data", type=Path, default=Path("/srv/genesis/web"))
+        if name in ("balance", "grant", "disable", "enable", "limits"):
+            sp.add_argument("email")
+    admin["grant"].add_argument("credits", help="напр. 12.5 или -3")
+    admin["grant"].add_argument("--note", default="")
+    admin["limits"].add_argument("--turns-per-day", type=int)
+    admin["limits"].add_argument("--max-tokens", type=int)
+    admin["limits"].add_argument("--monthly-cap", help="кредити")
+    admin["limits"].add_argument("--clear", action="store_true", help="обратно към подразбирането")
+    admin["invite"].add_argument("--count", type=int, default=1)
+    admin["invite"].add_argument("--credits", default="0", help="подарени кредити при регистрация")
+    admin["invite"].add_argument("--note", default="")
+    admin["invite"].add_argument("--public-url", default="")
+    admin["reconcile"].add_argument("--gateway-usage", type=Path, required=True)
+    admin["reconcile"].add_argument("--prices", type=Path, default=billing.PRICES)
     srv = sub.add_parser("serve")
     srv.add_argument("--data", type=Path, default=Path("/srv/genesis/web"))
     srv.add_argument("--jobs", type=Path, default=Path("/srv/jobs"))
@@ -648,6 +1070,18 @@ def main(argv: list[str] | None = None) -> int:
                      help="IP от последния адрес в X-Forwarded-For (зад Caddy/nginx)")
     srv.add_argument("--trust-cloudflare", action="store_true",
                      help="IP от CF-Connecting-IP (само зад Cloudflare Tunnel)")
+    srv.add_argument("--billing", action="store_true",
+                     help="плащане с кредити (иска --gateway-usage)")
+    srv.add_argument("--prices", type=Path, default=billing.PRICES,
+                     help="цените (JSON), по подразбиране cloud/web/prices.json")
+    srv.add_argument("--turns-per-day", type=int, default=TURNS_PER_DAY,
+                     help="ходове на човек на ден (UTC), важи и без плащане")
+    srv.add_argument("--max-tokens-per-turn", type=int, default=launch.TASK_BUDGET,
+                     help="таван на токените на ход в шлюза")
+    srv.add_argument("--monthly-cap", default=str(MONTHLY_CAP // MICRO),
+                     help="месечен таван на харченето в кредити (с плащане)")
+    srv.add_argument("--public-url", default="",
+                     help="https://адресът на услугата (за Stripe; иначе GENESIS_PUBLIC_URL)")
     a = p.parse_args(argv)
     # README-то казва „никога и двете“, а кодът приемаше и вярваше на
     # CF-Connecting-IP — зад Caddy клиентът си го пише сам и спирачката на
@@ -666,6 +1100,35 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"{a.email.strip().lower()}  парола: {password}")
         return 0
+    if a.cmd != "serve":
+        return _admin(a, store)
+    try:
+        monthly_cap = billing.parse_credits(a.monthly_cap)
+    except ValueError as e:
+        print(f"--monthly-cap: {e}", file=sys.stderr)
+        return 2
+    prices = None
+    if a.billing:
+        if not a.gateway_usage:
+            print("плащането иска --gateway-usage: без шлюза токените ги казва кодът в контейнера",
+                  file=sys.stderr)
+            return 2
+        try:
+            prices = billing.load_prices(a.prices)
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 2
+    try:
+        stripe = billing.StripeConfig.from_env(os.environ)
+        if stripe is not None:
+            if prices is None:
+                raise ValueError("Stripe ключовете са зададени, а плащането не е (--billing)")
+            public = a.public_url or os.environ.get("GENESIS_PUBLIC_URL", "")
+            stripe = dataclasses.replace(stripe, public_url=billing.check_public_url(
+                public, allow_http=a.insecure_cookie))
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 2
     gateway = None
     if a.gateway_usage:
         if not a.env_file:
@@ -675,7 +1138,8 @@ def main(argv: list[str] | None = None) -> int:
     app = App(store, a.jobs, workers=a.workers, limits=launch.Limits(seconds=a.seconds),
               env_file=a.env_file, runtime=a.runtime, secure_cookie=not a.insecure_cookie,
               trust_proxy="cloudflare" if a.trust_cloudflare else a.trust_proxy, gateway=gateway,
-              recover=False)
+              recover=False, prices=prices, turns_per_day=a.turns_per_day,
+              max_tokens_per_turn=a.max_tokens_per_turn, monthly_cap=monthly_cap, stripe=stripe)
     try:
         server = make_server(app, a.host, a.port)
     except OSError as e:
