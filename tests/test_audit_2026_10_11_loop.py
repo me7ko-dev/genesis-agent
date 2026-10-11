@@ -177,3 +177,48 @@ def test_the_phone_keeps_the_work_of_a_crashed_turn(ws, monkeypatch):
     assert rs.serve(["--port", "0"]) == 0
     assert len(seen) == 3
     assert any(m.get("role") == "tool" and "made.py" in str(m.get("content")) for m in seen[2])
+
+
+# ── A3/A4: провалена команда не доказва свършена работа ───────────────────
+
+def test_a_failed_install_does_not_prove_the_install():
+    from genesis_agent import claim_check
+    res = ("[RUN_CMD: pip install fastapi-nonexist]  (rc=1)\nstderr:\n"
+           "ERROR: Could not find a version that satisfies the requirement fastapi-nonexist")
+    entry = claim_check.counts_as_executed("RUN_CMD", "pip install fastapi-nonexist", res)
+    claims = claim_check.unsupported_claims("Инсталирах пакета fastapi-nonexist.",
+                                            [entry] if entry else [])
+    assert [c.kind for c in claims] == ["инсталация"]
+
+
+def test_a_failed_move_is_challenged_in_the_loop(ws, monkeypatch):
+    seen = _script(monkeypatch, [("", [_call("RUN_CMD", {"command": "mv nosuch.jpg photos/"})]),
+                                 ("Преместих снимките в photos/.", None),
+                                 ("Не успях — nosuch.jpg го няма.", None)])
+    monkeypatch.setattr(gs, "dispatch_tool_call", lambda name, args: (
+        "[RUN_CMD: mv nosuch.jpg photos/]  (rc=1)\nstderr:\n"
+        "mv: cannot stat 'nosuch.jpg': No such file or directory"))
+    ui = _UI()
+    gta.run_turn(_fresh(), "премести снимките", ui)
+    assert any(e[0] == "warn" and "Твърди" in e[1] for e in ui.log)
+    assert len(seen) == 3
+
+
+def test_failing_tests_do_not_prove_that_the_tests_pass():
+    from genesis_agent import claim_check
+    res = "[RUN_CMD: pytest -q]  (rc=1)\nF.\nFAILED test_x.py::test_a - assert 1 == 2\n1 failed, 1 passed"
+    entry = claim_check.counts_as_executed("RUN_CMD", "pytest -q", res)
+    assert entry is not None
+    # „Пуснах тестовете“ е вярно и при паднал тест …
+    assert claim_check.unsupported_claims("Пуснах тестовете: test_a пада.", [entry]) == []
+    # … „всички минаха“ — не.
+    claims = claim_check.unsupported_claims("Готово — всички тестове минаха.", [entry])
+    assert claims and "rc=1" in claim_check.nudge_text(claims)
+    # Последното пускане решава: след поправка и зелено пускане твърдението е вярно.
+    ok = claim_check.counts_as_executed("RUN_CMD", "pytest -q", "[RUN_CMD: pytest -q]  (rc=0)\n2 passed")
+    assert ok is not None
+    assert claim_check.unsupported_claims("Всички тестове минаха.", [entry, ok]) == []
+    assert claim_check.unsupported_claims("All tests pass now.", [ok, entry])
+    # Текстовият път дава същото.
+    assert claim_check.unsupported_claims(
+        "Тестовете минаха.", claim_check.executed_from_text_results([res]))
