@@ -812,3 +812,69 @@ def test_a_braked_address_that_sends_no_body_is_dropped_fast(live) -> None:
     _, took = _raw_post(base, 200 * 1024, b"", wait=10)
     assert took < 5.0, took
     assert _call(base, "status")["ok"]
+
+
+# Начало на плик: публично, ~30 байта, минава _ENVELOPE_HEAD.
+_ENVELOPE_PREFIX = b'{"v":1,"n":"abcdefgh","c":"' + b"A" * 200
+
+
+def _open_post(base: str, declared: int, sent: bytes):
+    import socket
+    port = int(base.rsplit(":", 1)[1])
+    sock = socket.create_connection(("127.0.0.1", port), timeout=10)
+    sock.sendall(b"POST /api/v1 HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                 + f"Content-Length: {declared}\r\n\r\n".encode() + sent)
+    return sock
+
+
+def _closed_within(sock, seconds: float, trickle: bytes = b"") -> float | None:
+    """След колко секунди сървърът отговаря или затваря (None — не го прави).
+    С `trickle` праща по един байт на 1.5 s, докато чака."""
+    started = time.monotonic()
+    try:
+        while time.monotonic() - started < seconds:
+            sock.settimeout(1.5)
+            try:
+                sock.recv(4096)
+                return time.monotonic() - started
+            except TimeoutError:
+                if trickle:
+                    sock.sendall(trickle)
+            except ConnectionError:
+                return time.monotonic() - started
+        return None
+    finally:
+        sock.close()
+
+
+def test_a_braked_envelope_prefix_that_stalls_is_dropped(live) -> None:
+    """Ревю на вълна 5 (2026-10-11): спрян адрес, пратил публичното начало на
+    плик и спрял, се четеше нататък с 30 s на всяко recv — държеше нишка и
+    място на адреса; 8 s по-късно връзката още беше отворена."""
+    base, _, _ = live
+    _braked(base)
+    took = _closed_within(_open_post(base, 200 * 1024, _ENVELOPE_PREFIX), 8)
+    assert took is not None and took < rs._BRAKED_READ_S + 1.5, took
+
+
+def test_a_braked_trickle_is_dropped_on_a_total_deadline(live) -> None:
+    """Таймаутът беше за едно recv: байт на 1.5 s не стигаше до 429 и след 12 s."""
+    base, _, _ = live
+    _braked(base)
+    took = _closed_within(_open_post(base, 200 * 1024, b"["), 9, trickle=b"1")
+    assert took is not None and took < rs._BRAKED_READ_S + 2, took
+
+
+def test_stalled_braked_envelopes_do_not_lock_out_the_phone(live) -> None:
+    """16 спрели начала на плик заемаха всички места на адреса: сдвоеният
+    телефон 3 s по-късно получаваше затворена връзка без отговор."""
+    base, _, _ = live
+    _braked(base)
+    socks = [_open_post(base, 200 * 1024, _ENVELOPE_PREFIX)
+             for _ in range(rs._QuietServer._MAX_PER_IP)]
+    try:
+        time.sleep(rs._BRAKED_READ_S + 1.5)
+        assert _call(base, "status")["ok"]
+    finally:
+        for sock in socks:
+            sock.close()
