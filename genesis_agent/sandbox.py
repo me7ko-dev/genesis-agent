@@ -153,7 +153,9 @@ _SECRET_PATHS = (
     r"|/proc/[^/\s]+/(?:environ|mem|maps)\b"
     # Добре известни файлове с токени (2026-10-11): gcloud, Azure CLI, Vault,
     # PostgreSQL. `.git-credentials` хваща `credentials\b` по-горе.
-    r"|\.config[/\\]gcloud\b|[/\\]Roaming[/\\]gcloud\b|\.azure(?:[/\\]|\b)"
+    # `.azure` без `-`/`.` след него (2026-10-11): `\b` съвпадаше и в
+    # `.azure-pipelines/` — CI папката на Azure DevOps в проекта беше „тайна“.
+    r"|\.config[/\\]gcloud\b|[/\\]Roaming[/\\]gcloud\b|\.azure(?![\w.-])"
     r"|\.vault-token\b|\.pgpass\b|pgpass\.conf\b"
 )
 

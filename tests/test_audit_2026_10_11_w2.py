@@ -160,3 +160,12 @@ def test_reading_or_mentioning_genesis_files_stays_safe(command) -> None:
 ])
 def test_writing_the_operators_own_commands_still_asks(command) -> None:
     assert sandbox.assess_command(command).level == RiskLevel.CONFIRM, command
+
+
+# ── .azure-pipelines не е тайна ─────────────────────────────────────────────
+
+def test_azure_pipelines_folder_is_not_a_secret(tmp_path) -> None:
+    assert sandbox.sensitive_path_reason(tmp_path / ".azure-pipelines" / "ci.yml") is None
+    assert sandbox.assess_command("cat .azure-pipelines/ci.yml").level == RiskLevel.SAFE
+    assert sandbox.sensitive_path_reason(tmp_path / ".azure" / "msal_token_cache.json")
+    assert sandbox.assess_command("cat ~/.azure/accessTokens.json").level == RiskLevel.CONFIRM
