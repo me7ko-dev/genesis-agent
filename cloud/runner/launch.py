@@ -169,7 +169,7 @@ def close_task_network(network: str, name: str, helper: str) -> None:
 
 def cleanup_leftovers() -> int:
     """Убива всички контейнери на задачи и трие мрежите им. Пуска се при старт
-    и спиране на уеб сървъра (и от systemd — deploy/genesis-web.service).
+    и спиране на уеб сървъра (и от systemd — cloud/deploy/genesis-web.service).
 
     Деплой одит 2026-10-11: единственият таван беше таймерът в уеб процеса. При
     SIGTERM/SIGKILL на сървъра контейнерът оставаше Up без срок (1 CPU, 1 GB), а

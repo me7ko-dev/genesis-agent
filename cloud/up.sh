@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Вдига мрежите и помощниците на задачите. Идемпотентно — безопасно да се пуска
-# повторно (и от systemd: deploy/genesis-net.service).
+# повторно (и от systemd: cloud/deploy/genesis-net.service).
 #   genesis-outside — обикновен bridge; помощниците излизат навън през него
 #   genesis-jobs    — --internal, за ръчните проверки (README); задачите от
 #                     launch.py са всяка в своя мрежа genesis-job-<id>
