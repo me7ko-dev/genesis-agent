@@ -794,6 +794,52 @@ def is_read_only(name: str) -> bool:
     return bool(found and found[1].read_only)
 
 
+def _secret_argument(arguments: Any, _budget: list[int] | None = None) -> str | None:
+    """Причина, ако някой низ в аргументите (и вложените) сочи тайна или
+    вътрешното състояние в ~/.genesis.
+
+    Одит 2026-10-11, възпроизведено: readOnlyHint/autoApprove пускаха
+    инструмента без никаква проверка — read_file на filesystem сървър
+    връщаше ~/.ssh/id_rsa в режим „deny“ и в plan mode, докато READ_FILE го
+    отказваше. Същото правило като за READ_FILE (sensitive_path_reason)."""
+    budget = _budget if _budget is not None else [500]
+    if budget[0] <= 0:
+        return None
+    budget[0] -= 1
+    if isinstance(arguments, dict):
+        values: list[Any] = list(arguments.values())
+    elif isinstance(arguments, (list, tuple)):
+        values = list(arguments)
+    elif isinstance(arguments, str):
+        text = arguments.strip()
+        if not text or len(text) > 4096 or "\n" in text:
+            return None
+        from genesis_agent import sandbox
+        path = os.path.expanduser(text.removeprefix("file://"))
+        reason = sandbox.sensitive_path_reason(path)
+        if reason:
+            return reason
+        if os.path.isabs(path):
+            try:
+                real = Path(os.path.realpath(path))
+                home = Path(os.path.realpath(_home()))
+                ws = Path(os.path.realpath(_workspace()))
+            except (OSError, ValueError):
+                return None
+            inside_home = real == home or home in real.parents
+            inside_ws = real == ws or ws in real.parents
+            if inside_home and not inside_ws:
+                return f"достъп до вътрешното състояние на Genesis ({path})"
+        return None
+    else:
+        return None
+    for value in values:
+        reason = _secret_argument(value, budget)
+        if reason:
+            return reason
+    return None
+
+
 def call(qualified: str, arguments: dict | None) -> str:
     """Run one MCP tool; never raises — the error goes back to the model."""
     found = _find(qualified)
@@ -802,11 +848,16 @@ def call(qualified: str, arguments: dict | None) -> str:
         return f"[MCP] ❌ Няма такъв инструмент: {qualified}. Налични: {known}"
     srv, tool = found
     label = f"{srv.name}.{tool.name}"
+    why: list[str] = []
+    secret = _secret_argument(arguments)
+    if secret:
+        why.append(secret)
     if not tool.read_only and tool.name not in srv.auto_approve:
+        why.append(f"MCP инструмент, който може да променя външна система ({srv.name})")
+    if why:
         from genesis_agent import sandbox
         allowed, reason = sandbox.confirm(
-            f"MCP {label} {json.dumps(arguments or {}, ensure_ascii=False)[:400]}",
-            [f"MCP инструмент, който може да променя външна система ({srv.name})"])
+            f"MCP {label} {json.dumps(arguments or {}, ensure_ascii=False)[:400]}", why)
         if not allowed:
             return f"[MCP {label}] {reason}"
     try:

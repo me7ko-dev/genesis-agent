@@ -212,3 +212,36 @@ def test_a_symlink_to_a_key_in_the_workspace_asks_in_run_cmd(secret_home, monkey
 def test_ordinary_files_in_the_workspace_stay_safe(secret_home, command) -> None:
     _, ws = secret_home
     assert sandbox.assess_command(command, cwd=ws).level == RiskLevel.SAFE
+
+
+# ── MCP инструмент „само чете“ не стига до тайните без въпрос ───────────────
+
+def test_a_read_only_mcp_tool_asks_before_a_secret_path(tmp_path, monkeypatch, clean_mcp) -> None:
+    """Одит 2026-10-11, възпроизведено: read_file на filesystem сървър
+    (readOnlyHint) връщаше ~/.ssh/id_rsa в режим „deny“ и в plan mode,
+    докато READ_FILE го отказваше."""
+    import genesis_skills as gs
+    from genesis_agent import paths
+    mcp_client = clean_mcp
+    key = tmp_path / "home" / ".ssh" / "id_rsa"
+    key.parent.mkdir(parents=True)
+    key.write_text("-----BEGIN KEY----- FAKEKEY", encoding="utf-8")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "readme.txt").write_text("hello from the project", encoding="utf-8")
+    home = Path(paths.GENESIS_HOME)
+    home.mkdir(parents=True, exist_ok=True)
+    inner = home / "remote_notes.txt"
+    inner.write_text("INTERNAL-STATE", encoding="utf-8")
+    (home / "mcp.json").write_text(json.dumps({"mcpServers": {
+        "fs": {"command": sys.executable, "args": [str(_FAKE_MCP), "fs"], "autoApprove": ["read_file"]},
+    }}), encoding="utf-8")
+    monkeypatch.setattr(gs, "_WORKSPACE", ws)
+    mcp_client.workspace = ws
+    assert any("fs: 1 инструмента" in line for line in mcp_client.start_all(ws))
+    monkeypatch.setattr(sandbox, "_POLICY", sandbox.SandboxPolicy(mode="deny"))
+    out = mcp_client.call("fs.read_file", {"path": str(key)})
+    assert "FAKEKEY" not in out and "SANDBOX DENIED" in out
+    out = mcp_client.call("fs.read_file", {"path": str(inner)})
+    assert "INTERNAL-STATE" not in out and "SANDBOX DENIED" in out
+    assert "hello from the project" in mcp_client.call("fs.read_file", {"path": str(ws / "readme.txt")})
