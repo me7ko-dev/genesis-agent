@@ -974,3 +974,30 @@ def test_build_env_keeps_the_windows_home_variables(monkeypatch) -> None:
     env = sandbox._build_env(SandboxPolicy())
     assert {k: env.get(k) for k in windows} == windows
     assert "OPENAI_API_KEY" not in env
+
+
+@pytest.mark.parametrize("cmd", [
+    r"Remove-Item $env:USERPROFILE\* -Recurse",
+    r"Remove-Item ${env:USERPROFILE} -Recurse",
+    r'powershell -c "rm -r -fo $env:USERPROFILE\*"',
+    r"rd /s /q %HOMEDRIVE%\ ",
+    r"rd /s /q %USERPROFILE%\*",
+    r"gci C:\ -r | ri -r -fo",
+    r"Get-ChildItem C:\Users\roika | Remove-Item -Recurse -Force",
+    r"dir C:\Users -Recurse | Remove-Item -Force",
+    # Първото триене (на проект) скриваше второто (на диска).
+    r'powershell -c "ri -r -fo build; rd -r -fo C:\"',
+])
+def test_windows_home_as_a_variable_or_a_pipeline_source_is_blocked(cmd) -> None:
+    """POSIX съответствията (`rm -rf $HOME/*`, `find / | xargs rm -rf`) са
+    BLOCKED, а тези бяха само CONFIRM (2026-10-11) — в „allow“ се пускат сами."""
+    assert sandbox.assess_command(cmd).level is BLOCKED
+
+
+@pytest.mark.parametrize("cmd", [
+    r"gci .\build -r | ri -r -fo",
+    r"Get-ChildItem C:\Users\roika\proj\dist | Remove-Item -Recurse -Force",
+    r"Remove-Item $env:USERPROFILE\proj\build -Recurse",
+])
+def test_windows_pipeline_delete_inside_a_project_asks(cmd) -> None:
+    assert sandbox.assess_command(cmd).level is CONFIRM

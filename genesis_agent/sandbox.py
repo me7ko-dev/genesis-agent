@@ -712,7 +712,9 @@ _WIN_CRITICAL = re.compile(
     r"^(?:[a-z]:(?:/\*?)?"
     r"|[a-z]:/(?:windows|users|program files[^/]*|programdata)(?:/\*)?"
     r"|[a-z]:/users/[^/]+(?:/\*)?"
-    r"|\$env:(?:userprofile|homepath|systemroot|windir)(?:/\*)?|%homedrive%%homepath%)$")
+    r"|\$env:(?:userprofile|homepath|homedrive|systemdrive|systemroot|windir)(?:/\*)?"
+    r"|%(?:userprofile|homedrive|systemdrive|systemroot|windir)%(?:/\*)?"
+    r"|%homedrive%%homepath%(?:/\*)?)$")
 
 _RECURSIVE_LONG = frozenset({"--recursive", "--force", "-R", "-r"})
 
@@ -781,6 +783,11 @@ def _normalise_target(token: str) -> str:
     # `rm -rf /c/`, `rm -rf C:/` и `rm -rf /c/Users/ivan` бяха само CONFIRM, а
     # RUN_CMD на Windows върви точно през Git Bash.
     if re.match(r"^[A-Za-z]:(?:[\\/]|$)", t):
+        t = t.replace("\\", "/")
+    elif re.match(r"^(?:\$\{?env:|%)", t, re.IGNORECASE):
+        # Домът като променлива на PowerShell/cmd (2026-10-11): `$env:USERPROFILE\*`,
+        # `${env:USERPROFILE}` и `%HOMEDRIVE%\` бяха само CONFIRM, а `$HOME/*` — BLOCKED.
+        t = re.sub(r"^\$\{env:([A-Za-z_]\w*)\}", r"$env:\1", t, flags=re.IGNORECASE)
         t = t.replace("\\", "/")
     else:
         drive = re.match(r"^/(?:mnt/)?([A-Za-z])(?=/|$)", t)
@@ -1057,33 +1064,61 @@ def _launcher_word(word: str) -> bool:
 
 def _windows_delete_verdict(command: str) -> RiskVerdict:
     """BLOCKED за рекурсивно/принудително триене на диск, системна папка или
-    дом; CONFIRM за всяко друго рекурсивно/принудително триене с тези глаголи."""
-    for statement in re.split(r"[;|&\n(){}]", command):
-        words = [w.strip("'\"`") for w in statement.split()]
-        words = [w for w in words if w]
-        for i, word in enumerate(words):
-            verb = word.lower()
-            if verb not in _WIN_DELETE_VERBS:
+    дом; CONFIRM за всяко друго рекурсивно/принудително триене с тези глаголи.
+
+    2026-10-11: `${env:X}` се чете като `$env:X` (иначе `{}` режеше израза);
+    триене без цели на командния ред взима целите си от тръбата — `gci C:\\ -r
+    | ri -r -fo` е BLOCKED като `find / | xargs rm -rf`, а не CONFIRM; и първото
+    намерено триене вече не скрива по-късен израз, който трие корен."""
+    command = re.sub(r"\$\{env:([A-Za-z_]\w*)\}", r"$env:\1", command, flags=re.IGNORECASE)
+    confirm: RiskVerdict | None = None
+    for statement in re.split(r"[;&\n(){}]", command):
+        stages = statement.split("|")
+        for index, stage in enumerate(stages):
+            words = _windows_words(stage)
+            for i, word in enumerate(words):
+                verb = word.lower()
+                if verb not in _WIN_DELETE_VERBS:
+                    continue
+                # Глаголът е командата, не дума в текст: в началото на израза
+                # или след `powershell -c`, `cmd /c` и техните флагове.
+                before = words[:i]
+                if not all(_launcher_word(w) for w in before):
+                    break
+                args = words[i + 1:]
+                if not any(a.startswith(("-", "/")) and _win_dangerous_flag(verb, a) for a in args):
+                    break
+                targets = [a for a in args if not a.startswith("-")
+                           and not (verb in _CMD_DELETE_VERBS and _cmd_switch_letters(a))]
+                for target in targets:
+                    reason = _critical_root_reason(target)
+                    if reason:
+                        return RiskVerdict(RiskLevel.BLOCKED,
+                                           [f"рекурсивно/принудително триене ({word}) на {reason}"])
+                upstream = None if targets else _upstream_windows_root(stages[:index])
+                if upstream:
+                    return RiskVerdict(RiskLevel.BLOCKED, [
+                        (f"рекурсивно/принудително триене ({word}) на целите от тръбата, "
+                         f"в която по-рано стои {upstream}")])
+                confirm = confirm or RiskVerdict(RiskLevel.CONFIRM,
+                                                 [f"рекурсивно/принудително триене ({word})"])
+                break
+    return confirm or RiskVerdict(RiskLevel.SAFE, [])
+
+
+def _windows_words(stage: str) -> list[str]:
+    return [w for w in (w.strip("'\"`") for w in stage.split()) if w]
+
+
+def _upstream_windows_root(stages: list[str]) -> str | None:
+    """Критичен път, изписан в по-ранен етап на тръбата (`gci C:\\Users\\x | ri …`)."""
+    for stage in stages:
+        for word in _windows_words(stage)[1:]:
+            if word.startswith("-") or _cmd_switch_letters(word):
                 continue
-            # Глаголът е командата, не дума в текст: в началото на израза или
-            # след `powershell -c`, `cmd /c` и техните флагове.
-            before = words[:i]
-            if not all(_launcher_word(w) for w in before):
-                break
-            args = words[i + 1:]
-            if not any(a.startswith(("-", "/")) and _win_dangerous_flag(verb, a) for a in args):
-                break
-            for target in args:
-                if verb in _CMD_DELETE_VERBS and _cmd_switch_letters(target):
-                    continue
-                if target.startswith("-"):
-                    continue
-                reason = _critical_root_reason(target)
-                if reason:
-                    return RiskVerdict(RiskLevel.BLOCKED,
-                                       [f"рекурсивно/принудително триене ({word}) на {reason}"])
-            return RiskVerdict(RiskLevel.CONFIRM, [f"рекурсивно/принудително триене ({word})"])
-    return RiskVerdict(RiskLevel.SAFE, [])
+            if _critical_root_reason(word):
+                return word
+    return None
 
 
 # ── PowerShell -EncodedCommand (2026-10-11) ─────────────────────────────────
