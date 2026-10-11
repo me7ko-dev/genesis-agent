@@ -995,3 +995,92 @@ def test_checkout_without_stripe_or_billing(paid, plain) -> None:
     cl2.login()
     assert cl2.json("POST", "/api/checkout", {"pack": "p5"})[0] == 404
     assert Client(cl.port).json("POST", "/api/checkout", {"pack": "p5"})[0] == 401
+
+
+# ── S12: командите на оператора ──────────────────────────────────────────────
+
+def _cli(tmp_path: Path, *args: str) -> int:
+    return web.main([args[0], "--data", str(tmp_path), *args[1:]])
+
+
+def test_grant_is_exact_and_each_grant_is_its_own_row(tmp_path, capsys) -> None:
+    s = Store(tmp_path / "web.db")
+    uid = s.add_user("a@x.y", PASSWORD)
+    assert _cli(tmp_path, "grant", "A@x.y", "12.5") == 0
+    assert s.balance(uid) == 12_500_000
+    assert _cli(tmp_path, "grant", "a@x.y", "12.5", "--note", "бонус") == 0
+    assert len(s.ledger_entries(uid)) == 2
+    assert _cli(tmp_path, "grant", "a@x.y", "-5") == 0
+    assert s.ledger_entries(uid)[0]["kind"] == "adjust" and s.balance(uid) == 20 * MICRO
+    assert _cli(tmp_path, "grant", "a@x.y", "0.0000001") == 2
+    assert _cli(tmp_path, "grant", "a@x.y", "NaN") == 2
+    assert _cli(tmp_path, "grant", "a@x.y", "0") == 2
+    assert _cli(tmp_path, "grant", "nobody@x.y", "1") == 1
+    assert s.balance(uid) == 20 * MICRO
+    assert "20.00" in capsys.readouterr().out
+
+
+def test_disable_from_the_cli_ends_the_live_session(tmp_path) -> None:
+    store = Store(tmp_path / "web.db")
+    store.add_user("ana@example.com", PASSWORD)
+    app = web.App(store, tmp_path / "jobs", runner=_NoRun(), secure_cookie=False)
+    srv = _serve(app)
+    try:
+        cl = Client(srv.server_address[1])
+        assert cl.login() == 200
+        assert _cli(tmp_path, "disable", "ana@example.com") == 0
+        assert cl.req("GET", "/api/me")[0] == 401
+        assert Client(cl.port).login() == 401
+        assert _cli(tmp_path, "enable", "ana@example.com") == 0
+        assert Client(cl.port).login() == 200
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_invite_codes_from_the_cli_work_once(tmp_path, capsys) -> None:
+    assert _cli(tmp_path, "invite", "--count", "3", "--credits", "5",
+                "--public-url", "https://genesis.example/") == 0
+    lines = capsys.readouterr().out.strip().splitlines()
+    codes = [line.split()[0] for line in lines]
+    assert len(set(codes)) == 3
+    assert lines[0].endswith(f"https://genesis.example/?invite={codes[0]}")
+    s = Store(tmp_path / "web.db")
+    for i, code in enumerate(codes):
+        uid = s.signup(code, f"u{i}@x.y", PASSWORD)
+        assert s.balance(uid) == 5 * MICRO
+        with pytest.raises(ValueError):
+            s.signup(code, f"again{i}@x.y", PASSWORD)
+
+
+def test_users_balance_and_limits(tmp_path, capsys) -> None:
+    s = Store(tmp_path / "web.db")
+    uid = s.add_user("a@x.y", PASSWORD)
+    s.add_entry(uid, "admin:x", "grant", 7_250_000)
+    assert _cli(tmp_path, "users") == 0
+    out = capsys.readouterr().out
+    assert "a@x.y" in out and "7.25" in out
+    assert _cli(tmp_path, "balance", "a@x.y") == 0
+    assert "7.25 кредита" in capsys.readouterr().out
+    assert _cli(tmp_path, "limits", "a@x.y", "--turns-per-day", "3", "--max-tokens", "5000",
+                "--monthly-cap", "10") == 0
+    acc = s.account(uid)
+    assert (acc["turns_per_day"], acc["max_tokens_per_turn"], acc["monthly_cap"]) == \
+        (3, 5000, 10 * MICRO)
+    assert _cli(tmp_path, "limits", "a@x.y", "--clear") == 0
+    assert s.account(uid)["turns_per_day"] is None and s.account(uid)["monthly_cap"] is None
+    assert _cli(tmp_path, "balance", "x@x.y") == 1
+
+
+def test_reconcile_from_the_cli(tmp_path, capsys) -> None:
+    s = Store(tmp_path / "web.db")
+    uid = s.add_user("a@x.y", PASSWORD)
+    turn = s.add_turn(s.new_chat(uid, "t"), "x")
+    s.set_job(turn, "genesis-task-1")
+    s.finish_turn(turn, ok=True, error="", tokens={}, seconds=1)
+    usage = tmp_path / "u.jsonl"
+    gw.Ledger(usage).add("genesis-task-1", "groq", "x", {"prompt_tokens": 100})
+    assert _cli(tmp_path, "reconcile", "--gateway-usage", str(usage)) == 0
+    assert _cli(tmp_path, "reconcile", "--gateway-usage", str(usage)) == 0
+    assert capsys.readouterr().out.split()[-1] == "0"
+    assert s.balance(uid) == -(2 * MICRO + 100 * 80)

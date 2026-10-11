@@ -1,8 +1,10 @@
-"""Етап 2: вход, уеб чат и сваляне на файловете от задачата.
+"""Етап 2: вход, уеб чат и сваляне на файловете от задачата; етап 3: плащане.
 
     python -m cloud.web.server add-user ivan@example.com        # отпечатва парола
     python -m cloud.web.server serve --data /srv/genesis/web --jobs /srv/jobs \\
         --env-file /srv/genesis/keys.env                          # 127.0.0.1:8080
+    python -m cloud.web.server users | balance | grant | disable | enable |
+        limits | invite | reconcile                               # оператор, само локално
 
 Всяко съобщение в разговор е нов контейнер (cloud/runner/launch.py) върху
 СЪЩАТА папка — файловете остават, историята е в /work/.genesis (task.py).
@@ -795,12 +797,133 @@ def make_server(app: App, host: str = "127.0.0.1", port: int = 8080) -> Threadin
     return server
 
 
+# ── командите на оператора ───────────────────────────────────────────────────
+# Само от командния ред, без HTTP (2026-10-11): до сървъра се стига през shell,
+# който и без това е на оператора; админ адрес в уеба е още нещо за пазене.
+
+def _who(store: Store, email: str) -> dict[str, Any] | None:
+    user = store.user_by_email(email)
+    if user is None:
+        print(f"няма такъв човек: {email.strip().lower()}", file=sys.stderr)
+    return user
+
+
+def _admin(a: argparse.Namespace, store: Store) -> int:
+    if a.cmd == "users":
+        print(f"{'id':>4}  {'имейл':<32} {'спрян':<6} {'баланс':>10} {'месец':>10} "
+              f"{'днес':>5}  план")
+        for u in store.users():
+            acc = store.account(u["id"])
+            print(f"{u['id']:>4}  {u['email']:<32} {'да' if acc['disabled'] else '':<6} "
+                  f"{billing.fmt_credits(store.balance(u['id'])):>10} "
+                  f"{billing.fmt_credits(store.month_spent(u['id'])):>10} "
+                  f"{store.turns_today(u['id']):>5}  {acc['plan']}")
+        return 0
+    if a.cmd == "invite":
+        try:
+            credits = billing.parse_credits(a.credits)
+            if credits < 0:
+                raise ValueError("кредитите на покана не са отрицателни")
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 2
+        public = (a.public_url or os.environ.get("GENESIS_PUBLIC_URL", "")).strip().rstrip("/")
+        for code in store.new_invites(a.count, credits, a.note):
+            print(f"{code}  {public}/?invite={code}" if public else code)
+        return 0
+    if a.cmd == "reconcile":
+        try:
+            prices = billing.load_prices(a.prices)
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 2
+        n = billing.reconcile(store, prices, a.gateway_usage)
+        print(f"таксувани ходове: {n}")
+        return 0
+    user = _who(store, a.email)
+    if user is None:
+        return 1
+    uid = user["id"]
+    if a.cmd == "balance":
+        print(f"{user['email']}: {billing.fmt_credits(store.balance(uid))} кредита "
+              f"(този месец похарчени {billing.fmt_credits(store.month_spent(uid))})")
+        for row in store.ledger_entries(uid, 20):
+            when = time.strftime("%Y-%m-%d %H:%M", time.gmtime(row["created"]))
+            print(f"  {when}  {row['kind']:<12} {billing.fmt_credits(row['amount']):>10}  "
+                  f"{row['event_id']}  {row['ref'][:60] if row['kind'] != 'charge' else ''}")
+        return 0
+    if a.cmd == "grant":
+        try:
+            amount = billing.parse_credits(a.credits)
+            if amount == 0:
+                raise ValueError("нула кредита не е промяна")
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 2
+        store.add_entry(uid, f"admin:{uuid.uuid4()}", "grant" if amount > 0 else "adjust",
+                        amount, ref=a.note)
+        print(f"{user['email']}: {billing.fmt_credits(amount)} → баланс "
+              f"{billing.fmt_credits(store.balance(uid))} кредита")
+        return 0
+    if a.cmd in ("disable", "enable"):
+        store.set_disabled(uid, a.cmd == "disable")
+        print(f"{user['email']}: {'спрян, сесиите са затворени' if a.cmd == 'disable' else 'пуснат'}")
+        return 0
+    # limits
+    fields: dict[str, Any] = {}
+    if a.clear:
+        fields = {"turns_per_day": None, "max_tokens_per_turn": None, "monthly_cap": None}
+    if a.turns_per_day is not None:
+        fields["turns_per_day"] = a.turns_per_day
+    if a.max_tokens is not None:
+        fields["max_tokens_per_turn"] = a.max_tokens
+    if a.monthly_cap is not None:
+        try:
+            fields["monthly_cap"] = billing.parse_credits(a.monthly_cap)
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 2
+    store.set_account(uid, **fields)
+    acc = store.account(uid)
+    cap = acc["monthly_cap"]
+    print(f"{user['email']}: ходове на ден {acc['turns_per_day'] or 'подразбиране'}, "
+          f"токени на ход {acc['max_tokens_per_turn'] or 'подразбиране'}, "
+          f"месечен таван {billing.fmt_credits(cap) if cap is not None else 'подразбиране'}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Genesis онлайн — вход, чат, файлове.")
     sub = p.add_subparsers(dest="cmd", required=True)
     add = sub.add_parser("add-user", help="нов човек (бета — само ръчно)")
     add.add_argument("email")
     add.add_argument("--data", type=Path, default=Path("/srv/genesis/web"))
+    admin = {
+        "users": sub.add_parser("users", help="всички хора: баланс, месец, днес, план"),
+        "balance": sub.add_parser("balance", help="баланс и последните 20 реда"),
+        "grant": sub.add_parser("grant", help="кредити на човек (отрицателно = корекция)"),
+        "disable": sub.add_parser("disable", help="спира човека и затваря сесиите му"),
+        "enable": sub.add_parser("enable", help="пуска спрян човек"),
+        "limits": sub.add_parser("limits", help="лимити на един човек"),
+        "invite": sub.add_parser("invite", help="нови покани (кодове за еднократна регистрация)"),
+        "reconcile": sub.add_parser("reconcile", help="таксува ходовете без такса от шлюза"),
+    }
+    for name, sp in admin.items():
+        sp.add_argument("--data", type=Path, default=Path("/srv/genesis/web"))
+        if name in ("balance", "grant", "disable", "enable", "limits"):
+            sp.add_argument("email")
+    admin["grant"].add_argument("credits", help="напр. 12.5 или -3")
+    admin["grant"].add_argument("--note", default="")
+    admin["limits"].add_argument("--turns-per-day", type=int)
+    admin["limits"].add_argument("--max-tokens", type=int)
+    admin["limits"].add_argument("--monthly-cap", help="кредити")
+    admin["limits"].add_argument("--clear", action="store_true", help="обратно към подразбирането")
+    admin["invite"].add_argument("--count", type=int, default=1)
+    admin["invite"].add_argument("--credits", default="0", help="подарени кредити при регистрация")
+    admin["invite"].add_argument("--note", default="")
+    admin["invite"].add_argument("--public-url", default="")
+    admin["reconcile"].add_argument("--gateway-usage", type=Path, required=True)
+    admin["reconcile"].add_argument("--prices", type=Path, default=billing.PRICES)
     srv = sub.add_parser("serve")
     srv.add_argument("--data", type=Path, default=Path("/srv/genesis/web"))
     srv.add_argument("--jobs", type=Path, default=Path("/srv/jobs"))
@@ -848,6 +971,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"{a.email.strip().lower()}  парола: {password}")
         return 0
+    if a.cmd != "serve":
+        return _admin(a, store)
     try:
         monthly_cap = billing.parse_credits(a.monthly_cap)
     except ValueError as e:
