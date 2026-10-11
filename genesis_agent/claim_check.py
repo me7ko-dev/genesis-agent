@@ -225,7 +225,20 @@ _TOOL_REFUSED_RE = re.compile(r"^\[[A-Z_]+(?::[^\n]*?)?\]\s*(?:❌|Грешка)
 # и `ls tests` (rc=0) след червен pytest се броеха за последно тестово пускане
 # и „Всички тестове минаха“ минаваше; паднал `cat tests/fixtures/data.json`
 # след зелен pytest оспорваше вярното твърдение.
-_SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||[;|\n]")
+# Разделители между команди във верига, в група — за да се види кой стои
+# пред последната (_rc_is_the_runners). Самотният `&` (фон в bash, „после“ в
+# cmd.exe) също дели: преглед 2026-10-11 — `cd app & npm test` не се броеше
+# за тестово пускане. `2>&1`, `>&2`, `&>` са пренасочвания, не разделители.
+_CHAIN_SEP_RE = re.compile(r"(&&|\|\||[;|&\n])")
+_REDIRECT_RE = re.compile(r"\d*>&\d*|&>")
+
+
+def _chain(command: str) -> list[str]:
+    """Веригата през едно: [команда, разделител, команда, …]."""
+    return _CHAIN_SEP_RE.split(_REDIRECT_RE.sub(" ", command or ""))
+
+
+
 _TEST_TOOLS = frozenset({"pytest", "py.test", "tox", "nox", "nose", "nose2", "unittest", "jest",
                          "vitest", "mocha", "ctest", "phpunit", "rspec", "ava", "karma"})
 _PY = frozenset({"python", "python3", "py"})
@@ -293,7 +306,7 @@ def _segment_is_test_run(segment: str) -> bool:
 
 def is_test_run(command: str) -> bool:
     """Пуска ли `command` тестове (поне един сегмент от веригата)."""
-    return any(_segment_is_test_run(seg) for seg in _SEGMENT_SPLIT_RE.split(command or ""))
+    return any(_segment_is_test_run(seg) for seg in _chain(command)[::2])
 
 
 # Заглавието, което пише genesis_skills._tool_run_cmd: „[RUN_CMD: cmd]  (rc=N)“
@@ -315,16 +328,21 @@ _RED_OUTPUT_RE = re.compile(
 
 
 def _rc_is_the_runners(command: str) -> bool:
-    """rc на `command` ли е rc на тестовия пускач: чиста `&&` верига, която
-    свършва с него. Одит 2026-10-11: `pytest | tail`, `| tee`, `|| true`,
-    `; echo`, `& echo` (cmd.exe) връщат rc на опашката — червен pytest
-    доказваше „всички минаха“; а в `pytest && git commit` неуспешният commit
-    правеше зеления pytest червен."""
-    rest = re.sub(r"\d*>&\d*|&>", " ", command or "").replace("&&", "\0")
-    if re.search(r"[|;&\n]", rest):
-        return False
-    segments = [seg for seg in rest.split("\0") if seg.strip()]
-    return bool(segments) and _segment_is_test_run(segments[-1])
+    """rc на `command` ли е rc на тестовия пускач: пускачът е ПОСЛЕДНАТА
+    команда на веригата и не стои след `||`. Така работи shell-ът: rc на
+    верига е rc на последната пусната команда.
+
+    Одит 2026-10-11: `pytest | tail`, `| tee`, `|| true`, `; echo`, `& echo`
+    (cmd.exe) връщат rc на опашката — червен pytest доказваше „всички минаха“;
+    а в `pytest && git commit` неуспешният commit правеше зеления pytest червен.
+    Преглед 2026-10-11: първата поправка вярваше само на чиста `&&` верига и
+    изхвърляше rc и при `cd app; pytest -q` — rc=4/5 (ImportError в conftest,
+    „no tests ran“) и паднал `npm test` без „N failed“ минаваха за зелени.
+    След `||` пускачът не тръгва, ако лявото е минало, и rc=0 не е негово;
+    `pytest &` (фон) връща 0 веднага — и в двата случая решава изходът."""
+    parts = _chain((command or "").rstrip().rstrip(";"))
+    last, sep = parts[-1], (parts[-2] if len(parts) > 1 else "")
+    return sep != "||" and _segment_is_test_run(last)
 
 
 def counts_as_executed(name: str, args: str, result: str) -> tuple[str, str] | None:

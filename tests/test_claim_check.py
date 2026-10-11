@@ -236,9 +236,14 @@ class TestTheRcHeaderDecides:
         assert executed == [("RUN_CMD", "python -m unittest")]
 
     def test_a_multiline_command_reads_the_real_rc(self) -> None:
-        cmd = "cd app\npytest -q"
-        executed = _executed(_run("pytest -q", 0, "5 passed"), _run(cmd, 1, "1 failed, 4 passed"))
-        assert _kinds("Всички тестове минаха.", executed) == ["минаващи тестове"]
+        # Изход без белег за червено: червено го казва само rc-то (2026-10-11 —
+        # с „1 failed“ тестът минаваше и при напълно изхвърлено rc).
+        for cmd in ("cd app\npytest -q", "cd app\nnpm test"):
+            executed = _executed(_run("pytest -q", 0, "5 passed"),
+                                 _run(cmd, 1, "AssertionError [ERR_ASSERTION]: 3 == 4"))
+            claims = unsupported_claims("Всички тестове минаха.", executed)
+            assert [c.kind for c in claims] == ["минаващи тестове"], cmd
+            assert claim_check.green_claim_after_red(claims, executed) == 1, cmd
 
     def test_a_timed_out_test_run_is_not_green(self) -> None:
         executed = _executed(_run("pytest -q", 1, "1 failed"),
@@ -311,6 +316,34 @@ class TestTheRcOfAPipeIsNotTheRunners:
         # Дума „FAILED“ в лога на зелено пускане с доверен rc не е червено.
         out = "WARNING FAILED to connect, retrying\n3 passed, 1 xfailed\nXFAIL test_x"
         assert _run("cd app && pytest -q", 0, out) == ("RUN_CMD", "cd app && pytest -q")
+
+
+class TestTheLastCommandOwnsTheRc:
+    """rc на верига е на последната ѝ команда (`;`, нов ред, `&`, `|`, `&&`).
+    Преглед 2026-10-11: при `source .venv/bin/activate; pytest -q` rc=4
+    (ImportError в conftest) се изхвърляше и червеното минаваше за зелено."""
+
+    def test_a_runner_after_a_semicolon_keeps_its_rc(self) -> None:
+        for cmd, rc, out in (
+                ("source .venv/bin/activate; pytest -q", 4,
+                 "ImportError while loading conftest '/app/tests/conftest.py'."),
+                ("cd app; pytest -q", 5, "no tests ran in 0.01s"),
+                ("cd app; npm test", 1, "AssertionError [ERR_ASSERTION]: 3 == 4"),
+                ("cd app & npm test", 1, "AssertionError [ERR_ASSERTION]: 3 == 4"),
+                ("cat cases.txt | pytest -q", 2, "ERROR: usage")):
+            entry = _run(cmd, rc, out)
+            assert entry == ("RUN_CMD", f"{cmd} (rc={rc})"), cmd
+            claims = unsupported_claims("Всички тестове минаха.", _executed(entry))
+            assert [c.kind for c in claims] == ["минаващи тестове"], cmd
+            assert claim_check.green_claim_after_red(claims, _executed(entry)) == rc, cmd
+
+    def test_a_runner_after_or_does_not_own_a_green_rc(self) -> None:
+        # `make lint || pytest`: при зелен lint pytest не тръгва, rc=0 не е негово.
+        assert _run("make lint || pytest -q", 0, "1 failed") == ("RUN_CMD", "make lint || pytest -q (rc=1)")
+
+    def test_a_backgrounded_runner_does_not_own_the_rc(self) -> None:
+        # `pytest &` връща 0 веднага — rc-то не е на тестовете.
+        assert _run("pytest -q &", 0, "1 failed") == ("RUN_CMD", "pytest -q & (rc=1)")
 
 
 class TestTextPathKeepsTheWholeCommand:
