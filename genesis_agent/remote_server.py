@@ -63,6 +63,11 @@ _MAX_WAIT_S = 25.0
 _CONFIRM_TIMEOUT_S = 300.0
 _EVENT_LOG = 1000
 _TOOL_PREVIEW = 4000
+# Таван на един отговор на `events` (одит 2026-10-11): студен старт след 1000
+# изхода на инструменти теглеше 7.3 MiB, а open() на телефона ги декодираше
+# 1.1 s (5 s без JIT, близо до Hermes) на JS нишката. Над тавана — най-новите
+# и reset, телефонът подменя списъка си (mergeEvents).
+_REPLY_BYTES = 512 * 1024
 
 
 class ProtocolError(Exception):
@@ -310,6 +315,15 @@ class RemoteSession:
             items = list(self._events) if reset else [e for e in self._events if e["seq"] > after]
             reply = {"events": items, "last": self._seq, "reset": reset,
                      "busy": self._busy, "epoch": self.epoch}
+        # Размерът се мери извън ключалката — emit() не чака сериализацията.
+        kept, size = 0, 0
+        for event in reversed(items):
+            size += len(utf8_bytes(json.dumps(event, ensure_ascii=False)))
+            if kept and size > _REPLY_BYTES:
+                break
+            kept += 1
+        if kept < len(items):
+            reply["events"], reply["reset"] = items[-kept:], True
         if self._state is not None:
             try:
                 reply["state"] = self._state()

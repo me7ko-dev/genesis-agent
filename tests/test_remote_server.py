@@ -196,6 +196,28 @@ def test_a_phone_that_missed_too_much_gets_the_whole_log() -> None:
     assert got["reset"] is True and len(got["events"]) == rs._EVENT_LOG
 
 
+def test_a_cold_start_after_a_long_session_gets_a_bounded_reply() -> None:
+    """Одит 2026-10-11: `events after=0` (всеки студен старт на приложението)
+    след 1000 изхода на инструменти беше 7.3 MiB, а open() на телефона го
+    декодираше 1.1–5 s на JS нишката. Сега най-новите в ~512 KiB и reset."""
+    session, _ = _session()
+    ui = rs.RemoteTurnUI(session)
+    for i in range(1000):
+        ui.tool("RUN_CMD", f"ред {i} " + "изход от теста " * 400)
+    ui.assistant("последно")
+    server = rs.RemoteServer(KEY, session, name="pc")
+    payload = _request("events", after=0, wait=0)
+    reply, rid = server.handle(_client_seal(KEY, payload))
+    sealed = json.dumps(server.seal(reply, rid))
+    assert len(sealed) <= 1 << 20
+    opened = _client_open(KEY, json.loads(sealed), rid)
+    assert opened["reset"] is True and opened["events"][-1]["text"] == "последно"
+    assert opened["last"] == opened["events"][-1]["seq"]
+    # Обикновеното допитване „какво има след N“ не се пипа.
+    small = session.events_after(opened["last"] - 3)
+    assert small["reset"] is False and len(small["events"]) == 3
+
+
 def test_confirm_is_answered_from_the_phone() -> None:
     session, _ = _session(Recorder(confirm=True))
     session.send("clean")
