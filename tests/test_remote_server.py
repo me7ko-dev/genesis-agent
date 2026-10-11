@@ -404,6 +404,37 @@ def test_run_turn_stops_before_the_next_tool(monkeypatch, tmp_path) -> None:
     assert "tool_calls" not in list(messages)[-1], "history left with unanswered tool_calls"
 
 
+def test_the_phone_stop_interrupts_a_running_command(monkeypatch, tmp_path) -> None:
+    """Одит 2026-10-11: ■ на телефона не стигаше до работеща команда — ходът
+    свърши 7.1 s след Стоп, `sleep 8` довърши с rc=0."""
+    from collections import deque
+
+    import genesis_terminal_agent as gta
+
+    monkeypatch.setattr(gta, "HISTORY_DIR", tmp_path)
+    monkeypatch.setattr(gta, "_remember", lambda *a: None)
+    gta.genesis_skills.set_workspace(tmp_path)
+    call = {"id": "c1", "type": "function",
+            "function": {"name": "RUN_CMD", "arguments": json.dumps({"command": "sleep 8"})}}
+    replies = iter([("running tests", [call]), ("done", [])])
+    monkeypatch.setattr(gta, "ask_genesis", lambda *a, **k: next(replies))
+    session = rs.RemoteSession(lambda text, ui: gta.run_turn(
+        deque([{"role": "system", "content": "s"}], maxlen=50), text, ui))
+    assert session.send("run the tests")
+    deadline = time.monotonic() + 10
+    while not any(e["type"] == "thinking" for e in session.events_after(0)["events"]):
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+    time.sleep(1.0)
+    stopped_at = time.monotonic()
+    session.request_stop()
+    while session.busy and time.monotonic() - stopped_at < 15:
+        time.sleep(0.05)
+    assert time.monotonic() - stopped_at < 3, "the command ran to the end after Stop"
+    tools = [e for e in session.events_after(0)["events"] if e["type"] == "tool"]
+    assert tools and "Спряно от оператора" in tools[-1]["result"]
+
+
 def test_a_replay_is_still_rejected_after_a_restart(tmp_path) -> None:
     """Одит 2026-10-07: видяното беше само в паметта — след рестарт на
     `genesis serve` записано съобщение се изпълняваше пак."""

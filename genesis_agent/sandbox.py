@@ -35,6 +35,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -1372,6 +1373,21 @@ def _preexec(policy: SandboxPolicy, nproc_cap: int):  # изпълнява се 
 # мисли (одит 2026-10-09).
 before_exec: Callable[[], None] | None = None
 
+# „Стоп“ на оператора (бутонът на телефона), докато командата върви. Задава го
+# genesis_skills._set_cancel. Одит 2026-10-11: проверката беше само преди
+# следващия инструмент — `sleep 8` довършваше 7.1 s след Стоп, а увиснал
+# `npm test` държеше телефона на „Genesis работи…“ до таймаута от 120 s.
+cancel_check: Callable[[], bool] | None = None
+_CANCEL_POLL_S = 0.5
+
+
+def _stop_requested() -> bool:
+    check = cancel_check
+    try:
+        return bool(check and check())
+    except Exception:
+        return False
+
 
 def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
          env_extra: dict[str, str] | None = None) -> SandboxResult:
@@ -1411,8 +1427,22 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
     except Exception as e:
         return SandboxResult(ok=False, stdout="", stderr=f"[sandbox] стартът се провали: {e}",
                              returncode=None)
+    deadline = time.monotonic() + timeout
+    stopped = False
     try:
-        out, err = proc.communicate(timeout=timeout)
+        # На парчета по 0.5 s, за да се види „Стоп“; повторният communicate()
+        # не губи изход (документирано за TimeoutExpired).
+        while True:
+            try:
+                out, err = proc.communicate(
+                    timeout=max(0.01, min(_CANCEL_POLL_S, deadline - time.monotonic())))
+                break
+            except subprocess.TimeoutExpired:
+                if _stop_requested():
+                    stopped = True
+                    raise
+                if time.monotonic() >= deadline:
+                    raise
         return SandboxResult(ok=proc.returncode == 0, stdout=out or "", stderr=err or "",
                              returncode=proc.returncode)
     except subprocess.TimeoutExpired:
@@ -1446,8 +1476,9 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
                 except OSError:
                     pass
             out, err = "", "[sandbox] процесът не пусна изхода си и след убиване"
+        note = "⏹ Спряно от оператора" if stopped else f"Timeout след {timeout}s"
         return SandboxResult(ok=False, stdout=out or "",
-                             stderr=(err or "") + f"\n[sandbox] Timeout след {timeout}s",
+                             stderr=(err or "") + f"\n[sandbox] {note}",
                              returncode=None)
 
 
