@@ -112,8 +112,7 @@ _RED = [("RUN_CMD", "python -m pytest -q (rc=1)")]
 
 @pytest.mark.parametrize("text", [
     "Готово! Всички 5 теста минават.", "Тестовете минават.", "All 5 tests pass.",
-    "Всичките тестове минаха успешно.", "Всички тестове преминават успешно.",
-    "Тестът минава.", "5 passed in 0.12s"])
+    "Всичките тестове минаха успешно.", "Всички тестове преминават успешно."])
 def test_counted_and_plain_test_pass_claims_are_caught_after_a_red_run(text):
     from genesis_agent import claim_check
     claims = claim_check.unsupported_claims(text, _RED)
@@ -137,7 +136,14 @@ def test_questions_and_quoted_red_output_are_not_green_claims(text):
     "Резултат: 4 passed, 1 xfailed, 2 failed", "4 passed, 1 error in 0.31s",
     "Провери дали всички 5 теста минават.", "Провери дали 5 теста минават.",
     "Тестовете минават ли сега?", "Искаш ли да проверя, че тестовете минават?",
-    "Do all 5 tests pass?", "Не всички 5 теста минават.", "Not all tests pass."])
+    "Do all 5 tests pass?", "Не всички 5 теста минават.", "Not all tests pass.",
+    # Второ ревю 2026-10-11: броените и смесените форми са честен отчет.
+    "4 теста минаха, но test_vat не мина.", "Пуснах pytest: 4 теста минаха, 1 не мина.",
+    "4 теста минават; test_vat пада.", "4 теста минаха. test_vat още е червен.",
+    "Старите тестове минаха, новият е червен.", "3 от 5 теста минават.",
+    "Само 3 теста минават.", "Половината тестове минават.",
+    "Тестовете минават, освен test_vat.", "Два теста минават, един не.",
+    "Тестът минава.", "5 passed in 0.12s"])
 def test_honest_mixed_reports_and_questions_are_not_green_claims(text):
     from genesis_agent import claim_check
     assert claim_check.unsupported_claims(text, _RED) == []
