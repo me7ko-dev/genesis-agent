@@ -11,7 +11,7 @@ import zipfile
 
 import pytest
 
-from genesis_agent import deliver, repo_agent
+from genesis_agent import cli, deliver, repo_agent
 from genesis_agent import setup_wizard as sw
 
 PY = f'"{sys.executable}" -m pytest -q -p no:cacheprovider'
@@ -262,3 +262,40 @@ def test_setup_keeps_the_good_keys_when_one_is_typed_in_cyrillic(setup_env, monk
     assert "HF_TOKEN=hf_good123" in text and "GROQ_API_KEY" not in text
     assert "латин" in capsys.readouterr().out
     assert sent == ["Bearer hf_good123"], "ключ на кирилица не стига до мрежата"
+
+
+# ── genesis fix: непозната опция не е част от описанието на бъга ────────────
+
+@pytest.fixture
+def fake_repair(monkeypatch):
+    seen: dict = {}
+
+    def repair(project, task, **kw):
+        seen.update(project=project, task=task, **kw)
+        return repo_agent.RepairOutcome(True, "ok")
+    monkeypatch.setattr(repo_agent, "repair", repair)
+    return seen
+
+
+@pytest.mark.parametrize("argv", [
+    ["fix", "./proj", "бутонът не работи", "--chekpoint"],
+    ["fix", "./proj", "бутонът не работи", "--max-coding"],
+    ["fix", "./proj", "бутонът не работи", "--rounds"],
+    ["fix", "./proj", "бутонът не работи", "--test"],
+])
+def test_fix_refuses_an_unknown_or_incomplete_option(fake_repair, argv, capsys):
+    assert cli.main(argv) == 2
+    assert fake_repair == {}
+    out = capsys.readouterr().out
+    assert "Употреба" in out and argv[-1] in out
+
+
+def test_fix_options_may_come_before_the_path(fake_repair):
+    assert cli.main(["fix", "--checkpoint", "./proj", "бутонът не работи"]) == 0
+    assert fake_repair["project"] == "./proj" and fake_repair["task"] == "бутонът не работи"
+    assert fake_repair["checkpoint"] is True
+
+
+def test_fix_double_dash_keeps_the_rest_as_the_task(fake_repair):
+    assert cli.main(["fix", "./proj", "--", "флагът", "--verbose", "не", "работи"]) == 0
+    assert fake_repair["task"] == "флагът --verbose не работи"
