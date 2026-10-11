@@ -307,6 +307,11 @@ def _rg_globs(glob: str | None) -> list[str]:
     if not glob:
         return []
     neg, body = ("!", glob[1:]) if glob.startswith("!") else ("", glob)
+    # `./src/*.py` и `src/./*.py`: `_matcher` пропуска сегментите `.`, а rg ги
+    # мери буквално и не намираше нищо (ревю 2026-10-11, трета вълна).
+    # Абсолютен или завършващ на `/` шаблон `_matcher` не приема — него не пипаме.
+    if not body.startswith("/") and not body.endswith("/"):
+        body = "/".join(seg for seg in body.split("/") if seg not in ("", ".")) or body
     if "/" in body and not body.startswith(("/", "**/")):
         body = "**/" + body
     variants = [body] + ([body.replace("[", "[[]")] if "[" in body else [])

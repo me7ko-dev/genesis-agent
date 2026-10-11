@@ -103,3 +103,14 @@ def test_search_finds_carriage_returns(ws, engine):
     assert [h.line for h in hits] == [1, 2]
     # `$` пред CRLF продължава да работи (вълна 2).
     assert [h.line for h in repo_map.search_code(r"off$", ws)] == [1]
+
+
+# ── `./` в `glob` ────────────────────────────────────────────────────────────
+
+def test_search_glob_with_dot_slash_matches_like_python(ws, engine):
+    (ws / "src").mkdir()
+    (ws / "src" / "a.py").write_text("needle\n", encoding="utf-8")
+    (ws / "b.py").write_text("needle\n", encoding="utf-8")
+    for glob in ("./src/*.py", "src/./*.py"):
+        hits = repo_map.search_code("needle", ws, glob=glob)
+        assert [os.path.basename(h.path) for h in hits] == ["a.py"], glob
