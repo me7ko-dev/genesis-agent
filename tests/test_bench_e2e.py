@@ -136,6 +136,41 @@ def test_bench_fix_a_claimed_but_missing_fix_is_a_failure(tmp_path):
     assert not r["fixed"] and not r["infra"], r
 
 
+def test_an_empty_answer_is_a_model_failure_in_both_benches(tmp_path):
+    # Моделът отговаря (и е таксуван — редът е в бюджетния лог), но с празно
+    # съдържание. bench_projects го брои за грешен пуск; bench_fix го броеше
+    # за infra („моделът не отговори“) и проектът изпадаше от сравнението в
+    # bench_all — регресия до празни отговори нямаше как да се види
+    # (измерено 2026-10-11 с този фалшив доставчик).
+    out = tmp_path / "fix"
+    with fp.FakeProvider([], final="") as fake:
+        env = _env(tmp_path, fake.url)
+        fix = _run([str(ROOT / "scripts" / "bench_fix.py"), "--only", "median", "--out", str(out)],
+                   env, tmp_path)
+        projects = _run([str(ROOT / "scripts" / "bench_projects.py"), "--only", PROJECT, "--runs", "1",
+                         "--out", str(tmp_path / "out"), "--test-python", sys.executable,
+                         "--timeout", str(CHAT_TIMEOUT)], env, tmp_path)
+    r = json.loads((out / "results.json").read_text("utf-8"))["runs"][0]
+    assert not r["fixed"] and not r["infra"], (r, fix.stdout[-2000:])
+    assert fix.returncode == 1
+    run = json.loads((tmp_path / "out" / "results.json").read_text("utf-8"))["runs"][0]
+    assert not run["infra"] and run["passed"] < run["total"], run
+    assert projects.returncode == 1
+
+
+def test_a_provider_that_is_down_is_infra_in_both_benches(tmp_path):
+    # Обратната страна: нито един таксуван отговор → infra, не грешка на модела.
+    out = tmp_path / "fix"
+    env = _env(tmp_path, "http://127.0.0.1:9")      # нищо не слуша там
+    fix = _run([str(ROOT / "scripts" / "bench_fix.py"), "--only", "median", "--out", str(out)], env, tmp_path)
+    projects = _run([str(ROOT / "scripts" / "bench_projects.py"), "--only", PROJECT, "--runs", "1",
+                     "--out", str(tmp_path / "out"), "--test-python", sys.executable,
+                     "--timeout", str(CHAT_TIMEOUT)], env, tmp_path)
+    assert json.loads((out / "results.json").read_text("utf-8"))["runs"][0]["infra"] is True
+    assert json.loads((tmp_path / "out" / "results.json").read_text("utf-8"))["runs"][0]["infra"] is True
+    assert fix.returncode == 1 and projects.returncode == 1
+
+
 def test_bench_all_dry_run_plans_against_the_baseline_and_runs_nothing(tmp_path):
     env = _env(tmp_path, "http://127.0.0.1:9")    # нищо не бива да се вика
     base = tmp_path / "genesis_home" / "bench" / "2026-09-30-history"

@@ -296,6 +296,7 @@ def bench_one(name: str, task: str, files: dict[str, str], rounds: int, repair) 
     test_command = None if needs else f'"{project_python(root)}" {TEST}'
 
     USAGE.update(prompt=0, completion=0, calls=0, errors=0)
+    log_path, offset = _budget_offset()
     t0 = time.time()
     try:
         out = repair(root, task, test_command=test_command,
@@ -312,7 +313,29 @@ def bench_one(name: str, task: str, files: dict[str, str], rounds: int, repair) 
     return {"name": name, "fixed": passed, "reported": reported, "rounds": used_rounds,
             "test_touched": test_touched, "sec": round(elapsed, 1),
             "prompt": USAGE["prompt"], "completion": USAGE["completion"],
-            "infra": USAGE["calls"] == 0}
+            "infra": USAGE["calls"] == 0 and not _billed_since(log_path, offset)}
+
+
+def _budget_offset() -> tuple[Path | None, int]:
+    """Докъде е бюджетният лог преди проекта — за _billed_since."""
+    try:
+        from genesis_agent import budget
+        path = Path(budget.LOG_PATH)
+    except Exception:  # без лога остава само броячът на успешните извиквания
+        return None, 0
+    return path, path.stat().st_size if path.exists() else 0
+
+
+def _billed_since(log_path: Path | None, offset: int) -> bool:
+    """Има ли таксуван отговор от модел след `offset` — същото определение за
+    infra като в bench_projects. Празен отговор е грешка на Brain (calls == 0),
+    но моделът е отговорил и е платен: броеше се за „моделът не отговори“ и
+    проектът изпадаше от сравнението в bench_all, докато bench_projects го
+    брои за грешен пуск (измерено 2026-10-11, фалшив доставчик с празно
+    съдържание: fix — infra, projects — 0/1)."""
+    if log_path is None:
+        return False
+    return bool(bp.usage_since(bp._log_lines_since(log_path, offset))[1])
 
 
 def _line(r: dict) -> str:
