@@ -440,6 +440,7 @@ _BENCH_KNOWLEDGE = {
     "csv-sqlite": ["bg_excel_csv_import"], "shop-scraper": ["bg_shop_scrape_prices"],
     "cli-config": ["money_round_up_step"],
     "shop-bot": ["telegram_bot_updates"], "expense-bot": ["telegram_bot_updates"],
+    "library-pkg": ["isbn13_validate"],
 }
 
 
@@ -457,8 +458,10 @@ def test_every_bench_task_gets_exactly_its_knowledge(_shipped_skills) -> None:
 
 
 def test_shared_words_without_a_whole_trigger_are_not_a_match(_shipped_skills) -> None:
-    assert sl.domain_context(
-        "ISBN-13 с проверка на контролната цифра; add_reader връща номер на читателя") == ""
+    # Правилата за ЕГН — не; ISBN (2026-10-11) има свое умение и то е на място.
+    text = sl.domain_context(
+        "ISBN-13 с проверка на контролната цифра; add_reader връща номер на читателя")
+    assert "bg_egn" not in text and "библиотеката: isbn13_validate" in text
 
 
 def test_a_general_skill_is_never_injected_in_chat(monkeypatch) -> None:

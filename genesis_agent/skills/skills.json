@@ -642,6 +642,28 @@
       }
     },
     {
+      "name": "isbn13_validate",
+      "category": "domain",
+      "file_path": "skills/isbn13_validate.md",
+      "description": "ISBN-13 — махни тирета и интервали, точно 13 цифри, префикс 978/979, контролна цифра с тегла 1,3,1,3… (10 − сума mod 10) mod 10; 978-954-529-301-5 е невалиден (трябва 6).",
+      "triggers": [
+        "isbn",
+        "isbn контролна цифра",
+        "isbn-13",
+        "провери isbn",
+        "валиден isbn",
+        "валидирай isbn"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-10-11T21:30:00+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
+    },
+    {
       "name": "telegram_bot_updates",
       "category": "domain",
       "file_path": "skills/telegram_bot_updates.md",
