@@ -230,3 +230,12 @@ def test_a_huge_stderr_or_an_endless_line_does_not_stall_or_bloat(monkeypatch, t
     done = {"kind": "done", "ok": True, "error": "", "seconds": 1, "tokens": {}}
     res, seen = _run(monkeypatch, tmp_path, ["x" * 5000, json.dumps(done)], stderr="W" * 200_000)
     assert res.ok and [e["kind"] for e in seen] == ["done"]
+
+
+def test_a_deeply_nested_line_from_the_container_is_noise_not_a_crash(monkeypatch, tmp_path) -> None:
+    """Ревю 2026-10-11: ред `[` * 200000 (под тавана от 1 MiB) хвърляше
+    RecursionError от json.loads; той излизаше от run_task, наблюдателят се
+    спираше във finally, а `docker run` оставаше да работи без таван."""
+    done = {"kind": "done", "ok": True, "error": "", "seconds": 1, "tokens": {}}
+    res, seen = _run(monkeypatch, tmp_path, ["[" * 200_000, json.dumps(done)])
+    assert res.ok and [e["kind"] for e in seen] == ["done"]

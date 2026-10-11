@@ -194,7 +194,9 @@ def run_task(text: str, workspace: Path, *, limits: Limits | None = None,
                 continue
             try:
                 ev = json.loads(raw.decode("utf-8", "replace"))
-            except ValueError:
+            except (ValueError, RecursionError):
+                # RecursionError: ред `[` * 200000 от кода в контейнера излизаше
+                # от run_task и `docker run` оставаше без таван (ревю 2026-10-11).
                 continue  # шум от Python/rich — не е събитие
             if not isinstance(ev, dict) or "kind" not in ev:
                 continue
