@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 import genesis_skills as gs
-from genesis_agent import checkpoints, edit_history
+from genesis_agent import checkpoints, edit_history, hooks
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="няма git")
 
@@ -310,6 +310,7 @@ def test_a_formatter_hook_after_an_edit_does_not_stop_undo(ws, monkeypatch) -> N
     hook = f'"{py}" -c "import os;open(os.environ[\'GENESIS_FILE\'],\'a\').write(\'# fmt\\n\')"'
     (Path(paths.GENESIS_HOME) / "hooks.json").write_text(json.dumps(
         {"PostToolUse": [{"matcher": "EDIT_FILE", "command": hook}]}), encoding="utf-8")
+    hooks.trust(Path(paths.GENESIS_HOME) / "hooks.json")  # операторът го е потвърдил
     app = ws / "src" / "app.py"
     edit_history.begin_turn("редакция")
     gs.dispatch_tool_call("READ_FILE", {"path": str(app)})

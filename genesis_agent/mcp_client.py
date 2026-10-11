@@ -4,16 +4,22 @@ way Claude Code uses them: GitHub, databases, Slack, a browser, anything that
 ships an MCP server.
 
     ~/.genesis/mcp.json      — the operator's servers, every project
-    <project>/.mcp.json      — the project's (Claude Code's file, same format);
-                               only after `/mcp trust`, pinned to its content:
-                               starting a server is running a program.
+    <project>/.mcp.json      — the project's (Claude Code's file, same format)
+
+Both only after `/mcp trust`, pinned to the file's content: starting a server
+is running a program (the home file too since 2026-10-11 — a sandboxed
+command could write it).
 
     {"mcpServers": {
       "github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"],
                  "env": {"GITHUB_TOKEN": "..."}},
-      "db": {"command": "uvx", "args": ["mcp-server-sqlite", "--db-path", "app.db"],
+      "db": {"command": "uvx", "args": ["mcp-server-sqlite", "--db-path", "/home/me/app/app.db"],
              "autoApprove": ["read_query", "list_tables"]}
     }}
+
+Servers from ~/.genesis/mcp.json start in an empty temporary folder (not the
+project, where a planted module would be imported — 2026-10-11), so data
+paths there must be full paths; the chat start warns about relative ones.
 
 Only the stdio transport (a local program speaking JSON-RPC on stdin/stdout)
 — what nearly every server offers; no extra dependency.
@@ -578,6 +584,43 @@ def _neutral_cwd() -> Path:
     return _NEUTRAL
 
 
+def home_file() -> Path:
+    return _home() / "mcp.json"
+
+
+_DATA_FILE = re.compile(
+    r"\.(?:db|sqlite3?|duckdb|json|jsonl|ya?ml|toml|csv|tsv|txt|md|ini|cfg|conf|xml|log"
+    r"|py|js|mjs|cjs|ts)$", re.IGNORECASE)
+
+
+def _relative_path_args(args: list[str]) -> list[str]:
+    """Аргументите, които приличат на относителен път към файл или папка.
+
+    Сървърите от ~/.genesis/mcp.json тръгват от празна временна папка (одит
+    2026-10-11: от проекта внасяха подхвърлен модул), така че `--db-path
+    app.db` от примера в документацията отваряше празна база там, изтривана
+    на изхода — без дума. Пакетите (`@scope/name`, `pkg==1.2`), модулите след
+    `-m`, адресите и `owner/repo` не са пътища."""
+    out: list[str] = []
+    after_m = False
+    for arg in args:
+        if after_m:
+            after_m = False
+            continue
+        if arg == "-m":
+            after_m = True
+            continue
+        value = arg.split("=", 1)[1] if arg.startswith("-") and "=" in arg else arg
+        if not value or value.startswith(("-", "@", "~", "$", "%")) or "://" in value:
+            continue
+        if os.path.isabs(value) or value.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:[\\/]", value):
+            continue
+        if value in (".", "..") or value.startswith(("./", "../", ".\\", "..\\")) \
+                or _DATA_FILE.search(value):
+            out.append(value)
+    return out
+
+
 def project_file(ws: Path | None = None) -> Path:
     from genesis_agent.project_instructions import _project_root
     return _project_root(Path(ws or _workspace()).resolve()) / ".mcp.json"
@@ -652,7 +695,11 @@ def _parse(path: Path) -> list[Server]:
 def configured(ws: Path | None = None) -> tuple[list[Server], Path | None]:
     """The servers in force (not started), and the project file when it is not trusted."""
     from genesis_agent import hooks
-    servers = _parse(_home() / "mcp.json")
+    # И сървърите на оператора — само с подпис от /mcp trust (одит 2026-10-11):
+    # команда от sandbox-а записваше ~/.genesis/mcp.json и програмата ѝ
+    # тръгваше при следващия чат, извън sandbox-а.
+    home = home_file()
+    servers = _parse(home) if home.is_file() and hooks.is_trusted(home) else []
     project = project_file(ws)
     untrusted = None
     if project.is_file():
@@ -674,6 +721,7 @@ def start_all(ws: Path | None = None) -> list[str]:
     chat start its 20 s, one after another — audit 2026-10-08); returns lines
     for the operator."""
     global _started, last_start
+    from genesis_agent import hooks
     stop_all()
     _started = True
     lines: list[str] = []
@@ -705,6 +753,14 @@ def start_all(ws: Path | None = None) -> list[str]:
             lines.append(f"⚠ MCP {srv.name}: {srv.error}")
         else:
             lines.append(f"🔌 MCP {srv.name}: {len(srv.tools)} инструмента")
+        relative = _relative_path_args(srv.args) if srv.source == home_file() else []
+        if relative:
+            lines.append(f"⚠ MCP {srv.name}: относителен път ({', '.join(relative[:3])}) — сървърите "
+                         "от ~/.genesis/mcp.json тръгват от празна временна папка, не от проекта; "
+                         "дай пълен път.")
+    home = home_file()
+    if home.is_file() and not hooks.is_trusted(home):
+        lines.append(f"⚠ {home} не се пуска: {hooks.trust_problem(home)}. Прегледай го и /mcp trust.")
     if untrusted:
         lines.append(f"⚠ {untrusted} има MCP сървъри, но не е доверен — прегледай го и /mcp trust.")
     last_start = lines
@@ -813,6 +869,15 @@ def _secret_argument(arguments: Any, _budget: list[int] | None = None) -> str | 
     elif isinstance(arguments, str):
         text = arguments.strip()
         if not text or len(text) > 4096 or "\n" in text:
+            return None
+        # Изречение с интервали, което не започва като път, е свободен текст
+        # (заявка, SQL, заглавие на issue) — не път (2026-10-11): „rotate the
+        # credentials in .env“ в търсене караше read-only инструмент да пита,
+        # а в автономен режим — да бъде отказан. Пътят с интервали
+        # (`/Users/x/My Keys/.env`) започва от корен, `~` или буква на диск.
+        if any(ch.isspace() for ch in text) and not (
+                text.startswith(("/", "\\", "~", "file://", "./", "../", ".\\", "..\\"))
+                or re.match(r"^[A-Za-z]:[\\/]", text)):
             return None
         from genesis_agent import sandbox
         path = os.path.expanduser(text.removeprefix("file://"))

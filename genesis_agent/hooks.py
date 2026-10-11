@@ -3,12 +3,14 @@ genesis_agent.hooks — the operator's own commands around the agent's work
 (Claude Code's hooks): format after every edit, refuse writes into a folder,
 run the tests before the turn may end, log every command.
 
-    ~/.genesis/hooks.json             — always on (the operator wrote it)
-    <project>/.genesis/hooks.json     — only after `/hooks trust`: a cloned
-                                        repository must not run code on this
-                                        machine because the agent opened it.
-                                        Trust is for the file's exact content;
-                                        any change needs it again.
+    ~/.genesis/hooks.json             — the operator's, every project
+    <project>/.genesis/hooks.json     — the project's: a cloned repository
+                                        must not run code on this machine
+                                        because the agent opened it.
+
+Both run only after `/hooks trust`, for the file's exact content; any change
+needs it again. The home file too (2026-10-11): a sandboxed command could
+write it, and it runs outside the sandbox with the whole environment.
 
     {"hooks": {
       "PreToolUse":  [{"matcher": "WRITE_FILE|EDIT_FILE", "command": "python check.py"}],
@@ -98,6 +100,10 @@ def project_file(ws: Path | None = None) -> Path:
     return root / ".genesis" / "hooks.json"
 
 
+def home_file() -> Path:
+    return _home() / "hooks.json"
+
+
 def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -169,6 +175,43 @@ def is_trusted(path: Path) -> bool:
         return False
 
 
+def trust_problem(path: Path) -> str:
+    """Защо файлът не е доверен ("" — доверен). Записите отпреди подписа
+    (голият sha256) не са доверие, защото команда ги сглобяваше сама; без
+    обяснение операторът виждаше „не е доверен“ за файл, на който вече се е
+    доверил (одит 2026-10-11). Не ги приемаме и еднократно: старият запис не
+    се различава от подхвърлен."""
+    if is_trusted(path):
+        return ""
+    stored = _trusted().get(_key(path))
+    if not isinstance(stored, str):
+        if path.parent == _home():
+            return ("от 2026-10-11 и твоят файл иска потвърждение веднъж — команда от "
+                    "sandbox-а можеше да го подмени, а той се пуска извън него")
+        return "не е доверен"
+    try:
+        legacy = stored == _digest(path)
+    except OSError:
+        legacy = False
+    if legacy:
+        return "доверието е записано от по-стара версия на Genesis (без подпис) — потвърди го отново"
+    return "променен след последното потвърждение"
+
+
+_warned: set[tuple[str, str]] = set()
+
+
+def warn_untrusted_home(path: Path, command: str) -> None:
+    """Веднъж за всяко съдържание: файлът на оператора не се пуска и защо."""
+    try:
+        seen = (str(path), _digest(path))
+    except OSError:
+        return
+    if seen not in _warned:
+        _warned.add(seen)
+        _say(f"⚠ {path} не се пуска: {trust_problem(path)}. Прегледай го и {command}.")
+
+
 def trust(path: Path) -> None:
     data = _trusted()
     data[_key(path)] = _seal(path)
@@ -219,7 +262,13 @@ def _parse(path: Path) -> list[Hook]:
 def configured(ws: Path | None = None) -> tuple[list[Hook], Path | None]:
     """The hooks in force, and the project file when it exists but is not trusted."""
     from genesis_agent.project_instructions import _project_root
-    hooks = _parse(_home() / "hooks.json")
+    home = home_file()
+    hooks: list[Hook] = []
+    if home.is_file():
+        if is_trusted(home):
+            hooks = _parse(home)
+        else:
+            warn_untrusted_home(home, "/hooks trust")
     project = project_file(ws)
     untrusted = None
     if project.is_file():

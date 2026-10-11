@@ -15,28 +15,30 @@ from genesis_agent import hooks, sandbox
 from genesis_agent.sandbox import RiskLevel
 
 # ── Управляващите файлове на Genesis: hooks.json, mcp.json, доверието ────────
+# Втори кръг (2026-10-11): hooks.json/mcp.json пази подписът (hooks.py), не
+# думите в командата — гейтът пита само за командите/агентите на оператора.
 
 @pytest.mark.parametrize("command", [
-    "mkdir -p ~/.genesis && printf '%s' '{\"hooks\":{}}' > ~/.genesis/hooks.json",
-    "echo '{}' > ~/.genesis/mcp.json",
-    "cp evil.json $HOME/.genesis/settings.json",
-    "python3 -c \"import pathlib; (pathlib.Path.home()/'.genesis'/'trusted_hooks.json').write_text('{}')\"",
     "cp x.md ~/.genesis/commands/review.md",
     "cp x.md ~/.genesis/agents/helper.md",
+    "python3 -c \"import pathlib; (pathlib.Path.home()/'.genesis'/'commands'/'r.md').write_text('x')\"",
 ])
 def test_a_shell_command_touching_genesis_control_files_asks(command) -> None:
     assert sandbox.assess_command(command).level == RiskLevel.CONFIRM
 
 
-def test_a_planted_hooks_file_is_not_written_in_deny_mode(tmp_path, monkeypatch) -> None:
+@pytest.mark.skipif(sys.platform == "win32", reason="printf и ~ в POSIX shell")
+def test_a_planted_hooks_file_does_not_run_in_deny_mode(tmp_path, monkeypatch) -> None:
+    from genesis_agent import paths
     home = tmp_path / "home"
     (home / ".genesis").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(paths, "GENESIS_HOME", home / ".genesis")
     monkeypatch.setattr(sandbox, "_POLICY", sandbox.SandboxPolicy(mode="deny"))
-    cmd = "printf '%s' '{\"hooks\":{}}' > ~/.genesis/hooks.json"
-    res = sandbox.run_shell(cmd, cwd=tmp_path)
-    assert res.blocked
-    assert not (home / ".genesis" / "hooks.json").exists()
+    hooks.trust_key()
+    cmd = "printf '%s' '{\"hooks\":{\"Stop\":[{\"command\":\"echo x\"}]}}' > ~/.genesis/hooks.json"
+    sandbox.run_shell(cmd, cwd=tmp_path)
+    assert hooks.configured(tmp_path)[0] == []
 
 
 def test_a_hand_written_trust_record_is_not_trust(tmp_path) -> None:
@@ -151,6 +153,7 @@ def test_a_home_mcp_server_does_not_import_a_module_planted_in_the_workspace(
         "planted": {"command": sys.executable, "args": ["-m", "planted_mcp_mod"]},
         "fake": {"command": sys.executable, "args": [str(_FAKE_MCP)]},
     }}), encoding="utf-8")
+    hooks.trust(home / "mcp.json")  # операторът го е потвърдил
     monkeypatch.setattr(gs, "_WORKSPACE", ws)
     mcp_client.workspace = ws
     lines = mcp_client.start_all(ws)
@@ -236,6 +239,7 @@ def test_a_read_only_mcp_tool_asks_before_a_secret_path(tmp_path, monkeypatch, c
     (home / "mcp.json").write_text(json.dumps({"mcpServers": {
         "fs": {"command": sys.executable, "args": [str(_FAKE_MCP), "fs"], "autoApprove": ["read_file"]},
     }}), encoding="utf-8")
+    hooks.trust(home / "mcp.json")  # операторът го е потвърдил
     monkeypatch.setattr(gs, "_WORKSPACE", ws)
     mcp_client.workspace = ws
     assert any("fs: 1 инструмента" in line for line in mcp_client.start_all(ws))
