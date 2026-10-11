@@ -689,12 +689,19 @@ def _ask_via_legacy(messages, tools, prov, model):
     global _last_usage
     _last_usage = None
     use_tools = tools if (tools and _SUPPORTS_TOOLS.get((prov, model))) else None
-    msgs = list(messages) if use_tools else _sanitize_for_textmode(list(messages))
+    # Същият бюджет като Brain.complete (2026-10-11): без него ollama/github/
+    # llmstudio получаваха целия ход — измерено на 40 рунда с 6000-знакови
+    # резултати: 82 съобщения / 248 764 знака срещу 30 / 15 193 през
+    # budget_history. Локалният ollama реже отпред при малък num_ctx и губеше
+    # точно системния промпт и задачата (виж budget.request_window).
+    from genesis_agent.budget import budget_history
+    base = budget_history(list(messages))
+    msgs = base if use_tools else _sanitize_for_textmode(base)
     try:
         response, tool_calls = _call_provider(prov, model, msgs, tools=use_tools)
     except Exception as e:
         return f"[Грешка: {e}]", None
-    count_usage(_last_usage, messages, response)
+    count_usage(_last_usage, msgs, response)
     if _last_usage:
         try:
             from genesis_agent.budget import record_usage
