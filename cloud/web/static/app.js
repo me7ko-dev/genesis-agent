@@ -292,6 +292,10 @@ function renderAccount(a) {
   $("billing-off").hidden = a.billing;
   $("billing-on").hidden = !a.billing;
   $("acc-balance").textContent = a.balance;
+  // Неизхарченото от жетоните на последните задачи (до ~17 мин след началото им).
+  const held = parseFloat(a.held) || 0;
+  $("acc-held").hidden = held <= 0;
+  $("acc-held").textContent = held > 0 ? `от тях ${a.held} са задържани за последните ти задачи — освобождават се до ~17 мин` : "";
   $("balance").textContent = a.billing ? `· ${a.balance} кр.` : "";
   $("acc-month").textContent = `${a.month_spent} от ${a.monthly_cap} кредита`;
   $("acc-month-bar").max = Math.max(parseFloat(a.monthly_cap) || 1, 0.01);

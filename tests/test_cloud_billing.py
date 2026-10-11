@@ -188,13 +188,16 @@ def test_a_disabled_login_costs_exactly_one_scrypt(tmp_path, monkeypatch) -> Non
 def test_account_defaults_and_whitelist(tmp_path) -> None:
     s = Store(tmp_path / "db")
     assert s.account(5) == {"disabled": False, "turns_per_day": None, "max_tokens_per_turn": None,
-                            "monthly_cap": None, "stripe_customer": None, "plan": ""}
-    s.set_account(5, turns_per_day=3, plan="basic")
-    s.set_account(5, stripe_customer="cus_1")
+                            "monthly_cap": None, "plan": ""}
+    s.set_account(5, turns_per_day=3)
+    assert s.link_customer("cus_1", 5, "basic") is True
     assert s.account(5)["turns_per_day"] == 3 and s.account(5)["plan"] == "basic"
     assert s.user_by_customer("cus_1") == 5 and s.user_by_customer("") is None
+    assert s.link_customer("cus_1", 6, "basic") is False and s.account(6)["plan"] == ""
     with pytest.raises(ValueError):
         s.set_account(5, email="x")
+    with pytest.raises(ValueError):
+        s.set_account(5, stripe_customer="cus_2")
 
 
 def test_turns_today_counts_failed_turns(tmp_path) -> None:
@@ -527,12 +530,14 @@ def test_a_turn_is_charged_from_the_gateway_not_the_container(paid) -> None:
 
 def test_failed_turns_are_charged_too(paid) -> None:
     app, _, client = paid
+    # 100 кредита стигат за един ход, докато жетонът му живее (задържаното)
+    app.store.add_entry(1, "admin:more", "grant", 900 * MICRO)
     cl = client()
     cl.login()
     for text in ("fail", "boom"):
         _, data = _turn(cl, text)
         assert _wait(cl, data["turn_id"])["status"] == "failed"
-    assert app.store.balance(1) == 100 * MICRO - 2 * GROQ_TURN
+    assert app.store.balance(1) == 1000 * MICRO - 2 * GROQ_TURN
 
 
 def test_a_crash_before_the_charge_is_billed_once_on_restart(tmp_path, monkeypatch) -> None:
@@ -569,6 +574,11 @@ def test_a_turn_killed_by_a_restart_is_billed_from_the_gateway(tmp_path) -> None
     app2, _ = _billing_app(tmp_path)
     assert app2.store.turn(1, turn)["status"] == "failed"   # type: ignore[index]
     assert app2.store.balance(1) == 100 * MICRO - GROQ_TURN
+    # Ревю 2026-10-11: контейнерът може да е жив и жетонът — да харчи;
+    # сметката не е окончателна, докато не изтече, и бюджетът е задържан.
+    (row,) = app2.store.unsettled()
+    assert row["settle_after"] > time.time() + launch.Limits().seconds
+    assert app2.held(1) > 0
     runner.gate.set()
     app.pool.shutdown(wait=True)
     assert app.store.balance(1) == 100 * MICRO - GROQ_TURN  # и после — пак веднъж
@@ -954,12 +964,14 @@ def test_checkout_sends_exactly_what_stripe_needs(tmp_path) -> None:
             "cancel_url": "https://genesis.example/?view=account",
             "client_reference_id": "1", "metadata[user_id]": "1", "metadata[pack]": "p5",
             "customer_email": "ana@example.com"}
-        # абонамент: метаданни и на абонамента; известен клиент вместо имейл
-        app.store.set_account(1, stripe_customer="cus_9")
+        # абонамент: метаданни и на абонамента; винаги нов клиент по имейла —
+        # всеки абонамент е свой клиент (ревю 2026-10-11), и след стар абонамент
+        app.store.link_customer("cus_9", 1, "basic")
+        app.store.end_subscription("cus_9")
         assert cl.json("POST", "/api/checkout", {"plan": "basic"})[0] == 200
         form = dict(parse_qsl(fake.seen[1][0].data.decode()))
-        assert form["mode"] == "subscription" and form["customer"] == "cus_9"
-        assert "customer_email" not in form
+        assert form["mode"] == "subscription" and form["customer_email"] == "ana@example.com"
+        assert "customer" not in form
         assert form["subscription_data[metadata][plan]"] == "basic"
         assert form["subscription_data[metadata][user_id]"] == "1"
         app.store.set_account(1, plan="basic")
@@ -1134,3 +1146,175 @@ def test_the_page_has_the_account_and_signup_views(plain) -> None:
     assert b'id="account"' in html and b'id="signup-form"' in html
     js = client().req("GET", "/app.js")[2]
     assert b"/api/account" in js and b"/api/checkout" in js and b".innerHTML" not in js
+
+
+# ── Ревю 2026-10-11 (w4): такса преди края, късни токени, два абонамента ─────
+
+class _FullRunner(BillRunner):
+    """Харчи целия бюджет на жетона по default (huggingface/m няма своя тарифа)."""
+
+    def __call__(self, text: str, workspace: Path, **kw: Any) -> launch.Result:
+        self.kw.append(kw)
+        gw.Ledger(self.usage).add(kw["name"], "huggingface", "m",
+                                  {"prompt_tokens": 0, "completion_tokens": kw["gateway"].budget})
+        return launch.Result(True, False, 0, 0.5, job=kw["name"])
+
+
+def test_a_turn_stays_busy_until_it_is_charged(tmp_path, monkeypatch) -> None:
+    # Ревю: ходът ставаше 'ok' преди таксата; в процепа втори ход минаваше
+    # приема с баланс без цената на първия → два бюджета за парите на един.
+    app, _ = _billing_app(tmp_path, runner=_FullRunner(tmp_path / "usage.jsonl"))
+    app.store.add_entry(1, "admin:a", "grant", THRESHOLD)
+    entered, release = threading.Event(), threading.Event()
+    real = gw.usage_lines
+
+    def slow(path: Path, job: str) -> list[dict[str, Any]]:
+        entered.set()
+        release.wait(5)
+        return real(path, job)
+
+    monkeypatch.setattr(gw, "usage_lines", slow)
+    chat = app.store.new_chat(1, "t")
+    turn = app.start_turn(ANA, chat, "x")
+    try:
+        assert entered.wait(5)
+        assert app.store.turn(1, turn)["status"] == "running"    # type: ignore[index]
+        with pytest.raises(web.TurnRefused):
+            app.start_turn(ANA, chat, "x")
+    finally:
+        release.set()
+        app.pool.shutdown(wait=True)
+    assert app.store.turn(1, turn)["status"] == "ok"             # type: ignore[index]
+    with pytest.raises(web.TurnRefused) as e:
+        app.start_turn(ANA, chat, "x")
+    assert e.value.status == 402
+    assert app.store.balance(1) == 0
+
+
+def _job_of(app: web.App, turn_id: int) -> str:
+    (row,) = [r for r in app.store.unsettled() if r["turn_id"] == turn_id]
+    return str(row["job"])
+
+
+def test_usage_after_the_charge_is_charged_once_the_token_is_dead(paid) -> None:
+    # Ревю: жетонът живее limits.seconds + 60 s след края на хода; кодът в
+    # контейнера може да го запише в /work и следващият ход да харчи по него.
+    app, _, client = paid
+    cl = client()
+    cl.login()
+    turn = _turn(cl)[1]["turn_id"]
+    _wait(cl, turn)
+    assert app.store.balance(1) == 100 * MICRO - GROQ_TURN
+    job = _job_of(app, turn)
+    gw.Ledger(app.gateway.usage).add(job, "groq", "x",              # type: ignore[union-attr]
+                                     {"prompt_tokens": 900_000, "completion_tokens": 90_000})
+    late = 900_000 * 80 + 90_000 * 100
+    usage = app.gateway.usage                                       # type: ignore[union-attr]
+    # докато жетонът може да харчи, сметката не е окончателна
+    assert billing.reconcile(app.store, app.prices, usage) == 0     # type: ignore[arg-type]
+    (row,) = app.store.unsettled()
+    after = row["settle_after"]
+    limits = launch.Limits()
+    assert after >= time.time() + limits.seconds + 60 + gw.UPSTREAM_TIMEOUT - 30
+    assert billing.reconcile(app.store, app.prices, usage, now=after + 1) == 1  # type: ignore[arg-type]
+    assert billing.reconcile(app.store, app.prices, usage, now=after + 9) == 0  # type: ignore[arg-type]
+    assert app.store.balance(1) == 100 * MICRO - GROQ_TURN - late
+    assert app.store.unsettled() == []
+    assert app.store.turn(1, turn)["cost_micro"] == GROQ_TURN + late  # type: ignore[index]
+
+
+def test_a_live_token_holds_its_unspent_budget(paid) -> None:
+    # Без задържане: ход 1 харчи малко, ход 2 получава почти целия баланс, а
+    # жетонът на ход 1 още може да изхарчи своя бюджет — два пъти баланса.
+    app, runner, client = paid
+    chat = app.store.new_chat(1, "t")
+    app.start_turn(ANA, chat, "x")
+    for _ in range(300):
+        if not app.store.busy(user_id=1):
+            break
+        time.sleep(0.01)
+    budget = runner.kw[0]["gateway"].budget
+    held = (budget - 1500) * 1200
+    assert app.held(1) == held
+    with pytest.raises(web.TurnRefused) as e:
+        app.start_turn(ANA, chat, "x")
+    assert e.value.status == 402 and "задържани" in e.value.message
+    cl = client()
+    cl.login()
+    assert cl.json("GET", "/api/account")[1]["held"] == billing.fmt_credits(held)
+    (row,) = app.store.unsettled()
+    billing.reconcile(app.store, app.prices, app.gateway.usage,     # type: ignore[arg-type, union-attr]
+                      now=row["settle_after"] + 1)
+    assert app.held(1) == 0
+    assert app.start_turn(ANA, chat, "x") > 0
+    app.pool.shutdown(wait=True)
+
+
+def test_two_subscription_checkouts_each_get_their_credits(tmp_path) -> None:
+    # Ревю: два раздела с плана → два Stripe клиента; връзката беше само с
+    # последния и фактурите на първия висяха на 503 завинаги.
+    app, _ = _billing_app(tmp_path)
+    h = billing.handle_event
+
+    def ev(etype: str, obj: dict[str, Any]) -> dict[str, Any]:
+        return {"id": "evt", "type": etype, "livemode": False, "data": {"object": obj}}
+
+    for n in (1, 2):
+        sub = _session(id=f"cs_sub{n}", mode="subscription", customer=f"cus_{n}",
+                       metadata={"user_id": "1", "plan": "basic"})
+        assert h(app.store, app.prices, ev("checkout.session.completed", sub), live=False)[0] == 200
+    for n in (1, 2):
+        inv = {"id": f"in_{n}", "customer": f"cus_{n}", "status": "paid",
+               "amount_paid": 1500, "currency": "eur"}
+        assert h(app.store, app.prices, ev("invoice.paid", inv), live=False) == (200, "заредено")
+    assert app.store.balance(1) == 3000 * MICRO
+    # спирането на единия не спира другия
+    gone = {"id": "sub_1", "customer": "cus_1"}
+    h(app.store, app.prices, ev("customer.subscription.deleted", gone), live=False)
+    assert app.store.account(1)["plan"] == "basic"
+    inv = {"id": "in_3", "customer": "cus_1", "status": "paid", "amount_paid": 1500,
+           "currency": "eur"}
+    assert h(app.store, app.prices, ev("invoice.paid", inv), live=False)[1] == "без план — пропуснато"
+    h(app.store, app.prices, ev("customer.subscription.deleted", {"customer": "cus_2"}), live=False)
+    assert app.store.account(1)["plan"] == ""
+    # чужд клиент не се прехвърля
+    stolen = _session(id="cs_x", mode="subscription", customer="cus_1", client_reference_id="2",
+                      metadata={"user_id": "2", "plan": "basic"})
+    assert h(app.store, app.prices, ev("checkout.session.completed", stolen),
+             live=False)[1] == "клиентът е на друг човек — пропуснато"
+    assert app.store.user_by_customer("cus_1") == 1
+
+
+def test_a_huge_signature_stamp_is_refused_not_raised() -> None:
+    # int() над 4300 цифри хвърля ValueError (3.10.7+) — беше 500 без отговор.
+    assert not billing.verify_stripe_signature(b"{}", "t=" + "1" * 5000 + ",v1=ab", WHSEC)
+    assert not billing.verify_stripe_signature(b"{}", "t=" + "9" * 13 + ",v1=ab", WHSEC)
+
+
+def test_the_gateway_refuses_a_token_that_expired_while_the_body_was_read(tmp_path) -> None:
+    # Бавно тяло: жетонът е проверен при заглавията, а заявката тръгва чак
+    # след тялото — без втора проверка разходът идва след окончателната сметка.
+    g = gw.Gateway("s" * 40, {"GROQ_API_KEY": "k"}, gw.Ledger(tmp_path / "u.jsonl"),
+                   opener=lambda req, timeout=0: _Resp(b'{"usage": {"total_tokens": 5}}'))
+    status, _ = g.forward("groq", b'{"model": "m"}', gw.Grant("j", int(time.time()) - 1, 10**6))
+    assert status == 401 and gw.usage_lines(tmp_path / "u.jsonl", "j") == []
+
+
+def test_the_gateway_stops_rotating_keys_at_the_deadline(tmp_path, monkeypatch) -> None:
+    # Ревю: с N ключа и 429 след 299 s отговор идваше след N × 300 s — след
+    # окончателната сметка. Общ срок за всички ключове.
+    clock = [1000.0]
+    seen: list[float] = []
+
+    def opener(req: Any, timeout: float = 0) -> Any:
+        seen.append(timeout)
+        clock[0] += gw.UPSTREAM_TIMEOUT - 1
+        import io
+        import urllib.error
+        raise urllib.error.HTTPError(req.full_url, 429, "x", {}, io.BytesIO(b"{}"))  # type: ignore[arg-type]
+
+    monkeypatch.setattr(gw.time, "monotonic", lambda: clock[0])
+    g = gw.Gateway("s" * 40, {"GROQ_API_KEY": "a", "GROQ_API_KEY_2": "b", "GROQ_API_KEY_3": "c"},
+                   gw.Ledger(tmp_path / "u.jsonl"), opener=opener)
+    assert g.forward("groq", b'{"model": "m"}', gw.Grant("j", 10**12, 10**6))[0] == 429
+    assert seen[0] == gw.UPSTREAM_TIMEOUT and len(seen) == 2 and seen[1] <= 1

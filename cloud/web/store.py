@@ -1,5 +1,5 @@
 """Данните на уеб услугата в един SQLite файл: хора, сесии, разговори, ходове,
-сметка (кредити), профили (спрян, лимити, Stripe клиент) и покани.
+сметка (кредити), профили (спрян, лимити, план), Stripe клиенти и покани.
 
 Паролите са scrypt със сол; сесиите и поканите се пазят като SHA-256, тоест
 изтекла база не дава вход. Всяка операция отваря своя връзка — сървърът е
@@ -93,12 +93,27 @@ CREATE TABLE IF NOT EXISTS accounts (
     turns_per_day INTEGER,          -- NULL = подразбирането на сървъра
     max_tokens_per_turn INTEGER,    -- NULL = подразбирането на сървъра
     monthly_cap INTEGER,            -- µc; NULL = подразбирането на сървъра
-    stripe_customer TEXT UNIQUE,
-    plan TEXT NOT NULL DEFAULT ''
+    plan TEXT NOT NULL DEFAULT ''   -- някой от абонаментите в stripe_customers
 );
+-- Един човек може да има няколко Stripe клиента (ревю 2026-10-11): два
+-- раздела с плана, платени и двата, са два клиента с по един абонамент. С една
+-- колона в accounts фактурите на първия висяха на 503, а парите се взимаха.
+-- Всеки абонамент е нов клиент (customer_email), затова планът е на клиента.
+CREATE TABLE IF NOT EXISTS stripe_customers (
+    customer TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    plan TEXT NOT NULL DEFAULT ''   -- '' = абонаментът е спрян
+);
+-- Задачата в шлюза на всеки платен ход. Жетонът ѝ живее и след края на хода
+-- (launch.token_ttl), затова сметката става окончателна чак след settle_after
+-- (ревю 2026-10-11); дотогава неизхарченият бюджет е задържан от баланса.
 CREATE TABLE IF NOT EXISTS turn_jobs (
     turn_id INTEGER PRIMARY KEY,
-    job TEXT NOT NULL
+    job TEXT NOT NULL,
+    budget INTEGER NOT NULL DEFAULT 0,  -- токените в жетона
+    used INTEGER,                       -- токените при първата такса; NULL = без такса
+    settle_after REAL,                  -- NULL = контейнерът не е тръгнал
+    settled INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS invites (
     code_hash TEXT PRIMARY KEY,
@@ -112,11 +127,10 @@ CREATE TABLE IF NOT EXISTS invites (
 
 KINDS = ("charge", "purchase", "subscription", "grant", "adjust")
 MICRO = 1_000_000          # µc в един кредит
-_ACCOUNT_FIELDS = ("disabled", "turns_per_day", "max_tokens_per_turn", "monthly_cap",
-                   "stripe_customer", "plan")
+_ACCOUNT_FIELDS = ("disabled", "turns_per_day", "max_tokens_per_turn", "monthly_cap", "plan")
 _ACCOUNT_DEFAULTS: dict[str, Any] = {"disabled": False, "turns_per_day": None,
                                      "max_tokens_per_turn": None, "monthly_cap": None,
-                                     "stripe_customer": None, "plan": ""}
+                                     "plan": ""}
 
 
 def _day_start(now: float | None = None) -> float:
@@ -271,8 +285,10 @@ class Store:
                       ("ok" if ok else "failed", error[:500], json.dumps(tokens), seconds, turn_id))
 
     # Цената на хода (µc, ≥ 0) — от реда в сметката, ако има такъв.
-    _TURN_SELECT = ("SELECT t.*, -l.amount AS cost_micro FROM turns t "
-                    "LEFT JOIN ledger l ON l.event_id = 'turn:' || t.id ")
+    # С късния разход (turn:<id>:late), ако вече го има.
+    _TURN_SELECT = ("SELECT t.*, (SELECT -SUM(l.amount) FROM ledger l WHERE l.event_id "
+                    "IN ('turn:' || t.id, 'turn:' || t.id || ':late')) AS cost_micro "
+                    "FROM turns t ")
 
     def turn(self, user_id: int, turn_id: int) -> dict[str, Any] | None:
         with self._db() as c:
@@ -420,13 +436,50 @@ class Store:
         with self._db() as c:
             return c.execute("SELECT 1 FROM users WHERE id = ?", (user_id,)).fetchone() is not None
 
-    def user_by_customer(self, customer: str) -> int | None:
+    def customer(self, customer: str) -> dict[str, Any] | None:
+        """{'user_id', 'plan'} на Stripe клиента, или None."""
         if not customer:
             return None
         with self._db() as c:
-            row = c.execute("SELECT user_id FROM accounts WHERE stripe_customer = ?",
+            row = c.execute("SELECT user_id, plan FROM stripe_customers WHERE customer = ?",
                             (customer,)).fetchone()
-        return int(row["user_id"]) if row else None
+        return {"user_id": int(row["user_id"]), "plan": row["plan"]} if row else None
+
+    def user_by_customer(self, customer: str) -> int | None:
+        row = self.customer(customer)
+        return row["user_id"] if row else None
+
+    @staticmethod
+    def _sync_plan(c: sqlite3.Connection, user_id: int) -> None:
+        # Планът в профила е последният още активен абонамент — или нищо.
+        row = c.execute("SELECT plan FROM stripe_customers WHERE user_id = ? AND plan != '' "
+                        "ORDER BY rowid DESC LIMIT 1", (user_id,)).fetchone()
+        c.execute("INSERT INTO accounts (user_id, plan) VALUES (?, ?) "
+                  "ON CONFLICT(user_id) DO UPDATE SET plan = excluded.plan",
+                  (user_id, row["plan"] if row else ""))
+
+    def link_customer(self, customer: str, user_id: int, plan: str) -> bool:
+        """Абонамент `plan` на клиента за този човек. False — клиентът е на друг."""
+        with self._db() as c:
+            c.execute("INSERT INTO stripe_customers (customer, user_id, plan) VALUES (?,?,?) "
+                      "ON CONFLICT(customer) DO UPDATE SET plan = excluded.plan "
+                      "WHERE stripe_customers.user_id = excluded.user_id",
+                      (customer, user_id, plan))
+            owner = c.execute("SELECT user_id FROM stripe_customers WHERE customer = ?",
+                              (customer,)).fetchone()["user_id"]
+            if owner != user_id:
+                return False
+            self._sync_plan(c, user_id)
+        return True
+
+    def end_subscription(self, customer: str) -> None:
+        with self._db() as c:
+            row = c.execute("SELECT user_id FROM stripe_customers WHERE customer = ?",
+                            (customer,)).fetchone()
+            if row is None:
+                return
+            c.execute("UPDATE stripe_customers SET plan = '' WHERE customer = ?", (customer,))
+            self._sync_plan(c, int(row["user_id"]))
 
     def turns_today(self, user_id: int, now: float | None = None) -> int:
         """Ходовете от полунощ UTC — всякакви, и провалените: спам с грешни
@@ -436,9 +489,39 @@ class Store:
                                  "WHERE ch.user_id = ? AND t.created >= ?",
                                  (user_id, _day_start(now))).fetchone()[0])
 
-    def set_job(self, turn_id: int, job: str) -> None:
+    def set_job(self, turn_id: int, job: str, budget: int = 0) -> None:
         with self._db() as c:
-            c.execute("INSERT OR REPLACE INTO turn_jobs (turn_id, job) VALUES (?, ?)", (turn_id, job))
+            c.execute("INSERT OR REPLACE INTO turn_jobs (turn_id, job, budget) VALUES (?, ?, ?)",
+                      (turn_id, job, budget))
+
+    def job_started(self, turn_id: int, settle_after: float) -> None:
+        """Контейнерът тръгва: до `settle_after` жетонът му може да харчи."""
+        with self._db() as c:
+            c.execute("UPDATE turn_jobs SET settle_after = ? WHERE turn_id = ?",
+                      (settle_after, turn_id))
+
+    def set_job_used(self, turn_id: int, used: int) -> None:
+        with self._db() as c:
+            c.execute("UPDATE turn_jobs SET used = ? WHERE turn_id = ?", (used, turn_id))
+
+    def unsettled(self, user_id: int | None = None) -> list[dict[str, Any]]:
+        """Платените ходове, чиято сметка още не е окончателна. `charged` е
+        първата такса в µc (None — още няма)."""
+        sql = ("SELECT j.turn_id, ch.user_id, j.job, j.budget, j.used, j.settle_after, t.status, "
+               "(SELECT -l.amount FROM ledger l WHERE l.event_id = 'turn:' || j.turn_id) "
+               "AS charged FROM turn_jobs j JOIN turns t ON t.id = j.turn_id "
+               "JOIN chats ch ON ch.id = t.chat_id WHERE j.settled = 0")
+        args: list[Any] = []
+        if user_id is not None:
+            sql += " AND ch.user_id = ?"
+            args.append(user_id)
+        with self._db() as c:
+            rows = c.execute(sql + " ORDER BY j.turn_id", args).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_settled(self, turn_id: int) -> None:
+        with self._db() as c:
+            c.execute("UPDATE turn_jobs SET settled = 1 WHERE turn_id = ?", (turn_id,))
 
     def unbilled_turns(self) -> list[dict[str, Any]]:
         """Завършени ходове с име на задача в шлюза и без ред в сметката."""

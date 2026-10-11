@@ -200,22 +200,90 @@ def turn_cost(prices: Prices, usage: list[dict[str, Any]]) -> int:
     return cost
 
 
+def _tokens(usage: list[dict[str, Any]]) -> int:
+    """Токените така, както ги брои шлюзът срещу бюджета (Usage.total_tokens)."""
+    return sum(v for line in usage if type(v := line.get("total_tokens")) is int and v > 0)
+
+
 def charge_turn(store: Store, prices: Prices, user_id: int, turn_id: int,
                 usage: list[dict[str, Any]]) -> bool:
-    """Таксува хода веднъж (event_id turn:<id>). True ако е таксуван сега."""
-    return store.add_entry(user_id, f"turn:{turn_id}", "charge", -turn_cost(prices, usage),
-                           turn_id=turn_id, ref=json.dumps(usage, ensure_ascii=False)[:2000])
+    """Таксува хода веднъж (event_id turn:<id>). True ако е таксуван сега.
+
+    Токените до този момент се записват: задържаното до края на жетона е
+    само неизхарченото от бюджета (held)."""
+    new = store.add_entry(user_id, f"turn:{turn_id}", "charge", -turn_cost(prices, usage),
+                          turn_id=turn_id, ref=json.dumps(usage, ensure_ascii=False)[:2000])
+    if new:
+        store.set_job_used(turn_id, _tokens(usage))
+    return new
 
 
-def reconcile(store: Store, prices: Prices, usage_path: Path) -> int:
-    """Ходовете без такса (срив между края на хода и таксата, рестарт посред
-    хода) — таксуват се от файла на шлюза. Повторно пускане не таксува нищо."""
-    rows = store.unbilled_turns()
-    if not rows:
+# Жетонът е проверен преди заявката (шлюзът проверява и след тялото), а една
+# заявка с всички ключове е най-много UPSTREAM_TIMEOUT — +1 мин запас.
+LATE_MARGIN = gw.UPSTREAM_TIMEOUT + 60
+
+
+def settle_after(start: float, ttl: int) -> float:
+    """След този момент шлюзът не може да запише нов разход за задачата."""
+    return start + ttl + LATE_MARGIN
+
+
+def settle(store: Store, prices: Prices, usage_path: Path, *, now: float | None = None,
+           user_id: int | None = None) -> int:
+    """Окончателната сметка на ходовете, чийто жетон вече не може да харчи.
+
+    Ревю 2026-10-11: ходът се таксуваше веднъж, щом контейнерът спре, а
+    жетонът живее до limits.seconds + 60 s — записан в /work, следващият ход
+    харчеше по него без такса. Разликата след изтичането е втори ред
+    turn:<id>:late; и двата са по event_id, затова повторно пускане не таксува
+    втори път. Връща броя на новите редове."""
+    now = time.time() if now is None else now
+    due = [r for r in store.unsettled(user_id) if r["status"] in ("ok", "failed")
+           and (r["settle_after"] is None or r["settle_after"] <= now)]
+    if not due:
         return 0
-    usage = gw.usage_lines_by_job(usage_path, {r["job"] for r in rows})
-    return sum(charge_turn(store, prices, r["user_id"], r["turn_id"], usage[r["job"]])
-               for r in rows)
+    usage = gw.usage_lines_by_job(usage_path, {r["job"] for r in due})
+    written = 0
+    for r in due:
+        lines = usage[r["job"]]
+        if r["charged"] is None:
+            written += charge_turn(store, prices, r["user_id"], r["turn_id"], lines)
+        else:
+            late = turn_cost(prices, lines) - r["charged"]
+            if late > 0:
+                written += store.add_entry(
+                    r["user_id"], f"turn:{r['turn_id']}:late", "charge", -late,
+                    turn_id=r["turn_id"], ref=json.dumps(lines, ensure_ascii=False)[:2000])
+        store.mark_settled(r["turn_id"])
+    return written
+
+
+def held(store: Store, prices: Prices, user_id: int) -> int:
+    """µc, задържани от баланса за ходове с още жив жетон: колкото най-много
+    може да изхарчи жетонът до края си. Без това ход 1 харчеше малко, ход 2
+    получаваше почти целия баланс, а жетонът на ход 1 още можеше да изхарчи
+    своя бюджет — два бюджета за парите на един (ревю 2026-10-11)."""
+    total = 0
+    for r in store.unsettled(user_id):
+        if r["charged"] is None:
+            total += prices.per_turn_micro + r["budget"] * prices.max_rate
+        else:
+            total += max(0, r["budget"] - (r["used"] or 0)) * prices.max_rate
+    return total
+
+
+def reconcile(store: Store, prices: Prices, usage_path: Path, *,
+              now: float | None = None) -> int:
+    """Ходовете без такса (срив между края на хода и таксата, рестарт посред
+    хода) — таксуват се от файла на шлюза; после окончателната сметка на тези
+    с изтекъл жетон (settle). Повторно пускане не таксува нищо."""
+    rows = store.unbilled_turns()
+    charged = 0
+    if rows:
+        usage = gw.usage_lines_by_job(usage_path, {r["job"] for r in rows})
+        charged = sum(charge_turn(store, prices, r["user_id"], r["turn_id"], usage[r["job"]])
+                      for r in rows)
+    return charged + settle(store, prices, usage_path, now=now)
 
 
 # ── Stripe ───────────────────────────────────────────────────────────────────
@@ -290,7 +358,10 @@ def verify_stripe_signature(payload: bytes, header: str, secret: str, *,
             stamp = value
         elif key == "v1":
             sigs.append(value)
-    if stamp is None or not (stamp.isascii() and stamp.isdigit()) or not sigs:
+    # До 12 цифри (ревю 2026-10-11): int() на над 4300 цифри хвърля ValueError
+    # (3.10.7+), а webhook-ът го пускаше нагоре — прекъсната връзка вместо 400.
+    if (stamp is None or len(stamp) > 12 or not (stamp.isascii() and stamp.isdigit())
+            or not sigs):
         return False
     if abs((time.time() if now is None else now) - int(stamp)) > tolerance:
         return False
@@ -308,9 +379,12 @@ Opener = Callable[..., Any]
 
 
 def create_checkout(cfg: StripeConfig, *, user_id: int, email: str, offer: Offer, mode: str,
-                    customer: str | None = None,
                     opener: Opener = urllib.request.urlopen) -> str:
-    """Нова Stripe Checkout сесия → адресът ѝ (https://checkout.stripe.com/…)."""
+    """Нова Stripe Checkout сесия → адресът ѝ (https://checkout.stripe.com/…).
+
+    Винаги customer_email, никога стар клиент (ревю 2026-10-11): всеки
+    абонамент е свой клиент, затова фактурата по клиента казва точно кой план
+    е платен — и два раздела с плана, платени и двата, зареждат и двата."""
     if mode not in ("payment", "subscription"):
         raise ValueError(mode)
     what = "pack" if mode == "payment" else "plan"
@@ -327,7 +401,7 @@ def create_checkout(cfg: StripeConfig, *, user_id: int, email: str, offer: Offer
     if mode == "subscription":
         form += [("subscription_data[metadata][user_id]", str(user_id)),
                  ("subscription_data[metadata][plan]", offer.id)]
-    form.append(("customer", customer) if customer else ("customer_email", email))
+    form.append(("customer_email", email))
     req = urllib.request.Request(
         f"{STRIPE_API}/checkout/sessions", data=urllib.parse.urlencode(form).encode(),
         method="POST", headers={
@@ -388,9 +462,8 @@ def handle_event(store: Store, prices: Prices, event: dict[str, Any], *,
     if etype == "invoice.paid":
         return _invoice_paid(store, prices, obj, ref)
     if etype == "customer.subscription.deleted":
-        uid = store.user_by_customer(_str(obj, "customer"))
-        if uid is not None:
-            store.set_account(uid, plan="")
+        # Само абонаментът на този клиент; друг активен остава (ревю 2026-10-11).
+        store.end_subscription(_str(obj, "customer"))
         return 200, "абонаментът е спрян"
     return 200, "пропуснато"
 
@@ -430,27 +503,28 @@ def _checkout_done(store: Store, prices: Prices, obj: dict[str, Any], ref: str) 
         if plan is None or not customer.startswith("cus_"):
             _log(f"сесия {_str(obj, 'id')}: непознат план {meta.get('plan')!r} или клиент")
             return 200, "непознат план — пропуснато"
-        owner = store.user_by_customer(customer)
-        if owner is not None and owner != uid:
-            _log(f"клиент {customer} вече е на човек {owner}, не на {uid}")
-            return 200, "клиентът е на друг човек — пропуснато"
         # Кредитите идват с invoice.paid; тук само кой е клиентът и планът.
-        store.set_account(uid, stripe_customer=customer, plan=plan.id)
+        # Нов ред за всеки клиент — вторият абонамент не изтрива първия.
+        if not store.link_customer(customer, uid, plan.id):
+            _log(f"клиент {customer} вече е на човек {store.user_by_customer(customer)}, "
+                 f"не на {uid}")
+            return 200, "клиентът е на друг човек — пропуснато"
         return 200, "абонаментът е записан"
     return 200, "пропуснато"
 
 
 def _invoice_paid(store: Store, prices: Prices, obj: dict[str, Any], ref: str) -> tuple[int, str]:
-    uid = store.user_by_customer(_str(obj, "customer"))
-    if uid is None:
+    customer = store.customer(_str(obj, "customer"))
+    if customer is None:
         # Stripe не пази реда: invoice.paid може да дойде преди
         # checkout.session.completed. 503 → Stripe опитва пак.
         return 503, "непознат клиент — ще се опита пак"
-    account = store.account(uid)
-    plan = prices.plans.get(account["plan"])
+    uid = customer["user_id"]
+    # Планът на клиента, не на профила: всеки абонамент е свой клиент.
+    plan = prices.plans.get(customer["plan"])
     invoice = _str(obj, "id")
     if plan is None or not invoice.startswith("in_"):
-        _log(f"фактура {invoice}: човек {uid} без план ({account['plan']!r})")
+        _log(f"фактура {invoice}: човек {uid} без план ({customer['plan']!r})")
         return 200, "без план — пропуснато"
     amount = obj.get("amount_paid")
     if (obj.get("status") != "paid" or type(amount) is not int or amount < plan.amount_cents

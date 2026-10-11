@@ -178,6 +178,13 @@ def docker_args(name: str, workspace: Path, text: str, *, limits: Limits | None 
     return [*args, image, text]
 
 
+def token_ttl(limits: Limits) -> int:
+    """Колко живее жетонът на задачата: колкото задачата (+1 мин за последния
+    отговор). Не свършва с контейнера — затова уеб сървърът смята хода за
+    окончателен чак след него (cloud/web/billing.settle, ревю 2026-10-11)."""
+    return limits.seconds + 60
+
+
 def prepare_workspace(workspace: Path) -> None:
     """Папката на задачата трябва да е записваема от потребител 10001."""
     workspace.mkdir(parents=True, exist_ok=True)
@@ -202,9 +209,8 @@ def run_task(text: str, workspace: Path, *, limits: Limits | None = None,
     prepare_workspace(workspace)
     token = ""
     if gateway is not None:
-        # Жетонът живее колкото задачата (+1 мин за последния отговор).
         token = gw.make_token(gateway.secret, name, budget=gateway.budget,
-                              ttl=limits.seconds + 60)
+                              ttl=token_ttl(limits))
     argv = docker_args(name, workspace, text, limits=limits, env_file=env_file,
                        runtime=runtime, image=image, gateway=gateway, token=token)
     t0 = time.monotonic()

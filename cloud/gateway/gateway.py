@@ -300,6 +300,11 @@ class Gateway:
         # таван и без сметка (2026-10-07). Genesis не ползва stream.
         if request.get("stream"):
             return 400, _err("stream не се поддържа през шлюза")
+        # Жетонът е проверен при заглавията, а тялото може да е идвало бавно
+        # (ревю 2026-10-11). Сметката на хода става окончателна след изтичането
+        # + UPSTREAM_TIMEOUT — заявка, тръгнала по-късно, би останала без такса.
+        if grant.expires < time.time():
+            return 401, _err("невалиден или изтекъл жетон")
         # Отговорът се ограничава до оставащото: проверяваше се само дали вече е
         # похарчено — заявка от 1.9 MB с max_tokens 64k минаваше и струваше 1.8×
         # бюджета (одит 2026-10-09). Промпт, по-голям от остатъка, не минава.
@@ -319,12 +324,19 @@ class Gateway:
     def _forward(self, provider: str, base: str, keys: list[str], body: bytes, model: str,
                  grant: Grant, estimate: int) -> tuple[int, bytes]:
         status, data = 502, _err("няма отговор")
+        # Един общ срок за всички ключове (ревю 2026-10-11): с N ключа и 429
+        # след 299 s разходът се записваше до N × 300 s след изтичането на
+        # жетона — след окончателната сметка на хода (billing.LATE_MARGIN).
+        deadline = time.monotonic() + UPSTREAM_TIMEOUT
         for key in keys:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
             req = urllib.request.Request(
                 f"{base}/chat/completions", data=body, method="POST",
                 headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"})
             try:
-                with self.opener(req, timeout=UPSTREAM_TIMEOUT) as r:
+                with self.opener(req, timeout=left) as r:
                     status, data = r.status, r.read()
             except urllib.error.HTTPError as e:
                 status, data = e.code, e.read()

@@ -254,6 +254,7 @@ class App:
         fmt = billing.fmt_credits
         return {
             "email": user["email"], "balance": fmt(balance), "balance_micro": balance,
+            "held": fmt(self.held(uid)),
             "month_spent": fmt(spent), "monthly_cap": fmt(cap),
             "turns_today": self.store.turns_today(uid), "turns_per_day": per_day,
             "max_tokens_per_turn": max_tokens, "plan": account["plan"],
@@ -264,24 +265,44 @@ class App:
                          "turn_id": e["turn_id"]} for e in self.store.ledger_entries(uid, 50)],
         }
 
+    def held(self, user_id: int) -> int:
+        """µc, задържани за ходове с още жив жетон (0 без плащане)."""
+        if self.prices is None:
+            return 0
+        return billing.held(self.store, self.prices, user_id)
+
     def _affordable(self, user_id: int, cap: int, prices: billing.Prices, budget: int) -> int:
         """Колко токена може да плати човекът за следващия ход — или TurnRefused.
 
         Таванът на токените в шлюза (жетонът на задачата) става толкова: шлюзът
         вече спира задачата на него, значи надхарчването е най-много грешката
-        в оценката на шлюза — без задържани суми и без нов начин за провал."""
+        в оценката на шлюза. Неизхарченото от жетоните, които още живеят, е
+        задържано (ревю 2026-10-11): иначе всеки ход харчеше и бюджета на
+        предишния — жетонът му, записан в /work, важи до 11 мин след края."""
+        assert self.gateway is not None   # prices без шлюз не тръгва (__init__)
+        # Ходовете с изтекъл жетон — окончателно, преди да се смята задържаното.
+        billing.settle(self.store, prices, self.gateway.usage, user_id=user_id)
         spent = self.store.month_spent(user_id)
         if spent >= cap:
             raise TurnRefused(402, f"достигна месечния си таван от {billing.fmt_credits(cap)} "
                                    "кредита — пиши ни, ако ти трябва повече")
         balance = self.store.balance(user_id)
-        room = min(balance, cap - spent)
+        held = billing.held(self.store, prices, user_id)
+        room = min(balance, cap - spent) - held
         left = room - prices.per_turn_micro
         if prices.max_rate:
             affordable = left // prices.max_rate
         else:
             affordable = budget if left >= 0 else -1
         if affordable < prices.min_turn_tokens:
+            free = min(balance, cap - spent) - prices.per_turn_micro
+            if held and (free // prices.max_rate if prices.max_rate
+                         else (budget if free >= 0 else -1)) >= prices.min_turn_tokens:
+                minutes = -(-(launch.token_ttl(self.limits) + billing.LATE_MARGIN) // 60)
+                raise TurnRefused(402, f"{billing.fmt_credits(held)} кредита са задържани за "
+                                       "последните ти задачи, докато изтече достъпът им до "
+                                       f"моделите (до {minutes} мин след началото им) — опитай "
+                                       "след малко или зареди от „Сметка“.")
             if cap - spent < balance:
                 raise TurnRefused(402, f"достигна месечния си таван от {billing.fmt_credits(cap)} "
                                        "кредита — пиши ни, ако ти трябва повече")
@@ -308,40 +329,57 @@ class App:
                                        "опитай пак утре")
             if self.prices is not None:
                 budget = min(budget, self._affordable(uid, cap, self.prices, budget))
+            gateway = (dataclasses.replace(self.gateway, budget=min(self.gateway.budget, budget))
+                       if self.gateway is not None else None)
             turn_id = self.store.add_turn(chat_id, text)
             job = f"genesis-task-{uuid.uuid4().hex[:12]}"
-            if self.prices is not None:
+            if self.prices is not None and gateway is not None:
                 # Името на задачата в шлюза — ПРЕДИ контейнера: срив посред хода
-                # не губи сметката, reconcile при старт я намира по него.
-                self.store.set_job(turn_id, job)
-        gateway = (dataclasses.replace(self.gateway, budget=min(self.gateway.budget, budget))
-                   if self.gateway is not None else None)
+                # не губи сметката, reconcile при старт я намира по него. С
+                # бюджета на жетона — от него е задържаното (billing.held).
+                self.store.set_job(turn_id, job, gateway.budget)
         self.pool.submit(self._run, turn_id, uid, text, self.workspace(uid, chat_id), job, gateway)
         return turn_id
 
     def _run(self, turn_id: int, user_id: int, text: str, workspace: Path, job: str,
              gateway: launch.Gateway | None) -> None:
+        prices = self.prices if gateway is not None else None
         self.store.set_status(turn_id, "running")
+        if prices is not None:
+            # Жетонът се прави сега (run_task) — оттук тече животът му.
+            self.store.job_started(turn_id, billing.settle_after(time.time(),
+                                                                 launch.token_ttl(self.limits)))
+        ok, error, seconds = False, "", 0.0
+        tokens: dict[str, int] = {}
         try:
             res = self.runner(text, workspace, limits=self.limits,
                               on_event=lambda e: self.store.add_event(turn_id, e),
                               env_file=self.env_file, runtime=self.runtime,
                               gateway=gateway, name=job)
-            self.store.finish_turn(turn_id, ok=res.ok, error=res.error,
-                                   tokens=res.tokens, seconds=res.seconds)
+            ok, error, tokens, seconds = res.ok, res.error, res.tokens, res.seconds
         except Exception as e:
-            self.store.finish_turn(turn_id, ok=False, error=f"{type(e).__name__}: {e}",
-                                   tokens={}, seconds=0.0)
-        if self.prices is not None and gateway is not None:
-            # И провален ход се таксува: шлюзът вече е платил токените му.
+            error = f"{type(e).__name__}: {e}"
+        if prices is not None and gateway is not None:
+            # Таксата ПРЕДИ края на хода (ревю 2026-10-11): докато е 'running',
+            # човекът е зает и нов ход не минава приема с баланс без нея. И
+            # провален ход се таксува: шлюзът вече е платил токените му.
             # Сметката е от файла на шлюза по името на задачата — същият път
             # като reconcile, независимо какво е върнал контейнерът. Грешка тук
             # не проваля хода: reconcile при следващия старт го таксува.
             try:
-                billing.charge_turn(self.store, self.prices, user_id, turn_id,
+                billing.charge_turn(self.store, prices, user_id, turn_id,
                                     gw.usage_lines(gateway.usage, job))
             except Exception as e:
                 print(f"сметка: ход {turn_id} не е таксуван: {type(e).__name__}: {e}",
+                      file=sys.stderr)
+        self.store.finish_turn(turn_id, ok=ok, error=error, tokens=tokens, seconds=seconds)
+        if prices is not None and gateway is not None:
+            # Покрай всеки ход — окончателната сметка на ходовете с изтекъл жетон
+            # (и на хора, които не са пускали нищо оттогава).
+            try:
+                billing.settle(self.store, prices, gateway.usage)
+            except Exception as e:
+                print(f"сметка: окончателната сметка не мина: {type(e).__name__}: {e}",
                       file=sys.stderr)
 
 
@@ -818,8 +856,7 @@ class Handler(BaseHTTPRequestHandler):
         kw = {"opener": app.stripe_opener} if app.stripe_opener is not None else {}
         try:
             url = billing.create_checkout(app.stripe, user_id=user["id"], email=user["email"],
-                                          offer=offer, mode=mode,
-                                          customer=account["stripe_customer"], **kw)
+                                          offer=offer, mode=mode, **kw)
         except billing.StripeError:
             self._error(502, "плащането не отговаря — опитай пак след малко")
             return
