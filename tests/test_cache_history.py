@@ -154,3 +154,43 @@ def test_light_work_does_not_take_the_paid_chain_from_the_environment(monkeypatc
     assert brain.Brain(use_local=False).premium
     assert not brain.Brain(light=True, use_local=False).premium
     assert brain.Brain(light=True, use_local=False, quality="max").premium
+
+
+def test_a_free_provider_on_the_list_gets_the_append_only_history_with_its_lower_ceiling(
+        monkeypatch) -> None:
+    """GENESIS_CACHE_PROVIDERS (2026-10-11): ollama_cloud кешира сам 69% от входа,
+    но свиването сменяше префикса. От списъка — пълната история, до по-ниския таван."""
+    from genesis_agent import config
+    got: dict = {}
+
+    def fake_call(self, provider, model, messages, tools=None):
+        got[provider] = messages
+        return "готово", None
+
+    monkeypatch.setattr(brain.Brain, "_call", fake_call)
+    monkeypatch.setattr(brain, "_local_available", lambda m: False)
+    monkeypatch.setattr("genesis_agent.provider_stats.deprioritize_flaky", lambda c: c)
+    monkeypatch.setattr(brain, "_EXHAUSTED", {})
+    monkeypatch.setattr(config, "CACHE_PROVIDERS", frozenset({"ollama_cloud"}))
+    monkeypatch.setattr(config, "CACHE_HISTORY_MAX_CHARS_FREE", 25_000)
+    tools = [{"type": "function", "function": {"name": "RUN_CMD", "description": "d",
+                                               "parameters": {"type": "object", "properties": {}}}}]
+    for provider in ("ollama_cloud", "groq"):
+        monkeypatch.setattr(brain, "_load_chain", lambda p=provider: [
+            {"provider": p, "model": "m", "size_b": 120, "supports_tools": True}])
+        brain.Brain(use_local=False).complete(_rounds(6, size=6000), tools=tools)
+    cached = got["ollama_cloud"]
+    assert all(len(m["content"]) > 6000 for m in cached if m.get("role") == "tool")
+    assert sum(len(str(m.get("content") or "")) for m in cached) <= 25_000 + 7000
+    assert len(next(m for m in got["groq"] if m.get("role") == "tool")["content"]) < 6000
+
+
+
+def test_ollama_cloud_is_cached_by_default_and_the_list_can_be_emptied() -> None:
+    import os
+
+    from genesis_agent import config
+    if "GENESIS_CACHE_PROVIDERS" not in os.environ:
+        assert config.CACHE_PROVIDERS == frozenset({"ollama_cloud"})
+    assert config._names(" ") == frozenset()
+    assert config._names("groq, ollama_cloud,") == frozenset({"groq", "ollama_cloud"})

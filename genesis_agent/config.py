@@ -276,6 +276,23 @@ ELIDE_WRITE_ROUNDS: int = _int_env("GENESIS_ELIDE_WRITE_ROUNDS", 6, minimum=2)
 # следващото парче.
 CACHE_HISTORY_MAX_CHARS: int = _int_env("GENESIS_CACHE_HISTORY_MAX_CHARS", 300_000)
 CACHE_TRIM_CHUNK: int = _int_env("GENESIS_CACHE_TRIM_CHUNK", 20, minimum=2)
+# Безплатните доставчици кешират сами по префикс, без маркери (budget_log до
+# 2026-10-11: ollama_cloud gpt-oss-120b 69% от входа, groq 7%, nvidia 3%,
+# openrouter 6%) — и при тях свиването сменя префикса всеки рунд. Тези от
+# списъка получават историята само допълвана; таванът е по-нисък, защото
+# прозорецът им е по-малък (gpt-oss: 131k токена), а кирилицата е ~2-3 знака на
+# токен. Anthropic е винаги вътре (виж brain._NATIVE_PROVIDERS).
+# Измерено 2026-10-11 (egn-check + iban-check, по 1 пуск, всички верни): само
+# допълвана история — ollama_cloud 69% → 83% от кеша, некеширани токени на
+# заявка 2 770 → 1 126; nvidia и groq — 0% и при двата начина, там пълната
+# история само праща повече. Затова по подразбиране е само ollama_cloud.
+def _names(raw: str) -> frozenset[str]:
+    """"a, b" → {"a", "b"}; празен низ → празно множество."""
+    return frozenset(p.strip() for p in raw.split(",") if p.strip())
+
+
+CACHE_PROVIDERS: frozenset[str] = _names(os.environ.get("GENESIS_CACHE_PROVIDERS", "ollama_cloud"))
+CACHE_HISTORY_MAX_CHARS_FREE: int = _int_env("GENESIS_CACHE_HISTORY_MAX_CHARS_FREE", 120_000)
 
 # Колко tool рунда има правото да направи агентът за ЕДНО съобщение, преди
 # цикълът да спре и да върне контрола. Това е предпазителят срещу зацикляне,

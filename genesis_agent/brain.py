@@ -1915,10 +1915,25 @@ class Brain:
         # остава пълна (budget_history не мутира входа); свива се само копието,
         # което тръгва по мрежата.
         from genesis_agent.budget import budget_history, cache_history
-        # Native доставчикът (Anthropic) кешира по префикс: той получава
-        # историята само допълвана, без свиването на budget_history, което
-        # сменя средата ѝ на всеки рунд (виж config.CACHE_HISTORY_MAX_CHARS).
-        cache_messages = cache_history(messages)
+        from genesis_agent.config import (
+            CACHE_HISTORY_MAX_CHARS,
+            CACHE_HISTORY_MAX_CHARS_FREE,
+            CACHE_PROVIDERS,
+        )
+        # Доставчик, който кешира по префикс (Anthropic винаги, безплатните от
+        # GENESIS_CACHE_PROVIDERS), получава историята само допълвана, без
+        # свиването на budget_history, което сменя средата ѝ на всеки рунд
+        # (виж config.CACHE_HISTORY_MAX_CHARS). Изгледът се смята при нужда.
+        raw_history = list(messages)
+        cache_views: dict[int, list[dict]] = {}
+
+        def cache_view(provider: str) -> list[dict]:
+            limit = (CACHE_HISTORY_MAX_CHARS if provider in _NATIVE_PROVIDERS
+                     else CACHE_HISTORY_MAX_CHARS_FREE)
+            if limit not in cache_views:
+                cache_views[limit] = cache_history(raw_history, max_chars=limit)
+            return cache_views[limit]
+
         messages = budget_history(messages)
 
         last_error = "неизвестна грешка"
@@ -2062,8 +2077,8 @@ class Brain:
                         continue  # временно изчерпан → пропускаме
                     use_tools = tools if (tools and attempt.get("supports_tools")) else None
                     msgs = messages if use_tools else messages_notools
-                    if use_tools and prov in _NATIVE_PROVIDERS:
-                        msgs = cache_messages
+                    if use_tools and (prov in _NATIVE_PROVIDERS or prov in CACHE_PROVIDERS):
+                        msgs = cache_view(prov)
                     t0 = time.time()
                     self._attempt_id = (prov, model)
                     self._usage_attempt = None
