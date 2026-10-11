@@ -1,0 +1,23 @@
+# HTTPS пред уеб сървъра (127.0.0.1:8080, пуснат с --trust-proxy, никога с
+# --trust-cloudflare). cloud/deploy.sh слага домейна на мястото на @DOMAIN@.
+# Измерено 2026-10-11 (Caddy 2.11.7, tls internal): /healthz 200 по HTTP/2,
+# HSTS, http → 308, бисквитката е Secure, чужд Origin → 403, 6-ият грешен вход с
+# подправен X-Forwarded-For → 429 (Caddy добавя истинския адрес последен), а
+# в лога Cookie е REDACTED.
+@DOMAIN@ {
+	encode gzip
+	request_body {
+		max_size 1MB
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+	reverse_proxy 127.0.0.1:8080
+	log {
+		output file /var/log/caddy/genesis.log {
+			roll_size 10MiB
+			roll_keep 10
+		}
+	}
+}

@@ -126,8 +126,64 @@ def test_build_runs_from_any_folder_with_python3(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("script", sorted(p.relative_to(ROOT).as_posix() for p in
-                                          [*ROOT.glob("cloud/*.sh"), *ROOT.glob("deploy/*.sh")]))
+                                          ROOT.glob("cloud/*.sh")))
 def test_shell_scripts_parse(script) -> None:
     p = subprocess.run([str(BASH), "-n", str(ROOT / script)], capture_output=True, text=True,
                        check=False)
     assert p.returncode == 0, p.stderr
+
+
+# ── cloud/deploy.sh: сухо пускане ────────────────────────────────────────────
+
+def _dry(tmp_path: Path, keys: str | None) -> tuple[int, str, Path, list[list[str]]]:
+    fake = tmp_path / "fake"
+    fake.write_text(_FAKE.format(python=sys.executable), encoding="utf-8")
+    fake.chmod(0o755)
+    log = tmp_path / "calls.log"
+    log.write_text("", encoding="utf-8")
+    keys_path = tmp_path / "keys.env"
+    if keys is not None:
+        keys_path.write_text(keys, encoding="utf-8")
+        keys_path.chmod(0o600)
+    out = tmp_path / "out"
+    env = {**os.environ, "DEPLOY_DRY_RUN": "1", "DEPLOY_DRY_DIR": str(out), "DOCKER": str(fake),
+           "PYTHON": str(fake), "SYSTEMCTL": str(fake), "FAKE_LOG": str(log),
+           "GENESIS_KEYS": str(keys_path), "GENESIS_DOMAIN": "genesis.example.com"}
+    p = subprocess.run([str(BASH), str(ROOT / "cloud" / "deploy.sh")], capture_output=True,
+                       check=False, text=True, encoding="utf-8", env=env, cwd=tmp_path, timeout=60)
+    calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    return p.returncode, p.stdout + p.stderr, out, calls
+
+
+def test_dry_deploy_shows_every_step_in_order_and_changes_nothing(tmp_path) -> None:
+    """N6 (деплой одит 2026-10-11): деплоят беше ~8 ръчни стъпки без проверка."""
+    code, out, files, calls = _dry(tmp_path, SECRET)
+    assert code == 0, out
+    steps = ["проверки преди деплой", "код", "образи", "daemon.json", "up.sh", "systemd",
+             "Caddy", "cloud/check.py", "готово"]
+    positions = [out.index(f"── {s}") if out.find(f"── {s}") >= 0 else out.index(s) for s in steps]
+    assert positions == sorted(positions), out
+    assert "режим: gateway" in out
+    # само четене: `docker info` и проверки с python, нищо не се строи и пуска
+    assert all(c[:1] in (["info"], ["-c"], ["-m"]) for c in calls), calls
+    assert not any("restart" in c or "build" in c for c in calls)
+    unit = (files / "genesis-web.service").read_text(encoding="utf-8")
+    assert "@REPO@" not in unit and f"WorkingDirectory={ROOT}" in unit
+    assert "--gateway-usage" in (files / "genesis-web").read_text(encoding="utf-8")
+    assert "genesis.example.com {" in (files / "Caddyfile").read_text(encoding="utf-8")
+
+
+def test_dry_deploy_without_a_secret_is_proxy_mode(tmp_path) -> None:
+    code, out, files, _ = _dry(tmp_path, "GROQ_API_KEY=k\n")
+    assert code == 0 and "режим: proxy" in out, out
+    args = (files / "genesis-web").read_text(encoding="utf-8")
+    assert "--env-file" in args and "--gateway-usage" not in args
+
+
+def test_the_web_unit_cleans_up_and_keeps_the_database_private() -> None:
+    """D4/N2: след SIGKILL на сървъра контейнерите се махат от ExecStopPost;
+    web.db (scrypt хешове) не е 0644; зад Caddy — само --trust-proxy."""
+    unit = (ROOT / "cloud" / "deploy" / "genesis-web.service").read_text(encoding="utf-8")
+    assert "cleanup_leftovers()" in unit.split("ExecStopPost=", 1)[1].splitlines()[0]
+    assert "UMask=0077" in unit and "--trust-proxy" in unit and "cloudflare" not in unit
+    assert "Requires=docker.service genesis-net.service" in unit

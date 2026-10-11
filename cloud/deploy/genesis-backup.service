@@ -1,0 +1,11 @@
+# Копие на web.db и usage.jsonl (cloud/backup.py), пуска се от genesis-backup.timer.
+[Unit]
+Description=Genesis онлайн: резервно копие
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO@
+UMask=0077
+ExecStart=/usr/bin/python3 -m cloud.backup --data /srv/genesis/web --usage /srv/genesis/gateway/usage.jsonl --dest /srv/backup/genesis --keep-days 14
+# Извън машината (Hetzner Storage Box и подобни) — с ключ за SSH, решение на оператора:
+#ExecStartPost=/usr/bin/rsync -a --delete -e "ssh -p 23" /srv/backup/genesis/ u123456@u123456.your-storagebox.de:genesis/
