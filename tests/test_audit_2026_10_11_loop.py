@@ -416,3 +416,77 @@ def test_todo_write_accepts_the_object_form_in_text_mode():
         assert refused.startswith("[TODO_WRITE] ❌") and todos.items() == before
     finally:
         todos.clear()
+
+
+# ── Втора вълна (преглед 2026-10-11) ───────────────────────────────────────
+
+def _ran(cmd, rc, out=""):
+    from genesis_agent import claim_check
+    return claim_check.counts_as_executed("RUN_CMD", cmd, f"[RUN_CMD: {cmd}]  (rc={rc})\n{out}")
+
+
+@pytest.mark.parametrize("cmd", ["make check", "python run_tests.py", "npm run check"])
+def test_a_failing_run_of_any_test_runner_is_still_a_run(cmd):
+    from genesis_agent import claim_check
+    entry = _ran(cmd, 1, "1 failed, 4 passed")
+    executed = [entry] if entry else []
+    assert claim_check.unsupported_claims("Пуснах тестовете: един пада.", executed) == []
+    # … но не доказва „всички минаха“.
+    assert claim_check.unsupported_claims("Всички тестове минаха.", executed)
+
+
+def test_a_failed_command_still_proves_nothing_else():
+    from genesis_agent import claim_check
+    entry = _ran("pip install fastapi-nonexist", 1, "ERROR: Could not find a version")
+    executed = [entry] if entry else []
+    assert [c.kind for c in claim_check.unsupported_claims("Инсталирах пакета.", executed)] \
+        == ["инсталация"]
+    moved = _ran("mv a.jpg photos/", 1, "mv: cannot stat 'a.jpg'")
+    executed = [moved] if moved else []
+    assert claim_check.unsupported_claims("Преместих снимките.", executed)
+    written = _ran("cp a.txt b.txt", 1, "cp: cannot stat 'a.txt'")
+    executed = [written] if written else []
+    assert claim_check.unsupported_claims("Записах b.txt.", executed)
+
+
+@pytest.mark.parametrize("later", ["git add tests/ && git commit -m wip", "ls tests"])
+def test_a_later_command_that_names_tests_does_not_hide_a_red_run(later):
+    from genesis_agent import claim_check
+    executed = [e for e in (_ran("pytest -q", 1, "1 failed"), _ran(later, 0)) if e]
+    assert claim_check.unsupported_claims("Всички тестове минаха.", executed)
+
+
+def test_a_failing_read_of_a_tests_file_is_not_a_red_test_run():
+    from genesis_agent import claim_check
+    executed = [e for e in (_ran("pytest -q", 0, "3 passed"),
+                            _ran("cat tests/fixtures/data.json", 1, "No such file")) if e]
+    assert claim_check.unsupported_claims("Всички тестове минаха.", executed) == []
+
+
+@pytest.mark.parametrize("cmd,expected", [
+    ("cd proj && python -m pytest -q 2>&1 | tail -20", True),
+    (r".venv\Scripts\python.exe -m pytest", True),
+    ("FOO=1 timeout 60 uv run pytest tests", True),
+    ("npm run test:unit", True), ("go test ./...", True), ("make -C sub check", True),
+    ("python manage.py test", True), ("./run_tests.sh", True),
+    ("python app.py", False), ("make", False), ("cargo build", False),
+    ("pip install pytest", False), ("test -f x && echo ok", False), ("./fetch_latest.sh", False),
+    ("mkdir tests", False),
+])
+def test_a_test_run_is_known_by_the_head_of_the_command(cmd, expected):
+    from genesis_agent.claim_check import is_test_run
+    assert is_test_run(cmd) is expected
+
+
+@pytest.mark.parametrize("command", [
+    "pip install -r requirements.txt && python solution.py",
+    "python solution.py --version",
+    "python -m pip install -q requests; python3 solution.py",
+])
+def test_code_check_sees_the_run_next_to_pip_or_a_flag(command):
+    from genesis_agent.code_check import RunCheck
+    c = RunCheck()
+    c.observe("[WRITE_FILE: /ws/solution.py] ✓ записани 120 символа")
+    c.observe(f"[RUN_CMD: {command}]  (rc=0)\nok")
+    assert "НЕ пуснат" not in c.note()
+

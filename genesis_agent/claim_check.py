@@ -42,6 +42,7 @@ class Claim:
 _TEST_WORDS = frozenset({"pytest", "test", "tests", "unittest", "tox", "nose", "make",
                          "npm", "cargo", "go", "python", "python3"})
 _PASS_KIND = "минаващи тестове"
+_RAN_KIND = "пускане на тестове"
 
 # Всяка категория: (какво твърди) → (кои инструменти биха го доказали,
 # кои командни думи биха го доказали при RUN_CMD).
@@ -75,7 +76,7 @@ _CATEGORIES: tuple[tuple[str, re.Pattern[str], frozenset[str], frozenset[str]], 
         frozenset({"mv", "rm", "rmdir", "cp", "rename", "trash", "git"}),
     ),
     (
-        "пускане на тестове",
+        _RAN_KIND,
         re.compile(
             # Само свършено (2026-10-07): „дали тестовете минават“ и „make sure
             # the tests pass“ са съвет към оператора, не твърдение.
@@ -166,12 +167,71 @@ _RESULT_PREFIX_RE = re.compile(r"\[([A-Z_]+)[:\]]\s*([^\]]*)")
 # `[WRITE_FILE] Грешка: [Errno 13]…`, `[EDIT_FILE: p] ❌ Anchor-ът…`. Дотук се
 # броеше за изпълнено и „записах app.py“ минаваше след отказан запис.
 _TOOL_REFUSED_RE = re.compile(r"^\[[A-Z_]+(?::[^\n]*?)?\]\s*(?:❌|Грешка)")
-_TEST_CMD_RE = re.compile(r"\b(pytest|unittest|tox|nose2?|test|tests|jest|vitest|mocha)\b", re.IGNORECASE)
+
+# Тестово пускане се познава по ГЛАВАТА на командата, не по думата „tests“
+# където и да е (bug fix, 2026-10-11). Измерено: `git add tests/ && git commit`
+# и `ls tests` (rc=0) след червен pytest се броеха за последно тестово пускане
+# и „Всички тестове минаха“ минаваше; паднал `cat tests/fixtures/data.json`
+# след зелен pytest оспорваше вярното твърдение.
+_SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||[;|\n]")
+_TEST_TOOLS = frozenset({"pytest", "py.test", "tox", "nox", "nose", "nose2", "unittest", "jest",
+                         "vitest", "mocha", "ctest", "phpunit", "rspec", "ava", "karma"})
+_PY = frozenset({"python", "python3", "py"})
+_PY_TEST_MODULES = frozenset({"pytest", "unittest", "nose2", "tox", "nox"})
+# Подкоманда-цел: `npm test`, `npm run check`, `cargo test`, `make check`, `make test-unit`.
+_TASK_TOOLS = frozenset({"npm", "yarn", "pnpm", "bun", "deno", "cargo", "go", "dotnet", "mvn",
+                         "gradle", "gradlew", "make", "just", "rake", "mix", "composer"})
+_TEST_TARGET_RE = re.compile(r"^(?:test|tests|check|spec)(?:[-:_.]\S*)?$")
+# Име на скрипт с „test“ като отделна част: run_tests.sh, test_all.py — не latest.sh.
+_TESTY_NAME_RE = re.compile(r"(?:^|[-_.])tests?(?:[-_.]|$)")
+_WRAPPERS = frozenset({"sudo", "env", "uv", "poetry", "pipenv", "pdm", "hatch", "npx", "time",
+                       "nice", "run", "exec", "timeout", "xvfb-run"})
+
+
+def _head(token: str) -> str:
+    base = re.split(r"[/\\]", token.strip("\"'"))[-1].lower()
+    return base.removesuffix(".exe")
+
+
+def _segment_is_test_run(segment: str) -> bool:
+    tokens = [t for t in segment.split() if t]
+    # Обвивки и променливи отпред: `FOO=1 timeout 60 uv run pytest`.
+    while tokens and ("=" in tokens[0] or _head(tokens[0]) in _WRAPPERS
+                      or tokens[0].isdigit() or tokens[0].startswith("-")):
+        tokens.pop(0)
+    if not tokens:
+        return False
+    tool, rest = _head(tokens[0]), [_head(t) for t in tokens[1:]]
+    if tool in _TEST_TOOLS:
+        return True
+    if re.fullmatch(r"python\d+(?:\.\d+)?", tool):
+        tool = "python"
+    if tool in _PY:
+        args = [t for t in rest if not t.startswith("-") or t == "-m"]
+        if args[:1] == ["-m"]:
+            return len(args) > 1 and args[1] in _PY_TEST_MODULES
+        # `python run_tests.py`, `python tests/test_x.py`, `python manage.py test`.
+        return bool(args) and (bool(_TESTY_NAME_RE.search(args[0]))
+                               or (len(args) > 1 and bool(_TEST_TARGET_RE.match(args[1]))))
+    if tool in _TASK_TOOLS:
+        targets = [t for t in rest if not t.startswith("-") and "=" not in t and t != "run"]
+        if tool != "make":
+            targets = targets[:1]
+        return any(_TEST_TARGET_RE.match(t) for t in targets)
+    # Собствен скрипт: `./run_tests.sh`, `test.bat`. Самото `test` е
+    # проверката на shell-а (`test -f x`), не тестове.
+    return tool != "test" and bool(_TESTY_NAME_RE.search(tool))
+
+
+def is_test_run(command: str) -> bool:
+    """Пуска ли `command` тестове (поне един сегмент от веригата)."""
+    return any(_segment_is_test_run(seg) for seg in _SEGMENT_SPLIT_RE.split(command or ""))
 
 
 _RC_RE = re.compile(r"\(rc=(-?\d+)\)")
-# Белег в края на аргументите на тестово пускане с rc≠0 — по него „всички
-# тестове минаха“ разбира, че последното пускане е паднало.
+# Белег в края на аргументите на команда с rc≠0 — по него „всички тестове
+# минаха“ разбира, че последното пускане е паднало, а останалите категории
+# не броят командата.
 _FAILED_RC_RE = re.compile(r" \(rc=(-?\d+)\)$")
 
 
@@ -183,29 +243,48 @@ def counts_as_executed(name: str, args: str, result: str) -> tuple[str, str] | N
     first = result.split("\n", 1)[0]
     rc_match = _RC_RE.search(first) if name == "RUN_CMD" else None
     rc = int(rc_match.group(1)) if rc_match else 0
-    # Пуснат тест, който пада, пак е пуснат тест: `(rc=1)` и Traceback в
-    # изхода значат, че командата е тръгнала. Без това вярното „Пуснах
-    # тестовете: test_div пада“ се връщаше като неподкрепено. Падналото
-    # пускане носи rc-то си — „всички тестове минаха“ не се доказва с него.
-    if rc_match and _TEST_CMD_RE.search(args or ""):
-        return (name, f"{args} (rc={rc})" if rc else args)
-    # Всяка друга команда с rc≠0 не е свършила това, за което е пусната
+    # Команда с rc≠0 е тръгнала, но не е свършила това, за което е пусната
     # (bug fix, 2026-10-11). Измерено: `pip install` с rc=1 доказваше
     # „Инсталирах пакета“, а `mv` с „cannot stat“ — „Преместих снимките“.
+    # Записът остава, белязан с rc-то си: паднал тест пак е пуснат тест, а
+    # пускач, който is_test_run не познава (`./ci.sh`), пак доказва „Пуснах
+    # тестовете: един пада“. Белязаният запис доказва САМО пускане на тестове
+    # (виж _evidence) и „всички минаха“ не се доказва с него.
     if rc:
-        return None
+        return (name, f"{args} (rc={rc})")
     if any(marker in result for marker in _FAILURE_MARKERS):
         return None
     return (name, args)
 
 
+def _failed_rc(entry: tuple[str, str]) -> tuple[str, int]:
+    """(командата без белега, rc) — rc е 0 за успешен запис."""
+    args = entry[1] or ""
+    mark = _FAILED_RC_RE.search(args)
+    return (args[:mark.start()], int(mark.group(1))) if mark else (args, 0)
+
+
+def _is_test_entry(entry: tuple[str, str]) -> bool:
+    return entry[0].upper() == "RUN_CMD" and is_test_run(_failed_rc(entry)[0])
+
+
 def _last_test_rc(executed: list[tuple[str, str]]) -> int:
     """rc на последното тестово пускане в `executed` (0 при липса на белег)."""
-    for name, args in reversed(executed):
-        if name.upper() == "RUN_CMD" and _TEST_CMD_RE.search(args or ""):
-            mark = _FAILED_RC_RE.search(args)
-            return int(mark.group(1)) if mark else 0
+    for entry in reversed(executed):
+        if _is_test_entry(entry):
+            return _failed_rc(entry)[1]
     return 0
+
+
+def _evidence(kind: str, executed: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Кои записи доказват `kind`. Паднала команда доказва само „пуснах
+    тестовете“; за „всички минаха“ влиза само ако е тестово пускане — тогава
+    rc-то ѝ го опровергава в _last_test_rc."""
+    if kind == _RAN_KIND:
+        return executed
+    if kind == _PASS_KIND:
+        return [e for e in executed if not _failed_rc(e)[1] or _is_test_entry(e)]
+    return [e for e in executed if not _failed_rc(e)[1]]
 
 
 def executed_from_text_results(results: list[str]) -> list[tuple[str, str]]:
@@ -237,14 +316,14 @@ def unsupported_claims(text: str, executed: list[tuple[str, str]]) -> list[Claim
     """
     if not text:
         return []
-    tool_names = {name.upper() for name, _ in executed}
-    command_text = " ".join(arg for _, arg in executed)
-
     found: list[Claim] = []
     for kind, pattern, ok_tools, ok_words in _CATEGORIES:
         match = pattern.search(text)
         if not match:
             continue
+        evidence = _evidence(kind, executed)
+        tool_names = {name.upper() for name, _ in evidence}
+        command_text = " ".join(arg for _, arg in evidence)
         if _supported(tool_names, command_text, ok_tools, ok_words):
             last_rc = _last_test_rc(executed) if kind == _PASS_KIND else 0
             if not last_rc:
