@@ -595,7 +595,15 @@ def _tool_write_file(arg: str, content: str) -> str:
         # файл не можеше да се обърне в UTF-8. Съдържание, което не влиза в
         # старото кодиране, не е върнат обратно сбъркан текст от READ_FILE
         # (той е в старото кодиране), така че UTF-8 не губи нищо.
-        data = encode_text(content, "utf-8")
+        try:
+            data = encode_text(content, "utf-8")
+        except UnicodeEncodeError as e2:
+            # Самотен сурогат (половин емоджи от JSON, `\ud83d`) няма място и в
+            # UTF-8: без това излизаше суровата английска грешка на кодека от
+            # dispatch_tool_call (ревю 2026-10-11, трета вълна).
+            return (f"[WRITE_FILE: {path}] ❌ Знакът {content[e2.start:e2.end]!r} не е "
+                    "текст в никое кодиране (половин емоджи?) — махни го или го замени. "
+                    "ФАЙЛЪТ НЕ Е ПРОМЕНЕН.")
         enc_note = (f" (файлът беше {encoding}, а {content[e.start:e.end]!r} няма място "
                     "в него — записан е като UTF-8)")
     try:

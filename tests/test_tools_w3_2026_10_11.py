@@ -59,3 +59,19 @@ def test_cr_only_file_is_one_line_in_every_view(ws):
     assert [h.line for h in repo_map.search_code("two", ws)] == [1]
     # Прегледът не показва промяна там, където записът не прави такава.
     assert agent_core._diff_for_write(gs, {"path": "old.txt", "content": body}) is None
+
+
+# ── самотен сурогат ──────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("existing", [None, "utf-8", "cp1251"])
+def test_write_with_lone_surrogate_is_refused_in_bulgarian(ws, existing):
+    p = ws / "m.txt"
+    if existing:
+        p.write_bytes("Здравей\n".encode(existing))
+        gs._tool_read_file("m.txt")
+    before = p.read_bytes() if existing else None
+    # Половин емоджи (high surrogate) от JSON — няма го в никое кодиране.
+    out = gs.dispatch_tool_call("WRITE_FILE", {"path": "m.txt", "content": "ok \ud83d\n"})
+    assert out.startswith("[WRITE_FILE"), out
+    assert "❌" in out and "codec" not in out, out
+    assert (p.read_bytes() if existing else p.exists()) == (before if existing else False)
