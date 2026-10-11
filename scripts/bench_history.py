@@ -7,8 +7,9 @@ What a long project turn costs, and what the model still sees at its end.
 
 NEXT_STEPS Г.12. Offline, no model: a scripted turn builds a project the way
 the chat does — WRITE_FILE per file (the content travels in the assistant's
-tool_call arguments), READ_FILE before an edit, EDIT_FILE, pytest after each
-change with a failing run now and then. Every request goes through exactly
+tool_call arguments), READ_FILE before an edit, EDIT_FILE ({path, old, new} as
+in tool_schemas), every 7th round a full WRITE_FILE rewrite of an existing
+file, pytest after each change with a failing run now and then. Every request goes through exactly
 what Brain.complete sends (budget.budget_history → request_window). Reported
 per request: estimated prompt tokens and messages; at the end: is the system
 prompt there, is the task there, how many files can the model still see in
@@ -31,6 +32,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from genesis_agent import budget
 
 SYSTEM = "x" * 7600          # ~2 200 tokens: system prompt + schemas, measured in PR #7
+# Всеки 7-и рунд пренаписва цял съществуващ файл: реален ход го прави
+# (рефакторинг, „започни модула отначало“). Без това правило „по-нов запис на
+# същия файл заменя стария“ няма какво да мери — 2026-10-11 старият bench
+# пишеше всеки файл веднъж и то даваше 0% спестяване.
+REWRITE_EVERY = 7
 TASK = ("Направи в текущата папка Python проект за фактури: парсване на PDF, валидиране на ЕИК, "
         "изчисляване на ДДС, експорт в Excel и CLI. Добави тестове с pytest и ги пусни.")
 
@@ -64,6 +70,7 @@ class Session:
         self.msgs: list[dict] = [{"role": "system", "content": SYSTEM},
                                  {"role": "user", "content": TASK}]
         self.current: dict[str, str] = {}
+        self.versions: dict[str, int] = {}
         self.k = 0
         self.last_test = ""
 
@@ -86,6 +93,13 @@ class Session:
                        f"[WRITE_FILE: /ws/{name}] ✓ записани {len(body)} символа")
             return
         name = rng.choice(self.names)
+        if i % REWRITE_EVERY == 0:                                # full rewrite of a file
+            self.versions[name] = self.versions.get(name, 1) + 1
+            body = _file_body(name, self.versions[name], rng.randint(1500, 4000), rng)
+            self.current[name] = body
+            self._call("WRITE_FILE", {"path": name, "content": body},
+                       f"[WRITE_FILE: /ws/{name}] ✓ записани {len(body)} символа")
+            return
         kind = i % 3
         if kind == 0:                                             # read before an edit
             self._call("READ_FILE", {"path": name}, f"[READ_FILE: /ws/{name}]\n{self.current[name]}")
@@ -93,7 +107,7 @@ class Session:
             old = self.current[name].splitlines()[3]
             new = old + "  # fixed"
             self.current[name] = self.current[name].replace(old, new, 1)
-            self._call("EDIT_FILE", {"path": name, "old_string": old, "new_string": new},
+            self._call("EDIT_FILE", {"path": name, "old": old, "new": new},
                        f"[EDIT_FILE: /ws/{name}] ✓ заменено (1)\n--- a\n+++ b\n-{old}\n+{new}")
         else:                                                     # run tests
             out = _pytest_output(rng.random() < 0.6, self.names, rng)
@@ -126,8 +140,10 @@ def run(files: int, rounds: int, seed: int) -> dict:
         chars = sum(len(str(m.get("content", ""))) + sum(len(tc["function"]["arguments"])
                     for tc in m.get("tool_calls") or []) for m in sent)
         args_chars = sum(len(tc["function"]["arguments"]) for m in sent for tc in m.get("tool_calls") or [])
+        visible = sum(_visible(sent, n, body) for n, body in s.current.items())
         per_request.append({"round": i + 1, "messages": len(sent), "tokens": round(chars / 3.5),
-                            "in_tool_call_args": round(args_chars / 3.5)})
+                            "in_tool_call_args": round(args_chars / 3.5),
+                            "files_visible": f"{visible}/{len(s.current)}"})
     seen = [n for n in s.names if _visible(sent, n, s.current[n])]
     return {
         "rounds": rounds, "files": files,
@@ -139,6 +155,11 @@ def run(files: int, rounds: int, seed: int) -> dict:
         "system_kept": sent[0]["content"] == SYSTEM,
         "task_kept": any(m.get("role") == "user" and m.get("content") == TASK for m in sent),
         "files_current_visible": f"{len(seen)}/{len(s.names)}",
+        # Средно за хода: какъв дял от вече написаните файлове моделът вижда в
+        # текущия им вид — цената на всяко свиване в историята (2026-10-11).
+        "files_visible_mean": round(sum(
+            int(r["files_visible"].split("/")[0]) / max(int(r["files_visible"].split("/")[1]), 1)
+            for r in per_request) / len(per_request), 2),
         "last_test_intact": bool(s.last_test) and any(s.last_test in str(m.get("content", "")) for m in sent),
         "per_request": per_request,
     }
@@ -158,12 +179,14 @@ def main() -> int:
     print(f"{res['files']} файла, {res['rounds']} рунда в един ход")
     for r in res["per_request"][:: max(1, len(res["per_request"]) // 8)]:
         print(f"  рунд {r['round']:>3}: {r['messages']:>3} съобщения, ~{r['tokens']:>6} токена "
-              f"({r['in_tool_call_args']} в аргументите на извикванията)")
+              f"({r['in_tool_call_args']} в аргументите на извикванията), "
+              f"файлове в текущия си вид {r['files_visible']}")
     print(f"Общо промпт за хода: ~{res['total_prompt_tokens']} токена; "
           f"последната заявка ~{res['last_request_tokens']} (макс. ~{res['max_request_tokens']})")
     print(f"Делът на аргументите (съдържание на WRITE_FILE/EDIT_FILE): {res['share_in_tool_call_args']:.0%}")
     print(f"Системен промпт: {'✓' if res['system_kept'] else '✗'}  Задача: {'✓' if res['task_kept'] else '✗'}  "
-          f"Файлове в текущия си вид: {res['files_current_visible']}  "
+          f"Файлове в текущия си вид: {res['files_current_visible']} "
+          f"(средно за хода {res['files_visible_mean']:.0%})  "
           f"Последният pytest: {'✓' if res['last_test_intact'] else '✗'}")
     return 0
 
