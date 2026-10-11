@@ -48,6 +48,7 @@ from genesis_agent.paths import (
     ENV_FILES,
     env_value,
 )
+from genesis_agent.tool_schemas import load_tool_arguments
 
 # Extra ollama_cloud keys an operator may add THEMSELVES to their own
 # gitignored ~/.genesis/.env — OLLAMA_API_KEY_2 through _10. Not suggested,
@@ -464,13 +465,17 @@ def _is_truncated(text: str) -> bool:
 
 
 def _has_cut_tool_arguments(tool_calls: Any) -> bool:
-    """True ако аргументите на някой tool_call не са цял JSON (отрязани)."""
+    """True ако аргументите на някой tool_call не са цял JSON (отрязани).
+
+    Със същия парсер като цикъла (ревю 2026-10-11): plain json.loads отхвърляше
+    `"\\d{4}"` от регекс код, който load_tool_arguments поправя — цял call с
+    finish_reason=length падаше като HTTP_TRUNCATED към следващия модел."""
     for tc in tool_calls or []:
         fn = tc.get("function") if isinstance(tc, dict) else None
         args = fn.get("arguments") if isinstance(fn, dict) else None
         if isinstance(args, str) and args.strip():
             try:
-                json.loads(args)
+                load_tool_arguments(args)
             except ValueError:
                 return True
     return False

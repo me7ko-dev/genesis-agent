@@ -237,6 +237,20 @@ def test_complete_tool_call_arguments_with_length_are_still_accepted(monkeypatch
     assert [m for m, _ in seen] == ["A"] and r.tool_calls
 
 
+def test_a_whole_call_with_a_regex_escape_and_length_is_accepted(monkeypatch) -> None:
+    """Ревю 2026-10-11: `"\\d{4}"` в регекс код е невалиден JSON escape, който
+    цикълът поправя (load_tool_arguments); с finish_reason=length plain
+    json.loads го обявяваше за отрязан и ходът падаше към следващия модел."""
+    monkeypatch.setattr(brain, "_load_chain", lambda: chain(("groq", "A"), ("nvidia", "C")))
+    monkeypatch.setenv("GROQ_API_KEY", "g")
+    monkeypatch.setenv("NVIDIA_API_KEY", " n")
+    args = '{"path": "a.py", "content": "import re\\nYEAR = re.compile(r\\"\\d{4}\\")\\n"}'
+    tc = [{"id": "c1", "type": "function", "function": {"name": "WRITE_FILE", "arguments": args}}]
+    seen = _route(monkeypatch, lambda p: ok(None, tool_calls=tc, finish="length"))
+    r = brain.Brain(use_local=False).complete([{"role": "user", "content": "x"}], tools=_TOOLS)
+    assert [m for m, _ in seen] == ["A"] and r.tool_calls
+
+
 def test_a_write_cut_on_every_model_reaches_the_loop_after_one_pass(monkeypatch) -> None:
     """Ревю 2026-10-11: файл, по-голям от тавана на ВСИЧКИ модели, правеше
     2 кръга × цялата верига (4 платени заявки), 8 s пауза и „Error: …
