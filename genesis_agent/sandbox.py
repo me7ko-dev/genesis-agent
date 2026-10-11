@@ -137,12 +137,18 @@ _BLOCK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 # без въпрос. Папките (`.ssh`, `.aws`, `.gnupg`) — и без наклонена черта след
 # тях (2026-10-07): `grep -r SECRET ~/.ssh ~/.aws` и `tar cz ~/.ssh` минаваха
 # като SAFE и печатаха ключовете, макар `cat ~/.ssh/id_rsa` да беше спрян.
+# Папката на Genesis и 8.3 името ѝ на Windows (`GENESI~1`), 2026-10-11:
+# `echo {} > ~/GENESI~1/hooks.json` беше SAFE, а `~/.genesis/hooks.json` — CONFIRM.
+_GENESIS_DIR = r"(?:\.genesis|\bgenesi~\d)"
+
 _SECRET_PATHS = (
     r"\.ssh(?:[/\\]|\b)|\.aws(?:[/\\]|\b)|\.gnupg(?:[/\\]|\b)|id_rsa|id_ed25519|id_ecdsa|id_dsa"
     r"|\bid_[*?\[]|\.env\b|credentials\b"
-    r"|\.pem\b|\.p12\b|\.pfx\b|\.genesis[/\\]remote\.json|gh[/\\]hosts\.yml"
+    r"|\.pem\b|\.p12\b|\.pfx\b|" + _GENESIS_DIR + r"[/\\]remote\.json|gh[/\\]hosts\.yml"
+    # gh на Windows: %APPDATA%\GitHub CLI\hosts.yml (2026-10-11).
+    r"|GitHub CLI[/\\]hosts\.yml"
     # OAuth токените за MCP и копията на проекта за /undo (2026-10-09).
-    r"|mcp_tokens\.json\b|\.genesis[/\\]checkpoints\b"
+    r"|mcp_tokens\.json\b|" + _GENESIS_DIR + r"[/\\]checkpoints\b"
     r"|\.npmrc\b|\.pypirc\b|\.netrc\b|\.docker[/\\]config\.json|\.kube[/\\]config\b"
     r"|Login Data\b"
     # Ключът, с който се подписва доверието за hooks/MCP (2026-10-11).
@@ -163,9 +169,11 @@ _SECRET_PATHS = (
 # команда, която виждаше API ключа, скрит от самия RUN_CMD. Отделна причина, не
 # в _SECRET_PATHS: READ_FILE на тези файлове (за /hooks) остава без въпрос.
 _GENESIS_CONTROL = (
-    r"\.genesis\b[^\n]{0,40}?\b(?:hooks|mcp|settings|trusted_\w+)\.json\b"
-    r"|\btrusted_hooks\b|\.genesis[/\\](?:agents|commands)\b"
+    _GENESIS_DIR + r"\b[^\n]{0,40}?\b(?:hooks|mcp|settings|trusted_\w+)\.json\b"
+    r"|\btrusted_hooks\b|" + _GENESIS_DIR + r"[/\\](?:agents|commands)\b"
 )
+_GENESIS_CONTROL_REASON = ("промяна на управляващ файл на Genesis (hooks/MCP/доверие) — "
+                           "пуска програми извън sandbox-а")
 
 # Опасни — изискват потвърждение (interactive) или отказ (autonomous).
 _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
@@ -202,8 +210,7 @@ _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
      "git push (публикуване)"),
     (_c(_SECRET_PATHS),
      "достъп до чувствителни файлове (ключове/тайни)"),
-    (_c(_GENESIS_CONTROL),
-     "промяна на управляващ файл на Genesis (hooks/MCP/доверие) — пуска програми извън sandbox-а"),
+    (_c(_GENESIS_CONTROL), _GENESIS_CONTROL_REASON),
     # Качване на локален файл навън — пътят, по който тайна напуска машината.
     # localhost е изключен: така агентът тества собственото си API.
     (_c(r"\bcurl\b(?![^\n]*\b(?:localhost|127\.0\.0\.1)\b)[^\n]*\s(?:-T\s*\S|--upload-file\b"
@@ -1273,6 +1280,26 @@ _SECRET_ARG_RX = re.compile(_SECRET_PATHS, re.IGNORECASE)
 _MAX_SECRET_GLOB = 300
 
 
+_CONTROL_ARG_RX = re.compile(_GENESIS_CONTROL, re.IGNORECASE)
+_REDIRECT_PREFIX = re.compile(r"^\d*[<>]+&?")
+
+
+def _control_file_reached(token: str, expanded: str) -> bool:
+    """Стига ли аргументът до управляващ файл на Genesis — и без кавичките и
+    escape-ите (`~/.gene''sis/hooks.json`), и по истинския път: realpath
+    разгъва символните връзки, а на Windows и 8.3 имената (`GENESI~1`), и то
+    за файл, който още не съществува (2026-10-11)."""
+    if _CONTROL_ARG_RX.search(token.replace("\\", "/")):
+        return True
+    if not any(ch in token for ch in "/\\~"):
+        return False
+    try:
+        real = os.path.realpath(expanded)
+    except (OSError, ValueError):
+        return False
+    return bool(_CONTROL_ARG_RX.search(real.replace("\\", "/")))
+
+
 def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:
     """Тайна, до която стигат АРГУМЕНТИТЕ на командата, а не само текстът ѝ.
 
@@ -1290,6 +1317,7 @@ def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:
     for seg in _split_segments(command):
         tokens = [tok for reading in _argument_readings(seg) for tok in reading]
         for tok in tokens:
+            tok = _REDIRECT_PREFIX.sub("", tok)     # `>~/x`, `2>>log` — целта е пътят
             if not tok or tok.startswith("-"):
                 continue
             match = _SECRET_ARG_RX.search(tok.replace("\\", "/"))
@@ -1298,6 +1326,8 @@ def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:
             expanded = os.path.expanduser(os.path.expandvars(tok))
             if not os.path.isabs(expanded):
                 expanded = str(base / expanded)
+            if _control_file_reached(tok, expanded):
+                return _GENESIS_CONTROL_REASON
             if any(ch in tok for ch in "*?["):
                 try:
                     paths = _glob.glob(expanded)[:_MAX_SECRET_GLOB - seen]
@@ -1370,7 +1400,8 @@ def assess_command(command: str, cwd: Path | None = None, *, arguments: bool = T
         except Exception:
             secret = None
         if secret:
-            reasons.append(secret)
+            if secret not in reasons:
+                reasons.append(secret)
             level = RiskLevel(max(level, RiskLevel.CONFIRM))
     verdict = RiskVerdict(level, reasons)
     try:

@@ -1001,3 +1001,38 @@ def test_windows_home_as_a_variable_or_a_pipeline_source_is_blocked(cmd) -> None
 ])
 def test_windows_pipeline_delete_inside_a_project_asks(cmd) -> None:
     assert sandbox.assess_command(cmd).level is CONFIRM
+
+
+@pytest.mark.parametrize("cmd", [
+    "echo {} > ~/GENESI~1/hooks.json",
+    r"type nul > %USERPROFILE%\GENESI~1\mcp.json",
+    "echo {} > ~/.gene''sis/hooks.json",
+    r"echo {} > ~/.gene\sis/hooks.json",
+])
+def test_aliases_of_genesis_control_files_ask(cmd) -> None:
+    """8.3 името на `.genesis` е `GENESI~1`; образецът искаше буквалното
+    `.genesis` и `echo {} > ~/GENESI~1/hooks.json` беше SAFE (2026-10-11)."""
+    assert sandbox.assess_command(cmd).level is CONFIRM
+
+
+def test_a_link_to_the_genesis_folder_asks(tmp_path, monkeypatch) -> None:
+    """Каквото realpath разгъва — символна връзка тук, 8.3 име на Windows —
+    се проверява по истинския път, и за файл, който още не съществува."""
+    home = tmp_path / "home"
+    (home / ".genesis").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    try:
+        (tmp_path / "g").symlink_to(home / ".genesis", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("no symlinks here")
+    assert sandbox.assess_command("echo {} > g/hooks.json", cwd=tmp_path).level is CONFIRM
+    assert sandbox.assess_command("echo {} > g/notes.txt", cwd=tmp_path).level is SAFE
+
+
+def test_gh_hosts_file_on_windows_is_a_secret() -> None:
+    """На Windows gh държи токена в %APPDATA%\\GitHub CLI\\hosts.yml."""
+    assert sandbox.sensitive_path_reason(
+        r"C:\Users\roika\AppData\Roaming\GitHub CLI\hosts.yml")
+    assert sandbox.assess_command(
+        r'type "%APPDATA%\GitHub CLI\hosts.yml"').level is CONFIRM
