@@ -465,6 +465,19 @@ def run_tool_loop(
                     args = load_tool_arguments(fn.get("arguments"))
                 except (json.JSONDecodeError, TypeError):
                     args = {}
+                if asked:
+                    # След ASK_USER нищо от същия рунд не тръгва, преди човекът
+                    # да отговори — същото като терминала и текстовите тагове
+                    # (bug fix, 2026-10-11). Измерено: [ASK_USER „Да трия ли?“,
+                    # RUN_CMD rm -rf build] тук пускаше и командата. Заместителят
+                    # пази двойката извикване/резултат цяла; on_tool_result не
+                    # се вика — неизпълненото не е резултат (capability_report
+                    # иначе би го броил за доказателство).
+                    messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
+                                     "name": name,
+                                     "content": f"[{name}] не е изпълнено — чака "
+                                                "отговора на оператора."})
+                    continue
                 diff = _diff_for_write(core.skills, args) if name == "WRITE_FILE" else None
                 result = core.skills.dispatch_tool_call(name, args or fn.get("arguments") or {})
                 page_check.observe(result)
@@ -482,7 +495,8 @@ def run_tool_loop(
                     spinning = verdict.note
                 elif verdict.note:
                     repeat_note = verdict.note
-                if _is_question(result):
+                # Само ASK_USER пита: прочетен файл с маркера в него не е въпрос.
+                if name == "ASK_USER" and _is_question(result):
                     asked = result
             if asked:
                 # Агентът е попитал → цикълът СПИРА и контролът се връща на

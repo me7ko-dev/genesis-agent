@@ -1612,7 +1612,11 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                         _spinning = _v.note
                     elif _v.note:
                         _repeat_note = _v.note
-                    if genesis_skills.ASK_USER_MARKER in result:
+                    # Само резултат от ASK_USER е въпрос (bug fix, 2026-10-11).
+                    # Измерено: READ_FILE на файл, в който стои маркерът (Genesis
+                    # върху собственото си repo), задържаше EDIT_FILE от същия
+                    # рунд и ходът свършваше с прочетеното като „въпрос“.
+                    if name == "ASK_USER" and genesis_skills.ASK_USER_MARKER in result:
                         asked = result
                 if asked:
                     # ASK_USER (design note, 2026-07-27): агентът е попитал → цикълът

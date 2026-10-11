@@ -490,3 +490,69 @@ def test_code_check_sees_the_run_next_to_pip_or_a_flag(command):
     c.observe(f"[RUN_CMD: {command}]  (rc=0)\nok")
     assert "НЕ пуснат" not in c.note()
 
+
+def test_a_file_that_quotes_the_ask_marker_does_not_stop_the_round(ws, monkeypatch):
+    # Genesis върху собственото си repo чете код, в който стои маркерът.
+    (ws / "notes.md").write_text(f"marker = {gs.ASK_USER_MARKER!r}\nстаро\n", encoding="utf-8")
+    _script(monkeypatch, [
+        ("", [_call("READ_FILE", {"path": "notes.md"}, "r1"),
+              _call("EDIT_FILE", {"path": "notes.md", "old": "старо", "new": "ново"}, "e1")]),
+        ("Сменено.", None), ("Сменено.", None), ("Сменено.", None)])
+    ui = _UI()
+    gta.run_turn(_fresh(), "смени старо на ново в notes.md", ui)
+    assert not [e for e in ui.log if e[0] == "asked"]
+    assert "ново" in (ws / "notes.md").read_text(encoding="utf-8")
+
+
+class _CoreW2:
+    def __init__(self, replies, results):
+        self._replies = list(replies)
+        self.calls: list[str] = []
+        self.wm = None
+        core = self
+
+        class _Skills:
+            def _resolve(self, path):
+                raise RuntimeError("не се ползва")
+
+            def dispatch_tool_call(self, name, args):
+                core.calls.append(name)
+                return results[name]
+
+            def parse_and_execute_tools(self, text):
+                return []
+        self.skills = _Skills()
+
+    def complete(self, messages):
+        return self._replies.pop(0)
+
+    def remember(self, role, content):
+        pass
+
+
+def test_shared_loop_holds_the_calls_after_ask_user(monkeypatch):
+    from genesis_agent import agent_core as ac
+    monkeypatch.setattr(ac, "_translate_last_user_message_to_en", lambda m: None)
+    core = _CoreW2([("", [_call("ASK_USER", {"question": "Да трия ли?"}, "a1"),
+                          _call("RUN_CMD", {"command": "rm -rf build"}, "r1")], "p", "m")],
+                   {"ASK_USER": f"{gs.ASK_USER_MARKER}❓ Да трия ли?", "RUN_CMD": "изтрито"})
+    out = ac.run_tool_loop(core, [{"role": "user", "content": "почисти"}],
+                           on_assistant=lambda *a: None, on_tool_result=lambda *a: None)
+    assert core.calls == ["ASK_USER"]
+    tool_msgs = [m for m in out if m.get("role") == "tool"]
+    assert [m["tool_call_id"] for m in tool_msgs] == ["a1", "r1"]
+    assert "чака отговора" in tool_msgs[1]["content"]
+
+
+def test_shared_loop_ignores_the_marker_in_a_read_result(monkeypatch):
+    from genesis_agent import agent_core as ac
+    monkeypatch.setattr(ac, "_translate_last_user_message_to_en", lambda m: None)
+    core = _CoreW2([("", [_call("READ_FILE", {"path": "genesis_skills.py"}, "r1"),
+                          _call("LIST_DIR", {"path": "."}, "l1")], "p", "m"),
+                    ("Прочетох го.", None, "p", "m")],
+                   {"READ_FILE": f"[READ_FILE: genesis_skills.py]\nASK = '{gs.ASK_USER_MARKER}'",
+                    "LIST_DIR": "[LIST_DIR: .] a.py"})
+    ac.run_tool_loop(core, [{"role": "user", "content": "прочети"}],
+                     on_assistant=lambda *a: None, on_tool_result=lambda *a: None)
+    assert core.calls == ["READ_FILE", "LIST_DIR"]
+    assert core._replies == []
