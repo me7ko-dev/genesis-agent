@@ -321,13 +321,16 @@ def _local_available(model: str) -> bool:
     return any(_same_ollama_model(model, n) for n in _ollama_installed())
 
 
-def _installed_local_tier() -> str | None:
-    """Първото инсталирано ниво от model_router.LOCAL_TIERS (от бързо към мощно)."""
+def _installed_local_tier(names: list[str] | None = None) -> str | None:
+    """Първото инсталирано ниво от model_router.LOCAL_TIERS (от бързо към мощно).
+
+    `names` — вече прочетеният /api/tags, за да не се пита Ollama втори път."""
     try:
         from genesis_agent.model_router import LOCAL_TIERS
     except Exception:
         return None
-    names = _ollama_installed()
+    if names is None:
+        names = _ollama_installed()
     return next((t for t in LOCAL_TIERS if any(_same_ollama_model(t, n) for n in names)), None)
 # Грешки, при които минаваме към следващия модел (вкл. остарял/невалиден модел).
 _FALLBACK_CODES = {400, 401, 402, 403, 404, 408, 429, 500, 502, 503}
@@ -789,13 +792,19 @@ class Brain:
             # откаже. use_local=False изрично го изключва напълно (за
             # self-modification — виж genesis_agent/self_modify.py).
             self.local = None
-            if use_local and _local_available(LOCAL_MODEL):
+            # ЕДНА проба на /api/tags (ревю 2026-10-11): _local_available и
+            # _installed_local_tier питаха поотделно, а ask_genesis строи силен
+            # Brain всеки ход — при висящ Ollama 4 s на ход вместо 2 s.
+            installed = _ollama_installed() if use_local else []
+            if any(_same_ollama_model(LOCAL_MODEL, n) for n in installed):
                 self.local = {"provider": "ollama_local", "model": LOCAL_MODEL}
-            elif use_local and os.environ.get("GENESIS_LOCAL_ONLY") != "1":
+            elif installed and os.environ.get("GENESIS_LOCAL_ONLY") != "1" \
+                    and not os.environ.get("GENESIS_LOCAL_MODEL"):
                 # Подразбиращият се модел липсва → инсталирано ниво вместо 404
-                # (одит 2026-10-11). Изрично избраният офлайн модел не се
-                # подменя: там честата грешка е по-добра от тиха смяна.
-                tier = _installed_local_tier()
+                # (одит 2026-10-11). Изрично избраният модел (офлайн режим или
+                # GENESIS_LOCAL_MODEL) не се подменя: там честата грешка е
+                # по-добра от тиха смяна.
+                tier = _installed_local_tier(installed)
                 if tier:
                     self.local = {"provider": "ollama_local", "model": tier}
 

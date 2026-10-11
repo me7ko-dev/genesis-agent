@@ -544,12 +544,15 @@ def _ollama_tags(monkeypatch):
     from genesis_agent import model_router
     tags = FakeResp(200, {"models": [{"name": "qwen2.5-coder:7b"}, {"name": "qwen3:4b"},
                                      {"name": "llama3:latest"}]})
-    monkeypatch.setattr(brain.requests, "get", lambda *a, **kw: tags)
-    monkeypatch.setattr(model_router.requests, "get", lambda *a, **kw: tags)
+    probes: list = []
+    # brain.requests и model_router.requests са един и същ модул — една подмяна.
+    monkeypatch.setattr(brain.requests, "get", lambda *a, **kw: (probes.append(a), tags)[1])
     monkeypatch.setattr(model_router, "LOCAL_TIERS",
                         ["qwen2.5-coder:3b", "qwen2.5-coder:7b", "qwen2.5-coder:14b"])
     monkeypatch.setattr(brain, "_local_available", _REAL_LOCAL_AVAILABLE)
     monkeypatch.delenv("GENESIS_LOCAL_ONLY", raising=False)
+    monkeypatch.delenv("GENESIS_LOCAL_MODEL", raising=False)
+    return probes
 
 
 def test_a_missing_tag_of_an_installed_family_is_not_available(_ollama_tags) -> None:
@@ -569,4 +572,20 @@ def test_the_last_resort_is_an_installed_tier_not_a_missing_default(monkeypatch,
 def test_an_explicit_local_only_model_is_never_swapped(monkeypatch, _ollama_tags) -> None:
     monkeypatch.setattr(brain, "LOCAL_MODEL", "qwen3:14b")
     monkeypatch.setenv("GENESIS_LOCAL_ONLY", "1")
+    assert brain.Brain().local is None
+
+
+def test_brain_probes_ollama_once_when_the_default_model_is_missing(monkeypatch, _ollama_tags) -> None:
+    """Ревю 2026-10-11: _local_available и _installed_local_tier питаха
+    /api/tags по веднъж — при висящ Ollama всеки ход в чата чакаше 4 s, не 2 s."""
+    monkeypatch.setattr(brain, "LOCAL_MODEL", "qwen2.5-coder:3b")
+    assert brain.Brain().local == {"provider": "ollama_local", "model": "qwen2.5-coder:7b"}
+    assert len(_ollama_tags) == 1
+
+
+def test_an_explicitly_set_local_model_is_never_swapped(monkeypatch, _ollama_tags) -> None:
+    """GENESIS_LOCAL_MODEL, зададен от оператора, не се подменя тихо и извън
+    LOCAL_ONLY (ревю 2026-10-11) — сменя се само подразбиращият се модел."""
+    monkeypatch.setenv("GENESIS_LOCAL_MODEL", "qwen2.5-coder:14b")
+    monkeypatch.setattr(brain, "LOCAL_MODEL", "qwen2.5-coder:14b")
     assert brain.Brain().local is None
