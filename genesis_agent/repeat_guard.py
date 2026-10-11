@@ -39,11 +39,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import deque
 from dataclasses import dataclass
 
 # Второто еднакво повторение → бележка към модела. Третото → спираме хода.
 WARN_AT = 2
 STOP_AT = 3
+# Колко последни извика се помнят за кръговете (A, B, A, B, A): 8 стигат за
+# кръг от три инструмента, повторен до третото връщане (2·3 + 1 = 7).
+CYCLE_WINDOW = 8
 
 
 @dataclass(frozen=True)
@@ -84,13 +88,15 @@ class RepeatGuard:
         self.stop_at = stop_at
         self._last: str = ""
         self._streak: int = 0
+        self._recent: deque[tuple[str, str]] = deque(maxlen=CYCLE_WINDOW)
 
     def observe(self, name: str, arguments: object, result: str) -> Verdict:
         """Отчита един изпълнен инструмент и казва дали ходът да продължи.
 
         Поредицата се нулира при всеки извик, който се различава по нещо —
         друг инструмент, други аргументи или друг изход. Затова A, B, A не е
-        въртене, а A, A, A е.
+        въртене ПОДРЕД, а A, A, A е; кръговете без промяна (A, B, A, B, A)
+        хваща `_cycle`.
         """
         fp = _fingerprint(name, arguments, result)
         if fp == self._last:
@@ -98,6 +104,11 @@ class RepeatGuard:
         else:
             self._last = fp
             self._streak = 1
+        self._recent.append((fp, name))
+        if self._streak < self.warn_at:
+            cycle = self._cycle(fp)
+            if cycle:
+                return cycle
 
         if self._streak >= self.stop_at:
             return Verdict(
@@ -124,6 +135,36 @@ class RepeatGuard:
                 ),
             )
         return Verdict(repeats=self._streak, stop=False, note="")
+
+    def _cycle(self, fp: str) -> Verdict | None:
+        """Кръг без промяна: A, B, A, B, A (bug fix, 2026-10-11).
+
+        Поредицата по-горе вижда само ЕДНАКВИ извиквания ПОДРЕД. Измерено:
+        READ_FILE app.py ↔ EDIT_FILE с липсващ anchor, всеки път същият
+        резултат — изгаряше всичките 25 рунда, без предпазителят да каже нищо.
+        Броим от първата поява на този отпечатък в прозореца: второ връщане с
+        най-много още един инструмент между тях → бележка; трето, при което
+        всичко в отрязъка се е повторило (нищо ново) → спираме. A, B, C с
+        различни резултати не се повтарят и никога не спират.
+        """
+        fps = [f for f, _ in self._recent]
+        segment = fps[fps.index(fp):]
+        seen = segment.count(fp)
+        if seen < 2:
+            return None
+        names = [n for f, n in self._recent if f in segment]
+        loop = " ↔ ".join(dict.fromkeys(names))
+        if seen >= self.stop_at and all(segment.count(f) >= 2 for f in segment):
+            return Verdict(repeats=seen, stop=True, note=(
+                f"[Система]: Кръг {loop} без промяна: същите извиквания върнаха "
+                f"буквално същите резултати {seen} пъти. Този подход не води доникъде — "
+                "спирам хода, за да не изгоря останалите рундове."))
+        if len(set(segment)) <= 2:
+            return Verdict(repeats=seen, stop=False, note=(
+                f"[Система]: Въртиш се в кръг {loop}: същото извикване върна същия "
+                "резултат като преди малко. Повтарянето няма да даде друго — ползвай "
+                "полученото или смени подхода (напр. прочети файла и копирай точния текст)."))
+        return None
 
     def observe_text_result(self, result: str) -> Verdict:
         """Същото, за текстовия таг-режим, където има само изходен низ.

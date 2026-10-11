@@ -342,3 +342,42 @@ def test_stop_reaches_explore(ws):
         gs._set_cancel(None)
     assert n["calls"] == 1
     assert "⏹ Спрян от оператора след 1 рунда" in out and "търся" in out
+
+
+# ── A10: кръг READ_FILE ↔ провален EDIT_FILE без промяна се хваща ─────────
+
+def test_a_read_edit_ping_pong_stops_early(ws, monkeypatch):
+    import itertools
+    gs.parse_and_execute_tools("[READ_FILE: app.py]")
+    calls = {"n": 0}
+    cycle = itertools.cycle([
+        ("", [_call("READ_FILE", {"path": "app.py"}, "r")]),
+        ("", [_call("EDIT_FILE", {"path": "app.py", "old": "PRICE=42", "new": "PRICE = 0"}, "e")]),
+    ])
+
+    def fake(messages, tools=None):
+        calls["n"] += 1
+        return next(cycle)
+    monkeypatch.setattr(gta, "ask_genesis", fake)
+    ui = _UI()
+    gta.run_turn(_fresh(), "смени цената на 0", ui)
+    assert calls["n"] <= 8
+    spins = [e[1] for e in ui.log if e[0] == "spin"]
+    assert spins and "READ_FILE ↔ EDIT_FILE" in spins[0]
+
+
+def test_the_cycle_guard_warns_then_stops_and_spares_progress():
+    from genesis_agent.repeat_guard import RepeatGuard
+    g = RepeatGuard()
+    assert g.observe("READ_FILE", {"path": "a"}, "A").note == ""
+    assert g.observe("EDIT_FILE", {"path": "a"}, "❌ няма го").note == ""
+    third = g.observe("READ_FILE", {"path": "a"}, "A")
+    assert not third.stop and third.note        # предупреждение при първото връщане
+    assert not g.observe("EDIT_FILE", {"path": "a"}, "❌ няма го").stop
+    assert g.observe("READ_FILE", {"path": "a"}, "A").stop
+    # A, B, C с различни резултати — напредък, никога спиране.
+    g = RepeatGuard()
+    for i in range(12):
+        assert not g.observe("RUN_CMD", {"command": "pytest"}, "1 failed").stop
+        assert not g.observe("EDIT_FILE", {"path": "a", "new": str(i)}, "✓").stop
+        assert not g.observe("READ_FILE", {"path": "a"}, f"v{i}").stop
