@@ -245,13 +245,29 @@ def _head(token: str) -> str:
     return base.removesuffix(".exe")
 
 
+# Флагове, с които пускачът не пуска нито един тест. Одит 2026-10-11:
+# `pytest --version` и `pytest --collect-only -q` (rc=0) след червен pytest се
+# броеха за последно, зелено пускане и „Всички тестове минаха“ минаваше.
+_NO_RUN_FLAGS = frozenset({"--version", "--help", "-h", "--collect-only", "--co"})
+# `check` е тест-цел за make/npm/just (`make check`), но не и за cargo
+# (`cargo check` само компилира) и Django (`python manage.py check` —
+# системна проверка). Одит 2026-10-11: и двете с rc=0 скриваха червен тест.
+_CHECK_IS_NOT_TESTS = frozenset({"cargo", "python"})
+
+
+def _test_target(tool: str, target: str) -> bool:
+    if not _TEST_TARGET_RE.match(target):
+        return False
+    return not (tool in _CHECK_IS_NOT_TESTS and target.startswith("check"))
+
+
 def _segment_is_test_run(segment: str) -> bool:
     tokens = [t for t in segment.split() if t]
     # Обвивки и променливи отпред: `FOO=1 timeout 60 uv run pytest`.
     while tokens and ("=" in tokens[0] or _head(tokens[0]) in _WRAPPERS
                       or tokens[0].isdigit() or tokens[0].startswith("-")):
         tokens.pop(0)
-    if not tokens:
+    if not tokens or _NO_RUN_FLAGS & set(tokens[1:]):
         return False
     tool, rest = _head(tokens[0]), [_head(t) for t in tokens[1:]]
     if tool in _TEST_TOOLS:
@@ -264,12 +280,12 @@ def _segment_is_test_run(segment: str) -> bool:
             return len(args) > 1 and args[1] in _PY_TEST_MODULES
         # `python run_tests.py`, `python tests/test_x.py`, `python manage.py test`.
         return bool(args) and (bool(_TESTY_NAME_RE.search(args[0]))
-                               or (len(args) > 1 and bool(_TEST_TARGET_RE.match(args[1]))))
+                               or (len(args) > 1 and _test_target("python", args[1])))
     if tool in _TASK_TOOLS:
         targets = [t for t in rest if not t.startswith("-") and "=" not in t and t != "run"]
         if tool != "make":
             targets = targets[:1]
-        return any(_TEST_TARGET_RE.match(t) for t in targets)
+        return any(_test_target(tool, t) for t in targets)
     # Собствен скрипт: `./run_tests.sh`, `test.bat`. Самото `test` е
     # проверката на shell-а (`test -f x`), не тестове.
     return tool != "test" and bool(_TESTY_NAME_RE.search(tool))
@@ -280,33 +296,66 @@ def is_test_run(command: str) -> bool:
     return any(_segment_is_test_run(seg) for seg in _SEGMENT_SPLIT_RE.split(command or ""))
 
 
-_RC_RE = re.compile(r"\(rc=(-?\d+)\)")
+# Заглавието, което пише genesis_skills._tool_run_cmd: „[RUN_CMD: cmd]  (rc=N)“
+# в края на ред. Одит 2026-10-11: rc се търсеше само на първия ред, така че
+# при `cd app\npytest -q` (rc=1) се четеше rc=0; а `(rc=None)` (timeout,
+# спряна или непусната команда) не пасваше на `-?\d+` и убит pytest минаваше
+# за зелен. Командата се взема пак оттук: `[^\]]*` на текстовия път режеше
+# `[ -d tests ] && pytest -q` до `[ -d tests `.
+_HEADER_RE = re.compile(r"\[RUN_CMD: (.*?)\]  \(rc=(-?\d+|None)\)$", re.DOTALL | re.MULTILINE)
 # Белег в края на аргументите на команда с rc≠0 — по него „всички тестове
 # минаха“ разбира, че последното пускане е паднало, а останалите категории
 # не броят командата.
 _FAILED_RC_RE = re.compile(r" \(rc=(-?\d+)\)$")
+# Червен изход на тестов пускач, независимо кой е: pytest/jest „1 failed“,
+# unittest „FAILED (failures=1)“, go „FAIL“, cargo „test result: FAILED“.
+# `FAIL` е с главни букви нарочно — „xfailed“, „XFAIL“ не са червени.
+_RED_OUTPUT_RE = re.compile(
+    r"\bFAIL(?:ED|URES)?\b|\b[1-9]\d* (?:failed|failing|failures?|errors?)\b")
+
+
+def _rc_is_the_runners(command: str) -> bool:
+    """rc на `command` ли е rc на тестовия пускач: чиста `&&` верига, която
+    свършва с него. Одит 2026-10-11: `pytest | tail`, `| tee`, `|| true`,
+    `; echo`, `& echo` (cmd.exe) връщат rc на опашката — червен pytest
+    доказваше „всички минаха“; а в `pytest && git commit` неуспешният commit
+    правеше зеления pytest червен."""
+    rest = re.sub(r"\d*>&\d*|&>", " ", command or "").replace("&&", "\0")
+    if re.search(r"[|;&\n]", rest):
+        return False
+    segments = [seg for seg in rest.split("\0") if seg.strip()]
+    return bool(segments) and _segment_is_test_run(segments[-1])
 
 
 def counts_as_executed(name: str, args: str, result: str) -> tuple[str, str] | None:
     """Записът за `executed`, или None, ако резултатът не доказва изпълнение."""
-    result = result or ""
-    if _TOOL_REFUSED_RE.match(result.lstrip()):
+    result = (result or "").lstrip()
+    if _TOOL_REFUSED_RE.match(result):
         return None
-    first = result.split("\n", 1)[0]
-    rc_match = _RC_RE.search(first) if name == "RUN_CMD" else None
-    rc = int(rc_match.group(1)) if rc_match else 0
+    head = _HEADER_RE.match(result) if name.upper() == "RUN_CMD" else None
+    if head is None:
+        # Без заглавие с rc командата не е тръгнала (отказ на sandbox-а) или е
+        # друг инструмент — тогава решават белезите за неуспех в текста.
+        if any(marker in result for marker in _FAILURE_MARKERS):
+            return None
+        return (name, args)
+    # Със заглавие командата е тръгнала и решава rc-то; изходът не го отменя.
+    # Одит 2026-10-11: зелен pytest, който логва „Traceback“ или „не
+    # съществува“, изпадаше — подкана, а след по-ранен червен — фалшиво „⚠
+    # червено“ и `genesis -p` с exit 1.
+    command = head.group(1)
+    if head.group(2) == "None":
+        rc = -1  # timeout или спряна: не е свършила
+    elif is_test_run(command) and not _rc_is_the_runners(command):
+        # rc е на опашката на веригата, не на пускача — решава изходът му.
+        rc = 1 if _RED_OUTPUT_RE.search(result, head.end()) else 0
+    else:
+        rc = int(head.group(2))
     # Команда с rc≠0 е тръгнала, но не е свършила това, за което е пусната
     # (bug fix, 2026-10-11). Измерено: `pip install` с rc=1 доказваше
     # „Инсталирах пакета“, а `mv` с „cannot stat“ — „Преместих снимките“.
-    # Записът остава, белязан с rc-то си: паднал тест пак е пуснат тест, а
-    # пускач, който is_test_run не познава (`./ci.sh`), пак доказва „Пуснах
-    # тестовете: един пада“. Белязаният запис доказва САМО пускане на тестове
-    # (виж _evidence) и „всички минаха“ не се доказва с него.
-    if rc:
-        return (name, f"{args} (rc={rc})")
-    if any(marker in result for marker in _FAILURE_MARKERS):
-        return None
-    return (name, args)
+    # Записът остава, белязан с rc-то си: паднал тест пак е пуснат тест.
+    return (name, f"{command} (rc={rc})") if rc else (name, command)
 
 
 def _failed_rc(entry: tuple[str, str]) -> tuple[str, int]:
@@ -329,12 +378,11 @@ def _last_test_rc(executed: list[tuple[str, str]]) -> int:
 
 
 def _evidence(kind: str, executed: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """Кои записи доказват `kind`. Паднала команда доказва само „пуснах
-    тестовете“; за „всички минаха“ влиза само ако е тестово пускане — тогава
-    rc-то ѝ го опровергава в _last_test_rc."""
-    if kind == _RAN_KIND:
-        return executed
-    if kind == _PASS_KIND:
+    """Кои записи доказват `kind`. Паднала команда доказва нещо само ако е
+    тестово пускане — „пуснах тестовете“, а за „всички минаха“ rc-то ѝ го
+    опровергава в _last_test_rc. Одит 2026-10-11: паднали `npm run build`,
+    `cargo build`, `npm install` доказваха „Пуснах тестовете, един пада“."""
+    if kind in (_RAN_KIND, _PASS_KIND):
         return [e for e in executed if not _failed_rc(e)[1] or _is_test_entry(e)]
     return [e for e in executed if not _failed_rc(e)[1]]
 
@@ -351,6 +399,8 @@ def executed_from_text_results(results: list[str]) -> list[tuple[str, str]]:
         match = _RESULT_PREFIX_RE.match(result or "")
         if not match:
             continue
+        # За RUN_CMD с rc командата се взема от цялото заглавие (_HEADER_RE):
+        # group(2) спира на първото „]“.
         entry = counts_as_executed(match.group(1), match.group(2), result)
         if entry:
             out.append(entry)
