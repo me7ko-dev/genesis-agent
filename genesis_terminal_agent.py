@@ -15,6 +15,7 @@ rich rendering, and the interactive sandbox confirmation prompt.
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1654,6 +1655,12 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
             tool_results = parse_and_execute_tools(response)
             _executed.extend(claim_check.executed_from_text_results(tool_results))
             for _r in tool_results:
+                # Резултатът — към оператора, както при native пътя (e2e
+                # 2026-10-11). Измерено: с модел на текстови тагове (локалният
+                # резервен слой) телефонът не виждаше нито един резултат, а
+                # `genesis -p --json` даваше "tools": [] след EDIT_FILE и RUN_CMD.
+                _tag = re.match(r"\[([A-Z_]+)[:\]]", _r or "")
+                ui.tool(_tag.group(1) if _tag else "инструмент", _r)
                 _page_check.observe(_r)
                 _run_check.observe(_r)
                 _accept.observe(_r)

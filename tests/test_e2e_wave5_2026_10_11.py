@@ -309,3 +309,20 @@ def test_a_write_blocked_by_an_operator_hook_is_not_proof_of_writing(ws, monkeyp
 ], ids=["hook", "plan", "cancel", "elided"])
 def test_gate_refusals_are_not_executed(result):
     assert claim_check.counts_as_executed("WRITE_FILE", "a.py x", result) is None
+
+
+# ── F8: резултатите от текстови тагове стигат до оператора ──────────────────
+
+def test_text_tag_results_reach_the_ui_and_the_headless_json(ws, monkeypatch, capsys):
+    from genesis_agent import headless
+    (ws / "calc.py").write_bytes(b"def add(a, b):\r\n    return a - b\r\n")
+    monkeypatch.setattr(gta, "build_system_prompt", lambda: ("SYS", ""))
+    monkeypatch.setattr(headless, "_read_stdin", lambda: "")
+    _script(monkeypatch, [
+        ("[EDIT_FILE: calc.py]\nreturn a - b\n---GENESIS-REPLACE-WITH---\nreturn a + b\n[END_EDIT]", None),
+        (f'[RUN_CMD: "{sys.executable}" -c "from calc import add; print(add(2, 3))"]', None),
+        ("Поправих add: 2 + 3 дава 5.", None), ("Пробвах и с отрицателни.", None)])
+    code = headless.run(["--json", "--cwd", str(ws), "оправи add в calc.py"])
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0 and out["tools"] == ["EDIT_FILE", "RUN_CMD"], out
+    assert (ws / "calc.py").read_bytes() == b"def add(a, b):\r\n    return a + b\r\n"
