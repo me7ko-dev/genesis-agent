@@ -145,6 +145,9 @@ def _isolated_operator_settings(monkeypatch, tmp_path):
     env_files = (str(tmp_path / "project.env"), str(home / ".env"))
     monkeypatch.setattr("genesis_agent.paths.ENV_FILES", env_files)
     monkeypatch.setattr("genesis_agent.brain.ENV_FILES", env_files)
+    # Отказаните като твърде големи размери са на модула (2026-10-11) — тест с
+    # HTTP_413 не бива да скрива модела от следващите тестове.
+    monkeypatch.setattr("genesis_agent.brain._TOO_LARGE", {})
     # Историята на чата: тестове с run_turn пишеха session_*.json и
     # by_workspace.json в истинската ~/.local/share/genesis-agent/history —
     # `genesis -c` после продължаваше тестов разговор (одит 2026-10-09).

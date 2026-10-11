@@ -244,6 +244,24 @@ def _hit_output_cap(error: str) -> bool:
     return "HTTP_TRUNCATED" in error
 
 
+# Заявка над лимита на модела за един път (безплатният Groq: 8 000 токена в
+# минута → HTTP_413 „Request too large“). Bench all-2026-10-11-mega: 127 такива
+# отказа на groq/gpt-oss-120b (86 s), по един на всеки рунд, щом историята
+# порасне — и всеки се броеше за провал на доставчика, тоест бързият стартов
+# модел слизаше надолу във веригата за всички. Помни се най-малкият отказан
+# размер (знаци JSON) за модела: по-голяма или равна заявка не тръгва към него,
+# по-малка (нова задача, свита история) — пак.
+_TOO_LARGE: dict[str, int] = {}
+
+
+def _too_large(error: str) -> bool:
+    return error.startswith("HTTP_413")
+
+
+def _request_size(messages: list[dict], tools: list[dict] | None) -> int:
+    return len(json.dumps([messages, tools], ensure_ascii=False, default=str))
+
+
 def _openai_usage(usage: Any) -> Any:
     """usage от OpenAI-съвместим отговор + `cached_read_tokens` за budget.py.
 
@@ -2083,6 +2101,11 @@ class Brain:
                     if use_tools and (prov in _NATIVE_PROVIDERS or prov in CACHE_PROVIDERS
                                       or key in CACHE_PROVIDERS):
                         msgs = cache_view(prov)
+                    size = _request_size(msgs, use_tools)
+                    if size >= _TOO_LARGE.get(key, size + 1):
+                        only_unconfigured = False
+                        last_error = f"{prov}/{model}: заявката е над лимита му за един път"
+                        continue
                     t0 = time.time()
                     self._attempt_id = (prov, model)
                     self._usage_attempt = None
@@ -2152,7 +2175,9 @@ class Brain:
                         if not synthetic:
                             sent_any = True
                             last_real_error = last_error
-                            if not _hit_output_cap(last_error):
+                            if _too_large(last_error):
+                                _TOO_LARGE[key] = min(_TOO_LARGE.get(key, size), size)
+                            elif not _hit_output_cap(last_error):
                                 retry_useful = retry_useful or not cools
                                 # Изяден таван не е болен доставчик (2026-10-11):
                                 # 5 отрязани големи WRITE_FILE на groq даваха
