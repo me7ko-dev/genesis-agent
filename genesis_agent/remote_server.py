@@ -34,6 +34,12 @@ Code на телефона управлява сесия, която тече д
 `events` носи и "state": {"plan": bool, "todos": [{content, status}]}; събитието
 "progress" е напредъкът на под-агент. `send` с "/plan", "/undo" … — командите на
 чата (phone_command), не текст за модела.
+
+2026-10-11: `events` с "more": true — отговорът е стигнал тавана, телефонът пита
+веднага пак от "last". `send` може да носи "mid" (идентификатор от телефона):
+повторен опит със същия "mid" получава първия отговор, без втори ход. Грешка в
+отворена заявка е {"ok": false, "error": "unknown_op"|"empty"|"bad_args"|…},
+не 401.
 """
 from __future__ import annotations
 
@@ -65,9 +71,23 @@ _EVENT_LOG = 1000
 _TOOL_PREVIEW = 4000
 # Таван на един отговор на `events` (одит 2026-10-11): студен старт след 1000
 # изхода на инструменти теглеше 7.3 MiB, а open() на телефона ги декодираше
-# 1.1 s (5 s без JIT, близо до Hermes) на JS нишката. Над тавана — най-новите
-# и reset, телефонът подменя списъка си (mergeEvents).
+# 1.1 s (5 s без JIT, близо до Hermes) на JS нишката. Над тавана: при reset —
+# най-новите; иначе — НАЙ-СТАРИТЕ след `after` и "more", телефонът дотегля
+# (втори одит 2026-10-11: най-новите + reset губеха дупката и целия разговор
+# на телефон, събуден след ~130 инструмента).
 _REPLY_BYTES = 512 * 1024
+# Колко последни `mid` на `send` помним (2026-10-11): повторен опит след
+# изгубен отговор не пуска хода втори път.
+_SENT_MIDS = 256
+_MID = re.compile(r"[A-Za-z0-9_-]{8,64}")
+# Видът на плика {"v":1,"n":…,"c":…} в суровите байтове (преглед 2026-10-11):
+# адрес над спирачката получава 429 веднага, без json.loads и опит за
+# отваряне — освен ако тялото не е точно плик (сдвоеният телефон зад същия
+# NAT минава). Без тази проверка всяка спряна заявка от 240 KiB струваше на
+# сървъра 10 ms вместо 1.5 ms преди спирачката да се премести след плика.
+_ENVELOPE_SHAPE = re.compile(
+    rb'\s*\{\s*"v"\s*:\s*\d{1,3}\s*,\s*"n"\s*:\s*"[A-Za-z0-9_=+/-]{1,64}"\s*,'
+    rb'\s*"c"\s*:\s*"[A-Za-z0-9_=+/-]+"\s*\}\s*')
 
 
 class ProtocolError(Exception):
@@ -311,19 +331,33 @@ class RemoteSession:
             first = self._events[0]["seq"] if self._events else self._seq + 1
             # Пропуснатото вече не е в дневника → телефонът получава целия
             # наличен дневник и знае, че трябва да го покаже наново.
-            reset = after + 1 < first or after > self._seq
+            # after <= 0 — телефон без история (студен старт): и той е reset,
+            # иначе над тавана щеше да тегли целия дневник от НАЙ-СТАРИТЕ
+            # страница по страница (преглед 2026-10-11: 450 инструмента без
+            # завъртян дневник — 7 страници, 3.3 MB вместо 1 страница 0.5 MB).
+            reset = after <= 0 or after + 1 < first or after > self._seq
             items = list(self._events) if reset else [e for e in self._events if e["seq"] > after]
             reply = {"events": items, "last": self._seq, "reset": reset,
-                     "busy": self._busy, "epoch": self.epoch}
+                     "busy": self._busy, "epoch": self.epoch, "more": False}
         # Размерът се мери извън ключалката — emit() не чака сериализацията.
+        # reset: телефонът подменя всичко → най-новите. Иначе той вече показва
+        # всичко до `after` → най-старите след него, `last` = последното
+        # изпратено и "more": дупка няма, а всеки отговор е до тавана (одит
+        # 2026-10-11: 200 инструмента в заключен телефон — изчезваха 130
+        # събития и собствените му съобщения).
+        ordered = list(reversed(items)) if reset else items
         kept, size = 0, 0
-        for event in reversed(items):
+        for event in ordered:
             size += len(utf8_bytes(json.dumps(event, ensure_ascii=False)))
             if kept and size > _REPLY_BYTES:
                 break
             kept += 1
         if kept < len(items):
-            reply["events"], reply["reset"] = items[-kept:], True
+            if reset:
+                reply["events"] = items[-kept:]
+            else:
+                reply["events"], reply["more"] = items[:kept], True
+                reply["last"] = items[kept - 1]["seq"]
         if self._state is not None:
             try:
                 reply["state"] = self._state()
@@ -576,6 +610,11 @@ class RemoteServer:
         self.web_root = web_root
         self._failures: dict[str, list[float]] = {}
         self._lock = threading.Lock()
+        # Приетите `send` по идентификатора от телефона (`mid`), за повторен
+        # опит след изгубен отговор (одит 2026-10-11: LAN прекъсне, телефонът
+        # казва „няма връзка“, операторът натиска пак — ходът вървеше два пъти).
+        self._sent: dict[str, dict] = {}
+        self._send_lock = threading.Lock()
 
     # -- заявки --
     def hello(self) -> dict:
@@ -584,7 +623,13 @@ class RemoteServer:
                 "name": self.name, "version": __version__}
 
     def handle(self, envelope: Any) -> tuple[dict, str]:
-        """(отговор, rid) за вече декодиран JSON плик. Хвърля ProtocolError."""
+        """(отговор, rid) за вече декодиран JSON плик. Хвърля ProtocolError
+        САМО за плик, който не се отваря с ключа или е стар/повторен.
+
+        Грешка в самата заявка (непозната операция, празно съобщение) идва в
+        запечатания отговор като {"ok": false, "error": …} — одит 2026-10-11:
+        беше 401, телефонът го показваше като „ключът вече не се приема,
+        сдвои отново“ и го броеше за спирачката срещу налучкване."""
         payload = self.cipher.open(envelope, _REQ_AAD)
         rid = self.replay.check(payload)
         return self._dispatch(payload), rid
@@ -595,18 +640,26 @@ class RemoteServer:
         if op == "status":
             return {"ok": True, **self.hello(), "busy": s.busy, **self.status()}
         if op == "send":
-            text = str(p.get("text") or "")
-            if len(text) > 20000:
-                return {"ok": False, "error": "too_long"}
-            if text.strip().lower() in ("/clear", "/нов"):
-                return self._dispatch({"op": "clear"})
-            return {"ok": True} if s.send(text) else {"ok": False, "error": "busy"}
+            mid = p.get("mid")
+            if not (isinstance(mid, str) and _MID.fullmatch(mid)):
+                return self._send(p)
+            with self._send_lock:
+                if mid in self._sent:
+                    return self._sent[mid]
+                reply = self._send(p)
+                # Само приетото: „busy“ не е изпълнено — повторният опит
+                # трябва да може да мине, щом ходът свърши.
+                if reply.get("ok"):
+                    self._sent[mid] = reply
+                    while len(self._sent) > _SENT_MIDS:
+                        del self._sent[next(iter(self._sent))]
+                return reply
         if op == "events":
             try:
                 after = int(p.get("after") or 0)
                 wait = float(p.get("wait") or 0)
-            except (TypeError, ValueError, OverflowError) as e:   # "after": Infinity
-                raise ProtocolError("bad events args") from e
+            except (TypeError, ValueError, OverflowError):   # "after": Infinity
+                return {"ok": False, "error": "bad_args"}
             return {"ok": True, **s.events_after(after, wait)}
         if op == "confirm":
             return {"ok": s.answer(str(p.get("id") or ""), bool(p.get("allow")))}
@@ -620,7 +673,20 @@ class RemoteServer:
                 self.clear()
             s.emit("cleared")
             return {"ok": True}
-        raise ProtocolError("unknown op")
+        # По-ново приложение с операция, която този `genesis serve` не знае.
+        return {"ok": False, "error": "unknown_op"}
+
+    def _send(self, p: dict) -> dict:
+        text = str(p.get("text") or "")
+        if len(text) > 20000:
+            return {"ok": False, "error": "too_long"}
+        # Python strip(), не JS trim(): "\x1c" или "\x85" минават trim() на
+        # телефона и тук са празно (одит 2026-10-11).
+        if not text.strip():
+            return {"ok": False, "error": "empty"}
+        if text.strip().lower() in ("/clear", "/нов"):
+            return self._dispatch({"op": "clear"})
+        return {"ok": True} if self.session.send(text) else {"ok": False, "error": "busy"}
 
     def seal(self, response: dict, rid: str) -> dict:
         return self.cipher.seal(response, _RES_AAD + rid.encode("ascii"))
@@ -700,9 +766,6 @@ class RemoteServer:
                 if self.path.split("?", 1)[0] != "/api/v1":
                     self._json(404, {"error": "not_found"})
                     return
-                if server.too_many_failures(ip):
-                    self._json(429, {"error": "slow_down"})
-                    return
                 try:
                     length = int(self.headers.get("Content-Length") or 0)
                 except ValueError:
@@ -715,6 +778,18 @@ class RemoteServer:
                 except OSError:   # таймаут — броим го като провал за спирачката
                     server.record_failure(ip)
                     return
+                # Спирачката е СЛЕД опита да отворим плика (одит 2026-10-11):
+                # преди беше първа и по адрес — страница в браузъра на самия
+                # телефон (30 POST-а text/plain) или съсед зад същия NAT
+                # заключваше сдвоения телефон. Заявка, която се отваря с ключа и
+                # минава ReplayGuard, не се спира; провалите се броят както
+                # преди и над 30/мин получават 429 без подробност. Над
+                # спирачката само тяло с вида на плик стига до json.loads и
+                # ключа (_ENVELOPE_SHAPE); всичко друго — 429 веднага.
+                if server.too_many_failures(ip) and not _ENVELOPE_SHAPE.fullmatch(body):
+                    server.record_failure(ip)
+                    self._json(429, {"error": "slow_down"})
+                    return
                 try:
                     envelope = json.loads(body.decode("utf-8"))
                     response, rid = server.handle(envelope)
@@ -722,7 +797,11 @@ class RemoteServer:
                 # на оператора на всяка заявка и без провал за спирачката (одит
                 # 2026-10-11).
                 except (ProtocolError, ValueError, UnicodeDecodeError, RecursionError) as e:
+                    braked = server.too_many_failures(ip)
                     server.record_failure(ip)
+                    if braked:
+                        self._json(429, {"error": "slow_down"})
+                        return
                     # Подробността е само вида на отказа („cannot open",
                     # „stale request"): полезна на своя телефон, безполезна
                     # на непознат, който няма ключа.

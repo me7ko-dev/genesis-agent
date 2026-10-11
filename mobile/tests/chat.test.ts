@@ -1,9 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
-import { mergeEvents, thinkingLabel, todoSummary, toChatItems } from '../src/lib/chat.ts';
+import {
+  MAX_EVENTS, mergeEvents, reuseItems, thinkingLabel, todoSummary, toChatItems, trimEvents,
+} from '../src/lib/chat.ts';
 import { splitBlocks, splitInline } from '../src/lib/markdown.ts';
-import type { GenesisEvent } from '../src/lib/protocol.ts';
+import { errorText, MAX_MESSAGE, messageLength, replyErrorText, trimDraft } from '../src/lib/messages.ts';
+import { Outbox, RETRY_WINDOW_MS } from '../src/lib/outbox.ts';
+import { ProtocolError, type GenesisEvent } from '../src/lib/protocol.ts';
 
 const ev = (seq: number, type: string, extra: Partial<GenesisEvent> = {}): GenesisEvent =>
   ({ seq, ts: seq, type, ...extra });
@@ -68,4 +73,179 @@ test('markdown: fences and inline marks', () => {
   assert.deepEqual(splitInline('a **b** `c` d'), [
     { t: 'a ' }, { t: 'b', bold: true }, { t: ' ' }, { t: 'c', code: true }, { t: ' d' },
   ]);
+});
+
+// ── одит 2026-10-11 ─────────────────────────────────────────────────────────
+
+test('the phone keeps what the server keeps: the last 1000, nothing before "cleared"', () => {
+  let events: GenesisEvent[] = [];
+  for (let turn = 0; turn < 400; turn++) {
+    const base = turn * 27;
+    events = mergeEvents(events, Array.from({ length: 27 }, (_, i) =>
+      ev(base + i + 1, i === 0 ? 'user' : 'tool', { text: `ход ${turn}`, name: 'RUN_CMD', result: 'x' })), false);
+  }
+  assert.equal(events.length, MAX_EVENTS, 'беше 10 800 — нищо не се махаше');
+  assert.equal(events[events.length - 1].seq, 400 * 27);
+  const end = 400 * 27;
+  const cleared = mergeEvents(events, [ev(end + 1, 'cleared'), ev(end + 2, 'user', { text: 'ново' })], false);
+  assert.deepEqual(cleared.map((e) => e.type), ['cleared', 'user'], 'преди "cleared" нищо не се показва');
+  // След "cleared" следващото сливане знае докъде е стигнало.
+  assert.equal(mergeEvents(cleared, [ev(end + 2, 'user')], false), cleared);
+  assert.equal(trimEvents(cleared), cleared, 'нищо за махане → същият масив');
+  assert.equal(mergeEvents([], Array.from({ length: 1500 }, (_, i) => ev(i + 1, 'info')), true).length, MAX_EVENTS);
+});
+
+test('an unchanged chat item stays the same object across polls', () => {
+  const events = [ev(1, 'user', { text: 'hi' }), ev(2, 'tool', { name: 'RUN_CMD', result: 'ok' }),
+    ev(3, 'confirm', { id: 'a', operation: 'rm x', reasons: ['r'] })];
+  const before = reuseItems([], toChatItems(events));
+  // Само „thinking“: нищо видимо не се променя → същият масив, същите обекти.
+  const thinking = reuseItems(before, toChatItems([...events, ev(4, 'thinking', { label: 'x' })]));
+  assert.equal(thinking, before);
+  // Отговорът на потвърждението сменя само неговата карта.
+  const done = ev(5, 'confirm_done', { id: 'a', allow: true });
+  const answered = reuseItems(before, toChatItems([...events, done]));
+  assert.notEqual(answered, before);
+  assert.equal(answered[0], before[0]);
+  assert.equal(answered[1], before[1]);
+  assert.notEqual(answered[2], before[2]);
+  assert.equal(answered[2].kind === 'confirm' && answered[2].state, 'allowed');
+  // Нов елемент накрая: старите остават същите обекти.
+  const more = reuseItems(answered, toChatItems([...events, done, ev(6, 'assistant', { text: 'готово' })]));
+  assert.equal(more.length, 4);
+  for (let i = 0; i < 3; i++) assert.equal(more[i], answered[i]);
+});
+
+test('the cards are memo and the confirm card gets a stable callback', () => {
+  const cards = readFileSync(new URL('../src/components/Cards.tsx', import.meta.url), 'utf8');
+  for (const name of ['UserBubble', 'AssistantMessage', 'ToolCard', 'Note', 'ConfirmCard']) {
+    assert.match(cards, new RegExp(`export const ${name} = memo\\(`), name);
+  }
+  const chat = readFileSync(new URL('../src/app/chat.tsx', import.meta.url), 'utf8');
+  assert.match(chat, /<ConfirmCard item=\{item\} onAnswer=\{g\.confirm\} \/>/);
+});
+
+test('one send at a time; a retry of the same text keeps its id', async () => {
+  let n = 0;
+  const outbox = new Outbox(() => `mid-${++n}-xxxxxx`);
+  const seen: string[] = [];
+  let release!: () => void;
+  const slow = (text: string, mid: string) => {
+    seen.push(`${text}:${mid}`);
+    return new Promise<{ ok: boolean }>((r) => { release = () => r({ ok: true }); });
+  };
+  const first = outbox.send('/plan', slow);
+  assert.equal(outbox.sending, true);
+  assert.equal(await outbox.send('/plan', slow), null, 'второто докосване не прави нищо');
+  release();
+  assert.deepEqual(await first, { ok: true });
+  assert.equal(outbox.sending, false);
+  assert.deepEqual(seen, ['/plan:mid-1-xxxxxx']);
+
+  // Изгубен отговор: грешката минава нататък, повторният опит е със същия mid.
+  const lost = async (): Promise<{ ok: boolean }> => { throw new Error('lost'); };
+  await assert.rejects(outbox.send('пусни тестовете', lost));
+  const ids: string[] = [];
+  const ok = async (_: string, mid: string) => { ids.push(mid); return { ok: true }; };
+  await outbox.send('пусни тестовете', ok);
+  assert.deepEqual(ids, ['mid-2-xxxxxx']);
+  // След отговор — нов mid, и за същия текст.
+  await outbox.send('пусни тестовете', ok);
+  assert.deepEqual(ids, ['mid-2-xxxxxx', 'mid-3-xxxxxx']);
+  // Друг текст след изгубен отговор — нов mid.
+  await assert.rejects(outbox.send('а', lost));
+  await outbox.send('б', ok);
+  assert.equal(ids[2], 'mid-5-xxxxxx');
+});
+
+test('a stale mid is forgotten: a later message with the same text is a new turn', async () => {
+  // Преглед 2026-10-11: сървърът приема „продължи“, отговорът се губи; по-късно
+  // операторът нарочно праща „продължи“ пак — със стария mid сървърът
+  // (RemoteServer._sent) го поглъщаше: 1 ход вместо 2.
+  let clock = 0;
+  let n = 0;
+  const box = new Outbox(() => `mid-${++n}-xxxxxx`, () => clock);
+  const sent = new Map<string, { ok: boolean }>();
+  let turns = 0;
+  let drop = false;
+  const server = async (_: string, mid: string) => {
+    let reply = sent.get(mid);
+    if (!reply) {
+      turns += 1;
+      reply = { ok: true };
+      sent.set(mid, reply);
+    }
+    if (drop) throw new Error('lost');
+    return reply;
+  };
+
+  // 1) Своето балонче дойде в събитията → следващото е нов ход.
+  drop = true;
+  await assert.rejects(box.send('продължи', server));
+  drop = false;
+  box.seen([{ type: 'assistant', text: 'продължи' }]);
+  box.seen([{ type: 'user', text: 'продължи' }]);
+  await box.send('продължи', server);
+  assert.equal(turns, 2);
+
+  // 2) Без събития (телефонът е без връзка) — след прозореца е нов ход.
+  drop = true;
+  await assert.rejects(box.send('/plan', server));
+  drop = false;
+  clock += RETRY_WINDOW_MS;
+  await box.send('/plan', server);
+  assert.equal(turns, 4);
+
+  // 3) Повторен опит в прозореца, без своето балонче — пак същият mid.
+  drop = true;
+  await assert.rejects(box.send('да', server));
+  clock += RETRY_WINDOW_MS - 1;
+  await assert.rejects(box.send('да', server));
+  clock += RETRY_WINDOW_MS - 1;   // прозорецът тече от последния опит
+  drop = false;
+  box.seen([{ type: 'user', text: 'друго' }]);
+  await box.send('да', server);
+  assert.equal(turns, 5);
+
+  const hook = readFileSync(new URL('../src/lib/useGenesis.ts', import.meta.url), 'utf8');
+  assert.match(hook, /outbox\.seen\(reply\.events\)/);
+});
+
+test('errors reach the operator in Bulgarian', () => {
+  assert.match(replyErrorText('too_long'), /твърде дълго/);
+  assert.match(replyErrorText('busy'), /още работи/);
+  assert.match(replyErrorText('unknown_op'), /по-стар/);
+  assert.match(replyErrorText('empty'), /празно/);
+  assert.equal(replyErrorText('toString'), 'Компютърът отказа заявката.');
+  assert.equal(replyErrorText(undefined), 'Компютърът отказа заявката.');
+  assert.match(errorText(new ProtocolError('server error 413', 'server', 413)), /твърде голямо/);
+  assert.match(errorText(new ProtocolError('too many failed attempts — wait a minute', 'network', 429)), /изчакай минута/);
+  assert.match(errorText(new ProtocolError('cannot reach http://x', 'network')), /Няма връзка/);
+  assert.match(errorText(new ProtocolError('the reply could not be verified', 'protocol')), /проверен/);
+  for (const kind of ['network', 'unauthorized', 'clock', 'protocol', 'server'] as const) {
+    assert.doesNotMatch(errorText(new ProtocolError('english', kind, 500)), /[a-z]{4,}/, kind);
+  }
+  assert.equal(errorText(new TypeError('x')), 'Неочаквана грешка в приложението.');
+  // useGenesis вече не показва нито `reply.error ?? …`, нито e.message.
+  const hook = readFileSync(new URL('../src/lib/useGenesis.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(hook, /reply\.error \?\? /);
+  assert.doesNotMatch(hook, /setError\(e instanceof Error \? e\.message/);
+});
+
+test('a draft is trimmed the way the server strips it; the length is counted like the server', () => {
+  assert.equal(trimDraft('\x1c'), '');
+  assert.equal(trimDraft(' \x85здравей\x1f\n'), 'здравей');
+  assert.equal(trimDraft('a\x1cb'), 'a\x1cb');
+  assert.equal(messageLength('👋'.repeat(3)), 3);
+  assert.equal(messageLength('я'.repeat(MAX_MESSAGE)), MAX_MESSAGE);
+});
+
+test('"Нов разговор" is not offered while a turn runs, and its "busy" is said', () => {
+  const chat = readFileSync(new URL('../src/app/chat.tsx', import.meta.url), 'utf8');
+  const guard = chat.indexOf('{g.busy ? null : (');
+  const item = chat.indexOf('label="Нов разговор"');
+  assert.ok(guard > 0 && item > guard, '„Нов разговор“ е под проверката за busy');
+  const hook = readFileSync(new URL('../src/lib/useGenesis.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(hook, /const clear = useCallback\(\(\) => act\(\(\) => client\.clear\(\)\)/);
+  assert.match(hook, /client\.clear\(\)\);\s+if \(reply && !reply\.ok\) setError\(replyErrorText\(reply\.error\)\)/);
 });
