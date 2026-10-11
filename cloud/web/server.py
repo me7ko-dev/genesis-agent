@@ -198,7 +198,14 @@ def list_files(workspace: Path) -> list[dict[str, Any]]:
             st = p.lstat()
             if not stat.S_ISREG(st.st_mode):
                 continue  # символна връзка, fifo, устройство — не се дава
-            out.append({"path": (rel_root / name).as_posix(), "size": st.st_size})
+            rel = (rel_root / name).as_posix()
+            try:
+                rel.encode("utf-8")
+            except UnicodeEncodeError:
+                # Име извън UTF-8 (cp1251 от стар архив) — JSON-ът и zip-ът
+                # гърмяха и не се виждаше нито един файл (одит 2026-10-11).
+                continue
+            out.append({"path": rel, "size": st.st_size})
             if len(out) >= MAX_FILES:
                 return out
     return out

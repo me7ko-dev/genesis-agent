@@ -408,6 +408,28 @@ def test_symlinks_from_the_container_are_never_followed(env, tmp_path) -> None:
         assert z.namelist() == ["out/result.csv"]
 
 
+def test_a_non_utf8_file_name_does_not_hide_every_file(env) -> None:
+    """Одит 2026-10-11: едно име в cp1251 (от стар архив или от кода в
+    контейнера) правеше /files и files.zip „RemoteDisconnected“ — не се виждаше
+    и не се теглеше нищо, и добрият report.xlsx също."""
+    app, _, client = env
+    cl = client()
+    cl.login()
+    chat_id, _ = _chat_with_turn(cl)
+    ws = app.workspace(1, chat_id)
+    try:
+        os.close(os.open(os.fsencode(str(ws)) + b"/\xee\xf2\xf7\xe5\xf2.txt",
+                         os.O_CREAT | os.O_WRONLY))
+    except (OSError, ValueError):
+        pytest.skip("файловата система тук не приема имена извън UTF-8")
+    code, data = cl.json("GET", f"/api/chats/{chat_id}/files")
+    assert code == 200 and [f["path"] for f in data["files"]] == ["out/result.csv"]
+    code, _, body = cl.req("GET", f"/api/chats/{chat_id}/files.zip")
+    assert code == 200
+    with zipfile.ZipFile(io.BytesIO(body)) as z:
+        assert z.namelist() == ["out/result.csv"]
+
+
 def test_no_downloads_while_a_turn_is_running(env) -> None:
     _, runner, client = env
     cl = client()
