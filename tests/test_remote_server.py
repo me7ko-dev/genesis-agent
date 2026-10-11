@@ -196,6 +196,28 @@ def test_a_phone_that_missed_too_much_gets_the_whole_log() -> None:
     assert got["reset"] is True and len(got["events"]) == rs._EVENT_LOG
 
 
+def test_a_cold_start_after_a_long_session_gets_a_bounded_reply() -> None:
+    """Одит 2026-10-11: `events after=0` (всеки студен старт на приложението)
+    след 1000 изхода на инструменти беше 7.3 MiB, а open() на телефона го
+    декодираше 1.1–5 s на JS нишката. Сега най-новите в ~512 KiB и reset."""
+    session, _ = _session()
+    ui = rs.RemoteTurnUI(session)
+    for i in range(1000):
+        ui.tool("RUN_CMD", f"ред {i} " + "изход от теста " * 400)
+    ui.assistant("последно")
+    server = rs.RemoteServer(KEY, session, name="pc")
+    payload = _request("events", after=0, wait=0)
+    reply, rid = server.handle(_client_seal(KEY, payload))
+    sealed = json.dumps(server.seal(reply, rid))
+    assert len(sealed) <= 1 << 20
+    opened = _client_open(KEY, json.loads(sealed), rid)
+    assert opened["reset"] is True and opened["events"][-1]["text"] == "последно"
+    assert opened["last"] == opened["events"][-1]["seq"]
+    # Обикновеното допитване „какво има след N“ не се пипа.
+    small = session.events_after(opened["last"] - 3)
+    assert small["reset"] is False and len(small["events"]) == 3
+
+
 def test_confirm_is_answered_from_the_phone() -> None:
     session, _ = _session(Recorder(confirm=True))
     session.send("clean")
@@ -346,6 +368,41 @@ def test_guessing_is_slowed_down(live) -> None:
     assert codes[0] == 401 and codes[-1] == 429
 
 
+def test_deeply_nested_json_is_a_counted_failure_not_a_traceback(live, capsys) -> None:
+    """Одит 2026-10-11: `[` × 200 000 без ключ даваше RecursionError — traceback
+    в терминала на оператора на всяка заявка и нито един провал за спирачката."""
+    base, _, _ = live
+    codes = [_post(base, b"[" * 200_000)[0] for _ in range(35)]
+    assert codes[0] == 401 and codes[-1] == 429
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_one_address_cannot_take_every_connection_slot(live) -> None:
+    """Одит 2026-10-11: 64 празни връзки от един адрес без ключ заемаха всички
+    места за 30 s — сдвоеният телефон получаваше „RemoteDisconnected“, а
+    спирачката не виждаше нито един провал."""
+    import http.client
+    import socket
+    base, _, _ = live
+    port = int(base.rsplit(":", 1)[1])
+    try:
+        probe = socket.create_connection(("127.0.0.1", port), source_address=("127.0.0.2", 0))
+        probe.close()
+    except OSError:
+        pytest.skip("тук няма втори loopback адрес")
+    idle = [socket.create_connection(("127.0.0.1", port)) for _ in range(64)]
+    try:
+        time.sleep(0.3)
+        phone = http.client.HTTPConnection("127.0.0.1", port, timeout=5,
+                                           source_address=("127.0.0.2", 0))
+        phone.request("GET", "/api/hello")
+        assert phone.getresponse().status == 200
+        phone.close()
+    finally:
+        for sock in idle:
+            sock.close()
+
+
 def test_the_web_page_falls_back_to_a_landing_page(live) -> None:
     base, _, _ = live
     with urllib.request.urlopen(base + "/", timeout=5) as r:
@@ -404,6 +461,37 @@ def test_run_turn_stops_before_the_next_tool(monkeypatch, tmp_path) -> None:
     assert "tool_calls" not in list(messages)[-1], "history left with unanswered tool_calls"
 
 
+def test_the_phone_stop_interrupts_a_running_command(monkeypatch, tmp_path) -> None:
+    """Одит 2026-10-11: ■ на телефона не стигаше до работеща команда — ходът
+    свърши 7.1 s след Стоп, `sleep 8` довърши с rc=0."""
+    from collections import deque
+
+    import genesis_terminal_agent as gta
+
+    monkeypatch.setattr(gta, "HISTORY_DIR", tmp_path)
+    monkeypatch.setattr(gta, "_remember", lambda *a: None)
+    gta.genesis_skills.set_workspace(tmp_path)
+    call = {"id": "c1", "type": "function",
+            "function": {"name": "RUN_CMD", "arguments": json.dumps({"command": "sleep 8"})}}
+    replies = iter([("running tests", [call]), ("done", [])])
+    monkeypatch.setattr(gta, "ask_genesis", lambda *a, **k: next(replies))
+    session = rs.RemoteSession(lambda text, ui: gta.run_turn(
+        deque([{"role": "system", "content": "s"}], maxlen=50), text, ui))
+    assert session.send("run the tests")
+    deadline = time.monotonic() + 10
+    while not any(e["type"] == "thinking" for e in session.events_after(0)["events"]):
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+    time.sleep(1.0)
+    stopped_at = time.monotonic()
+    session.request_stop()
+    while session.busy and time.monotonic() - stopped_at < 15:
+        time.sleep(0.05)
+    assert time.monotonic() - stopped_at < 3, "the command ran to the end after Stop"
+    tools = [e for e in session.events_after(0)["events"] if e["type"] == "tool"]
+    assert tools and "Спряно от оператора" in tools[-1]["result"]
+
+
 def test_a_replay_is_still_rejected_after_a_restart(tmp_path) -> None:
     """Одит 2026-10-07: видяното беше само в паметта — след рестарт на
     `genesis serve` записано съобщение се изпълняваше пак."""
@@ -449,3 +537,19 @@ def test_serve_web_without_the_web_build_says_so(monkeypatch, capsys, no_listen)
     monkeypatch.setattr(rs, "_web_root", lambda: None)
     assert rs.serve(["--web"]) == 2
     assert "--web" in capsys.readouterr().out
+
+
+# ── a file name that is not UTF-8 ───────────────────────────────────────────
+
+def test_a_non_utf8_file_name_does_not_break_the_event_stream(live) -> None:
+    """Одит 2026-10-11: име на файл в cp1251 („отчет.txt“) стига до LIST_DIR като
+    lone surrogates; seal() гърмеше с UnicodeEncodeError и всяко `events after=0`
+    затваряше връзката — телефонът показваше „няма връзка“ до края на сесията."""
+    base, session, _ = live
+    rs.RemoteTurnUI(session).tool("LIST_DIR", "  main.py\n  \udcee\udcf2\udcf7\udce5\udcf2.txt")
+    rs.RemoteTurnUI(session).assistant("Готово.")
+    for _ in range(2):
+        got = _call(base, "events", after=0, wait=0)
+        tools = [e for e in got["events"] if e["type"] == "tool"]
+        assert tools and "main.py" in tools[0]["result"] and ".txt" in tools[0]["result"]
+        assert got["events"][-1]["text"] == "Готово."

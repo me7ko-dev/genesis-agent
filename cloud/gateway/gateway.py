@@ -250,7 +250,7 @@ class Gateway:
         try:
             request = json.loads(body)
             model = str(request.get("model", ""))
-        except (ValueError, AttributeError):
+        except (ValueError, AttributeError, RecursionError):   # "[" × 200 000 (2026-10-11)
             return 400, _err("невалиден JSON")
         # Поточен отговор не е JSON — `usage` се губеше и задачата харчеше без
         # таван и без сметка (2026-10-07). Genesis не ползва stream.
@@ -302,25 +302,37 @@ class Gateway:
 
 
 def _cap_completion(request: dict, body: bytes, allowed: int) -> bytes:
-    """`max_tokens` (или `max_completion_tokens`) не над `allowed`."""
-    key = "max_completion_tokens" if "max_completion_tokens" in request else "max_tokens"
-    try:
-        current = int(request.get(key) or 4096)
-    except (TypeError, ValueError):
-        current = 4096
-    if current <= allowed:
-        return body
-    request[key] = max(1, allowed)
-    return json.dumps(request).encode()
+    """Всеки таван на отговора (`max_tokens`, `max_completion_tokens`) не над
+    `allowed`; без таван — изрично `max_tokens`.
+
+    Одит 2026-10-11: липсващ таван се приемаше за 4 096, но тялото оставаше
+    непипнато и доставчикът слагаше своя (32 789 от бюджет 6 000); с двата
+    ключа се режеше само `max_completion_tokens`, а `max_tokens=200000` минаваше."""
+    allowed = max(1, allowed)
+    keys = [k for k in ("max_tokens", "max_completion_tokens") if k in request] or ["max_tokens"]
+    changed = False
+    for key in keys:
+        try:
+            current = int(request.get(key) or 4096)
+        except (TypeError, ValueError, OverflowError):
+            current = 4096
+        capped = max(1, min(current, allowed))
+        if request.get(key) != capped or type(request.get(key)) is not int:
+            request[key] = capped
+            changed = True
+    return json.dumps(request).encode() if changed else body
 
 
 def _estimate(request: dict, body: bytes) -> int:
-    """Горна оценка на заявката: промптът (~3 байта на токен) + таванът на
-    отговора (`max_tokens`, иначе 4 096)."""
-    try:
-        cap = int(request.get("max_tokens") or request.get("max_completion_tokens") or 4096)
-    except (TypeError, ValueError):
-        cap = 4096
+    """Горна оценка на заявката: промптът (~3 байта на токен) + по-големият от
+    таваните на отговора (иначе 4 096)."""
+    caps = []
+    for key in ("max_tokens", "max_completion_tokens"):
+        try:
+            caps.append(int(request.get(key) or 0))
+        except (TypeError, ValueError, OverflowError):
+            pass
+    cap = max(caps, default=0) or 4096
     return len(body) // 3 + max(1, min(cap, 64_000))
 
 

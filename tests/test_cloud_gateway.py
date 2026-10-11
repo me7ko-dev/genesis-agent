@@ -350,3 +350,29 @@ def test_parallel_requests_cannot_overspend(tmp_path) -> None:
     assert results.count(200) == 1
     assert results.count(429) == 29
     assert g.ledger.reserved == {}
+
+
+@pytest.mark.parametrize("extra", [
+    {},                                                    # без таван — доставчикът слагаше своя
+    {"max_tokens": 200_000, "max_completion_tokens": 1},   # двата ключа — режеше се само единият
+    {"max_tokens": 200_000},
+    {"max_completion_tokens": 200_000},
+])
+def test_the_forwarded_body_always_carries_a_cap_within_the_budget(tmp_path, extra) -> None:
+    """Одит 2026-10-11: без max_tokens тялото минаваше непипнато (32 789 от
+    бюджет 6 000), а с двата ключа max_tokens=200000 стигаше до доставчика."""
+    up = FakeUpstream([(200, {"total_tokens": 1})])
+    g = _gw_for(up, tmp_path)
+    budget = 6000
+    body = json.dumps({"model": "m", "messages": [{"role": "user", "content": "hi"}], **extra}).encode()
+    assert g.forward("groq", body, _grant(budget))[0] == 200
+    sent = json.loads(up.seen[0].data)
+    caps = [sent[k] for k in ("max_tokens", "max_completion_tokens") if k in sent]
+    assert caps and all(isinstance(c, int) and 1 <= c <= budget for c in caps)
+
+
+def test_deeply_nested_json_is_a_400(tmp_path) -> None:
+    """Одит 2026-10-11: RecursionError от json.loads не се хващаше."""
+    up = FakeUpstream([])
+    g = _gw_for(up, tmp_path)
+    assert g.forward("groq", b"[" * 200_000, _grant(1000))[0] == 400 and up.seen == []

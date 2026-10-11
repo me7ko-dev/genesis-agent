@@ -138,6 +138,23 @@ def test_done_ok_but_nonzero_exit_is_a_failure(monkeypatch, tmp_path) -> None:
     assert not res.ok
 
 
+def test_a_flood_of_events_is_capped_per_turn(monkeypatch, tmp_path) -> None:
+    """Одит 2026-10-11: таванът беше само на дължината на реда — 300 събития по
+    1 MiB дадоха 300 MiB web.db и 626 MiB RSS на уеб сървъра от един ход. Кодът в
+    контейнера е недоверен и пише в същия stdout."""
+    flood = [json.dumps({"kind": "tool", "name": "RUN_CMD", "result": "x" * 8000})] * 3000
+    done = json.dumps({"kind": "done", "ok": True, "tokens": {"total_tokens": 5}})
+    res, seen = _run(monkeypatch, tmp_path, [*flood, *[done] * 50])
+    assert len(seen) <= launch._MAX_EVENTS + 2 and len(res.events) == len(seen)
+    assert sum(len(json.dumps(e)) for e in seen) < launch._MAX_EVENT_BYTES + (1 << 20)
+    assert [e["kind"] for e in seen].count("done") == 1 and seen[-1]["kind"] == "done"
+    assert any(e["kind"] == "warn" and "отрязан" in e["text"] for e in seen)
+    assert res.ok and res.tokens == {"total_tokens": 5}
+    # Нормален ход не се пипа.
+    res, seen = _run(monkeypatch, tmp_path, [flood[0], done])
+    assert [e["kind"] for e in seen] == ["tool", "done"]
+
+
 def test_the_task_folder_is_created(monkeypatch, tmp_path) -> None:
     _run(monkeypatch, tmp_path, [])
     assert (tmp_path / "ws").is_dir()
@@ -166,6 +183,14 @@ def test_an_empty_task_is_refused_without_calling_a_model(capsys, monkeypatch) -
     assert task.main([]) == 2
     done = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert done["kind"] == "done" and not done["ok"]
+
+
+def test_a_non_utf8_file_name_does_not_fail_the_cloud_turn(capsys) -> None:
+    """Одит 2026-10-11: LIST_DIR с име в cp1251 даваше lone surrogates; print()
+    в emit гърмеше с UnicodeEncodeError и целият ход в облака свършваше с грешка."""
+    task.emit("tool", name="LIST_DIR", result="  report.xlsx\n  \udcee\udcf2.txt")
+    line = json.loads(capsys.readouterr().out.strip())
+    assert line["kind"] == "tool" and "report.xlsx" in line["result"] and ".txt" in line["result"]
 
 
 # ── egress: истинският процес на локален порт, без мрежа навън ────────────────

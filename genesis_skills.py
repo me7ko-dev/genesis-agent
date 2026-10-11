@@ -106,6 +106,8 @@ _CANCEL: Callable[[], bool] | None = None
 def _set_cancel(check: Callable[[], bool] | None) -> None:
     global _CANCEL
     _CANCEL = check
+    # И за вече работеща команда, не само преди следващия инструмент (2026-10-11).
+    sandbox.cancel_check = check
 
 
 def _cancelled() -> bool:

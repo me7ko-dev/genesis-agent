@@ -63,6 +63,11 @@ _MAX_WAIT_S = 25.0
 _CONFIRM_TIMEOUT_S = 300.0
 _EVENT_LOG = 1000
 _TOOL_PREVIEW = 4000
+# Таван на един отговор на `events` (одит 2026-10-11): студен старт след 1000
+# изхода на инструменти теглеше 7.3 MiB, а open() на телефона ги декодираше
+# 1.1 s (5 s без JIT, близо до Hermes) на JS нишката. Над тавана — най-новите
+# и reset, телефонът подменя списъка си (mergeEvents).
+_REPLY_BYTES = 512 * 1024
 
 
 class ProtocolError(Exception):
@@ -75,6 +80,22 @@ def _b64e(raw: bytes) -> str:
 
 def _b64d(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def utf8_bytes(text: str) -> bytes:
+    """UTF-8 байтове и за текст с lone surrogates (име на файл в cp1251/cp866).
+
+    Одит 2026-10-11: os.listdir връща непрочитаемите байтове като \\udcXX и
+    .encode("utf-8") гърмеше — всеки отговор на `events` с такъв LIST_DIR
+    затваряше връзката. Байтовете се връщат каквито са били и невалидното става
+    U+FFFD; останали surrogates (не от файловата система) — „?“."""
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError:
+        try:
+            return text.encode("utf-8", "surrogateescape").decode("utf-8", "replace").encode("utf-8")
+        except UnicodeEncodeError:
+            return text.encode("utf-8", "replace")
 
 
 def key_id(key: bytes) -> str:
@@ -166,7 +187,7 @@ class Cipher:
 
     def seal(self, payload: dict, aad: bytes) -> dict:
         nonce = secrets.token_bytes(12)
-        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        raw = utf8_bytes(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
         return {"v": PROTOCOL, "n": _b64e(nonce), "c": _b64e(self._aead.encrypt(nonce, raw, aad))}
 
     def open(self, envelope: Any, aad: bytes) -> dict:
@@ -294,6 +315,15 @@ class RemoteSession:
             items = list(self._events) if reset else [e for e in self._events if e["seq"] > after]
             reply = {"events": items, "last": self._seq, "reset": reset,
                      "busy": self._busy, "epoch": self.epoch}
+        # Размерът се мери извън ключалката — emit() не чака сериализацията.
+        kept, size = 0, 0
+        for event in reversed(items):
+            size += len(utf8_bytes(json.dumps(event, ensure_ascii=False)))
+            if kept and size > _REPLY_BYTES:
+                break
+            kept += 1
+        if kept < len(items):
+            reply["events"], reply["reset"] = items[-kept:], True
         if self._state is not None:
             try:
                 reply["state"] = self._state()
@@ -688,7 +718,10 @@ class RemoteServer:
                 try:
                     envelope = json.loads(body.decode("utf-8"))
                     response, rid = server.handle(envelope)
-                except (ProtocolError, ValueError, UnicodeDecodeError) as e:
+                # RecursionError: `[` × 200 000 без ключ — traceback в терминала
+                # на оператора на всяка заявка и без провал за спирачката (одит
+                # 2026-10-11).
+                except (ProtocolError, ValueError, UnicodeDecodeError, RecursionError) as e:
                     server.record_failure(ip)
                     # Подробността е само вида на отказа („cannot open",
                     # „stale request"): полезна на своя телефон, безполезна
@@ -707,29 +740,59 @@ class _QuietServer(ThreadingHTTPServer):
     връзката — това е нормално, не грешка за печатане в терминала.
 
     Най-много _MAX_CONNECTIONS връзки наведнъж: над тях новата се затваря
-    веднага, вместо да ражда още една нишка (одит 2026-10-09)."""
+    веднага, вместо да ражда още една нишка (одит 2026-10-09). И най-много
+    _MAX_PER_IP от един адрес (одит 2026-10-11): 64 празни връзки от един
+    съсед без ключ заемаха всички места за 30 s и сдвоеният телефон не
+    можеше да влезе, а спирачката не виждаше провал."""
 
     _MAX_CONNECTIONS = 64
+    _MAX_PER_IP = 16
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._slots = threading.BoundedSemaphore(self._MAX_CONNECTIONS)
+        self._per_ip: dict[str, int] = {}
+        self._per_ip_lock = threading.Lock()
+
+    @staticmethod
+    def _ip(client_address: Any) -> str:
+        try:
+            return str(client_address[0])
+        except (TypeError, IndexError):
+            return ""
+
+    def _release(self, client_address: Any) -> None:
+        ip = self._ip(client_address)
+        with self._per_ip_lock:
+            left = self._per_ip.get(ip, 0) - 1
+            if left > 0:
+                self._per_ip[ip] = left
+            else:
+                self._per_ip.pop(ip, None)
+        self._slots.release()
 
     def process_request(self, request: Any, client_address: Any) -> None:
-        if not self._slots.acquire(blocking=False):
+        ip = self._ip(client_address)
+        with self._per_ip_lock:
+            full = self._per_ip.get(ip, 0) >= self._MAX_PER_IP
+            if not full and self._slots.acquire(blocking=False):
+                self._per_ip[ip] = self._per_ip.get(ip, 0) + 1
+            else:
+                full = True
+        if full:
             self.shutdown_request(request)
             return
         try:
             super().process_request(request, client_address)
         except Exception:
-            self._slots.release()
+            self._release(client_address)
             raise
 
     def process_request_thread(self, request: Any, client_address: Any) -> None:
         try:
             super().process_request_thread(request, client_address)
         finally:
-            self._slots.release()
+            self._release(client_address)
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         import sys

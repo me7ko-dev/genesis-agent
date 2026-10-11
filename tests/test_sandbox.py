@@ -276,6 +276,24 @@ def test_run_shell_timeout_kills_the_process(tmp_path) -> None:
     assert "Timeout" in res.stderr
 
 
+def test_stop_interrupts_a_running_command(tmp_path) -> None:
+    """Одит 2026-10-11: „Стоп“ от телефона се гледаше само преди следващия
+    инструмент — `sleep 8` довършваше (7.1 s след Стоп), увиснал `npm test`
+    държеше телефона на „Genesis работи…“ до 120 s."""
+    import time
+
+    import genesis_skills
+    t0 = time.monotonic()
+    genesis_skills._set_cancel(lambda: time.monotonic() - t0 > 0.5)
+    try:
+        res = sandbox.run_shell("sleep 8", cwd=tmp_path, policy=SandboxPolicy(mode="allow"),
+                                timeout=60)
+    finally:
+        genesis_skills._set_cancel(None)
+    assert time.monotonic() - t0 < 4
+    assert res.ok is False and "Спряно от оператора" in res.stderr
+
+
 def test_run_python_executes_and_returns_stdout(tmp_path) -> None:
     res = sandbox.run_python("print(2 + 2)", cwd=tmp_path)
     assert res.ok is True
