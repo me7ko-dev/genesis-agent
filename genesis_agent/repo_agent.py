@@ -633,7 +633,7 @@ def _edit_succeeded(result: str) -> bool:
 
 
 def _verify_after_edit(root: Path, cmd: str | None, before: TestRun,
-                       messages: list[dict], say) -> TestRun | None:
+                       messages: list[dict], say, runner=None) -> TestRun | None:
     """Пуска тестовете веднага след успешна редакция (design note, 2026-09-24).
 
     Досега тестовете вървяха едва когато моделът сам реши, че е готов — и
@@ -648,7 +648,7 @@ def _verify_after_edit(root: Path, cmd: str | None, before: TestRun,
     """
     if not cmd or (before.ran and before.passed):
         return None
-    run = run_tests(root, cmd)
+    run = (runner or run_tests)(root, cmd)
     if not run.ran:
         return None
     if run.passed:
@@ -730,6 +730,17 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
     test_noise = {rel for rel in set(pre_tests) | set(files_before)
                   if pre_tests.get(rel) != files_before.get(rel)}
 
+    def _tests(root_: Path, cmd_: str) -> TestRun:
+        """run_tests, а каквото пипне самото пускане — шум (e2e 2026-10-11):
+        първото пускане падаше на import, преди да пише last_run.log, и логът
+        от зеленото пускане след поправката излизаше като „променен файл“
+        в диффа и в съвета за връщане."""
+        pre = _fingerprint(root_)
+        run = run_tests(root_, cmd_)
+        post = _fingerprint(root_)
+        test_noise.update(rel for rel in set(pre) | set(post) if pre.get(rel) != post.get(rel))
+        return run
+
     def _changed_by_fix() -> list[str]:
         return [rel for rel in _changed_since(root, files_before) if rel not in test_noise]
     if before.ran:
@@ -793,7 +804,7 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
                 if edited_now:
                     edited_now = False
                     _drop_stale_bytecode(root, touched)
-                    verdict = _verify_after_edit(root, cmd, before, messages, say)
+                    verdict = _verify_after_edit(root, cmd, before, messages, say, _tests)
                     if verdict is not None:
                         after = verdict
                         break
@@ -815,7 +826,7 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
                                  + "\n".join(r[:_MAX_TOOL_OUTPUT] for r in tag_results)})
                 if edited:
                     _drop_stale_bytecode(root, touched)
-                    verdict = _verify_after_edit(root, cmd, before, messages, say)
+                    verdict = _verify_after_edit(root, cmd, before, messages, say, _tests)
                     if verdict is not None:
                         after = verdict
                         break
@@ -852,7 +863,7 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
                     rounds, snapshot, [], "", before, before)
 
             _drop_stale_bytecode(root, touched)
-            after = run_tests(root, cmd)
+            after = _tests(root, cmd)
             if not after.ran or after.passed:
                 break
             if rounds >= max_rounds:
@@ -883,7 +894,7 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
     if touched and after is before and cmd:
         say("🧪 Рундовете свършиха — пускам тестовете за финална присъда…")
         _drop_stale_bytecode(root, touched)
-        after = run_tests(root, cmd)
+        after = _tests(root, cmd)
 
     diff = project_diff(root, snapshot, touched)
     files = sorted(set(touched))

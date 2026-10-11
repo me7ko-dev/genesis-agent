@@ -81,6 +81,24 @@ def test_a_log_written_by_the_tests_is_not_a_fix(proj, monkeypatch):
     assert len(calls) == 3
 
 
+def test_a_log_only_the_green_run_after_the_fix_writes_is_not_a_fix(proj, monkeypatch):
+    # e2e 2026-10-11: първото пускане пада на import (преди лога), значи
+    # шумът не се вижда в него — а зеленото след поправката пише лога.
+    (proj / "calc.py").write_text("def ad(a, b):\n    return a + b\n", encoding="utf-8")
+    (proj / "run_tests.py").write_text(
+        "import pathlib\nfrom calc import add\n"
+        "pathlib.Path('last_run.log').write_text('ran')\nassert add(2, 3) == 5\n",
+        encoding="utf-8")
+    _brain(monkeypatch, [_Reply([_tc("EDIT_FILE", {"path": "calc.py", "old": "def ad(a, b):",
+                                                   "new": "def add(a, b):"})])])
+    out = repo_agent.repair(proj, "add липсва", test_command=f'"{sys.executable}" run_tests.py',
+                            max_rounds=3, on_status=lambda s: None)
+    assert (proj / "last_run.log").exists()
+    assert out.success is True
+    assert out.files_touched == ["calc.py"]
+    assert "last_run.log" not in out.diff
+
+
 # ── genesis fix: изчерпана верига не е „описа, но не направи“ ───────────────
 
 _CHAIN_DOWN = "Error: цялата верига е изчерпана | последна: нито един модел няма API ключ"
