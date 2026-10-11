@@ -196,6 +196,53 @@ def _find_key(data: bytes) -> re.Match[bytes] | None:
     return min(found, key=lambda m: m.start()) if found else None
 
 
+# Част от името на променлива, която носи тайна — цели части (`DB_PASSWORD`,
+# `GITHUB_TOKEN`, `APIKEY`), не поднизове: `PATH` и `COMPASS_URL` не са тайни.
+_SECRET_ENV_PARTS = frozenset({"KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASS", "PAT",
+                               "CREDENTIAL", "CREDENTIALS", "DSN", "AUTH"})
+
+
+def _secret_env_name(name: str) -> bool:
+    parts = [p for p in re.split(r"[^A-Za-z0-9]+", name.upper()) if p]
+    return any(p in _SECRET_ENV_PARTS or p.endswith(("KEY", "TOKEN", "SECRET")) for p in parts)
+
+
+def _mcp_literal_secret(data: bytes) -> str | None:
+    """`сървър.headers.Authorization` / `сървър.env.DB_PASSWORD`, ако
+    .mcp.json на проекта носи самата тайна, а не `${ПРОМЕНЛИВА}`.
+
+    E2e 2026-10-11: MCP сървърите на проекта (mcp_client) се описват в
+    .mcp.json, а export го пращаше на клиента с `"Authorization": "Bearer
+    9f8e…"` и `"DB_PASSWORD": "Tr0ub4dor&3xyz"` — ключовете нямат формата,
+    която _find_key познава. Стойност само от `${VAR}` е препратка, не тайна."""
+    import json
+
+    from genesis_agent.code_edit import decode_text
+    from genesis_agent.mcp_client import _static_auth
+    try:
+        config = json.loads(decode_text(data)[0].lstrip("﻿"))
+    except ValueError:
+        return None
+    servers = config.get("mcpServers") if isinstance(config, dict) else None
+    if not isinstance(servers, dict):
+        return None
+    for name, server in servers.items():
+        if not isinstance(server, dict):
+            continue
+        for field_name, is_secret in (("headers", lambda k: _static_auth({k: ""})),
+                                      ("env", _secret_env_name)):
+            table = server.get(field_name)
+            if not isinstance(table, dict):
+                continue
+            for key, value in table.items():
+                # `Bearer ${TOKEN}` е препратка; `Bearer 9f8e…` — не.
+                literal = re.sub(r"\$\{[^}]*\}", "", str(value or "")).strip()
+                if literal and literal.lower() not in ("bearer", "basic", "token") \
+                        and is_secret(str(key)):
+                    return f"{name}.{field_name}.{key}"
+    return None
+
+
 def _secret_file(p: Path, rel: str) -> str | None:
     """None — файлът може да замине; иначе как да се впише в „извън архива“."""
     from genesis_agent import sandbox
@@ -210,6 +257,10 @@ def _secret_file(p: Path, rel: str) -> str | None:
         return None
     if _SECRET_CONTENT.search(data):
         return rel
+    if p.name.lower() in (".mcp.json", "mcp.json"):
+        where = _mcp_literal_secret(data)
+        if where:
+            return f"{rel} (вписан ключ в {where} — сложи ${{ПРОМЕНЛИВА}} вместо него)"
     # API ключ, вписан направо в кода или конфига (`GROQ_API_KEY = "gsk_…"`,
     # `ghp_…` в settings.json, `AKIA…` в aws.cfg). Одит 2026-10-11: и трите
     # заминаваха към клиента — пазеше се само блок PRIVATE KEY. Казва се къде
