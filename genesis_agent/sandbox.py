@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import ast
 import os
+import posixpath
 import re
 import shlex
 import signal
@@ -781,9 +782,23 @@ def _normalise_target(token: str) -> str:
             t = f"{drive.group(1)}:{t[drive.end():] or '/'}"
     # `/home/./user` и `/home/user/../user` сочат същото място като
     # `/home/user`, но без канонизация се четат като по-дълбоки пътища и
-    # проверката за дълбочина ги пропускаше.
-    if t.startswith("/") and (".." in t or "/." in t):
-        t = os.path.normpath(t)
+    # проверката за дълбочина ги пропускаше. Същото за `c:/…` и `~/…`
+    # (2026-10-11): канонизацията стоеше СЛЕД превръщането на `/c/x` в `c:/x`
+    # и изискваше `/` отпред, затова `rm -rf C:\Users\<име>\Projects\..` (целият
+    # дом) и `rm -rf ~/..` бяха само CONFIRM. posixpath, не os.path: на Windows
+    # ntpath.normpath връща `\home\user` и сравнението с `/home/` пропада.
+    if ".." in t or "/." in t:
+        if t.startswith("/"):
+            t = posixpath.normpath(t)
+        elif re.match(r"^[A-Za-z]:/", t):
+            t = t[:2] + posixpath.normpath(t[2:])
+        elif t == "~" or t.startswith("~/"):
+            # Домът като истински път, за да се види излизането над него:
+            # `~/..` е родителят на дома (`/home`), `~/../x` — чужд дом.
+            anchor = "/home/\0home"
+            t = posixpath.normpath(anchor + t[1:])
+            if t == anchor or t.startswith(anchor + "/"):
+                t = "~" + t[len(anchor):]
     if len(t) > 1 and t.endswith(("/", "\\")):
         t = t.rstrip("/\\") or "/"
     return t.lower()

@@ -888,3 +888,25 @@ def test_backslash_escaped_secret_asks_on_windows_too(monkeypatch, tmp_path, cmd
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setattr(sandbox, "os", _NtOs())
     assert sandbox.assess_command(cmd, cwd=tmp_path).level is CONFIRM
+
+
+@pytest.mark.parametrize("cmd", [
+    r"rm -rf C:\Users\roika\Projects\..",
+    "rm -rf /c/Users/roika/..",
+    "rm -rf /c/Users/roika/Projects/../..",
+    "rm -rf /c/Users/roika/.",
+    "rm -rf C:/Users/roika/./Projects/..",
+    "rm -rf ~/..",
+    "rm -rf ~/.",
+    "rm -rf ~/proj/../..",
+])
+def test_dot_segments_do_not_hide_a_critical_root(cmd) -> None:
+    """След превръщането на `/c/x` в `c:/x` канонизацията на `..` не се
+    правеше: `rm -rf C:\\Users\\roika\\Projects\\..` (целият дом) беше само
+    CONFIRM, а `/home/roika/..` — BLOCKED (2026-10-11)."""
+    assert sandbox.assess_command(cmd).level is BLOCKED
+
+
+@pytest.mark.parametrize("cmd", ["rm -rf /c/Users/roika/proj/./build", "rm -rf ~/proj/../old"])
+def test_dot_segments_inside_a_project_still_ask(cmd) -> None:
+    assert sandbox.assess_command(cmd).level is CONFIRM
