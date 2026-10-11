@@ -1125,3 +1125,27 @@ def test_project_files_in_the_genesis_workspace_are_not_control_files(tmp_path, 
     # Истинските управляващи файлове — и през пътя от workspace — пак питат.
     assert sandbox.assess_command("echo {} > ../../hooks.json", cwd=app).level is CONFIRM
     assert sandbox.assess_command("echo {} > ./.genesis/hooks.json", cwd=app).level is CONFIRM
+
+
+# Ревю 2026-10-11 (трета вълна): всичко под AppData — и през променлива —
+# е BLOCKED, както в main; проектите под C:\Users само питат.
+@pytest.mark.parametrize("cmd", [
+    r"Remove-Item -Recurse -Force C:\Users\roika\AppData\Roaming\Microsoft\Protect",
+    r"Remove-Item -Recurse -Force $env:USERPROFILE\AppData\Local\Google",
+    r"Remove-Item -Recurse -Force $env:APPDATA\Microsoft\Credentials",
+    r"rd /s /q %APPDATA%\Microsoft",
+    r"rd /s /q %LOCALAPPDATA%",
+    r"del /s /q C:\Users\roika\AppData\Local\Packages\*.*",
+])
+def test_windows_appdata_deletes_are_blocked_in_every_spelling(cmd):
+    from genesis_agent import sandbox
+    assert sandbox.assess_command(cmd).level == sandbox.RiskLevel.BLOCKED
+
+
+@pytest.mark.parametrize("cmd", [
+    r"rd /s /q C:\Users\roika\Projects\app\build",
+    r"Remove-Item -Recurse -Force C:\Users\roika\Projects\app\node_modules",
+])
+def test_windows_project_cleanup_under_users_asks(cmd):
+    from genesis_agent import sandbox
+    assert sandbox.assess_command(cmd).level == sandbox.RiskLevel.CONFIRM

@@ -264,6 +264,13 @@ _WIN_ROOT = (r"(?:[A-Za-z]:\\*(?:\s|$|[\"';*])"          # C:\ / C: / C:\\ (ес
              r"(?:[\\/]AppData(?:[\\/](?:Local|LocalLow|Roaming))?)?)?"
              + _WIN_ROOT_END +
              r"|(?:\$env:USERPROFILE|%USERPROFILE%|\$HOME)" + _WIN_ROOT_END +
+             # Всичко под AppData — и по буква, и през променлива (ревю
+             # 2026-10-11, трета вълна): `…\AppData\Roaming\Microsoft\Protect`
+             # (ключовете на DPAPI) и `$env:APPDATA\…` бяха паднали от BLOCKED
+             # (main) на CONFIRM. Там няма проекти — само настройки и пароли.
+             r"|(?:[A-Za-z]:[\\/]Users[\\/][^\\/\s\"';|&]+|\$env:USERPROFILE|%USERPROFILE%"
+             r"|\$HOME|~)[\\/]AppData(?:[\\/][^\s\"';|&]*)?(?=[\s\"';|&)]|$)"
+             r"|(?:\$env:(?:LOCAL)?APPDATA|%(?:LOCAL)?APPDATA%)(?:[\\/][^\s\"';|&]*)?(?=[\s\"';|&)]|$)"
              r"|[A-Za-z]:\\\*)")
 
 _WIN_BLOCK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
