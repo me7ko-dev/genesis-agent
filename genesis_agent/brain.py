@@ -799,11 +799,13 @@ class Brain:
             if any(_same_ollama_model(LOCAL_MODEL, n) for n in installed):
                 self.local = {"provider": "ollama_local", "model": LOCAL_MODEL}
             elif installed and os.environ.get("GENESIS_LOCAL_ONLY") != "1" \
-                    and not os.environ.get("GENESIS_LOCAL_MODEL"):
+                    and "GENESIS_LOCAL_MODEL" not in os.environ:
                 # Подразбиращият се модел липсва → инсталирано ниво вместо 404
                 # (одит 2026-10-11). Изрично избраният модел (офлайн режим или
                 # GENESIS_LOCAL_MODEL) не се подменя: там честата грешка е
-                # по-добра от тиха смяна.
+                # по-добра от тиха смяна. Проверката е за наличие, не за
+                # истинност: GENESIS_LOCAL_MODEL="" изключва локалния модел и
+                # не бива да го включва обратно с друго ниво (ревю 2026-10-11).
                 tier = _installed_local_tier(installed)
                 if tier:
                     self.local = {"provider": "ollama_local", "model": tier}
@@ -1678,12 +1680,14 @@ class Brain:
 
         last_err: Exception | None = None
         tried_any = False
+        no_token = False
         for idx, project in enumerate(project_list, start=1):
             kid = f"key::VERTEX#{idx}"
             if _is_exhausted(kid) or _is_exhausted(f"{kid}::{model}"):
                 continue
             access_token = vertex_auth.token(project)
             if not access_token:
+                no_token = True
                 continue
             tried_any = True
             try:
@@ -1697,7 +1701,13 @@ class Brain:
                     continue
                 raise
         if not tried_any:
-            raise RuntimeError("skip: no usable Vertex credentials (ADC not configured or all cooling down)")
+            # „cooling down“ само когато наистина всеки проект е в cooldown
+            # (ревю 2026-10-11): при изтекли ADC веригата броеше Vertex за
+            # охлаждащ се с 0 s оставащи — 8 s пауза, празен втори кръг и
+            # „най-рано след 0 s“ вместо истинските 290 s на другите модели.
+            if no_token:
+                raise RuntimeError("skip: no usable Vertex credentials (ADC not configured or expired)")
+            raise RuntimeError("skip: every Vertex project is cooling down")
         raise last_err or RuntimeError("HTTP_502: vertex project rotation exhausted")
 
     def _call_local(self, messages: list[dict], attempts: int = 1) -> tuple[str, str] | None:
@@ -2094,10 +2104,15 @@ class Brain:
                 if only_unconfigured:
                     last_error = "нито един модел няма API ключ — пусни `genesis setup`"
                     break
-                if sent_any and not retry_useful:
+                if sent_any and not retry_useful and not any(
+                        self._cooldown_left(p, m) <= _ROUND_PAUSE_S for p, m in cooled):
                     # Всяка изпратена заявка е отрязана на тавана (ревю
                     # 2026-10-11): втори кръг е още веднъж цялата верига,
-                    # платена, след 8 s — със същия сигурен провал.
+                    # платена, след 8 s — със същия сигурен провал. Само за
+                    # изпратените: модел, пропуснат заради cooldown, който
+                    # свършва в паузата (Groq TPM 429 с 5 s), може да напише
+                    # файла цял — за него вторият кръг остава (ревю 2026-10-11,
+                    # регресия на F4 спрямо базовия клон).
                     break
                 if not sent_any:
                     # Кръг без нито една заявка — всичко е в cooldown или без
