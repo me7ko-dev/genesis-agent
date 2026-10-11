@@ -83,6 +83,11 @@ class Result:
 
 # Най-дългият ред събитие от контейнера, който се чете (1 MiB).
 _MAX_EVENT_LINE = 1 << 20
+# Таван на ход: брой събития и общ размер (одит 2026-10-11). Само таванът на
+# реда пускаше 300 събития по 1 MiB — 300 MiB web.db и 626 MiB RSS на уеб
+# сървъра от един ход; кодът в контейнера пише в същия stdout като агента.
+_MAX_EVENTS = 2000
+_MAX_EVENT_BYTES = 8 << 20
 
 
 def docker_args(name: str, workspace: Path, text: str, *, limits: Limits | None = None,
@@ -174,6 +179,9 @@ def run_task(text: str, workspace: Path, *, limits: Limits | None = None,
         proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=err_file)
         assert proc.stdout is not None
         skipping = False
+        kept_bytes = 0
+        capped = False
+        late_done: dict[str, Any] | None = None
         while True:
             # Ред с таван: един ред без край от контейнера иначе изяждаше
             # паметта на уеб сървъра (400 MiB → 826 MiB RSS).
@@ -188,10 +196,28 @@ def run_task(text: str, workspace: Path, *, limits: Limits | None = None,
                 ev = json.loads(raw.decode("utf-8", "replace"))
             except ValueError:
                 continue  # шум от Python/rich — не е събитие
-            if isinstance(ev, dict) and "kind" in ev:
-                events.append(ev)
+            if not isinstance(ev, dict) or "kind" not in ev:
+                continue
+            if not capped and (len(events) >= _MAX_EVENTS
+                               or kept_bytes + len(raw) > _MAX_EVENT_BYTES):
+                capped = True
+                warn = {"kind": "warn", "text": "изходът е отрязан — твърде много събития в един ход"}
+                events.append(warn)
                 if on_event:
-                    on_event(ev)
+                    on_event(warn)
+            if capped:
+                # Над тавана само последното „done“ — с него е сметката.
+                if ev.get("kind") == "done":
+                    late_done = ev
+                continue
+            kept_bytes += len(raw)
+            events.append(ev)
+            if on_event:
+                on_event(ev)
+        if late_done is not None:
+            events.append(late_done)
+            if on_event:
+                on_event(late_done)
         code = proc.wait()
         err_file.seek(0, os.SEEK_END)
         err_file.seek(max(0, err_file.tell() - 8192))
