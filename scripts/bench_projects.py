@@ -68,7 +68,10 @@ HIDDEN_TIMEOUT = 300
 # пропуска с ясна причина, както NEEDS в bench_fix.py.
 NEEDS: dict[str, tuple[str, ...]] = {
     "booking-form": ("flask",),
+    "booking-guesthouse": ("flask", "bs4"),
     "car-ads": ("bs4",),
+    "contact-form": ("flask",),
+    "expense-bot": ("tzdata",) if sys.platform == "win32" else (),
     "faktura-excel": ("reportlab",),
     "tasks-api": ("flask",),
 }

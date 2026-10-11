@@ -427,11 +427,18 @@ def test_an_unrelated_request_gets_nothing(_shipped_skills) -> None:
     assert sl.domain_context("напиши rate limiter с asyncio и тестове") == ""
 
 
+# booking-form (2026-10-11): правилата за телефона, не уеб ръководството — 2/2
+# пуска паднаха само на „0898/123-456“, а ръководството е за оформление на сайт.
+# Второ знание идва само строго: clients-migrate — CSV-то и телефонът.
 _BENCH_KNOWLEDGE = {
-    "booking-form": "web_site_2026", "egn-check": "bg_egn_validate_and_decode",
-    "eik-check": "bg_eik_bulstat_validate", "euro-convert": "bg_euro_bgn_conversion",
-    "faktura-excel": "bg_invoice_fields", "iban-check": "bg_iban_validate",
-    "vat-check": "bg_vat_number_validate", "workdays": "bg_working_days",
+    "booking-form": ["bg_contact_form_phone"], "egn-check": ["bg_egn_validate_and_decode"],
+    "eik-check": ["bg_eik_bulstat_validate"], "euro-convert": ["bg_euro_bgn_conversion"],
+    "faktura-excel": ["bg_invoice_fields"], "iban-check": ["bg_iban_validate"],
+    "vat-check": ["bg_vat_number_validate"], "workdays": ["bg_working_days"],
+    "booking-guesthouse": ["bg_contact_form_phone"], "contact-form": ["bg_contact_form_phone"],
+    "clients-migrate": ["bg_excel_csv_import", "bg_contact_form_phone"],
+    "csv-sqlite": ["bg_excel_csv_import"], "shop-scraper": ["bg_shop_scrape_prices"],
+    "cli-config": ["money_round_up_step"],
 }
 
 
@@ -445,7 +452,7 @@ def test_every_bench_task_gets_exactly_its_knowledge(_shipped_skills) -> None:
     got = {t.parent.name: re.findall(r"библиотеката: (\S+)", sl.domain_context(t.read_text("utf-8")))
            for t in sorted(bench.glob("*/task.txt"))}
     assert len(got) >= 16
-    assert got == {name: [_BENCH_KNOWLEDGE[name]] if name in _BENCH_KNOWLEDGE else [] for name in got}
+    assert got == {name: _BENCH_KNOWLEDGE.get(name, []) for name in got}
 
 
 def test_shared_words_without_a_whole_trigger_are_not_a_match(_shipped_skills) -> None:
@@ -498,7 +505,7 @@ def test_an_excel_csv_request_gets_the_csv_rules_not_the_eik_check(_shipped_skil
     assert "bg_eik_bulstat_validate" not in text
 
 
-_PHONE_TASKS = {"contact-form", "booking-form", "clients-migrate"}
+_PHONE_TASKS = {"contact-form", "booking-form", "booking-guesthouse", "clients-migrate"}
 
 def test_the_contact_form_gets_the_phone_rules_and_nothing_else_does(_shipped_skills) -> None:
     """bench contact-form 2026-10-02: 1/2 — 00359888123456 → +3590359888123456 и
@@ -711,16 +718,11 @@ def test_another_word_form_still_gets_the_verified_rules(_shipped_skills, query,
 def test_stemming_changes_no_bench_task_knowledge(_shipped_skills, project) -> None:
     """Кое знание получава всяка задача от bench-а — същото като преди _stem
     (2026-10-07). Нов тригер тук е фалшива тревога, която bench-ът е мерил без."""
-    expected = {
-        "booking-form": "web_site_2026", "egn-check": "bg_egn_validate_and_decode",
-        "eik-check": "bg_eik_bulstat_validate", "euro-convert": "bg_euro_bgn_conversion",
-        "faktura-excel": "bg_invoice_fields", "iban-check": "bg_iban_validate",
-        "vat-check": "bg_vat_number_validate", "workdays": "bg_working_days",
-    }.get(project)
+    expected = _BENCH_KNOWLEDGE.get(project)
     task = sl.Path(__file__).resolve().parent.parent / "bench" / "projects" / project / "task.txt"
     text = sl.domain_context(task.read_text(encoding="utf-8"))
     if expected:
-        assert f"библиотеката: {expected}" in text
+        assert all(f"библиотеката: {name}" in text for name in expected)
     else:
         assert text == ""
 
