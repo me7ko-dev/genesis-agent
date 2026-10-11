@@ -543,20 +543,22 @@ def test_a_crash_before_the_charge_is_billed_once_on_restart(tmp_path, monkeypat
         raise OSError("диск")
 
     monkeypatch.setattr(billing, "charge_turn", broken)
+    app.store.add_entry(1, "admin:start", "grant", 100 * MICRO)
     chat = app.store.new_chat(1, "t")
     turn = app.start_turn({"id": 1, "email": "ana@example.com"}, chat, "x")
     app.pool.shutdown(wait=True)
     assert app.store.turn(1, turn)["status"] == "ok"        # type: ignore[index]
-    assert app.store.balance(1) == 0
+    assert app.store.balance(1) == 100 * MICRO
     monkeypatch.setattr(billing, "charge_turn", real)
     _billing_app(tmp_path)                                   # „рестарт“
     _billing_app(tmp_path)                                   # и още един
-    assert app.store.balance(1) == -GROQ_TURN
+    assert app.store.balance(1) == 100 * MICRO - GROQ_TURN
 
 
 def test_a_turn_killed_by_a_restart_is_billed_from_the_gateway(tmp_path) -> None:
     app, runner = _billing_app(tmp_path)
     runner.gate.clear()
+    app.store.add_entry(1, "admin:start", "grant", 100 * MICRO)
     chat = app.store.new_chat(1, "t")
     turn = app.start_turn({"id": 1, "email": "ana@example.com"}, chat, "x")
     for _ in range(200):
@@ -566,10 +568,10 @@ def test_a_turn_killed_by_a_restart_is_billed_from_the_gateway(tmp_path) -> None
     # сървърът „умира“ посред хода; новият го маркира failed и го таксува
     app2, _ = _billing_app(tmp_path)
     assert app2.store.turn(1, turn)["status"] == "failed"   # type: ignore[index]
-    assert app2.store.balance(1) == -GROQ_TURN
+    assert app2.store.balance(1) == 100 * MICRO - GROQ_TURN
     runner.gate.set()
     app.pool.shutdown(wait=True)
-    assert app.store.balance(1) == -GROQ_TURN               # и после — пак веднъж
+    assert app.store.balance(1) == 100 * MICRO - GROQ_TURN  # и после — пак веднъж
 
 
 def test_billing_without_the_gateway_is_refused(tmp_path, capsys) -> None:
@@ -589,3 +591,129 @@ def test_turns_before_billing_was_on_are_never_charged(tmp_path) -> None:
     free.pool.shutdown(wait=True)
     _billing_app(tmp_path)
     assert store.balance(1) == 0 and store.unbilled_turns() == []
+
+
+# ── S6: прием на ход ─────────────────────────────────────────────────────────
+
+# per_turn 2 кредита + 20 000 токена по 1 200 µc = 26 кредита
+THRESHOLD = 2 * MICRO + 20_000 * 1200
+ANA = {"id": 1, "email": "ana@example.com"}
+
+
+def _turn_rows(app: web.App) -> int:
+    return sum(len(app.store.turns(c["id"])) for c in app.store.chats(1))
+
+
+def test_just_under_the_threshold_is_a_402_without_a_turn(tmp_path) -> None:
+    app, runner = _billing_app(tmp_path)
+    app.store.add_entry(1, "admin:a", "grant", THRESHOLD - 1)
+    with pytest.raises(web.TurnRefused) as e:
+        app.start_turn(ANA, app.store.new_chat(1, "t"), "x")
+    assert e.value.status == 402
+    assert e.value.message == ("балансът ти е 26.00 кредита — за нова задача трябват поне "
+                               "26.00. Зареди от „Сметка“.")
+    assert _turn_rows(app) == 0 and runner.kw == []
+
+
+def test_at_the_threshold_the_gateway_budget_is_what_the_balance_pays(tmp_path) -> None:
+    app, runner = _billing_app(tmp_path)
+    app.store.add_entry(1, "admin:a", "grant", THRESHOLD)
+    app.start_turn(ANA, app.store.new_chat(1, "t"), "x")
+    app.pool.shutdown(wait=True)
+    assert runner.kw[0]["gateway"].budget == 20_000
+    assert app.gateway.budget == launch.TASK_BUDGET          # type: ignore[union-attr]
+
+
+def test_max_tokens_per_turn_caps_the_budget(tmp_path) -> None:
+    app, runner = _billing_app(tmp_path, max_tokens_per_turn=5000)
+    app.store.add_entry(1, "admin:a", "grant", 1000 * MICRO)
+    app.start_turn(ANA, app.store.new_chat(1, "t"), "x")
+    app.store.set_account(1, max_tokens_per_turn=7000)
+    app.pool.shutdown(wait=True)
+    assert runner.kw[0]["gateway"].budget == 5000
+
+
+def test_the_monthly_cap_refuses_even_with_a_big_balance(tmp_path) -> None:
+    app, _ = _billing_app(tmp_path, monthly_cap=10 * MICRO)
+    app.store.add_entry(1, "admin:a", "grant", 10_000 * MICRO)
+    app.store.add_entry(1, "turn:999", "charge", -10 * MICRO, turn_id=999)
+    with pytest.raises(web.TurnRefused) as e:
+        app.start_turn(ANA, app.store.new_chat(1, "t"), "x")
+    assert e.value.status == 402 and "месечния си таван от 10.00" in e.value.message
+    # профилът може да има свой таван
+    app.store.set_account(1, monthly_cap=1000 * MICRO)
+    assert app.start_turn(ANA, app.store.new_chat(1, "t"), "x") > 0
+    app.pool.shutdown(wait=True)
+
+
+def test_turns_per_day_hold_without_billing(tmp_path) -> None:
+    store = Store(tmp_path / "web.db")
+    store.add_user("ana@example.com", PASSWORD)
+    app = web.App(store, tmp_path / "jobs", runner=_NoRun(), turns_per_day=3)
+    chat = store.new_chat(1, "t")
+    for _ in range(3):
+        app.start_turn(ANA, chat, "x")
+        for _ in range(100):
+            if not store.busy(user_id=1):
+                break
+            time.sleep(0.01)
+    with pytest.raises(web.TurnRefused) as e:
+        app.start_turn(ANA, chat, "x")
+    assert e.value.status == 429 and "лимит от 3 задачи" in e.value.message
+    store.set_account(1, turns_per_day=4)
+    assert app.start_turn(ANA, chat, "x") > 0
+    app.pool.shutdown(wait=True)
+
+
+def test_the_51st_turn_of_the_day_is_a_429(paid) -> None:
+    app, _, client = paid
+    chat = app.store.new_chat(1, "t")
+    for _ in range(web.TURNS_PER_DAY):
+        t = app.store.add_turn(chat, "x")
+        app.store.finish_turn(t, ok=False, error="", tokens={}, seconds=0)
+    cl = client()
+    cl.login()
+    code, data = _turn(cl, chat=chat)
+    assert code == 429 and "50" in data["error"]
+
+
+def test_twenty_parallel_starts_with_money_for_one_start_one(paid) -> None:
+    app, runner, client = paid
+    app.store.add_entry(1, "admin:down", "adjust", THRESHOLD - 100 * MICRO)
+    runner.gate.clear()
+    cl = client()
+    cl.login()
+    chats = [cl.json("POST", "/api/chats", {})[1]["id"] for _ in range(20)]
+    results: list[tuple[int, Any]] = []
+
+    def go(chat: str) -> None:
+        results.append(_turn(cl, chat=chat))
+
+    threads = [threading.Thread(target=go, args=(c,)) for c in chats]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(code for code, _ in results) == [202] + [409] * 19
+    runner.gate.set()
+    (started,) = [data["turn_id"] for code, data in results if code == 202]
+    _wait(cl, started)
+    # след таксата парите не стигат за втори ход
+    assert _turn(cl, chat=chats[0])[0] == 402
+
+
+def test_a_disabled_account_cannot_start_a_turn(tmp_path) -> None:
+    app, _ = _billing_app(tmp_path)
+    app.store.set_disabled(1, True)
+    with pytest.raises(web.TurnRefused) as e:
+        app.start_turn(ANA, app.store.new_chat(1, "t"), "x")
+    assert e.value.status == 403
+
+
+def test_a_402_reaches_the_person_in_bulgarian(paid) -> None:
+    app, _, client = paid
+    app.store.add_entry(1, "admin:debt", "adjust", -100 * MICRO)
+    cl = client()
+    cl.login()
+    code, data = _turn(cl)
+    assert code == 402 and "Зареди от „Сметка“" in data["error"]

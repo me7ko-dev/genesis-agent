@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import io
 import json
 import os
@@ -46,7 +47,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 from cloud.gateway import gateway as gw
 from cloud.runner import launch
 from cloud.web import billing
-from cloud.web.store import SESSION_SECONDS, Store
+from cloud.web.store import MICRO, SESSION_SECONDS, Store
 
 STATIC = Path(__file__).with_name("static")
 COOKIE = "genesis_session"
@@ -59,6 +60,10 @@ MAX_ZIP_FILES = 20000
 MAX_ZIP_BYTES = 200 * 1024 * 1024
 LOGIN_WINDOW = 15 * 60
 LOGIN_FAILURES = 5
+# Подразбиранията за всеки човек (2026-10-11) — профилът може да ги смени
+# (`limits`). Ходовете на ден важат и без плащане: всеки ход е контейнер.
+TURNS_PER_DAY = 50
+MONTHLY_CAP = 2000 * MICRO
 HIDDEN = ".genesis"          # историята на разговора (task.py) — не е за сваляне
 
 Runner = Callable[..., launch.Result]
@@ -78,6 +83,15 @@ class LoginBlocked(Exception):
     """Твърде много неуспешни опити — 429."""
 
 
+class TurnRefused(Exception):
+    """Ходът не започва: HTTP статус и обяснение за човека."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
 class App:
     """Всичко без HTTP: може да се тества и да се пусне с фалшив runner."""
 
@@ -86,7 +100,9 @@ class App:
                  env_file: str | None = None, runtime: str | None = None,
                  secure_cookie: bool = True, trust_proxy: bool | str = False,
                  gateway: launch.Gateway | None = None,
-                 prices: billing.Prices | None = None) -> None:
+                 prices: billing.Prices | None = None, turns_per_day: int = TURNS_PER_DAY,
+                 max_tokens_per_turn: int = launch.TASK_BUDGET,
+                 monthly_cap: int = MONTHLY_CAP) -> None:
         if prices is not None and gateway is None:
             # Без шлюза токените ги казва кодът в контейнера (2026-10-11).
             raise ValueError("плащането иска шлюза (--gateway-usage)")
@@ -100,6 +116,9 @@ class App:
         self.trust_proxy = trust_proxy
         self.gateway = gateway
         self.prices = prices          # None = без плащане
+        self.turns_per_day = turns_per_day
+        self.max_tokens_per_turn = max_tokens_per_turn
+        self.monthly_cap = monthly_cap  # µc
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="turn")
         self._failures: dict[str, list[float]] = {}
         self._lock = threading.Lock()
@@ -198,19 +217,67 @@ class App:
     def workspace(self, user_id: int, chat_id: str) -> Path:
         return self.jobs_dir / str(user_id) / chat_id
 
-    def start_turn(self, user: dict[str, Any], chat_id: str, text: str) -> int | None:
-        """Нов ход, или None ако човекът вече чака отговор (по един на човек)."""
+    def limits_for(self, account: dict[str, Any]) -> tuple[int, int, int]:
+        """(ходове на ден, токени на ход, месечен таван в µc) за този профил."""
+        def pick(key: str, default: int) -> int:
+            return default if account[key] is None else int(account[key])
+        return (pick("turns_per_day", self.turns_per_day),
+                pick("max_tokens_per_turn", self.max_tokens_per_turn),
+                pick("monthly_cap", self.monthly_cap))
+
+    def _affordable(self, user_id: int, cap: int, prices: billing.Prices, budget: int) -> int:
+        """Колко токена може да плати човекът за следващия ход — или TurnRefused.
+
+        Таванът на токените в шлюза (жетонът на задачата) става толкова: шлюзът
+        вече спира задачата на него, значи надхарчването е най-много грешката
+        в оценката на шлюза — без задържани суми и без нов начин за провал."""
+        spent = self.store.month_spent(user_id)
+        if spent >= cap:
+            raise TurnRefused(402, f"достигна месечния си таван от {billing.fmt_credits(cap)} "
+                                   "кредита — пиши ни, ако ти трябва повече")
+        balance = self.store.balance(user_id)
+        room = min(balance, cap - spent)
+        left = room - prices.per_turn_micro
+        if prices.max_rate:
+            affordable = left // prices.max_rate
+        else:
+            affordable = budget if left >= 0 else -1
+        if affordable < prices.min_turn_tokens:
+            if cap - spent < balance:
+                raise TurnRefused(402, f"достигна месечния си таван от {billing.fmt_credits(cap)} "
+                                       "кредита — пиши ни, ако ти трябва повече")
+            need = prices.per_turn_micro + prices.min_turn_tokens * prices.max_rate
+            raise TurnRefused(402, f"балансът ти е {billing.fmt_credits(balance)} кредита — "
+                                   f"за нова задача трябват поне {billing.fmt_credits(need)}. "
+                                   "Зареди от „Сметка“.")
+        return affordable
+
+    def start_turn(self, user: dict[str, Any], chat_id: str, text: str) -> int:
+        """Нов ход — или TurnRefused. Всички проверки са под заключването: два
+        раздела не могат да минат едновременно покрай тях."""
+        uid = user["id"]
         with self._lock:
-            if self.store.busy(user_id=user["id"]) or chat_id in self._downloading:
-                return None
+            account = self.store.account(uid)
+            if account["disabled"]:
+                # Сесията вече е невалидна (session_user) — това е само втора стена.
+                raise TurnRefused(403, "профилът е спрян — пиши на поддръжката")
+            if self.store.busy(user_id=uid) or chat_id in self._downloading:
+                raise TurnRefused(409, "предишната ти задача още върви")
+            per_day, budget, cap = self.limits_for(account)
+            if self.store.turns_today(uid) >= per_day:
+                raise TurnRefused(429, f"днешният лимит от {per_day} задачи е изчерпан — "
+                                       "опитай пак утре")
+            if self.prices is not None:
+                budget = min(budget, self._affordable(uid, cap, self.prices, budget))
             turn_id = self.store.add_turn(chat_id, text)
             job = f"genesis-task-{uuid.uuid4().hex[:12]}"
             if self.prices is not None:
                 # Името на задачата в шлюза — ПРЕДИ контейнера: срив посред хода
                 # не губи сметката, reconcile при старт я намира по него.
                 self.store.set_job(turn_id, job)
-        self.pool.submit(self._run, turn_id, user["id"], text,
-                         self.workspace(user["id"], chat_id), job, self.gateway)
+        gateway = (dataclasses.replace(self.gateway, budget=min(self.gateway.budget, budget))
+                   if self.gateway is not None else None)
+        self.pool.submit(self._run, turn_id, uid, text, self.workspace(uid, chat_id), job, gateway)
         return turn_id
 
     def _run(self, turn_id: int, user_id: int, text: str, workspace: Path, job: str,
@@ -633,9 +700,10 @@ class Handler(BaseHTTPRequestHandler):
             if not text or len(text) > MAX_TEXT:
                 self._error(400, f"съобщението трябва да е между 1 и {MAX_TEXT} знака")
                 return
-            turn_id = self.app.start_turn(user, chat["id"], text)
-            if turn_id is None:
-                self._error(409, "предишната ти задача още върви")
+            try:
+                turn_id = self.app.start_turn(user, chat["id"], text)
+            except TurnRefused as e:
+                self._error(e.status, e.message)
                 return
             self._json(202, {"turn_id": turn_id})
         else:
@@ -676,6 +744,12 @@ def main(argv: list[str] | None = None) -> int:
                      help="плащане с кредити (иска --gateway-usage)")
     srv.add_argument("--prices", type=Path, default=billing.PRICES,
                      help="цените (JSON), по подразбиране cloud/web/prices.json")
+    srv.add_argument("--turns-per-day", type=int, default=TURNS_PER_DAY,
+                     help="ходове на човек на ден (UTC), важи и без плащане")
+    srv.add_argument("--max-tokens-per-turn", type=int, default=launch.TASK_BUDGET,
+                     help="таван на токените на ход в шлюза")
+    srv.add_argument("--monthly-cap", default=str(MONTHLY_CAP // MICRO),
+                     help="месечен таван на харченето в кредити (с плащане)")
     a = p.parse_args(argv)
     # README-то казва „никога и двете“, а кодът приемаше и вярваше на
     # CF-Connecting-IP — зад Caddy клиентът си го пише сам и спирачката на
@@ -694,6 +768,11 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"{a.email.strip().lower()}  парола: {password}")
         return 0
+    try:
+        monthly_cap = billing.parse_credits(a.monthly_cap)
+    except ValueError as e:
+        print(f"--monthly-cap: {e}", file=sys.stderr)
+        return 2
     prices = None
     if a.billing:
         if not a.gateway_usage:
@@ -714,7 +793,8 @@ def main(argv: list[str] | None = None) -> int:
     app = App(store, a.jobs, workers=a.workers, limits=launch.Limits(seconds=a.seconds),
               env_file=a.env_file, runtime=a.runtime, secure_cookie=not a.insecure_cookie,
               trust_proxy="cloudflare" if a.trust_cloudflare else a.trust_proxy, gateway=gateway,
-              prices=prices)
+              prices=prices, turns_per_day=a.turns_per_day,
+              max_tokens_per_turn=a.max_tokens_per_turn, monthly_cap=monthly_cap)
     server = make_server(app, a.host, a.port)
     print(f"genesis web: http://{a.host}:{server.server_address[1]}", flush=True)
     with contextlib.suppress(KeyboardInterrupt):
