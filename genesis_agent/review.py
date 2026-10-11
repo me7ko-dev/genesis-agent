@@ -56,13 +56,10 @@ _HOSTILE_OFF = ("-c", "core.fsmonitor=", "-c", f"core.hooksPath={os.devnull}")
 
 
 def _git_env() -> dict[str, str]:
-    """Минималната среда на sandbox-а (без API ключовете) + това, с което Git
-    for Windows намира дома си (не са тайни)."""
+    """Минималната среда на sandbox-а (без API ключовете); домът на Git for
+    Windows (USERPROFILE и сродните) вече е в нея."""
     from genesis_agent import sandbox
     env = sandbox._build_env(sandbox.get_policy())
-    for key in ("USERPROFILE", "HOMEDRIVE", "HOMEPATH", "LOCALAPPDATA", "APPDATA"):
-        if key in os.environ:
-            env.setdefault(key, os.environ[key])
     env["GIT_TERMINAL_PROMPT"] = "0"
     return env
 
