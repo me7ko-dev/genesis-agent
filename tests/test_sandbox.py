@@ -419,11 +419,11 @@ class TestNonAsciiOutputSurvives:
         monkeypatch.setattr(sandbox.subprocess, "Popen", _spy)
         sandbox.run_python('print("x")', cwd=tmp_path)
 
-        assert seen.get("encoding") == "utf-8", (
-            "без изрично encoding текстът се декодира с локалното кодиране "
-            "на машината — cp1252/cp1251 на Windows"
-        )
-        assert seen.get("errors") == "replace"
+        # 2026-10-11: байтове, които декодира sandbox.decode_output (UTF-8,
+        # на Windows с резерва кодовата страница) — не text=True, при който
+        # Python решава по локалното кодиране (cp1252/cp1251 на Windows).
+        assert not seen.get("text") and not seen.get("encoding") and not seen.get(
+            "universal_newlines"), "изходът трябва да идва като байтове"
 
     def test_undecodable_bytes_do_not_kill_the_read(self, tmp_path) -> None:
         """errors="replace", защото sandbox-ът изпълнява ПРОИЗВОЛЕН код:
@@ -434,6 +434,28 @@ class TestNonAsciiOutputSurvives:
             cwd=tmp_path,
         )
         assert "стигнах дотук" in res.stdout
+
+    _NOT_FOUND = "Системата не може да намери указания път."
+
+    @pytest.mark.parametrize("codec", ["cp866", "cp1251"])
+    def test_windows_code_pages_are_read_as_such(self, monkeypatch, codec) -> None:
+        """cmd.exe, `dir`, `type` и `powershell -c` към тръба пишат в OEM/ANSI
+        кодовата страница; строгото UTF-8 даваше на модела „���⥬��…“ (2026-10-11)."""
+        monkeypatch.setattr(sandbox, "_legacy_codepages", lambda: ["cp866", "cp1251"])
+        raw = ("ok\r\n" + self._NOT_FOUND + "\r\n").encode(codec)
+        assert sandbox.decode_output(raw) == "ok\n" + self._NOT_FOUND + "\n"
+
+    def test_utf8_and_code_page_lines_mixed_in_one_output(self, monkeypatch) -> None:
+        monkeypatch.setattr(sandbox, "_legacy_codepages", lambda: ["cp866", "cp1251"])
+        raw = "готово ✓\n".encode() + self._NOT_FOUND.encode("cp866")
+        assert sandbox.decode_output(raw) == "готово ✓\n" + self._NOT_FOUND
+
+    def test_run_decodes_a_code_page_child(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(sandbox, "_legacy_codepages", lambda: ["cp866", "cp1251"])
+        res = sandbox.run_python(
+            "import sys; sys.stdout.buffer.write("
+            f"{self._NOT_FOUND.encode('cp866')!r}); sys.stdout.flush()", cwd=tmp_path)
+        assert res.stdout == self._NOT_FOUND
 
 
 class TestWindowsShellSelection:

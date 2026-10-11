@@ -1727,21 +1727,13 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
             cwd=str(cwd),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            # Изрично UTF-8, а не локалното кодиране (bug fix, 2026-09-20,
-            # хванат от Windows CI). `text=True` само по себе си декодира с
-            # locale.getpreferredencoding() — cp1252 на англоезичен Windows,
-            # cp1251 на български. Детето обаче пише UTF-8: _build_env му
-            # задава PYTHONIOENCODING=utf-8 няколко реда по-горе. Двете страни
-            # се разминаваха, и всяко умение или команда, отпечатала кирилица,
-            # чуплеше reader нишката с UnicodeDecodeError — изходът се губеше,
-            # а причината не личеше отникъде. Това е проектът, чийто оператор
-            # пише на български; изходите също.
-            # errors="replace", защото sandbox-ът изпълнява ПРОИЗВОЛЕН код:
-            # програма, която извади двоични байтове на stdout, трябва да
-            # даде повреден текст, не да срине четенето.
-            encoding="utf-8",
-            errors="replace",
+            # Байтове, декодирани от decode_output, а не text=True (bug fix,
+            # 2026-09-20, хванат от Windows CI): text=True декодира с
+            # locale.getpreferredencoding() — cp1252/cp1251 на Windows — а
+            # детето пише UTF-8 (PYTHONIOENCODING от _build_env); кирилицата
+            # чупеше reader нишката с UnicodeDecodeError. Строгото UTF-8 пък
+            # (2026-10-11) правеше на „���“ българския изход на cmd.exe, `dir`,
+            # `type` и `powershell -c`, които пишат в кодовата страница.
             env=env,
             preexec_fn=(lambda: _preexec(policy, nproc_cap)) if os.name == "posix" else None,  # noqa: PLW1509 — fork()+exec() is immediate; setrlimit-only preexec, no locks touched
         )
@@ -1764,8 +1756,8 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
                     raise
                 if time.monotonic() >= deadline:
                     raise
-        return SandboxResult(ok=proc.returncode == 0, stdout=out or "", stderr=err or "",
-                             returncode=proc.returncode)
+        return SandboxResult(ok=proc.returncode == 0, stdout=decode_output(out),
+                             stderr=decode_output(err), returncode=proc.returncode)
     except subprocess.TimeoutExpired:
         # Убиваме цялата process group — само на POSIX (os.killpg/getpgid не
         # съществуват на Windows и AttributeError не се хваща по-долу, значи
@@ -1788,7 +1780,8 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
         # 11 246 секунди при таймаут от 120. Ако нещо ги държи и след убиването
         # на дървото, изоставяме изхода, не чакаме завинаги.
         try:
-            out, err = proc.communicate(timeout=10)
+            raw_out, raw_err = proc.communicate(timeout=10)
+            text_out, text_err = decode_output(raw_out), decode_output(raw_err)
         except subprocess.TimeoutExpired:
             for stream in (proc.stdout, proc.stderr):
                 try:
@@ -1796,11 +1789,77 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
                         stream.close()
                 except OSError:
                     pass
-            out, err = "", "[sandbox] процесът не пусна изхода си и след убиване"
+            text_out, text_err = "", "[sandbox] процесът не пусна изхода си и след убиване"
         note = "⏹ Спряно от оператора" if stopped else f"Timeout след {timeout}s"
-        return SandboxResult(ok=False, stdout=out or "",
-                             stderr=(err or "") + f"\n[sandbox] {note}",
+        return SandboxResult(ok=False, stdout=text_out,
+                             stderr=text_err + f"\n[sandbox] {note}",
                              returncode=None)
+
+
+# ── Изход на детето: UTF-8, а на Windows и кодовата страница (2026-10-11) ────
+# Python децата пишат UTF-8 (PYTHONIOENCODING), но вградените в Windows
+# програми — в OEM (cp866, конзолата) или ANSI (cp1251) кодовата страница на
+# българския Windows. Измерено: run_shell на дете, което пише „Системата не
+# може да намери указания път.“ в cp866, връщаше „���⥬�� …“, а `!команда`
+# (shell_mode) я четеше правилно. Решава се ред по ред: UTF-8, ако е валиден;
+# иначе онази кодова страница, която дава най-много четим текст — cp866 и
+# cp1251 декодират всеки байт, затова грешка при декодиране не ги различава.
+_READABLE = re.compile(r"[\x20-\x7e\sЀ-џ]")
+
+
+def _legacy_codepages() -> list[str]:
+    """Кодовите страници, с които пишат програмите извън Python; празно извън Windows."""
+    if sys.platform != "win32":
+        return []
+    global _CODEPAGES
+    if _CODEPAGES is None:
+        import codecs
+        import locale
+
+        names: list[str] = []
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            names += [f"cp{cp}" for cp in (kernel32.GetConsoleOutputCP(), kernel32.GetOEMCP(),
+                                           kernel32.GetACP()) if cp]
+        except Exception:
+            pass
+        names.append(locale.getpreferredencoding(False))
+        found: list[str] = []
+        for name in names:
+            try:
+                codec = codecs.lookup(name).name
+            except (LookupError, TypeError):
+                continue
+            if codec != "utf-8" and codec not in found:
+                found.append(codec)
+        _CODEPAGES = found
+    return _CODEPAGES
+
+
+_CODEPAGES: list[str] | None = None
+
+
+def _decode_line(raw: bytes, codepages: list[str]) -> str:
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    if not codepages:
+        return raw.decode("utf-8", errors="replace")
+    candidates = [raw.decode(cp, errors="replace") for cp in codepages]
+    return max(candidates, key=lambda text: len(_READABLE.findall(text)))
+
+
+def decode_output(raw: bytes | str | None) -> str:
+    """Изход на подпроцес → текст с `\\n` за край на ред (както text=True)."""
+    if not raw:
+        return ""
+    if isinstance(raw, str):
+        return raw
+    codepages = _legacy_codepages()
+    text = "".join(_decode_line(line, codepages) for line in raw.splitlines(keepends=True))
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _kill_tree_win32(pid: int) -> None:

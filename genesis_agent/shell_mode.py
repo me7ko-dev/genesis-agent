@@ -13,7 +13,6 @@ genesis_agent.shell_mode — `!команда` в чата: операторът
 """
 from __future__ import annotations
 
-import locale
 import os
 import queue
 import signal
@@ -36,13 +35,11 @@ def is_bang(text: str) -> bool:
 
 def _decode(raw: bytes) -> str:
     """UTF-8; на Windows програмите извън Python пишат в кодовата страница на
-    системата (cp1251/cp866) — ред, който не е UTF-8, се чете с нея."""
-    if sys.platform == "win32":
-        try:
-            return raw.decode("utf-8")
-        except UnicodeDecodeError:
-            return raw.decode(locale.getpreferredencoding(False), errors="replace")
-    return raw.decode("utf-8", errors="replace")
+    системата (cp866/cp1251) — ред, който не е UTF-8, се чете с нея. Същото
+    правило като RUN_CMD (sandbox.decode_output, 2026-10-11): двата пътя за
+    команди иначе виждаха различен текст за един и същ изход."""
+    from genesis_agent import sandbox
+    return sandbox._decode_line(raw, sandbox._legacy_codepages())
 
 
 def _kill_group(proc: subprocess.Popen) -> None:
