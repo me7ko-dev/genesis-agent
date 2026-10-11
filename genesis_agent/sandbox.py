@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import ast
 import os
+import posixpath
 import re
 import shlex
 import signal
@@ -136,12 +137,18 @@ _BLOCK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 # без въпрос. Папките (`.ssh`, `.aws`, `.gnupg`) — и без наклонена черта след
 # тях (2026-10-07): `grep -r SECRET ~/.ssh ~/.aws` и `tar cz ~/.ssh` минаваха
 # като SAFE и печатаха ключовете, макар `cat ~/.ssh/id_rsa` да беше спрян.
+# Папката на Genesis и 8.3 името ѝ на Windows (`GENESI~1`), 2026-10-11:
+# `echo {} > ~/GENESI~1/hooks.json` беше SAFE, а `~/.genesis/hooks.json` — CONFIRM.
+_GENESIS_DIR = r"(?:\.genesis|\bgenesi~\d)"
+
 _SECRET_PATHS = (
     r"\.ssh(?:[/\\]|\b)|\.aws(?:[/\\]|\b)|\.gnupg(?:[/\\]|\b)|id_rsa|id_ed25519|id_ecdsa|id_dsa"
     r"|\bid_[*?\[]|\.env\b|credentials\b"
-    r"|\.pem\b|\.p12\b|\.pfx\b|\.genesis[/\\]remote\.json|gh[/\\]hosts\.yml"
+    r"|\.pem\b|\.p12\b|\.pfx\b|" + _GENESIS_DIR + r"[/\\]remote\.json|gh[/\\]hosts\.yml"
+    # gh на Windows: %APPDATA%\GitHub CLI\hosts.yml (2026-10-11).
+    r"|GitHub CLI[/\\]hosts\.yml"
     # OAuth токените за MCP и копията на проекта за /undo (2026-10-09).
-    r"|mcp_tokens\.json\b|\.genesis[/\\]checkpoints\b"
+    r"|mcp_tokens\.json\b|" + _GENESIS_DIR + r"[/\\]checkpoints\b"
     r"|\.npmrc\b|\.pypirc\b|\.netrc\b|\.docker[/\\]config\.json|\.kube[/\\]config\b"
     r"|Login Data\b"
     # Ключът, с който се подписва доверието за hooks/MCP (2026-10-11).
@@ -162,9 +169,11 @@ _SECRET_PATHS = (
 # команда, която виждаше API ключа, скрит от самия RUN_CMD. Отделна причина, не
 # в _SECRET_PATHS: READ_FILE на тези файлове (за /hooks) остава без въпрос.
 _GENESIS_CONTROL = (
-    r"\.genesis\b[^\n]{0,40}?\b(?:hooks|mcp|settings|trusted_\w+)\.json\b"
-    r"|\btrusted_hooks\b|\.genesis[/\\](?:agents|commands)\b"
+    _GENESIS_DIR + r"\b[^\n]{0,40}?\b(?:hooks|mcp|settings|trusted_\w+)\.json\b"
+    r"|\btrusted_hooks\b|" + _GENESIS_DIR + r"[/\\](?:agents|commands)\b"
 )
+_GENESIS_CONTROL_REASON = ("промяна на управляващ файл на Genesis (hooks/MCP/доверие) — "
+                           "пуска програми извън sandbox-а")
 
 # Опасни — изискват потвърждение (interactive) или отказ (autonomous).
 _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
@@ -201,8 +210,7 @@ _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
      "git push (публикуване)"),
     (_c(_SECRET_PATHS),
      "достъп до чувствителни файлове (ключове/тайни)"),
-    (_c(_GENESIS_CONTROL),
-     "промяна на управляващ файл на Genesis (hooks/MCP/доверие) — пуска програми извън sandbox-а"),
+    (_c(_GENESIS_CONTROL), _GENESIS_CONTROL_REASON),
     # Качване на локален файл навън — пътят, по който тайна напуска машината.
     # localhost е изключен: така агентът тества собственото си API.
     (_c(r"\bcurl\b(?![^\n]*\b(?:localhost|127\.0\.0\.1)\b)[^\n]*\s(?:-T\s*\S|--upload-file\b"
@@ -236,10 +244,33 @@ _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 # срещат случайно в POSIX команда, така че цената на безусловното включване е
 # нула, а ползата е, че една и съща команда се оценява еднакво навсякъде.
 
-# Корени, чието рекурсивно триене е катастрофа (не просто опасно).
+# Корени, чието рекурсивно триене е катастрофа (не просто опасно). Всеки
+# завършва с края на думата (2026-10-11): без него всичко ПОД C:\Users — тоест
+# всеки проект на оператора — беше BLOCKED и не можеше да се одобри, а
+# `rd /s /q C:\Users\<име>\Projects\app\build` е нормално чистене.
+# Последната част може да е глоб (2026-10-11, трета вълна): с `\*?` отзад
+# `del /s /q C:\Users\<име>\*.*` и `… C:\Windows\*.*` — идиомът на cmd.exe за
+# „всички файлове“ — бяха паднали от BLOCKED (main) на CONFIRM.
+_WIN_GLOB_TAIL = r"[^\\/\s\"';|&]*[*?][^\\/\s\"';|&]*"
+_WIN_ROOT_END = r"[\\/]*(?:" + _WIN_GLOB_TAIL + r")?(?=[\s\"';|&)]|$)"
 _WIN_ROOT = (r"(?:[A-Za-z]:\\*(?:\s|$|[\"';*])"          # C:\ / C: / C:\\ (ескейпнато)
-             r"|[A-Za-z]:\\(?:Windows|Users|Program\s)"   # C:\Windows, C:\Users
-             r"|\$env:USERPROFILE|%USERPROFILE%|\$HOME"
+             # Системните папки — с всичко под тях, както в main: там няма
+             # проекти на оператора, които котвата да пази (2026-10-11).
+             # `rd /s /q C:\Windows\System32\drivers` беше паднал на CONFIRM.
+             r"|[A-Za-z]:[\\/](?:Windows|Program(?:\s|Data))"
+             # C:\Users, C:\Users\<име> и AppData на дома (настройките и
+             # паролите на всички програми; не е проект, а в main беше BLOCKED).
+             r"|[A-Za-z]:[\\/]Users(?:[\\/][^\\/\s\"';|&]+"
+             r"(?:[\\/]AppData(?:[\\/](?:Local|LocalLow|Roaming))?)?)?"
+             + _WIN_ROOT_END +
+             r"|(?:\$env:USERPROFILE|%USERPROFILE%|\$HOME)" + _WIN_ROOT_END +
+             # Всичко под AppData — и по буква, и през променлива (ревю
+             # 2026-10-11, трета вълна): `…\AppData\Roaming\Microsoft\Protect`
+             # (ключовете на DPAPI) и `$env:APPDATA\…` бяха паднали от BLOCKED
+             # (main) на CONFIRM. Там няма проекти — само настройки и пароли.
+             r"|(?:[A-Za-z]:[\\/]Users[\\/][^\\/\s\"';|&]+|\$env:USERPROFILE|%USERPROFILE%"
+             r"|\$HOME|~)[\\/]AppData(?:[\\/][^\s\"';|&]*)?(?=[\s\"';|&)]|$)"
+             r"|(?:\$env:(?:LOCAL)?APPDATA|%(?:LOCAL)?APPDATA%)(?:[\\/][^\s\"';|&]*)?(?=[\s\"';|&)]|$)"
              r"|[A-Za-z]:\\\*)")
 
 _WIN_BLOCK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
@@ -247,9 +278,10 @@ _WIN_BLOCK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # (и двата символа са не-word), затова тук е `(?:^|\s)-`.
     (_c(r"\bRemove-Item\b[^\n]*(?:^|\s)-(?:Recurse|Force)\b[^\n]*" + _WIN_ROOT),
      "Remove-Item -Recurse/-Force върху диск/системна/домашна директория"),
-    (_c(r"\b(del|erase)\b[^\n]*\s/s\b[^\n]*" + _WIN_ROOT),
+    # `(?:/[a-z])*` — слепените ключове на cmd.exe (`/q/s`), 2026-10-11.
+    (_c(r"\b(del|erase)\b[^\n]*\s(?:/[a-z])*/s\b[^\n]*" + _WIN_ROOT),
      "del /s върху диск/системна/домашна директория"),
-    (_c(r"\brd\b[^\n]*\s/s\b[^\n]*" + _WIN_ROOT),
+    (_c(r"\brd\b[^\n]*\s(?:/[a-z])*/s\b[^\n]*" + _WIN_ROOT),
      "rd /s върху диск/системна/домашна директория"),
     (_c(r"\bformat\s+[A-Za-z]:"),
      "форматиране на дял (format)"),
@@ -268,14 +300,13 @@ _WIN_BLOCK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 _WIN_CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (_c(r"\bRemove-Item\b[^\n]*(?:^|\s)-(?:Recurse|Force)\b"),
      "рекурсивно/принудително триене (Remove-Item)"),
-    (_c(r"\b(del|erase)\b[^\n]*\s/(s|q|f)\b"),
+    (_c(r"\b(del|erase)\b[^\n]*\s(?:/[a-z])*/(s|q|f)\b"),
      "принудително/рекурсивно триене (del)"),
-    (_c(r"\brd\b[^\n]*\s/s\b|\brmdir\b[^\n]*\s/s\b"),
+    (_c(r"\b(rd|rmdir)\b[^\n]*\s(?:/[a-z])*/s\b"),
      "триене на директория (rd /s)"),
     (_c(r"\breg\s+(delete|add|import)\b|\bSet-ItemProperty\b[^\n]*\bHK(LM|CU|CR|U|CC):"),
      "промяна на регистъра"),
-    (_c(r"\bpowershell(\.exe)?\b[^\n]*\s-(enc|e|encodedcommand)\b"),
-     "PowerShell с кодирана команда (-EncodedCommand)"),
+    # `-EncodedCommand` се проверява структурно (_encoded_powershell_verdict).
     (_c(r"\b(Invoke-Expression|iex)\b|\|\s*(powershell|pwsh)\b"),
      "динамично изпълнение / изтеглено съдържание директно в PowerShell"),
     (_c(r"\bSet-ExecutionPolicy\b"),
@@ -584,6 +615,26 @@ def _shlex_split_for_classification(seg: str) -> list[str]:
     return shlex.split(seg)
 
 
+def _argument_readings(seg: str) -> list[list[str]]:
+    """Думите на сегмента така, както ги вижда всеки шел, който може да го
+    изпълни. На Windows RUN_CMD върви през Git Bash, където `\\` е escape, а
+    без bash — през cmd.exe, където е разделител. Измерено 2026-10-11:
+    `cat ~/.s\\sh/id_ed2551\\9` беше SAFE на Windows (само `/`-четенето), а bash
+    печаташе ключа. Проверката за тайни гледа и двете четения."""
+    try:
+        readings = [_shlex_split_for_classification(seg)]
+    except ValueError:
+        readings = [seg.split()]
+    if os.name == "nt":
+        try:
+            posix = shlex.split(seg)
+        except ValueError:
+            posix = []
+        if posix and posix != readings[0]:
+            readings.append(posix)
+    return readings
+
+
 def _assess_file_ops(command: str, cwd: Path | None = None) -> RiskVerdict:
     """Структурна оценка на файлови операции + РАЗГЪНАТ преглед кои файлове
     реално ще бъдат засегнати. Виж коментара при _DESTRUCTIVE_MOVE_CMDS."""
@@ -681,11 +732,18 @@ _HOME_PARENTS = ("/home/", "/users/", "/root/")
 # Нормализираните Windows корени (виж _normalise_target): `c:`, `c:/*`,
 # `c:/windows`, `c:/users`, `c:/program files (x86)`, `c:/users/<име>` и домът
 # през PowerShell/cmd (2026-10-11).
+# Глобът отзад (`*`, `*.*`, `*.txt`) трие от същия корен (2026-10-11, трета
+# вълна: `ri -r -fo C:\Users\<име>\*.*` беше само CONFIRM), а под системните
+# папки всичко е критично, както в _WIN_ROOT (и AppData на дома).
+_WIN_GLOB = r"(?:/[^/]*[*?][^/]*)?"
 _WIN_CRITICAL = re.compile(
-    r"^(?:[a-z]:(?:/\*?)?"
-    r"|[a-z]:/(?:windows|users|program files[^/]*|programdata)(?:/\*)?"
-    r"|[a-z]:/users/[^/]+(?:/\*)?"
-    r"|\$env:(?:userprofile|homepath|systemroot|windir)(?:/\*)?|%homedrive%%homepath%)$")
+    r"^(?:[a-z]:/?" + _WIN_GLOB +
+    r"|[a-z]:/(?:windows|program files[^/]*|programdata)(?:/.*)?"
+    r"|[a-z]:/users(?:/[^/]+(?:/appdata(?:/(?:local|locallow|roaming))?)?)?" + _WIN_GLOB +
+    r"|\$env:(?:userprofile|homepath|homedrive|systemdrive|systemroot|windir)" + _WIN_GLOB +
+    r"|%(?:userprofile|homedrive|systemdrive|systemroot|windir)%" + _WIN_GLOB +
+    r"|%homedrive%%homepath%" + _WIN_GLOB +
+    r"|\$\{?home\}?" + _WIN_GLOB + r")$")
 
 _RECURSIVE_LONG = frozenset({"--recursive", "--force", "-R", "-r"})
 
@@ -755,15 +813,35 @@ def _normalise_target(token: str) -> str:
     # RUN_CMD на Windows върви точно през Git Bash.
     if re.match(r"^[A-Za-z]:(?:[\\/]|$)", t):
         t = t.replace("\\", "/")
+    elif re.match(r"^(?:\$\{?env:|%|\$\{?home\b)", t, re.IGNORECASE):
+        # Домът като променлива на PowerShell/cmd (2026-10-11): `$env:USERPROFILE\*`,
+        # `${env:USERPROFILE}` и `%HOMEDRIVE%\` бяха само CONFIRM, а `$HOME/*` — BLOCKED.
+        # И `$HOME\*.*` на PowerShell (`ri -r -fo $HOME\*.*` беше CONFIRM).
+        t = re.sub(r"^\$\{env:([A-Za-z_]\w*)\}", r"$env:\1", t, flags=re.IGNORECASE)
+        t = t.replace("\\", "/")
     else:
         drive = re.match(r"^/(?:mnt/)?([A-Za-z])(?=/|$)", t)
         if drive:
             t = f"{drive.group(1)}:{t[drive.end():] or '/'}"
     # `/home/./user` и `/home/user/../user` сочат същото място като
     # `/home/user`, но без канонизация се четат като по-дълбоки пътища и
-    # проверката за дълбочина ги пропускаше.
-    if t.startswith("/") and (".." in t or "/." in t):
-        t = os.path.normpath(t)
+    # проверката за дълбочина ги пропускаше. Същото за `c:/…` и `~/…`
+    # (2026-10-11): канонизацията стоеше СЛЕД превръщането на `/c/x` в `c:/x`
+    # и изискваше `/` отпред, затова `rm -rf C:\Users\<име>\Projects\..` (целият
+    # дом) и `rm -rf ~/..` бяха само CONFIRM. posixpath, не os.path: на Windows
+    # ntpath.normpath връща `\home\user` и сравнението с `/home/` пропада.
+    if ".." in t or "/." in t:
+        if t.startswith("/"):
+            t = posixpath.normpath(t)
+        elif re.match(r"^[A-Za-z]:/", t):
+            t = t[:2] + posixpath.normpath(t[2:])
+        elif t == "~" or t.startswith("~/"):
+            # Домът като истински път, за да се види излизането над него:
+            # `~/..` е родителят на дома (`/home`), `~/../x` — чужд дом.
+            anchor = "/home/\0home"
+            t = posixpath.normpath(anchor + t[1:])
+            if t == anchor or t.startswith(anchor + "/"):
+                t = "~" + t[len(anchor):]
     if len(t) > 1 and t.endswith(("/", "\\")):
         t = t.rstrip("/\\") or "/"
     return t.lower()
@@ -982,7 +1060,18 @@ def _catastrophic_rm_reason(command: str) -> str | None:
 _WIN_DELETE_VERBS = frozenset({"remove-item", "ri", "rm", "del", "erase", "rd", "rmdir"})
 _CMD_DELETE_VERBS = frozenset({"del", "erase", "rd", "rmdir"})
 _WIN_LAUNCHERS = frozenset({"powershell", "pwsh", "cmd"})
-_CMD_DELETE_FLAG = re.compile(r"^/[sqf]$", re.IGNORECASE)
+# Ключовете на cmd.exe, и слепени: `/q/s`, `/Q/S/F`, `/a:h/s`. Измерено
+# 2026-10-11: проверката искаше по един ключ на дума и `rd /q/s C:\Users\<име>`
+# беше SAFE, а `rd /s/q …` — BLOCKED само заради реда на ключовете.
+_CMD_SWITCHES = re.compile(r"^(?:/[a-z](?::[^/\s]*)?)+$", re.IGNORECASE)
+
+
+def _cmd_switch_letters(token: str) -> set[str]:
+    """Буквите на ключовете в една дума (`/q/s` → {q, s}); празно, ако думата
+    не е само ключове — `/c/Users/x` е път на Git Bash, не ключове."""
+    if not _CMD_SWITCHES.match(token):
+        return set()
+    return {m.lower() for m in re.findall(r"/([a-z])", token, re.IGNORECASE)}
 
 
 def _win_dangerous_flag(verb: str, flag: str) -> bool:
@@ -995,7 +1084,7 @@ def _win_dangerous_flag(verb: str, flag: str) -> bool:
         return True
     if verb == "rm" and re.fullmatch(r"-[a-z]*[rf][a-z]*", f) is not None and len(f) <= 5:
         return True                                   # `rm -rf` в Git Bash/PowerShell
-    return verb in _CMD_DELETE_VERBS and _CMD_DELETE_FLAG.match(f) is not None
+    return verb in _CMD_DELETE_VERBS and bool(_cmd_switch_letters(f) & {"s", "q", "f"})
 
 
 def _launcher_word(word: str) -> bool:
@@ -1005,33 +1094,166 @@ def _launcher_word(word: str) -> bool:
 
 def _windows_delete_verdict(command: str) -> RiskVerdict:
     """BLOCKED за рекурсивно/принудително триене на диск, системна папка или
-    дом; CONFIRM за всяко друго рекурсивно/принудително триене с тези глаголи."""
+    дом; CONFIRM за всяко друго рекурсивно/принудително триене с тези глаголи.
+
+    2026-10-11: `${env:X}` се чете като `$env:X` (иначе `{}` режеше израза);
+    триене без цели на командния ред взима целите си от тръбата — `gci C:\\ -r
+    | ri -r -fo` е BLOCKED като `find / | xargs rm -rf`, а не CONFIRM; и първото
+    намерено триене вече не скрива по-късен израз, който трие корен."""
+    command = re.sub(r"\$\{env:([A-Za-z_]\w*)\}", r"$env:\1", command, flags=re.IGNORECASE)
+    confirm: RiskVerdict | None = None
+    for statement in re.split(r"[;&\n(){}]", command):
+        stages = statement.split("|")
+        for index, stage in enumerate(stages):
+            words = _windows_words(stage)
+            for i, word in enumerate(words):
+                verb = word.lower()
+                if verb not in _WIN_DELETE_VERBS:
+                    continue
+                # Глаголът е командата, не дума в текст: в началото на израза
+                # или след `powershell -c`, `cmd /c` и техните флагове.
+                before = words[:i]
+                if not all(_launcher_word(w) for w in before):
+                    break
+                args = words[i + 1:]
+                if not any(a.startswith(("-", "/")) and _win_dangerous_flag(verb, a) for a in args):
+                    break
+                targets = [a for a in args if not a.startswith("-")
+                           and not (verb in _CMD_DELETE_VERBS and _cmd_switch_letters(a))]
+                for target in targets:
+                    reason = _critical_root_reason(target)
+                    if reason:
+                        return RiskVerdict(RiskLevel.BLOCKED,
+                                           [f"рекурсивно/принудително триене ({word}) на {reason}"])
+                upstream = None if targets else _upstream_windows_root(stages[:index])
+                if upstream:
+                    return RiskVerdict(RiskLevel.BLOCKED, [
+                        (f"рекурсивно/принудително триене ({word}) на целите от тръбата, "
+                         f"в която по-рано стои {upstream}")])
+                confirm = confirm or RiskVerdict(RiskLevel.CONFIRM,
+                                                 [f"рекурсивно/принудително триене ({word})"])
+                break
+    return confirm or RiskVerdict(RiskLevel.SAFE, [])
+
+
+def _windows_words(stage: str) -> list[str]:
+    return [w for w in (w.strip("'\"`") for w in stage.split()) if w]
+
+
+def _upstream_windows_root(stages: list[str]) -> str | None:
+    """Критичен път, изписан в по-ранен етап на тръбата (`gci C:\\Users\\x | ri …`).
+
+    Етап, който стеснява списъка (`-Filter *.tmp`, `-Include *.log`, път с глоб
+    `C:\\Users\\x\\*.tmp`), не подава целия корен: такова чистене пита, както
+    в main, а не е BLOCKED без право на одобрение (2026-10-11, трета вълна —
+    `gci $HOME -r -Filter *.tmp | ri -fo` беше станало неодобримо). `-Exclude`
+    и `-Filter *` не стесняват нищо и остават BLOCKED."""
+    for stage in stages:
+        words = _windows_words(stage)[1:]
+        if any(_is_narrowing_filter(w) and i + 1 < len(words) and _narrowing_glob(words[i + 1])
+               for i, w in enumerate(words)):
+            continue
+        for word in words:
+            if word.startswith("-") or _cmd_switch_letters(word):
+                continue
+            last = re.split(r"[\\/]", word)[-1]
+            if any(ch in last for ch in "*?") and _narrowing_glob(last):
+                continue
+            if _critical_root_reason(word):
+                return word
+    return None
+
+
+def _is_narrowing_filter(word: str) -> bool:
+    """`-Filter`/`-Include` на Get-ChildItem и еднозначните им префикси."""
+    w = word.lower()
+    return (len(w) >= 5 and "-filter".startswith(w)) or (len(w) >= 4 and "-include".startswith(w))
+
+
+def _narrowing_glob(value: str) -> bool:
+    """`*.tmp`, `*.log,*.tmp` стесняват; `*`, `*.*` и празното — не."""
+    items = [v for v in value.split(",") if v]
+    return bool(items) and all(re.search(r"[^*?.]", v) for v in items)
+
+
+# ── PowerShell -EncodedCommand (2026-10-11) ─────────────────────────────────
+# Образецът искаше `powershell` и точно `-e`/`-enc`/`-encodedcommand`.
+# Измерено в режим „deny“ с base64 на `Remove-Item -Recurse -Force
+# $env:USERPROFILE`: `powershell -ec …`, `pwsh -enc …` и `pwsh -e …` бяха SAFE
+# и се изпълняваха без въпрос. `-ec` е документиран псевдоним, а PowerShell
+# приема всеки префикс на параметъра (`-e`, `-en`, `-enc` …) и с `/` отпред.
+# Кодираната команда е скрита от оператора, затова винаги пита — а щом се
+# декодира, получава и собствената си оценка: изтриване на дома е BLOCKED, не
+# въпрос, на който някой може да отговори „да“, без да вижда какво одобрява.
+_PS_LAUNCHERS = frozenset({"powershell", "pwsh"})
+_PS_PARAM = re.compile(r"^(?:--?|/)([a-z]+)$", re.IGNORECASE)
+
+
+def _is_encoded_command_flag(word: str) -> bool:
+    m = _PS_PARAM.match(word)
+    if not m:
+        return False
+    name = m.group(1).lower()
+    return name == "ec" or "encodedcommand".startswith(name)
+
+
+def _ends_launcher_params(word: str) -> bool:
+    """`-Command`/`-File`: думите след тях са скрипт или негови аргументи —
+    `pwsh -c "Select-String -e x"` не е кодирана команда."""
+    m = _PS_PARAM.match(word)
+    if not m:
+        return False
+    name = m.group(1).lower()
+    return name in ("c", "f") or (len(name) >= 3 and ("command".startswith(name)
+                                                      or "file".startswith(name)))
+
+
+def _encoded_powershell_verdict(command: str, cwd: Path | None) -> RiskVerdict:
+    import base64
+    import binascii
+
+    # Скобите и `{}` също започват команда (2026-10-11, трета вълна): с делене
+    # само по `;|&` думата беше `(powershell`, `$(powershell`, `x=$(powershell`
+    # — непозната — и командата ставаше SAFE дори с base64 на триене на дома,
+    # а в main беше CONFIRM. `@` е префиксът на cmd.exe, който скрива ехото.
+    command = re.sub(r"\\\s*\n", " ", command)
+    unrecognised = False
     for statement in re.split(r"[;|&\n(){}]", command):
         words = [w.strip("'\"`") for w in statement.split()]
-        words = [w for w in words if w]
+        launched = seen = False
         for i, word in enumerate(words):
-            verb = word.lower()
-            if verb not in _WIN_DELETE_VERBS:
+            name = os.path.basename(word.replace("\\", "/")).lower().lstrip("@").removesuffix(".exe")
+            if name in _PS_LAUNCHERS:
+                launched = seen = True
                 continue
-            # Глаголът е командата, не дума в текст: в началото на израза или
-            # след `powershell -c`, `cmd /c` и техните флагове.
-            before = words[:i]
-            if not all(_launcher_word(w) for w in before):
-                break
-            args = words[i + 1:]
-            if not any(a.startswith(("-", "/")) and _win_dangerous_flag(verb, a) for a in args):
-                break
-            for target in args:
-                if verb in _CMD_DELETE_VERBS and _CMD_DELETE_FLAG.match(target):
-                    continue
-                if target.startswith("-"):
-                    continue
-                reason = _critical_root_reason(target)
-                if reason:
-                    return RiskVerdict(RiskLevel.BLOCKED,
-                                       [f"рекурсивно/принудително триене ({word}) на {reason}"])
-            return RiskVerdict(RiskLevel.CONFIRM, [f"рекурсивно/принудително триене ({word})"])
+            if launched and _ends_launcher_params(word):
+                launched = False             # нататък е скриптът, не параметри
+                continue
+            if not (launched and _is_encoded_command_flag(word)):
+                continue
+            payload = words[i + 1] if i + 1 < len(words) else ""
+            try:
+                decoded = base64.b64decode(payload, validate=True).decode("utf-16-le")
+            except (binascii.Error, ValueError):
+                return RiskVerdict(RiskLevel.CONFIRM, [
+                    "PowerShell с кодирана команда (-EncodedCommand), която не се декодира"])
+            # Декодираното е по-късо от кодираното, затова рекурсията свършва.
+            inner = assess_command(decoded, cwd)
+            shown = " ".join(decoded.split())[:120]
+            reasons = [f"PowerShell с кодирана команда (-EncodedCommand): {shown}"]
+            if inner.level == RiskLevel.BLOCKED:
+                return RiskVerdict(RiskLevel.BLOCKED, reasons + inner.reasons)
+            return RiskVerdict(RiskLevel.CONFIRM, reasons + inner.reasons)
+        # Мрежа под структурната проверка: старият образец от main за израз,
+        # в който думите не са разпознали стартера — никоя форма не пада под main.
+        unrecognised = unrecognised or (not seen and bool(_PS_ENCODED_TEXT.search(statement)))
+    if unrecognised:
+        return RiskVerdict(RiskLevel.CONFIRM, ["PowerShell с кодирана команда (-EncodedCommand)"])
     return RiskVerdict(RiskLevel.SAFE, [])
+
+
+_PS_ENCODED_TEXT = re.compile(
+    r"\b(?:powershell|pwsh)(?:\.exe)?\b[^\n]*\s[-/](?:enc|e|ec|encodedcommand)\b", re.IGNORECASE)
 
 
 _INTERPRETERS = re.compile(r"^(python[\d.]*|py|pypy[\d.]*|perl|ruby|node|deno|bun)(\.exe)?$",
@@ -1121,6 +1343,36 @@ _SECRET_ARG_RX = re.compile(_SECRET_PATHS, re.IGNORECASE)
 _MAX_SECRET_GLOB = 300
 
 
+_CONTROL_ARG_RX = re.compile(_GENESIS_CONTROL, re.IGNORECASE)
+_REDIRECT_PREFIX = re.compile(r"^\d*[<>]+&?")
+
+
+def _control_file_reached(token: str, expanded: str) -> bool:
+    """Стига ли аргументът до управляващ файл на Genesis — и без кавичките и
+    escape-ите (`~/.gene''sis/hooks.json`), и по истинския път: realpath
+    разгъва символните връзки, а на Windows и 8.3 имената (`GENESI~1`), и то
+    за файл, който още не съществува (2026-10-11)."""
+    if _CONTROL_ARG_RX.search(token.replace("\\", "/")):
+        return True
+    if not any(ch in token for ch in "/\\~"):
+        return False
+    try:
+        real = os.path.realpath(expanded)
+    except (OSError, ValueError):
+        return False
+    # ~/.genesis/workspace е папката за проекти, когато Genesis тръгне от дома
+    # (paths._frozen_workspace): `config/settings.json` там е файл на проекта,
+    # а не на Genesis, но истинският му път съдържа `.genesis/` и в режим
+    # „deny“ командата се отказваше (2026-10-11, трета вълна). Отрязва се само
+    # префиксът — `<проект>/.genesis/hooks.json` вътре остава управляващ файл,
+    # а връзка навън realpath вече е разгънал до истинската ѝ цел.
+    real = _WORKSPACE_PREFIX.sub("", real.replace("\\", "/"), count=1)
+    return bool(_CONTROL_ARG_RX.search(real))
+
+
+_WORKSPACE_PREFIX = re.compile(r"^.*?/(?:\.genesis|genesi~\d)/workspace(?=/|$)", re.IGNORECASE)
+
+
 def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:
     """Тайна, до която стигат АРГУМЕНТИТЕ на командата, а не само текстът ѝ.
 
@@ -1136,11 +1388,9 @@ def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:
     base = cwd if (cwd and cwd.is_dir()) else Path.cwd()
     seen = 0
     for seg in _split_segments(command):
-        try:
-            tokens = _shlex_split_for_classification(seg)
-        except ValueError:
-            tokens = seg.split()
+        tokens = [tok for reading in _argument_readings(seg) for tok in reading]
         for tok in tokens:
+            tok = _REDIRECT_PREFIX.sub("", tok)     # `>~/x`, `2>>log` — целта е пътят
             if not tok or tok.startswith("-"):
                 continue
             match = _SECRET_ARG_RX.search(tok.replace("\\", "/"))
@@ -1149,6 +1399,8 @@ def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:
             expanded = os.path.expanduser(os.path.expandvars(tok))
             if not os.path.isabs(expanded):
                 expanded = str(base / expanded)
+            if _control_file_reached(tok, expanded):
+                return _GENESIS_CONTROL_REASON
             if any(ch in tok for ch in "*?["):
                 try:
                     paths = _glob.glob(expanded)[:_MAX_SECRET_GLOB - seen]
@@ -1191,6 +1443,9 @@ def assess_command(command: str, cwd: Path | None = None, *, arguments: bool = T
     windows_delete = _windows_delete_verdict(command)
     if windows_delete.level == RiskLevel.BLOCKED:
         return windows_delete
+    encoded = _encoded_powershell_verdict(command, cwd)
+    if encoded.level == RiskLevel.BLOCKED:
+        return encoded
 
     for rx, why in _BLOCK_PATTERNS:
         if rx.search(command):
@@ -1205,6 +1460,9 @@ def assess_command(command: str, cwd: Path | None = None, *, arguments: bool = T
     if windows_delete.level == RiskLevel.CONFIRM and level < RiskLevel.CONFIRM:
         reasons.extend(windows_delete.reasons)
         level = RiskLevel.CONFIRM
+    if encoded.level == RiskLevel.CONFIRM:
+        reasons.extend(encoded.reasons)
+        level = RiskLevel.CONFIRM
     inline = _inline_code_reasons(command)
     if inline:
         reasons.extend(inline)
@@ -1215,7 +1473,8 @@ def assess_command(command: str, cwd: Path | None = None, *, arguments: bool = T
         except Exception:
             secret = None
         if secret:
-            reasons.append(secret)
+            if secret not in reasons:
+                reasons.append(secret)
             level = RiskLevel(max(level, RiskLevel.CONFIRM))
     verdict = RiskVerdict(level, reasons)
     try:
@@ -1411,6 +1670,11 @@ class SandboxPolicy:
         # found: neither %ComSpec% nor %SystemRoot%“, а Python в детето — без
         # random/сокети (Windows CI 2026-10-09). Не са тайни.
         "SYSTEMROOT", "COMSPEC", "PATHEXT", "WINDIR", "TEMP", "TMP",
+        # Домът на Windows (2026-10-11): HOME/USER обикновено ги няма там, а
+        # Python от 3.8 не чете HOME — без тези `Path.home()` в детето хвърляше
+        # RuntimeError, getpass.getuser() падаше, а git без bash нямаше дом.
+        # review._git_env ги добавяше само за git; не са тайни.
+        "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "USERNAME",
     )
     cpu_seconds: int = 120
     max_memory_mb: int = 2048
@@ -1602,21 +1866,13 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
             cwd=str(cwd),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            # Изрично UTF-8, а не локалното кодиране (bug fix, 2026-09-20,
-            # хванат от Windows CI). `text=True` само по себе си декодира с
-            # locale.getpreferredencoding() — cp1252 на англоезичен Windows,
-            # cp1251 на български. Детето обаче пише UTF-8: _build_env му
-            # задава PYTHONIOENCODING=utf-8 няколко реда по-горе. Двете страни
-            # се разминаваха, и всяко умение или команда, отпечатала кирилица,
-            # чуплеше reader нишката с UnicodeDecodeError — изходът се губеше,
-            # а причината не личеше отникъде. Това е проектът, чийто оператор
-            # пише на български; изходите също.
-            # errors="replace", защото sandbox-ът изпълнява ПРОИЗВОЛЕН код:
-            # програма, която извади двоични байтове на stdout, трябва да
-            # даде повреден текст, не да срине четенето.
-            encoding="utf-8",
-            errors="replace",
+            # Байтове, декодирани от decode_output, а не text=True (bug fix,
+            # 2026-09-20, хванат от Windows CI): text=True декодира с
+            # locale.getpreferredencoding() — cp1252/cp1251 на Windows — а
+            # детето пише UTF-8 (PYTHONIOENCODING от _build_env); кирилицата
+            # чупеше reader нишката с UnicodeDecodeError. Строгото UTF-8 пък
+            # (2026-10-11) правеше на „���“ българския изход на cmd.exe, `dir`,
+            # `type` и `powershell -c`, които пишат в кодовата страница.
             env=env,
             preexec_fn=(lambda: _preexec(policy, nproc_cap)) if os.name == "posix" else None,  # noqa: PLW1509 — fork()+exec() is immediate; setrlimit-only preexec, no locks touched
         )
@@ -1639,8 +1895,8 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
                     raise
                 if time.monotonic() >= deadline:
                     raise
-        return SandboxResult(ok=proc.returncode == 0, stdout=out or "", stderr=err or "",
-                             returncode=proc.returncode)
+        return SandboxResult(ok=proc.returncode == 0, stdout=decode_output(out),
+                             stderr=decode_output(err), returncode=proc.returncode)
     except subprocess.TimeoutExpired:
         # Убиваме цялата process group — само на POSIX (os.killpg/getpgid не
         # съществуват на Windows и AttributeError не се хваща по-долу, значи
@@ -1663,7 +1919,8 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
         # 11 246 секунди при таймаут от 120. Ако нещо ги държи и след убиването
         # на дървото, изоставяме изхода, не чакаме завинаги.
         try:
-            out, err = proc.communicate(timeout=10)
+            raw_out, raw_err = proc.communicate(timeout=10)
+            text_out, text_err = decode_output(raw_out), decode_output(raw_err)
         except subprocess.TimeoutExpired:
             for stream in (proc.stdout, proc.stderr):
                 try:
@@ -1671,11 +1928,77 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
                         stream.close()
                 except OSError:
                     pass
-            out, err = "", "[sandbox] процесът не пусна изхода си и след убиване"
+            text_out, text_err = "", "[sandbox] процесът не пусна изхода си и след убиване"
         note = "⏹ Спряно от оператора" if stopped else f"Timeout след {timeout}s"
-        return SandboxResult(ok=False, stdout=out or "",
-                             stderr=(err or "") + f"\n[sandbox] {note}",
+        return SandboxResult(ok=False, stdout=text_out,
+                             stderr=text_err + f"\n[sandbox] {note}",
                              returncode=None)
+
+
+# ── Изход на детето: UTF-8, а на Windows и кодовата страница (2026-10-11) ────
+# Python децата пишат UTF-8 (PYTHONIOENCODING), но вградените в Windows
+# програми — в OEM (cp866, конзолата) или ANSI (cp1251) кодовата страница на
+# българския Windows. Измерено: run_shell на дете, което пише „Системата не
+# може да намери указания път.“ в cp866, връщаше „���⥬�� …“, а `!команда`
+# (shell_mode) я четеше правилно. Решава се ред по ред: UTF-8, ако е валиден;
+# иначе онази кодова страница, която дава най-много четим текст — cp866 и
+# cp1251 декодират всеки байт, затова грешка при декодиране не ги различава.
+_READABLE = re.compile(r"[\x20-\x7e\sЀ-џ]")
+
+
+def _legacy_codepages() -> list[str]:
+    """Кодовите страници, с които пишат програмите извън Python; празно извън Windows."""
+    if sys.platform != "win32":
+        return []
+    global _CODEPAGES
+    if _CODEPAGES is None:
+        import codecs
+        import locale
+
+        names: list[str] = []
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            names += [f"cp{cp}" for cp in (kernel32.GetConsoleOutputCP(), kernel32.GetOEMCP(),
+                                           kernel32.GetACP()) if cp]
+        except Exception:
+            pass
+        names.append(locale.getpreferredencoding(False))
+        found: list[str] = []
+        for name in names:
+            try:
+                codec = codecs.lookup(name).name
+            except (LookupError, TypeError):
+                continue
+            if codec != "utf-8" and codec not in found:
+                found.append(codec)
+        _CODEPAGES = found
+    return _CODEPAGES
+
+
+_CODEPAGES: list[str] | None = None
+
+
+def _decode_line(raw: bytes, codepages: list[str]) -> str:
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    if not codepages:
+        return raw.decode("utf-8", errors="replace")
+    candidates = [raw.decode(cp, errors="replace") for cp in codepages]
+    return max(candidates, key=lambda text: len(_READABLE.findall(text)))
+
+
+def decode_output(raw: bytes | str | None) -> str:
+    """Изход на подпроцес → текст с `\\n` за край на ред (както text=True)."""
+    if not raw:
+        return ""
+    if isinstance(raw, str):
+        return raw
+    codepages = _legacy_codepages()
+    text = "".join(_decode_line(line, codepages) for line in raw.splitlines(keepends=True))
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _kill_tree_win32(pid: int) -> None:
