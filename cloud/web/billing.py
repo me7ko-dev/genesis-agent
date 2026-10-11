@@ -231,8 +231,9 @@ def settle_after(start: float, ttl: int) -> float:
 def _usage(usage_path: Path, rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     """Разходът на задачите в `rows` — от най-ранния usage_start сред тях.
 
-    Деплой одит 2026-10-11: файлът на шлюза расте без край (1M реда — 3.3 s
-    на цял прочит), а settle върви покрай всеки ход и всеки прием. По-рано от
+    Сливане с деплоя 2026-10-11: файлът на шлюза расте без край, а settle
+    върви покрай всеки ход и всеки прием. usage_lines по целия файл: 3.8 s при
+    1M реда (166 MB); от usage_start — 0.09 ms (измерено тук). По-рано от
     usage_start на задачата нейни редове няма (записан е преди контейнера)."""
     start = min((int(r.get("usage_start") or 0) for r in rows), default=0)
     return gw.usage_lines_by_job(usage_path, {r["job"] for r in rows}, start)
@@ -286,7 +287,9 @@ def reconcile(store: Store, prices: Prices, usage_path: Path, *,
               now: float | None = None) -> int:
     """Ходовете без такса (срив между края на хода и таксата, рестарт посред
     хода) — таксуват се от файла на шлюза; после окончателната сметка на тези
-    с изтекъл жетон (settle). Повторно пускане не таксува нищо."""
+    с изтекъл жетон (settle). Повторно пускане не таксува нищо. Ходове, чийто
+    контейнер не е тръгвал (отказани при спиране), не се таксуват."""
+    store.drop_unstarted_jobs()
     rows = store.unbilled_turns()
     charged = 0
     if rows:

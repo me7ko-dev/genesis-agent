@@ -500,6 +500,19 @@ class Store:
         with self._db() as c:
             c.execute("DELETE FROM turn_jobs WHERE turn_id = ?", (turn_id,))
 
+    def drop_unstarted_jobs(self) -> int:
+        """Свършени ходове, чийто контейнер не е тръгвал (settle_after е NULL:
+        job_started се вика преди runner-а) — без жетон, без такса.
+
+        Сливане с деплоя 2026-10-11: shutdown() отказва чакащите ходове
+        (cancel_futures), те остават 'queued' с име на задача, при старт
+        стават 'failed' и reconcile таксуваше таксата на ход за всеки от тях."""
+        with self._db() as c:
+            cur = c.execute("DELETE FROM turn_jobs WHERE settle_after IS NULL AND turn_id IN "
+                            "(SELECT id FROM turns WHERE status IN ('ok', 'failed')) AND NOT "
+                            "EXISTS (SELECT 1 FROM ledger l WHERE l.event_id = 'turn:' || turn_jobs.turn_id)")
+        return cur.rowcount
+
     def job_started(self, turn_id: int, settle_after: float) -> None:
         """Контейнерът тръгва: до `settle_after` жетонът му може да харчи."""
         with self._db() as c:

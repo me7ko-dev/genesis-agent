@@ -1090,6 +1090,7 @@ def test_reconcile_from_the_cli(tmp_path, capsys) -> None:
     uid = s.add_user("a@x.y", PASSWORD)
     turn = s.add_turn(s.new_chat(uid, "t"), "x")
     s.set_job(turn, "genesis-task-1")
+    s.job_started(turn, time.time() - 1)        # контейнерът е тръгнал, жетонът е изтекъл
     s.finish_turn(turn, ok=True, error="", tokens={}, seconds=1)
     usage = tmp_path / "u.jsonl"
     gw.Ledger(usage).add("genesis-task-1", "groq", "x", {"prompt_tokens": 100})
@@ -1319,3 +1320,208 @@ def test_the_gateway_stops_rotating_keys_at_the_deadline(tmp_path, monkeypatch) 
                    gw.Ledger(tmp_path / "u.jsonl"), opener=opener)
     assert g.forward("groq", b'{"model": "m"}', gw.Grant("j", 10**12, 10**6))[0] == 429
     assert seen[0] == gw.UPSTREAM_TIMEOUT and len(seen) == 2 and seen[1] <= 1
+
+
+# ── сливане с деплоя (2026-10-11): мрежа на задача + име отвън ───────────────
+
+class _Container:
+    """`docker run` на задача (subprocess.Popen в launch): кодът в контейнера
+    вика модела през ИСТИНСКИЯ шлюз с жетона от argv. Доставчикът е фалшив."""
+
+    def __init__(self, gateway: gw.Gateway, secret: str, bodies: list[bytes]) -> None:
+        self.gateway, self.secret, self.bodies = gateway, secret, bodies
+        self.seen: dict[str, Any] = {}
+
+    def __call__(self, argv: list[str], **kw: Any) -> Any:
+        import io
+        token = next(a.split("=", 1)[1] for a in argv if a.startswith("GROQ_API_KEY="))
+        grant = gw.check_token(self.secret, token)
+        assert grant is not None
+        self.seen.update(name=argv[argv.index("--name") + 1], grant=grant,
+                         network=argv[argv.index("--network") + 1])
+        for body in self.bodies:
+            assert self.gateway.forward("groq", body, grant)[0] == 200
+
+        class Proc:
+            # Контейнерът лъже, че токените са 0 — сметката е от шлюза.
+            stdout = io.BytesIO(b'{"kind": "done", "ok": true, "tokens": {"total_tokens": 0}}\n')
+
+            def wait(self) -> int:
+                return 0
+        return Proc()
+
+
+def _upstream(replies: list[dict[str, Any]]) -> Any:
+    def opener(req: Any, timeout: float = 0) -> _Resp:
+        return _Resp(json.dumps(replies.pop(0)).encode())
+    return opener
+
+
+def _wait_turn(store: Store, turn_id: int) -> dict[str, Any]:
+    for _ in range(500):
+        t = store.turn(1, turn_id)
+        if t is not None and t["status"] in ("ok", "failed"):
+            return t
+        time.sleep(0.01)
+    raise AssertionError("ходът не завърши")
+
+
+def test_a_turn_through_app_run_task_and_the_gateway_lands_in_the_ledger(
+        tmp_path, monkeypatch, fake_docker) -> None:
+    # Целият път без Docker и без ключове: App → launch.run_task (мрежа на
+    # задачата, жетон) → „контейнерът“ вика шлюза → usage.jsonl → сметката.
+    secret = "s" * 40
+    usage = tmp_path / "usage.jsonl"
+    gw.Ledger(usage).add("genesis-task-older0000000", "groq", "x",
+                         {"prompt_tokens": 7, "completion_tokens": 7})
+    before = usage.stat().st_size
+    replies = [
+        {"usage": {"prompt_tokens": 1000, "completion_tokens": 500,
+                   "prompt_tokens_details": {"cached_tokens": 200}}},
+        {"usage": {"prompt_tokens": 2000, "completion_tokens": 300, "total_tokens": 2600}},
+        {"choices": []},                                   # без usage → оценка
+        {"usage": {"prompt_tokens": 10_000, "completion_tokens": 1000}},   # късният
+    ]
+    shared = gw.Gateway(secret, {"GROQ_API_KEY": "k"}, gw.Ledger(usage), opener=_upstream(replies))
+    body_x = b'{"model": "x", "max_tokens": 100}'
+    container = _Container(shared, secret, [body_x, b'{"model": "exact", "max_tokens": 100}',
+                                            body_x])
+    monkeypatch.setattr(launch.subprocess, "Popen", container)
+    store = Store(tmp_path / "web.db")
+    store.add_user("ana@example.com", PASSWORD)
+    store.add_entry(1, "admin:start", "grant", 100 * MICRO)
+    app = web.App(store, tmp_path / "jobs", secure_cookie=False, prices=_prices(),
+                  gateway=launch.Gateway(secret, usage, ("GROQ_API_KEY",)))
+    assert app.runner is launch.run_task
+    turn = app.start_turn(ANA, store.new_chat(1, "t"), "направи CSV")
+    t = _wait_turn(store, turn)
+    app.pool.shutdown(wait=True)
+    assert t["status"] == "ok"
+
+    # По ръка: groq/* = 80/40/100 µc на токен, groq/exact = 10/5/20, ход = 2 кредита.
+    x = 800 * 80 + 200 * 40 + 500 * 100              # 200 от кеша
+    exact = 2000 * 10 + (2600 - 2000) * 20          # разсъждението е само в total
+    estimated = (len(body_x) // 3 + 100) * 100      # оценка → най-скъпото поле на groq/*
+    first = 2 * MICRO + x + exact + estimated
+    t = store.turn(1, turn)  # type: ignore[assignment]
+    assert t["cost_micro"] == first
+    assert t["tokens"]["total_tokens"] == 1500 + 2600 + len(body_x) // 3 + 100
+    assert store.balance(1) == 100 * MICRO - first
+    job = container.seen["name"]
+    (row,) = store.unsettled()
+    assert row["job"] == job and row["usage_start"] == before
+    assert row["used"] == t["tokens"]["total_tokens"]
+    assert container.seen["grant"].job == job and container.seen["grant"].budget == row["budget"]
+    # Мрежата на задачата е по името, което уеб сървърът записа преди контейнера.
+    net = container.seen["network"]
+    assert net == launch.NETWORK_PREFIX + job.removeprefix(launch.TASK_PREFIX)
+    assert ["network", "create", "--internal", "--label", launch.LABEL, net] in fake_docker.calls
+    assert ["network", "rm", net] in fake_docker.calls
+
+    # Жетонът още живее: записан в /work, харчи и след края на хода.
+    assert shared.forward("groq", body_x, container.seen["grant"])[0] == 200
+    late = 10_000 * 80 + 1000 * 100
+    prices = app.prices
+    assert prices is not None
+    assert billing.reconcile(store, prices, usage) == 0
+    assert billing.reconcile(store, prices, usage, now=row["settle_after"] + 1) == 1
+    assert billing.reconcile(store, prices, usage, now=row["settle_after"] + 9) == 0
+    entries = {e["event_id"]: e["amount"] for e in store.ledger_entries(1)}
+    assert entries == {"admin:start": 100 * MICRO, f"turn:{turn}": -first,
+                       f"turn:{turn}:late": -late}
+    assert store.unsettled() == []
+    # Рестарт: нищо не се таксува втори път.
+    web.App(store, tmp_path / "jobs", secure_cookie=False, prices=_prices(),
+            gateway=launch.Gateway(secret, usage, ("GROQ_API_KEY",))).pool.shutdown(wait=True)
+    assert store.balance(1) == 100 * MICRO - first - late
+
+
+def test_the_charge_reads_from_where_the_gateway_file_ended_before_the_turn(
+        tmp_path, monkeypatch) -> None:
+    # Деплоят чете разхода от usage_size() преди задачата (1M реда — 3.3 s →
+    # 0.13 ms); таксата трябва да чете от същото място, иначе токените на хода
+    # и цената му се разминават. Името на задачата тук е предвидимо нарочно.
+    monkeypatch.setattr(launch, "new_task_name", lambda: "genesis-task-fixed")
+    app, _ = _billing_app(tmp_path)
+    assert app.gateway is not None and app.prices is not None
+    gw.Ledger(app.gateway.usage).add("genesis-task-fixed", "groq", "x",
+                                     {"prompt_tokens": 50_000, "completion_tokens": 0})
+    app.store.add_entry(1, "admin:a", "grant", 100 * MICRO)
+    turn = app.start_turn(ANA, app.store.new_chat(1, "t"), "x")
+    _wait_turn(app.store, turn)
+    app.pool.shutdown(wait=True)
+    assert app.store.balance(1) == 100 * MICRO - GROQ_TURN
+    (row,) = app.store.unsettled()
+    assert billing.reconcile(app.store, app.prices, app.gateway.usage,
+                             now=row["settle_after"] + 1) == 0
+    assert app.store.balance(1) == 100 * MICRO - GROQ_TURN
+
+
+def test_usage_lines_from_an_offset_and_after_rotation(tmp_path) -> None:
+    usage = tmp_path / "u.jsonl"
+    led = gw.Ledger(usage)
+    led.add("j", "groq", "x", {"prompt_tokens": 1, "completion_tokens": 1})
+    start = gw.usage_size(usage)
+    led.add("j", "groq", "x", {"prompt_tokens": 5, "completion_tokens": 5})
+    assert [u["total_tokens"] for u in gw.usage_lines(usage, "j", start)] == [10]
+    assert [u["total_tokens"] for u in gw.usage_lines(usage, "j")] == [12]
+    # По-къс файл от `start` (месечното архивиране) — отначало, като usage_for.
+    assert [u["total_tokens"] for u in gw.usage_lines(usage, "j", 10**9)] == [12]
+
+
+@pytest.mark.parametrize("name", ["other-1", "genesis-task-", "genesis-task-a b",
+                                  "genesis-task-../x", "genesis-task-я", "genesis-task-" + "a" * 41])
+def test_a_given_task_name_needs_the_prefix_and_a_safe_suffix(tmp_path, fake_docker, name) -> None:
+    # Без представката cleanup_leftovers не би го спрял след рестарт, а
+    # мрежата му не би се свързала с контейнера (cloud/check.leftovers).
+    with pytest.raises(ValueError):
+        launch.run_task("x", tmp_path / "ws", name=name)
+    assert fake_docker.calls == []
+
+
+def test_a_turn_dropped_by_shutdown_is_never_charged(tmp_path) -> None:
+    # Ход, тръгнал след shutdown(), не пуска контейнер и не прави жетон; без
+    # drop_job reconcile при следващия старт таксуваше таксата на ход за него.
+    app, runner = _billing_app(tmp_path)
+    app.store.add_entry(1, "admin:a", "grant", 100 * MICRO)
+    app._stopping.set()
+    turn = app.start_turn(ANA, app.store.new_chat(1, "t"), "x")
+    app.pool.shutdown(wait=True)
+    assert app.store.turn(1, turn)["status"] == "failed"            # type: ignore[index]
+    assert runner.kw == []
+    app.recover()
+    assert app.store.balance(1) == 100 * MICRO
+    assert app.store.unsettled() == [] and app.held(1) == 0
+
+
+def test_turns_cancelled_by_shutdown_are_not_charged_after_the_restart(tmp_path) -> None:
+    # shutdown() отказва чакащите ходове (cancel_futures): контейнер не са
+    # пускали, но имат име на задача — рестартът ги таксуваше по 2 кредита.
+    runner = BillRunner(tmp_path / "usage.jsonl")
+    runner.gate.clear()
+    stopping = threading.Event()
+
+    def cleanup() -> int:
+        if stopping.is_set():      # „docker rm -f“ спира хода, който върви
+            runner.gate.set()
+        return 0
+
+    app, _ = _billing_app(tmp_path, runner=runner, workers=1, cleanup=cleanup)
+    app.store.add_entry(1, "admin:a", "grant", 100 * MICRO)
+    app.store.add_entry(2, "admin:b", "grant", 100 * MICRO)
+    ana = app.start_turn(ANA, app.store.new_chat(1, "t"), "x")
+    for _ in range(300):
+        if runner.kw:
+            break
+        time.sleep(0.01)
+    bob = app.start_turn({"id": 2, "email": "bob@example.com"}, app.store.new_chat(2, "t"), "x")
+    stopping.set()
+    app.shutdown()
+    assert len(runner.kw) == 1
+    assert app.store.turn(2, bob)["status"] == "queued"         # type: ignore[index]
+    app2, _ = _billing_app(tmp_path, runner=runner)              # „рестарт“
+    app2.pool.shutdown(wait=True)
+    assert app2.store.turn(2, bob)["status"] == "failed"        # type: ignore[index]
+    assert app2.store.balance(2) == 100 * MICRO
+    assert app2.held(2) == 0
+    assert app2.store.turn(1, ana)["cost_micro"] == GROQ_TURN   # type: ignore[index]
