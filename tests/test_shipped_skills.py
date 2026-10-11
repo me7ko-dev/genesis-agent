@@ -139,3 +139,23 @@ class TestNoShippedSkillCarriesAPrivateSignature:
         entry = self._save_into(monkeypatch, tmp_path, tmp_path / "home" / "skills",
                                 tmp_path / "pkg")
         assert entry.get("signature"), "локалното умение трябва да остане подписано"
+
+
+def _skill_code(name: str) -> dict:
+    """Пуска първия ```python блок на умението и връща имената му."""
+    text = (SKILLS_DIR / f"{name}.md").read_text(encoding="utf-8")
+    code = text.split("```python", 1)[1].split("```", 1)[0]
+    namespace: dict = {}
+    exec(compile(code, f"{name}.md", "exec"), namespace)  # noqa: S102 — кодът на умението от репото
+    return namespace
+
+
+def test_the_telegram_skill_does_not_answer_an_edited_command() -> None:
+    """Bench 2026-10-12 (claude-opus-5, shop-bot 15/16): кодът на умението
+    отговаряше и на edited_message — поправена стара „/add хляб“ щеше да добави
+    хляба втори път, а задачата иска None за update без ново съобщение."""
+    ns = _skill_code("telegram_bot_updates")
+    chat = {"chat": {"id": 42}, "text": "/list"}
+    assert ns["message_of"]({"update_id": 1, "message": chat}) == chat
+    assert ns["message_of"]({"update_id": 2, "edited_message": chat}) is None
+    assert ns["parse_command"]("/add@PazarBot хляб", "PazarBot") == ("/add", "хляб")

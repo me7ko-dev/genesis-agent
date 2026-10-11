@@ -29,7 +29,8 @@ https://core.telegram.org/bots/features#commands.
 
 Факти (core.telegram.org/bots/api):
 - Update носи ЕДНО от: message, edited_message, channel_post, callback_query,
-  my_chat_member… Само message (и edited_message, ако искаш) е текст от човек.
+  my_chat_member… Команда е само в "message". edited_message → None: човек,
+  който поправи стара "/add хляб", не иска хлябът да се добави втори път.
 - Съобщение без "text" (снимка, стикер, нов член, закачено) → няма команда → None.
   Снимката има "caption", не "text".
 - В група командата идва като "/add@ИмеНаБота хляб". Махни "@…" от ПЪРВАТА дума;
@@ -52,8 +53,8 @@ from zoneinfo import ZoneInfo
 
 
 def message_of(update: dict) -> dict | None:
-    """Съобщението от човек в update-а, или None (callback, член на чат…)."""
-    msg = update.get("message") or update.get("edited_message")
+    """Новото съобщение от човек в update-а, или None (редакция, callback…)."""
+    msg = update.get("message")
     return msg if isinstance(msg, dict) else None
 
 
