@@ -61,3 +61,15 @@ def test_each_test_gets_its_own_database() -> None:
     em._init_db()
     goals = [e["goal"] for e in em._fetch_all_episodes()]
     assert "проба за изолация" not in goals, goals
+
+
+def test_signing_keys_are_never_the_operators(tmp_path) -> None:
+    """e2e 2026-10-11: пълният пакет създаде ~/.genesis/private_key.pem.
+    cryptography_utils връзва пътя при внасяне, а GENESIS_KEY_DIR, зададен
+    в теста по-късно, не го мести — подписваше се с ключа на оператора."""
+    from pathlib import Path
+    cu = pytest.importorskip("genesis_agent.cryptography_utils")
+    for path in (cu.KEY_DIR, cu.PRIVATE_KEY_PATH, cu.PUBLIC_KEY_PATH):
+        assert tmp_path in Path(path).parents, path
+    cu.sign_code("x = 1")
+    assert Path(cu.PRIVATE_KEY_PATH).exists()
