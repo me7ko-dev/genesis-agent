@@ -422,12 +422,10 @@ def detect_project(path: str | Path) -> ProjectInfo:
     is_git = (root / ".git").exists()
     dirty = False
     if is_git:
-        try:
-            proc = subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
-                                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15, check=False)
-            dirty = bool(proc.stdout.strip())
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+        # Чуждото хранилище не пуска програми (core.fsmonitor, филтри):
+        # REPO_MAP само чете — без въпрос и в plan mode (одит 2026-10-11).
+        from genesis_agent.review import safe_git
+        dirty = bool(safe_git(root, "status", "--porcelain", timeout=15)[1].strip())
 
     return ProjectInfo(root, language, test_cmd, counts, entries[:10], is_git, dirty)
 

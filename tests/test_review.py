@@ -185,3 +185,49 @@ def test_a_worktree_and_a_subfolder_are_reviewed_with_workspace_paths(tmp_path) 
     (wt / "calc.py").write_text("def add(a, b):\n    return 7\n", encoding="utf-8")
     prompt, _ = review.build(wt)
     assert prompt is not None and "+    return 7" in prompt
+
+
+def _hostile_tool(tmp_path: Path) -> tuple[str, Path]:
+    import sys
+    marker = tmp_path / "ran"
+    tool = tmp_path / "tool.py"
+    tool.write_text(f"import sys\nopen({str(marker)!r}, 'w').close()\nsys.stdout.write(sys.stdin.read())\n",
+                    encoding="utf-8")
+    return f'"{sys.executable}" "{tool}"'.replace("\\", "/"), marker
+
+
+def test_a_filter_name_with_an_equals_sign_does_not_run(tmp_path) -> None:
+    """Одит 2026-10-11, възпроизведено: `-c filter.a=b.clean=` git реже при
+    първото `=` и clean програмата на филтър `a=b` се пускаше при /review."""
+    root = _repo(tmp_path)
+    cmd, marker = _hostile_tool(tmp_path)
+    _git(root, "config", "filter.a=b.clean", cmd)
+    (root / ".git" / "info").mkdir(exist_ok=True)
+    (root / ".git" / "info" / "attributes").write_text("*.py filter=a=b\n", encoding="utf-8")
+    (root / "calc.py").write_text("def add(a, b):\n    return 2\n", encoding="utf-8")
+    prompt, _ = review.build(root)
+    assert prompt is not None and "+    return 2" in prompt
+    assert not marker.exists()
+
+
+def test_repo_map_and_genesis_fix_git_do_not_run_a_foreign_config(tmp_path, monkeypatch) -> None:
+    """Одит 2026-10-11, възпроизведено: REPO_MAP (само чете, без въпрос, и в
+    plan mode) пускаше `git status` с чуждия `.git/config` — core.fsmonitor
+    стартираше програма извън sandbox-а с целия os.environ (и API ключовете).
+    Същото — `git diff` на `genesis fix` (repo_agent._git) с filter/diff.external."""
+    from genesis_agent import repo_agent, repo_map
+    root = _repo(tmp_path)
+    cmd, marker = _hostile_tool(tmp_path)
+    _git(root, "config", "core.fsmonitor", cmd)
+    _git(root, "config", "filter.evil.clean", cmd)
+    _git(root, "config", "diff.external", cmd)
+    (root / ".git" / "info").mkdir(exist_ok=True)
+    (root / ".git" / "info" / "attributes").write_text("*.py filter=evil\n", encoding="utf-8")
+    (root / "calc.py").write_text("def add(a, b):\n    return 3\n", encoding="utf-8")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-fake-secret")
+    info = repo_map.detect_project(root)
+    assert info.git_dirty is True
+    diff = repo_agent.project_diff(root, None, ["calc.py"])
+    assert "+    return 3" in diff
+    assert repo_agent._git(root, "status", "--porcelain")
+    assert not marker.exists()

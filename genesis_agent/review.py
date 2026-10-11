@@ -23,7 +23,7 @@ _REF = re.compile(r"[\w][\w./~^@{}-]{0,200}")
 # fsmonitor празно = изключено и в стария git (там е път до програма), и в новия
 # (там е bool). quotePath=false: „файл.py“ остава „файл.py“, не "\321\204…" —
 # READ_FILE не намираше такъв път (одит 2026-10-10).
-_SAFE = ("-c", "core.fsmonitor=", "-c", "core.quotePath=false")
+_SAFE = ("-c", "core.quotePath=false")
 
 PROMPT = """Прегледай тези промени за грешки — НЕ променяй файлове, само докладвай.
 
@@ -38,28 +38,84 @@ PROMPT = """Прегледай тези промени за грешки — Н�
 грешки — кажи го с едно изречение, без да измисляш."""
 
 
-def _git(root: Path, *args: str, safe: tuple[str, ...] = ()) -> tuple[int, str]:
-    """(код, изход); при грешка изходът е празен — stderr на git не бива да
-    стига до модела като diff („fatal: ambiguous argument 'HEAD'“, одит 2026-10-10)."""
+def _run_git(argv: list[str], env: dict[str, str] | None, timeout: int) -> tuple[int, str]:
     try:
-        proc = subprocess.run(["git", *_SAFE, *safe, "-C", str(root), *args], capture_output=True,
-                              text=True, encoding="utf-8", errors="replace", timeout=30,
-                              check=False)
+        proc = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=timeout, check=False, env=env)
     except (OSError, subprocess.TimeoutExpired):
         return 1, ""
     return proc.returncode, proc.stdout if proc.returncode == 0 else ""
 
 
-def _no_filters(root: Path) -> tuple[str, ...]:
-    """`-c filter.X.clean= -c filter.X.process=` за всеки филтър в настройките.
-    `git diff` спрямо работното дърво пуска clean филтъра на всеки променен
-    файл — подхвърлен `.git/config` пускаше програма (одит 2026-10-10,
-    възпроизведено). Самото четене на настройките не пуска нищо."""
-    _, names = _git(root, "config", "--name-only", "--get-regexp", r"^filter\..*\.(clean|process)$")
-    out: list[str] = []
-    for name in {n.strip() for n in names.splitlines() if n.strip()}:
-        out += ["-c", f"{name}="]
-    return tuple(out)
+# Без програмите на чуждото хранилище (2026-10-11): fsmonitor и hooks. Нужни
+# са на всяко git извикване върху папка, която може да е изтеглена — не само
+# в /review. Измерено: REPO_MAP (`git status` в repo_map.detect_project) и
+# `genesis fix` (`git diff` в repo_agent) пускаха core.fsmonitor/diff.external
+# от подхвърлен `.git/config` извън sandbox-а, с целия os.environ.
+_HOSTILE_OFF = ("-c", "core.fsmonitor=", "-c", f"core.hooksPath={os.devnull}")
+
+
+def _git_env() -> dict[str, str]:
+    """Минималната среда на sandbox-а (без API ключовете) + това, с което Git
+    for Windows намира дома си (не са тайни)."""
+    from genesis_agent import sandbox
+    env = sandbox._build_env(sandbox.get_policy())
+    for key in ("USERPROFILE", "HOMEDRIVE", "HOMEPATH", "LOCALAPPDATA", "APPDATA"):
+        if key in os.environ:
+            env.setdefault(key, os.environ[key])
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
+_CONFIG_ENV_OK: bool | None = None
+
+
+def _config_env_supported() -> bool:
+    """GIT_CONFIG_COUNT/KEY/VALUE се четат от git ≥ 2.31."""
+    global _CONFIG_ENV_OK
+    if _CONFIG_ENV_OK is None:
+        _, out = _run_git(["git", "version"], None, 10)
+        m = re.search(r"(\d+)\.(\d+)", out)
+        _CONFIG_ENV_OK = m is not None and (int(m.group(1)), int(m.group(2))) >= (2, 31)
+    return _CONFIG_ENV_OK
+
+
+def _filter_keys(root: Path, env: dict[str, str]) -> list[str]:
+    """Всеки `filter.X.clean/smudge/process` в настройките. `git diff` и `git
+    status` пускат clean филтъра на променените файлове — подхвърлен
+    `.git/config` пускаше програма (одит 2026-10-10, възпроизведено). Самото
+    четене на настройките не пуска нищо."""
+    _, names = _run_git(["git", *_HOSTILE_OFF, "-C", str(root), "config", "--name-only",
+                         "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"], env, 30)
+    return sorted({n.strip() for n in names.splitlines() if n.strip()})
+
+
+def safe_git(root: Path, *args: str, extra: tuple[str, ...] = (), timeout: int = 30) -> tuple[int, str]:
+    """git върху хранилище, което може да е чуждо: (код, stdout); при грешка
+    stdout е празен — stderr на git не бива да стига до модела като diff.
+
+    Филтрите се изключват през GIT_CONFIG_KEY_n, не с `-c`: `-c` реже при
+    първото `=`, и `-c filter.a=b.clean=` оставяше clean програмата на филтър
+    `a=b` да тръгне (одит 2026-10-11, възпроизведено). Стар git (< 2.31) не
+    чете тези променливи — там филтър с `=` в името значи отказ."""
+    env = _git_env()
+    off = list(_HOSTILE_OFF)
+    keys = _filter_keys(root, env)
+    if _config_env_supported():
+        env["GIT_CONFIG_COUNT"] = str(len(keys))
+        for i, key in enumerate(keys):
+            env[f"GIT_CONFIG_KEY_{i}"] = key
+            env[f"GIT_CONFIG_VALUE_{i}"] = ""
+    else:
+        if any("=" in key for key in keys):
+            return 1, ""
+        for key in keys:
+            off += ["-c", f"{key}="]
+    return _run_git(["git", *off, *extra, "-C", str(root), *args], env, timeout)
+
+
+def _git(root: Path, *args: str) -> tuple[int, str]:
+    return safe_git(root, *args, extra=_SAFE)
 
 
 def _own_git_dir(root: Path, top: Path) -> bool:
@@ -90,14 +146,13 @@ def build(workspace: Path, target: str = "") -> tuple[str | None, str]:
         return None, "/review иска git хранилище — тази папка не е."
     if not _own_git_dir(root, Path(os.path.realpath(top.strip()))):
         return None, "/review: .git тук сочи към друго хранилище — не го преглеждам."
-    safe = _no_filters(root)
 
     def diff(*spec: str) -> str:
         # --relative: пътищата са спрямо работната папка, както ги чете READ_FILE
         # (в подпапка на хранилището бяха спрямо корена му — одит 2026-10-10);
         # `--` — файл с име HEAD не прави ревизията двусмислена.
         _, text = _git(root, "diff", "--no-ext-diff", "--no-textconv", "--no-color",
-                       "--relative", *spec, "--", safe=safe)
+                       "--relative", *spec, "--")
         return text
 
     def has(rev: str) -> bool:
@@ -126,7 +181,7 @@ def build(workspace: Path, target: str = "") -> tuple[str | None, str]:
                 text = diff("HEAD~1", "HEAD")
             else:   # единственият commit — спрямо нищо (одит 2026-10-10)
                 _, text = _git(root, "diff-tree", "-p", "--root", "--no-commit-id", "--no-color",
-                               "--no-ext-diff", "--no-textconv", "--relative", "HEAD", safe=safe)
+                               "--no-ext-diff", "--no-textconv", "--relative", "HEAD")
     diff_text = text
     if not diff_text.strip() and not untracked:
         return None, (f"Няма какво да прегледам ({what} са празни)." if target else
