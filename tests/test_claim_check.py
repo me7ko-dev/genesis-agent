@@ -371,3 +371,47 @@ class TestRunsThatRunNoTests:
     def test_make_and_npm_check_are_still_test_runs(self) -> None:
         for cmd in ("make check", "npm run check", "python manage.py test"):
             assert claim_check.is_test_run(cmd), cmd
+
+
+class TestNeverWeakerThanBefore:
+    """Вълна 5 (2026-10-11): таблица от 58 случая main / преди вълна 4 / сега.
+    Тези бяха по-слаби от преди: rc≠0 без белег в изхода, когато пускачът
+    не е последен, и честен смесен отчет без нито едно пускане."""
+
+    def test_a_failing_runner_before_another_command_stays_red(self) -> None:
+        for cmd, rc, out in (
+                ("pytest -q && git commit -am x", 4,
+                 "ImportError while loading conftest '/app/tests/conftest.py'."),
+                ("pytest -q && git commit -am x", 5, "no tests ran in 0.01s"),
+                ("set -o pipefail; pytest -q | tee log.txt", 1, "Traceback (most recent call last):"),
+                ("npm test && npm run build", 1, "npm ERR! Test failed.")):
+            entry = _run(cmd, rc, out)
+            assert entry == ("RUN_CMD", f"{cmd} (rc={rc})"), cmd
+            claims = unsupported_claims("Всички тестове минаха.", _executed(entry))
+            assert claim_check.green_claim_after_red(claims, _executed(entry)) == rc, cmd
+
+    def test_a_green_summary_keeps_a_later_failure_off_the_tests(self) -> None:
+        for cmd, out in (("pytest -q && git commit -am x", "5 passed in 0.1s\nnothing to commit"),
+                         ("npx jest && npm run build", "Tests:       4 passed, 4 total\nerror TS2304"),
+                         ("python -m unittest && make dist", "Ran 4 tests in 0.01s\n\nOK\nmake: *** Error"),
+                         ("cargo test && cargo build --release", "test result: ok. 3 passed\nerror[E0425]")):
+            assert _run(cmd, 1, out) == ("RUN_CMD", cmd), cmd
+
+    def test_a_backgrounded_runner_without_a_result_is_not_green(self) -> None:
+        executed = _executed(_run("pytest -q &", 0, ""))
+        claims = unsupported_claims("Всички тестове минаха.", executed)
+        assert claim_check.green_claim_after_red(claims, executed) == -1
+
+    def test_a_mixed_report_still_needs_a_test_run(self) -> None:
+        nothing = _executed(_run("ls", 0, "app.py"))
+        for text in ("Тестовете минаха, освен test_vat.", "4 tests passed, 1 failed.",
+                     "Не всички тестове минават."):
+            claims = unsupported_claims(text, nothing)
+            assert [c.kind for c in claims] == ["пускане на тестове"], text
+            assert claim_check.green_claim_after_red(claims, nothing) == 0, text
+            red = _executed(_run("pytest -q", 1, "1 failed, 4 passed"))
+            assert unsupported_claims(text, red) == [], text
+
+    def test_one_claim_for_a_run_and_a_mixed_report(self) -> None:
+        assert _kinds("Пуснах тестовете: тестовете минаха, освен test_vat.", []) \
+            == ["пускане на тестове"]
