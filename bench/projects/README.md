@@ -58,6 +58,18 @@
 `scripts/bench_projects.py`: flask, bs4, reportlab), се пропуска с причина; без
 pytest bench-ът изобщо не тръгва.
 
+## Без ключове: фалшив доставчик (CI)
+
+`tests/test_bench_e2e.py` пуска `bench_projects`, `bench_fix` и `bench_all
+--dry-run` от край до край с истинския чат срещу `tests/fake_openai_provider.py`
+(OpenAI-съвместим сървър на 127.0.0.1, сценарий от tool calls). Куката е
+същата като на онлайн услугата: `GENESIS_MODEL_GATEWAY=<адрес>` + фиктивен
+`GROQ_API_KEY`; `GENESIS_DATA_DIR` и `GENESIS_HOME` държат бюджетния лог,
+статистиката на доставчиците и `model_check.json` извън checkout-а. Еталоните
+на ръка: `python tests/fake_openai_provider.py --reference
+bench/projects/sync-cli/reference` печата адреса и „пише“ еталона при всяка
+задача (2026-10-11: и шестте еталона — верни през харнеса).
+
 ## Пускане на всички наведнъж
 
 ```powershell

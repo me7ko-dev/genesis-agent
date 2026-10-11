@@ -195,8 +195,16 @@ LOGS_DIR: Path = (Path.home() / ".genesis" / "logs") if _INSTALLED else PROJECT_
 # nobody can write survives exactly until the next `pip install --upgrade`
 # deletes it anyway. Same path as always in checkout mode: zero behavior
 # change for anyone running from a git clone.
-DATA_DIR: Path = (Path.home() / ".genesis" / "data") if _INSTALLED else (PROJECT_ROOT / "genesis_agent")
-if _INSTALLED:
+#
+# GENESIS_DATA_DIR премества и състоянието на веригата (2026-10-11): e2e тестът
+# на bench-а пуска истинския чат срещу фалшив доставчик и той записа
+# budget_log.jsonl, provider_stats.json и model_check.json в genesis_agent/ на
+# checkout-а — тоест в истинското състояние на оператора, от което веригата
+# после решава кой модел е мъртъв. GENESIS_MEMORY_DIR покриваше само паметта.
+_DATA_OVERRIDE = os.environ.get("GENESIS_DATA_DIR", "").strip()
+DATA_DIR: Path = (Path(_DATA_OVERRIDE).expanduser() if _DATA_OVERRIDE else
+                  (Path.home() / ".genesis" / "data") if _INSTALLED else (PROJECT_ROOT / "genesis_agent"))
+if _INSTALLED or _DATA_OVERRIDE:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # What Genesis remembers — conversations, episodes, work threads, decisions,

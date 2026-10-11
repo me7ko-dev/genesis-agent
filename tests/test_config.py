@@ -117,3 +117,21 @@ def test_memory_moves_with_genesis_memory_dir_and_the_chain_state_does_not(tmp_p
     assert all(Path(p).parent == tmp_path / "mem" for p in memory_paths), out
     assert Path(chain).parent != tmp_path / "mem"
     assert (tmp_path / "mem").is_dir()
+
+
+def test_genesis_data_dir_moves_the_chain_state_and_the_default_memory(tmp_path):
+    # 2026-10-11: e2e тестът на bench-а пуска истинския чат; без GENESIS_DATA_DIR
+    # budget_log/provider_stats/model_check отиваха в genesis_agent/ на checkout-а.
+    import os
+    import subprocess
+    import sys
+    code = ("from genesis_agent import budget, provider_stats, model_check, free_models, "
+            "embeddings, workspace_memory; "
+            "print(budget.LOG_PATH); print(provider_stats._STATS_PATH); print(model_check.CHECK_PATH); "
+            "print(free_models.CACHE_PATH); print(embeddings.DB_PATH); print(workspace_memory.DB_PATH)")
+    env = {k: v for k, v in os.environ.items() if k not in ("GENESIS_MEMORY_DIR", "GENESIS_DATA_DIR")}
+    env.update(GENESIS_DATA_DIR=str(tmp_path / "data"), PYTHONIOENCODING="utf-8")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         encoding="utf-8", env=env, timeout=120, check=True).stdout.splitlines()
+    assert len(out) == 6 and all(Path(p).parent == tmp_path / "data" for p in out), out
+    assert (tmp_path / "data").is_dir()
