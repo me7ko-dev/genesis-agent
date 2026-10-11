@@ -12,6 +12,7 @@ import zipfile
 import pytest
 
 from genesis_agent import deliver, repo_agent
+from genesis_agent import setup_wizard as sw
 
 PY = f'"{sys.executable}" -m pytest -q -p no:cacheprovider'
 
@@ -182,3 +183,56 @@ def test_export_withholds_keys_hard_coded_in_code_and_config(tmp_path):
         assert any(w.startswith(name) for w in d.withheld) and name in shipped, name
     assert any("config.py" in w and "ред 2" in w and "gsk_" in w for w in d.withheld)
     assert groq not in shipped, "отчетът не бива да носи самия ключ"
+
+
+# ── genesis setup: ключ, писан на кирилица или поставен с кавички ────────────
+
+class _Resp:
+    status_code = 200
+    text = ""
+
+
+@pytest.fixture
+def setup_env(tmp_path, monkeypatch):
+    from genesis_agent import paths
+    home = tmp_path / "gh"
+    home.mkdir()
+    envf = home / ".env"
+    monkeypatch.setattr(sw, "ENV_FILE", envf)
+    monkeypatch.setattr(paths, "ENV_FILE", envf)
+    monkeypatch.setattr(paths, "ENV_FILES", (str(tmp_path / "install.env"), str(envf)))
+    monkeypatch.setattr(sw, "ensure_genesis_home", lambda: home)
+    for v, *_ in sw.PROVIDERS + sw.PAID_PROVIDERS:
+        monkeypatch.delenv(v, raising=False)
+    sent: list[str] = []
+
+    def post(url, headers=None, **kw):
+        headers["Authorization"].encode("latin-1")   # както requests/http.client
+        sent.append(headers["Authorization"])
+        return _Resp()
+    monkeypatch.setattr(sw.requests, "post", post)
+    return envf, sent
+
+
+@pytest.mark.parametrize("raw", ["гск_abc123", "\u201cgsk_абв\u201d", "gsk_abc\u200b123x\u00e9"])
+def test_setup_key_outside_latin_does_not_crash(setup_env, raw):
+    ok, why = sw._test_key("http://x", sw._clean_key(raw), "m")
+    assert ok is False and "латин" in why
+
+
+def test_setup_cleans_quotes_zero_width_and_a_pasted_name(setup_env):
+    assert sw._clean_key("\u201cgsk_abc123\u201d") == "gsk_abc123"
+    assert sw._clean_key("GROQ_API_KEY=gsk_abc\u200b123") == "gsk_abc123"
+    assert sw._clean_key("'hf_x'") == "hf_x"
+
+
+def test_setup_keeps_the_good_keys_when_one_is_typed_in_cyrillic(setup_env, monkeypatch, capsys):
+    import builtins
+    envf, sent = setup_env
+    answers = iter(["hf_good123", "", "", "гск_typed_in_cyrillic", "", "", "n"])
+    monkeypatch.setattr(builtins, "input", lambda prompt="": next(answers, ""))
+    sw.run()
+    text = envf.read_text(encoding="utf-8")
+    assert "HF_TOKEN=hf_good123" in text and "GROQ_API_KEY" not in text
+    assert "латин" in capsys.readouterr().out
+    assert sent == ["Bearer hf_good123"], "ключ на кирилица не стига до мрежата"
