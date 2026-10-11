@@ -82,10 +82,12 @@ class TestWhenTheGuideIsGiven:
     def test_other_web_work_does_not(self, query) -> None:
         assert "web_site_2026" not in domain_context(query)
 
-    def test_only_the_bench_site_gets_it(self) -> None:
+    def test_no_bench_task_gets_it(self) -> None:
         """fuel-prices съдържа „HTML страница“ — затова тези думи не са тригери.
-        booking-form е сайт с форма — на него ръководството се полага."""
-        sites = {"booking-form"}
+        booking-form (2026-10-11) е Flask форма: по-строгите правила за
+        телефона минават пред ръководството за оформление (2/2 пуска паднаха
+        само на „0898/123-456“), а второ знание може да е само строго."""
+        sites: set[str] = set()
         for task in sorted(BENCH.glob("*/task.txt")):
             given = "web_site_2026" in domain_context(task.read_text("utf-8"))
             assert given == (task.parent.name in sites), task.parent.name
