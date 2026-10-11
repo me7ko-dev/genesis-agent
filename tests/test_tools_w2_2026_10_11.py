@@ -123,3 +123,15 @@ def test_search_glob_with_a_folder_works_outside_cwd(ws, engine):
     (ws / "b.tsx").write_text("useRouter()\n", encoding="utf-8")
     assert _names(repo_map.search_code("useRouter", ws, glob="pages/*.tsx")) == ["a.tsx"]
     assert _names(repo_map.search_code("useRouter", ws, glob="src/**/*.tsx")) == ["a.tsx"]
+
+
+# ── кодирането след първите 32 KB ────────────────────────────────────────────
+
+def test_read_range_past_the_head_uses_the_whole_file_encoding(ws):
+    p = ws / "late.txt"
+    p.write_bytes(b"x = 1\n" * 8000 + "# Грешка при запис\n".encode("cp1251"))
+    out = gs._tool_read_file("late.txt", offset=8001, limit=1)
+    assert "Грешка при запис" in out, out
+    assert "cp1251" in out.splitlines()[0]
+    hit = repo_map.search_code("Грешка", ws)[0]
+    assert hit.line == 8001 and hit.text in out
