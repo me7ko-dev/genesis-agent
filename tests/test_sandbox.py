@@ -795,3 +795,50 @@ def test_windows_recursive_delete_of_a_project_folder_asks(cmd) -> None:
 ])
 def test_windows_delete_detection_keeps_ordinary_commands_safe(cmd) -> None:
     assert sandbox.assess_command(cmd).level is SAFE
+
+
+# ── 2026-10-11: одит на Windows, втора вълна ─────────────────────────────────
+
+def _ps_encoded(script: str) -> str:
+    import base64
+    return base64.b64encode(script.encode("utf-16-le")).decode()
+
+
+_WIPE_HOME = _ps_encoded("Remove-Item -Recurse -Force $env:USERPROFILE")
+_HARMLESS = _ps_encoded("Get-ChildItem")
+
+
+@pytest.mark.parametrize("cmd", [
+    f"powershell -ec {_HARMLESS}",
+    f"powershell -NoProfile -ec {_HARMLESS}",
+    f"pwsh -enc {_HARMLESS}",
+    f"pwsh -e {_HARMLESS}",
+    f"pwsh.exe -En {_HARMLESS}",
+    f"powershell /enc {_HARMLESS}",
+    f"powershell -EncodedCommand {_HARMLESS}",
+    "powershell -ec not-base64!!",
+])
+def test_encoded_powershell_always_asks(cmd) -> None:
+    """`-ec` е документиран псевдоним на -EncodedCommand, а PowerShell
+    приема всеки префикс; `pwsh` изобщо не се гледаше — и четирите бяха SAFE."""
+    assert sandbox.assess_command(cmd).level is CONFIRM
+
+
+@pytest.mark.parametrize("cmd", [
+    f"powershell -ec {_WIPE_HOME}",
+    f"pwsh -e {_WIPE_HOME}",
+    f"powershell.exe -NoP -EncodedCommand {_WIPE_HOME}",
+])
+def test_encoded_powershell_is_judged_by_what_it_decodes_to(cmd) -> None:
+    verdict = sandbox.assess_command(cmd)
+    assert verdict.level is BLOCKED
+    assert not sandbox._decide("run", verdict, SandboxPolicy(mode="deny"))[0]
+
+
+@pytest.mark.parametrize("cmd", [
+    "powershell -ExecutionPolicy Bypass -File build.ps1",
+    'pwsh -c "Get-ChildItem"',
+    "grep -e pwsh notes.txt",
+])
+def test_powershell_without_encoded_command_is_not_flagged(cmd) -> None:
+    assert sandbox.assess_command(cmd).level is SAFE

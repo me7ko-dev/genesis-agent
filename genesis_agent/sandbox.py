@@ -274,8 +274,7 @@ _WIN_CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
      "триене на директория (rd /s)"),
     (_c(r"\breg\s+(delete|add|import)\b|\bSet-ItemProperty\b[^\n]*\bHK(LM|CU|CR|U|CC):"),
      "промяна на регистъра"),
-    (_c(r"\bpowershell(\.exe)?\b[^\n]*\s-(enc|e|encodedcommand)\b"),
-     "PowerShell с кодирана команда (-EncodedCommand)"),
+    # `-EncodedCommand` се проверява структурно (_encoded_powershell_verdict).
     (_c(r"\b(Invoke-Expression|iex)\b|\|\s*(powershell|pwsh)\b"),
      "динамично изпълнение / изтеглено съдържание директно в PowerShell"),
     (_c(r"\bSet-ExecutionPolicy\b"),
@@ -1034,6 +1033,71 @@ def _windows_delete_verdict(command: str) -> RiskVerdict:
     return RiskVerdict(RiskLevel.SAFE, [])
 
 
+# ── PowerShell -EncodedCommand (2026-10-11) ─────────────────────────────────
+# Образецът искаше `powershell` и точно `-e`/`-enc`/`-encodedcommand`.
+# Измерено в режим „deny“ с base64 на `Remove-Item -Recurse -Force
+# $env:USERPROFILE`: `powershell -ec …`, `pwsh -enc …` и `pwsh -e …` бяха SAFE
+# и се изпълняваха без въпрос. `-ec` е документиран псевдоним, а PowerShell
+# приема всеки префикс на параметъра (`-e`, `-en`, `-enc` …) и с `/` отпред.
+# Кодираната команда е скрита от оператора, затова винаги пита — а щом се
+# декодира, получава и собствената си оценка: изтриване на дома е BLOCKED, не
+# въпрос, на който някой може да отговори „да“, без да вижда какво одобрява.
+_PS_LAUNCHERS = frozenset({"powershell", "pwsh"})
+_PS_PARAM = re.compile(r"^(?:--?|/)([a-z]+)$", re.IGNORECASE)
+
+
+def _is_encoded_command_flag(word: str) -> bool:
+    m = _PS_PARAM.match(word)
+    if not m:
+        return False
+    name = m.group(1).lower()
+    return name == "ec" or "encodedcommand".startswith(name)
+
+
+def _ends_launcher_params(word: str) -> bool:
+    """`-Command`/`-File`: думите след тях са скрипт или негови аргументи —
+    `pwsh -c "Select-String -e x"` не е кодирана команда."""
+    m = _PS_PARAM.match(word)
+    if not m:
+        return False
+    name = m.group(1).lower()
+    return name in ("c", "f") or (len(name) >= 3 and ("command".startswith(name)
+                                                      or "file".startswith(name)))
+
+
+def _encoded_powershell_verdict(command: str, cwd: Path | None) -> RiskVerdict:
+    import base64
+    import binascii
+
+    for statement in re.split(r"[;|&\n]", command):
+        words = [w.strip("'\"`") for w in statement.split()]
+        launched = False
+        for i, word in enumerate(words):
+            name = os.path.basename(word.replace("\\", "/")).lower().removesuffix(".exe")
+            if name in _PS_LAUNCHERS:
+                launched = True
+                continue
+            if launched and _ends_launcher_params(word):
+                launched = False             # нататък е скриптът, не параметри
+                continue
+            if not (launched and _is_encoded_command_flag(word)):
+                continue
+            payload = words[i + 1] if i + 1 < len(words) else ""
+            try:
+                decoded = base64.b64decode(payload, validate=True).decode("utf-16-le")
+            except (binascii.Error, ValueError):
+                return RiskVerdict(RiskLevel.CONFIRM, [
+                    "PowerShell с кодирана команда (-EncodedCommand), която не се декодира"])
+            # Декодираното е по-късо от кодираното, затова рекурсията свършва.
+            inner = assess_command(decoded, cwd)
+            shown = " ".join(decoded.split())[:120]
+            reasons = [f"PowerShell с кодирана команда (-EncodedCommand): {shown}"]
+            if inner.level == RiskLevel.BLOCKED:
+                return RiskVerdict(RiskLevel.BLOCKED, reasons + inner.reasons)
+            return RiskVerdict(RiskLevel.CONFIRM, reasons + inner.reasons)
+    return RiskVerdict(RiskLevel.SAFE, [])
+
+
 _INTERPRETERS = re.compile(r"^(python[\d.]*|py|pypy[\d.]*|perl|ruby|node|deno|bun)(\.exe)?$",
                            re.IGNORECASE)
 _INLINE_FLAGS = frozenset({"-c", "-e", "-E", "--eval", "-p", "--print"})
@@ -1191,6 +1255,9 @@ def assess_command(command: str, cwd: Path | None = None, *, arguments: bool = T
     windows_delete = _windows_delete_verdict(command)
     if windows_delete.level == RiskLevel.BLOCKED:
         return windows_delete
+    encoded = _encoded_powershell_verdict(command, cwd)
+    if encoded.level == RiskLevel.BLOCKED:
+        return encoded
 
     for rx, why in _BLOCK_PATTERNS:
         if rx.search(command):
@@ -1204,6 +1271,9 @@ def assess_command(command: str, cwd: Path | None = None, *, arguments: bool = T
             level = RiskLevel.CONFIRM
     if windows_delete.level == RiskLevel.CONFIRM and level < RiskLevel.CONFIRM:
         reasons.extend(windows_delete.reasons)
+        level = RiskLevel.CONFIRM
+    if encoded.level == RiskLevel.CONFIRM:
+        reasons.extend(encoded.reasons)
         level = RiskLevel.CONFIRM
     inline = _inline_code_reasons(command)
     if inline:
