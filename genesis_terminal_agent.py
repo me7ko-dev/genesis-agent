@@ -1558,7 +1558,8 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                     # всяко „продължи“ плащаше същия отрязан опит пак. Една
                     # подкана да пише на части, после — спира.
                     _cut_retries += 1
-                    ui.warn("Отговорът на модела е отрязан на тавана — казвам му да пише на части.")
+                    # Без „таван“ в текста: headless го чете като спрян по таван ход.
+                    ui.warn("Отговорът на модела е отрязан (твърде дълъг) — казвам му да пише на части.")
                     messages.append({"role": "system", "content": _CUT_NOTE})
                     with ui.thinking("Пиша на части…", "aesthetic"):
                         response, tool_calls = ask_genesis(messages, tools=_turn_tools())

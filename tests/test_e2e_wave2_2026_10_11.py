@@ -95,6 +95,20 @@ def test_a_cut_turn_asks_only_once(ws, monkeypatch):
     assert any(m["role"] == "system" and "отрязан" in str(m["content"]) for m in msgs)
 
 
+def test_headless_succeeds_when_the_model_writes_in_parts_after_a_cut(ws, monkeypatch, capsys):
+    # headless брои предупреждение с „таван“ за спрян ход (таван на рундовете).
+    from genesis_agent import headless
+    monkeypatch.setattr(gta, "build_system_prompt", lambda: ("SYS", ""))
+    monkeypatch.setattr(headless, "_read_stdin", lambda: "")
+    _script(monkeypatch, [
+        (_CUT, None),
+        ("", [_call("WRITE_FILE", {"path": "big.md", "content": "# x\n"}, "w1")]),
+        ("Записах big.md.", None)])
+    code = headless.run(["--json", "--cwd", str(ws), "направи big.md"])
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0 and out["ok"] is True and out["error"] is None
+
+
 # ── F2: пазачът „няма ключ“ не спира доставчик извън Brain ──────────────────
 
 @pytest.mark.parametrize("prov, model", [("github", "gpt-4o"), ("llmstudio", "local-model"),
