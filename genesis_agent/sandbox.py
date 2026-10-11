@@ -744,6 +744,10 @@ _WIN_CRITICAL = re.compile(
     r"^(?:[a-z]:/?" + _WIN_GLOB +
     r"|[a-z]:/(?:windows|program files[^/]*|programdata)(?:/.*)?"
     r"|[a-z]:/users(?:/[^/]+(?:/appdata(?:/(?:local|locallow|roaming))?)?)?" + _WIN_GLOB +
+    # Всичко под AppData, както в _WIN_ROOT: `ri -r -fo $env:APPDATA\x` и
+    # `Remove-Item -r -fo C:\Users\<име>\AppData\Roaming\x` бяха само CONFIRM.
+    r"|(?:[a-z]:/users/[^/]+|\$env:userprofile|%userprofile%|\$\{?home\}?|~)[\\/]appdata(?:[\\/].*)?"
+    r"|(?:\$env:(?:local)?appdata|%(?:local)?appdata%)(?:/.*)?"
     r"|\$env:(?:userprofile|homepath|homedrive|systemdrive|systemroot|windir)" + _WIN_GLOB +
     r"|%(?:userprofile|homedrive|systemdrive|systemroot|windir)%" + _WIN_GLOB +
     r"|%homedrive%%homepath%" + _WIN_GLOB +

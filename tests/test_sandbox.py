@@ -1154,6 +1154,14 @@ def test_project_files_in_the_genesis_workspace_are_not_control_files(tmp_path, 
     r"rd /s /q %APPDATA%\Microsoft",
     r"rd /s /q %LOCALAPPDATA%",
     r"del /s /q C:\Users\roika\AppData\Local\Packages\*.*",
+    # Псевдонимите и съкратените ключове (лаптопът, 2026-10-11): минаваха
+    # през _windows_delete_verdict, който знаеше само върха на AppData.
+    r"Remove-Item -r -fo C:\Users\roika\AppData\Roaming\x",
+    r"ri -r -fo $env:APPDATA\Microsoft\Credentials",
+    r"ri -r -fo ${env:LOCALAPPDATA}\Google",
+    r"del -r -fo $env:USERPROFILE\AppData\Local\x",
+    r"rm -r -fo $HOME\AppData\Roaming\x",
+    r"rmdir -r C:/Users/roika/AppData/LocalLow/x",
 ])
 def test_windows_appdata_deletes_are_blocked_in_every_spelling(cmd):
     from genesis_agent import sandbox
