@@ -98,6 +98,9 @@ _ENVELOPE_HEAD = re.compile(
     rb'\s*"c"\s*:\s*"[A-Za-z0-9_=+/-]*')
 _HEAD_BYTES = 160
 _BRAKED_READ_S = 2.0
+# След 429 без прочетено тяло: колко най-много да се изхвърля остатъкът, за да
+# стигне отговорът до клиента вместо RST (виж _linger_close).
+_LINGER_S = 0.5
 
 
 class ProtocolError(Exception):
@@ -848,6 +851,20 @@ class RemoteServer:
                     return None
                 return body if len(body) == length else None
 
+            def _linger_close(self, left: int) -> None:
+                """Затваряне след 429 с непрочетено тяло: първо FIN, после до
+                `left` байта и до _LINGER_S се изхвърлят. На Windows close() с
+                непрочетени данни праща RST — клиентът, който още праща тялото,
+                получаваше WinError 10053 вместо 429 (лаптопът, 2026-10-11).
+                Срокът е общ и кратък, за да не върне вълна 5 (място за 30 s)."""
+                self.close_connection = True
+                try:
+                    self.wfile.flush()
+                    self.connection.shutdown(socket.SHUT_WR)
+                    self._read_by(max(left, 0), time.monotonic() + _LINGER_S)
+                except OSError:
+                    pass
+
             def do_POST(self) -> None:
                 ip = self.client_address[0]
                 if self.path.split("?", 1)[0] != "/api/v1":
@@ -867,6 +884,7 @@ class RemoteServer:
                             server.record_failure(ip)
                             self.close_connection = True
                             self._json(429, {"error": "slow_down"})
+                            self._linger_close(length)
                             return
                         body = braked_body
                     else:

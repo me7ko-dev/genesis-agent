@@ -66,11 +66,15 @@ class TestSecretsDoNotReachGeneratedCode:
         assert res.ok, f"кодът трябва РЕАЛНО да се е изпълнил: {res.stderr[:300]}"
         assert "GENESIS_TEST_CANARY" not in res.stdout
         assert "canary-value-98765" not in res.stdout
-        # Средата е шепа променливи, не наследеният списък на родителя —
+        # Средата е само белият списък, не наследеният списък на родителя —
         # това е разликата между whitelist и "махнахме познатите имена".
+        # Имената, не броят: на Windows списъкът сам е 16 (SYSTEMROOT, APPDATA…)
+        # и `< 15` падаше на лаптопа, без нищо да е изтекло (2026-10-11).
+        from genesis_agent.sandbox import SandboxPolicy
         assert "N= " in res.stdout
-        count = int(res.stdout.split("N= ")[1].split()[0])
-        assert count < 15, f"детето вижда {count} променливи — прилича на наследена среда"
+        names = set(res.stdout.split("\n", 1)[0].strip().split("|")) - {""}
+        extra = names - set(SandboxPolicy().env_passthrough)
+        assert not extra, f"детето вижда променливи извън белия списък: {sorted(extra)}"
 
 
 class TestExecutionNeverRaises:
