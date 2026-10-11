@@ -261,3 +261,37 @@ def test_pyproject_with_a_bom_is_read(ws):
         b'\xef\xbb\xbf[project]\nname = "x"\ndependencies = ["requests", "flask>=3"]\n')
     assert py_deps.declared(ws) == {"requests", "flask"}
     assert py_deps.undeclared(ws) == []
+
+
+# ── write-crlf-bom ───────────────────────────────────────────────────────────
+
+def _read_write(ws, name: str, old: str, new: str) -> bytes:
+    body = _body(gs._tool_read_file(name))
+    out = gs.dispatch_tool_call("WRITE_FILE", {"path": name, "content": body.replace(old, new)})
+    assert "✓" in out, out
+    return (ws / name).read_bytes()
+
+
+def test_write_over_crlf_bom_file_keeps_endings_and_bom(ws):
+    (ws / "run.bat").write_bytes(b"\xef\xbb\xbf@echo off\r\nset A=1\r\necho %A%\r\n")
+    assert _read_write(ws, "run.bat", "A=1", "A=2") == b"\xef\xbb\xbf@echo off\r\nset A=2\r\necho %A%\r\n"
+
+
+def test_write_over_bom_file_without_bom_in_content_adds_it_back(ws):
+    (ws / "a.txt").write_bytes(b"\xef\xbb\xbfx=1\n")
+    gs._tool_read_file("a.txt")
+    gs.dispatch_tool_call("WRITE_FILE", {"path": "a.txt", "content": "x=2\n"})
+    assert (ws / "a.txt").read_bytes() == b"\xef\xbb\xbfx=2\n"
+
+
+def test_write_over_utf16_file_keeps_it_readable(ws):
+    (ws / "w.txt").write_bytes("hello\r\nсвят\r\n".encode("utf-16"))
+    raw = _read_write(ws, "w.txt", "hello", "здравей")
+    assert raw == "здравей\r\nсвят\r\n".encode("utf-16")
+
+
+def test_write_over_mixed_file_and_new_file_use_lf(ws):
+    (ws / "mixed.txt").write_bytes(b"a\r\nb\nc\n")
+    assert _read_write(ws, "mixed.txt", "c", "d") == b"a\nb\nd\n"
+    gs.dispatch_tool_call("WRITE_FILE", {"path": "new.sh", "content": "echo 1\necho 2\n"})
+    assert (ws / "new.sh").read_bytes() == b"echo 1\necho 2\n"

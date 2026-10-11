@@ -562,6 +562,15 @@ def _tool_write_file(arg: str, content: str) -> str:
             return (f"[WRITE_FILE: {path}] ❌ Файлът има байтове, които не са текст в "
                     f"{encoding}, а в READ_FILE се виждат като „\ufffd“ — записът би ги "
                     "заменил завинаги. Ползвай EDIT_FILE за частична промяна: тя ги пази.")
+        # Краищата на редовете и BOM-ът също са на файла (одит 2026-10-11):
+        # READ_FILE показва LF, моделът пише LF, и CRLF .bat излизаше изцяло с
+        # LF и без BOM — дифф на всеки ред и счупени GOTO етикети. Чист CRLF
+        # файл остава CRLF; смесеният получава LF, както EDIT_FILE го прави.
+        crlf = original.count("\r\n")
+        if crlf and crlf == original.count("\n"):
+            content = content.replace("\r\n", "\n").replace("\n", "\r\n")
+        if original.startswith("\ufeff") and not content.startswith("\ufeff"):
+            content = "\ufeff" + content
     try:
         data = encode_text(content, encoding)
     except UnicodeEncodeError as e:
