@@ -368,6 +368,15 @@ def test_guessing_is_slowed_down(live) -> None:
     assert codes[0] == 401 and codes[-1] == 429
 
 
+def test_deeply_nested_json_is_a_counted_failure_not_a_traceback(live, capsys) -> None:
+    """Одит 2026-10-11: `[` × 200 000 без ключ даваше RecursionError — traceback
+    в терминала на оператора на всяка заявка и нито един провал за спирачката."""
+    base, _, _ = live
+    codes = [_post(base, b"[" * 200_000)[0] for _ in range(35)]
+    assert codes[0] == 401 and codes[-1] == 429
+    assert "Traceback" not in capsys.readouterr().err
+
+
 def test_the_web_page_falls_back_to_a_landing_page(live) -> None:
     base, _, _ = live
     with urllib.request.urlopen(base + "/", timeout=5) as r:

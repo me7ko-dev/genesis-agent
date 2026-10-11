@@ -233,6 +233,18 @@ def test_oversized_body_is_refused(env) -> None:
     assert code == 413
 
 
+def test_deeply_nested_json_is_a_400(env) -> None:
+    """Одит 2026-10-11: json.loads("[" * 60000) е RecursionError, не ValueError —
+    без вход връзката падаше с traceback вместо 400."""
+    _, _, client = env
+    cl = client()
+    c = http.client.HTTPConnection("127.0.0.1", cl.port, timeout=10)
+    c.request("POST", "/api/login", body=b"[" * 60_000,
+              headers={"Host": f"127.0.0.1:{cl.port}", "Content-Type": "application/json"})
+    assert c.getresponse().status == 400
+    c.close()
+
+
 def test_security_headers_are_on_every_response(env) -> None:
     _, _, client = env
     for path in ("/", "/api/me"):

@@ -369,3 +369,10 @@ def test_the_forwarded_body_always_carries_a_cap_within_the_budget(tmp_path, ext
     sent = json.loads(up.seen[0].data)
     caps = [sent[k] for k in ("max_tokens", "max_completion_tokens") if k in sent]
     assert caps and all(isinstance(c, int) and 1 <= c <= budget for c in caps)
+
+
+def test_deeply_nested_json_is_a_400(tmp_path) -> None:
+    """Одит 2026-10-11: RecursionError от json.loads не се хващаше."""
+    up = FakeUpstream([])
+    g = _gw_for(up, tmp_path)
+    assert g.forward("groq", b"[" * 200_000, _grant(1000))[0] == 400 and up.seen == []

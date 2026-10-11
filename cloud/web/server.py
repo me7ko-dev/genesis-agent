@@ -348,7 +348,7 @@ class Handler(BaseHTTPRequestHandler):
             return None
         try:
             data = json.loads(self.rfile.read(length) or b"{}")
-        except ValueError:
+        except (ValueError, RecursionError):   # "[" × 60 000 е RecursionError (2026-10-11)
             self._error(400, "невалиден JSON")
             return None
         if not isinstance(data, dict):

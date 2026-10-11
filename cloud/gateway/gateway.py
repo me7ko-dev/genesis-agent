@@ -250,7 +250,7 @@ class Gateway:
         try:
             request = json.loads(body)
             model = str(request.get("model", ""))
-        except (ValueError, AttributeError):
+        except (ValueError, AttributeError, RecursionError):   # "[" × 200 000 (2026-10-11)
             return 400, _err("невалиден JSON")
         # Поточен отговор не е JSON — `usage` се губеше и задачата харчеше без
         # таван и без сметка (2026-10-07). Genesis не ползва stream.

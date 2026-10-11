@@ -718,7 +718,10 @@ class RemoteServer:
                 try:
                     envelope = json.loads(body.decode("utf-8"))
                     response, rid = server.handle(envelope)
-                except (ProtocolError, ValueError, UnicodeDecodeError) as e:
+                # RecursionError: `[` × 200 000 без ключ — traceback в терминала
+                # на оператора на всяка заявка и без провал за спирачката (одит
+                # 2026-10-11).
+                except (ProtocolError, ValueError, UnicodeDecodeError, RecursionError) as e:
                     server.record_failure(ip)
                     # Подробността е само вида на отказа („cannot open",
                     # „stale request"): полезна на своя телефон, безполезна
