@@ -163,6 +163,10 @@ def test_repair_in_the_bench_gets_its_own_memory() -> None:
     env = {k: v for k, v in os.environ.items() if k != "GENESIS_MEMORY_DIR"}
     out = subprocess.run([sys.executable, "-c", code, str(ROOT / "scripts")], cwd=ROOT, env=env,
                          capture_output=True, text=True, timeout=120, check=False)
+    memory = out.stdout.strip().partition(" ")[2]
+    if memory and memory != "None":
+        import shutil
+        shutil.rmtree(memory, ignore_errors=True)
     assert out.stdout.startswith("SAME "), out.stdout + out.stderr
 
 
