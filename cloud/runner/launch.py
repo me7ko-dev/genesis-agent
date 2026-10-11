@@ -96,6 +96,10 @@ class Result:
     # Името на контейнера на задачата: cloud/check.py проверява, че махнатото е
     # точно нейното, не и задачите на клиенти на живия сървър (ревю 2026-10-11).
     container: str = ""
+    # Името на задачата в шлюза (= container) и разходът по модели (с шлюз) —
+    # по тях cloud/web/billing смята цената (2026-10-11).
+    job: str = ""
+    usage: list[dict[str, Any]] = field(default_factory=list)
 
 # Най-дългият ред събитие от контейнера, който се чете (1 MiB).
 _MAX_EVENT_LINE = 1 << 20
@@ -257,6 +261,28 @@ def docker_args(name: str, workspace: Path, text: str, *, limits: Limits | None 
     return [*args, image, text]
 
 
+def token_ttl(limits: Limits) -> int:
+    """Колко живее жетонът на задачата: колкото задачата (+1 мин за последния
+    отговор). Не свършва с контейнера — затова уеб сървърът смята хода за
+    окончателен чак след него (cloud/web/billing.settle, ревю 2026-10-11)."""
+    return limits.seconds + 60
+
+
+def new_task_name() -> str:
+    return f"{TASK_PREFIX}{uuid.uuid4().hex[:12]}"
+
+
+def task_suffix(name: str) -> str:
+    """Суфиксът след TASK_PREFIX — или ValueError. Име отвън (уеб сървърът)
+    без представката не би се хванало от cleanup_leftovers при рестарт, а с
+    друг знак — нито от жетона на шлюза (make_token), нито от името на мрежата."""
+    suffix = name[len(TASK_PREFIX):]
+    if (not name.startswith(TASK_PREFIX) or not suffix or len(suffix) > 40
+            or not all(c.isascii() and (c.isalnum() or c in "-_") for c in suffix)):
+        raise ValueError(f"невалидно име на задача: {name[:80]!r}")
+    return suffix
+
+
 def prepare_workspace(workspace: Path) -> None:
     """Папката на задачата трябва да е записваема от потребител 10001."""
     workspace.mkdir(parents=True, exist_ok=True)
@@ -273,20 +299,27 @@ def run_task(text: str, workspace: Path, *, limits: Limits | None = None,
              on_event: Callable[[dict[str, Any]], None] | None = None,
              env_file: str | None = None, runtime: str | None = None,
              image: str = IMAGE, gateway: Gateway | None = None,
-             egress_url: str = EGRESS_URL) -> Result:
+             egress_url: str = EGRESS_URL, name: str | None = None,
+             on_token: Callable[[int], None] | None = None) -> Result:
+    """`on_token(expires)` се вика с изтичането на жетона на шлюза, след като
+    е направен и преди контейнерът да тръгне — уеб сървърът смята от него кога
+    сметката на хода е окончателна (cloud/web/billing.settle_after)."""
     limits = limits or Limits()
-    suffix = uuid.uuid4().hex[:12]
-    name = f"{TASK_PREFIX}{suffix}"
+    # Името може да дойде отвън: уеб сървърът го записва ПРЕДИ контейнера,
+    # за да таксува хода и след срив посред него (2026-10-11). Мрежата е със
+    # същия суфикс — cleanup_leftovers и check.leftovers ги свързват по него.
+    name = name or new_task_name()
+    suffix = task_suffix(name)
     network = f"{NETWORK_PREFIX}{suffix}"
     helper = helper_container(gateway.url if gateway is not None else egress_url)
     prepare_workspace(workspace)
     error = open_task_network(network, helper)
     if error:
-        return Result(False, False, -1, 0.0, error=error, container=name)
+        return Result(False, False, -1, 0.0, error=error, container=name, job=name)
     try:
         res = _run_in(network, name, text, workspace, limits=limits, on_event=on_event,
                       env_file=env_file, runtime=runtime, image=image, gateway=gateway,
-                      egress_url=egress_url)
+                      egress_url=egress_url, on_token=on_token)
     finally:
         close_task_network(network, name, helper)
     res.container = name
@@ -296,14 +329,20 @@ def run_task(text: str, workspace: Path, *, limits: Limits | None = None,
 def _run_in(network: str, name: str, text: str, workspace: Path, *, limits: Limits,
             on_event: Callable[[dict[str, Any]], None] | None, env_file: str | None,
             runtime: str | None, image: str, gateway: Gateway | None,
-            egress_url: str) -> Result:
+            egress_url: str, on_token: Callable[[int], None] | None = None) -> Result:
     token = ""
     usage_start = 0
     if gateway is not None:
         usage_start = gw.usage_size(gateway.usage)
-        # Жетонът живее колкото задачата (+1 мин за последния отговор).
+        minted = time.time()
         token = gw.make_token(gateway.secret, name, budget=gateway.budget,
-                              ttl=limits.seconds + 60)
+                              ttl=token_ttl(limits), now=minted)
+        if on_token is not None:
+            # Ревю 2026-10-11: уеб сървърът смяташе края на жетона от момента
+            # преди мрежата на задачата (две docker команди до 60 s всяка) —
+            # при 2×45 s жетонът изтичаше 90 s по-късно от сметнатото и късен
+            # разход оставаше нетаксуван. Сега — от истинското изтичане.
+            on_token(int(minted + token_ttl(limits)))
     argv = docker_args(name, workspace, text, limits=limits, env_file=env_file,
                        runtime=runtime, image=image, gateway=gateway, token=token,
                        network=network, egress_url=egress_url)
@@ -382,16 +421,17 @@ def _run_in(network: str, name: str, text: str, workspace: Path, *, limits: Limi
     seconds = round(time.monotonic() - t0, 1)
     # С шлюз сметката е от шлюза — контейнерът може да каже каквото си иска.
     billed = gw.usage_for(gateway.usage, name, usage_start) if gateway is not None else None
+    usage = gw.usage_lines(gateway.usage, name, usage_start) if gateway is not None else []
     if timed_out.is_set():
         return Result(False, True, code, seconds, error=f"прекъснато след {limits.seconds} s",
-                      tokens=billed or {}, events=events)
+                      tokens=billed or {}, events=events, job=name, usage=usage)
     if done is None:
         return Result(False, False, code, seconds,
                       error=(stderr.strip().splitlines() or ["контейнерът спря без резултат"])[-1][:500],
-                      tokens=billed or {}, events=events)
+                      tokens=billed or {}, events=events, job=name, usage=usage)
     return Result(bool(done.get("ok")) and code == 0, False, code, seconds,
                   tokens=billed if billed is not None else dict(done.get("tokens") or {}),
-                  error=str(done.get("error") or ""), events=events)
+                  error=str(done.get("error") or ""), events=events, job=name, usage=usage)
 
 
 def main(argv: list[str] | None = None) -> int:

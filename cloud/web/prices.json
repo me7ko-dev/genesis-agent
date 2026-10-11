@@ -1,0 +1,13 @@
+{
+  "default": {"input": 300, "cached": 75, "output": 1200},
+  "models": {
+    "groq/*": {"input": 80, "cached": 40, "output": 100},
+    "cerebras/*": {"input": 100, "cached": 50, "output": 100},
+    "nvidia/*": {"input": 100, "cached": 50, "output": 300},
+    "openai/*": {"input": 300, "cached": 75, "output": 1200}
+  },
+  "per_turn": 2,
+  "min_turn_tokens": 20000,
+  "packs": {"p5": {"credits": 500, "amount_cents": 500, "currency": "eur", "stripe_price": ""}},
+  "plans": {"basic": {"credits": 1500, "amount_cents": 1500, "currency": "eur", "stripe_price": ""}}
+}

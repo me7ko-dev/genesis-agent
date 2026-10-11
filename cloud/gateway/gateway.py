@@ -181,8 +181,13 @@ class Ledger:
         t = int(usage.get("total_tokens") or 0) or p + c
         details = usage.get("prompt_tokens_details")
         cached = int((details.get("cached_tokens") if isinstance(details, dict) else 0) or 0)
-        entry = {"job": job, "provider": provider, "model": model, "prompt_tokens": p,
-                 "completion_tokens": c, "total_tokens": t, "cached_tokens": cached}
+        entry: dict[str, Any] = {
+            "job": job, "provider": provider, "model": model, "prompt_tokens": p,
+            "completion_tokens": c, "total_tokens": t, "cached_tokens": cached,
+            # Оценка без `usage` от доставчика (2026-10-11): сметката не знае
+            # колко е вход и колко изход, затова таксува целия сбор по най-
+            # скъпата тарифа — флагът трябва да стигне до файла.
+            **({"estimated": True} if usage.get("estimated") else {})}
         with self.lock:
             self.jobs.setdefault(job, Usage()).add(entry)
             if self.path is not None:
@@ -225,6 +230,51 @@ def usage_for(path: Path, job: str, start: int = 0) -> dict[str, int]:
     except OSError:
         pass
     return u.as_dict()
+
+
+def _count(v: Any) -> int:
+    """Брой токени от реда, или 0 — никога отрицателен, никога float."""
+    return v if type(v) is int and v > 0 else 0
+
+
+def usage_lines_by_job(path: Path, jobs: set[str],
+                       start: int = 0) -> dict[str, list[dict[str, Any]]]:
+    """Разходът на всяка от `jobs` по (доставчик, модел, оценка) — за сметката.
+
+    Сборът на usage_for не стига за цена: моделите струват различно, а
+    кешираният вход — по-малко (2026-10-11). Файлът се чете веднъж за всички
+    задачи (reconcile при старт иска много наведнъж). `start` — като при
+    usage_for: най-малкият usage_size() отпреди задачите (2026-10-11)."""
+    groups: dict[str, dict[tuple[str, str, bool], dict[str, Any]]] = {j: {} for j in jobs}
+    try:
+        with path.open("rb") as f:
+            if start <= f.seek(0, os.SEEK_END):
+                f.seek(start)
+            else:
+                f.seek(0)
+            for raw in f:
+                try:
+                    e = json.loads(raw.decode("utf-8"))
+                except (ValueError, RecursionError):  # вкл. UnicodeDecodeError
+                    continue
+                if not isinstance(e, dict) or e.get("job") not in groups:
+                    continue
+                est = bool(e.get("estimated"))
+                key = (str(e.get("provider", "")), str(e.get("model", "")), est)
+                g = groups[str(e["job"])].setdefault(key, {
+                    "provider": key[0], "model": key[1], "prompt_tokens": 0,
+                    "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0,
+                    "calls": 0, **({"estimated": True} if est else {})})
+                for k in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens"):
+                    g[k] += _count(e.get(k))
+                g["calls"] += 1
+    except OSError:
+        pass
+    return {j: list(g.values()) for j, g in groups.items()}
+
+
+def usage_lines(path: Path, job: str, start: int = 0) -> list[dict[str, Any]]:
+    return usage_lines_by_job(path, {job}, start)[job]
 
 
 def read_keys(path: Path) -> dict[str, str]:
@@ -275,6 +325,11 @@ class Gateway:
         # таван и без сметка (2026-10-07). Genesis не ползва stream.
         if request.get("stream"):
             return 400, _err("stream не се поддържа през шлюза")
+        # Жетонът е проверен при заглавията, а тялото може да е идвало бавно
+        # (ревю 2026-10-11). Сметката на хода става окончателна след изтичането
+        # + UPSTREAM_TIMEOUT — заявка, тръгнала по-късно, би останала без такса.
+        if grant.expires < time.time():
+            return 401, _err("невалиден или изтекъл жетон")
         # Отговорът се ограничава до оставащото: проверяваше се само дали вече е
         # похарчено — заявка от 1.9 MB с max_tokens 64k минаваше и струваше 1.8×
         # бюджета (одит 2026-10-09). Промпт, по-голям от остатъка, не минава.
@@ -294,12 +349,19 @@ class Gateway:
     def _forward(self, provider: str, base: str, keys: list[str], body: bytes, model: str,
                  grant: Grant, estimate: int) -> tuple[int, bytes]:
         status, data = 502, _err("няма отговор")
+        # Един общ срок за всички ключове (ревю 2026-10-11): с N ключа и 429
+        # след 299 s разходът се записваше до N × 300 s след изтичането на
+        # жетона — след окончателната сметка на хода (billing.LATE_MARGIN).
+        deadline = time.monotonic() + UPSTREAM_TIMEOUT
         for key in keys:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
             req = urllib.request.Request(
                 f"{base}/chat/completions", data=body, method="POST",
                 headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"})
             try:
-                with self.opener(req, timeout=UPSTREAM_TIMEOUT) as r:
+                with self.opener(req, timeout=left) as r:
                     status, data = r.status, r.read()
             except urllib.error.HTTPError as e:
                 status, data = e.code, e.read()

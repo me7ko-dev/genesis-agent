@@ -178,6 +178,16 @@ def _isolated_operator_settings(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_stripe(monkeypatch):
+    """Stripe ключове от shell-а на разработчика не включват истинско плащане
+    в тест (2026-10-11): cloud/web/server.main чете STRIPE_* и
+    GENESIS_PUBLIC_URL от средата. Тестовете с Stripe ги задават сами, а
+    обръщенията към Stripe са винаги фалшив opener."""
+    for name in ("STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "GENESIS_PUBLIC_URL"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _elide_off_like_the_default(monkeypatch):
     """B.12 (2026-10-11): config.py казва на оператора да пусне A/B с
     GENESIS_ELIDE_OLD_WRITES=1; с изнесена такава променлива
