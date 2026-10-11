@@ -1531,6 +1531,11 @@ class SandboxPolicy:
         # found: neither %ComSpec% nor %SystemRoot%“, а Python в детето — без
         # random/сокети (Windows CI 2026-10-09). Не са тайни.
         "SYSTEMROOT", "COMSPEC", "PATHEXT", "WINDIR", "TEMP", "TMP",
+        # Домът на Windows (2026-10-11): HOME/USER обикновено ги няма там, а
+        # Python от 3.8 не чете HOME — без тези `Path.home()` в детето хвърляше
+        # RuntimeError, getpass.getuser() падаше, а git без bash нямаше дом.
+        # review._git_env ги добавяше само за git; не са тайни.
+        "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "USERNAME",
     )
     cpu_seconds: int = 120
     max_memory_mb: int = 2048

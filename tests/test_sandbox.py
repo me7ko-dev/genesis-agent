@@ -936,3 +936,19 @@ def test_deleting_inside_a_project_under_users_asks_not_blocks(cmd) -> None:
 ])
 def test_deleting_a_windows_root_is_still_blocked(cmd) -> None:
     assert sandbox.assess_command(cmd).level is BLOCKED
+
+
+def test_build_env_keeps_the_windows_home_variables(monkeypatch) -> None:
+    """Без тях `Path.home()` в детето на Windows хвърля RuntimeError (Python
+    не чете HOME от 3.8), а getpass.getuser() пада (2026-10-11)."""
+    windows = {
+        "USERPROFILE": r"C:\Users\roika", "HOMEDRIVE": "C:", "HOMEPATH": r"\Users\roika",
+        "APPDATA": r"C:\Users\roika\AppData\Roaming",
+        "LOCALAPPDATA": r"C:\Users\roika\AppData\Local", "USERNAME": "roika",
+    }
+    for key, value in windows.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-fake")
+    env = sandbox._build_env(SandboxPolicy())
+    assert {k: env.get(k) for k in windows} == windows
+    assert "OPENAI_API_KEY" not in env
