@@ -135,3 +135,12 @@ def test_read_range_past_the_head_uses_the_whole_file_encoding(ws):
     assert "cp1251" in out.splitlines()[0]
     hit = repo_map.search_code("Грешка", ws)[0]
     assert hit.line == 8001 and hit.text in out
+
+
+# ── файл само с CR ───────────────────────────────────────────────────────────
+
+def test_read_file_shows_cr_only_file_as_lines(ws):
+    (ws / "old.txt").write_bytes(b"one\rtwo\rthree\r")
+    body = _body(gs._tool_read_file("old.txt"))
+    assert "\r" not in body
+    assert body.splitlines() == ["one", "two", "three"]

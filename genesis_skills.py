@@ -413,7 +413,9 @@ def _tool_read_file(arg: str, offset=None, limit=None) -> str:
     # Кодирането се разпознава (code_edit.decode_text) и се казва в заглавието:
     # cp1251 файл се показваше като „�������“, а моделът копираше това в
     # WRITE_FILE и кирилицата изчезваше от диска (одит 2026-10-11).
-    text = displayable(text).replace("\r\n", "\n")
+    # Самотен `\r` (стар Mac) — също край на ред, както в текстовия режим
+    # преди (ревю 2026-10-11: файлът излизаше като един ред с `\r` в него).
+    text = displayable(text).replace("\r\n", "\n").replace("\r", "\n")
     _SEEN_PATHS.add(path.resolve())
     if whole and not text.strip("\ufeff"):
         text = "(празен файл)"
