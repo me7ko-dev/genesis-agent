@@ -239,3 +239,63 @@ def test_a_deeply_nested_line_from_the_container_is_noise_not_a_crash(monkeypatc
     done = {"kind": "done", "ok": True, "error": "", "seconds": 1, "tokens": {}}
     res, seen = _run(monkeypatch, tmp_path, ["[" * 200_000, json.dumps(done)])
     assert res.ok and [e["kind"] for e in seen] == ["done"]
+
+
+class _KillableProc(_FakeProc):
+    """_FakeProc, който помни kill() и wait() — за пътя с грешка."""
+
+    def __init__(self, lines: list[str]) -> None:
+        super().__init__(lines)
+        self.killed = False
+        self.waited = False
+        self.name = ""
+
+    def kill(self) -> None:
+        self.killed = True
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.waited = True
+        return -9 if self.killed else 0
+
+
+def test_any_error_in_the_read_loop_kills_and_waits_the_container(monkeypatch, tmp_path) -> None:
+    """Ревю 2026-10-11: грешка от on_event (или от какъвто и да е ред) излизаше
+    от run_task, finally спираше само наблюдателя и `docker run` оставаше да
+    върви без таван. Сега контейнерът се убива (`docker kill <име>`), клиентът
+    също, изчаква се — и грешката продължава нагоре."""
+    procs: list[_KillableProc] = []
+    killed: list[list[str]] = []
+
+    def popen(argv, **kw):
+        procs.append(_KillableProc([json.dumps({"kind": "assistant", "text": "x"})]))
+        procs[-1].name = argv[argv.index("--name") + 1]
+        return procs[-1]
+
+    monkeypatch.setattr(launch.subprocess, "Popen", popen)
+    monkeypatch.setattr(launch.subprocess, "run", lambda argv, **kw: killed.append(argv))
+
+    def boom(ev):
+        raise KeyboardInterrupt  # BaseException — не само Exception
+
+    with pytest.raises(KeyboardInterrupt):
+        launch.run_task("задача", tmp_path / "ws", on_event=boom)
+    assert killed == [["docker", "kill", procs[0].name]]
+    assert procs[0].killed and procs[0].waited
+
+
+def test_a_lone_surrogate_from_the_container_reaches_the_store(monkeypatch, tmp_path) -> None:
+    """Ревю 2026-10-11: `{"kind":"assistant","text":"\\udcee"}` ставаше lone
+    surrogate; store.add_event (json.dumps → sqlite) гърмеше с
+    UnicodeEncodeError и ходът падаше. Сега е U+FFFD, а истинските двойки
+    (емоджи) остават."""
+    from cloud.web.store import Store
+    store = Store(tmp_path / "web.db")
+    uid = store.add_user("ana@example.com", "correct-horse-battery")
+    turn = store.add_turn(store.new_chat(uid, "чат"), "задача")
+    line = '{"kind": "assistant", "text": "a\\udcee b\\uD800 \\ud83d\\ude00", "\\udcff": 1}'
+    done = json.dumps({"kind": "done", "ok": True, "tokens": {}})
+    monkeypatch.setattr(launch.subprocess, "Popen", lambda *a, **k: _FakeProc([line, done]))
+    res = launch.run_task("задача", tmp_path / "ws", on_event=lambda e: store.add_event(turn, e))
+    assert res.ok
+    got = store.events(turn)
+    assert got[0]["text"] == "a� b� \U0001f600" and got[0]["�"] == 1

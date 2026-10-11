@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -88,6 +89,44 @@ _MAX_EVENT_LINE = 1 << 20
 # сървъра от един ход; кодът в контейнера пише в същия stdout като агента.
 _MAX_EVENTS = 2000
 _MAX_EVENT_BYTES = 8 << 20
+# Ревю 2026-10-11: ред `{"kind":"assistant","text":"\\udcee"}` от кода в
+# контейнера става lone surrogate след json.loads; store.add_event (json.dumps
+# в sqlite) гърмеше с UnicodeEncodeError, ходът падаше и `docker run`
+# оставаше да върви без таван. Escape-ът се търси в суровия ред — така
+# обикновените събития не се кодират втори път.
+_SURROGATE_ESCAPE = re.compile(rb"\\u[dD][89a-fA-F]")
+_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _parse_event(raw: bytes) -> dict[str, Any] | None:
+    """Събитие от реда на контейнера, или None за шум. Без lone surrogates:
+    всяко събитие оттук се записва и праща като UTF-8."""
+    try:
+        ev = json.loads(raw.decode("utf-8", "replace"))
+        if not isinstance(ev, dict) or "kind" not in ev:
+            return None
+        if _SURROGATE_ESCAPE.search(raw):
+            # Двойките вече са слети от json.loads — всеки останал surrogate е
+            # самотен и е само в низ, затова замяната оставя валиден JSON.
+            ev = json.loads(_SURROGATE.sub("\ufffd", json.dumps(ev, ensure_ascii=False)))
+    except (ValueError, RecursionError):
+        # RecursionError: ред `[` * 200000 от кода в контейнера (ревю 2026-10-11).
+        return None  # шум от Python/rich — не е събитие
+    return ev
+
+
+def _stop(proc: subprocess.Popen[bytes], name: str) -> None:
+    """Спира контейнера и клиента `docker run` и ги изчаква. Само убиването
+    на клиента не стига: контейнерът продължава без него."""
+    try:
+        subprocess.run(["docker", "kill", name], capture_output=True, check=False, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        proc.kill()
+        proc.wait(timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def docker_args(name: str, workspace: Path, text: str, *, limits: Limits | None = None,
@@ -175,6 +214,7 @@ def run_task(text: str, workspace: Path, *, limits: Limits | None = None,
     # 64 KB предупреждения, блокираше на пълната тръба, stdout никога не
     # стигаше до края и завършен ход се убиваше на тавана (одит 2026-10-07).
     err_file = tempfile.TemporaryFile()  # noqa: SIM115 — затваря се във finally, ползва се от Popen
+    proc: subprocess.Popen[bytes] | None = None
     try:
         proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=err_file)
         assert proc.stdout is not None
@@ -192,13 +232,8 @@ def run_task(text: str, workspace: Path, *, limits: Limits | None = None,
             if skipping or not complete and len(raw) >= _MAX_EVENT_LINE:
                 skipping = not complete
                 continue
-            try:
-                ev = json.loads(raw.decode("utf-8", "replace"))
-            except (ValueError, RecursionError):
-                # RecursionError: ред `[` * 200000 от кода в контейнера излизаше
-                # от run_task и `docker run` оставаше без таван (ревю 2026-10-11).
-                continue  # шум от Python/rich — не е събитие
-            if not isinstance(ev, dict) or "kind" not in ev:
+            ev = _parse_event(raw)
+            if ev is None:
                 continue
             if not capped and (len(events) >= _MAX_EVENTS
                                or kept_bytes + len(raw) > _MAX_EVENT_BYTES):
@@ -224,6 +259,14 @@ def run_task(text: str, workspace: Path, *, limits: Limits | None = None,
         err_file.seek(0, os.SEEK_END)
         err_file.seek(max(0, err_file.tell() - 8192))
         stderr = err_file.read().decode("utf-8", "replace")
+    except BaseException:
+        # Ревю 2026-10-11: всяка грешка тук (on_event, sqlite, Ctrl+C, нов вид
+        # лош ред) излизаше от run_task, finally спираше само наблюдателя и
+        # `docker run` оставаше да върви без таван. Причината не се изброява
+        # по тип — каквото и да е, контейнерът се убива и изчаква.
+        if proc is not None:
+            _stop(proc, name)
+        raise
     finally:
         timer.cancel()
         err_file.close()
