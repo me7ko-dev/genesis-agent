@@ -1839,7 +1839,13 @@ class Brain:
                         self._usage_attempt = None
                         _print_skip(prov, model, last_error, time.time() - t0)
                         # При 429/503/402 → маркирай изчерпан за cooldown (спестява безсмислени опити).
-                        for c in _EXHAUST_CODES:
+                        # Без заявка (synthetic) — не: „GROQ_API_KEY … cooling
+                        # down“ започва с HTTP_429 и всеки модел под ключа
+                        # получаваше свежи 300 s, тоест оставаше извън веригата
+                        # до 5 мин след като ключът се възстанови (одит
+                        # 2026-10-11: ключ с 1 s оставащ cooldown → groq/A и
+                        # groq/B с по 300 s). Cooldown-ът на ключа покрива това.
+                        for c in () if synthetic else _EXHAUST_CODES:
                             if f"HTTP_{c}" in last_error:
                                 _mark_exhausted(key)
                                 break

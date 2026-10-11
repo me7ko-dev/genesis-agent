@@ -154,3 +154,36 @@ def test_brain_reads_the_same_keys_as_paths_from_a_bom_and_a_quoted_hash(monkeyp
     assert b._provider_key("GROQ_API_KEY") == "gsk_real"
     assert b._provider_key("OPENAI_API_KEY") == "sk-proj #1"
     assert b._provider_key("NVIDIA_API_KEY") == "nv"
+
+
+# ── F3: прескочен заради ключа модел не получава свой 300 s cooldown ─────────
+
+def test_a_model_skipped_for_its_keys_cooldown_is_back_when_the_key_is(monkeypatch) -> None:
+    monkeypatch.setattr(brain, "_load_chain",
+                        lambda: chain(("groq", "A"), ("groq", "B"), ("nvidia", "C")))
+    monkeypatch.setenv("GROQ_API_KEY", "g")
+    monkeypatch.setenv("NVIDIA_API_KEY", " n")
+    clock = [1_000_000.0]
+    monkeypatch.setattr(brain.time, "time", lambda: clock[0])
+    monkeypatch.setattr(brain.time, "sleep", lambda s: None)
+    brain._EXHAUSTED["key::GROQ_API_KEY"] = clock[0] + 1
+    seen = _route(monkeypatch, lambda p: ok("от " + p["model"]))
+    b = brain.Brain(use_local=False)
+    assert b.complete([{"role": "user", "content": "hi"}]).raw_text == "от C"
+    assert not brain._is_exhausted("groq::A") and not brain._is_exhausted("groq::B")
+    clock[0] += 1.1
+    seen.clear()
+    assert b.complete([{"role": "user", "content": "hi"}]).raw_text == "от A"
+    assert [m for m, _ in seen] == ["A"]
+
+
+def test_a_model_skipped_because_all_rotating_keys_cool_down_is_not_marked(monkeypatch) -> None:
+    monkeypatch.setattr(brain, "_load_chain", lambda: chain(("groq", "A"), ("nvidia", "C")))
+    monkeypatch.setenv("GROQ_API_KEY", "g1")
+    monkeypatch.setenv("GROQ_API_KEY_2", "g2")
+    monkeypatch.setenv("NVIDIA_API_KEY", " n")
+    brain._mark_exhausted("key::GROQ_API_KEY#1")
+    brain._mark_exhausted("key::GROQ_API_KEY#2")
+    _route(monkeypatch, lambda p: ok("от " + p["model"]))
+    assert brain.Brain(use_local=False).complete([{"role": "user", "content": "hi"}]).raw_text == "от C"
+    assert "groq::A" not in brain._EXHAUSTED
