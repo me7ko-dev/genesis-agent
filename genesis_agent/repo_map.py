@@ -164,6 +164,10 @@ def _search_python(root: Path, pattern: str, glob: str | None,
         # както при rg и EDIT_FILE, за да съвпадат номерата.
         text = displayable(decode_text(raw)[0])
         for i, line in enumerate(text.split("\n"), 1):
+            # `\r` от CRLF не е част от реда (ревю 2026-10-11): `return 1$`
+            # не съвпадаше в CRLF файл и инструментът казваше „наистина го
+            # няма“ — старият текстов режим го махаше. rg е с `--crlf`.
+            line = line.removesuffix("\r")
             if rx.search(line):
                 out.append(Match(str(p), i, line.rstrip()[:_LINE_CLIP]))
                 if len(out) >= max_results:
@@ -189,6 +193,8 @@ def _search_ripgrep(root: Path, pattern: str, glob: str | None,
                       generated trees are excluded by `_SKIP_DIRS` instead,
                       which BOTH paths honour
       --max-filesize  the Python path skips files over `_MAX_FILE_BYTES`
+      --crlf          `$` съвпада пред `\r\n`, както Python пътят го маха
+                      (ревю 2026-10-11)
 
     `.git/` stays excluded because it is in `_SKIP_DIRS`, which is turned into
     `--glob !.git/` below — so `--hidden --no-ignore` does not drag in object
@@ -210,7 +216,7 @@ def _run_ripgrep(root: Path, pattern: str, glob: str | None,
                  max_results: int, encoding: str | None) -> list[Match] | None:
     cmd = ["rg", "--json", "--max-count", str(max_results),
            "--hidden", "--no-ignore", "--max-filesize", str(_MAX_FILE_BYTES),
-           "-e", pattern]
+           "--crlf", "-e", pattern]
     if encoding:
         cmd += ["--encoding", encoding]
     for d in sorted(_SKIP_DIRS):
