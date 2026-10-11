@@ -141,10 +141,17 @@ class Server:
     def start(self, forbidden: list[Path] | None = None) -> None:
         env = _server_env(self.env)
         exe = _resolve_command(self.command, env, forbidden or [])
+        # Сървър от ~/.genesis/mcp.json тръгва от празна папка, не от проекта
+        # (одит 2026-10-11, възпроизведено): `python -m mcp_server_time` внася
+        # от cwd, `npx` търси първо в локалния node_modules — подхвърлен в
+        # клонирано хранилище модул се пускаше при всеки старт на чата без
+        # /mcp trust. Проектът стига до сървъра през roots/list. Доверен
+        # проектен .mcp.json остава в проекта — той е писан за него.
+        cwd = _neutral_cwd() if self.source == _home() / "mcp.json" else _workspace()
         try:
             self.proc = subprocess.Popen(
                 [exe, *self.args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, env=env, cwd=str(_workspace()),
+                stderr=subprocess.PIPE, env=env, cwd=str(cwd),
                 start_new_session=(os.name == "posix"),
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
@@ -553,6 +560,22 @@ def _version() -> str:
 def _home() -> Path:
     from genesis_agent.paths import GENESIS_HOME
     return Path(GENESIS_HOME)
+
+
+_NEUTRAL: Path | None = None
+
+
+def _neutral_cwd() -> Path:
+    """Празна папка (0700), създадена от този процес — нито проектът, нито
+    ~/.genesis, където команда на модела може да остави модул предварително."""
+    global _NEUTRAL
+    if _NEUTRAL is None or not _NEUTRAL.is_dir():
+        import atexit
+        import shutil
+        import tempfile
+        _NEUTRAL = Path(tempfile.mkdtemp(prefix="genesis-mcp-"))
+        atexit.register(shutil.rmtree, str(_NEUTRAL), True)
+    return _NEUTRAL
 
 
 def project_file(ws: Path | None = None) -> Path:

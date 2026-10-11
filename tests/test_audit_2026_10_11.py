@@ -116,3 +116,43 @@ def test_a_sandboxed_child_cannot_read_the_parents_environment(tmp_path) -> None
     # root има CAP_SYS_PTRACE и чете всеки /proc въпреки PR_SET_DUMPABLE.
     if os.geteuid() != 0:
         assert "LEAK" not in out.stdout
+
+
+# ── MCP сървърите на оператора не тръгват от папката на проекта ─────────────
+
+_FAKE_MCP = Path(__file__).parent / "fake_mcp_server.py"
+
+
+@pytest.fixture
+def clean_mcp():
+    from genesis_agent import mcp_client
+    yield mcp_client
+    mcp_client.stop_all()
+    mcp_client.workspace = None
+
+
+def test_a_home_mcp_server_does_not_import_a_module_planted_in_the_workspace(
+        tmp_path, monkeypatch, clean_mcp) -> None:
+    """Одит 2026-10-11, възпроизведено: `python3 -m mcp_server_time` от
+    ~/.genesis/mcp.json тръгваше с cwd = клонирания проект, `-m` внася от cwd
+    и подхвърленият mcp_server_time.py се пускаше при всеки старт на чата —
+    без /mcp trust. Същото с npx и локален node_modules."""
+    import genesis_skills as gs
+    from genesis_agent import paths
+    mcp_client = clean_mcp
+    ws = tmp_path / "cloned_repo"
+    ws.mkdir()
+    marker = tmp_path / "PWNED"
+    (ws / "planted_mcp_mod.py").write_text(f"open({str(marker)!r}, 'w').write('ran')\n",
+                                           encoding="utf-8")
+    home = Path(paths.GENESIS_HOME)
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "mcp.json").write_text(json.dumps({"mcpServers": {
+        "planted": {"command": sys.executable, "args": ["-m", "planted_mcp_mod"]},
+        "fake": {"command": sys.executable, "args": [str(_FAKE_MCP)]},
+    }}), encoding="utf-8")
+    monkeypatch.setattr(gs, "_WORKSPACE", ws)
+    mcp_client.workspace = ws
+    lines = mcp_client.start_all(ws)
+    assert not marker.exists()
+    assert any("fake: 2 инструмента" in line for line in lines), lines
