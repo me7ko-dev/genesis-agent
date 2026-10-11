@@ -404,8 +404,7 @@ class TestNeverWeakerThanBefore:
 
     def test_a_mixed_report_still_needs_a_test_run(self) -> None:
         nothing = _executed(_run("ls", 0, "app.py"))
-        for text in ("Тестовете минаха, освен test_vat.", "4 tests passed, 1 failed.",
-                     "Не всички тестове минават."):
+        for text in ("Тестовете минаха, освен test_vat.", "4 tests passed, 1 failed."):
             claims = unsupported_claims(text, nothing)
             assert [c.kind for c in claims] == ["пускане на тестове"], text
             assert claim_check.green_claim_after_red(claims, nothing) == 0, text
@@ -415,3 +414,84 @@ class TestNeverWeakerThanBefore:
     def test_one_claim_for_a_run_and_a_mixed_report(self) -> None:
         assert _kinds("Пуснах тестовете: тестовете минаха, освен test_vat.", []) \
             == ["пускане на тестове"]
+
+
+class TestGreenSummariesOfOtherRunners:
+    """Ревю на вълна 5 (2026-10-11): зелен итог, който _GREEN_OUTPUT_RE не
+    познаваше, оставяше rc≠0 на падналия `git commit` след пускача — честното
+    „Всички тестове минават“ ставаше „⚠ червено“ (main и вълна 4: зелено).
+    Измерено с node --test (и `# pass 35` на mobile/), Maven, Gradle, dotnet, bun."""
+
+    _GREEN = (
+        ("npm test && git commit -am wip", 1,
+         "ℹ tests 5\nℹ pass 5\nℹ fail 0\nnothing to commit, working tree clean"),
+        ("npm test && git commit -am wip", 1, "# tests 35\n# pass 35\n# fail 0\nnothing to commit"),
+        ("mvn test && git commit -am wip", 1,
+         ("[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0\n[INFO] BUILD SUCCESS\n"
+          "nothing to commit")),
+        ("./gradlew test && git commit -am wip", 1, "BUILD SUCCESSFUL in 3s\nnothing to commit"),
+        ("dotnet test && git commit -am wip", 1,
+         "Passed!  - Failed:     0, Passed:     5, Skipped:     0, Total:     5\nnothing to commit"),
+        ("dotnet test && git push", 128,
+         ("Passed!  - Failed:     0, Passed:     5, Skipped:     0, Total:     5\n"
+          "fatal: could not read Username")),
+        ("bun test && git commit -am wip", 1, " 5 pass\n 0 fail\nRan 5 tests\nnothing to commit"),
+    )
+
+    # Същите пускачи, червени: rc е на пускача (git не тръгва след `&&`).
+    _RED = (
+        ("npm test && git commit -am wip", 1, "ℹ tests 5\nℹ pass 4\nℹ fail 1"),
+        ("npm test && git commit -am wip", 1, "# tests 35\n# pass 34\n# fail 1"),
+        ("mvn test && git commit -am wip", 1,
+         "[ERROR] Tests run: 5, Failures: 1, Errors: 0, Skipped: 0\n[INFO] BUILD FAILURE"),
+        ("./gradlew test && git commit -am wip", 1, "3 tests completed, 1 failed\nBUILD FAILED"),
+        ("dotnet test && git commit -am wip", 1,
+         "Failed!  - Failed:     1, Passed:     4, Skipped:     0, Total:     5"),
+        ("bun test && git commit -am wip", 1, " 4 pass\n 1 fail\nRan 5 tests"),
+    )
+
+    def test_a_green_runner_before_a_failing_command_stays_green(self) -> None:
+        for cmd, rc, out in self._GREEN:
+            executed = _executed(_run(cmd, rc, out))
+            assert executed == [("RUN_CMD", cmd)], (cmd, out)
+            assert unsupported_claims("Всички тестове минават.", executed) == [], cmd
+
+    def test_the_same_runners_red_stay_red(self) -> None:
+        for cmd, rc, out in self._RED:
+            executed = _executed(_run(cmd, rc, out))
+            assert executed == [("RUN_CMD", f"{cmd} (rc={rc})")], (cmd, out)
+            claims = unsupported_claims("Всички тестове минават.", executed)
+            assert claim_check.green_claim_after_red(claims, executed) == rc, cmd
+
+
+class TestTwoRunnersInOneChain:
+    """Ревю на вълна 5 (2026-10-11): зелен итог на първия пускач изтриваше
+    rc≠0 на втория, който не е печатал червен белег (`jest: not found`,
+    ImportError в conftest, „no tests ran“, грешка на tsc в `npm test`).
+    Преди вълна 4 и четирите бяха червени."""
+
+    def test_a_green_first_runner_does_not_hide_the_second(self) -> None:
+        for cmd, rc, out in (
+                ("pytest -q && npm test && git push", 127, "5 passed in 0.1s\nsh: 1: jest: not found"),
+                ("pytest -q tests/unit && pytest -q tests/integration && git commit -am x", 4,
+                 "5 passed in 0.1s\nImportError while loading conftest '/app/conftest.py'."),
+                ("pytest -q tests/unit && pytest -q tests/integration && git commit -am x", 5,
+                 "5 passed in 0.1s\nno tests ran in 0.01s"),
+                ("cd api && pytest -q && cd ../web && npm test && cd ..", 1,
+                 "12 passed in 0.3s\nsrc/app.ts(3,1): error TS2304: Cannot find name 'x'.")):
+            executed = _executed(_run(cmd, rc, out))
+            assert executed == [("RUN_CMD", f"{cmd} (rc={rc})")], cmd
+            claims = unsupported_claims("Всички тестове минават.", executed)
+            assert claim_check.green_claim_after_red(claims, executed) == rc, cmd
+
+    def test_two_green_runners_with_rc_zero_are_green(self) -> None:
+        cmd = "pytest -q && npm test && git push"
+        assert _run(cmd, 0, "5 passed\nTests: 3 passed") == ("RUN_CMD", cmd)
+
+
+def test_not_all_tests_pass_with_nothing_run_is_not_a_claim() -> None:
+    """Ревю на вълна 5 (2026-10-11): „Не всички тестове минават.“ без нито
+    едно пускане даваше подкана „пускане на тестове“; на main и преди
+    вълна 4 — нищо. Отрицанието не твърди и пускане."""
+    nothing = _executed(_run("ls", 0, "app.py"))
+    assert unsupported_claims("Не всички тестове минават.", nothing) == []

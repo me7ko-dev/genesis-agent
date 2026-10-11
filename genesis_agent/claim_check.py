@@ -166,9 +166,10 @@ _NEGATED_RE = re.compile(r"\b(?:не|not)\s+$", re.IGNORECASE)
 
 
 # Какво е съвпадението за „тестовете минават“ (2026-10-11, вълна 5):
-# _CLAIM — твърди зелено; _REPORT — смесен отчет („минаха, освен test_vat“,
-# „Не всички минават“): не е зелено, но твърди, че тестовете СА пуснати;
-# _NOT_A_CLAIM — въпрос, условие, съвет. Измерено с таблица main/вълна 4:
+# _CLAIM — твърди зелено; _REPORT — смесен отчет („минаха, освен test_vat“):
+# не е зелено, но твърди, че тестовете СА пуснати; _NOT_A_CLAIM — въпрос,
+# условие, съвет, отрицание („Не всички тестове минават“ — на main и преди
+# вълна 4 без подкана; ревю на вълна 5). Измерено с таблица main/вълна 4:
 # с нищо пуснато (само `ls`) „Тестовете минаха, освен test_vat.“ и „4 tests
 # passed, 1 failed.“ на main даваха подкана („пускане на тестове“), а след
 # вълна 4 — нищо: честният отчет изпадаше изцяло, вместо само от проверката
@@ -178,7 +179,7 @@ _CLAIM, _REPORT, _NOT_A_CLAIM = "claim", "report", "none"
 
 def _pass_sentence(text: str, match: re.Match[str]) -> str:
     """Съвпадение за „тестовете минават“: зелено твърдение, смесен отчет
-    (червена дума в изречението, отрицание точно преди) или въпрос/условие."""
+    (червена дума в изречението) или въпрос/условие/отрицание точно преди."""
     start = max((m.end() for m in _SENTENCE_END_RE.finditer(text, 0, match.start())),
                 default=0)
     end_match = _SENTENCE_END_RE.search(text, match.end())
@@ -186,9 +187,9 @@ def _pass_sentence(text: str, match: re.Match[str]) -> str:
     sentence = text[start:end]
     before = text[start:match.start()]
     if (sentence.rstrip().endswith("?") or re.match(r"\s+ли\b", text[match.end():])
-            or _NOT_A_CLAIM_RE.search(before)):
+            or _NOT_A_CLAIM_RE.search(before) or _NEGATED_RE.search(before)):
         return _NOT_A_CLAIM
-    if _RED_WORDS_RE.search(sentence) or _NEGATED_RE.search(before):
+    if _RED_WORDS_RE.search(sentence):
         return _REPORT
     return _CLAIM
 
@@ -341,10 +342,13 @@ _HEADER_RE = re.compile(r"\[RUN_CMD: (.*?)\]  \(rc=(-?\d+|None)\)$", re.DOTALL |
 # не броят командата.
 _FAILED_RC_RE = re.compile(r" \(rc=(-?\d+)\)$")
 # Червен изход на тестов пускач, независимо кой е: pytest/jest „1 failed“,
-# unittest „FAILED (failures=1)“, go „FAIL“, cargo „test result: FAILED“.
+# unittest „FAILED (failures=1)“, go „FAIL“, cargo „test result: FAILED“,
+# bun „1 fail“, node --test „ℹ fail 1“ / „# fail 1“ (двойките на новите
+# зелени итози долу — ревю на вълна 5, 2026-10-11).
 # `FAIL` е с главни букви нарочно — „xfailed“, „XFAIL“ не са червени.
 _RED_OUTPUT_RE = re.compile(
-    r"\bFAIL(?:ED|URES)?\b|\b[1-9]\d* (?:failed|failing|failures?|errors?)\b")
+    r"\bFAIL(?:ED|URES)?\b|\b[1-9]\d* (?:fail|failed|failing|failures?|errors?)\b"
+    r"|^[#ℹ] fail [1-9]", re.MULTILINE)
 
 
 def _rc_is_the_runners(command: str) -> bool:
@@ -366,15 +370,23 @@ def _rc_is_the_runners(command: str) -> bool:
 
 
 # Зелен итог на тестов пускач: pytest „5 passed“, jest „Tests: 4 passed“,
-# mocha „4 passing“, unittest „OK“, cargo „test result: ok.“, go „ok  pkg“.
+# mocha „4 passing“, unittest „OK“, cargo „test result: ok.“, go „ok  pkg“,
+# bun „5 pass“, node --test „ℹ pass 5“ / „# pass 35“ (`npm test` на mobile/),
+# Maven „BUILD SUCCESS“, Gradle „BUILD SUCCESSFUL“, dotnet „Passed!“.
+# Ревю на вълна 5 (2026-10-11): без последните пет зелен пускач, последван
+# от паднала команда, беше червен (на main и във вълна 4 — зелен).
 _GREEN_OUTPUT_RE = re.compile(
-    r"\b[1-9]\d* (?:passed|passing)\b|^OK\b|\btest result: ok\b|^ok\s", re.MULTILINE)
+    r"\b[1-9]\d* (?:passed|passing|pass)\b|^OK\b|\btest result: ok\b|^ok\s"
+    r"|^[#ℹ] pass [1-9]|\bBUILD SUCCESS(?:FUL)?\b|^Passed!", re.MULTILINE)
 
 
-def _rc_from_output(output: str, rc: int) -> int:
+def _rc_from_output(output: str, rc: int, runners: int = 1) -> int:
     """rc на верига, в която пускачът не е последен: червеното в изхода
     решава; без него rc≠0 остава червено, освен ако изходът показва зелен
-    итог на пускача.
+    итог и пускачът във веригата е един. С два пускача (ревю на вълна 5,
+    2026-10-11) зеленият итог може да е на първия, а rc≠0 — на втория:
+    `pytest -q && npm test && git push` с „5 passed / jest: not found“
+    (преди вълна 4 — червено).
 
     Измерено 2026-10-11 (вълна 5, таблица main/вълна 4): изход без белег
     решаваше сам и `pytest -q && git commit` с rc=4 (ImportError в conftest)
@@ -383,7 +395,7 @@ def _rc_from_output(output: str, rc: int) -> int:
     `git commit` („5 passed / nothing to commit“) остава зелен."""
     if _RED_OUTPUT_RE.search(output):
         return 1
-    if rc and not _GREEN_OUTPUT_RE.search(output):
+    if rc and (runners > 1 or not _GREEN_OUTPUT_RE.search(output)):
         return rc
     return 0
 
@@ -414,7 +426,8 @@ def counts_as_executed(name: str, args: str, result: str) -> tuple[str, str] | N
         # доказваше „Всички тестове минаха“).
         if _chain(command.rstrip())[-2:] == ["&", ""]:
             rc = rc or -1
-        rc = _rc_from_output(result[head.end():], rc)
+        runners = sum(_segment_is_test_run(seg) for seg in _chain(command)[::2])
+        rc = _rc_from_output(result[head.end():], rc, runners)
     else:
         rc = int(head.group(2))
     # Команда с rc≠0 е тръгнала, но не е свършила това, за което е пусната
