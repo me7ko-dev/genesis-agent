@@ -381,3 +381,20 @@ def test_the_cycle_guard_warns_then_stops_and_spares_progress():
         assert not g.observe("RUN_CMD", {"command": "pytest"}, "1 failed").stop
         assert not g.observe("EDIT_FILE", {"path": "a", "new": str(i)}, "✓").stop
         assert not g.observe("READ_FILE", {"path": "a"}, f"v{i}").stop
+
+
+# ── A11: pip и отказана команда не са „пуснат код“ ─────────────────────────
+
+@pytest.mark.parametrize("result", [
+    "[RUN_CMD: python -m pip install requests]  (rc=0)\nSuccessfully installed requests",
+    "[RUN_CMD: pip3 install -r requirements.txt]  (rc=0)\nok",
+    "[RUN_CMD: python --version]  (rc=0)\nPython 3.12.1",
+    "[RUN_CMD: python solution.py]\n[SANDBOX DECLINED] операторът отказа",
+    "[RUN_CMD: python solution.py]\n[SANDBOX BLOCKED] опасна команда",
+])
+def test_code_check_needs_the_code_actually_run(result):
+    from genesis_agent.code_check import RunCheck
+    c = RunCheck()
+    c.observe("[WRITE_FILE: /ws/solution.py] ✓ записани 120 символа")
+    c.observe(result)
+    assert "НЕ пуснат" in c.note()
