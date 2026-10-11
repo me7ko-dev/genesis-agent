@@ -101,3 +101,25 @@ def test_write_preview_of_cp1251_file_shows_only_the_changed_line(ws):
     changed = [ln for ln in diff.splitlines()
                if ln[:1] in "+-" and not ln.startswith(("+++", "---"))]
     assert changed == ["-name = 1", "+name = 2"], diff
+
+
+# ── `glob` с `[ ]` ───────────────────────────────────────────────────────────
+
+def test_search_glob_with_brackets_finds_the_file(ws, engine):
+    (ws / "pages").mkdir()
+    (ws / "pages" / "[slug].tsx").write_text("useRouter()\n", encoding="utf-8")
+    (ws / "pages" / "s.tsx").write_text("useRouter()\n", encoding="utf-8")
+    hits = repo_map.search_code("useRouter", ws, glob="pages/[slug].tsx")
+    # Като GLOB и Python пътя: буквалното име ИЛИ класът знаци (`s.tsx`).
+    assert _names(hits) == ["[slug].tsx", "s.tsx"]
+
+
+def test_search_glob_with_a_folder_works_outside_cwd(ws, engine):
+    # rg мери `--glob` с `/` спрямо cwd, а тестът (и Genesis с друг
+    # workspace) търси в папка, която не е cwd: беше „няма съвпадения“.
+    assert os.getcwd() != str(ws)
+    (ws / "src" / "pages").mkdir(parents=True)
+    (ws / "src" / "pages" / "a.tsx").write_text("useRouter()\n", encoding="utf-8")
+    (ws / "b.tsx").write_text("useRouter()\n", encoding="utf-8")
+    assert _names(repo_map.search_code("useRouter", ws, glob="pages/*.tsx")) == ["a.tsx"]
+    assert _names(repo_map.search_code("useRouter", ws, glob="src/**/*.tsx")) == ["a.tsx"]

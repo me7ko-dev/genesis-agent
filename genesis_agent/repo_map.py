@@ -236,8 +236,8 @@ def _run_ripgrep(root: Path, pattern: str, glob: str | None,
         cmd += ["--encoding", encoding]
     for d in sorted(_SKIP_DIRS):
         cmd += ["--glob", f"!{d}/"]
-    if glob:
-        cmd += ["--glob", glob]
+    for g in _rg_globs(glob):
+        cmd += ["--glob", g]
     cmd.append(str(root))
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, check=False)
@@ -275,6 +275,25 @@ def _run_ripgrep(root: Path, pattern: str, glob: str | None,
         if len(out) >= max_results:
             break
     return out
+
+
+def _rg_globs(glob: str | None) -> list[str]:
+    """`glob` за rg, така че да избира същите файлове като `_matcher`.
+
+    Ревю 2026-10-11, мерено с rg 14.1: `--glob pages/*.tsx` се мери спрямо
+    cwd, не спрямо търсената папка — когато workspace-ът не е cwd, rg
+    връщаше „няма съвпадения“, а Python пътят намираше файла. `_matcher`
+    слага `**/` отпред, тук също. `[slug].tsx` е клас знаци за rg, а
+    `_segments_match` приема и буквалното име — затова второ `--glob` с
+    `[[]` (буквално `[`); няколко `--glob` са „или“.
+    """
+    if not glob:
+        return []
+    neg, body = ("!", glob[1:]) if glob.startswith("!") else ("", glob)
+    if "/" in body and not body.startswith(("/", "**/")):
+        body = "**/" + body
+    variants = [body] + ([body.replace("[", "[[]")] if "[" in body else [])
+    return [neg + v for v in variants]
 
 
 def _rg_text(lines: dict) -> str:
