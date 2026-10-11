@@ -297,10 +297,15 @@ def _diff_for_write(skills, args: dict) -> str | None:
         # Старият файл се чете като в READ_FILE (ревю 2026-10-11): с utf-8 +
         # replace cp1251 файл показваше всеки кирилски ред за променен
         # („-�������“ / „+Здравей“), а на диска се сменя един ред.
+        # BOM-\u044a\u0442 \u043e\u0441\u0442\u0430\u0432\u0430, \u043a\u0430\u043a\u0442\u043e \u0432 READ_FILE, \u0430 \u043d\u0430 \u043d\u043e\u0432\u043e\u0442\u043e \u0441\u044a\u0434\u044a\u0440\u0436\u0430\u043d\u0438\u0435 \u0441\u0435 \u0441\u043b\u0430\u0433\u0430,
+        # \u043a\u0430\u043a\u0442\u043e \u0433\u043e \u043f\u0440\u0430\u0432\u0438 \u0441\u0430\u043c\u0438\u044f\u0442 \u0437\u0430\u043f\u0438\u0441: \u043c\u0430\u0445\u043d\u0430\u0442 \u0441\u0430\u043c\u043e \u043e\u0442 \u0441\u0442\u0430\u0440\u043e\u0442\u043e, \u0432\u0441\u0435\u043a\u0438 \u043f\u0440\u0435\u0433\u043b\u0435\u0434
+        # \u043d\u0430 BOM \u0444\u0430\u0439\u043b \u043f\u043e\u043a\u0430\u0437\u0432\u0430\u0448\u0435 \u0440\u0435\u0434 1 \u0437\u0430 \u043f\u0440\u043e\u043c\u0435\u043d\u0435\u043d (\u0440\u0435\u0432\u044e 2026-10-11, \u0442\u0440\u0435\u0442\u0430 \u0432\u044a\u043b\u043d\u0430).
         old_content = ""
         if target.is_file():
             old_content = (displayable(decode_text(target.read_bytes())[0])
-                           .replace("\r\n", "\n").removeprefix("\ufeff"))
+                           .replace("\r\n", "\n"))
+            if old_content.startswith("\ufeff") and not new_content.startswith("\ufeff"):
+                new_content = "\ufeff" + new_content
         if old_content == new_content:
             return None
         diff = difflib.unified_diff(

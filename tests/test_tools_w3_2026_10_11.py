@@ -75,3 +75,17 @@ def test_write_with_lone_surrogate_is_refused_in_bulgarian(ws, existing):
     assert out.startswith("[WRITE_FILE"), out
     assert "❌" in out and "codec" not in out, out
     assert (p.read_bytes() if existing else p.exists()) == (before if existing else False)
+
+
+# ── BOM в прегледа ───────────────────────────────────────────────────────────
+
+def test_write_preview_of_bom_file_shows_only_the_changed_line(ws):
+    from genesis_agent import agent_core
+    (ws / "b.txt").write_bytes("﻿a = 1\nb = 1\n".encode())
+    body = _body(gs._tool_read_file("b.txt"))
+    assert body.startswith("﻿")
+    for content in (body, body.removeprefix("﻿")):
+        diff = agent_core._diff_for_write(gs, {"path": "b.txt",
+                                               "content": content.replace("b = 1", "b = 2")})
+        assert diff is not None
+        assert _changed(diff) == ["-b = 1", "+b = 2"], diff
