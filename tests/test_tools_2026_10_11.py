@@ -178,3 +178,25 @@ def test_read_range_offset_past_eof_says_so(ws):
     (ws / "a.py").write_text("".join(f"x{i} = {i}\n" for i in range(300)), encoding="utf-8")
     out = gs._tool_read_file("a.py", offset=500, limit=10)
     assert "300 реда" in out and "след" in out
+
+
+# ── bracket-filenames ────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("engine", ["rg", "python"])
+def test_bracket_filenames_are_found_by_search_and_glob(ws, monkeypatch, engine):
+    from genesis_agent import repo_map
+    if engine == "python":
+        monkeypatch.setattr(repo_map.shutil, "which", lambda _name: None)
+    elif not repo_map.shutil.which("rg"):
+        pytest.skip("няма rg")
+    (ws / "pages" / "[id]").mkdir(parents=True)
+    (ws / "pages" / "[slug].tsx").write_text("const r = useRouter()\n", encoding="utf-8")
+    (ws / "pages" / "[id]" / "page.tsx").write_text("useRouter()\n", encoding="utf-8")
+    out = gs.dispatch_tool_call("SEARCH_CODE", {"pattern": "useRouter", "path": "pages/[slug].tsx"})
+    assert "1 съвпадения" in out, out
+    hits = repo_map.search_code("useRouter", ws / "pages" / "[id]" / "page.tsx")
+    assert len(hits) == 1
+    assert "[slug].tsx" in gs._tool_glob("pages/[slug].tsx")
+    assert "page.tsx" in gs._tool_glob("pages/[id]/page.tsx")
+    # Истинският клас знаци продължава да работи.
+    assert "[slug].tsx" in gs._tool_glob("pages/[[]slug].tsx")

@@ -91,7 +91,10 @@ def _segments_match(parts: tuple[str, ...], segs: tuple[str, ...]) -> bool:
         return not parts
     if segs[0] == "**":
         return any(_segments_match(parts[i:], segs[1:]) for i in range(len(parts) + 1))
-    return bool(parts) and fnmatch.fnmatch(parts[0], segs[0]) and _segments_match(parts[1:], segs[1:])
+    # Буквалното име печели преди fnmatch: `[slug].tsx` (Next.js, SvelteKit) е
+    # клас знаци за fnmatch и GLOB отговаряше „няма файлове“ (одит 2026-10-11).
+    return (bool(parts) and (parts[0] == segs[0] or fnmatch.fnmatch(parts[0], segs[0]))
+            and _segments_match(parts[1:], segs[1:]))
 
 
 def _matcher(pattern: str):
@@ -125,7 +128,9 @@ def _files(root: Path, pattern: str):
 
 
 def _iter_files(root: Path, glob: str | None = None):
-    for p in (_walk(root) if glob is None else _files(root, glob)):
+    # Файл като корен е самият той — не шаблон по името му (виж search_code).
+    files = [root] if root.is_file() else _walk(root) if glob is None else _files(root, glob)
+    for p in files:
         if glob is None and p.suffix.lower() not in _TEXT_SUFFIXES:
             continue
         try:
@@ -284,25 +289,15 @@ def search_code(pattern: str, path: str | Path = ".", glob: str | None = None,
     root = Path(path).expanduser()
     if not root.exists():
         raise FileNotFoundError(f"няма такъв път: {root}")
-    only: Path | None = None
     if root.is_file():
-        # Само този файл — не и едноименните в подпапките (`src/__init__.py`
-        # иначе връщаше и `src/sub/__init__.py`).
-        only, root, glob = root.resolve(), root.parent, root.name
+        # Само този файл — подаден направо на двата енджина. Преди името му
+        # ставаше glob, а `[slug].tsx` е клас знаци и за rg, и за fnmatch:
+        # „низът наистина го няма“ във файл, който го съдържа (одит 2026-10-11).
+        glob = None
     hits = _search_ripgrep(root, pattern, glob, max_results) if shutil.which("rg") else None
     if hits is None:
         hits = _search_python(root, pattern, glob, max_results)
-    if only is not None:
-        hits = [h for h in hits if _same_file(h.path, root, only)]
     return hits
-
-
-def _same_file(hit_path: str, root: Path, target: Path) -> bool:
-    p = Path(hit_path)
-    try:
-        return (p if p.is_absolute() else root / p).resolve() == target
-    except OSError:
-        return False
 
 
 # ── Project shape ────────────────────────────────────────────────────────────
