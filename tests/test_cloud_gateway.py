@@ -371,6 +371,27 @@ def test_the_forwarded_body_always_carries_a_cap_within_the_budget(tmp_path, ext
     assert caps and all(isinstance(c, int) and 1 <= c <= budget for c in caps)
 
 
+@pytest.mark.parametrize("extra", [
+    {"n": 128}, {"n": 2, "max_tokens": 200_000}, {"best_of": 5}, {"n": "128"}, {"n": True},
+])
+def test_many_choices_cannot_multiply_the_cap(tmp_path, extra) -> None:
+    """Одит 2026-10-11: таванът е за един избор, доставчикът таксува n × max_tokens —
+    n=128 при бюджет 20 000 записа 2.5M токена."""
+    up = FakeUpstream([])
+    g = _gw_for(up, tmp_path)
+    body = json.dumps({"model": "m", "messages": [{"role": "user", "content": "hi"}], **extra}).encode()
+    assert g.forward("groq", body, _grant(20_000))[0] == 400 and up.seen == []
+    assert g.ledger.reserved == {}
+
+
+@pytest.mark.parametrize("extra", [{"n": 1}, {"n": None}, {"best_of": 1}])
+def test_a_single_choice_still_goes_through(tmp_path, extra) -> None:
+    up = FakeUpstream([(200, {"total_tokens": 5})])
+    g = _gw_for(up, tmp_path)
+    body = json.dumps({"model": "m", **extra}).encode()
+    assert g.forward("groq", body, _grant(20_000))[0] == 200 and len(up.seen) == 1
+
+
 def test_deeply_nested_json_is_a_400(tmp_path) -> None:
     """Одит 2026-10-11: RecursionError от json.loads не се хващаше."""
     up = FakeUpstream([])
