@@ -31,6 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from genesis_agent import budget
+from genesis_agent.paths import ensure_utf8_streams
 
 SYSTEM = "x" * 7600          # ~2 200 tokens: system prompt + schemas, measured in PR #7
 # Всеки 7-и рунд пренаписва цял съществуващ файл: реален ход го прави
@@ -166,7 +167,7 @@ def run(files: int, rounds: int, seed: int) -> dict:
     }
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--files", type=int, default=5)
     ap.add_argument("--rounds", type=int, default=24)
@@ -176,12 +177,18 @@ def main() -> int:
                     help="B.12: elide old WRITE_FILE/EDIT_FILE args (GENESIS_ELIDE_OLD_WRITES=1)")
     ap.add_argument("--elide-rounds", type=int, default=None,
                     help="K for --elide (GENESIS_ELIDE_WRITE_ROUNDS, default 6)")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
+    # Пренасочен stdout на български Windows е cp1251: „✓“ в последния ред
+    # сриваше отчета (одит 2026-10-11).
+    ensure_utf8_streams()
     if a.elide:
         budget.ELIDE_OLD_WRITES = 1
     if a.elide_rounds is not None:
         budget.ELIDE_WRITE_ROUNDS = max(2, a.elide_rounds)
-    res = run(max(1, min(a.files, 10)), max(a.files, a.rounds), a.seed)
+    # Рундовете — поне колкото файловете СЛЕД ограничението: при --files 0
+    # --rounds 0 ставаха 0 и нито един файл не се записваше → KeyError (2026-10-11).
+    files = max(1, min(a.files, 10))
+    res = run(files, max(files, a.rounds), a.seed)
     if a.json:
         print(json.dumps(res, ensure_ascii=False, indent=2))
         return 0
