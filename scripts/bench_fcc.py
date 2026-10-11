@@ -24,12 +24,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
 import tempfile
 import textwrap
-from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -201,13 +201,12 @@ def run_tests(python: str, solution: Path, tests: list[dict]) -> list[dict]:
     return results
 
 
-_TOOL = re.compile(r"🔧 ([A-Z_]+) ")
 _ROUND_CAP = "Достигнат таван"
 
 
 def tool_counts(log: str) -> dict[str, int]:
     """Which tools a run used — WEB_SEARCH on a five-line function is a finding."""
-    return dict(Counter(_TOOL.findall(log)))
+    return bp.tool_counts(log)
 
 
 def selfcheck(python: str, challenges: list[dict]) -> int:
@@ -231,6 +230,9 @@ def selfcheck(python: str, challenges: list[dict]) -> int:
 def weak_spots(runs: list[dict]) -> str:
     lines = []
     for r in runs:
+        if r.get("infra"):
+            lines.append(f"- {r['title']} #{r['run']}: моделът не отговори — не се брои")
+            continue
         if r["passed"] == r["total"]:
             continue
         why = r["failed"][0] if r["failed"] else {"label": "?", "error": "?"}
@@ -260,13 +262,20 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     from genesis_agent.budget import LOG_PATH
-    from genesis_agent.paths import ensure_utf8_streams, project_python
+    from genesis_agent.paths import GENESIS_HOME, ensure_utf8_streams, project_python
 
     ensure_utf8_streams()
+    # `~` в PowerShell 5.1 и cmd стига буквално; --compare се проверява ПРЕДИ
+    # пусканията, не след тях (одит 2026-10-11).
+    args.fcc_dir = args.fcc_dir.expanduser()
+    compare_path, err = bp.check_compare(args.compare)
+    if err:
+        print(err)
+        return 2
     commit = fetch(args.fcc_dir, args.update)
     everything = load(args.fcc_dir)
     usable = [c for c in everything if not c["unsupported"]]
-    python = args.test_python or project_python()
+    python = os.path.expanduser(args.test_python) if args.test_python else project_python()
     print(f"freeCodeCamp {commit}: {len(usable)} от {len(everything)} задачи стават за проверка")
     for c in everything:
         if c["unsupported"]:
@@ -284,7 +293,15 @@ def main(argv: list[str] | None = None) -> int:
     else:
         chosen = pick(usable, args.sample)
 
-    out_dir = args.out or Path.home() / ".genesis" / "bench" / datetime.now().strftime("fcc-%Y%m%d-%H%M%S")
+    # Под GENESIS_HOME, където bench_all търси базите си (2026-10-11: беше
+    # Path.home()/.genesis — различно, щом GENESIS_HOME е зададен).
+    out_dir = (args.out.expanduser() if args.out else
+               Path(GENESIS_HOME) / "bench" / datetime.now().strftime("fcc-%Y%m%d-%H%M%S"))
+    taken = bp.occupied(out_dir, [f"c{ch['num']:03d}-{i}" for ch in chosen for i in range(1, args.runs + 1)])
+    if taken:
+        print(f"В {out_dir} вече има пускане ({', '.join(taken[:3])}{' …' if len(taken) > 3 else ''}) "
+              f"— дай нова --out.")
+        return 2
     out_dir.mkdir(parents=True, exist_ok=True)
     genesis_cmd = [sys.executable, "-m", "genesis_agent.cli"]
     print(f"Genesis: {' '.join(genesis_cmd)} (код от {bp.REPO})")
@@ -308,25 +325,28 @@ def main(argv: list[str] | None = None) -> int:
                    "files": sorted(p.name for p in workdir.iterdir() if p.is_file()),
                    "seconds": round(seconds, 1), "stopped": stopped, "tokens": tokens,
                    "models": models, "dropped": bp.parse_log(log), "tools": tool_counts(log),
-                   "round_cap": _ROUND_CAP in log}
+                   "round_cap": _ROUND_CAP in log, "infra": bp.is_infra(models, log)}
             runs.append(run)
+            # after every run: a stopped bench keeps what it measured
+            bp.write_results(out_dir, runs, complete=False, fcc=commit, examples=args.examples)
+            if run["infra"]:
+                print(f"⚠️  {ch['title']} #{i}: моделът не отговори — не се брои", flush=True)
+                continue
             mark = "✅" if not failed else "❌"
             tools_s = " ".join(f"{t}×{n}" for t, n in sorted(run["tools"].items(), key=lambda x: -x[1]))
             print(f"{mark} {ch['title']} #{i}: {run['passed']}/{run['total']} скрити, {seconds:.0f} s, "
                   f"{tokens} токена; {tools_s or 'без инструменти'}", flush=True)
-            # after every run: a stopped bench keeps what it measured
-            (out_dir / "results.json").write_text(
-                json.dumps({"date": datetime.now().isoformat(timespec="seconds"), "fcc": commit,
-                            "examples": args.examples, "summary": bp.summarize(runs), "runs": runs},
-                           ensure_ascii=False, indent=1), encoding="utf-8")
 
+    bp.write_results(out_dir, runs, complete=True, fcc=commit, examples=args.examples)
     summary = bp.summarize(runs)
-    before = json.loads(args.compare.read_text("utf-8")).get("summary") if args.compare else None
+    before, err = bp.load_compare(compare_path)
+    if err:
+        print(err)
     print("\n" + bp.format_table(summary, before))
     print("\nСлаби места:\n" + weak_spots(runs))
     print(f"\nРезултати: {out_dir / 'results.json'}")
-    return 0 if all(s["ok"] == s["runs"] for s in summary.values()) else 1
-
+    infra = sum(s["infra"] for s in summary.values())
+    return 0 if not infra and all(s["ok"] == s["runs"] for s in summary.values()) else 1
 
 if __name__ == "__main__":
     sys.exit(main())
