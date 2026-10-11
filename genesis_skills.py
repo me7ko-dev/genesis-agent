@@ -1318,6 +1318,9 @@ def _before_tool(name: str, args: dict) -> str | None:
             return blocked
     except Exception as e:
         return f"[{name}] ⛔ Проверката преди инструмента се провали ({e}) — не е изпълнен."
+    elided = _copies_elided_mark(name, args)
+    if elided:
+        return elided
     if name in ("WRITE_FILE", "EDIT_FILE") and args.get("path"):
         try:
             from genesis_agent import edit_history
@@ -1342,6 +1345,30 @@ def _before_tool(name: str, args: dict) -> str | None:
         except Exception:
             pass
     return None
+
+
+def _copies_elided_mark(name: str, args: dict) -> str | None:
+    """Отказва запис, който носи маркера за изпуснато от историята (B.12).
+
+    budget._elide_old_writes заменя съдържанието на стари записи в изпратеното
+    копие с маркер; в текстов режим слаб модел вижда
+    WRITE_FILE({path, content: <маркер>…}) и може да го препише като „код“ —
+    файлът би станал един ред бележка. Пазачът е в кода, не в промпта, и е
+    винаги включен, независимо от GENESIS_ELIDE_OLD_WRITES (2026-10-11): двата
+    пътя (native и текстови тагове) стигат дотук с нормализирани аргументи.
+    RUN_CMD/RUN_BG също — heredoc в команда е същият запис по друг път."""
+    if name in ("WRITE_FILE", "EDIT_FILE"):
+        text = str(args.get("content", "")) + str(args.get("new", ""))
+    elif name in ("RUN_CMD", "RUN_BG"):
+        text = str(args.get("command", "")) + str(args.get("arg", ""))
+    else:
+        return None
+    from genesis_agent.budget import ELIDED_TAG
+    if ELIDED_TAG not in text:
+        return None
+    target = args.get("path") or args.get("command") or args.get("arg") or ""
+    return (f"[{name}: {str(target)[:120]}] ⛔ Това е маркер за изпуснато от историята, "
+            f"не съдържание — прочети файла с READ_FILE и напиши истинския код.")
 
 
 def _may_change_files(name: str, args: dict) -> bool:

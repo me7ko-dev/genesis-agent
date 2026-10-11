@@ -479,3 +479,46 @@ class TestStatusBar:
         gta.count_usage(None, msgs, "o" * 40)
         assert gta.get_context_stats()[0] == 210
         gta.reset_usage()
+
+
+class TestTheLegacyPathIsBudgetedToo:
+    """2026-10-11: ръчно избран ollama/github/llmstudio минаваше по стария път
+    без budget_history — на рунд 40 тръгваха 82 съобщения / 248 764 знака
+    вместо 30 / 15 193. Локалният ollama реже отпред при малък num_ctx и така
+    губеше системния промпт и задачата."""
+
+    @staticmethod
+    def _turn(rounds: int, native: bool) -> list[dict]:
+        msgs: list[dict] = [{"role": "system", "content": "SYSPROMPT " + "s" * 7600},
+                            {"role": "user", "content": "ЗАДАЧАТА"}]
+        for i in range(rounds):
+            if native:
+                msgs += [{"role": "assistant", "content": "", "tool_calls": [
+                             {"id": f"c{i}", "type": "function",
+                              "function": {"name": "RUN_CMD", "arguments": "{}"}}]},
+                         {"role": "tool", "tool_call_id": f"c{i}", "content": "x" * 6000}]
+            else:
+                msgs += [{"role": "assistant", "content": f"[RUN_CMD: pytest {i}]"},
+                         {"role": "system", "content": "[Резултат]:\n" + "x" * 6000}]
+        return msgs
+
+    @pytest.mark.parametrize("native", [False, True])
+    def test_a_long_turn_is_windowed_and_keeps_the_task(self, monkeypatch, native) -> None:
+        from genesis_agent import budget
+        sent: list = []
+
+        def fake(prov, model, msgs, tools=None):
+            sent.append(msgs)
+            return "ok", None
+
+        monkeypatch.setattr(gta, "_call_provider", fake)
+        if native:
+            monkeypatch.setitem(gta._SUPPORTS_TOOLS, ("ollama", "m"), True)
+        history = self._turn(40, native)
+        gta._ask_via_legacy(history, [{"type": "function"}] if native else None, "ollama", "m")
+        msgs = sent[0]
+        assert len(msgs) <= budget.MAX_SENT_MESSAGES
+        assert str(msgs[0]["content"]).startswith("SYSPROMPT")
+        assert any(m.get("content") == "ЗАДАЧАТА" for m in msgs)
+        assert sum(len(str(m.get("content", ""))) for m in msgs) < 60_000
+        assert len(history) == 82, "историята на извикващия не се пипа"
