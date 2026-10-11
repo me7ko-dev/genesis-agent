@@ -187,3 +187,66 @@ def test_a_model_skipped_because_all_rotating_keys_cool_down_is_not_marked(monke
     _route(monkeypatch, lambda p: ok("от " + p["model"]))
     assert brain.Brain(use_local=False).complete([{"role": "user", "content": "hi"}]).raw_text == "от C"
     assert "groq::A" not in brain._EXHAUSTED
+
+
+# ── F4: отрязан на тавана tool_call и платен празен отговор ──────────────────
+
+_TOOLS = [{"type": "function", "function": {"name": "WRITE_FILE", "parameters": {"type": "object"}}}]
+
+
+def _usage_rows(monkeypatch) -> list:
+    rows: list = []
+    monkeypatch.setattr("genesis_agent.budget.record_usage",
+                        lambda **kw: rows.append((kw["model"], kw["completion_tokens"])))
+    return rows
+
+
+def test_tool_call_arguments_cut_at_max_tokens_go_to_the_next_model(monkeypatch) -> None:
+    monkeypatch.setattr(brain, "_load_chain", lambda: chain(("groq", "A"), ("nvidia", "C")))
+    monkeypatch.setenv("GROQ_API_KEY", "g")
+    monkeypatch.setenv("NVIDIA_API_KEY", " n")
+    cut = json.dumps({"path": "app.py", "content": "x = 1\n" * 50})[:120]
+    good = json.dumps({"path": "app.py", "content": "x = 1\n"})
+
+    def handler(p):
+        args = cut if p["model"] == "A" else good
+        tc = [{"id": "c1", "type": "function", "function": {"name": "WRITE_FILE", "arguments": args}}]
+        return ok(None, tool_calls=tc, finish="length" if p["model"] == "A" else "tool_calls",
+                  usage={"prompt_tokens": 3000, "completion_tokens": 4096 if p["model"] == "A" else 40})
+
+    seen = _route(monkeypatch, handler)
+    rows = _usage_rows(monkeypatch)
+    r = brain.Brain(use_local=False).complete([{"role": "user", "content": "напиши app.py"}], tools=_TOOLS)
+    assert [m for m, _ in seen] == ["A", "C"]
+    assert json.loads(r.tool_calls[0]["function"]["arguments"])["path"] == "app.py"
+    assert rows == [("A", 4096), ("C", 40)]
+    assert not brain._is_exhausted("groq::A")   # таванът не е изчерпана квота
+
+
+def test_complete_tool_call_arguments_with_length_are_still_accepted(monkeypatch) -> None:
+    monkeypatch.setattr(brain, "_load_chain", lambda: chain(("groq", "A"), ("nvidia", "C")))
+    monkeypatch.setenv("GROQ_API_KEY", "g")
+    args = json.dumps({"path": "a.py", "content": "x"})
+    tc = [{"id": "c1", "type": "function", "function": {"name": "WRITE_FILE", "arguments": args}}]
+    seen = _route(monkeypatch, lambda p: ok(None, tool_calls=tc, finish="length"))
+    r = brain.Brain(use_local=False).complete([{"role": "user", "content": "x"}], tools=_TOOLS)
+    assert [m for m, _ in seen] == ["A"] and r.tool_calls
+
+
+def test_an_empty_but_paid_reply_is_recorded_in_the_budget(monkeypatch) -> None:
+    monkeypatch.setattr(brain, "_load_chain", lambda: chain(("groq", "A"), ("nvidia", "C")))
+    monkeypatch.setenv("GROQ_API_KEY", "g")
+    monkeypatch.setenv("NVIDIA_API_KEY", " n")
+
+    def handler(p):
+        if p["model"] == "A":
+            return FakeResp(200, {"choices": [{"message": {"role": "assistant", "content": "",
+                                                           "reasoning": "r" * 9000},
+                                               "finish_reason": "length"}],
+                                  "usage": {"prompt_tokens": 3500, "completion_tokens": 4096}})
+        return ok("от C", usage={"prompt_tokens": 3500, "completion_tokens": 50})
+
+    _route(monkeypatch, handler)
+    rows = _usage_rows(monkeypatch)
+    assert brain.Brain(use_local=False).complete([{"role": "user", "content": "hi"}]).raw_text == "от C"
+    assert rows == [("A", 4096), ("C", 50)]

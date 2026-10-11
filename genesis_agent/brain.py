@@ -394,6 +394,19 @@ def _is_truncated(text: str) -> bool:
     return text.count("```") % 2 == 1
 
 
+def _has_cut_tool_arguments(tool_calls: Any) -> bool:
+    """True ако аргументите на някой tool_call не са цял JSON (отрязани)."""
+    for tc in tool_calls or []:
+        fn = tc.get("function") if isinstance(tc, dict) else None
+        args = fn.get("arguments") if isinstance(fn, dict) else None
+        if isinstance(args, str) and args.strip():
+            try:
+                json.loads(args)
+            except ValueError:
+                return True
+    return False
+
+
 def _load_keys() -> dict[str, str]:
     """
     Every key Genesis might need, with the precedence documented in
@@ -1122,6 +1135,11 @@ class Brain:
             # Причината в лога (2026-09-30): ollama връщаше празно след 0.3 s в 13
             # от 210 bench разговора, до края им — а редът не казваше защо.
             usage = data.get("usage") or {}
+            # Празният отговор също е платен (одит 2026-10-11: gpt-oss изяжда
+            # тавана в размисъл — out=4096, content="" — а редът не стигаше до
+            # budget_log, защото usage се записваше чак след тази проверка).
+            self._last_usage = _openai_usage(data.get("usage"))
+            self._usage_attempt = getattr(self, "_attempt_id", None)
             raise RuntimeError(f"празен отговор (finish_reason={finish_reason or '—'}, "
                                f"prompt={usage.get('prompt_tokens', '?')}, "
                                f"out={usage.get('completion_tokens', '?')}, "
@@ -1136,12 +1154,16 @@ class Brain:
         # каква е реалната причина, вместо мистериозен SyntaxError два слоя
         # по-надолу. НЕ съвпада с _EXHAUST_CODES (429/402/503) нарочно — таванът
         # не е изчерпана квота и не бива да вкарва модела в cooldown.
-        if finish_reason == "length" and _is_truncated(content or ""):
+        # Същото за аргументите на tool_call (одит 2026-10-11): WRITE_FILE,
+        # отрязан на 4096, стигаше до цикъла като „невалидни аргументи“ и
+        # моделът пренаписваше същия голям файл в същия таван рунд след рунд.
+        if finish_reason == "length" and (_is_truncated(content or "")
+                                          or _has_cut_tool_arguments(tool_calls)):
             self._last_usage = _openai_usage(data.get("usage"))
             self._usage_attempt = getattr(self, "_attempt_id", None)
             raise RuntimeError(
                 f"HTTP_TRUNCATED: отговорът е отрязан на тавана от {_output_cap(model)} "
-                f"токена, посред код-ограда (finish_reason=length). Вдигни го с "
+                f"токена, посред код-ограда или tool_call (finish_reason=length). Вдигни го с "
                 f"`max_tokens:` за модела в config.yaml, ако доставчикът го позволява."
             )
         # usage липсва при локален Ollama /v1 понякога — None е ОК, budget.py го обработва.
