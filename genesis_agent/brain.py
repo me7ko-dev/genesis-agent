@@ -963,8 +963,18 @@ class Brain:
             return messages
         old_part = rest[:cut]
         recent_part = rest[cut:]
+        # Предишното резюме влиза цяло (до 3000 знака) и ПЪРВО; само обикновените
+        # реплики се режат до 500 (bug fix, 2026-10-11). Измерено: резюме от 586
+        # знака, завършващо с „РЕШЕНИЕ: базата е PostgreSQL 16“, стигаше до
+        # обобщаващия модел отрязано на 500 — решението изчезваше при следващото
+        # компактиране (на ~3 хода), всеки път по малко от по-ранния разговор.
+        def _is_summary(m: dict) -> bool:
+            return (m.get("role") == "system"
+                    and str(m.get("content", "")).startswith("## Резюме на по-ранния разговор:"))
         transcript = "\n".join(
-            f"{m.get('role', '?')}: {str(m.get('content', ''))[:500]}" for m in old_part
+            [f"system: {str(m.get('content', ''))[:3000]}" for m in old_part if _is_summary(m)]
+            + [f"{m.get('role', '?')}: {str(m.get('content', ''))[:500]}" for m in old_part
+               if not _is_summary(m)]
         )
         maxlen = getattr(messages, "maxlen", None)
 

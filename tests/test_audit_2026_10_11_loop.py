@@ -291,3 +291,33 @@ def test_headless_reports_a_chain_error_as_the_error(ws, monkeypatch, capsys):
     assert headless.run(["здравей", "--json", "--cwd", str(ws)]) == 1
     out = json.loads(capsys.readouterr().out)
     assert out["ok"] is False and "верига" in (out["error"] or "")
+
+
+# ── A7: повторното компактиране не реже предишното резюме ──────────────────
+
+@pytest.mark.parametrize("ordinary_len", [10, 2000])
+def test_recompaction_keeps_the_whole_previous_summary(monkeypatch, ordinary_len):
+    from types import SimpleNamespace
+
+    from genesis_agent import brain
+    compact = brain.Brain.compact_chat_history
+    seen: list[str] = []
+
+    class Fake:
+        def __init__(self, *a, **k):
+            pass
+
+        def complete(self, msgs, tools=None):
+            seen.append(msgs[-1]["content"])
+            return SimpleNamespace(raw_text="ново резюме")
+    monkeypatch.setattr(brain, "Brain", Fake)
+    old_summary = ("## Резюме на по-ранния разговор:\n" + "Работим по проекта faktura-excel. " * 15
+                   + "РЕШЕНИЕ: базата е PostgreSQL 16, не SQLite.")
+    msgs = [{"role": "system", "content": "SYS"}, {"role": "system", "content": old_summary}]
+    for i in range(10):
+        msgs += [{"role": "user", "content": f"въпрос {i} " + "x" * ordinary_len},
+                 {"role": "assistant", "content": f"отговор {i}"}]
+    out = compact(msgs, threshold=16, keep_recent=10)
+    assert "PostgreSQL 16" in seen[0]
+    assert len(seen[0]) <= 8000
+    assert out[1]["content"].endswith("ново резюме")
