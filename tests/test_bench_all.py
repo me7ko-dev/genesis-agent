@@ -254,6 +254,9 @@ def test_the_baseline_covers_the_plan_not_just_the_newest(tmp_path) -> None:
     assert ba.find_baseline(tmp_path, "projects", want=want) == full
     info = ba.describe_baseline(tmp_path / "only-a" / "results.json", want)
     assert "1 проекта" in info and "НЕ покрива 2" in info and "b, c" in info
+    _results(tmp_path / "no-flask" / "results.json", {"a": _s(2), "b": _s(2)}, skipped={"c": ["flask"]})
+    info = ba.describe_baseline(tmp_path / "no-flask" / "results.json", want)
+    assert "НЕ покрива" not in info and "пропуснати там (няма пакет): c" in info
 
 
 def test_compare_ignores_projects_without_an_answer_on_either_side() -> None:

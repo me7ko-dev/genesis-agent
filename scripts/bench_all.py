@@ -159,7 +159,8 @@ def find_baseline(root: Path, kind: str, *, exclude: Path | None = None,
         data = _read(path)
         if data is None or _kind(data) != kind or not usable(data):
             continue
-        score = (len(want & set(data["summary"])) if want else 0, path.stat().st_mtime, path)
+        covered = set(data["summary"]) | set(data.get("skipped") or {})
+        score = (len(want & covered) if want else 0, path.stat().st_mtime, path)
         if best is None or score[:2] > best[:2]:
             best = score
     return best[2] if best else None
@@ -173,9 +174,14 @@ def describe_baseline(path: Path | None, want: set[str] | None) -> str:
     names = set(data.get("summary") or {})
     date = str(data.get("date") or "")[:10] or datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d")
     info = f"{len(names)} проекта, {date}"
-    missing = sorted((want or set()) - names)
+    # Пропуснатите там заради липсващ пакет (NEEDS) ще се пропуснат и сега на
+    # същата машина — не са дупка в базата, само се казват.
+    skipped = set(data.get("skipped") or {})
+    missing = sorted((want or set()) - names - skipped)
     if missing:
         info += f"; ⚠️ НЕ покрива {len(missing)} от плана: {', '.join(missing)}"
+    if skipped & (want or set()):
+        info += f"; пропуснати там (няма пакет): {', '.join(sorted(skipped & (want or set())))}"
     return info
 
 
