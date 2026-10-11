@@ -30,6 +30,7 @@ from __future__ import annotations
 import re
 import sys
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 
 # Уверяваме се, че genesis_agent/ пакетът е импортируем (мостът стои в root-а).
@@ -1261,8 +1262,15 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
     if not response_text:
         return []
 
-    # (позиция_в_текста, изход) — сортира се по позиция, после се връщат само изходите.
-    results: list[tuple[int, str]] = []
+    # (позиция_в_текста, име, действие) — НИЩО не се изпълнява, докато не са
+    # събрани всички тагове и не е решено влагането. После се изпълняват в
+    # реда на позицията (bug fix, 2026-10-11). Дотук всяка група (блокове →
+    # USE_SKILL → едноредови → BROWSER_READ …) се ИЗПЪЛНЯВАШЕ в свой проход и
+    # само резултатите се сортираха: „[RUN_CMD: cp app.py app.bak]“ преди
+    # „[WRITE_FILE: app.py]“ правеше копието СЛЕД презаписа (измерено:
+    # app.bak = „PRICE = 0“), а върнатите резултати лъжеха модела, че копието
+    # е първо. Същото за READ_FILE преди EDIT_FILE — четенето виждаше новото.
+    actions: list[tuple[int, str, Callable[[], str]]] = []
 
     # ── 1. Блокови тагове: събираме кандидатите, после решаваме влагането ────
     # (start, end, kind, match) за трите блокови типа, подредени по позиция.
@@ -1279,28 +1287,27 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
     def _inside_block(pos: int) -> bool:
         return any(s <= pos < e for s, e in consumed_spans)
 
+    def _edit_action(m: re.Match) -> str:
+        body = m.group("body")
+        if _EDIT_SEPARATOR not in body:
+            return (f"[EDIT_FILE: {m.group('path').strip()}] ❌ Липсва разделителят "
+                    f"{_EDIT_SEPARATOR} между стария и новия текст.")
+        old_part, new_part = body.split(_EDIT_SEPARATOR, 1)
+        return _safe_tool("EDIT_FILE", _tool_edit_file, m.group("path"),
+                          _strip_one_newline(old_part), _strip_one_newline(new_part))
+
     for start, end, kind, m in block_candidates:
         if _inside_block(start):
             continue  # вложен в вече приет блок → това е текст, не тул
         consumed_spans.append((start, end))
         if kind == "WRITE_FILE":
-            results.append((start, _safe_tool("WRITE_FILE", _tool_write_file,
-                                              m.group("path"), m.group("body"))))
+            actions.append((start, kind, partial(
+                _safe_tool, "WRITE_FILE", _tool_write_file, m.group("path"), m.group("body"))))
         elif kind == "EDIT_FILE":
-            body = m.group("body")
-            if _EDIT_SEPARATOR not in body:
-                results.append((start,
-                                (f"[EDIT_FILE: {m.group('path').strip()}] ❌ Липсва разделителят "
-                                 f"{_EDIT_SEPARATOR} между стария и новия текст.")))
-            else:
-                old_part, new_part = body.split(_EDIT_SEPARATOR, 1)
-                results.append((start, _safe_tool("EDIT_FILE", _tool_edit_file,
-                                                  m.group("path"),
-                                                  _strip_one_newline(old_part),
-                                                  _strip_one_newline(new_part))))
+            actions.append((start, kind, partial(_edit_action, m)))
         else:  # USE_SKILL
-            results.append((start, _safe_tool("USE_SKILL", _tool_use_skill,
-                                              m.group("name"), m.group("body"))))
+            actions.append((start, kind, partial(
+                _safe_tool, "USE_SKILL", _tool_use_skill, m.group("name"), m.group("body"))))
 
     # ── 1b. USE_SKILL БЕЗ затварящ [END_USE_SKILL] ──────────────────────────
     # Най-скъпият пропуск в целия парсер (bug fix, 2026-09-20). driver кодът е
@@ -1315,10 +1322,7 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
     # пише същото пак — и рундовете изгарят, без нито един скил да е тръгнал.
     # Тук consume-ваме САМО самия таг (не остатъка от отговора), за да могат
     # другите тагове след него пак да се изпълнят.
-    for m in _BARE_USE_SKILL_RE.finditer(response_text):
-        if _inside_block(m.start()):
-            continue
-        consumed_spans.append((m.start(), m.end()))
+    def _bare_skill_action(m: re.Match) -> str:
         out = _safe_tool("USE_SKILL", _tool_use_skill, m.group("name"), "")
         # Изпълнено е — но ако моделът е искал да ВИКА нещо от умението, нека
         # научи точния синтаксис, вместо да гадае пак следващия рунд. Само при
@@ -1327,36 +1331,52 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
         if not any(marker in out for marker in _USE_SKILL_FAILURES):
             out += ("\n(Без driver код — блокът не беше затворен. За да извикаш функция "
                     "от умението: [USE_SKILL: име]<твоят код>[END_USE_SKILL].)")
-        results.append((m.start(), out))
+        return out
+
+    for m in _BARE_USE_SKILL_RE.finditer(response_text):
+        if _inside_block(m.start()):
+            continue
+        consumed_spans.append((m.start(), m.end()))
+        actions.append((m.start(), "USE_SKILL", partial(_bare_skill_action, m)))
 
     # ── 2. Едноредови тулове — прескачаме тези вътре в блоков таг ───────────
     for m in _SIMPLE_RE.finditer(response_text):
         if _inside_block(m.start()):
             continue
-        fn = _SIMPLE_DISPATCH[m.group("tool")]
-        results.append((m.start(), _safe_tool(m.group("tool"), fn, m.group("arg"))))
+        tool = m.group("tool")
+        actions.append((m.start(), tool, partial(
+            _safe_tool, tool, _SIMPLE_DISPATCH[tool], m.group("arg"))))
 
-    # 3. BROWSER_READ — без аргумент.
-    for m in _BROWSER_READ_RE.finditer(response_text):
-        if _inside_block(m.start()):
+    # 3. BROWSER_READ — без аргумент. 3b. REPO_MAP без аргумент — картира
+    # текущия workspace. 4. TASK_LIST без аргумент — показва отворените нишки.
+    no_arg: tuple[tuple[str, re.Pattern, Callable[[], str]], ...] = (
+        ("BROWSER_READ", _BROWSER_READ_RE, partial(_safe_tool, "BROWSER_READ", _tool_browser_read)),
+        ("REPO_MAP", _REPO_MAP_RE, partial(_safe_tool, "REPO_MAP", _tool_repo_map, "")),
+        ("TASK_LIST", _TASK_LIST_RE, partial(_safe_tool, "TASK_LIST", _tool_task_list, "open")))
+    for name, rx, thunk in no_arg:
+        for m in rx.finditer(response_text):
+            if _inside_block(m.start()):
+                continue
+            actions.append((m.start(), name, thunk))
+
+    # Изпълняваме по позиция в текста (sort е стабилен; позициите не се дублират).
+    actions.sort(key=lambda a: a[0])
+    results: list[str] = []
+    asked = False
+    for _pos, name, thunk in actions:
+        if asked:
+            # Таговете СЛЕД ASK_USER чакат отговора (bug fix, 2026-10-11).
+            # Измерено: „[ASK_USER: Да презапиша ли notes.txt?]“ + WRITE_FILE
+            # в същата реплика записваше файла, преди операторът да отговори.
+            # Резултат-заместител вместо мълчание — моделът трябва да знае, че
+            # не е направено.
+            results.append(f"[{name}] не е изпълнено — чака отговора на оператора.")
             continue
-        results.append((m.start(), _safe_tool("BROWSER_READ", _tool_browser_read)))
-
-    # 3b. REPO_MAP без аргумент — картира текущия workspace.
-    for m in _REPO_MAP_RE.finditer(response_text):
-        if _inside_block(m.start()):
-            continue
-        results.append((m.start(), _safe_tool("REPO_MAP", _tool_repo_map, "")))
-
-    # 4. TASK_LIST без аргумент — [TASK_LIST] показва отворените нишки.
-    for m in _TASK_LIST_RE.finditer(response_text):
-        if _inside_block(m.start()):
-            continue
-        results.append((m.start(), _safe_tool("TASK_LIST", _tool_task_list, "open")))
-
-    # Подреждаме по позиция в текста, връщаме само низовете.
-    results.sort(key=lambda t: t[0])
-    return [r for _, r in results]
+        out = thunk()
+        results.append(out)
+        if name == "ASK_USER" and ASK_USER_MARKER in out:
+            asked = True
+    return results
 
 
 # Всяко скоби-подобно "[ГЛАВНИ_БУКВИ:" или "[ГЛАВНИ_БУКВИ]" в текста — независимо

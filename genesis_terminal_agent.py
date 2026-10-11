@@ -1575,6 +1575,17 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                         # получава „Невалидни аргументи“ и пише пак (одит 2026-10-09).
                         args = {}
                         call_args = raw_args if isinstance(raw_args, str) else json.dumps(raw_args)
+                    if asked:
+                        # След ASK_USER нищо от същия рунд не тръгва, преди
+                        # операторът да отговори (bug fix, 2026-10-11). Измерено:
+                        # [ASK_USER „Да сменя ли цената на 0?“, EDIT_FILE] сменяше
+                        # цената, докато въпросът още висеше. Резултат-заместител
+                        # пази двойката извикване/резултат цяла.
+                        _held = f"[{name}] не е изпълнено — чака отговора на оператора."
+                        ui.tool(name, _held)
+                        messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
+                                         "name": name, "content": _held})
+                        continue
                     result = (_prefetched[_tc_i] if _tc_i in _prefetched
                               else genesis_skills.dispatch_tool_call(name, call_args))
                     _page_check.observe(result)
