@@ -129,6 +129,46 @@ def test_questions_and_quoted_red_output_are_not_green_claims(text):
     assert claim_check.unsupported_claims(text, _RED) == []
 
 
+# Ревю 2026-10-11: по-широкият шаблон четеше честния червен отчет и въпросите
+# като зелено — подкана, „⚠ червено“ и exit 1. Всички се хващаха преди поправката.
+@pytest.mark.parametrize("text", [
+    "Пуснах pytest: 4 теста минаха, 1 падна.", "4 теста минават, а test_vat пада.",
+    "Старите тестове минават, но новият test_vat пада.", "4 passed and 1 failed",
+    "Резултат: 4 passed, 1 xfailed, 2 failed", "4 passed, 1 error in 0.31s",
+    "Провери дали всички 5 теста минават.", "Провери дали 5 теста минават.",
+    "Тестовете минават ли сега?", "Искаш ли да проверя, че тестовете минават?",
+    "Do all 5 tests pass?", "Не всички 5 теста минават.", "Not all tests pass."])
+def test_honest_mixed_reports_and_questions_are_not_green_claims(text):
+    from genesis_agent import claim_check
+    assert claim_check.unsupported_claims(text, _RED) == []
+
+
+@pytest.mark.parametrize("text", [
+    "Поправих грешката; всички тестове минават.", "Проверих, че тестовете минават.",
+    "Не беше лесно, но всички тестове минаха.", "Fixed the error. All tests pass now."])
+def test_a_green_claim_next_to_other_words_is_still_caught(text):
+    from genesis_agent import claim_check
+    assert claim_check.unsupported_claims(text, _RED)
+
+
+def test_headless_accepts_an_honest_red_report(ws, monkeypatch, capsys):
+    from genesis_agent import headless
+    monkeypatch.setattr(gta, "build_system_prompt", lambda: ("SYS", ""))
+    monkeypatch.setattr(headless, "_read_stdin", lambda: "")
+    red = "[RUN_CMD: python -m pytest -q]  (rc=1)\n....F\n1 failed, 4 passed"
+    real = gs.dispatch_tool_call
+    monkeypatch.setattr(gs, "dispatch_tool_call",
+                        lambda name, args: red if name == "RUN_CMD" else real(name, args))
+    answer = "Пуснах pytest: 4 теста минаха, 1 падна (test_vat). Не успях да го оправя."
+    seen = _script(monkeypatch, [
+        ("", [_call("RUN_CMD", {"command": "python -m pytest -q"}, "t1")]),
+        (answer, None), ("(подкана — не бива)", None)])
+    code = headless.run(["--json", "--cwd", str(ws), "оправи тестовете"])
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0 and out["ok"] is True and out["warnings"] == []
+    assert len(seen) == 2 and out["result"] == answer
+
+
 def test_headless_fails_when_the_answer_insists_on_green_after_red(ws, monkeypatch, capsys):
     from genesis_agent import headless
     monkeypatch.setattr(gta, "build_system_prompt", lambda: ("SYS", ""))
