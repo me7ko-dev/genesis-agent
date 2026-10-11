@@ -840,8 +840,59 @@ def _tool_repo_map(arg: str = "") -> str:
     return out
 
 
+# `pip install` на вече инсталирани пакети (bench sales-report, 2026-10-11):
+# моделът започна с `python -m pip install pytest`, sandbox-ът без оператор
+# отказа, моделът попита „да инсталираме ли?“ и пускът свърши без нито един
+# файл — а pytest си беше там. Само прости имена: версия, -U, -r, -e или път
+# значат „искам друго“ и минават през sandbox-а както винаги.
+_PIP_INSTALL = re.compile(r"^(?:(?P<py>\"[^\"]+\"|\S+)\s+-m\s+pip|pip3?)\s+install\s+(?P<rest>.+)$",
+                          re.IGNORECASE)
+_PIP_QUIET_FLAGS = frozenset({"-q", "--quiet", "--user", "--disable-pip-version-check",
+                              "--no-input", "--no-warn-script-location"})
+_VERSIONS_PROBE = ("import importlib.metadata as m, sys\n"
+                   "print(', '.join(f'{n} {m.version(n)}' for n in sys.argv[1:]))")
+_PIP_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9,._-]+\])?$")
+
+
+def _already_installed(command: str) -> str:
+    """Резултат „вече е инсталиран“, ако командата е pip install само на пакети,
+    които Python-ът на командата вече има; иначе празен низ (пускай нормално)."""
+    m = _PIP_INSTALL.match(command.strip())
+    if not m:
+        return ""
+    words = [w.strip('"') for w in re.findall(r'"[^"]*"|\S+', m.group("rest"))]
+    names = [w for w in words if w not in _PIP_QUIET_FLAGS]
+    if not names or not all(_PIP_NAME.match(n) for n in names):
+        return ""
+    import shutil
+    import subprocess
+    py = (m.group("py") or "").strip('"')
+    try:
+        if not py:
+            from genesis_agent.paths import project_python
+            exe = project_python(_WORKSPACE)
+        else:
+            exe = shutil.which(py, path=sandbox._build_env(sandbox.get_policy()).get("PATH")) or ""
+        if not exe:
+            return ""
+        probe = subprocess.run(
+            [exe, "-c", _VERSIONS_PROBE, *[re.sub(r"\[.*\]$", "", n) for n in names]],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20,
+            check=False)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return ""
+    if probe.returncode != 0 or not probe.stdout.strip():
+        return ""
+    _log_episode(f"RUN_CMD {command}", "вече инсталирано", ["tool", "run_cmd"])
+    return (f"[RUN_CMD: {command}]  (rc=0)\nВече е инсталирано ({probe.stdout.strip()}) "
+            f"в {exe} — pip не е пускан. Продължи със задачата.")
+
+
 def _tool_run_cmd(arg: str) -> str:
     command = arg.strip()
+    installed = _already_installed(command)
+    if installed:
+        return installed
     res = sandbox.run_shell(command, cwd=_WORKSPACE)
     if res.blocked:
         _log_episode(f"RUN_CMD {command}", f"отказан: {res.stderr}", ["tool", "run_cmd", "blocked"])

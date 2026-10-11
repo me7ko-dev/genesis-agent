@@ -15,6 +15,7 @@ Three properties matter most, and are what these tests are built around:
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -1078,3 +1079,19 @@ def test_write_file_reports_a_syntax_error_without_ruff(_workspace, monkeypatch)
     assert (_workspace / "test_app.py").exists()
     out = gs._tool_write_file("ok.py", "x = 1\n")
     assert "не се компилира" not in out
+
+
+def test_pip_install_of_what_is_already_installed_does_not_run_pip(_workspace) -> None:
+    """bench sales-report 2026-10-11: `python -m pip install pytest`, sandbox-ът
+    без оператор отказа, моделът попита и пускът свърши без файл — pytest си беше там."""
+    py = f'"{sys.executable}"'
+    out = gs._tool_run_cmd(f"{py} -m pip install pytest --quiet")
+    assert "Вече е инсталирано" in out and "pytest " in out and "rc=0" in out, out
+
+
+@pytest.mark.parametrize("tail", [
+    "-U pytest", "pytest==1.0", "-r requirements.txt", "-e .", "./pkg",
+    "pytest && del x", "genesis-no-such-package-xyz",
+])
+def test_pip_install_that_asks_for_something_else_goes_to_the_sandbox(_workspace, tail) -> None:
+    assert gs._already_installed(f'"{sys.executable}" -m pip install {tail}') == ""
