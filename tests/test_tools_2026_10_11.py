@@ -3,6 +3,11 @@
 (пуснато срещу стария код)."""
 from __future__ import annotations
 
+import os
+import sys
+import threading
+import tracemalloc
+
 import pytest
 
 import genesis_skills as gs
@@ -98,3 +103,78 @@ def test_decode_helper_round_trips_every_kind():
     for raw in samples:
         text, enc = code_edit.decode_text(raw)
         assert code_edit.encode_text(text, enc) == raw, (raw, enc)
+
+
+# ── read-unbounded ───────────────────────────────────────────────────────────
+
+@pytest.mark.skipif(sys.platform == "win32", reason="FIFO е POSIX")
+def test_read_file_refuses_a_fifo_at_once(ws):
+    os.mkfifo(ws / "pipe")
+    result: list[str] = []
+    t = threading.Thread(target=lambda: result.append(gs._tool_read_file("pipe")), daemon=True)
+    t.start()
+    t.join(5)
+    if not result:
+        # Отблокираме висящия open(), за да не остане нишката жива.
+        with open(ws / "pipe", "wb"):
+            pass
+        t.join(5)
+        pytest.fail("READ_FILE виси на FIFO")
+    assert "не е обикновен файл" in result[0]
+
+
+def test_read_file_on_a_big_file_stays_small_in_memory(ws):
+    p = ws / "big.log"
+    line = b"2026-10-11 12:00:00 INFO something happened here\n"
+    with open(p, "wb") as fh:
+        fh.write(line * (50_000_000 // len(line)))
+    tracemalloc.start()
+    try:
+        out = gs._tool_read_file("big.log", offset=10, limit=5)
+        _, peak_range = tracemalloc.get_traced_memory()
+        tracemalloc.reset_peak()
+        head = gs._tool_read_file("big.log")
+        _, peak_head = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert "   10\t2026-10-11" in out and "   14\t" in out and "   15\t" not in out
+    assert "отрязано" in head
+    assert peak_range < 5_000_000, peak_range
+    assert peak_head < 5_000_000, peak_head
+
+
+# ── read-binary ──────────────────────────────────────────────────────────────
+
+def test_read_file_refuses_binary_without_garbage(ws):
+    import zlib
+    (ws / "img.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00" + zlib.compress(bytes(range(256)) * 40))
+    out = gs._tool_read_file("img.png")
+    assert "двоичен файл" in out and ".png" in out
+    assert "PNG" not in out.split("двоичен", 1)[1]
+    assert len(out) < 400
+
+
+def test_read_file_shows_utf16_text(ws):
+    (ws / "w.txt").write_bytes("hello\r\nсвят\r\n".encode("utf-16"))
+    out = gs._tool_read_file("w.txt")
+    assert "hello\nсвят" in out
+    assert "\x00" not in out
+    ranged = gs._tool_read_file("w.txt", offset=2, limit=1)
+    assert "    2\tсвят" in ranged and "от 2)" in ranged
+
+
+# ── read-range-linenumbers ───────────────────────────────────────────────────
+
+def test_read_range_numbers_lines_like_search_and_edit(ws):
+    (ws / "m.py").write_text("a = '\f'\nb = '\u2028'\nc = 1\nd = 2\nTARGET = 3\n", encoding="utf-8")
+    from genesis_agent.repo_map import search_code
+    [hit] = search_code("TARGET", ws)
+    out = gs._tool_read_file("m.py", offset=hit.line, limit=1)
+    assert f"{hit.line:>5}\tTARGET = 3" in out
+    assert "от 5)" in out
+
+
+def test_read_range_offset_past_eof_says_so(ws):
+    (ws / "a.py").write_text("".join(f"x{i} = {i}\n" for i in range(300)), encoding="utf-8")
+    out = gs._tool_read_file("a.py", offset=500, limit=10)
+    assert "300 реда" in out and "след" in out
