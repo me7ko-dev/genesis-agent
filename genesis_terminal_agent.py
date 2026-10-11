@@ -1862,6 +1862,57 @@ def _continue_session(messages: "deque", system_prompt: str) -> "deque":
     return restored
 
 
+_NO_MODEL_HINT = ("⚠ Няма нито един API ключ (и локален Ollama) — съобщението НЕ е пратено "
+                  "към модел. Пусни `genesis setup` и напиши пак.")
+_YES_ANSWERS = ("", "да", "д", "d", "da", "y", "yes")
+
+
+def _no_model_guard() -> bool:
+    """True — няма кой да отговори и ходът се пропуска.
+
+    Одит 2026-10-11: без ключове едно „здравей“ печаташе 25 реда „[Brain] ✗ …
+    skip: no KEY“ и кутия с грешка — първото, което вижда нов потребител след
+    инсталацията. Тук то е едно изречение; в терминал се предлага настройката
+    веднага и след нея съобщението тръгва нормално."""
+    try:
+        from genesis_agent.brain import any_model_reachable
+        if any_model_reachable():
+            return False
+    except Exception:
+        return False   # проверката не бива да спира чата
+    console.print(f"[bold yellow]{_NO_MODEL_HINT}[/]", highlight=False)
+    try:
+        interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, ValueError):
+        interactive = False
+    if not interactive:
+        return True
+    answer = console.input("[cyan]Да пусна ли настройката сега? (Enter = да / не) > [/]")
+    if answer.strip().lower() not in _YES_ANSWERS:
+        return True
+    try:
+        from genesis_agent.setup_wizard import run as _setup_run
+        _setup_run()
+    except SystemExit:   # Ctrl-C в настройката връща в чата, не го затваря
+        pass
+    try:
+        from genesis_agent.brain import any_model_reachable
+        return not any_model_reachable()
+    except Exception:
+        return False
+
+
+def _worth_capturing(convo: list[dict]) -> bool:
+    """Има ли в разговора поне един истински отговор на модела. Само грешки
+    („[Грешка: цялата верига…]“) → извличащият пас би минал през веригата пак
+    за нищо (13 реда „[Brain] ✗“ при изход без ключове, одит 2026-10-11)."""
+    for m in convo:
+        text = str(m.get("content") or "").strip()
+        if m.get("role") == "assistant" and text and not text.startswith(("[Грешка", "Error:")):
+            return True
+    return False
+
+
 def main():
     reset_usage()
 
@@ -2282,6 +2333,8 @@ def main():
                     continue
                 user_input = _res.prompt
 
+            if _no_model_guard():
+                continue
             turn_input = _with_attachments(user_input, pending_shell)
             messages = run_turn(messages, turn_input, RICH_UI)
             if not LAST_TURN_BLOCKED:   # спряно от hook → изходът чака следващото
@@ -2309,7 +2362,7 @@ def main():
     try:
         from genesis_agent import workspace_memory as _wm
         convo = [m for m in messages if m.get("role") in ("user", "assistant")]
-        if len(convo) >= 2:
+        if len(convo) >= 2 and _worth_capturing(convo):
             with console.status("[dim]Запомням какво свършихме...[/]", spinner="dots"):
                 saved = _wm.auto_capture(list(convo))
             if any(saved.values()):

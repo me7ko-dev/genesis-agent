@@ -350,3 +350,43 @@ def test_cyrillic_custom_command_runs_and_the_list_matches_the_dispatch(tmp_path
     assert "преглед" in listed
     for name in listed:   # каквото се показва в /commands, това и тръгва
         assert chat_commands._NAME.match(f"/{name} x"), name
+
+
+# ── първо пускане без ключове: едно изречение, не 38 реда „[Brain] ✗“ ───────
+
+def test_no_key_and_no_local_model_means_nothing_is_reachable(monkeypatch):
+    from genesis_agent import brain
+    monkeypatch.setattr(brain, "_load_keys", dict)
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+    assert brain.any_model_reachable() is False      # ollama: портът е затворен (conftest)
+    monkeypatch.setattr(brain, "_load_keys", lambda: {"GROQ_API_KEY": "gsk_x"})
+    assert brain.any_model_reachable() is True
+
+
+def test_first_message_without_keys_never_reaches_the_chain(monkeypatch, capsys):
+    import genesis_terminal_agent as gta
+    from genesis_agent import brain, chat_input, model_check, workspace_memory
+    monkeypatch.setattr(brain, "any_model_reachable", lambda: False, raising=False)
+    monkeypatch.setattr(gta, "print_minimal_banner", lambda: None)
+    monkeypatch.setattr(gta, "show_status_bar", lambda: None)
+    monkeypatch.setattr(gta, "build_system_prompt", lambda: ("system", ""))
+    monkeypatch.setattr(model_check, "needs_check", lambda: False)
+    lines = iter(["здравей", "exit"])
+    monkeypatch.setattr(chat_input, "read_message", lambda read: next(lines))
+    turns: list[str] = []
+    monkeypatch.setattr(gta, "run_turn", lambda messages, text, ui: turns.append(text) or messages)
+    captured: list[int] = []
+    monkeypatch.setattr(workspace_memory, "auto_capture", lambda convo: captured.append(1) or {})
+    monkeypatch.setattr(gta.sys, "argv", ["genesis"])
+    gta.main()
+    out = capsys.readouterr().out
+    assert turns == [] and captured == []
+    assert out.count("genesis setup") == 1 and "[Brain]" not in out
+
+
+def test_exit_after_only_chain_errors_does_not_run_auto_capture():
+    import genesis_terminal_agent as gta
+    convo = [{"role": "user", "content": "здравей"},
+             {"role": "assistant", "content": "[Грешка: цялата верига е изчерпана]"}]
+    assert gta._worth_capturing(convo) is False
+    assert gta._worth_capturing(convo + [{"role": "assistant", "content": "Здравей!"}]) is True
