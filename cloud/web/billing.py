@@ -9,9 +9,17 @@
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import re
-from collections.abc import Mapping
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from pathlib import Path
@@ -208,3 +216,247 @@ def reconcile(store: Store, prices: Prices, usage_path: Path) -> int:
     usage = gw.usage_lines_by_job(usage_path, {r["job"] for r in rows})
     return sum(charge_turn(store, prices, r["user_id"], r["turn_id"], usage[r["job"]])
                for r in rows)
+
+
+# ── Stripe ───────────────────────────────────────────────────────────────────
+
+STRIPE_API = "https://api.stripe.com/v1"
+CHECKOUT_PREFIX = "https://checkout.stripe.com/"
+WEBHOOK_TOLERANCE = 300
+
+
+class StripeError(Exception):
+    """Stripe не отговори както трябва — подробностите са в stderr, не при клиента."""
+
+
+@dataclass(frozen=True)
+class StripeConfig:
+    secret_key: str
+    webhook_secret: str
+    public_url: str = ""
+
+    @property
+    def live(self) -> bool:
+        return self.secret_key.startswith(("sk_live_", "rk_live_"))
+
+    @classmethod
+    def from_env(cls, environ: Mapping[str, str], public_url: str = "") -> StripeConfig | None:
+        """Ключовете само от средата — никога от флаг (видим в `ps`) или от
+        prices.json. Нито един → None (плащането с карта е изключено); само
+        единият или грешен префикс → ValueError: половин настроено плащане
+        взима пари, без да зарежда кредити (2026-10-11)."""
+        key = environ.get("STRIPE_SECRET_KEY", "").strip()
+        hook = environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
+        if not key and not hook:
+            return None
+        if not key or not hook:
+            raise ValueError("Stripe иска и STRIPE_SECRET_KEY, и STRIPE_WEBHOOK_SECRET — "
+                             "зададен е само единият")
+        if not key.startswith(("sk_", "rk_")):
+            raise ValueError("STRIPE_SECRET_KEY трябва да започва със sk_ или rk_ "
+                             "(pk_ е публичният ключ)")
+        if not hook.startswith("whsec_"):
+            raise ValueError("STRIPE_WEBHOOK_SECRET трябва да започва с whsec_")
+        return cls(key, hook, public_url)
+
+
+def check_public_url(url: str, *, allow_http: bool = False) -> str:
+    """Адресът за връщане от Stripe — от настройките, никога от Host заглавието
+    (иначе чужд Host праща човека след плащането където си иска)."""
+    url = url.strip().rstrip("/")
+    parts = urllib.parse.urlsplit(url)
+    schemes = ("https", "http") if allow_http else ("https",)
+    if parts.scheme not in schemes or not parts.netloc or parts.query or parts.fragment:
+        raise ValueError("--public-url трябва да е https://адрес (http:// само с --insecure-cookie)")
+    return url
+
+
+def verify_stripe_signature(payload: bytes, header: str, secret: str, *,
+                            now: float | None = None, tolerance: int = WEBHOOK_TOLERANCE) -> bool:
+    """Подписът `Stripe-Signature: t=…,v1=…` върху СУРОВИТЕ байтове на тялото.
+
+    Повече от един v1 (смяна на тайната) — стига един да съвпада; v0 и
+    непознати схеми не се броят. Времето е ±tolerance: стара доставка,
+    повторена от някой друг, не минава след 5 минути."""
+    if not header or not secret:
+        return False
+    stamp: str | None = None
+    sigs: list[str] = []
+    for item in header.split(","):
+        key, sep, value = item.strip().partition("=")
+        if not sep:
+            continue
+        if key == "t" and stamp is None:
+            stamp = value
+        elif key == "v1":
+            sigs.append(value)
+    if stamp is None or not (stamp.isascii() and stamp.isdigit()) or not sigs:
+        return False
+    if abs((time.time() if now is None else now) - int(stamp)) > tolerance:
+        return False
+    expected = hmac.new(secret.encode(), stamp.encode() + b"." + payload,
+                        hashlib.sha256).hexdigest().encode()
+    # Байтове, не str: compare_digest хвърля TypeError на не-ASCII низ, а
+    # заглавието е каквото е пратил клиентът. Без ранен изход — всички се сравняват.
+    ok = False
+    for sig in sigs:
+        ok |= hmac.compare_digest(expected, sig.encode("utf-8", "replace"))
+    return ok
+
+
+Opener = Callable[..., Any]
+
+
+def create_checkout(cfg: StripeConfig, *, user_id: int, email: str, offer: Offer, mode: str,
+                    customer: str | None = None,
+                    opener: Opener = urllib.request.urlopen) -> str:
+    """Нова Stripe Checkout сесия → адресът ѝ (https://checkout.stripe.com/…)."""
+    if mode not in ("payment", "subscription"):
+        raise ValueError(mode)
+    what = "pack" if mode == "payment" else "plan"
+    form = [
+        ("mode", mode),
+        ("line_items[0][price]", offer.stripe_price),
+        ("line_items[0][quantity]", "1"),
+        ("success_url", f"{cfg.public_url}/?view=account&paid=1"),
+        ("cancel_url", f"{cfg.public_url}/?view=account"),
+        ("client_reference_id", str(user_id)),
+        ("metadata[user_id]", str(user_id)),
+        (f"metadata[{what}]", offer.id),
+    ]
+    if mode == "subscription":
+        form += [("subscription_data[metadata][user_id]", str(user_id)),
+                 ("subscription_data[metadata][plan]", offer.id)]
+    form.append(("customer", customer) if customer else ("customer_email", email))
+    req = urllib.request.Request(
+        f"{STRIPE_API}/checkout/sessions", data=urllib.parse.urlencode(form).encode(),
+        method="POST", headers={
+            "Authorization": f"Bearer {cfg.secret_key}",
+            "Content-Type": "application/x-www-form-urlencoded",
+            # Повторена заявка (мрежата) не прави втора сесия.
+            "Idempotency-Key": str(uuid.uuid4()),
+        })
+    try:
+        with opener(req, timeout=20) as r:
+            body = r.read()
+    except urllib.error.HTTPError as e:
+        detail = e.read()[:2000].decode("utf-8", "replace")
+        _log(f"checkout {e.code}: {detail}")
+        raise StripeError(f"stripe {e.code}") from None
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        _log(f"checkout: {type(e).__name__}: {e}")
+        raise StripeError(type(e).__name__) from None
+    try:
+        url = json.loads(body).get("url")
+    except (ValueError, AttributeError, RecursionError):
+        url = None
+    if not isinstance(url, str) or not url.startswith(CHECKOUT_PREFIX):
+        _log(f"checkout без адрес на checkout.stripe.com: {url!r}"[:300])
+        raise StripeError("bad url")
+    return url
+
+
+def _log(msg: str) -> None:
+    print(f"stripe: {msg}", file=sys.stderr)
+
+
+def _str(obj: dict[str, Any], key: str) -> str:
+    v = obj.get(key)
+    return v if isinstance(v, str) else ""
+
+
+def handle_event(store: Store, prices: Prices, event: dict[str, Any], *,
+                 live: bool) -> tuple[int, str]:
+    """Подписано събитие от Stripe → (HTTP статус, бележка).
+
+    Само полетата най-горе в обекта (id, customer, status, amount_*,
+    currency, metadata, client_reference_id): пътищата към редовете и цените
+    на фактурата се местиха между версиите на API-то (2025 „basil“ ги сложи
+    под parent/pricing), тези — не. Всеки запис е един ред с ключ по сесията
+    или фактурата, затова повторена доставка не зарежда втори път."""
+    if event.get("livemode") is not live:
+        # Тестово събитие никога не зарежда истинската база (и обратно).
+        return 200, "друг режим (test/live) — пропуснато"
+    data = event.get("data")
+    obj = data.get("object") if isinstance(data, dict) else None
+    if not isinstance(obj, dict):
+        return 200, "без обект — пропуснато"
+    etype = _str(event, "type")
+    ref = _str(event, "id")
+    if etype in ("checkout.session.completed", "checkout.session.async_payment_succeeded"):
+        return _checkout_done(store, prices, obj, ref)
+    if etype == "invoice.paid":
+        return _invoice_paid(store, prices, obj, ref)
+    if etype == "customer.subscription.deleted":
+        uid = store.user_by_customer(_str(obj, "customer"))
+        if uid is not None:
+            store.set_account(uid, plan="")
+        return 200, "абонаментът е спрян"
+    return 200, "пропуснато"
+
+
+def _checkout_done(store: Store, prices: Prices, obj: dict[str, Any], ref: str) -> tuple[int, str]:
+    ref_id = _str(obj, "client_reference_id")
+    uid = int(ref_id) if ref_id.isascii() and ref_id.isdigit() else None
+    if uid is None or not store.user_exists(uid):
+        _log(f"сесия {_str(obj, 'id')}: непознат човек {ref_id!r}")
+        return 200, "непознат човек — пропуснато"
+    raw_meta = obj.get("metadata")
+    meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
+    paid = obj.get("payment_status")
+    if obj.get("mode") == "payment":
+        # Бавните методи (SEPA) идват като completed с unpaid и после
+        # async_payment_succeeded — същата функция, същият ключ по сесията.
+        if paid != "paid":
+            return 200, "още не е платено"
+        pack = prices.packs.get(str(meta.get("pack", "")))
+        session = _str(obj, "id")
+        if pack is None or not session.startswith("cs_"):
+            _log(f"сесия {session}: непознат пакет {meta.get('pack')!r}")
+            return 200, "непознат пакет — пропуснато"
+        if (obj.get("amount_total") != pack.amount_cents
+                or _str(obj, "currency").lower() != pack.currency):
+            # Грешен price id в таблото не бива да зарежда пакет на чужда цена.
+            _log(f"сесия {session}: {obj.get('amount_total')} {obj.get('currency')} ≠ "
+                 f"{pack.amount_cents} {pack.currency} за {pack.id} — без кредити")
+            return 200, "сумата не съвпада — пропуснато"
+        store.add_entry(uid, f"stripe:{session}", "purchase", pack.credits * MICRO, ref=ref)
+        return 200, "заредено"
+    if obj.get("mode") == "subscription":
+        if paid not in ("paid", "no_payment_required"):
+            return 200, "още не е платено"
+        plan = prices.plans.get(str(meta.get("plan", "")))
+        customer = _str(obj, "customer")
+        if plan is None or not customer.startswith("cus_"):
+            _log(f"сесия {_str(obj, 'id')}: непознат план {meta.get('plan')!r} или клиент")
+            return 200, "непознат план — пропуснато"
+        owner = store.user_by_customer(customer)
+        if owner is not None and owner != uid:
+            _log(f"клиент {customer} вече е на човек {owner}, не на {uid}")
+            return 200, "клиентът е на друг човек — пропуснато"
+        # Кредитите идват с invoice.paid; тук само кой е клиентът и планът.
+        store.set_account(uid, stripe_customer=customer, plan=plan.id)
+        return 200, "абонаментът е записан"
+    return 200, "пропуснато"
+
+
+def _invoice_paid(store: Store, prices: Prices, obj: dict[str, Any], ref: str) -> tuple[int, str]:
+    uid = store.user_by_customer(_str(obj, "customer"))
+    if uid is None:
+        # Stripe не пази реда: invoice.paid може да дойде преди
+        # checkout.session.completed. 503 → Stripe опитва пак.
+        return 503, "непознат клиент — ще се опита пак"
+    account = store.account(uid)
+    plan = prices.plans.get(account["plan"])
+    invoice = _str(obj, "id")
+    if plan is None or not invoice.startswith("in_"):
+        _log(f"фактура {invoice}: човек {uid} без план ({account['plan']!r})")
+        return 200, "без план — пропуснато"
+    amount = obj.get("amount_paid")
+    if (obj.get("status") != "paid" or type(amount) is not int or amount < plan.amount_cents
+            or _str(obj, "currency").lower() != plan.currency):
+        _log(f"фактура {invoice}: {obj.get('status')} {amount} {obj.get('currency')} "
+             f"не покрива {plan.id} — без кредити")
+        return 200, "сумата не съвпада — пропуснато"
+    store.add_entry(uid, f"stripe:{invoice}", "subscription", plan.credits * MICRO, ref=ref)
+    return 200, "заредено"

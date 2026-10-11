@@ -52,6 +52,7 @@ from cloud.web.store import MICRO, SESSION_SECONDS, Store
 STATIC = Path(__file__).with_name("static")
 COOKIE = "genesis_session"
 MAX_BODY = 64 * 1024
+MAX_WEBHOOK = 256 * 1024     # събитие от Stripe (сесия/фактура) е няколко KiB
 MAX_TEXT = 4000
 MAX_FILES = 1000
 # Архивът „сваля всичко“ — не спира на MAX_FILES (одит 2026-10-11: при 1500
@@ -102,7 +103,8 @@ class App:
                  gateway: launch.Gateway | None = None,
                  prices: billing.Prices | None = None, turns_per_day: int = TURNS_PER_DAY,
                  max_tokens_per_turn: int = launch.TASK_BUDGET,
-                 monthly_cap: int = MONTHLY_CAP) -> None:
+                 monthly_cap: int = MONTHLY_CAP, stripe: billing.StripeConfig | None = None,
+                 stripe_opener: billing.Opener | None = None) -> None:
         if prices is not None and gateway is None:
             # Без шлюза токените ги казва кодът в контейнера (2026-10-11).
             raise ValueError("плащането иска шлюза (--gateway-usage)")
@@ -119,6 +121,10 @@ class App:
         self.turns_per_day = turns_per_day
         self.max_tokens_per_turn = max_tokens_per_turn
         self.monthly_cap = monthly_cap  # µc
+        if stripe is not None and (prices is None or not stripe.public_url):
+            raise ValueError("Stripe иска плащане (--billing) и --public-url")
+        self.stripe = stripe
+        self.stripe_opener = stripe_opener
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="turn")
         self._failures: dict[str, list[float]] = {}
         self._lock = threading.Lock()
@@ -652,6 +658,11 @@ class Handler(BaseHTTPRequestHandler):
     # ── POST ──
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
+        if path == "/api/stripe/webhook":
+            # Преди _body(): подписът е върху суровите байтове, а Stripe не
+            # праща Origin. Единственият POST без вход — пази го HMAC-ът.
+            self._stripe_webhook()
+            return
         body = self._body()
         if body is None:
             return
@@ -688,6 +699,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/logout":
             store.end_session(self._token())
             self._json(200, {"ok": True}, {"Set-Cookie": self._cookie("", 0)})
+        elif path == "/api/checkout":
+            self._checkout(user, body)
         elif path == "/api/chats":
             title = str(body.get("title") or "Нов разговор").strip()
             self._json(201, {"id": store.new_chat(user["id"], title)})
@@ -708,6 +721,71 @@ class Handler(BaseHTTPRequestHandler):
             self._json(202, {"turn_id": turn_id})
         else:
             self._error(404, "няма такъв адрес")
+
+
+    # ── плащане ──
+    def _stripe_webhook(self) -> None:
+        app = self.app
+        if app.stripe is None or app.prices is None:
+            self._error(404, "няма такъв адрес")
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        if length <= 0 or length > MAX_WEBHOOK:
+            self._error(413, "тялото липсва или е твърде голямо")
+            return
+        payload = self.rfile.read(length)
+        if not billing.verify_stripe_signature(payload, self.headers.get("Stripe-Signature", ""),
+                                               app.stripe.webhook_secret):
+            self._error(400, "невалиден подпис")
+            return
+        try:
+            event = json.loads(payload)
+        except (ValueError, RecursionError):
+            self._error(400, "невалиден JSON")
+            return
+        if not isinstance(event, dict):
+            self._error(400, "очаква се обект")
+            return
+        try:
+            status, note = billing.handle_event(app.store, app.prices, event, live=app.stripe.live)
+        except Exception as e:
+            # Всеки запис е един ред (или нищо) — Stripe ще опита пак.
+            print(f"stripe: {event.get('id')}: {type(e).__name__}: {e}", file=sys.stderr)
+            self._error(500, "грешка — ще се опита пак")
+            return
+        self._json(status, {"ok": status == 200, "note": note})
+
+    def _checkout(self, user: dict[str, Any], body: dict[str, Any]) -> None:
+        app = self.app
+        if app.prices is None:
+            self._error(404, "няма такъв адрес")
+            return
+        if app.stripe is None:
+            self._error(503, "плащането още не е включено")
+            return
+        if body.get("pack"):
+            offer, mode = app.prices.packs.get(str(body["pack"])), "payment"
+        else:
+            offer, mode = app.prices.plans.get(str(body.get("plan", ""))), "subscription"
+        if offer is None or not offer.stripe_price:
+            self._error(400, "няма такъв пакет или план")
+            return
+        account = app.store.account(user["id"])
+        if mode == "subscription" and account["plan"]:
+            self._error(409, "вече имаш абонамент")
+            return
+        kw = {"opener": app.stripe_opener} if app.stripe_opener is not None else {}
+        try:
+            url = billing.create_checkout(app.stripe, user_id=user["id"], email=user["email"],
+                                          offer=offer, mode=mode,
+                                          customer=account["stripe_customer"], **kw)
+        except billing.StripeError:
+            self._error(502, "плащането не отговаря — опитай пак след малко")
+            return
+        self._json(200, {"url": url})
 
 
 def make_server(app: App, host: str = "127.0.0.1", port: int = 8080) -> ThreadingHTTPServer:
@@ -750,6 +828,8 @@ def main(argv: list[str] | None = None) -> int:
                      help="таван на токените на ход в шлюза")
     srv.add_argument("--monthly-cap", default=str(MONTHLY_CAP // MICRO),
                      help="месечен таван на харченето в кредити (с плащане)")
+    srv.add_argument("--public-url", default="",
+                     help="https://адресът на услугата (за Stripe; иначе GENESIS_PUBLIC_URL)")
     a = p.parse_args(argv)
     # README-то казва „никога и двете“, а кодът приемаше и вярваше на
     # CF-Connecting-IP — зад Caddy клиентът си го пише сам и спирачката на
@@ -784,6 +864,17 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as e:
             print(e, file=sys.stderr)
             return 2
+    try:
+        stripe = billing.StripeConfig.from_env(os.environ)
+        if stripe is not None:
+            if prices is None:
+                raise ValueError("Stripe ключовете са зададени, а плащането не е (--billing)")
+            public = a.public_url or os.environ.get("GENESIS_PUBLIC_URL", "")
+            stripe = dataclasses.replace(stripe, public_url=billing.check_public_url(
+                public, allow_http=a.insecure_cookie))
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 2
     gateway = None
     if a.gateway_usage:
         if not a.env_file:
@@ -794,7 +885,7 @@ def main(argv: list[str] | None = None) -> int:
               env_file=a.env_file, runtime=a.runtime, secure_cookie=not a.insecure_cookie,
               trust_proxy="cloudflare" if a.trust_cloudflare else a.trust_proxy, gateway=gateway,
               prices=prices, turns_per_day=a.turns_per_day,
-              max_tokens_per_turn=a.max_tokens_per_turn, monthly_cap=monthly_cap)
+              max_tokens_per_turn=a.max_tokens_per_turn, monthly_cap=monthly_cap, stripe=stripe)
     server = make_server(app, a.host, a.port)
     print(f"genesis web: http://{a.host}:{server.server_address[1]}", flush=True)
     with contextlib.suppress(KeyboardInterrupt):

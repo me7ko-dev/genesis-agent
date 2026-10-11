@@ -72,9 +72,9 @@ class _NoRun:
 @pytest.fixture
 def plain(tmp_path):
     """Сървър без плащане — за профилите и поканите."""
-    store = Store(tmp_path / "web.db")
+    store = Store(tmp_path / "plain" / "web.db")
     store.add_user("ana@example.com", PASSWORD)
-    app = web.App(store, tmp_path / "jobs", runner=_NoRun(), secure_cookie=False)
+    app = web.App(store, tmp_path / "plain" / "jobs", runner=_NoRun(), secure_cookie=False)
     srv = _serve(app)
     yield app, lambda: Client(srv.server_address[1])
     srv.shutdown()
@@ -717,3 +717,281 @@ def test_a_402_reaches_the_person_in_bulgarian(paid) -> None:
     cl.login()
     code, data = _turn(cl)
     assert code == 402 and "Зареди от „Сметка“" in data["error"]
+
+
+# ── S7: подпис на Stripe ─────────────────────────────────────────────────────
+
+WHSEC = "whsec_test"
+NOW = 1_760_000_000
+
+
+def _sign(payload: bytes, secret: str = WHSEC, t: int = NOW) -> str:
+    import hmac as _hmac
+    sig = _hmac.new(secret.encode(), f"{t}.".encode() + payload, hashlib.sha256).hexdigest()
+    return f"t={t},v1={sig}"
+
+
+def test_a_correct_signature_passes_and_any_change_fails() -> None:
+    payload = b'{"id": "evt_1", "type": "x"}'
+    v = billing.verify_stripe_signature
+    assert v(payload, _sign(payload), WHSEC, now=NOW)
+    assert not v(payload[:-2] + b"X}", _sign(payload), WHSEC, now=NOW)
+    assert not v(payload, _sign(payload), "whsec_other", now=NOW)
+    # същото съдържание, друго подреждане/интервали — подписът е върху байтовете
+    redumped = json.dumps(json.loads(payload), separators=(",", ":")).encode()
+    assert not v(redumped, _sign(payload), WHSEC, now=NOW)
+
+
+def test_the_signature_window_is_five_minutes_both_ways() -> None:
+    payload = b"{}"
+    v = billing.verify_stripe_signature
+    assert not v(payload, _sign(payload, t=NOW - 301), WHSEC, now=NOW)
+    assert not v(payload, _sign(payload, t=NOW + 301), WHSEC, now=NOW)
+    assert v(payload, _sign(payload, t=NOW - 299), WHSEC, now=NOW)
+
+
+def test_signature_header_forms() -> None:
+    payload = b"{}"
+    good = _sign(payload).split(",")[1]
+    v = billing.verify_stripe_signature
+    assert v(payload, f"t={NOW}, v1={'0' * 64}, {good}", WHSEC, now=NOW)        # смяна на тайната
+    assert not v(payload, f"t={NOW},v0={good[3:]}", WHSEC, now=NOW)             # само v0
+    assert not v(payload, f"t=12a,{good}", WHSEC, now=NOW)
+    assert not v(payload, f"t=١٢,{good}", WHSEC, now=NOW)                       # не-ASCII цифри
+    assert not v(payload, f"t={NOW},v1=ж{good[3:]}", WHSEC, now=NOW)            # не-ASCII подпис
+    assert not v(payload, "", WHSEC, now=NOW)
+    assert not v(payload, _sign(payload, secret=""), "", now=NOW)
+
+
+# ── S8: Stripe webhook ───────────────────────────────────────────────────────
+
+SK = "sk_test_123"
+
+
+@pytest.fixture
+def stripe(tmp_path):
+    app, _ = _billing_app(tmp_path, stripe=billing.StripeConfig(SK, WHSEC, "https://genesis.example"))
+    srv = _serve(app)
+    yield app, lambda: Client(srv.server_address[1])
+    srv.shutdown()
+    srv.server_close()
+    app.pool.shutdown(wait=True)
+
+
+def _event(etype: str, obj: dict[str, Any], *, live: bool = False, eid: str = "evt_1") -> bytes:
+    return json.dumps({"id": eid, "type": etype, "livemode": live,
+                       "data": {"object": obj}}).encode()
+
+
+def _deliver(cl: Client, payload: bytes, sig: str | None = None) -> int:
+    headers = {"Stripe-Signature": sig if sig is not None else _sign(payload, t=int(time.time())),
+               "Content-Type": "application/json"}
+    return cl.req("POST", "/api/stripe/webhook", raw=payload, headers=headers)[0]
+
+
+def _session(**over: Any) -> dict[str, Any]:
+    return {"id": "cs_test_1", "object": "checkout.session", "mode": "payment",
+            "payment_status": "paid", "client_reference_id": "1", "amount_total": 500,
+            "currency": "eur", "metadata": {"user_id": "1", "pack": "p5"}, **over}
+
+
+def test_a_paid_session_credits_the_pack_once(stripe) -> None:
+    app, client = stripe
+    cl = client()
+    done = _event("checkout.session.completed", _session())
+    assert _deliver(cl, done) == 200
+    assert _deliver(cl, done) == 200                       # повторена доставка
+    late = _event("checkout.session.async_payment_succeeded", _session(), eid="evt_2")
+    assert _deliver(cl, late) == 200
+    assert app.store.balance(1) == 500 * MICRO
+    assert app.store.balance(2) == 0
+
+
+@pytest.mark.parametrize("over", [
+    {"payment_status": "unpaid"},
+    {"amount_total": 499},
+    {"currency": "usd"},
+    {"client_reference_id": "99"},
+    {"client_reference_id": "1 OR 1"},
+    {"metadata": {"pack": "nope"}},
+])
+def test_unpaid_or_mismatched_sessions_credit_nothing(stripe, over) -> None:
+    app, client = stripe
+    assert _deliver(client(), _event("checkout.session.completed", _session(**over))) == 200
+    assert app.store.balance(1) == 0
+
+
+def test_a_livemode_mismatch_credits_nothing(stripe) -> None:
+    app, client = stripe
+    assert _deliver(client(), _event("checkout.session.completed", _session(), live=True)) == 200
+    assert app.store.balance(1) == 0
+
+
+def test_a_bad_signature_is_a_400_and_touches_nothing(stripe) -> None:
+    app, client = stripe
+    payload = _event("checkout.session.completed", _session())
+    assert _deliver(client(), payload, sig=_sign(payload, secret="whsec_evil")) == 400
+    assert _deliver(client(), payload, sig="") == 400
+    assert app.store.ledger_entries(1) == []
+
+
+def test_a_huge_webhook_body_is_a_413(stripe) -> None:
+    _, client = stripe
+    try:
+        code = _deliver(client(), b"x" * (300 * 1024), sig="t=1,v1=0")
+    except ConnectionError:
+        return   # Windows: отговорът 413 и затварянето изпреварват тялото (виж test_cloud_web)
+    assert code == 413
+
+
+def test_invoice_before_the_subscription_checkout_is_retried(stripe) -> None:
+    app, client = stripe
+    cl = client()
+    invoice = _event("invoice.paid", {"id": "in_1", "customer": "cus_1", "status": "paid",
+                                      "amount_paid": 1500, "currency": "eur"}, eid="evt_inv")
+    assert _deliver(cl, invoice) == 503
+    sub = _session(id="cs_sub", mode="subscription", customer="cus_1",
+                   metadata={"user_id": "1", "plan": "basic"}, amount_total=1500)
+    assert _deliver(cl, _event("checkout.session.completed", sub, eid="evt_sub")) == 200
+    assert app.store.balance(1) == 0                       # кредитите идват с фактурата
+    assert _deliver(cl, invoice) == 200
+    assert _deliver(cl, invoice) == 200
+    assert app.store.balance(1) == 1500 * MICRO
+    assert app.store.account(1)["plan"] == "basic"
+    # фактура под цената на плана не зарежда
+    low = _event("invoice.paid", {"id": "in_2", "customer": "cus_1", "status": "paid",
+                                  "amount_paid": 0, "currency": "eur"}, eid="evt_low")
+    assert _deliver(cl, low) == 200 and app.store.balance(1) == 1500 * MICRO
+    gone = _event("customer.subscription.deleted", {"id": "sub_1", "customer": "cus_1"})
+    assert _deliver(cl, gone) == 200 and app.store.account(1)["plan"] == ""
+
+
+def test_the_webhook_does_not_exist_without_stripe(paid) -> None:
+    _, _, client = paid
+    payload = _event("checkout.session.completed", _session())
+    assert _deliver(client(), payload) == 404
+
+
+# ── S9: Stripe Checkout ──────────────────────────────────────────────────────
+
+def test_stripe_config_comes_only_from_the_environment() -> None:
+    assert billing.StripeConfig.from_env({}) is None
+    assert billing.StripeConfig.from_env({"STRIPE_SECRET_KEY": " ", "STRIPE_WEBHOOK_SECRET": ""}) is None
+    for env in ({"STRIPE_SECRET_KEY": SK}, {"STRIPE_WEBHOOK_SECRET": WHSEC},
+                {"STRIPE_SECRET_KEY": "pk_test_1", "STRIPE_WEBHOOK_SECRET": WHSEC},
+                {"STRIPE_SECRET_KEY": SK, "STRIPE_WEBHOOK_SECRET": "secret"}):
+        with pytest.raises(ValueError):
+            billing.StripeConfig.from_env(env)
+    cfg = billing.StripeConfig.from_env({"STRIPE_SECRET_KEY": SK, "STRIPE_WEBHOOK_SECRET": WHSEC})
+    assert cfg is not None and not cfg.live
+    assert billing.StripeConfig("sk_live_x", WHSEC).live
+
+
+def _serve_args(tmp_path: Path) -> list[str]:
+    keys = tmp_path / "keys.env"
+    keys.write_text("GATEWAY_SECRET=" + "s" * 40 + "\nGROQ_API_KEY=x\n", encoding="utf-8")
+    return ["serve", "--data", str(tmp_path), "--jobs", str(tmp_path / "jobs"), "--billing",
+            "--gateway-usage", str(tmp_path / "u.jsonl"), "--env-file", str(keys)]
+
+
+def test_serve_refuses_half_a_stripe_setup(tmp_path, monkeypatch, capsys) -> None:
+    started: list[bool] = []
+    monkeypatch.setattr(web, "make_server", lambda *a, **k: started.append(True))
+    monkeypatch.setenv("STRIPE_SECRET_KEY", SK)
+    assert web.main(_serve_args(tmp_path)) == 2
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", WHSEC)
+    assert web.main(_serve_args(tmp_path)) == 2                     # без --public-url
+    assert web.main([*_serve_args(tmp_path), "--public-url", "http://x.example"]) == 2
+    assert web.main(["serve", "--data", str(tmp_path), "--public-url", "https://x.example"]) == 2
+    assert started == []
+    assert "STRIPE_WEBHOOK_SECRET" in capsys.readouterr().err
+
+
+class FakeStripe:
+    def __init__(self, url: str = "https://checkout.stripe.com/c/pay/cs_test_1",
+                 status: int = 200) -> None:
+        self.url, self.status = url, status
+        self.seen: list[tuple[Any, float]] = []
+
+    def __call__(self, req: Any, timeout: float = 0) -> Any:
+        self.seen.append((req, timeout))
+        if self.status != 200:
+            import io
+            import urllib.error
+            raise urllib.error.HTTPError(req.full_url, self.status, "err", {},  # type: ignore[arg-type]
+                                         io.BytesIO(b'{"error": {"message": "sk_test_123 bad"}}'))
+        return _Resp(json.dumps({"id": "cs_test_1", "url": self.url}).encode())
+
+
+def _checkout_app(tmp_path: Path, fake: FakeStripe) -> tuple[web.App, Any]:
+    app, _ = _billing_app(tmp_path, stripe=billing.StripeConfig(SK, WHSEC, "https://genesis.example"),
+                          stripe_opener=fake)
+    srv = _serve(app)
+    return app, srv
+
+
+def test_checkout_sends_exactly_what_stripe_needs(tmp_path) -> None:
+    from urllib.parse import parse_qsl
+    fake = FakeStripe()
+    app, srv = _checkout_app(tmp_path, fake)
+    try:
+        cl = Client(srv.server_address[1])
+        cl.login()
+        code, data = cl.json("POST", "/api/checkout", {"pack": "p5"},
+                             headers={"Host": "evil.example"})
+        # Host е чужд — _body() го приема (няма Origin), но адресът за връщане
+        # е от --public-url, никога от Host.
+        assert code == 200 and data == {"url": fake.url}
+        req, timeout = fake.seen[0]
+        assert req.full_url == "https://api.stripe.com/v1/checkout/sessions"
+        assert req.get_method() == "POST" and timeout == 20
+        assert req.get_header("Authorization") == f"Bearer {SK}"
+        assert req.get_header("Content-type") == "application/x-www-form-urlencoded"
+        assert len(req.get_header("Idempotency-key")) == 36
+        assert dict(parse_qsl(req.data.decode())) == {
+            "mode": "payment", "line_items[0][price]": "price_p5", "line_items[0][quantity]": "1",
+            "success_url": "https://genesis.example/?view=account&paid=1",
+            "cancel_url": "https://genesis.example/?view=account",
+            "client_reference_id": "1", "metadata[user_id]": "1", "metadata[pack]": "p5",
+            "customer_email": "ana@example.com"}
+        # абонамент: метаданни и на абонамента; известен клиент вместо имейл
+        app.store.set_account(1, stripe_customer="cus_9")
+        assert cl.json("POST", "/api/checkout", {"plan": "basic"})[0] == 200
+        form = dict(parse_qsl(fake.seen[1][0].data.decode()))
+        assert form["mode"] == "subscription" and form["customer"] == "cus_9"
+        assert "customer_email" not in form
+        assert form["subscription_data[metadata][plan]"] == "basic"
+        assert form["subscription_data[metadata][user_id]"] == "1"
+        app.store.set_account(1, plan="basic")
+        assert cl.json("POST", "/api/checkout", {"plan": "basic"})[0] == 409
+        assert cl.json("POST", "/api/checkout", {"pack": "nope"})[0] == 400
+        assert cl.json("POST", "/api/checkout", {"pack": "p5"},
+                       headers={"Origin": "https://evil.example"})[0] == 403
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+@pytest.mark.parametrize("fake", [FakeStripe(url="https://evil.example/pay"), FakeStripe(status=400)])
+def test_a_bad_stripe_answer_is_a_502_without_details(tmp_path, fake, capsys) -> None:
+    _, srv = _checkout_app(tmp_path, fake)
+    try:
+        cl = Client(srv.server_address[1])
+        cl.login()
+        code, data = cl.json("POST", "/api/checkout", {"pack": "p5"})
+        assert code == 502 and data == {"error": "плащането не отговаря — опитай пак след малко"}
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_checkout_without_stripe_or_billing(paid, plain) -> None:
+    _, _, client = paid
+    cl = client()
+    cl.login()
+    assert cl.json("POST", "/api/checkout", {"pack": "p5"})[0] == 503
+    _, client2 = plain
+    cl2 = client2()
+    cl2.login()
+    assert cl2.json("POST", "/api/checkout", {"pack": "p5"})[0] == 404
+    assert Client(cl.port).json("POST", "/api/checkout", {"pack": "p5"})[0] == 401
