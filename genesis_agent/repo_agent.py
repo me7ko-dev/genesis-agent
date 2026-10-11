@@ -712,10 +712,19 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
     pushbacks = 0
     after = before
     edited_now = False
+    chain_error = ""
     try:
         for rounds in range(1, max_rounds + 1):
             reply = brain.complete(messages, tools=REPAIR_TOOLS)
             raw = (reply.raw_text or "").strip()
+
+            # Brain.complete не хвърля: изчерпаната верига идва като текст
+            # „Error: …“. Одит 2026-10-11: без ключове това се четеше като проза
+            # на модела — два пъти „описа, но не направи“, още две минавания
+            # през всичките 12 модела (36 реда „[Brain] ✗“) и вината на модела.
+            if not getattr(reply, "tool_calls", None) and raw.startswith("Error:"):
+                chain_error = raw.removeprefix("Error:").strip()
+                break
 
             # ── Native tool calls ───────────────────────────────────────────
             if getattr(reply, "tool_calls", None):
@@ -833,6 +842,12 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
     diff = project_diff(root, snapshot, touched)
     files = sorted(set(touched))
 
+    if chain_error:
+        hint = "" if "genesis setup" in chain_error else " Провери ключовете с `genesis setup`."
+        summary = f"Нито един модел не отговори: {chain_error}.{hint}"
+        if files:
+            summary += f" Промените дотук са запазени; {_undo_hint(root, snapshot, files)}"
+        return RepairOutcome(False, summary, rounds, snapshot, files, diff, before, after)
     if not files:
         # Зелени тестове без нито една промяна не са поправка (одит 2026-10-09:
         # „Промените са направени“ при празен дифф и код 0).

@@ -80,6 +80,32 @@ def test_a_log_written_by_the_tests_is_not_a_fix(proj, monkeypatch):
     assert len(calls) == 3
 
 
+# ── genesis fix: изчерпана верига не е „описа, но не направи“ ───────────────
+
+_CHAIN_DOWN = "Error: цялата верига е изчерпана | последна: нито един модел няма API ключ"
+
+
+def test_exhausted_chain_stops_at_once_and_says_so(proj, monkeypatch):
+    said: list[str] = []
+    calls = _brain(monkeypatch, [], then=_Reply(raw_text=_CHAIN_DOWN))
+    out = repo_agent.repair(proj, "add е грешна", test_command=PY, max_rounds=6,
+                            on_status=said.append)
+    assert len(calls) == 1, "без нови минавания през цялата верига"
+    assert not any("описа промяна" in s for s in said)
+    assert out.success is False and "Нито един модел не отговори" in out.summary
+    assert "genesis setup" in out.summary
+
+
+def test_exhausted_chain_after_an_edit_still_gets_a_verdict(proj, monkeypatch):
+    calls = _brain(monkeypatch, [_Reply([_tc("WRITE_FILE", {"path": "notes.md", "content": "x\n"})])],
+                   then=_Reply(raw_text=_CHAIN_DOWN))
+    out = repo_agent.repair(proj, "add е грешна", test_command=PY, max_rounds=6,
+                            on_status=lambda m: None)
+    assert len(calls) == 2
+    assert out.success is False and "Нито един модел не отговори" in out.summary
+    assert out.files_touched == ["notes.md"] and out.tests_after is not out.tests_before
+
+
 # ── genesis fix: подпапка на git хранилище (monorepo) ───────────────────────
 
 def _monorepo(tmp_path):
