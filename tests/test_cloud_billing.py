@@ -144,6 +144,21 @@ def test_an_old_database_keeps_its_rows_and_gains_the_new_tables(tmp_path) -> No
     assert s.add_entry(1, "admin:a", "grant", 1)
 
 
+def test_turn_jobs_from_before_the_deploy_merge_gain_usage_start(tmp_path) -> None:
+    db = tmp_path / "web.db"
+    old = sqlite3.connect(db)
+    old.executescript(store_mod._SCHEMA.replace(
+        ",\n    usage_start INTEGER NOT NULL DEFAULT 0  -- gw.usage_size() преди задачата", ""))
+    assert "usage_start" not in {r[1] for r in old.execute("PRAGMA table_info(turn_jobs)")}
+    old.close()
+    s = Store(db)
+    uid = s.add_user("a@b.c", PASSWORD)
+    turn = s.add_turn(s.new_chat(uid, "t"), "x")
+    s.set_job(turn, "genesis-task-1", 5, usage_start=42)
+    assert s.unsettled()[0]["usage_start"] == 42
+    Store(db)                                  # второ отваряне — без втори ALTER
+
+
 # ── S2: профили ──────────────────────────────────────────────────────────────
 
 def test_disabling_ends_the_live_session_and_blocks_login(plain) -> None:

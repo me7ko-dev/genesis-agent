@@ -178,6 +178,12 @@ class Store:
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._db() as c:
             c.executescript(_SCHEMA)
+            # turn_jobs отпреди сливането с деплоя (mega/w4-billing, 2026-10-11)
+            # е без usage_start; CREATE IF NOT EXISTS не я добавя, а без нея
+            # всеки платен ход падаше с „no such column“. 0 = от началото.
+            cols = {r["name"] for r in c.execute("PRAGMA table_info(turn_jobs)")}
+            if "usage_start" not in cols:
+                c.execute("ALTER TABLE turn_jobs ADD COLUMN usage_start INTEGER NOT NULL DEFAULT 0")
 
     @contextmanager
     def _db(self) -> Iterator[sqlite3.Connection]:
