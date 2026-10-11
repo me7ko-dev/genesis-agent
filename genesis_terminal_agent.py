@@ -1474,6 +1474,12 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     return messages
 
 
+_CUT_NOTE = ("[Система]: Последният ти отговор беше отрязан на тавана на изходните токени — "
+             "нищо от него не е изпълнено, файлът НЕ е записан. Не пиши голям файл наведнъж: "
+             "WRITE_FILE само с първата част (до ~150 реда), после допиши останалото на части "
+             "с EDIT_FILE. Без дълги обяснения в същия отговор.")
+
+
 def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str = "") -> "deque":
     content = user_input
     try:
@@ -1511,6 +1517,7 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
     _malformed_tag_retries = 0
     _claim_retries = 0
     _promise_retries = 0
+    _cut_retries = 0
     # Какво РЕАЛНО е изпълнено в тази реплика. Терминалът е фронтендът
     # по подразбиране (`genesis`), а до момента беше ЕДИНСТВЕНИЯТ без
     # никаква проверка срещу симулирана работа: claim_check влезе само
@@ -1538,11 +1545,24 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
 
         while True:
             if not tool_calls and str(response or "").lstrip().startswith("[Грешка"):
+                from genesis_agent.brain import TRUNCATED_ALL
                 # Грешка на веригата не е отговор на модела (bug fix, 2026-10-11).
                 # Измерено: след „[Грешка: цялата верига е изчерпана…]“ code_check
                 # пращаше подкана (още едно обръщение към изчерпаната верига), а
                 # грешката влизаше в историята като реплика на модела. Сега —
                 # само към оператора, без подкани, ходът спира тук.
+                if TRUNCATED_ALL in response and _cut_retries < 1:
+                    # Изключение — всеки опит е отрязан на тавана (2026-10-11).
+                    # Измерено: само groq, голям WRITE_FILE → ходът спираше с
+                    # историята ['system','user'], моделът не научаваше нищо и
+                    # всяко „продължи“ плащаше същия отрязан опит пак. Една
+                    # подкана да пише на части, после — спира.
+                    _cut_retries += 1
+                    ui.warn("Отговорът на модела е отрязан на тавана — казвам му да пише на части.")
+                    messages.append({"role": "system", "content": _CUT_NOTE})
+                    with ui.thinking("Пиша на части…", "aesthetic"):
+                        response, tool_calls = ask_genesis(messages, tools=_turn_tools())
+                    continue
                 ui.warn(response)
                 break
             ui.assistant(response)

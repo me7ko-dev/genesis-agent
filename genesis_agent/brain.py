@@ -229,6 +229,19 @@ def _is_transient(error: str) -> bool:
     return any(error.startswith(f"HTTP_{c}") for c in _TRANSIENT_CODES)
 
 
+# Маркер в грешката на complete(), когато ВСЕКИ изпратен опит е отрязан на
+# тавана на изходните токени. Терминалът по него казва на модела да пише на
+# части, вместо да спре хода без обратна връзка (2026-10-11, виж complete()).
+TRUNCATED_ALL = "HTTP_TRUNCATED_ALL"
+
+
+def _hit_output_cap(error: str) -> bool:
+    """Отговор, изял тавана на изходните токени — отрязан или празен (целият в
+    размисъл). Това е лимит на модела за дълъг отговор, не болен доставчик."""
+    return error.startswith("HTTP_TRUNCATED") or (
+        error.startswith("празен отговор") and "finish_reason=length" in error)
+
+
 def _openai_usage(usage: Any) -> Any:
     """usage от OpenAI-съвместим отговор + `cached_read_tokens` за budget.py.
 
@@ -1823,6 +1836,17 @@ class Brain:
         messages = budget_history(messages)
 
         last_error = "неизвестна грешка"
+        # Последната ИСТИНСКА грешка (тръгнала заявка). `last_error` се
+        # презаписва и от синтетичните „skip: no KEY“ след нея — измерено
+        # 2026-10-11: groq 429 и ollama_cloud отрязан → операторът и
+        # `genesis -p --json` виждаха „последна: skip: no HF_TOKEN configured“.
+        last_real_error = ""
+        # Отрязаните на тавана модели и дали ВСЕКИ изпратен опит е такъв.
+        # Същият промпт срещу същия таван дава същото: във втори кръг не се
+        # праща пак (измерено 2026-10-11: само groq → 2 платени отрязани опита
+        # на ход и по 2 на всяко „продължи“, без моделът да научи нищо).
+        truncated: set[str] = set()
+        other_real_failure = False
         local_only = os.environ.get("GENESIS_LOCAL_ONLY") == "1"
 
         # LOCAL-ONLY: изричен офлайн режим — никога не пипа облака.
@@ -1943,13 +1967,14 @@ class Brain:
                 # на чиста инсталация).
                 only_unconfigured = True
                 sent_any = False  # тръгнала ли е поне една истинска заявка
+                round_other_failure = False
                 for step in range(n):
                     attempt = ordered_chain[step]
                     prov, model = attempt["provider"], attempt["model"]
                     key = f"{prov}::{model}"
-                    if _is_exhausted(key):
+                    if _is_exhausted(key) or key in truncated:
                         only_unconfigured = False
-                        continue  # временно изчерпан → пропускаме
+                        continue  # временно изчерпан или вече отрязан → пропускаме
                     use_tools = tools if (tools and attempt.get("supports_tools")) else None
                     msgs = messages if use_tools else messages_notools
                     t0 = time.time()
@@ -1989,7 +2014,8 @@ class Brain:
                     except requests.exceptions.RequestException as e:
                         only_unconfigured = False
                         sent_any = True
-                        last_error = f"мрежа: {e}"
+                        last_error = last_real_error = f"мрежа: {e}"
+                        other_real_failure = round_other_failure = True
                         self._fail_count += 1
                         self._record_stat(prov, time.time() - t0, False)
                         _print_skip(prov, model, last_error, time.time() - t0)
@@ -2005,8 +2031,20 @@ class Brain:
                             only_unconfigured = False
                         if not synthetic:
                             sent_any = True
-                            self._fail_count += 1
-                            self._record_stat(prov, time.time() - t0, False)
+                            last_real_error = last_error
+                            if last_error.startswith("HTTP_TRUNCATED"):
+                                truncated.add(key)
+                            else:
+                                other_real_failure = round_other_failure = True
+                            # Изяден таван не е болен доставчик (2026-10-11):
+                            # 5 отрязани големи WRITE_FILE на groq даваха
+                            # success_rate 0.0 и deprioritize_flaky го местеше
+                            # последен за 15 мин за всички без пин (genesis fix,
+                            # леката верига, компресията). Разходът пак се
+                            # записва по-долу.
+                            if not _hit_output_cap(last_error):
+                                self._fail_count += 1
+                                self._record_stat(prov, time.time() - t0, False)
                             # Отрязан/отказан отговор е платен — разходът се записва.
                             if getattr(self, "_usage_attempt", None) == (prov, model):
                                 previous, self.current = getattr(self, "current", None), attempt
@@ -2047,6 +2085,10 @@ class Brain:
                             last_error = (f"всички модели са в cooldown "
                                           f"(най-рано след {math.ceil(wait)} s)")
                         break
+                if sent_any and not round_other_failure:
+                    # Всичко изпратено в кръга е отрязано на тавана: пауза и нов
+                    # кръг пращат същото към същите тавани (2026-10-11).
+                    break
                 if round_i + 1 < rounds:
                     print("  [Brain] Всички облачни модели заети/изчерпани, кратка пауза и нов кръг...")
                     time.sleep(_ROUND_PAUSE_S)
@@ -2062,9 +2104,19 @@ class Brain:
                 raw_text, code = hit
                 return type("Obj", (object,), {"raw_text": raw_text, "code": code,
                                                "usage": self._last_usage, "tool_calls": None})
-            last_error = self._last_local_error or last_error
+            if self._last_local_error:
+                last_error = last_real_error = self._last_local_error
+                if "HTTP_TRUNCATED" in last_error:
+                    truncated.add("local")
+                else:
+                    other_real_failure = True
 
-        return self._error_result(f"Error: цялата верига е изчерпана | последна: {last_error}")
+        if truncated and not other_real_failure:
+            return self._error_result(
+                f"Error: {TRUNCATED_ALL}: всеки изпратен опит е отрязан на тавана на "
+                f"изходните токени | последна: {last_real_error}")
+        return self._error_result(
+            f"Error: цялата верига е изчерпана | последна: {last_real_error or last_error}")
 
     def _error_result(self, msg: str):
         return type("Obj", (object,), {"raw_text": msg, "code": "", "usage": None, "tool_calls": None})
