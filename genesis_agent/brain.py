@@ -1511,6 +1511,35 @@ class Brain:
             )
         return text, (tool_calls or None)
 
+    def _cooldown_left(self, provider: str, model: str) -> float:
+        """Секунди, след които (provider, model) пак може да тръгне; 0 — веднага.
+
+        Огледало на проверките в _call/_call_rotating/_call_vertex: свободни
+        трябва да са моделът и поне един негов ключ (с двойката ключ::модел).
+        Ревю 2026-10-11: паузата между кръговете гледаше най-ранния край в
+        ЦЕЛИЯ _EXHAUSTED — чужд модел, лекият модел или чужд ключ#n даваха
+        8 s пауза и втори кръг без нито една заявка."""
+        now = time.time()
+
+        def left(k: str) -> float:
+            return max(0.0, _EXHAUSTED.get(k, now) - now)
+
+        key_env = _PROVIDERS.get(provider, ("", None))[1]
+        if provider == "vertex":
+            try:
+                from genesis_agent import vertex_auth
+                kids = [f"key::VERTEX#{i}" for i in range(1, len(vertex_auth.projects()) + 1)]
+            except Exception:
+                kids = []
+        elif not key_env:
+            kids = []
+        elif provider not in _NATIVE_PROVIDERS and len(self._numbered_keys(key_env)) > 1:
+            kids = [f"key::{key_env}#{i}" for i in range(1, len(self._numbered_keys(key_env)) + 1)]
+        else:
+            kids = [f"key::{key_env}"]
+        key_wait = min((max(left(k), left(f"{k}::{model}")) for k in kids), default=0.0)
+        return max(left(f"{provider}::{model}"), key_wait)
+
     def _call(self, provider: str, model: str, messages: list[dict],
              tools: list[dict] | None = None,
              extra: dict[str, Any] | None = None) -> tuple[str, list | None]:
@@ -1951,12 +1980,14 @@ class Brain:
                 # Нов кръг има смисъл само след грешка, която може да мине:
                 # HTTP_TRUNCATED не слага cooldown и същата заявка се реже пак.
                 retry_useful = False
+                cooled: list[tuple[str, str]] = []  # пропуснати заради cooldown
                 for step in range(n):
                     attempt = ordered_chain[step]
                     prov, model = attempt["provider"], attempt["model"]
                     key = f"{prov}::{model}"
                     if _is_exhausted(key):
                         only_unconfigured = False
+                        cooled.append((prov, model))
                         continue  # временно изчерпан → пропускаме
                     use_tools = tools if (tools and attempt.get("supports_tools")) else None
                     msgs = messages if use_tools else messages_notools
@@ -2013,6 +2044,8 @@ class Brain:
                         synthetic = last_error.startswith("skip:") or "cooling down" in last_error
                         if not (last_error.startswith("skip:") and "configured" in last_error):
                             only_unconfigured = False
+                        if "cooling down" in last_error:
+                            cooled.append((prov, model))
                         if not synthetic:
                             sent_any = True
                             if "HTTP_TRUNCATED" not in last_error:
@@ -2058,13 +2091,11 @@ class Brain:
                     # по време на паузата (одит 2026-10-11: всички модели с
                     # ~290 s оставащи → 0 заявки, 8 s чакане и „неизвестна
                     # грешка“).
-                    now = time.time()
-                    soonest = min((exp for exp in _EXHAUSTED.values() if exp > now), default=None)
-                    wait = None if soonest is None else soonest - now
+                    wait = min((self._cooldown_left(p, m) for p, m in cooled), default=None)
+                    if wait is not None:
+                        last_error = (f"всички модели са в cooldown "
+                                      f"(най-рано след {math.ceil(wait)} s)")
                     if wait is None or wait > _ROUND_PAUSE_S:
-                        if wait is not None:
-                            last_error = (f"всички модели са в cooldown "
-                                          f"(най-рано след {math.ceil(wait)} s)")
                         break
                 if round_i + 1 < rounds:
                     print("  [Brain] Всички облачни модели заети/изчерпани, кратка пауза и нов кръг...")

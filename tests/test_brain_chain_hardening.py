@@ -379,6 +379,48 @@ def test_a_cooldown_ending_within_the_pause_still_gets_the_second_round(monkeypa
     assert _slept == [8]
 
 
+@pytest.mark.parametrize("unrelated", ["openrouter::other", "groq::small",
+                                       "key::OPENROUTER_API_KEY#2::x", "key::GROQ_API_KEY#1::A"])
+def test_a_cooldown_outside_this_chain_does_not_buy_a_second_round(monkeypatch, _slept,
+                                                                   unrelated) -> None:
+    """Ревю 2026-10-11: „най-рано“ се смяташе по ЦЕЛИЯ _EXHAUSTED — чужд модел,
+    лекият модел или (ключ#n, модел), който веригата не ползва (тук ключът е
+    един), даваха 8 s пауза и празен втори кръг с „неизвестна грешка“."""
+    clock = [1_000_000.0]
+    monkeypatch.setattr(brain.time, "time", lambda: clock[0])
+    monkeypatch.setattr(brain.time, "sleep", lambda s: (_slept.append(s), clock.__setitem__(0, clock[0] + s)))
+    for k in ("groq::A", "nvidia::C"):
+        brain._EXHAUSTED[k] = clock[0] + 290
+    brain._EXHAUSTED[unrelated] = clock[0] + 3
+    seen = _route(monkeypatch, lambda p: ok("x"))
+    r = brain.Brain(use_local=False).complete([{"role": "user", "content": "hi"}])
+    assert seen == [] and _slept == []
+    assert "cooldown" in r.raw_text and "неизвестна грешка" not in r.raw_text
+
+
+def test_a_key_cooldown_ending_within_the_pause_gets_the_second_round(monkeypatch, _slept) -> None:
+    clock = [1_000_000.0]
+    monkeypatch.setattr(brain.time, "time", lambda: clock[0])
+    monkeypatch.setattr(brain.time, "sleep", lambda s: (_slept.append(s), clock.__setitem__(0, clock[0] + s)))
+    brain._EXHAUSTED["key::GROQ_API_KEY"] = clock[0] + 3
+    brain._EXHAUSTED["nvidia::C"] = clock[0] + 290
+    _route(monkeypatch, lambda p: ok("от " + p["model"]))
+    assert brain.Brain(use_local=False).complete([{"role": "user", "content": "hi"}]).raw_text == "от A"
+    assert _slept == [8]
+
+
+def test_a_short_key_cooldown_does_not_hide_a_long_model_cooldown(monkeypatch, _slept) -> None:
+    clock = [1_000_000.0]
+    monkeypatch.setattr(brain.time, "time", lambda: clock[0])
+    monkeypatch.setattr(brain.time, "sleep", lambda s: (_slept.append(s), clock.__setitem__(0, clock[0] + s)))
+    brain._EXHAUSTED["key::GROQ_API_KEY"] = clock[0] + 3
+    for k in ("groq::A", "nvidia::C"):
+        brain._EXHAUSTED[k] = clock[0] + 290
+    seen = _route(monkeypatch, lambda p: ok("x"))
+    r = brain.Brain(use_local=False).complete([{"role": "user", "content": "hi"}])
+    assert seen == [] and _slept == [] and "cooldown" in r.raw_text
+
+
 def test_the_light_route_walks_the_chain_once(monkeypatch, _slept) -> None:
     import requests
 
