@@ -50,7 +50,8 @@
 
 ```bash
 sudo apt install -y docker.io python3 python3-pip git caddy   # Caddy: виж caddyserver.com/docs/install
-git clone https://github.com/me7ko-dev/genesis-agent /opt/genesis && cd /opt/genesis
+# кодът е на root: уеб сървърът върви като root от тази папка (deploy.sh отказва чужда)
+sudo git clone https://github.com/me7ko-dev/genesis-agent /opt/genesis && cd /opt/genesis
 sudo mkdir -p /srv/genesis
 # ключовете остават в шлюза; GATEWAY_SECRET — поне 32 знака
 printf 'GATEWAY_SECRET=%s\nGROQ_API_KEY=...\nNVIDIA_API_KEY=...\n' "$(openssl rand -base64 48)" \
@@ -61,7 +62,8 @@ sudo python3 -m cloud.web.server add-user ivan@example.com   # бета: хор�
 ```
 
 `deploy.sh` е идемпотентен и спира на първата грешка: проверки (root, Docker,
-python3 ≥ 3.10 и pip, GATEWAY_SECRET, права на keys.env) → `git pull --ff-only`
+python3 ≥ 3.10 и pip, кодът само на root и без o+w, GATEWAY_SECRET, права на
+keys.env) → `git pull --ff-only`
 → `build.sh` (етикети `:latest` и `:<git sha>`) → `/etc/docker/daemon.json`, ако
 го няма → `up.sh` → systemd → Caddy → `cloud/check.py` → `https://<домейн>/healthz`.
 

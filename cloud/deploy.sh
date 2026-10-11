@@ -47,6 +47,13 @@ install_file() {  # шаблон цел
 
 step "проверки преди деплой"
 need test "$(id -u)" = 0 || fail "пусни като root (sudo): вика docker, systemctl и пише в /etc"
+# Ревю 2026-10-11: genesis-web и genesis-backup вървят като root с кода от тази
+# папка — файл, който друг потребител може да пише, е root за него. И git като
+# root отказва чужда папка („dubious ownership“, git ≥ 2.35.2): `git pull`
+# спираше деплоя на „код“, а build.sh слагаше :dev вместо :<sha>.
+BAD="$(find "$REPO" \( ! -user 0 -o \( -perm -0002 ! -type l \) \) -print -quit 2>/dev/null || true)"
+need test -z "$BAD" \
+  || fail "$BAD не е само на root — кодът трябва да е на root: sudo chown -R root:root $REPO && sudo chmod -R o-w $REPO"
 need "$DOCKER" info || fail "Docker не отговаря (apt install docker.io или docker-ce)"
 need "$PYTHON" -c 'import sys; assert sys.version_info >= (3, 10)' \
   || fail "нужен е python3 ≥ 3.10 и python3-pip (apt install python3 python3-pip)"

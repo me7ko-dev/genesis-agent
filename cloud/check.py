@@ -15,7 +15,8 @@
     capabilities, no_new_privs;
   - 1 GB памет при таван 256 MB → убито (137); 500 процеса при таван 64 → спира;
   - задача без ключ за модел → ok:false (не се таксува като успех), и след нея
-    не остава нито контейнер, нито мрежа;
+    не остава нито контейнер, нито мрежа от пуснатите тук (задачите на клиенти
+    на живия сървър не се броят и не се пипат);
   - свободно място за /srv/jobs; по желание — /healthz на уеб сървъра.
 
 Не вика истински модел: задачата е без ключове, а пробите пускат python -c.
@@ -101,10 +102,12 @@ def helper() -> tuple[str, str]:
 
 
 def _in_task_network(url: str, code: str, args: list[str], limits: launch.Limits,
-                     workspace: Path) -> tuple[int, str]:
-    """`python -c code args` в образа на задачите, с тавани и мрежа като задача."""
+                     workspace: Path, started: set[str]) -> tuple[int, str]:
+    """`python -c code args` в образа на задачите, с тавани и мрежа като задача.
+    Името на контейнера се добавя в `started` — за проверката „нищо не остава“."""
     suffix = uuid.uuid4().hex[:12]
     name, network = f"{launch.TASK_PREFIX}{suffix}", f"{launch.NETWORK_PREFIX}{suffix}"
+    started.add(name)
     host = launch.helper_container(url)
     error = launch.open_task_network(network, host)
     _ok(not error, "мрежа на задача", error)
@@ -118,6 +121,20 @@ def _in_task_network(url: str, code: str, args: list[str], limits: launch.Limits
         launch.close_task_network(network, name, host)
 
 
+def leftovers(started: set[str]) -> tuple[list[str], list[str]]:
+    """Кои от контейнерите в `started` (и мрежите им) още ги има.
+
+    Само своите: ревю 2026-10-11 — броеше се всеки genesis-task-* контейнер и
+    genesis-job-* мрежа на машината, а deploy.sh пуска проверката веднага след
+    рестарта на genesis-web; при жива задача на клиент деплоят излизаше
+    „неуспешен“. Мрежата на задача е NETWORK_PREFIX + същия суфикс."""
+    nets = {launch.NETWORK_PREFIX + c[len(launch.TASK_PREFIX):] for c in started}
+    ps = launch._docker("ps", "-a", "--format", "{{.Names}}",
+                        "--filter", f"name=^{launch.TASK_PREFIX}").stdout.split()
+    ls = launch._docker("network", "ls", "--format", "{{.Name}}").stdout.split()
+    return sorted(c for c in ps if c in started), sorted(n for n in ls if n in nets)
+
+
 def run_checks(jobs: Path, web: str | None, min_free_gb: float,
                say: Callable[[str], None] = print) -> None:
     r = launch._docker("info", "--format", "{{.ServerVersion}}")
@@ -129,10 +146,12 @@ def run_checks(jobs: Path, web: str | None, min_free_gb: float,
     say(f"✓ режим: {mode} ({launch.helper_container(url)} е Up)")
     host = launch.helper_container(url)
     port = str(int(url.rsplit(":", 1)[1].strip("/")))
+    started: set[str] = set()
     with tempfile.TemporaryDirectory(prefix="genesis-check-") as tmp:
         ws = Path(tmp) / "work"
         launch.prepare_workspace(ws)
-        code, out = _in_task_network(url, _PROBE, [mode, host, port], launch.Limits(seconds=60), ws)
+        code, out = _in_task_network(url, _PROBE, [mode, host, port], launch.Limits(seconds=60), ws,
+                                     started)
         try:
             got = json.loads(out.splitlines()[-1])
         except (ValueError, IndexError):
@@ -145,21 +164,22 @@ def run_checks(jobs: Path, web: str | None, min_free_gb: float,
         _ok(got["uid"] == launch.RUNNER_UID and got["cap_eff"] == 0 and got["no_new_privs"] == 1,
             "права в контейнера", json.dumps(got))
         say(f"✓ изолация: без изход, {host} → {expected}, read-only, uid {got['uid']}, без capabilities")
-        code, out = _in_task_network(url, _MEMORY, [], launch.Limits(memory="256m", seconds=60), ws)
+        code, out = _in_task_network(url, _MEMORY, [], launch.Limits(memory="256m", seconds=60), ws,
+                                     started)
         _ok(code == 137 and "alive" not in out, "таванът на паметта", f"код {code}")
-        code, out = _in_task_network(url, _PIDS, [], launch.Limits(pids=64, seconds=60), ws)
+        code, out = _in_task_network(url, _PIDS, [], launch.Limits(pids=64, seconds=60), ws,
+                                     started)
         _ok(code == 0 and out.isdigit() and int(out) < 64, "таванът на процесите", f"{code} {out}")
         say(f"✓ тавани: 1 GB при 256 MB → 137, процеси {out}/64")
         # Задача без ключове — като на клиент, но без да вика модел: в режим с
         # шлюз жетон няма, затова пак е „без ключ“.
         res = launch.run_task("кажи здравей", ws, limits=launch.Limits(seconds=120),
                               egress_url=url)
+        started.add(res.container)
         _ok(not res.ok and not res.timed_out, "задача без модел трябва да е ok:false",
             f"ok={res.ok} timed_out={res.timed_out} {res.error}")
         say(f"✓ задача без модел → ok:false ({res.error[:80]})")
-    left = launch._docker("ps", "-aq", "--filter", f"name=^{launch.TASK_PREFIX}").stdout.split()
-    nets = [n for n in launch._docker("network", "ls", "--format", "{{.Name}}").stdout.split()
-            if n.startswith(launch.NETWORK_PREFIX)]
+    left, nets = leftovers(started)
     _ok(not left and not nets, "след задачите остана нещо", f"контейнери {left}, мрежи {nets}")
     say("✓ не остава контейнер или мрежа")
     free = shutil.disk_usage(jobs if jobs.exists() else jobs.parent).free / 2 ** 30

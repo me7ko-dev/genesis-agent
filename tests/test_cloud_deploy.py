@@ -135,7 +135,8 @@ def test_shell_scripts_parse(script) -> None:
 
 # ── cloud/deploy.sh: сухо пускане ────────────────────────────────────────────
 
-def _dry(tmp_path: Path, keys: str | None) -> tuple[int, str, Path, list[list[str]]]:
+def _dry(tmp_path: Path, keys: str | None,
+         root: Path = ROOT) -> tuple[int, str, Path, list[list[str]]]:
     fake = tmp_path / "fake"
     fake.write_text(_FAKE.format(python=sys.executable), encoding="utf-8")
     fake.chmod(0o755)
@@ -149,7 +150,7 @@ def _dry(tmp_path: Path, keys: str | None) -> tuple[int, str, Path, list[list[st
     env = {**os.environ, "DEPLOY_DRY_RUN": "1", "DEPLOY_DRY_DIR": str(out), "DOCKER": str(fake),
            "PYTHON": str(fake), "SYSTEMCTL": str(fake), "FAKE_LOG": str(log),
            "GENESIS_KEYS": str(keys_path), "GENESIS_DOMAIN": "genesis.example.com"}
-    p = subprocess.run([str(BASH), str(ROOT / "cloud" / "deploy.sh")], capture_output=True,
+    p = subprocess.run([str(BASH), str(root / "cloud" / "deploy.sh")], capture_output=True,
                        check=False, text=True, encoding="utf-8", env=env, cwd=tmp_path, timeout=60)
     calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
     return p.returncode, p.stdout + p.stderr, out, calls
@@ -187,3 +188,52 @@ def test_the_web_unit_cleans_up_and_keeps_the_database_private() -> None:
     assert "cleanup_leftovers()" in unit.split("ExecStopPost=", 1)[1].splitlines()[0]
     assert "UMask=0077" in unit and "--trust-proxy" in unit and "cloudflare" not in unit
     assert "Requires=docker.service genesis-net.service" in unit
+
+
+# ── чий е кодът, от който вървят root услугите (ревю 2026-10-11) ─────────────
+
+def _copy_cloud(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    shutil.copytree(ROOT / "cloud", repo / "cloud",
+                    ignore=shutil.ignore_patterns("__pycache__", ".wheels"))
+    return repo
+
+
+def test_deploy_refuses_a_checkout_that_is_not_only_roots(tmp_path) -> None:
+    """genesis-web върви като root с код от папката: файл на друг потребител е
+    root за него. И git като root отказва чужда папка („dubious ownership“) —
+    `git pull` спираше деплоя на стъпка „код“ (измерено с git 2.43.0)."""
+    repo = _copy_cloud(tmp_path)
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        os.chown(repo / "cloud" / "web" / "server.py", 1000, 1000)
+    code, out, _, _ = _dry(tmp_path, SECRET, root=repo)
+    assert code == 0 and "[сухо] не минава: test -z" in out and str(repo) in out, out
+
+
+def test_deploy_refuses_world_writable_code(tmp_path) -> None:
+    repo = _copy_cloud(tmp_path)
+    (repo / "cloud" / "check.py").chmod(0o666)
+    _, out, _, _ = _dry(tmp_path, SECRET, root=repo)
+    assert "[сухо] не минава: test -z" in out, out
+
+
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() != 0, reason="иска root")
+def test_a_root_owned_checkout_passes(tmp_path) -> None:
+    code, out, _, _ = _dry(tmp_path, SECRET, root=_copy_cloud(tmp_path))
+    assert code == 0 and "test -z" not in out, out
+
+
+def test_build_says_when_the_tag_is_not_the_git_sha(tmp_path) -> None:
+    """Ревю 2026-10-11: при грешка от `git rev-parse` (чужда папка като root,
+    няма .git) build.sh тихо слагаше :dev — връщане назад по sha нямаше."""
+    repo = _copy_cloud(tmp_path)
+    fake = tmp_path / "fake"
+    fake.write_text(_FAKE.format(python=sys.executable), encoding="utf-8")
+    fake.chmod(0o755)
+    (tmp_path / "calls.log").write_text("", encoding="utf-8")
+    env = {**os.environ, "DOCKER": str(fake), "PYTHON": str(fake),
+           "FAKE_LOG": str(tmp_path / "calls.log"), "GIT_CEILING_DIRECTORIES": str(tmp_path)}
+    p = subprocess.run([str(BASH), str(repo / "cloud" / "build.sh")], capture_output=True,
+                       check=False, text=True, encoding="utf-8", env=env, timeout=60)
+    assert p.returncode == 0, p.stderr
+    assert "внимание" in p.stderr and ":dev" in p.stderr, p.stderr

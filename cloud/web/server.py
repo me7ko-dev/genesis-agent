@@ -36,7 +36,7 @@ import threading
 import time
 import zipfile
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
@@ -58,6 +58,8 @@ MAX_ZIP_BYTES = 200 * 1024 * 1024
 LOGIN_WINDOW = 15 * 60
 LOGIN_FAILURES = 5
 HIDDEN = ".genesis"          # историята на разговора (task.py) — не е за сваляне
+# През колко секунди shutdown() почиства отново, докато чака живите ходове.
+SHUTDOWN_POLL = 1.0
 
 Runner = Callable[..., launch.Result]
 
@@ -100,6 +102,7 @@ class App:
         self._downloading: set[str] = set()
         self._cleanup = cleanup or launch.cleanup_leftovers
         self._stopping = threading.Event()
+        self._futures: set[Future[None]] = set()
         if recover:
             self.recover()
 
@@ -119,7 +122,16 @@ class App:
         чакащите не тръгват. Без това контейнер оставаше Up без срок."""
         self._stopping.set()
         self.pool.shutdown(wait=False, cancel_futures=True)
-        self._cleanup()
+        # Почиства се отново, докато има живи ходове (ревю 2026-10-11): ход,
+        # минал проверката `_stopping` точно преди set(), пуска контейнера СЛЕД
+        # първото почистване — тогава shutdown чакаше задачата до края ѝ (до
+        # 600 s), контейнерът живееше, а ходът ставаше „ok“.
+        while True:
+            self._cleanup()
+            with self._lock:
+                running = set(self._futures)
+            if not running or not wait(running, timeout=SHUTDOWN_POLL).not_done:
+                break
         self.pool.shutdown(wait=True)
 
     # ── вход ────────────────────────────────────────────────────────────────
@@ -193,8 +205,15 @@ class App:
             if self.store.busy(user_id=user["id"]) or chat_id in self._downloading:
                 return None
             turn_id = self.store.add_turn(chat_id, text)
-        self.pool.submit(self._run, turn_id, text, self.workspace(user["id"], chat_id))
+        fut = self.pool.submit(self._run, turn_id, text, self.workspace(user["id"], chat_id))
+        with self._lock:
+            self._futures.add(fut)
+        fut.add_done_callback(self._forget)
         return turn_id
+
+    def _forget(self, fut: Future[None]) -> None:
+        with self._lock:
+            self._futures.discard(fut)
 
     def _run(self, turn_id: int, text: str, workspace: Path) -> None:
         if self._stopping.is_set():

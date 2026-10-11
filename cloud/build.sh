@@ -12,7 +12,12 @@ cd "$(dirname "$0")/.."
 PYTHON="${PYTHON:-python3}"
 DOCKER="${DOCKER:-docker}"
 PLATFORM="${PLATFORM:-manylinux2014_x86_64}"
-SHA="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
+# Ревю 2026-10-11: грешката на git се криеше и етикетът тихо ставаше :dev —
+# напр. root в чужда папка („dubious ownership“, git ≥ 2.35.2).
+if ! SHA="$(git rev-parse --short HEAD)"; then
+  echo "внимание: git rev-parse не мина — образите са само :latest и :dev (без връщане назад по sha)" >&2
+  SHA=dev
+fi
 rm -rf cloud/.wheels
 "$PYTHON" -m pip wheel --quiet --no-deps --wheel-dir cloud/.wheels .
 "$PYTHON" -m pip download --quiet --only-binary=:all: --dest cloud/.wheels \

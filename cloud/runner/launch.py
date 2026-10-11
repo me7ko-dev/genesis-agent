@@ -93,6 +93,9 @@ class Result:
     tokens: dict[str, int] = field(default_factory=dict)
     error: str = ""
     events: list[dict[str, Any]] = field(default_factory=list)
+    # Името на контейнера на задачата: cloud/check.py проверява, че махнатото е
+    # точно нейното, не и задачите на клиенти на живия сървър (ревю 2026-10-11).
+    container: str = ""
 
 # Най-дългият ред събитие от контейнера, който се чете (1 MiB).
 _MAX_EVENT_LINE = 1 << 20
@@ -279,13 +282,15 @@ def run_task(text: str, workspace: Path, *, limits: Limits | None = None,
     prepare_workspace(workspace)
     error = open_task_network(network, helper)
     if error:
-        return Result(False, False, -1, 0.0, error=error)
+        return Result(False, False, -1, 0.0, error=error, container=name)
     try:
-        return _run_in(network, name, text, workspace, limits=limits, on_event=on_event,
-                       env_file=env_file, runtime=runtime, image=image, gateway=gateway,
-                       egress_url=egress_url)
+        res = _run_in(network, name, text, workspace, limits=limits, on_event=on_event,
+                      env_file=env_file, runtime=runtime, image=image, gateway=gateway,
+                      egress_url=egress_url)
     finally:
         close_task_network(network, name, helper)
+    res.container = name
+    return res
 
 
 def _run_in(network: str, name: str, text: str, workspace: Path, *, limits: Limits,
