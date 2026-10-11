@@ -39,6 +39,19 @@ LOG_PATH = DATA_DIR / "budget_log.jsonl"
 # пътят ги слага като role="tool"; и двата трябва да минават през бюджета,
 # иначе половината фронтенди го заобикалят тихо.
 _TEXT_RESULT_PREFIX = "[Резултат]:"
+# Инструкцията, която терминалът добавя след текстовите резултати. Държи се тук,
+# за да може budget_history да я махне от СТАРИТЕ резултати (2026-10-11): 444
+# знака в края изяждаха опашката на middle-out свиването — от изхода на pytest
+# оставаха 286 знака срещу 728 при native, и всеки стар резултат я плащаше пак.
+# Нужна е само на последния рунд.
+TEXT_RESULT_FOLLOWUP = (
+    "\n\nАко тези резултати вече изпълняват заявката на потребителя "
+    "напълно — дай КРАТКО финално обобщение БЕЗ никакви нови tool тагове. "
+    "Викай нов tool САМО ако наистина има следваща реална стъпка. "
+    "ВАЖНО: ако някоя команда е отказана от оператора (SANDBOX DECLINED), "
+    "но ДРУГ резултат по-горе вече доказва, че целта е постигната (напр. "
+    "командата вече работи правилно) — не настоявай за отказаната команда, "
+    "просто отчети успех с наличните доказателства.")
 
 # Под този размер дедупликацията не си струва — препратката е по-дълга от
 # самото съдържание ("✓ записано", "OK", кратък git status).
@@ -92,6 +105,10 @@ def clip_for_context(text: str, limit: int | None = None) -> str:
         + _CLIP_NOTICE_TEMPLATE.format(cut=cut)
         + text[-tail:]
     )
+
+
+def _without_followup(content: str) -> str:
+    return content.removesuffix(TEXT_RESULT_FOLLOWUP)
 
 
 def _is_tool_result(msg: dict) -> bool:
@@ -289,10 +306,13 @@ def budget_history(messages, *, fresh: int | None = None,
         if i in duplicates:
             content = str(m.get("content", ""))
             kept = latest_of[content]
-            clipped = kept in stale and len(content) > stale_limit
+            clipped = kept in stale and len(_without_followup(content)) > stale_limit
             m = {**m, "content": _DEDUP_NOTICE_CLIPPED if clipped else _DEDUP_NOTICE}
         elif i in stale:
             content = str(m.get("content", ""))
+            if m.get("role") == "system" and content.endswith(TEXT_RESULT_FOLLOWUP):
+                content = _without_followup(content)
+                m = {**m, "content": content}
             if len(content) > stale_limit:
                 m = {**m, "content": clip_for_context(content, limit=stale_limit)}
         out.append(m)

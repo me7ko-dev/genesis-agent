@@ -102,7 +102,7 @@ except Exception:
 # installed package and the user's own home — nothing machine-specific here.
 from genesis_agent import claim_check
 from genesis_agent.acceptance import AcceptanceCheck as _AcceptanceCheck
-from genesis_agent.budget import clip_for_context
+from genesis_agent.budget import TEXT_RESULT_FOLLOWUP, clip_for_context
 from genesis_agent.code_check import RunCheck as _RunCheck
 from genesis_agent.config import TOOL_ROUND_CAP as _TOOL_ROUND_CAP
 from genesis_agent.page_check import FinalCheck as _PageCheck
@@ -1732,16 +1732,12 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                 ui.warn(f"Достигнат таван от {_TOOL_ROUND_CAP} инструмент-рунда "
                         "за това съобщение — спирам тук, продължи с ново съобщение.")
                 break
+            # Инструкцията живее в budget, за да я маха budget_history от
+            # старите резултати — пречеше на опашката им (2026-10-11).
             messages.append({"role": "system",
                               "content": "[Резултат]:\n" +
                               "\n\n".join(clip_for_context(r) for r in tool_results) +
-                              "\n\nАко тези резултати вече изпълняват заявката на потребителя "
-                              "напълно — дай КРАТКО финално обобщение БЕЗ никакви нови tool тагове. "
-                              "Викай нов tool САМО ако наистина има следваща реална стъпка. "
-                              "ВАЖНО: ако някоя команда е отказана от оператора (SANDBOX DECLINED), "
-                              "но ДРУГ резултат по-горе вече доказва, че целта е постигната (напр. "
-                              "командата вече работи правилно) — не настоявай за отказаната команда, "
-                              "просто отчети успех с наличните доказателства."})
+                              TEXT_RESULT_FOLLOWUP})
             with ui.thinking("Анализирам...", "aesthetic"):
                 response, tool_calls = ask_genesis(messages, tools=_turn_tools())
     except KeyboardInterrupt:

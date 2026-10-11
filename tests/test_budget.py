@@ -210,6 +210,31 @@ class TestBudgetHistory:
         assert len(out[1]["content"]) < 1100, "старият текстов резултат трябва да е свит"
         assert out[3]["content"] == msgs[3]["content"], "последният остава пълен"
 
+    def test_a_stale_text_result_keeps_its_end_not_the_instruction_suffix(self) -> None:
+        """2026-10-11: 444-знаковата инструкция в края на „[Резултат]:“ изяждаше
+        опашката на middle-out свиването — от реалния резултат оставаха 286
+        знака срещу 728 при native. Краят (traceback, обобщение) е решаващият."""
+        summary = ("=" * 20 + " short test summary info " + "=" * 20 + "\n"
+                   + "FAILED tests/test_x.py::test_y - AssertionError: 41 != 42\n" * 9
+                   + "1 failed, 99 passed in 3.21s")[-600:]
+        result = "[RUN_CMD: python -m pytest -q]\n" + "." * 9000 + "\n" + summary
+        msgs = [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "T"},
+            {"role": "assistant", "content": "[RUN_CMD: python -m pytest -q]"},
+            {"role": "system", "content": "[Резултат]:\n" + result + budget.TEXT_RESULT_FOLLOWUP},
+            {"role": "assistant", "content": "a"},
+            {"role": "system", "content": "[Резултат]:\nok" + budget.TEXT_RESULT_FOLLOWUP},
+            {"role": "assistant", "content": "b"},
+            {"role": "system", "content": "[Резултат]:\nok2" + budget.TEXT_RESULT_FOLLOWUP},
+        ]
+        out = budget.budget_history(msgs, fresh=2, stale_limit=2000)
+        stale = str(out[3]["content"])
+        assert stale.endswith(summary)
+        assert budget.TEXT_RESULT_FOLLOWUP.strip() not in stale
+        assert len(stale) <= 2100
+        assert str(out[-1]["content"]).endswith(budget.TEXT_RESULT_FOLLOWUP), "последният я пази"
+
     def test_a_short_history_is_returned_as_is(self) -> None:
         msgs = self._history(1, size=50)
         assert budget.budget_history(msgs) == msgs
