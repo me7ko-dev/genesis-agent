@@ -752,7 +752,12 @@ class Brain:
             already = {(c["provider"], c["model"]) for c in fast}
             self.chain = fast + [c for c in self.chain
                                  if (c["provider"], c["model"]) not in already]
-        self.quality = (quality or os.environ.get("GENESIS_QUALITY") or "").strip().lower()
+        # Леката работа не наследява GENESIS_QUALITY (2026-10-11): с `max` от
+        # средата резюмето между ходовете, паметта и графът на знанието тръгваха
+        # към claude-opus-5 при xhigh — платен размисъл за второстепенна работа.
+        # Изрично `quality=` пак важи.
+        env_quality = "" if light else os.environ.get("GENESIS_QUALITY")
+        self.quality = (quality or env_quality or "").strip().lower()
         self.premium: list[dict] = []
         self._premium_meta: dict[tuple[str, str], dict] = {}
 

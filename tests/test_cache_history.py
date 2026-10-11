@@ -119,3 +119,16 @@ def test_the_request_caches_the_tail_and_the_system_for_an_hour(monkeypatch) -> 
     brain.Brain()._call_anthropic("k", "claude-opus-5", _rounds(3), None, "high")
     assert sent["cache_control"] == {"type": "ephemeral"}
     assert sent["system"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+
+
+def test_light_work_does_not_take_the_paid_chain_from_the_environment(monkeypatch) -> None:
+    """Резюмето, паметта и графът на знанието (Brain(light=True)) не бива да
+    тръгват към claude-opus-5 само защото операторът е пуснал GENESIS_QUALITY=max."""
+    monkeypatch.setenv("GENESIS_QUALITY", "max")
+    monkeypatch.setattr(brain, "_load_premium_chain", lambda: [
+        {"provider": "anthropic", "model": "claude-opus-5", "size_b": 0,
+         "supports_tools": True, "premium": True, "effort": "xhigh"}])
+    monkeypatch.setattr(brain.Brain, "_provider_key", lambda self, env: "k")
+    assert brain.Brain(use_local=False).premium
+    assert not brain.Brain(light=True, use_local=False).premium
+    assert brain.Brain(light=True, use_local=False, quality="max").premium
