@@ -360,7 +360,7 @@ def test_files_are_listed_without_the_hidden_history(env) -> None:
     chat_id, _ = _chat_with_turn(cl)
     code, data = cl.json("GET", f"/api/chats/{chat_id}/files")
     assert code == 200 and data["files"] == [{"path": "out/result.csv", "size": 13}]
-    assert data["busy"] is False
+    assert data["busy"] is False and data["truncated"] is False
 
 
 def test_a_file_downloads_as_an_attachment(env) -> None:
@@ -440,6 +440,30 @@ def test_a_non_utf8_file_name_does_not_hide_every_file(env) -> None:
     assert code == 200
     with zipfile.ZipFile(io.BytesIO(body)) as z:
         assert z.namelist() == ["out/result.csv"]
+
+
+def test_a_long_file_list_says_it_is_cut_and_the_zip_has_everything(env, monkeypatch) -> None:
+    """Одит 2026-10-11: списъкът и zip-ът спираха мълчаливо на 1000 файла —
+    при 1500 в out/ result/report.pdf липсваше и от двете, без знак."""
+    app, _, client = env
+    cl = client()
+    cl.login()
+    chat_id, _ = _chat_with_turn(cl)
+    ws = app.workspace(1, chat_id)
+    for i in range(5):
+        (ws / "out" / f"f{i}.txt").write_text(str(i), encoding="utf-8")
+    (ws / "result").mkdir()
+    (ws / "result" / "report.pdf").write_bytes(b"%PDF")
+    monkeypatch.setattr(web, "MAX_FILES", 3)
+    code, data = cl.json("GET", f"/api/chats/{chat_id}/files")
+    assert code == 200 and len(data["files"]) == 3 and data["truncated"] is True
+    code, _, body = cl.req("GET", f"/api/chats/{chat_id}/files.zip")
+    assert code == 200
+    with zipfile.ZipFile(io.BytesIO(body)) as z:
+        assert "result/report.pdf" in z.namelist() and len(z.namelist()) == 7
+    # Над тавана на архива — ясен отказ, не непълен архив.
+    monkeypatch.setattr(web, "MAX_ZIP_FILES", 5)
+    assert cl.req("GET", f"/api/chats/{chat_id}/files.zip")[0] == 413
 
 
 def test_no_downloads_while_a_turn_is_running(env) -> None:

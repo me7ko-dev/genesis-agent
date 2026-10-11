@@ -159,7 +159,7 @@ async function poll(turnId, box, seq) {
 
 async function loadFiles() {
   if (!current) { $("files").hidden = true; return; }
-  const { files, busy } = await api(`/api/chats/${current}/files`);
+  const { files, busy, truncated } = await api(`/api/chats/${current}/files`);
   const ul = $("file-list");
   ul.replaceChildren();
   $("files").hidden = !files.length;
@@ -177,6 +177,8 @@ async function loadFiles() {
     li.append(el("span", "muted", ` · ${f.size < 1024 ? f.size + " B" : Math.round(f.size / 1024) + " KB"}`));
     ul.append(li);
   }
+  // Списъкът спира на 1000 — казва го, zip-ът носи всички (2026-10-11).
+  if (truncated) ul.append(el("li", "muted", `показани са първите ${files.length} — всички са в zip-а`));
 }
 
 $("ask").addEventListener("submit", async (ev) => {

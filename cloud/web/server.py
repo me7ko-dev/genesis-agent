@@ -50,6 +50,9 @@ COOKIE = "genesis_session"
 MAX_BODY = 64 * 1024
 MAX_TEXT = 4000
 MAX_FILES = 1000
+# Архивът „сваля всичко“ — не спира на MAX_FILES (одит 2026-10-11: при 1500
+# файла в out/ result/report.pdf липсваше без знак). Над този брой — 413.
+MAX_ZIP_FILES = 20000
 MAX_ZIP_BYTES = 200 * 1024 * 1024
 LOGIN_WINDOW = 15 * 60
 LOGIN_FAILURES = 5
@@ -185,7 +188,9 @@ class App:
 
 # ── файлове: кодът в контейнера е чужд, всичко от /work е недоверено ────────
 
-def list_files(workspace: Path) -> list[dict[str, Any]]:
+def list_files(workspace: Path, limit: int | None = None) -> list[dict[str, Any]]:
+    """До `limit` файла (MAX_FILES по подразбиране)."""
+    limit = MAX_FILES if limit is None else limit
     out: list[dict[str, Any]] = []
     if not workspace.is_dir():
         return out
@@ -206,7 +211,7 @@ def list_files(workspace: Path) -> list[dict[str, Any]]:
                 # гърмяха и не се виждаше нито един файл (одит 2026-10-11).
                 continue
             out.append({"path": rel, "size": st.st_size})
-            if len(out) >= MAX_FILES:
+            if len(out) >= limit:
                 return out
     return out
 
@@ -243,8 +248,8 @@ def read_file(path: Path) -> bytes:
 
 def zip_files(workspace: Path) -> bytes | None:
     """Всички файлове в един zip, или None ако са над тавана."""
-    files = list_files(workspace)
-    if sum(f["size"] for f in files) > MAX_ZIP_BYTES:
+    files = list_files(workspace, MAX_ZIP_FILES + 1)
+    if len(files) > MAX_ZIP_FILES or sum(f["size"] for f in files) > MAX_ZIP_BYTES:
         return None
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
@@ -413,7 +418,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         ws = self.app.workspace(user["id"], chat["id"])
         if m.re is _FILES:
-            self._json(200, {"files": list_files(ws), "busy": bool(store.busy(chat_id=chat["id"]))})
+            # Едно отгоре — за да се знае, че списъкът е отрязан (2026-10-11).
+            files = list_files(ws, MAX_FILES + 1)
+            self._json(200, {"files": files[:MAX_FILES], "truncated": len(files) > MAX_FILES,
+                             "busy": bool(store.busy(chat_id=chat["id"]))})
             return
         # Докато върви ход, кодът в контейнера може да подмени файл с връзка
         # между проверката и четенето. Затова се сваля само между ходовете —
@@ -425,7 +433,7 @@ class Handler(BaseHTTPRequestHandler):
             if m.re is _ZIP:
                 data = zip_files(ws)
                 if data is None:
-                    self._error(413, "файловете са твърде големи за един архив")
+                    self._error(413, "файловете са твърде много или твърде големи за един архив")
                     return
                 self._send(200, data, "application/octet-stream", {
                     "Content-Disposition": "attachment; filename*=UTF-8''genesis-files.zip"})
