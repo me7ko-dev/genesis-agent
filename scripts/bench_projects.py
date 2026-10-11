@@ -44,7 +44,9 @@ REPO = Path(__file__).resolve().parent.parent
 PROJECTS_DIR = REPO / "bench" / "projects"
 sys.path.insert(0, str(REPO))
 
-_DROPPED = re.compile(r"\[Brain\] ✗ (\S+) след [\d.]+s: (\S+?)[:\s]")
+# `[` също слага край на причината (2026-10-11): Brain пише `HTTP_429[retry=N]`
+# и всяко N иначе ставаше отделен ключ — 429-ите в отчета се разпиляваха.
+_DROPPED = re.compile(r"\[Brain\] ✗ (\S+) след [\d.]+s: (\S+?)[:\s\[]")
 _PYTEST_COUNT = re.compile(r"(\d+) (passed|failed|errors?)\b")
 # A chat stuck printing the same error fills the disk long before the timeout:
 # measured 2026-09-26, 1.2M lines in 5 minutes. A real run logs well under 1 MB.
