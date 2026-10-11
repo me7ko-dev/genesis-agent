@@ -77,6 +77,28 @@ def _api_token_bytes() -> re.Pattern[bytes]:
     return re.compile(API_TOKEN_RE.pattern.encode())
 
 
+# Образецът от notifier.py е за маскиране, където да хване повече не вреди;
+# тук хванатото изпада от архива. Преглед 2026-10-11: README с
+# `sk-your-api-key-here`, .env.example с `sk-your-key-here`, index.html и CSS
+# със SpinKit класове (`sk-fading-circle`, `sk-circle12`) и Firebase web
+# конфиг (`apiKey: "AIza…"`, публичен по замисъл) — всички задържани. Истински
+# ключ е случаен низ: има цифра, `sk-` ключът има и главна буква и поне 20
+# знака след `sk-`, и няма думи-образци.
+_PLACEHOLDER_WORDS = (b"your", b"here", b"example", b"xxxx", b"placeholder", b"dummy",
+                      b"changeme", b"replace", b"insert", b"redacted", b"fake")
+
+
+def _real_key(tok: bytes, data: bytes) -> bool:
+    low = tok.lower()
+    if any(w in low for w in _PLACEHOLDER_WORDS) or not re.search(rb"[0-9]", tok):
+        return False
+    if tok.startswith(b"sk-"):
+        return len(tok) >= 23 and re.search(rb"[A-Z]", tok) is not None
+    if tok.startswith(b"AIza"):
+        return b"firebaseapp.com" not in data and b"authDomain" not in data
+    return True
+
+
 def _secret_file(p: Path, rel: str) -> str | None:
     """None — файлът може да замине; иначе как да се впише в „извън архива“."""
     from genesis_agent import sandbox
@@ -95,7 +117,7 @@ def _secret_file(p: Path, rel: str) -> str | None:
     # `ghp_…` в settings.json, `AKIA…` в aws.cfg). Одит 2026-10-11: и трите
     # заминаваха към клиента — пазеше се само блок PRIVATE KEY. Казва се къде
     # е ключът (без самия него), за да го изнесе човекът в .env.
-    m = _api_token_bytes().search(data)
+    m = next((m for m in _api_token_bytes().finditer(data) if _real_key(m.group(0), data)), None)
     if m:
         line = data.count(b"\n", 0, m.start()) + 1
         return f"{rel} (съдържа ключ {m.group(0)[:4].decode('ascii', 'replace')}… на ред {line})"
@@ -139,8 +161,12 @@ def _git_kept(root: Path) -> tuple[set[str], tuple[str, ...]] | None:
         # $HOME с `*` в .gitignore): git не казва нищо за проекта — тогава
         # решава собственият му .gitignore, а не „всичко е игнорирано“.
         return None
-    return ({e for e in entries if not e.endswith("/")},
-            tuple(e for e in entries if e.endswith("/")))
+    # Вложено хранилище, което е комитнато (gitlink/submodule), git изрежда
+    # като `lib` — без `/`. Преглед 2026-10-11: то не влизаше в приетите
+    # папки и цялото изпадаше от архива като „игнорирано“.
+    whole = {e for e in entries if e.endswith("/") or (root / e).is_dir()}
+    return ({e for e in entries if e not in whole},
+            tuple(e if e.endswith("/") else e + "/" for e in whole))
 
 
 def _gitignore_rules(root: Path) -> list[tuple[str, bool, bool]]:
@@ -170,7 +196,13 @@ def _matches_gitignore(rules: list[tuple[str, bool, bool]], rel: str, is_dir: bo
     for pat, dir_only, anchored in rules:
         if dir_only and not is_dir:
             continue
-        if fnmatch.fnmatch(rel if anchored else name, pat):
+        # `**/` в git пасва и на нула папки (`**/*.log` хваща и `app.log` в
+        # корена, `a/**/b` — и `a/b`); fnmatch иска поне една `/`. Преглед
+        # 2026-10-11: логът в корена оставаше в архива без git.
+        pats = {pat, pat.replace("/**/", "/")}
+        if pat.startswith("**/"):
+            pats.add(pat[3:])
+        if any(fnmatch.fnmatch(rel if anchored else name, p) for p in pats):
             return True
     return False
 
