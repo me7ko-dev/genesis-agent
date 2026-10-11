@@ -166,6 +166,16 @@ def is_light_turn(messages: list[dict]) -> bool:
     for m in reversed(msgs[:-1][-6:]):
         if m.get("role") == "tool" or m.get("tool_calls"):
             return False
+        # Текстовият tool път също е работа с инструменти: резултатите идват
+        # като system „[Резултат]“, извикването — като таг в отговора. Измерено
+        # 2026-10-11: отговорът „JSON“ на текстов [ASK_USER: CSV или JSON?]
+        # отиваше на лекия модел без инструменти и report.py не се записваше;
+        # със същия въпрос като native tool_call задачата продължаваше.
+        content = str(m.get("content") or "")
+        if m.get("role") == "system" and content.startswith("[Резултат]"):
+            return False
+        if m.get("role") == "assistant" and _TOOL_TAG.search(content):
+            return False
         if m.get("role") == "user":
             break
     return is_light_request(str(msgs[-1].get("content") or ""))

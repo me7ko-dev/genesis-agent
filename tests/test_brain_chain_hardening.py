@@ -373,6 +373,45 @@ def _slept(monkeypatch) -> list:
     return slept
 
 
+# ── Вълна 2 (e2e 2026-10-11): отрязан на тавана и коя грешка вижда операторът ─
+
+def _cut_write(p) -> FakeResp:
+    cut = json.dumps({"path": "big.py", "content": "x = 1\n" * 50})[:120]
+    tc = [{"id": "c1", "type": "function", "function": {"name": "WRITE_FILE", "arguments": cut}}]
+    return ok(None, tool_calls=tc, finish="length",
+              usage={"prompt_tokens": 900, "completion_tokens": 4096})
+
+
+@pytest.fixture
+def _groq_only(monkeypatch) -> list:
+    """Само groq има ключ — стартовият модел по подразбиране; nvidia след него
+    е „skip: no NVIDIA_API_KEY configured“."""
+    monkeypatch.setattr(brain, "_load_chain", lambda: chain(("groq", "A"), ("nvidia", "C")))
+    monkeypatch.setenv("GROQ_API_KEY", "g")
+    slept: list = []
+    monkeypatch.setattr(brain.time, "sleep", slept.append)
+    return slept
+
+
+def test_the_chain_error_names_the_real_failure_not_a_later_skip(monkeypatch, _groq_only) -> None:
+    seen = _route(monkeypatch, lambda p: FakeResp(400, {"error": {"message": "bad request x"}}))
+    r = brain.Brain(use_local=False).complete([{"role": "user", "content": "hi"}])
+    assert [m for m, _ in seen] == ["A", "A"]
+    assert r.raw_text.startswith("Error: цялата верига е изчерпана | последна: HTTP_400")
+
+
+def test_a_cut_reply_does_not_mark_the_provider_unhealthy(monkeypatch, _slept) -> None:
+    calls: list = []
+    monkeypatch.setattr("genesis_agent.provider_stats.record_call",
+                        lambda prov, lat, success: calls.append((prov, success)))
+    rows = _usage_rows(monkeypatch)
+    _route(monkeypatch, lambda p: _cut_write(p) if p["model"] == "A" else ok("от C"))
+    r = brain.Brain(use_local=False).complete([{"role": "user", "content": "x"}], tools=_TOOLS)
+    assert r.raw_text == "от C"
+    assert calls == [("nvidia", True)]
+    assert rows[0] == ("A", 4096)          # отрязаният пак е платен
+
+
 def test_a_round_with_every_model_cooling_down_does_not_pause(monkeypatch, _slept) -> None:
     for k in ("groq::A", "nvidia::C"):
         brain._EXHAUSTED[k] = time.time() + 290

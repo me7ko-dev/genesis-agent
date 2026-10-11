@@ -40,9 +40,14 @@ def _home() -> Path:
 
 # Имената, които чатът обработва преди тези команди — файл с такова име
 # никога не би тръгнал, затова не се и показва (одит 2026-10-08).
+# И кирилските им имена (e2e 2026-10-11): /commands показваше `задачи.md`,
+# `предай.md`, `макскод.md`…, а написани те пускаха вградената команда —
+# /предай правеше zip, /макскод включваше кодинг режима.
 RESERVED = {"help", "clear", "model", "models", "agent", "backup", "status", "history",
             "export", "update", "skills", "tasks", "done", "drop", "state", "maxcoding",
-            "local_model_max", "local_model_normal", "exit", "quit"}
+            "local_model_max", "local_model_normal", "exit", "quit",
+            "задачи", "умения", "предай", "ъпдейт", "макскод", "готово",
+            "локален_макс", "локален_нормал"}
 
 
 def command_dirs(workspace: Path) -> list[Path]:
