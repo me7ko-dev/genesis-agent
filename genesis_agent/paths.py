@@ -53,6 +53,12 @@ ENV_FILES: tuple[str, ...] = (
     str(PROJECT_ROOT / ".env"),
     str(ENV_FILE),
 )
+# GENESIS_NO_PROJECT_ENV=1 — само GENESIS_HOME/.env. За подпроцеси под тест
+# (tests/test_bench_e2e.py), които не бива да виждат ключовете в .env на
+# checkout-а: ревю 2026-10-11 — с OPENROUTER_API_KEY там чатът под тест
+# пробваше openrouter модели и пращаше истинския ключ към фалшивия шлюз.
+if os.environ.get("GENESIS_NO_PROJECT_ENV") == "1":
+    ENV_FILES = (str(ENV_FILE),)
 
 
 def ensure_utf8_streams() -> None:

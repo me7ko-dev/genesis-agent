@@ -42,6 +42,7 @@ def _env(tmp_path: Path, url: str) -> dict[str, str]:
                GENESIS_HOME=str(tmp_path / "genesis_home"),
                GENESIS_DATA_DIR=str(tmp_path / "data"),
                GENESIS_LOCAL_MODEL="",                       # без проба на локален модел
+               GENESIS_NO_PROJECT_ENV="1",                   # без ключовете от .env на checkout-а
                XDG_DATA_HOME=str(tmp_path / "xdg"),
                PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
     return env
@@ -188,6 +189,20 @@ def test_bench_all_dry_run_plans_against_the_baseline_and_runs_nothing(tmp_path)
     assert "GENESIS_ACCEPTANCE=1" in proc.stdout and "bench_fix.py" in proc.stdout
     assert not out.exists()
     assert not (tmp_path / "data" / "budget_log.jsonl").exists()
+
+
+def test_the_chat_under_test_reads_no_project_env(tmp_path):
+    # .env на checkout-а е документираното място за ключове на лаптопа: с него
+    # истинските OPENROUTER/HF/NVIDIA ключове влизаха в чата под тест и
+    # веригата ставаше друга (ревю 2026-10-11 — с .env с OPENROUTER_API_KEY
+    # чатът пробваше openrouter модели срещу шлюза). Тук се проверява самият
+    # подпроцес — без да се пише в .env на checkout-а.
+    probe = "import genesis_agent.paths as p, json; print(json.dumps(list(p.ENV_FILES)))"
+    proc = _run(["-c", probe], _env(tmp_path, "http://127.0.0.1:9"), ROOT, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    files = [Path(f) for f in json.loads(proc.stdout.strip().splitlines()[-1])]
+    assert ROOT / ".env" not in files
+    assert files == [tmp_path / "genesis_home" / ".env"]
 
 
 @pytest.mark.parametrize("name", sorted(p.parent.name for p in PROJECTS.glob("*/reference")))
