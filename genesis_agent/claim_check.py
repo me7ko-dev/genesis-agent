@@ -39,6 +39,10 @@ class Claim:
     needed: str
 
 
+_TEST_WORDS = frozenset({"pytest", "test", "tests", "unittest", "tox", "nose", "make",
+                         "npm", "cargo", "go", "python", "python3"})
+_PASS_KIND = "минаващи тестове"
+
 # Всяка категория: (какво твърди) → (кои инструменти биха го доказали,
 # кои командни думи биха го доказали при RUN_CMD).
 _CATEGORIES: tuple[tuple[str, re.Pattern[str], frozenset[str], frozenset[str]], ...] = (
@@ -75,13 +79,22 @@ _CATEGORIES: tuple[tuple[str, re.Pattern[str], frozenset[str], frozenset[str]], 
         re.compile(
             # Само свършено (2026-10-07): „дали тестовете минават“ и „make sure
             # the tests pass“ са съвет към оператора, не твърдение.
-            r"\b(пуснах тестовете|тестовете (?:вече |сега )?(?:минаха|минават успешно)|"
+            r"\b(пуснах тестовете|i(?:'ve| have) run the tests)\b", re.IGNORECASE),
+        frozenset({"RUN_CMD", "USE_SKILL", "DELEGATE"}),
+        _TEST_WORDS,
+    ),
+    (
+        # Отделно от „пуснах“ (2026-10-11): „всички тестове минаха“ иска
+        # ПОСЛЕДНОТО пускане на тестовете да е с rc=0. Измерено: pytest с rc=1
+        # („1 failed, 1 passed“) минаваше като доказателство за „всички минаха“.
+        _PASS_KIND,
+        re.compile(
+            r"\b(тестовете (?:вече |сега )?(?:минаха|минават успешно)|"
             r"тестовете вече минават|всички тестове (?:минаха|минават)|"
-            r"i(?:'ve| have) run the tests|tests? (?:now pass(?:es)?|passed)|all (?:the )?tests pass)\b",
+            r"tests? (?:now pass(?:es)?|passed)|all (?:the )?tests pass)\b",
             re.IGNORECASE),
         frozenset({"RUN_CMD", "USE_SKILL", "DELEGATE"}),
-        frozenset({"pytest", "test", "tests", "unittest", "tox", "nose", "make",
-                   "npm", "cargo", "go", "python", "python3"}),
+        _TEST_WORDS,
     ),
     (
         # Измерено 2026-09-28: задача за уеб сайт, моделът само чете файловете
@@ -156,20 +169,43 @@ _TOOL_REFUSED_RE = re.compile(r"^\[[A-Z_]+(?::[^\n]*?)?\]\s*(?:❌|Грешка)
 _TEST_CMD_RE = re.compile(r"\b(pytest|unittest|tox|nose2?|test|tests|jest|vitest|mocha)\b", re.IGNORECASE)
 
 
+_RC_RE = re.compile(r"\(rc=(-?\d+)\)")
+# Белег в края на аргументите на тестово пускане с rc≠0 — по него „всички
+# тестове минаха“ разбира, че последното пускане е паднало.
+_FAILED_RC_RE = re.compile(r" \(rc=(-?\d+)\)$")
+
+
 def counts_as_executed(name: str, args: str, result: str) -> tuple[str, str] | None:
     """Записът за `executed`, или None, ако резултатът не доказва изпълнение."""
     result = result or ""
     if _TOOL_REFUSED_RE.match(result.lstrip()):
         return None
+    first = result.split("\n", 1)[0]
+    rc_match = _RC_RE.search(first) if name == "RUN_CMD" else None
+    rc = int(rc_match.group(1)) if rc_match else 0
     # Пуснат тест, който пада, пак е пуснат тест: `(rc=1)` и Traceback в
     # изхода значат, че командата е тръгнала. Без това вярното „Пуснах
-    # тестовете: test_div пада“ се връщаше като неподкрепено.
-    first = result.split("\n", 1)[0]
-    if name == "RUN_CMD" and "(rc=" in first and _TEST_CMD_RE.search(args or ""):
-        return (name, args)
+    # тестовете: test_div пада“ се връщаше като неподкрепено. Падналото
+    # пускане носи rc-то си — „всички тестове минаха“ не се доказва с него.
+    if rc_match and _TEST_CMD_RE.search(args or ""):
+        return (name, f"{args} (rc={rc})" if rc else args)
+    # Всяка друга команда с rc≠0 не е свършила това, за което е пусната
+    # (bug fix, 2026-10-11). Измерено: `pip install` с rc=1 доказваше
+    # „Инсталирах пакета“, а `mv` с „cannot stat“ — „Преместих снимките“.
+    if rc:
+        return None
     if any(marker in result for marker in _FAILURE_MARKERS):
         return None
     return (name, args)
+
+
+def _last_test_rc(executed: list[tuple[str, str]]) -> int:
+    """rc на последното тестово пускане в `executed` (0 при липса на белег)."""
+    for name, args in reversed(executed):
+        if name.upper() == "RUN_CMD" and _TEST_CMD_RE.search(args or ""):
+            mark = _FAILED_RC_RE.search(args)
+            return int(mark.group(1)) if mark else 0
+    return 0
 
 
 def executed_from_text_results(results: list[str]) -> list[tuple[str, str]]:
@@ -210,6 +246,12 @@ def unsupported_claims(text: str, executed: list[tuple[str, str]]) -> list[Claim
         if not match:
             continue
         if _supported(tool_names, command_text, ok_tools, ok_words):
+            last_rc = _last_test_rc(executed) if kind == _PASS_KIND else 0
+            if not last_rc:
+                continue
+            found.append(Claim(kind=kind, quote=_quote(text, match),
+                               needed=f"тестово пускане с rc=0 (последното пускане на "
+                                      f"тестовете е с rc={last_rc})"))
             continue
         needed = " / ".join(sorted(ok_tools - {"USE_SKILL", "DELEGATE"}))
         found.append(Claim(kind=kind, quote=_quote(text, match), needed=needed))

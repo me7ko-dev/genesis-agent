@@ -1537,6 +1537,14 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
             response, tool_calls = ask_genesis(messages, tools=_turn_tools())
 
         while True:
+            if not tool_calls and str(response or "").lstrip().startswith("[Грешка"):
+                # Грешка на веригата не е отговор на модела (bug fix, 2026-10-11).
+                # Измерено: след „[Грешка: цялата верига е изчерпана…]“ code_check
+                # пращаше подкана (още едно обръщение към изчерпаната верига), а
+                # грешката влизаше в историята като реплика на модела. Сега —
+                # само към оператора, без подкани, ходът спира тук.
+                ui.warn(response)
+                break
             ui.assistant(response)
             assistant_msg = {"role": "assistant", "content": response}
             if tool_calls:
@@ -1575,6 +1583,17 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                         # получава „Невалидни аргументи“ и пише пак (одит 2026-10-09).
                         args = {}
                         call_args = raw_args if isinstance(raw_args, str) else json.dumps(raw_args)
+                    if asked:
+                        # След ASK_USER нищо от същия рунд не тръгва, преди
+                        # операторът да отговори (bug fix, 2026-10-11). Измерено:
+                        # [ASK_USER „Да сменя ли цената на 0?“, EDIT_FILE] сменяше
+                        # цената, докато въпросът още висеше. Резултат-заместител
+                        # пази двойката извикване/резултат цяла.
+                        _held = f"[{name}] не е изпълнено — чака отговора на оператора."
+                        ui.tool(name, _held)
+                        messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
+                                         "name": name, "content": _held})
+                        continue
                     result = (_prefetched[_tc_i] if _tc_i in _prefetched
                               else genesis_skills.dispatch_tool_call(name, call_args))
                     _page_check.observe(result)
@@ -1659,13 +1678,20 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                         with ui.thinking("Оправям според браузъра…", "aesthetic"):
                             response, tool_calls = ask_genesis(messages, tools=_turn_tools())
                         continue
-                if _run_check.due():
+                # В режим план планът от бъдещи стъпки („Ще създам…“) Е отговорът
+                # (bug fix, 2026-10-11): подканата за „неизпълнено обещание“ караше
+                # модела да изпълнява плана, записът се отказваше и `genesis -p
+                # --plan` печаташе отказа вместо плана. Кодът и приемните тестове
+                # нямат какво да проверят — нищо не е записано.
+                from genesis_agent import plan_mode
+                _planning = plan_mode.active()
+                if _run_check.due() and not _planning:
                     ui.warn("Написа код — казвам му да го пробва и извън примерите.")
                     messages.append({"role": "system", "content": _run_check.note()})
                     with ui.thinking("Пробвам кода…", "aesthetic"):
                         response, tool_calls = ask_genesis(messages, tools=_turn_tools())
                     continue
-                if _accept.due():
+                if _accept.due() and not _planning:
                     with ui.thinking("Приемни тестове само от заявката…", "dots2"):
                         _acc_note, _acc_line = _accept.check()
                     if _acc_line:
@@ -1675,7 +1701,7 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                         with ui.thinking("Сверявам със заявката…", "aesthetic"):
                             response, tool_calls = ask_genesis(messages, tools=_turn_tools())
                         continue
-                _promise = claim_check.unfinished_promise(response)
+                _promise = "" if _planning else claim_check.unfinished_promise(response)
                 if _promise and _promise_retries < 1:
                     _promise_retries += 1
                     ui.warn("Обещава работа и спира — казвам му да я направи.")
@@ -1776,8 +1802,24 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
             pass
     from genesis_agent.agent_core import bounded_history
     if _failure is not None:
+        # Грешката продължава нагоре (headless и телефонът я показват), но
+        # носи историята със свършеното (bug fix, 2026-10-11). Измерено:
+        # WRITE_FILE made.py, после ReadTimeout → main() и телефонът пазеха
+        # СТАРАТА история (само системния промпт), моделът забравяше made.py,
+        # а следващият ход презаписваше файла на сесията без него.
+        try:
+            _failure.genesis_messages = bounded_history(messages, limit)  # type: ignore[attr-defined]
+        except Exception:
+            pass
         raise _failure
     return bounded_history(messages, limit)
+
+
+def history_after_error(error: BaseException, messages: "deque") -> "deque":
+    """Историята, с която чатът продължава след грешка в run_turn: тази със
+    свършеното в хода, ако грешката я носи, иначе досегашната."""
+    kept = getattr(error, "genesis_messages", None)
+    return kept if kept is not None else messages
 
 
 def _unique_call_ids(tool_calls: list, round_i: int) -> None:
@@ -2293,6 +2335,7 @@ def main():
             # forever, since the next read hit EOF again immediately.
             break
         except Exception as e:
+            messages = history_after_error(e, messages)
             console.print(f"[red]⚠ {e}[/]")
 
     try:

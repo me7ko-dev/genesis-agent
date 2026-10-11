@@ -17,6 +17,8 @@ _RUN = re.compile(r"^\[RUN_CMD: ", re.MULTILINE)
 # A command word, not ".py" at the end of a file name.
 _PYTHON_CMD = re.compile(r"""(?:^|[\s"'/\\&|;(])(?:python(?:\d+(?:\.\d+)?)?|py|pytest)(?:\.exe)?(?=[\s"']|$)""",
                          re.IGNORECASE | re.MULTILINE)
+# Python команда, която не пуска кода: инсталация или проверка на версията.
+_NOT_A_RUN = re.compile(r"(?:^|\s)(?:-m\s+)?pip3?(?:\s|$)|--version\b|(?:^|\s)-V(?:\s|$)")
 _CASES = ("по един случай за всяко правило или ограничение в условието, различен от примерите "
           "в заявката: по-сложен вход, граничните стойности и вход, който трябва да бъде "
           "отхвърлен")
@@ -38,8 +40,16 @@ class RunCheck:
             if path.suffix.lower() == ".py":
                 self._written[path.name] = path
                 self._unrun.add(path.name)
-        command = result.split("]  (rc=", 1)[0].removeprefix("[RUN_CMD: ")
-        if self._unrun and _RUN.match(result) and _PYTHON_CMD.search(command):
+        # Пуснат = командата е тръгнала (заглавието завършва с „(rc=“;
+        # отказаната от sandbox-а няма rc) и наистина пуска код (bug fix,
+        # 2026-10-11). Измерено: `python -m pip install requests` и
+        # `[SANDBOX DECLINED]` за `python solution.py` махаха „записан, но НЕ
+        # пуснат“ и моделът получаваше само по-меката бележка.
+        head = result.split("]  (rc=", 1)
+        command = head[0].removeprefix("[RUN_CMD: ")
+        started = len(head) == 2 and "\n[SANDBOX" not in head[0]
+        if (self._unrun and _RUN.match(result) and started
+                and _PYTHON_CMD.search(command) and not _NOT_A_RUN.search(command)):
             self._unrun.clear()
 
     def due(self) -> bool:

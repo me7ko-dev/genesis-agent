@@ -861,7 +861,12 @@ def serve(args: list[str]) -> int:
                                          context=gta.context_info)
         state["messages"] = messages
         if prompt is not None:
-            state["messages"] = gta.run_turn(state["messages"], prompt, ui)
+            try:
+                state["messages"] = gta.run_turn(state["messages"], prompt, ui)
+            except Exception as e:
+                # Свършеното до грешката остава в разговора (одит 2026-10-11).
+                state["messages"] = gta.history_after_error(e, state["messages"])
+                raise
 
     def clear() -> None:
         # Както /clear в терминала: нов файл за историята (иначе следващият
