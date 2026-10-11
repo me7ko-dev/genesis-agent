@@ -62,6 +62,7 @@ FULL_TOOLS: list[dict] = [
                 "properties": {
                     "path": {"type": "string"},
                     "content": {"type": "string"},
+                    "exact": {"type": "boolean", "description": "true: as given (CRLF→LF, no BOM)"},
                 },
                 "required": ["path", "content"],
             },

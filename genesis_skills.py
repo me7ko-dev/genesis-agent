@@ -523,7 +523,7 @@ def _read_range(fh, path: Path, encoding: str, offset_i: int | None,
 _STYLE_PROBE = 2_000_000
 
 
-def _tool_write_file(arg: str, content: str) -> str:
+def _tool_write_file(arg: str, content: str, exact: bool = False) -> str:
     path, redirect = _resolve_noted(arg, redirect=False)
     if not arg.strip() or path.is_dir():
         # Иначе write_text върху папка → „Permission denied“, а моделът го
@@ -568,6 +568,7 @@ def _tool_write_file(arg: str, content: str) -> str:
     # Съществуващ файл се записва в СВОЕТО кодиране (одит 2026-10-11): cp1251
     # файл, минал през READ→WRITE, излизаше с U+FFFD на мястото на всяка буква.
     encoding = "utf-8"
+    kept: list[str] = []
     if path.is_file():
         try:
             with open(path, "rb") as fh:
@@ -582,12 +583,19 @@ def _tool_write_file(arg: str, content: str) -> str:
         # READ_FILE показва LF, моделът пише LF, и CRLF .bat излизаше изцяло с
         # LF и без BOM — дифф на всеки ред и счупени GOTO етикети. Чист CRLF
         # файл остава CRLF; смесеният получава LF, както EDIT_FILE го прави.
-        crlf = original.count("\r\n")
-        if crlf and crlf == original.count("\n"):
-            content = content.replace("\r\n", "\n").replace("\n", "\r\n")
-        if original.startswith("\ufeff") and not content.startswith("\ufeff"):
-            content = "\ufeff" + content
-    enc_note = ""
+        # Ревю 2026-10-11: така „обърни run.sh в LF“ / „махни BOM-а“ не ставаше
+        # с никой файлов инструмент, а WRITE_FILE отчиташе ✓ с файла непроменен.
+        # `exact` пише точно даденото, а запазеното се казва в резултата.
+        if not exact:
+            crlf = original.count("\r\n")
+            if crlf and crlf == original.count("\n") and content.replace("\r\n", "").count("\n"):
+                content = content.replace("\r\n", "\n").replace("\n", "\r\n")
+                kept.append("CRLF краищата")
+            if original.startswith("\ufeff") and not content.startswith("\ufeff"):
+                content = "\ufeff" + content
+                kept.append("BOM-ът")
+    enc_note = (f" (запазени {' и '.join(kept)} на файла; exact=true пише точно "
+                "даденото — напр. за LF или без BOM)") if kept else ""
     try:
         data = encode_text(content, encoding)
     except UnicodeEncodeError as e:
@@ -604,7 +612,7 @@ def _tool_write_file(arg: str, content: str) -> str:
             return (f"[WRITE_FILE: {path}] ❌ Знакът {content[e2.start:e2.end]!r} не е "
                     "текст в никое кодиране (половин емоджи?) — махни го или го замени. "
                     "ФАЙЛЪТ НЕ Е ПРОМЕНЕН.")
-        enc_note = (f" (файлът беше {encoding}, а {content[e.start:e.end]!r} няма място "
+        enc_note += (f" (файлът беше {encoding}, а {content[e.start:e.end]!r} няма място "
                     "в него — записан е като UTF-8)")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1646,7 +1654,9 @@ def _dispatch(name: str, arguments: dict) -> str:
             return _tool_read_file(arguments.get("path", ""),
                                    arguments.get("offset"), arguments.get("limit"))
         if name == "WRITE_FILE":
-            return _tool_write_file(arguments.get("path", ""), arguments.get("content", ""))
+            return _tool_write_file(arguments.get("path", ""), arguments.get("content", ""),
+                                    str(arguments.get("exact", "")).strip().lower()
+                                    in ("true", "1", "yes"))
         if name == "EDIT_FILE":
             return _tool_edit_file(arguments.get("path", ""),
                                    arguments.get("old", ""),
