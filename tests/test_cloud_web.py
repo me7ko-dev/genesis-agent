@@ -684,3 +684,40 @@ def test_shutdown_stops_running_tasks_and_says_why(tmp_path) -> None:
     app.shutdown()
     t = store.turn(uid, turn)
     assert t is not None and t["status"] == "failed" and "сървърът спря" in t["error"]
+
+
+def test_shutdown_kills_a_container_that_started_after_the_first_cleanup(tmp_path) -> None:
+    """Ревю 2026-10-11: ход минава проверката `_stopping` точно преди
+    shutdown() да я вдигне и пуска контейнера СЛЕД почистването. Измерено:
+    shutdown чакаше, докато задачата свърши сама (до limits.seconds, 600 s),
+    контейнерът оставаше жив, а ходът ставаше „ok“."""
+    store = Store(tmp_path / "db")
+    uid = store.add_user("a@b.c", PASSWORD)
+    chat = store.new_chat(uid, "t")
+    entered = threading.Event()
+    killed = threading.Event()
+    containers: set[str] = set()
+
+    def runner(text: str, workspace: Path, **kw: Any) -> launch.Result:
+        entered.set()
+        time.sleep(0.3)                     # docker run тръгва след почистването
+        containers.add("genesis-task-x")
+        if killed.wait(10):
+            return launch.Result(False, False, 137, 0.3, error="Killed")
+        return launch.Result(True, False, 0, 10.0)
+
+    def cleanup() -> int:
+        n = len(containers)
+        if n:
+            containers.clear()
+            killed.set()
+        return n
+
+    app = web.App(store, tmp_path / "jobs", runner=runner, recover=False, cleanup=cleanup)
+    turn = app.start_turn({"id": uid}, chat, "дълга задача")
+    assert turn is not None and entered.wait(5)
+    t0 = time.monotonic()
+    app.shutdown()
+    assert time.monotonic() - t0 < 5 and not containers
+    t = store.turn(uid, turn)
+    assert t is not None and t["status"] == "failed" and "сървърът спря" in t["error"]
