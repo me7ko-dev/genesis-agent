@@ -184,13 +184,48 @@ def test_a_free_provider_on_the_list_gets_the_append_only_history_with_its_lower
     assert sum(len(str(m.get("content") or "")) for m in cached) <= 25_000 + 7000
     assert len(next(m for m in got["groq"] if m.get("role") == "tool")["content"]) < 6000
 
-
-
 def test_ollama_cloud_is_cached_by_default_and_the_list_can_be_emptied() -> None:
     import os
 
     from genesis_agent import config
     if "GENESIS_CACHE_PROVIDERS" not in os.environ:
-        assert config.CACHE_PROVIDERS == frozenset({"ollama_cloud"})
+        assert config.CACHE_PROVIDERS == frozenset({"ollama_cloud", "nvidia"})
     assert config._names(" ") == frozenset()
     assert config._names("groq, ollama_cloud,") == frozenset({"groq", "ollama_cloud"})
+
+
+def test_one_model_of_a_provider_can_be_on_the_list(monkeypatch) -> None:
+    """„groq::openai/gpt-oss-120b“ — само този модел, не целият доставчик."""
+    from genesis_agent import config
+    got: dict = {}
+
+    def fake_call(self, provider, model, messages, tools=None):
+        got[model] = messages
+        return "готово", None
+
+    monkeypatch.setattr(brain.Brain, "_call", fake_call)
+    monkeypatch.setattr(brain, "_local_available", lambda m: False)
+    monkeypatch.setattr("genesis_agent.provider_stats.deprioritize_flaky", lambda c: c)
+    monkeypatch.setattr(brain, "_EXHAUSTED", {})
+    monkeypatch.setattr(config, "CACHE_PROVIDERS", frozenset({"groq::big"}))
+    tools = [{"type": "function", "function": {"name": "RUN_CMD", "description": "d",
+                                               "parameters": {"type": "object", "properties": {}}}}]
+    for model in ("big", "small"):
+        monkeypatch.setattr(brain, "_load_chain", lambda m=model: [
+            {"provider": "groq", "model": m, "size_b": 120, "supports_tools": True}])
+        brain.Brain(use_local=False).complete(_rounds(6, size=6000), tools=tools)
+    assert len(next(m for m in got["big"] if m.get("role") == "tool")["content"]) > 6000
+    assert len(next(m for m in got["small"] if m.get("role") == "tool")["content"]) < 6000
+
+
+@pytest.mark.parametrize("usage,want", [
+    ({"prompt_tokens": 8343, "prompt_tokens_details": {"cached_tokens": 6864}}, 6864),   # NVIDIA, Ollama
+    ({"prompt_tokens": 900, "prompt_cache_hit_tokens": 640, "prompt_cache_miss_tokens": 260}, 640),  # DeepSeek
+])
+def test_the_cache_hit_is_read_from_each_providers_field(usage, want) -> None:
+    assert brain._openai_usage(usage)["cached_read_tokens"] == want
+
+
+def test_a_reply_without_a_cache_field_stays_as_it_is() -> None:
+    usage = {"prompt_tokens": 2720, "completion_tokens": 32}   # безплатният Groq
+    assert brain._openai_usage(usage) == usage

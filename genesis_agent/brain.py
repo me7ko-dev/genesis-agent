@@ -251,12 +251,15 @@ def _openai_usage(usage: Any) -> Any:
     `prompt_tokens_details.cached_tokens` (измерено 2026-09-25: 4 064 от 4 089
     на второто обръщение със същия системен промпт). Досега полето не се
     четеше и `genesis budget` показваше кеш 0 при всички освен Anthropic.
-    Groq (gpt-oss) и NVIDIA не го връщат — тогава usage остава както е.
+    NVIDIA nemotron-3-super го връща също (2026-10-11: 6 864 от 8 343), ultra —
+    понякога; безплатният Groq — не. DeepSeek брои в `prompt_cache_hit_tokens`.
+    Без поле usage остава както е.
     """
     if not isinstance(usage, dict):
         return usage
     details = usage.get("prompt_tokens_details")
     cached = details.get("cached_tokens") if isinstance(details, dict) else None
+    cached = cached or usage.get("prompt_cache_hit_tokens")
     if not cached:
         return usage
     return {**usage, "cached_read_tokens": int(cached)}
@@ -2077,7 +2080,8 @@ class Brain:
                         continue  # временно изчерпан → пропускаме
                     use_tools = tools if (tools and attempt.get("supports_tools")) else None
                     msgs = messages if use_tools else messages_notools
-                    if use_tools and (prov in _NATIVE_PROVIDERS or prov in CACHE_PROVIDERS):
+                    if use_tools and (prov in _NATIVE_PROVIDERS or prov in CACHE_PROVIDERS
+                                      or key in CACHE_PROVIDERS):
                         msgs = cache_view(prov)
                     t0 = time.time()
                     self._attempt_id = (prov, model)
