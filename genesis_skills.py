@@ -38,6 +38,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from genesis_agent import sandbox
+from genesis_agent.code_edit import decode_text, displayable, encode_text, has_raw_bytes
 from genesis_agent.tool_schemas import load_tool_arguments
 
 # Паметта/уеб търсенето са meko-опционални — ако липсва зависимост (напр.
@@ -362,11 +363,17 @@ def _tool_read_file(arg: str, offset=None, limit=None) -> str:
     if path.is_dir():
         return f"[READ_FILE] {path} е папка, не файл — ползвай LIST_DIR."
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        raw = path.read_bytes()
     except FileNotFoundError:
         return f"[READ_FILE] Файлът не съществува: {path}.{_did_you_mean(path)}"
     except OSError as e:
         return f"[READ_FILE] Грешка: {e}"
+    # Одит 2026-10-11: cp1251 файл се показваше като „�������“, а моделът
+    # копираше това в WRITE_FILE и кирилицата изчезваше от диска. Кодирането
+    # се разпознава (code_edit.decode_text) и се казва в заглавието.
+    text, encoding = decode_text(raw)
+    text = displayable(text).replace("\r\n", "\n")
+    enc_note = "" if encoding == "utf-8" else f"  (кодиране {encoding})"
     _SEEN_PATHS.add(path.resolve())
 
     if offset_i is not None or limit_i is not None:
@@ -382,8 +389,8 @@ def _tool_read_file(arg: str, offset=None, limit=None) -> str:
         if len(chunk) > 8000:
             chunk = chunk[:8000] + "\n… [отрязано, диапазонът е по-голям от 8000 символа]"
         _log_episode(f"READ_FILE {path}", "прочетен (диапазон)", ["tool", "read_file"])
-        return (f"[READ_FILE: {path}]  (редове {start + 1}-{min(end, len(lines))} от {len(lines)})\n"
-                + chunk + redirect)
+        return (f"[READ_FILE: {path}]  (редове {start + 1}-{min(end, len(lines))} от {len(lines)})"
+                f"{enc_note}\n" + chunk + redirect)
 
     if len(text) > 8000:
         total_lines = text.count("\n") + 1
@@ -391,7 +398,12 @@ def _tool_read_file(arg: str, offset=None, limit=None) -> str:
                 + f"\n… [отрязано, общо {len(text)} символа, {total_lines} реда — "
                   f"за конкретен диапазон: READ_FILE: {path_str} | offset | limit]")
     _log_episode(f"READ_FILE {path}", "прочетен", ["tool", "read_file"])
-    return f"[READ_FILE: {path}]\n{text}{redirect}"
+    return f"[READ_FILE: {path}]{enc_note}\n{text}{redirect}"
+
+
+# Колко от съществуващ файл се чете, за да се познае кодирането му преди
+# WRITE_FILE — колкото и таванът на SEARCH_CODE (по-голям файл е генериран).
+_STYLE_PROBE = 2_000_000
 
 
 def _tool_write_file(arg: str, content: str) -> str:
@@ -436,9 +448,27 @@ def _tool_write_file(arg: str, content: str) -> str:
             content = detail
         elif not ok:
             lint_note = f"\n{detail}"
+    # Съществуващ файл се записва в СВОЕТО кодиране (одит 2026-10-11): cp1251
+    # файл, минал през READ→WRITE, излизаше с U+FFFD на мястото на всяка буква.
+    encoding = "utf-8"
+    if path.is_file():
+        try:
+            with open(path, "rb") as fh:
+                original, encoding = decode_text(fh.read(_STYLE_PROBE), partial=True)
+        except OSError:
+            original = ""
+        if has_raw_bytes(original) and "\ufffd" in content:
+            return (f"[WRITE_FILE: {path}] ❌ Файлът има байтове, които не са текст в "
+                    f"{encoding}, а в READ_FILE се виждат като „\ufffd“ — записът би ги "
+                    "заменил завинаги. Ползвай EDIT_FILE за частична промяна: тя ги пази.")
+    try:
+        data = encode_text(content, encoding)
+    except UnicodeEncodeError as e:
+        return (f"[WRITE_FILE: {path}] ❌ Файлът е в кодиране {encoding} и знакът "
+                f"{content[e.start:e.end]!r} няма място в него — махни го или го замени.")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        path.write_bytes(data)
     except OSError as e:
         return f"[WRITE_FILE] Грешка: {e}"
     _SEEN_PATHS.add(path.resolve())

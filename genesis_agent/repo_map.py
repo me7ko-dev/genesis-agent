@@ -22,6 +22,7 @@ Both refuse to descend into the directories that make a naive walk useless:
 """
 from __future__ import annotations
 
+import base64
 import json
 import re
 import shutil
@@ -29,6 +30,8 @@ import subprocess
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+
+from genesis_agent.code_edit import decode_text, displayable
 
 _SKIP_DIRS = {
     ".git", ".hg", ".svn", "node_modules", "__pycache__", ".mypy_cache",
@@ -142,14 +145,18 @@ def _search_python(root: Path, pattern: str, glob: str | None,
     out: list[Match] = []
     for p in _iter_files(root, glob):
         try:
-            with p.open("r", encoding="utf-8", errors="replace") as fh:
-                for i, line in enumerate(fh, 1):
-                    if rx.search(line):
-                        out.append(Match(str(p), i, line.rstrip()[:_LINE_CLIP]))
-                        if len(out) >= max_results:
-                            return out
+            raw = p.read_bytes()
         except OSError:
             continue
+        # Кодирането по файла (одит 2026-10-11): „Грешка“ в cp1251 файл даваше
+        # „няма съвпадения … наистина го няма“. Редовете се делят само по `\n`,
+        # както при rg и EDIT_FILE, за да съвпадат номерата.
+        text = displayable(decode_text(raw)[0])
+        for i, line in enumerate(text.split("\n"), 1):
+            if rx.search(line):
+                out.append(Match(str(p), i, line.rstrip()[:_LINE_CLIP]))
+                if len(out) >= max_results:
+                    return out
     return out
 
 
@@ -176,9 +183,25 @@ def _search_ripgrep(root: Path, pattern: str, glob: str | None,
     `--glob !.git/` below — so `--hidden --no-ignore` does not drag in object
     files.
     """
+    out = _run_ripgrep(root, pattern, glob, max_results, None)
+    # rg търси байтовете на шаблона в UTF-8, а cp1251 файл ги няма (одит
+    # 2026-10-11: „Грешка“ → „наистина го няма“). Шаблон с не-ASCII знаци се
+    # пуска втори път с windows-1251: UTF-8 файловете там стават „Р“СЂ…“ и не
+    # съвпадат, тоест вторият проход добавя само cp1251 попаденията.
+    if out is not None and not pattern.isascii() and len(out) < max_results:
+        extra = _run_ripgrep(root, pattern, glob, max_results - len(out), "windows-1251")
+        seen = {(m.path, m.line) for m in out}
+        out += [m for m in extra or [] if (m.path, m.line) not in seen]
+    return out
+
+
+def _run_ripgrep(root: Path, pattern: str, glob: str | None,
+                 max_results: int, encoding: str | None) -> list[Match] | None:
     cmd = ["rg", "--json", "--max-count", str(max_results),
            "--hidden", "--no-ignore", "--max-filesize", str(_MAX_FILE_BYTES),
            "-e", pattern]
+    if encoding:
+        cmd += ["--encoding", encoding]
     for d in sorted(_SKIP_DIRS):
         cmd += ["--glob", f"!{d}/"]
     if glob:
@@ -215,11 +238,24 @@ def _search_ripgrep(root: Path, pattern: str, glob: str | None,
         out.append(Match(
             (data.get("path") or {}).get("text", "?"),
             line_no,
-            ((data.get("lines") or {}).get("text") or "").rstrip()[:_LINE_CLIP],
+            _rg_text(data.get("lines") or {}).rstrip()[:_LINE_CLIP],
         ))
         if len(out) >= max_results:
             break
     return out
+
+
+def _rg_text(lines: dict) -> str:
+    """Редът от събитие на rg. Ред, който не е UTF-8, идва като `bytes`
+    (base64), не като `text` — попадението излизаше с празен текст
+    („msg.txt:1: “, одит 2026-10-11)."""
+    if isinstance(lines.get("text"), str):
+        return lines["text"]
+    try:
+        raw = base64.b64decode(lines.get("bytes") or "")
+    except (ValueError, TypeError):
+        return ""
+    return displayable(decode_text(raw)[0])
 
 
 def find_files(pattern: str, path: str | Path = ".",
