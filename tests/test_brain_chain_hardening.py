@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -315,3 +316,64 @@ def test_a_short_429_lets_the_start_model_answer_again_seconds_later(monkeypatch
     clock[0] += 11
     assert b.complete([{"role": "user", "content": "hi"}]).raw_text == "от A"
     assert [m for m, _ in seen] == ["A", "B", "A"]
+
+
+# ── F7: излишните 8 s паузи ──────────────────────────────────────────────────
+
+@pytest.fixture
+def _slept(monkeypatch) -> list:
+    monkeypatch.setattr(brain, "_load_chain", lambda: chain(("groq", "A"), ("nvidia", "C")))
+    monkeypatch.setattr(brain, "_load_light_chain", lambda: chain(("groq", "small")))
+    monkeypatch.setenv("GROQ_API_KEY", "g")
+    monkeypatch.setenv("NVIDIA_API_KEY", " n")
+    slept: list = []
+    monkeypatch.setattr(brain.time, "sleep", slept.append)
+    return slept
+
+
+def test_a_round_with_every_model_cooling_down_does_not_pause(monkeypatch, _slept) -> None:
+    for k in ("groq::A", "nvidia::C"):
+        brain._EXHAUSTED[k] = time.time() + 290
+    seen = _route(monkeypatch, lambda p: ok("x"))
+    r = brain.Brain(use_local=False).complete([{"role": "user", "content": "hi"}])
+    assert seen == [] and _slept == []
+    assert "cooldown" in r.raw_text and "неизвестна грешка" not in r.raw_text
+
+
+def test_a_cooldown_ending_within_the_pause_still_gets_the_second_round(monkeypatch, _slept) -> None:
+    clock = [1_000_000.0]
+    monkeypatch.setattr(brain.time, "time", lambda: clock[0])
+    monkeypatch.setattr(brain.time, "sleep", lambda s: (_slept.append(s), clock.__setitem__(0, clock[0] + s)))
+    brain._EXHAUSTED["groq::A"] = clock[0] + 3
+    brain._EXHAUSTED["nvidia::C"] = clock[0] + 290
+    _route(monkeypatch, lambda p: ok("от " + p["model"]))
+    assert brain.Brain(use_local=False).complete([{"role": "user", "content": "hi"}]).raw_text == "от A"
+    assert _slept == [8]
+
+
+def test_the_light_route_walks_the_chain_once(monkeypatch, _slept) -> None:
+    import requests
+
+    def down(p):
+        raise requests.exceptions.ConnectionError("network down")
+
+    seen = _route(monkeypatch, down)
+    r = brain.Brain(light=True, use_local=False).complete([{"role": "user", "content": "hi"}])
+    assert r.raw_text.startswith("Error:")
+    assert [m for m, _ in seen] == ["small", "A", "C"] and _slept == []
+
+
+def test_a_light_chat_turn_with_the_network_down_waits_one_pause_at_most(monkeypatch, _slept) -> None:
+    import requests
+
+    import genesis_terminal_agent as gta
+
+    def down(p):
+        raise requests.exceptions.ConnectionError("network down")
+
+    _route(monkeypatch, down)
+    monkeypatch.setattr(gta, "_CODING_MODE", False)
+    monkeypatch.setattr(gta, "current_provider", "groq")
+    monkeypatch.setattr(gta, "current_model_id", "A")
+    text, _calls = gta.ask_genesis([{"role": "system", "content": "s"}, {"role": "user", "content": "hi"}])
+    assert sum(_slept) <= 8 and "network down" in text

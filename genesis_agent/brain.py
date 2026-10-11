@@ -60,6 +60,7 @@ log = logging.getLogger("genesis.brain")
 CLOUD_TIMEOUT = 90
 LOCAL_TIMEOUT = 240  # локалният 3B модел на слаб GPU е бавен — даваме му време
 RETRY_ROUNDS = 2  # колко пъти да обходим цялата верига при пълен провал
+_ROUND_PAUSE_S = 8  # пауза между два кръга по веригата
 # Общ краен срок на едно обръщение = timeout × това. `timeout` на requests е
 # между два пакета, не общ: OpenRouter държи връзката жива с празни редове,
 # докато безплатният модел чака, и обръщението висеше без край (2026-09-25:
@@ -1845,12 +1846,19 @@ class Brain:
             # Обхождане отгоре дава и залепване (докато моделът работи, той
             # отговаря), и самолечение (щом cooldown-ът мине, се връщаме на
             # най-добрия наличен), без нищо да се помни между извикванията.
-            for round_i in range(RETRY_ROUNDS):
+            # Леката работа (light=True) обхожда веригата веднъж: викащият има
+            # своя резерва — терминалът ескалира към силния Brain, резюмето и
+            # паметта просто се пропускат. С два кръга „здрасти“ при паднала
+            # мрежа чакаше 8 s в лекия Brain и още 8 s в силния — 10 заявки и
+            # 16 s преди какъвто и да е отговор (одит 2026-10-11).
+            rounds = 1 if self.light else RETRY_ROUNDS
+            for round_i in range(rounds):
                 # Кръг, в който НИТО един модел няма ключ, не се повтаря: паузата
                 # и новите кръгове не могат да добавят ключ. Без ключове всяко
                 # съобщение чакаше 16 s, преди да каже нещо (2026-10-09, `genesis -p`
                 # на чиста инсталация).
                 only_unconfigured = True
+                sent_any = False  # тръгнала ли е поне една истинска заявка
                 for step in range(n):
                     attempt = ordered_chain[step]
                     prov, model = attempt["provider"], attempt["model"]
@@ -1880,6 +1888,7 @@ class Brain:
                             time.sleep(_TRANSIENT_PAUSE_S)
                             t0 = time.time()
                             raw_text, tool_calls = self._call(prov, model, msgs, tools=use_tools)
+                        sent_any = True
                         self._record_stat(prov, time.time() - t0, True)
                         self._fail_count = 0
                         self.current = attempt
@@ -1895,6 +1904,7 @@ class Brain:
                                                        "usage": self._last_usage, "tool_calls": tool_calls})
                     except requests.exceptions.RequestException as e:
                         only_unconfigured = False
+                        sent_any = True
                         last_error = f"мрежа: {e}"
                         self._fail_count += 1
                         self._record_stat(prov, time.time() - t0, False)
@@ -1910,6 +1920,7 @@ class Brain:
                         if not (last_error.startswith("skip:") and "configured" in last_error):
                             only_unconfigured = False
                         if not synthetic:
+                            sent_any = True
                             self._fail_count += 1
                             self._record_stat(prov, time.time() - t0, False)
                             # Отрязан/отказан отговор е платен — разходът се записва.
@@ -1938,9 +1949,23 @@ class Brain:
                 if only_unconfigured:
                     last_error = "нито един модел няма API ключ — пусни `genesis setup`"
                     break
-                if round_i + 1 < RETRY_ROUNDS:
+                if not sent_any:
+                    # Кръг без нито една заявка — всичко е в cooldown или без
+                    # ключ. Нов кръг помага само ако някой cooldown свършва
+                    # по време на паузата (одит 2026-10-11: всички модели с
+                    # ~290 s оставащи → 0 заявки, 8 s чакане и „неизвестна
+                    # грешка“).
+                    now = time.time()
+                    soonest = min((exp for exp in _EXHAUSTED.values() if exp > now), default=None)
+                    wait = None if soonest is None else soonest - now
+                    if wait is None or wait > _ROUND_PAUSE_S:
+                        if wait is not None:
+                            last_error = (f"всички модели са в cooldown "
+                                          f"(най-рано след {math.ceil(wait)} s)")
+                        break
+                if round_i + 1 < rounds:
                     print("  [Brain] Всички облачни модели заети/изчерпани, кратка пауза и нов кръг...")
-                    time.sleep(8)
+                    time.sleep(_ROUND_PAUSE_S)
 
         # ПОСЛЕДНА РЕЗЕРВА: локалният собствен мозък — само ако облакът напълно
         # отказа (или изобщо няма конфигурирани облачни модели).
