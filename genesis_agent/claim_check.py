@@ -173,19 +173,48 @@ _TOOL_REFUSED_RE = re.compile(r"^\[[A-Z_]+(?::[^\n]*?)?\]\s*(?:❌|Грешка)
 # и `ls tests` (rc=0) след червен pytest се броеха за последно тестово пускане
 # и „Всички тестове минаха“ минаваше; паднал `cat tests/fixtures/data.json`
 # след зелен pytest оспорваше вярното твърдение.
+#
+# Трета вълна (2026-10-11): чисто главовото разпознаване изпускаше обичайни
+# форми, които старото търсене на дума хващаше — `python -W error -m pytest`,
+# `timeout -s KILL 600 pytest`, `npm --prefix web test`, `bash -c 'pytest -q'`,
+# `sh run_tests.sh`, `cargo nextest run`, `hatch run test`,
+# `docker compose run app pytest` — и червено пускане в такава форма след
+# зелен pytest оставяше „всички минаха“ да мине. Затова: познатите глави се
+# разбират точно, известните НЕтестови глави (git, ls, cat, pip, линтери…)
+# никога не са пускане на тестове, а за всяка друга глава важи старата широта —
+# тестов инструмент или цел „test/check“ по-нататък в реда.
 _SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||[;|\n]")
 _TEST_TOOLS = frozenset({"pytest", "py.test", "tox", "nox", "nose", "nose2", "unittest", "jest",
                          "vitest", "mocha", "ctest", "phpunit", "rspec", "ava", "karma"})
 _PY = frozenset({"python", "python3", "py"})
+_PY_RE = re.compile(r"python\d+(?:\.\d+)?")
 _PY_TEST_MODULES = frozenset({"pytest", "unittest", "nose2", "tox", "nox"})
 # Подкоманда-цел: `npm test`, `npm run check`, `cargo test`, `make check`, `make test-unit`.
 _TASK_TOOLS = frozenset({"npm", "yarn", "pnpm", "bun", "deno", "cargo", "go", "dotnet", "mvn",
-                         "gradle", "gradlew", "make", "just", "rake", "mix", "composer"})
-_TEST_TARGET_RE = re.compile(r"^(?:test|tests|check|spec)(?:[-:_.]\S*)?$")
+                         "mvnw", "gradle", "gradlew", "make", "just", "rake", "mix", "composer"})
+_TEST_TARGET_RE = re.compile(r"^(?:test|tests|check|spec|nextest)(?:[-:_.]\S*)?$")
+# Опции на _TASK_TOOLS, които взимат стойност: `npm --prefix web test`.
+_VALUE_OPTS = frozenset({"--prefix", "--cwd", "--dir", "-c", "--manifest-path", "--filter",
+                         "--workspace", "-w", "--project", "-f", "--file"})
 # Име на скрипт с „test“ като отделна част: run_tests.sh, test_all.py — не latest.sh.
 _TESTY_NAME_RE = re.compile(r"(?:^|[-_.])tests?(?:[-_.]|$)")
-_WRAPPERS = frozenset({"sudo", "env", "uv", "poetry", "pipenv", "pdm", "hatch", "npx", "time",
-                       "nice", "run", "exec", "timeout", "xvfb-run"})
+_WRAPPERS = frozenset({"sudo", "env", "uv", "poetry", "pipenv", "pdm", "hatch", "rye", "npx",
+                       "pnpx", "bunx", "time", "nice", "ionice", "nohup", "stdbuf", "run", "exec",
+                       "timeout", "xvfb-run", "command"})
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish", "cmd", "pwsh", "powershell"})
+# Глави, които никога не пускат тестове, каквото и да стои след тях — четене,
+# файлове, git, инсталация, линтери. Те НЕ скриват предишно червено пускане.
+_NON_TEST_HEADS = frozenset({
+    "git", "ls", "dir", "cat", "type", "head", "tail", "less", "more", "grep", "egrep", "rg",
+    "ag", "find", "fd", "tree", "wc", "echo", "printf", "mkdir", "md", "touch", "cp", "copy",
+    "mv", "move", "rm", "del", "erase", "rmdir", "rd", "ren", "rename", "ln", "chmod", "chown",
+    "stat", "file", "du", "cd", "pushd", "popd", "sed", "awk", "sort", "uniq", "cut", "diff",
+    "cmp", "tar", "zip", "unzip", "gzip", "curl", "wget", "pip", "pip3", "pipx", "apt",
+    "apt-get", "brew", "dnf", "yum", "pacman", "choco", "winget", "code", "vim", "vi", "nano",
+    "open", "start", "which", "where", "whereis", "realpath", "readlink", "basename", "dirname",
+    "true", "false", "exit", "export", "set", "source", "tee", "jq", "xcopy", "robocopy",
+    "attrib", "icacls", "ruff", "black", "flake8", "isort", "mypy", "pylint", "pyright",
+    "eslint", "prettier", "tsc"})
 
 
 def _head(token: str) -> str:
@@ -193,46 +222,134 @@ def _head(token: str) -> str:
     return base.removesuffix(".exe")
 
 
-def _segment_is_test_run(segment: str) -> bool:
-    tokens = [t for t in segment.split() if t]
-    # Обвивки и променливи отпред: `FOO=1 timeout 60 uv run pytest`.
+def _python_runs_tests(args: list[str]) -> bool:
+    """Аргументите след интерпретатора (или след `coverage run`)."""
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ("-W", "-X"):            # `-W error`, `-X dev` — флаг със стойност
+            i += 2
+            continue
+        if arg == "-m":
+            module = _head(args[i + 1]) if i + 1 < len(args) else ""
+            if module == "coverage":
+                return _coverage_runs_tests(args[i + 2:])
+            return module in _PY_TEST_MODULES
+        if arg == "-c":
+            return bool(re.search(r"\b(?:pytest|unittest)\b", " ".join(args[i + 1:])))
+        if arg.startswith("-"):
+            i += 1
+            continue
+        # `python run_tests.py`, `python tests/test_x.py`, `python manage.py test`.
+        return bool(_TESTY_NAME_RE.search(_head(arg))) or (
+            i + 1 < len(args) and bool(_TEST_TARGET_RE.match(_head(args[i + 1]))))
+    return False
+
+
+def _coverage_runs_tests(args: list[str]) -> bool:
+    """`coverage run -m pytest`, `coverage run tests.py`."""
+    if not args or _head(args[0]) != "run":
+        return False
+    return _python_runs_tests(args[1:])
+
+
+def _task_runs_tests(tool: str, args: list[str]) -> bool:
+    if tool == "make":
+        return any(_TEST_TARGET_RE.match(_head(t)) for t in args
+                   if not t.startswith("-") and "=" not in t)
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg.startswith("-"):
+            i += 2 if arg.lower() in _VALUE_OPTS else 1
+            continue
+        low = _head(arg)
+        if low in ("run", "run-script", "exec", "x"):
+            i += 1
+            continue
+        if low == "workspace":             # `yarn workspace web test`
+            i += 2
+            continue
+        return bool(_TEST_TARGET_RE.match(low)) or low in _TEST_TOOLS
+    return False
+
+
+def _shell_runs_tests(args: list[str]) -> bool:
+    for i, arg in enumerate(args):
+        low = arg.lower()
+        if low in ("-c", "/c", "/k", "-command", "-lc"):
+            return is_test_run(" ".join(args[i + 1:]))
+        if arg.startswith("-") or (arg.startswith("/") and len(arg) == 2):
+            continue
+        return bool(_TESTY_NAME_RE.search(_head(arg)))
+    return False
+
+
+def _tokens_run_tests(tokens: list[str]) -> bool:
+    after_run = False
+    # Обвивки, опции и променливи отпред: `FOO=1 timeout 60 uv run pytest`.
     while tokens and ("=" in tokens[0] or _head(tokens[0]) in _WRAPPERS
                       or tokens[0].isdigit() or tokens[0].startswith("-")):
-        tokens.pop(0)
+        after_run = _head(tokens[0]) == "run"
+        tokens = tokens[1:]
     if not tokens:
         return False
-    tool, rest = _head(tokens[0]), [_head(t) for t in tokens[1:]]
+    tool, args = _head(tokens[0]), tokens[1:]
     if tool in _TEST_TOOLS:
         return True
-    if re.fullmatch(r"python\d+(?:\.\d+)?", tool):
-        tool = "python"
-    if tool in _PY:
-        args = [t for t in rest if not t.startswith("-") or t == "-m"]
-        if args[:1] == ["-m"]:
-            return len(args) > 1 and args[1] in _PY_TEST_MODULES
-        # `python run_tests.py`, `python tests/test_x.py`, `python manage.py test`.
-        return bool(args) and (bool(_TESTY_NAME_RE.search(args[0]))
-                               or (len(args) > 1 and bool(_TEST_TARGET_RE.match(args[1]))))
+    if after_run and _TEST_TARGET_RE.match(tool):
+        return True                        # `hatch run test`, `poetry run test:unit`
+    if tool == "test" or tool in _NON_TEST_HEADS:
+        # Самото `test` е проверката на shell-а (`test -f x`), не тестове.
+        return False
+    if tool in _PY or _PY_RE.fullmatch(tool):
+        return _python_runs_tests(args)
+    if tool == "coverage":
+        return _coverage_runs_tests(args)
     if tool in _TASK_TOOLS:
-        targets = [t for t in rest if not t.startswith("-") and "=" not in t and t != "run"]
-        if tool != "make":
-            targets = targets[:1]
-        return any(_TEST_TARGET_RE.match(t) for t in targets)
-    # Собствен скрипт: `./run_tests.sh`, `test.bat`. Самото `test` е
-    # проверката на shell-а (`test -f x`), не тестове.
-    return tool != "test" and bool(_TESTY_NAME_RE.search(tool))
+        return _task_runs_tests(tool, args)
+    if tool in _SHELLS:
+        return _shell_runs_tests(args)
+    if tool == "node" and "--test" in args:
+        return True
+    # Собствен скрипт (`./run_tests.sh`, `test.bat`) или непозната глава —
+    # обвивка с опции (`timeout -s KILL 600 pytest`, `env -u FOO pytest`),
+    # контейнер (`docker compose run app pytest`), `./build.sh test`.
+    if _TESTY_NAME_RE.search(tool):
+        return True
+    for j, arg in enumerate(args):
+        low = _head(arg)
+        if low in _NON_TEST_HEADS:
+            return False                   # `sudo -u bob ls tests` — истинската глава е ls
+        if low in _TEST_TOOLS or (not arg.startswith("-") and _TEST_TARGET_RE.match(low)):
+            return True
+        if low in _PY or low in _TASK_TOOLS or low in _SHELLS or low == "coverage" \
+                or _PY_RE.fullmatch(low):
+            return _tokens_run_tests(args[j:])
+    return False
 
 
 def is_test_run(command: str) -> bool:
     """Пуска ли `command` тестове (поне един сегмент от веригата)."""
-    return any(_segment_is_test_run(seg) for seg in _SEGMENT_SPLIT_RE.split(command or ""))
+    return any(_tokens_run_tests(seg.split())
+               for seg in _SEGMENT_SPLIT_RE.split(command or ""))
 
 
-_RC_RE = re.compile(r"\(rc=(-?\d+)\)")
-# Белег в края на аргументите на команда с rc≠0 — по него „всички тестове
-# минаха“ разбира, че последното пускане е паднало, а останалите категории
-# не броят командата.
+# Заглавието на RUN_CMD: `[RUN_CMD: <команда>]  (rc=N)`. Търси се първото
+# такова в целия резултат, не само в първия ред — многоредова команда
+# (heredoc) иначе губеше rc-то си.
+_RC_RE = re.compile(r"\]  \(rc=(-?\d+)\)$", re.MULTILINE)
+_RUN_HEADER_RE = re.compile(r"\[RUN_CMD: (.*?)\]  \(rc=-?\d+\)$", re.MULTILINE | re.DOTALL)
+# Белег в края на аргументите на тестово пускане с rc≠0 — по него „всички
+# тестове минаха“ разбира, че последното пускане е паднало, а останалите
+# категории не броят командата.
 _FAILED_RC_RE = re.compile(r" \(rc=(-?\d+)\)$")
+
+
+def command_from_result(result: str) -> str:
+    """Командата от заглавието на RUN_CMD резултат ("" ако не е такъв)."""
+    match = _RUN_HEADER_RE.match(result or "")
+    return match.group(1) if match else ""
 
 
 def counts_as_executed(name: str, args: str, result: str) -> tuple[str, str] | None:
@@ -240,18 +357,24 @@ def counts_as_executed(name: str, args: str, result: str) -> tuple[str, str] | N
     result = result or ""
     if _TOOL_REFUSED_RE.match(result.lstrip()):
         return None
-    first = result.split("\n", 1)[0]
-    rc_match = _RC_RE.search(first) if name == "RUN_CMD" else None
+    rc_match = _RC_RE.search(result) if name == "RUN_CMD" else None
     rc = int(rc_match.group(1)) if rc_match else 0
-    # Команда с rc≠0 е тръгнала, но не е свършила това, за което е пусната
+    # Тестово пускане с rc е тръгнало — зелено или червено. Изходът му не се
+    # гледа за _FAILURE_MARKERS (bug fix, 2026-10-11, трета вълна): unittest
+    # не прихваща stderr и тест, който упражнява logging.exception, печата
+    # „Traceback (most recent call last)“ и при „OK“. Измерено: зелено
+    # пускане с такъв изход изпадаше и вярното „Пуснах тестовете — всички
+    # тестове минаха“ се връщаше като неподкрепено. Червеното носи rc-то си —
+    # „всички тестове минаха“ не се доказва с него (_last_test_rc).
+    if rc_match and is_test_run(args):
+        return (name, f"{args} (rc={rc})" if rc else args)
+    # Всяка друга команда с rc≠0 не е свършила това, за което е пусната, и не
+    # доказва нищо — нито „Инсталирах пакета“, нито „Пуснах тестовете“
     # (bug fix, 2026-10-11). Измерено: `pip install` с rc=1 доказваше
-    # „Инсталирах пакета“, а `mv` с „cannot stat“ — „Преместих снимките“.
-    # Записът остава, белязан с rc-то си: паднал тест пак е пуснат тест, а
-    # пускач, който is_test_run не познава (`./ci.sh`), пак доказва „Пуснах
-    # тестовете: един пада“. Белязаният запис доказва САМО пускане на тестове
-    # (виж _evidence) и „всички минаха“ не се доказва с него.
+    # инсталацията, `mv` с „cannot stat“ — преместването, а паднал build или
+    # `npm install` — „Пуснах тестовете“ (думите „python“/„npm“ в командата).
     if rc:
-        return (name, f"{args} (rc={rc})")
+        return None
     if any(marker in result for marker in _FAILURE_MARKERS):
         return None
     return (name, args)
@@ -277,12 +400,11 @@ def _last_test_rc(executed: list[tuple[str, str]]) -> int:
 
 
 def _evidence(kind: str, executed: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """Кои записи доказват `kind`. Паднала команда доказва само „пуснах
-    тестовете“; за „всички минаха“ влиза само ако е тестово пускане — тогава
-    rc-то ѝ го опровергава в _last_test_rc."""
-    if kind == _RAN_KIND:
-        return executed
-    if kind == _PASS_KIND:
+    """Кои записи доказват `kind`. Белязан (паднал) запис доказва само
+    тестовите категории и само ако е тестово пускане: „пуснах тестовете“ е
+    вярно и при червено, а за „всички минаха“ влиза, за да го опровергае в
+    _last_test_rc."""
+    if kind in (_RAN_KIND, _PASS_KIND):
         return [e for e in executed if not _failed_rc(e)[1] or _is_test_entry(e)]
     return [e for e in executed if not _failed_rc(e)[1]]
 

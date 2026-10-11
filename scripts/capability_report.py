@@ -114,7 +114,13 @@ def _run_one(task: Task, core) -> TaskResult:
         # Същото правило като в самия цикъл: блокиран или провалил се
         # инструмент не е доказателство. Без това отчетът щеше да пропуска
         # точно симулациите, които съществува да мери.
-        entry = claim_check.counts_as_executed(name, str(result)[:200], str(result))
+        # За RUN_CMD аргументите са самата команда от заглавието (bug fix,
+        # 2026-10-11): с `str(result)[:200]` те започваха с „[RUN_CMD: “ и
+        # claim_check не познаваше тестово пускане — зелен, после червен
+        # pytest минаваше за „всички тестове минаха“.
+        text = str(result)
+        args = (claim_check.command_from_result(text) if name == "RUN_CMD" else "") or text[:200]
+        entry = claim_check.counts_as_executed(name, args, text)
         if entry:
             executed.append(entry)
 
