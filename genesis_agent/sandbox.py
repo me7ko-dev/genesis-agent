@@ -248,11 +248,21 @@ _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 # завършва с края на думата (2026-10-11): без него всичко ПОД C:\Users — тоест
 # всеки проект на оператора — беше BLOCKED и не можеше да се одобри, а
 # `rd /s /q C:\Users\<име>\Projects\app\build` е нормално чистене.
-_WIN_ROOT_END = r"[\\/]*\*?(?=[\s\"';|&)]|$)"
+# Последната част може да е глоб (2026-10-11, трета вълна): с `\*?` отзад
+# `del /s /q C:\Users\<име>\*.*` и `… C:\Windows\*.*` — идиомът на cmd.exe за
+# „всички файлове“ — бяха паднали от BLOCKED (main) на CONFIRM.
+_WIN_GLOB_TAIL = r"[^\\/\s\"';|&]*[*?][^\\/\s\"';|&]*"
+_WIN_ROOT_END = r"[\\/]*(?:" + _WIN_GLOB_TAIL + r")?(?=[\s\"';|&)]|$)"
 _WIN_ROOT = (r"(?:[A-Za-z]:\\*(?:\s|$|[\"';*])"          # C:\ / C: / C:\\ (ескейпнато)
-             r"|[A-Za-z]:[\\/](?:Windows(?:[\\/](?:System32|SysWOW64))?"
-             r"|Users(?:[\\/][^\\/\s\"';|&]+)?"            # C:\Users, C:\Users\<име>
-             r"|Program\sFiles(?:\s\(x86\))?|ProgramData)" + _WIN_ROOT_END +
+             # Системните папки — с всичко под тях, както в main: там няма
+             # проекти на оператора, които котвата да пази (2026-10-11).
+             # `rd /s /q C:\Windows\System32\drivers` беше паднал на CONFIRM.
+             r"|[A-Za-z]:[\\/](?:Windows|Program(?:\s|Data))"
+             # C:\Users, C:\Users\<име> и AppData на дома (настройките и
+             # паролите на всички програми; не е проект, а в main беше BLOCKED).
+             r"|[A-Za-z]:[\\/]Users(?:[\\/][^\\/\s\"';|&]+"
+             r"(?:[\\/]AppData(?:[\\/](?:Local|LocalLow|Roaming))?)?)?"
+             + _WIN_ROOT_END +
              r"|(?:\$env:USERPROFILE|%USERPROFILE%|\$HOME)" + _WIN_ROOT_END +
              r"|[A-Za-z]:\\\*)")
 
@@ -715,13 +725,18 @@ _HOME_PARENTS = ("/home/", "/users/", "/root/")
 # Нормализираните Windows корени (виж _normalise_target): `c:`, `c:/*`,
 # `c:/windows`, `c:/users`, `c:/program files (x86)`, `c:/users/<име>` и домът
 # през PowerShell/cmd (2026-10-11).
+# Глобът отзад (`*`, `*.*`, `*.txt`) трие от същия корен (2026-10-11, трета
+# вълна: `ri -r -fo C:\Users\<име>\*.*` беше само CONFIRM), а под системните
+# папки всичко е критично, както в _WIN_ROOT (и AppData на дома).
+_WIN_GLOB = r"(?:/[^/]*[*?][^/]*)?"
 _WIN_CRITICAL = re.compile(
-    r"^(?:[a-z]:(?:/\*?)?"
-    r"|[a-z]:/(?:windows|users|program files[^/]*|programdata)(?:/\*)?"
-    r"|[a-z]:/users/[^/]+(?:/\*)?"
-    r"|\$env:(?:userprofile|homepath|homedrive|systemdrive|systemroot|windir)(?:/\*)?"
-    r"|%(?:userprofile|homedrive|systemdrive|systemroot|windir)%(?:/\*)?"
-    r"|%homedrive%%homepath%(?:/\*)?)$")
+    r"^(?:[a-z]:/?" + _WIN_GLOB +
+    r"|[a-z]:/(?:windows|program files[^/]*|programdata)(?:/.*)?"
+    r"|[a-z]:/users(?:/[^/]+(?:/appdata(?:/(?:local|locallow|roaming))?)?)?" + _WIN_GLOB +
+    r"|\$env:(?:userprofile|homepath|homedrive|systemdrive|systemroot|windir)" + _WIN_GLOB +
+    r"|%(?:userprofile|homedrive|systemdrive|systemroot|windir)%" + _WIN_GLOB +
+    r"|%homedrive%%homepath%" + _WIN_GLOB +
+    r"|\$\{?home\}?" + _WIN_GLOB + r")$")
 
 _RECURSIVE_LONG = frozenset({"--recursive", "--force", "-R", "-r"})
 
@@ -791,9 +806,10 @@ def _normalise_target(token: str) -> str:
     # RUN_CMD на Windows върви точно през Git Bash.
     if re.match(r"^[A-Za-z]:(?:[\\/]|$)", t):
         t = t.replace("\\", "/")
-    elif re.match(r"^(?:\$\{?env:|%)", t, re.IGNORECASE):
+    elif re.match(r"^(?:\$\{?env:|%|\$\{?home\b)", t, re.IGNORECASE):
         # Домът като променлива на PowerShell/cmd (2026-10-11): `$env:USERPROFILE\*`,
         # `${env:USERPROFILE}` и `%HOMEDRIVE%\` бяха само CONFIRM, а `$HOME/*` — BLOCKED.
+        # И `$HOME\*.*` на PowerShell (`ri -r -fo $HOME\*.*` беше CONFIRM).
         t = re.sub(r"^\$\{env:([A-Za-z_]\w*)\}", r"$env:\1", t, flags=re.IGNORECASE)
         t = t.replace("\\", "/")
     else:
@@ -1118,14 +1134,39 @@ def _windows_words(stage: str) -> list[str]:
 
 
 def _upstream_windows_root(stages: list[str]) -> str | None:
-    """Критичен път, изписан в по-ранен етап на тръбата (`gci C:\\Users\\x | ri …`)."""
+    """Критичен път, изписан в по-ранен етап на тръбата (`gci C:\\Users\\x | ri …`).
+
+    Етап, който стеснява списъка (`-Filter *.tmp`, `-Include *.log`, път с глоб
+    `C:\\Users\\x\\*.tmp`), не подава целия корен: такова чистене пита, както
+    в main, а не е BLOCKED без право на одобрение (2026-10-11, трета вълна —
+    `gci $HOME -r -Filter *.tmp | ri -fo` беше станало неодобримо). `-Exclude`
+    и `-Filter *` не стесняват нищо и остават BLOCKED."""
     for stage in stages:
-        for word in _windows_words(stage)[1:]:
+        words = _windows_words(stage)[1:]
+        if any(_is_narrowing_filter(w) and i + 1 < len(words) and _narrowing_glob(words[i + 1])
+               for i, w in enumerate(words)):
+            continue
+        for word in words:
             if word.startswith("-") or _cmd_switch_letters(word):
+                continue
+            last = re.split(r"[\\/]", word)[-1]
+            if any(ch in last for ch in "*?") and _narrowing_glob(last):
                 continue
             if _critical_root_reason(word):
                 return word
     return None
+
+
+def _is_narrowing_filter(word: str) -> bool:
+    """`-Filter`/`-Include` на Get-ChildItem и еднозначните им префикси."""
+    w = word.lower()
+    return (len(w) >= 5 and "-filter".startswith(w)) or (len(w) >= 4 and "-include".startswith(w))
+
+
+def _narrowing_glob(value: str) -> bool:
+    """`*.tmp`, `*.log,*.tmp` стесняват; `*`, `*.*` и празното — не."""
+    items = [v for v in value.split(",") if v]
+    return bool(items) and all(re.search(r"[^*?.]", v) for v in items)
 
 
 # ── PowerShell -EncodedCommand (2026-10-11) ─────────────────────────────────
@@ -1164,13 +1205,19 @@ def _encoded_powershell_verdict(command: str, cwd: Path | None) -> RiskVerdict:
     import base64
     import binascii
 
-    for statement in re.split(r"[;|&\n]", command):
+    # Скобите и `{}` също започват команда (2026-10-11, трета вълна): с делене
+    # само по `;|&` думата беше `(powershell`, `$(powershell`, `x=$(powershell`
+    # — непозната — и командата ставаше SAFE дори с base64 на триене на дома,
+    # а в main беше CONFIRM. `@` е префиксът на cmd.exe, който скрива ехото.
+    command = re.sub(r"\\\s*\n", " ", command)
+    unrecognised = False
+    for statement in re.split(r"[;|&\n(){}]", command):
         words = [w.strip("'\"`") for w in statement.split()]
-        launched = False
+        launched = seen = False
         for i, word in enumerate(words):
-            name = os.path.basename(word.replace("\\", "/")).lower().removesuffix(".exe")
+            name = os.path.basename(word.replace("\\", "/")).lower().lstrip("@").removesuffix(".exe")
             if name in _PS_LAUNCHERS:
-                launched = True
+                launched = seen = True
                 continue
             if launched and _ends_launcher_params(word):
                 launched = False             # нататък е скриптът, не параметри
@@ -1190,7 +1237,16 @@ def _encoded_powershell_verdict(command: str, cwd: Path | None) -> RiskVerdict:
             if inner.level == RiskLevel.BLOCKED:
                 return RiskVerdict(RiskLevel.BLOCKED, reasons + inner.reasons)
             return RiskVerdict(RiskLevel.CONFIRM, reasons + inner.reasons)
+        # Мрежа под структурната проверка: старият образец от main за израз,
+        # в който думите не са разпознали стартера — никоя форма не пада под main.
+        unrecognised = unrecognised or (not seen and bool(_PS_ENCODED_TEXT.search(statement)))
+    if unrecognised:
+        return RiskVerdict(RiskLevel.CONFIRM, ["PowerShell с кодирана команда (-EncodedCommand)"])
     return RiskVerdict(RiskLevel.SAFE, [])
+
+
+_PS_ENCODED_TEXT = re.compile(
+    r"\b(?:powershell|pwsh)(?:\.exe)?\b[^\n]*\s[-/](?:enc|e|ec|encodedcommand)\b", re.IGNORECASE)
 
 
 _INTERPRETERS = re.compile(r"^(python[\d.]*|py|pypy[\d.]*|perl|ruby|node|deno|bun)(\.exe)?$",
@@ -1297,7 +1353,17 @@ def _control_file_reached(token: str, expanded: str) -> bool:
         real = os.path.realpath(expanded)
     except (OSError, ValueError):
         return False
-    return bool(_CONTROL_ARG_RX.search(real.replace("\\", "/")))
+    # ~/.genesis/workspace е папката за проекти, когато Genesis тръгне от дома
+    # (paths._frozen_workspace): `config/settings.json` там е файл на проекта,
+    # а не на Genesis, но истинският му път съдържа `.genesis/` и в режим
+    # „deny“ командата се отказваше (2026-10-11, трета вълна). Отрязва се само
+    # префиксът — `<проект>/.genesis/hooks.json` вътре остава управляващ файл,
+    # а връзка навън realpath вече е разгънал до истинската ѝ цел.
+    real = _WORKSPACE_PREFIX.sub("", real.replace("\\", "/"), count=1)
+    return bool(_CONTROL_ARG_RX.search(real))
+
+
+_WORKSPACE_PREFIX = re.compile(r"^.*?/(?:\.genesis|genesi~\d)/workspace(?=/|$)", re.IGNORECASE)
 
 
 def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:

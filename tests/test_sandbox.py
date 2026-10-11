@@ -1036,3 +1036,92 @@ def test_gh_hosts_file_on_windows_is_a_secret() -> None:
         r"C:\Users\roika\AppData\Roaming\GitHub CLI\hosts.yml")
     assert sandbox.assess_command(
         r'type "%APPDATA%\GitHub CLI\hosts.yml"').level is CONFIRM
+
+
+# ── Трета вълна 2026-10-11: регресиите на котвата и на -EncodedCommand ──────
+
+@pytest.mark.parametrize("cmd", [
+    r"del /s /q C:\Users\ivan\*.*",
+    r'del /s/q "C:\Users\ivan\*.*"',
+    r"del /s /q %USERPROFILE%\*.*",
+    r"del /s /q $HOME\*.*",
+    r"del /s /q C:\Windows\*.*",
+    r"rd /s /q C:\Users\ivan\*.*",
+    r"Remove-Item -Recurse -Force $env:USERPROFILE\*.*",
+    r"Remove-Item -Recurse -Force C:\Windows\System32\*.*",
+    r"ri -r -fo C:\Users\ivan\*.*",
+    r"ri -r -fo $HOME\*.*",
+    r"rd /s /q C:\Windows\System32\drivers",
+    r"rd /s /q C:\Users\ivan\AppData",
+])
+def test_windows_root_with_a_glob_or_a_system_subfolder_is_blocked(cmd) -> None:
+    """`*.*` е идиомът на cmd.exe за „всички файлове“; котвата на втората
+    вълна приемаше само `*` и тези паднаха от BLOCKED (main) на CONFIRM."""
+    assert sandbox.assess_command(cmd).level is BLOCKED
+
+
+@pytest.mark.parametrize("cmd", [
+    r"rd /s /q C:\Users\ivan\Projects\app\build",
+    r"del /s /q C:\Users\ivan\Projects\app\build\*.*",
+])
+def test_windows_project_folder_under_users_still_asks(cmd) -> None:
+    assert sandbox.assess_command(cmd).level is CONFIRM
+
+
+@pytest.mark.parametrize("template", [
+    "({} -enc {})",
+    "$({} -enc {})",
+    "x=$({} -enc {})",
+    "{{{} -ec {}}}",
+    'echo "$({}.exe -e {})"',
+    "@{} -enc {}",
+])
+@pytest.mark.parametrize("launcher", ["powershell", "pwsh"])
+def test_encoded_powershell_glued_to_a_bracket_is_still_judged(template, launcher) -> None:
+    """`x=$(powershell -enc …)` беше SAFE (думата `x=$(powershell` не се
+    разпознаваше), дори с base64 на триене на дома; в main беше CONFIRM."""
+    assert sandbox.assess_command(template.format(launcher, _WIPE_HOME)).level is BLOCKED
+    assert sandbox.assess_command(template.format(launcher, _HARMLESS)).level is CONFIRM
+
+
+def test_old_encoded_pattern_backs_up_an_unrecognised_launcher() -> None:
+    """Мрежата отдолу: дума, която структурната проверка не познава като
+    стартер, но старият образец от main хваща, пак пита."""
+    verdict = sandbox._encoded_powershell_verdict("x=powershell -enc " + _HARMLESS, None)
+    assert verdict.level is CONFIRM
+
+
+@pytest.mark.parametrize("cmd", [
+    r"Get-ChildItem $HOME -Recurse -Filter *.tmp | Remove-Item -Force",
+    r"gci C:\Users\ivan -r -Include *.log,*.tmp | ri -fo",
+    r"Get-ChildItem $env:USERPROFILE -Recurse -Include *.log | Remove-Item -Recurse -Force",
+    r"Get-ChildItem C:\Users\ivan\*.tmp -Recurse | Remove-Item -Force",
+])
+def test_filtered_windows_pipeline_delete_asks(cmd) -> None:
+    """Стеснен списък от дома е чистене, не триене на дома: CONFIRM, както в main."""
+    assert sandbox.assess_command(cmd).level is CONFIRM
+
+
+@pytest.mark.parametrize("cmd", [
+    r"gci $HOME -r -Filter * | ri -fo",
+    r"gci $HOME -r -Exclude *.keep | ri -fo",
+    r"gci C:\Users\ivan -r | ri -r -fo",
+])
+def test_unfiltered_windows_pipeline_delete_stays_blocked(cmd) -> None:
+    assert sandbox.assess_command(cmd).level is BLOCKED
+
+
+def test_project_files_in_the_genesis_workspace_are_not_control_files(tmp_path, monkeypatch) -> None:
+    """Стартиран от дома, Genesis работи в ~/.genesis/workspace; `settings.json`
+    на проекта там беше „управляващ файл на Genesis“ и в „deny“ се отказваше."""
+    home = tmp_path / "home"
+    app = home / ".genesis" / "workspace" / "app"
+    (app / "config").mkdir(parents=True)
+    (app / "config" / "settings.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    assert sandbox.assess_command("cat config/settings.json", cwd=app).level is SAFE
+    assert sandbox.assess_command("cat ./mcp.json", cwd=app).level is SAFE
+    # Истинските управляващи файлове — и през пътя от workspace — пак питат.
+    assert sandbox.assess_command("echo {} > ../../hooks.json", cwd=app).level is CONFIRM
+    assert sandbox.assess_command("echo {} > ./.genesis/hooks.json", cwd=app).level is CONFIRM
