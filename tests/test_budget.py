@@ -481,8 +481,20 @@ class TestElideOldWrites:
         raise AssertionError(cid)
 
     def test_off_by_default_changes_nothing(self, monkeypatch) -> None:
-        from genesis_agent import config
-        assert config.ELIDE_OLD_WRITES == 0
+        # Подразбирането — в чист процес без GENESIS_ELIDE_*: conftest вече
+        # е нулирал модулите, тоест config.ELIDE_OLD_WRITES тук не доказва
+        # нищо, а изнесената променлива на оператора не бива да чупи теста
+        # (2026-10-11).
+        import os
+        import subprocess
+        import sys
+        from pathlib import Path
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GENESIS_ELIDE_")}
+        got = subprocess.run([sys.executable, "-c",
+                              "from genesis_agent import config; print(config.ELIDE_OLD_WRITES)"],
+                             cwd=str(Path(__file__).resolve().parent.parent), env=env,
+                             capture_output=True, text=True, check=True).stdout.split()
+        assert got[-1:] == ["0"]
         monkeypatch.setattr(budget, "ELIDE_OLD_WRITES", 0)
         msgs = self._turn()
         assert budget.budget_history(msgs) == msgs

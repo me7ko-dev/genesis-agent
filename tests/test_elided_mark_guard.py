@@ -70,17 +70,51 @@ def test_an_ordinary_write_still_goes_through(ws) -> None:
     assert (ws / "a.py").read_text(encoding="utf-8") == "print(1)\n"
 
 
-def test_no_tracked_python_file_carries_the_joined_tag() -> None:
-    """Иначе Genesis не би могъл да редактира собствения си код: всеки запис на
-    такъв файл би бил отказан от пазача."""
+# Голото ASCII име на маркера не е маркерът (ревю 2026-10-11): пазачът
+# отказваше търсене за него, commit съобщение и бележка в .md, която го
+# назовава, с подвеждащото „прочети файла с READ_FILE“. Хваща се само формата,
+# която budget._elide_old_writes наистина слага: „⟦“ + името, или името + брой.
+@pytest.mark.parametrize("command", [
+    f"git grep -n {budget.ELIDED_TAG} -- genesis_skills.py",
+    f'git commit -m "guard: refuse the {budget.ELIDED_TAG} marker"',
+    f'git commit -m "{budget.ELIDED_TAG} 2026-10-11: narrower guard"',
+])
+def test_a_command_that_only_names_the_tag_is_not_refused(command) -> None:
+    assert gs._copies_elided_mark("RUN_CMD", {"command": command}) is None
+
+
+def test_a_doc_that_names_the_tag_can_be_written(ws) -> None:
+    text = f"# Бележки\n\nB.12: маркерът `{budget.ELIDED_TAG}` се изпуска само в копието.\n"
+    out = gs.dispatch_tool_call("WRITE_FILE", {"path": "NOTES.md", "content": text})
+    assert "⛔" not in out
+    assert (ws / "NOTES.md").read_text(encoding="utf-8") == text
+
+
+@pytest.mark.parametrize("text", [
+    MARK,
+    budget.ELIDED_MARK,
+    budget.ELIDED_TAG + " 3862 chars",
+    f"x = 1\n{budget.ELIDED_TAG}  12\tsymbols\n",
+    f"x = 1\n{budget.ELIDED_TAG} 3862",
+])
+def test_every_shape_of_the_generated_mark_is_caught(text) -> None:
+    assert budget.carries_elided_mark(text)
+    assert gs._copies_elided_mark("WRITE_FILE", {"path": "a.py", "content": text})
+
+
+def test_no_tracked_file_carries_the_mark() -> None:
+    """Иначе Genesis не би могъл да редактира собствения си код и бележки: всеки
+    запис на такъв файл би бил отказан от пазача. Сканира се с проверката на
+    самия пазач, по всички следени файлове, не само *.py (ревю 2026-10-11)."""
     root = Path(__file__).resolve().parent.parent
     try:
-        listed = subprocess.run(["git", "ls-files", "*.py"], cwd=root, capture_output=True,
-                                text=True, check=True).stdout.split()
+        listed = subprocess.run(["git", "ls-files", "-z"], cwd=root, capture_output=True,
+                                text=True, check=True).stdout.split("\0")
     except (OSError, subprocess.CalledProcessError):
         pytest.skip("няма git")
-    files = [root / f for f in listed]
+    files = [root / f for f in listed if f]
     assert files
     offenders = [str(f) for f in files
-                 if f.is_file() and budget.ELIDED_TAG in f.read_text(encoding="utf-8", errors="replace")]
+                 if f.is_file() and budget.carries_elided_mark(
+                     f.read_text(encoding="utf-8", errors="replace"))]
     assert offenders == []

@@ -1356,15 +1356,17 @@ def _copies_elided_mark(name: str, args: dict) -> str | None:
     файлът би станал един ред бележка. Пазачът е в кода, не в промпта, и е
     винаги включен, независимо от GENESIS_ELIDE_OLD_WRITES (2026-10-11): двата
     пътя (native и текстови тагове) стигат дотук с нормализирани аргументи.
-    RUN_CMD/RUN_BG също — heredoc в команда е същият запис по друг път."""
+    RUN_CMD/RUN_BG също — heredoc в команда е същият запис по друг път.
+    Хваща се формата на маркера, не голото му име (budget.carries_elided_mark)
+    — иначе търсене или commit съобщение, които го назовават, се отказваха."""
     if name in ("WRITE_FILE", "EDIT_FILE"):
         text = str(args.get("content", "")) + str(args.get("new", ""))
     elif name in ("RUN_CMD", "RUN_BG"):
         text = str(args.get("command", "")) + str(args.get("arg", ""))
     else:
         return None
-    from genesis_agent.budget import ELIDED_TAG
-    if ELIDED_TAG not in text:
+    from genesis_agent.budget import carries_elided_mark
+    if not carries_elided_mark(text):
         return None
     target = args.get("path") or args.get("command") or args.get("arg") or ""
     return (f"[{name}: {str(target)[:120]}] ⛔ Това е маркер за изпуснато от историята, "

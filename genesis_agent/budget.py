@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import posixpath
+import re
 from collections import defaultdict
 from datetime import date, datetime, timezone
 from typing import Any
@@ -165,8 +166,20 @@ def _whole_rounds(tail: list[dict]) -> list[dict]:
 # тук би блокирал всяко самопоправяне на този файл.
 ELIDED_TAG = "genesis:" + "elided"
 ELIDED_MARK = "⟦" + ELIDED_TAG
+# Какво е „копие на маркера“ (ревю 2026-10-11): голото ASCII име се срещаше в
+# легитимни команди и бележки — търсене за него, commit съобщение, .md, която
+# го описва — и пазачът ги отказваше с подвеждащото „прочети файла“. Хваща се
+# само формата, която _elide_old_writes слага: „⟦“ + името, или името + брой
+# символи (същото, без скобата — heredoc в команда, сдъвкан до ASCII).
+_ELIDED_COPY = re.compile(re.escape(ELIDED_MARK) + "|" + re.escape(ELIDED_TAG) + r"\s+\d+(?:\s|$)")
 _ELIDE_KEYS = ("content", "old", "new")
 _ELIDE_MIN_CHARS = 300
+
+
+def carries_elided_mark(text: str) -> bool:
+    """Дали текстът носи маркера, който _elide_old_writes слага на мястото на
+    съдържанието (а не само назовава името му)."""
+    return bool(_ELIDED_COPY.search(text))
 
 
 def _norm_path(path: str) -> str:

@@ -175,3 +175,18 @@ def _isolated_operator_settings(monkeypatch, tmp_path):
     agents.progress = None
     from genesis_agent import mcp_client
     mcp_client.stop_all()
+
+
+@pytest.fixture(autouse=True)
+def _elide_off_like_the_default(monkeypatch):
+    """B.12 (2026-10-11): config.py казва на оператора да пусне A/B с
+    GENESIS_ELIDE_OLD_WRITES=1; с изнесена такава променлива
+    test_bench_history (базата „off“) и test_budget (рундовете K) падаха при
+    верен код — стойностите се четат при внасяне на config. Тестовете
+    започват от подразбирането; който иска друго, го задава сам."""
+    monkeypatch.delenv("GENESIS_ELIDE_OLD_WRITES", raising=False)
+    monkeypatch.delenv("GENESIS_ELIDE_WRITE_ROUNDS", raising=False)
+    from genesis_agent import budget, config
+    for module in (budget, config):
+        monkeypatch.setattr(module, "ELIDE_OLD_WRITES", 0)
+        monkeypatch.setattr(module, "ELIDE_WRITE_ROUNDS", 6)
