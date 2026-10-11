@@ -114,3 +114,22 @@ def test_the_no_key_guard_still_stops_a_brain_provider(monkeypatch, capsys):
     monkeypatch.setattr(gta, "current_provider", "groq")
     monkeypatch.setattr(gta.sys.stdin, "isatty", lambda: False, raising=False)
     assert gta._no_model_guard() is True
+
+
+# ── F4: „създадох план“ в режим план е самият план, не твърдение за запис ───
+
+_PLAN = ("Прочетох app.py и създадох план:\n1. В app.py ще добавя функция vat(price).\n"
+         "2. Ще напиша test_app.py и ще пусна pytest.\nРиск: закръгляне.")
+
+
+def test_headless_plan_that_says_it_made_a_plan_is_the_answer(ws, monkeypatch, capsys):
+    from genesis_agent import headless
+    (ws / "app.py").write_text("PRICE = 42\n", encoding="utf-8")
+    monkeypatch.setattr(gta, "build_system_prompt", lambda: ("SYS", ""))
+    monkeypatch.setattr(headless, "_read_stdin", lambda: "")
+    seen = _script(monkeypatch, [("", [_call("READ_FILE", {"path": "app.py"}, "r1")]),
+                                 (_PLAN, None), ("План: (повторен)", None)])
+    code = headless.run(["--plan", "--json", "--cwd", str(ws), "добави ДДС към app.py"])
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0 and out["result"].startswith("Прочетох app.py и създадох план")
+    assert out["warnings"] == [] and len(seen) == 2
