@@ -36,7 +36,9 @@ def load_history(workspace: Path) -> list[dict[str, str]]:
     """Последните съобщения от разговора, в рамките на таваните."""
     try:
         raw = json.loads((workspace / HISTORY_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
+        # RecursionError: `[` * 200000, записан от кода в контейнера, иначе
+        # събаряше този чат на всеки следващ ход (ревю 2026-10-11).
         return []
     msgs = [{"role": m["role"], "content": m["content"]} for m in raw
             if isinstance(m, dict) and m.get("role") in ("user", "assistant")
@@ -50,10 +52,14 @@ def load_history(workspace: Path) -> list[dict[str, str]]:
 def save_history(workspace: Path, history: list[dict[str, str]]) -> None:
     path = workspace / HISTORY_FILE
     try:
+        # Кодира се ПРЕДИ записа: write_text отрязваше файла и чак после
+        # гърмеше на lone surrogate — един такъв отговор изтриваше целия
+        # разговор (ревю 2026-10-11). Невалидното става „?“, ходът се пази.
+        data = json.dumps(history[-HISTORY_MAX_MESSAGES:],
+                          ensure_ascii=False).encode("utf-8", "replace")
         path.parent.mkdir(exist_ok=True)
-        path.write_text(json.dumps(history[-HISTORY_MAX_MESSAGES:], ensure_ascii=False),
-                        encoding="utf-8")
-    except (OSError, ValueError):   # ValueError: lone surrogate в текста (2026-10-11)
+        path.write_bytes(data)
+    except (OSError, ValueError):
         pass  # разговорът губи паметта си, задачата не бива да пада заради това
 
 

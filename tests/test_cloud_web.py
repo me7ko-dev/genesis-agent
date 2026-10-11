@@ -527,6 +527,22 @@ def test_tampered_history_is_ignored_not_trusted(tmp_path) -> None:
     assert task.load_history(tmp_path) == [{"role": "user", "content": "ok"}]
     (tmp_path / ".genesis" / "history.json").write_text("{broken", encoding="utf-8")
     assert task.load_history(tmp_path) == []
+    # Ревю 2026-10-11: `[` * 200000, записан от кода в контейнера, хвърляше
+    # RecursionError и този чат падаше на всеки следващ ход.
+    (tmp_path / ".genesis" / "history.json").write_text("[" * 200_000, encoding="utf-8")
+    assert task.load_history(tmp_path) == []
+
+
+def test_a_lone_surrogate_in_a_reply_does_not_wipe_the_history(tmp_path) -> None:
+    """Ревю 2026-10-11: write_text отрязваше history.json и чак после
+    гърмеше на кодирането — един отговор с lone surrogate изтриваше целия
+    разговор."""
+    task.save_history(tmp_path, [{"role": "user", "content": "първо"}])
+    task.save_history(tmp_path, [{"role": "user", "content": "първо"},
+                                 {"role": "assistant", "content": "име \udcee.txt"}])
+    got = task.load_history(tmp_path)
+    assert got[0] == {"role": "user", "content": "първо"} and len(got) == 2
+    assert "\udcee" not in got[1]["content"]
 
 
 # ── одит 2026-10-07 ──────────────────────────────────────────────────────────
