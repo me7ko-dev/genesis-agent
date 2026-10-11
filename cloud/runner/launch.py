@@ -293,7 +293,9 @@ def _run_in(network: str, name: str, text: str, workspace: Path, *, limits: Limi
             runtime: str | None, image: str, gateway: Gateway | None,
             egress_url: str) -> Result:
     token = ""
+    usage_start = 0
     if gateway is not None:
+        usage_start = gw.usage_size(gateway.usage)
         # Жетонът живее колкото задачата (+1 мин за последния отговор).
         token = gw.make_token(gateway.secret, name, budget=gateway.budget,
                               ttl=limits.seconds + 60)
@@ -374,7 +376,7 @@ def _run_in(network: str, name: str, text: str, workspace: Path, *, limits: Limi
     done = next((e for e in reversed(events) if e.get("kind") == "done"), None)
     seconds = round(time.monotonic() - t0, 1)
     # С шлюз сметката е от шлюза — контейнерът може да каже каквото си иска.
-    billed = gw.usage_for(gateway.usage, name) if gateway is not None else None
+    billed = gw.usage_for(gateway.usage, name, usage_start) if gateway is not None else None
     if timed_out.is_set():
         return Result(False, True, code, seconds, error=f"прекъснато след {limits.seconds} s",
                       tokens=billed or {}, events=events)
