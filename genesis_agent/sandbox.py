@@ -141,8 +141,12 @@ _BLOCK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 # `echo {} > ~/GENESI~1/hooks.json` беше SAFE, а `~/.genesis/hooks.json` — CONFIRM.
 _GENESIS_DIR = r"(?:\.genesis|\bgenesi~\d)"
 
+# Краят на името на папката е `(?![\w-])`, не `\b` (ревю 2026-10-11): `\b` има и
+# преди „-“, и `.aws-sam/` (папката на AWS SAM) и `.azure-pipelines.yml` (CI на
+# Azure DevOps) искаха потвърждение, а в deny режим и `genesis fix` се отказваха.
 _SECRET_PATHS = (
-    r"\.ssh(?:[/\\]|\b)|\.aws(?:[/\\]|\b)|\.gnupg(?:[/\\]|\b)|id_rsa|id_ed25519|id_ecdsa|id_dsa"
+    r"\.ssh(?:[/\\]|(?![\w-]))|\.aws(?:[/\\]|(?![\w-]))|\.gnupg(?:[/\\]|(?![\w-]))"
+    r"|id_rsa|id_ed25519|id_ecdsa|id_dsa"
     r"|\bid_[*?\[]|\.env\b|credentials\b"
     r"|\.pem\b|\.p12\b|\.pfx\b|" + _GENESIS_DIR + r"[/\\]remote\.json|gh[/\\]hosts\.yml"
     # gh на Windows: %APPDATA%\GitHub CLI\hosts.yml (2026-10-11).
@@ -158,7 +162,7 @@ _SECRET_PATHS = (
     r"|/proc/[^/\s]+/(?:environ|mem|maps)\b"
     # Добре известни файлове с токени (2026-10-11): gcloud, Azure CLI, Vault,
     # PostgreSQL. `.git-credentials` хваща `credentials\b` по-горе.
-    r"|\.config[/\\]gcloud\b|[/\\]Roaming[/\\]gcloud\b|\.azure(?:[/\\]|\b)"
+    r"|\.config[/\\]gcloud\b|[/\\]Roaming[/\\]gcloud\b|\.azure(?:[/\\]|(?![\w-]))"
     r"|\.vault-token\b|\.pgpass\b|pgpass\.conf\b"
 )
 
