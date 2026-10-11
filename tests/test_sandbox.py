@@ -865,3 +865,26 @@ def test_concatenated_cmd_switches_on_home_are_blocked(cmd) -> None:
 ])
 def test_concatenated_cmd_switches_on_a_project_folder_ask(cmd) -> None:
     assert sandbox.assess_command(cmd).level is CONFIRM
+
+
+class _NtOs:
+    """`os` с name='nt' само за sandbox — pathlib остава истинският."""
+    name = "nt"
+
+    def __getattr__(self, attr):
+        return getattr(os, attr)
+
+
+@pytest.mark.parametrize("cmd", [
+    r"cat ~/.s\sh/id_ed2551\9",
+    r"cat ~/.genesis/.e\nv",
+    r"cat $HOME/.s\sh/id_ed\25519",
+])
+def test_backslash_escaped_secret_asks_on_windows_too(monkeypatch, tmp_path, cmd) -> None:
+    """Git Bash, който пуска RUN_CMD, чете `\\s` като `s`; класификаторът на
+    Windows го правеше `/` и `cat ~/.s\\sh/id_ed2551\\9` беше SAFE (2026-10-11),
+    а bash печаташе ключа."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setattr(sandbox, "os", _NtOs())
+    assert sandbox.assess_command(cmd, cwd=tmp_path).level is CONFIRM

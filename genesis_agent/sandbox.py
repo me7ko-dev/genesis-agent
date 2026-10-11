@@ -584,6 +584,26 @@ def _shlex_split_for_classification(seg: str) -> list[str]:
     return shlex.split(seg)
 
 
+def _argument_readings(seg: str) -> list[list[str]]:
+    """Думите на сегмента така, както ги вижда всеки шел, който може да го
+    изпълни. На Windows RUN_CMD върви през Git Bash, където `\\` е escape, а
+    без bash — през cmd.exe, където е разделител. Измерено 2026-10-11:
+    `cat ~/.s\\sh/id_ed2551\\9` беше SAFE на Windows (само `/`-четенето), а bash
+    печаташе ключа. Проверката за тайни гледа и двете четения."""
+    try:
+        readings = [_shlex_split_for_classification(seg)]
+    except ValueError:
+        readings = [seg.split()]
+    if os.name == "nt":
+        try:
+            posix = shlex.split(seg)
+        except ValueError:
+            posix = []
+        if posix and posix != readings[0]:
+            readings.append(posix)
+    return readings
+
+
 def _assess_file_ops(command: str, cwd: Path | None = None) -> RiskVerdict:
     """Структурна оценка на файлови операции + РАЗГЪНАТ преглед кои файлове
     реално ще бъдат засегнати. Виж коментара при _DESTRUCTIVE_MOVE_CMDS."""
@@ -1212,10 +1232,7 @@ def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:
     base = cwd if (cwd and cwd.is_dir()) else Path.cwd()
     seen = 0
     for seg in _split_segments(command):
-        try:
-            tokens = _shlex_split_for_classification(seg)
-        except ValueError:
-            tokens = seg.split()
+        tokens = [tok for reading in _argument_readings(seg) for tok in reading]
         for tok in tokens:
             if not tok or tok.startswith("-"):
                 continue
