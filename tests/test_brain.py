@@ -550,10 +550,12 @@ class TestContextBudgetIsAppliedOnTheWayOut:
         b.complete(history)
 
         assert len(sent) == 1, "заявката трябва наистина да е стигнала до _http"
-        wire = sent[0]
-        assert len(str(wire[1]["content"])) < 800, "старият резултат трябва да е свит"
-        assert str(wire[1]["content"]).startswith("S0"), "началото се пази"
-        assert wire[-1]["content"] == history[-1]["content"], "последният остава пълен"
+        # Без tools role='tool' тръгва като текст (одит 2026-10-11) — сравнява
+        # се съдържанието след префикса на _sanitize_for_textmode.
+        wire = [str(m["content"]).removeprefix("[Резултат от tool]: ") for m in sent[0]]
+        assert len(wire[1]) < 800, "старият резултат трябва да е свит"
+        assert wire[1].startswith("S0"), "началото се пази"
+        assert wire[-1] == history[-1]["content"], "последният остава пълен"
         assert history == snapshot, "историята на извикващия не бива да се пипа"
 
 

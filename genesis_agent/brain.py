@@ -1810,7 +1810,15 @@ class Brain:
             )
         else:
             ordered_chain = chain
-            messages_notools = messages
+            # Без tools, но с native tool история (лекият чат маршрут след
+            # tool ход): role='tool' без декларирани 'tools' е 400 при много
+            # доставчици и винаги при Anthropic, тоест ходът падаше по цялата
+            # лека верига и ескалираше (одит 2026-10-11). Чиста текстова
+            # история остава байт по байт същата.
+            messages_notools = (self._sanitize_for_textmode(messages)
+                                if any(m.get("role") == "tool" or m.get("tool_calls")
+                                       for m in messages)
+                                else messages)
 
         # An explicit pin outranks any reordering above (tools-capability sort
         # or deprioritize_flaky), in EITHER branch. The operator picked that

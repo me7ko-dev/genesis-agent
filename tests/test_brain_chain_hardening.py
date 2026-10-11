@@ -377,3 +377,42 @@ def test_a_light_chat_turn_with_the_network_down_waits_one_pause_at_most(monkeyp
     monkeypatch.setattr(gta, "current_model_id", "A")
     text, _calls = gta.ask_genesis([{"role": "system", "content": "s"}, {"role": "user", "content": "hi"}])
     assert sum(_slept) <= 8 and "network down" in text
+
+
+# ── F8: native tool история без `tools` се превежда в текст ─────────────────
+
+_TOOL_HISTORY = [
+    {"role": "system", "content": "sys"},
+    {"role": "user", "content": "колко файла има в папката?"},
+    {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function",
+        "function": {"name": "LIST_DIR", "arguments": "{\"path\": \".\"}"}}]},
+    {"role": "tool", "tool_call_id": "c1", "name": "LIST_DIR", "content": "a.py\nb.py"},
+    {"role": "assistant", "content": "Два файла."},
+    {"role": "user", "content": "благодаря!"},
+]
+
+
+def test_a_call_without_tools_never_sends_native_tool_history(monkeypatch) -> None:
+    monkeypatch.setattr(brain, "_load_chain", lambda: chain(("groq", "A")))
+    monkeypatch.setattr(brain, "_load_light_chain", lambda: chain(("groq", "small")))
+    monkeypatch.setenv("GROQ_API_KEY", "g")
+    sent: list = []
+    monkeypatch.setattr(brain, "_post_with_deadline",
+                        lambda url, **kw: (sent.append(kw["json"]), ok("моля"))[1])
+    assert brain.Brain(light=True, use_local=False).complete(_TOOL_HISTORY, tools=None).raw_text == "моля"
+    payload = sent[0]
+    assert "tools" not in payload
+    assert all(m["role"] != "tool" and not m.get("tool_calls") for m in payload["messages"])
+    assert any("LIST_DIR" in (m.get("content") or "") for m in payload["messages"])
+    assert any("a.py" in (m.get("content") or "") for m in payload["messages"])
+
+
+def test_a_plain_history_without_tools_is_sent_unchanged(monkeypatch) -> None:
+    monkeypatch.setattr(brain, "_load_chain", lambda: chain(("groq", "A")))
+    monkeypatch.setenv("GROQ_API_KEY", "g")
+    sent: list = []
+    monkeypatch.setattr(brain, "_post_with_deadline",
+                        lambda url, **kw: (sent.append(kw["json"]), ok("моля"))[1])
+    plain = [{"role": "system", "content": "sys"}, {"role": "user", "content": "здрасти"}]
+    brain.Brain(use_local=False).complete(plain)
+    assert sent[0]["messages"] == plain
