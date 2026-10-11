@@ -136,3 +136,21 @@ def test_a_vertex_429_on_one_model_leaves_the_project_for_another_model(monkeypa
         b._call("vertex", "A", [{"role": "user", "content": "x"}])
     assert b._call("vertex", "B", [{"role": "user", "content": "x"}]) == ("ok", None)
     assert seen == ["A", "B"]
+
+
+# ── F2: Brain чете .env като paths.read_env_files ────────────────────────────
+
+def test_brain_reads_the_same_keys_as_paths_from_a_bom_and_a_quoted_hash(monkeypatch, tmp_path) -> None:
+    from genesis_agent import paths
+    env = tmp_path / ".env"
+    # PowerShell 5.1 / стар Notepad: UTF-8 с BOM пред първия ключ.
+    env.write_bytes('GROQ_API_KEY=gsk_real\nOPENAI_API_KEY="sk-proj #1"\n'
+                    'export NVIDIA_API_KEY=nv  # бележка\n'.encode("utf-8-sig"))
+    monkeypatch.setattr(brain, "ENV_FILES", (str(env),))
+    monkeypatch.setattr(paths, "ENV_FILES", (str(env),))
+    b = brain.Brain(use_local=False)
+    for name in ("GROQ_API_KEY", "OPENAI_API_KEY", "NVIDIA_API_KEY"):
+        assert b._provider_key(name) == paths.read_env_files(name), name
+    assert b._provider_key("GROQ_API_KEY") == "gsk_real"
+    assert b._provider_key("OPENAI_API_KEY") == "sk-proj #1"
+    assert b._provider_key("NVIDIA_API_KEY") == "nv"

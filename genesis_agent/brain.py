@@ -44,7 +44,7 @@ import yaml
 from genesis_agent.paths import (
     CONFIG_PATH,
     ENV_FILES,
-    _strip_inline_comment,
+    env_value,
 )
 
 # Extra ollama_cloud keys an operator may add THEMSELVES to their own
@@ -410,11 +410,15 @@ def _load_keys() -> dict[str, str]:
         p = Path(envf)
         if not p.exists():
             continue
-        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+        # Същото четене като paths.read_env_files (одит 2026-10-11): с utf-8
+        # .env от PowerShell 5.1 започваше с BOM и първият ключ ставаше
+        # „\ufeffGROQ_API_KEY“ — терминалът го показваше активен, а Brain
+        # мълчаливо прескачаше groq; `"sk-proj #1"` се режеше до `sk-proj` → 401.
+        for line in p.read_text(encoding="utf-8-sig", errors="replace").splitlines():
             line = line.strip().removeprefix("export ").strip()
             if "=" in line and not line.startswith("#"):
                 k, v = line.split("=", 1)
-                keys.setdefault(k.strip(), _strip_inline_comment(v.strip()).strip('"').strip("'"))
+                keys.setdefault(k.strip(), env_value(v))
     for k, v in os.environ.items():
         # Exported-but-empty is not an override — it falls through to the file,
         # exactly as get_secret does.
