@@ -276,6 +276,51 @@ def test_a_write_cut_on_every_model_reaches_the_loop_after_one_pass(monkeypatch)
     assert rows == [("A", 4096), ("C", 4096)]   # всеки отрязан отговор е платен веднъж
 
 
+def test_a_cut_write_waits_for_a_model_whose_cooldown_ends_within_the_pause(monkeypatch) -> None:
+    """Ревю 2026-10-11 (F4): ранното спиране след отрязан WRITE_FILE не
+    гледаше моделите, пропуснати заради cooldown — C с 5 s оставащи (Groq TPM
+    429) не получаваше втори кръг и ходът връщаше отрязания call на A."""
+    clock = [1_000_000.0]
+    slept: list = []
+    monkeypatch.setattr(brain.time, "time", lambda: clock[0])
+    monkeypatch.setattr(brain.time, "sleep", lambda s: (slept.append(s), clock.__setitem__(0, clock[0] + s)))
+    monkeypatch.setattr(brain, "_load_chain", lambda: chain(("groq", "A"), ("nvidia", "C")))
+    monkeypatch.setenv("GROQ_API_KEY", "g")
+    monkeypatch.setenv("NVIDIA_API_KEY", " n")
+    brain._EXHAUSTED["nvidia::C"] = clock[0] + 5
+    cut = json.dumps({"path": "app.py", "content": "x = 1\n" * 50})[:120]
+    good = json.dumps({"path": "app.py", "content": "x = 1\n"})
+
+    def handler(p):
+        args = cut if p["model"] == "A" else good
+        tc = [{"id": "c1", "type": "function", "function": {"name": "WRITE_FILE", "arguments": args}}]
+        return ok(None, tool_calls=tc, finish="length" if p["model"] == "A" else "tool_calls")
+
+    seen = _route(monkeypatch, handler)
+    r = brain.Brain(use_local=False).complete([{"role": "user", "content": "напиши app.py"}], tools=_TOOLS)
+    assert slept == [8] and [m for m, _ in seen][-1] == "C"
+    assert r.tool_calls[0]["function"]["arguments"] == good
+
+
+def test_a_cut_write_with_only_long_cooldowns_still_stops_after_one_pass(monkeypatch) -> None:
+    """Обратната страна: cooldown, който не свършва в паузата, не купува
+    платен втори кръг на отрязания модел (ревю 2026-10-11)."""
+    clock = [1_000_000.0]
+    slept: list = []
+    monkeypatch.setattr(brain.time, "time", lambda: clock[0])
+    monkeypatch.setattr(brain.time, "sleep", lambda s: (slept.append(s), clock.__setitem__(0, clock[0] + s)))
+    monkeypatch.setattr(brain, "_load_chain", lambda: chain(("groq", "A"), ("nvidia", "C")))
+    monkeypatch.setenv("GROQ_API_KEY", "g")
+    monkeypatch.setenv("NVIDIA_API_KEY", " n")
+    brain._EXHAUSTED["nvidia::C"] = clock[0] + 290
+    cut = json.dumps({"path": "app.py", "content": "x = 1\n" * 50})[:120]
+    tc = [{"id": "c1", "type": "function", "function": {"name": "WRITE_FILE", "arguments": cut}}]
+    seen = _route(monkeypatch, lambda p: ok(None, tool_calls=tc, finish="length"))
+    r = brain.Brain(use_local=False).complete([{"role": "user", "content": "напиши app.py"}], tools=_TOOLS)
+    assert slept == [] and [m for m, _ in seen] == ["A"]
+    assert r.tool_calls[0]["function"]["arguments"] == cut
+
+
 def test_an_empty_but_paid_reply_is_recorded_in_the_budget(monkeypatch) -> None:
     monkeypatch.setattr(brain, "_load_chain", lambda: chain(("groq", "A"), ("nvidia", "C")))
     monkeypatch.setenv("GROQ_API_KEY", "g")
@@ -474,6 +519,37 @@ def test_a_short_key_cooldown_does_not_hide_a_long_model_cooldown(monkeypatch, _
     assert seen == [] and _slept == [] and "cooldown" in r.raw_text
 
 
+def test_vertex_without_a_token_is_not_reported_as_a_cooldown(monkeypatch, _slept) -> None:
+    """Ревю 2026-10-11 (F7): _call_vertex казваше „all cooling down“ и при
+    изтекли ADC без нито един проект в cooldown. Vertex влизаше в `cooled` с
+    0 s оставащи → 8 s пауза, празен втори кръг и „най-рано след 0 s“."""
+    from genesis_agent import vertex_auth
+    clock = [1_000_000.0]
+    monkeypatch.setattr(brain.time, "time", lambda: clock[0])
+    monkeypatch.setattr(brain.time, "sleep", lambda s: (_slept.append(s), clock.__setitem__(0, clock[0] + s)))
+    monkeypatch.setattr(brain, "_load_chain", lambda: chain(("vertex", "V"), ("nvidia", "C")))
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "p1")
+    monkeypatch.setattr(vertex_auth, "auth_available", lambda: True)
+    monkeypatch.setattr(vertex_auth, "token", lambda p: None)
+    brain._EXHAUSTED["nvidia::C"] = clock[0] + 290
+    seen = _route(monkeypatch, lambda p: ok("x"))
+    r = brain.Brain(use_local=False).complete([{"role": "user", "content": "hi"}])
+    assert seen == [] and _slept == []
+    assert "290 s" in r.raw_text
+
+
+def test_vertex_with_every_project_cooling_down_still_says_so(monkeypatch) -> None:
+    from genesis_agent import vertex_auth
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "p1")
+    monkeypatch.setattr(vertex_auth, "auth_available", lambda: True)
+    monkeypatch.setattr(vertex_auth, "token", lambda p: "tok")
+    brain._EXHAUSTED["key::VERTEX#1"] = time.time() + 60
+    b = brain.Brain(use_local=False)
+    with pytest.raises(RuntimeError, match="cooling down"):
+        b._call("vertex", "V", [{"role": "user", "content": "x"}])
+    assert 55 < b._cooldown_left("vertex", "V") <= 60
+
+
 def test_the_light_route_walks_the_chain_once(monkeypatch, _slept) -> None:
     import requests
 
@@ -627,4 +703,13 @@ def test_an_explicitly_set_local_model_is_never_swapped(monkeypatch, _ollama_tag
     LOCAL_ONLY (ревю 2026-10-11) — сменя се само подразбиращият се модел."""
     monkeypatch.setenv("GENESIS_LOCAL_MODEL", "qwen2.5-coder:14b")
     monkeypatch.setattr(brain, "LOCAL_MODEL", "qwen2.5-coder:14b")
+    assert brain.Brain().local is None
+
+
+def test_an_empty_local_model_turns_the_local_fallback_off(monkeypatch, _ollama_tags) -> None:
+    """GENESIS_LOCAL_MODEL="" е документираният начин да се изключи локалният
+    модел (ревю 2026-10-11): проверката по истинност го пропускаше и Brain()
+    пак слагаше инсталирано ниво като последна резерва."""
+    monkeypatch.setenv("GENESIS_LOCAL_MODEL", "")
+    monkeypatch.setattr(brain, "LOCAL_MODEL", "")
     assert brain.Brain().local is None
