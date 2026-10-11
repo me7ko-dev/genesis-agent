@@ -230,6 +230,14 @@ def _is_transient(error: str) -> bool:
     return any(error.startswith(f"HTTP_{c}") for c in _TRANSIENT_CODES)
 
 
+def _hit_output_cap(error: str) -> bool:
+    """Отговор, отрязан на тавана на изходните токени (HTTP_TRUNCATED) — лимит на
+    модела за дълъг отговор, не болен доставчик. Същото понятие, по което
+    complete() не праща втори кръг и пази отрязания tool_call (2026-10-11):
+    празен отговор с finish_reason=length остава обикновен провал, както в базата."""
+    return "HTTP_TRUNCATED" in error
+
+
 def _openai_usage(usage: Any) -> Any:
     """usage от OpenAI-съвместим отговор + `cached_read_tokens` за budget.py.
 
@@ -1870,6 +1878,11 @@ class Brain:
         messages = budget_history(messages)
 
         last_error = "неизвестна грешка"
+        # Последната ИСТИНСКА грешка (тръгнала заявка). `last_error` се
+        # презаписва и от синтетичните „skip: no KEY“ след нея — измерено
+        # 2026-10-11: groq 429 и ollama_cloud отрязан → операторът и
+        # `genesis -p --json` виждаха „последна: skip: no HF_TOKEN configured“.
+        last_real_error = ""
         local_only = os.environ.get("GENESIS_LOCAL_ONLY") == "1"
 
         # LOCAL-ONLY: изричен офлайн режим — никога не пипа облака.
@@ -2044,7 +2057,7 @@ class Brain:
                         only_unconfigured = False
                         sent_any = True
                         retry_useful = True
-                        last_error = f"мрежа: {e}"
+                        last_error = last_real_error = f"мрежа: {e}"
                         self._fail_count += 1
                         self._record_stat(prov, time.time() - t0, False)
                         _print_skip(prov, model, last_error, time.time() - t0)
@@ -2062,12 +2075,19 @@ class Brain:
                             cooled.append((prov, model))
                         if not synthetic:
                             sent_any = True
-                            if "HTTP_TRUNCATED" not in last_error:
+                            last_real_error = last_error
+                            if not _hit_output_cap(last_error):
                                 retry_useful = True
+                                # Изяден таван не е болен доставчик (2026-10-11):
+                                # 5 отрязани големи WRITE_FILE на groq даваха
+                                # success_rate 0.0 и deprioritize_flaky го местеше
+                                # последен за 15 мин за всички без пин (genesis
+                                # fix, леката верига, компресията). Разходът пак
+                                # се записва по-долу.
+                                self._fail_count += 1
+                                self._record_stat(prov, time.time() - t0, False)
                             elif cut_hit is None and getattr(self, "_cut_reply", None):
                                 cut_hit = (self._cut_reply, self._last_usage, attempt)
-                            self._fail_count += 1
-                            self._record_stat(prov, time.time() - t0, False)
                             # Отрязан/отказан отговор е платен — разходът се записва.
                             if getattr(self, "_usage_attempt", None) == (prov, model):
                                 previous, self.current = getattr(self, "current", None), attempt
@@ -2138,9 +2158,11 @@ class Brain:
                 raw_text, code = hit
                 return type("Obj", (object,), {"raw_text": raw_text, "code": code,
                                                "usage": self._last_usage, "tool_calls": None})
-            last_error = self._last_local_error or last_error
+            if self._last_local_error:
+                last_error = last_real_error = self._last_local_error
 
-        return self._error_result(f"Error: цялата верига е изчерпана | последна: {last_error}")
+        return self._error_result(
+            f"Error: цялата верига е изчерпана | последна: {last_real_error or last_error}")
 
     def _error_result(self, msg: str):
         return type("Obj", (object,), {"raw_text": msg, "code": "", "usage": None, "tool_calls": None})

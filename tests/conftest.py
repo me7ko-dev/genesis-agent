@@ -86,6 +86,12 @@ _PERSISTED_STATE = (
     ("genesis_agent.embeddings", "SKILLS_INDEX", "skills.json"),
     ("genesis_agent.benchmark", "HISTORY", "benchmark_history.json"),
     ("genesis_agent.web_search", "CACHE_DIR", ".search_cache"),
+    # Ключът за подписване на умения (e2e 2026-10-11): пълният пакет създаде
+    # ~/.genesis/private_key.pem — пътят се връзва при внасяне, а тест, който
+    # задава само GENESIS_KEY_DIR, подписваше с ключа на оператора.
+    ("genesis_agent.cryptography_utils", "KEY_DIR", "keys"),
+    ("genesis_agent.cryptography_utils", "PRIVATE_KEY_PATH", "keys/private_key.pem"),
+    ("genesis_agent.cryptography_utils", "PUBLIC_KEY_PATH", "keys/public_key.pem"),
 )
 
 

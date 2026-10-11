@@ -88,11 +88,19 @@ _CATEGORIES: tuple[tuple[str, re.Pattern[str], frozenset[str], frozenset[str]], 
         # Отделно от „пуснах“ (2026-10-11): „всички тестове минаха“ иска
         # ПОСЛЕДНОТО пускане на тестовете да е с rc=0. Измерено: pytest с rc=1
         # („1 failed, 1 passed“) минаваше като доказателство за „всички минаха“.
+        # Разширено 2026-10-11 (e2e): след pytest с rc=1 минаваха „Всички 5
+        # теста минават“, „Тестовете минават“, „All 5 tests pass“, „Всичките
+        # тестове минаха успешно“ — и `genesis -p` излизаше с 0. Само формите с
+        # „тестовете“/„всички“/„all“: броените („4 теста минават; test_vat
+        # пада“, „3 от 5 теста минават“) са честни отчети — две ревюта
+        # подред хванаха фалшива тревога там, затова извън шаблона.
         _PASS_KIND,
         re.compile(
-            r"\b(тестовете (?:вече |сега )?(?:минаха|минават успешно)|"
-            r"тестовете вече минават|всички тестове (?:минаха|минават)|"
-            r"tests? (?:now pass(?:es)?|passed)|all (?:the )?tests pass)\b",
+            r"\b(тестовете (?:вече |сега |успешно )?(?:минаха|минават|преминават|преминаха)|"
+            r"всички(?:те)? (?:\d+ )?(?:тестове|теста) (?:вече |сега |успешно )?"
+            r"(?:минаха|минават|преминават|преминаха)|"
+            r"tests? (?:now pass(?:es)?|passed)|"
+            r"all (?:the )?(?:\d+ )?tests (?:now )?pass(?:ed)?)\b",
             re.IGNORECASE),
         frozenset({"RUN_CMD", "USE_SKILL", "DELEGATE"}),
         _TEST_WORDS,
@@ -133,6 +141,50 @@ def _quote(text: str, match: re.Match[str]) -> str:
     start = max(0, match.start() - _QUOTE_RADIUS)
     end = min(len(text), match.end() + _QUOTE_RADIUS)
     return ("…" if start else "") + text[start:end].strip() + ("…" if end < len(text) else "")
+
+
+# Изречението около „N теста минават“ (ревю 2026-10-11): по-широкият шаблон
+# за _PASS_KIND четеше честния червен отчет като зелено твърдение — „Пуснах
+# pytest: 4 теста минаха, 1 падна.“ след pytest rc=1 даваше подкана, „⚠
+# червено“ и `genesis -p` с exit 1 (преди разширяването: exit 0, без
+# предупреждения). Същото за „4 passed and 1 failed“, „Старите тестове
+# минават, но новият пада“, „Провери дали 5 теста минават.“ и въпросите.
+# Червена дума в същото изречение, въпрос или условие/отрицание преди
+# съвпадението → не е твърдение за зелено. Нарочно консервативно (виж
+# горе): пропуснато твърдение е по-евтино от фалшива тревога.
+_SENTENCE_END_RE = re.compile(r"[.!?;](?=\s|$)|\n")
+_RED_WORDS_RE = re.compile(
+    r"\b(?:пада|падат|падна|паднаха|паднал[аио]?|падащ\w*|"
+    r"не мина\w*|не минава\w*|червен\w*|освен|с изключение|"
+    r"fail(?:s|ed|ing|ures?)?|except|\d+ errors?)\b", re.IGNORECASE)
+_NOT_A_CLAIM_RE = re.compile(
+    r"\b(?:дали|ако|когато|докато|провери|проверете|увери|"
+    r"if|whether|unless|when|until|check|ensure|make sure)\b", re.IGNORECASE)
+# Отрицание само точно пред съвпадението („Не всички тестове минават“): „не“
+# другаде в изречението („Не беше лесно, но всички минаха“) не отменя твърдението.
+_NEGATED_RE = re.compile(r"\b(?:не|not)\s+$", re.IGNORECASE)
+
+
+def _honest_pass_report(text: str, match: re.Match[str]) -> bool:
+    """Съвпадение за „тестовете минават“, което не твърди зелено: въпрос,
+    условие, отрицание или смесен отчет с червена дума в същото изречение."""
+    start = max((m.end() for m in _SENTENCE_END_RE.finditer(text, 0, match.start())),
+                default=0)
+    end_match = _SENTENCE_END_RE.search(text, match.end())
+    end = end_match.end() if end_match else len(text)
+    sentence = text[start:end]
+    if sentence.rstrip().endswith("?") or re.match(r"\s+ли\b", text[match.end():]):
+        return True
+    before = text[start:match.start()]
+    return bool(_RED_WORDS_RE.search(sentence) or _NOT_A_CLAIM_RE.search(before)
+                or _NEGATED_RE.search(before))
+
+
+def _find_claim(kind: str, pattern: re.Pattern[str], text: str) -> re.Match[str] | None:
+    for match in pattern.finditer(text):
+        if kind != _PASS_KIND or not _honest_pass_report(text, match):
+            return match
+    return None
 
 
 def _supported(tool_names: set[str], command_text: str,
@@ -318,7 +370,7 @@ def unsupported_claims(text: str, executed: list[tuple[str, str]]) -> list[Claim
         return []
     found: list[Claim] = []
     for kind, pattern, ok_tools, ok_words in _CATEGORIES:
-        match = pattern.search(text)
+        match = _find_claim(kind, pattern, text)
         if not match:
             continue
         evidence = _evidence(kind, executed)
@@ -335,6 +387,20 @@ def unsupported_claims(text: str, executed: list[tuple[str, str]]) -> list[Claim
         needed = " / ".join(sorted(ok_tools - {"USE_SKILL", "DELEGATE"}))
         found.append(Claim(kind=kind, quote=_quote(text, match), needed=needed))
     return found
+
+
+# Предупреждението, когато и след подканата отговорът твърди зелени тестове
+# срещу червено последно пускане. `genesis -p` го брои за неуспех (2026-10-11:
+# повторено „Всички тестове минават“ след pytest rc=1 даваше exit 0, ok:true).
+RED_TESTS_WARNING = "⚠ Отговорът твърди, че тестовете минават, а последното им пускане е червено"
+
+
+def green_claim_after_red(claims: list[Claim], executed: list[tuple[str, str]]) -> int:
+    """rc на последното тестово пускане, ако сред `claims` има „тестовете
+    минават“, а то е червено; иначе 0."""
+    if any(c.kind == _PASS_KIND for c in claims):
+        return _last_test_rc(executed)
+    return 0
 
 
 def nudge_text(claims: list[Claim]) -> str:

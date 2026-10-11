@@ -1720,7 +1720,12 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                     with ui.thinking("Продължавам…", "aesthetic"):
                         response, tool_calls = ask_genesis(messages, tools=_turn_tools())
                     continue
-                _unsupported = claim_check.unsupported_claims(response, _executed)
+                # И твърденията — в режим план нищо не може да е записано, тоест
+                # „създадох план“ описва самия план (2026-10-11): подканата искаше
+                # WRITE_FILE/RUN_CMD (отказани там) и `genesis -p --plan` печаташе
+                # втория отговор вместо плана.
+                _unsupported = ([] if _planning
+                                else claim_check.unsupported_claims(response, _executed))
                 if _unsupported and _claim_retries < 1:
                     _claim_retries += 1
                     ui.warn("Твърди свършена работа, която никой "
@@ -1730,6 +1735,9 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                     with ui.thinking("Проверявам…", "aesthetic"):
                         response, tool_calls = ask_genesis(messages, tools=_turn_tools())
                     continue
+                _red_rc = claim_check.green_claim_after_red(_unsupported, _executed)
+                if _red_rc:
+                    ui.warn(f"{claim_check.RED_TESTS_WARNING} (rc={_red_rc}).")
                 break
             _text_note = ""
             for _r in tool_results:
@@ -1923,6 +1931,14 @@ def _no_model_guard() -> bool:
     skip: no KEY“ и кутия с грешка — първото, което вижда нов потребител след
     инсталацията. Тук то е едно изречение; в терминал се предлага настройката
     веднага и след нея съобщението тръгва нормално."""
+    # Закачен доставчик, който Brain не познава (GitHub Models, LM Studio,
+    # локален Ollama със свой модел), отговаря по стария път и сам казва
+    # грешката си. any_model_reachable() гледа само веригите на Brain —
+    # измерено 2026-10-11: без *_API_KEY пазачът спираше всяко съобщение,
+    # а ask_genesis би отговорил „Здравей от github“. Условието е същото
+    # като в ask_genesis.
+    if not _brain_handles(current_provider) and not os.environ.get("GENESIS_LOCAL_ONLY"):
+        return False
     try:
         from genesis_agent.brain import any_model_reachable
         if any_model_reachable():
@@ -2278,7 +2294,9 @@ def main():
                 continue
 
             # ── Затваряне/изхвърляне на нишка (хигиена) ──
-            if user_input.lower().startswith(("/done", "/drop", "/готово")):
+            # По първата дума, не по префикс: `/dropbox x` е собствена команда
+            # на оператора, не `/drop` (e2e 2026-10-11).
+            if user_input.lower().split(" ", 1)[0] in ("/done", "/drop", "/готово"):
                 parts_cmd = user_input.split()
                 if len(parts_cmd) < 2:
                     console.print("[yellow]Дай номер: `/done 3` (готово) или `/drop 3` (изхвърли)[/]")

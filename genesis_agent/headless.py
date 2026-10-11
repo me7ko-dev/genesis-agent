@@ -218,13 +218,17 @@ def run(argv: list[str]) -> int:
     # Грешката на веригата идва като предупреждение, не като отговор (2026-10-11).
     if not error:
         error = next((w for w in ui.warnings if w.lstrip().startswith("[Грешка")), "")
-    failed = bool(error or cut) or not answer.strip() or \
+    # Зелено, казано срещу червено пускане на тестовете — неуспех, не ok:true
+    # (2026-10-11: CI скрипт приемаше „Всички тестове минават“ след pytest rc=1).
+    from genesis_agent.claim_check import RED_TESTS_WARNING
+    red = next((w for w in ui.warnings if w.startswith(RED_TESTS_WARNING)), "")
+    failed = bool(error or cut or red) or not answer.strip() or \
         answer.lstrip().startswith(("[Грешка", "Error:"))
     code = 130 if error.startswith("прекъснато") else (3 if ui.question and not failed else
                                                         1 if failed else 0)
     if opts["json"]:
         print(json.dumps({"ok": code == 0, "result": answer, "question": ui.question or None,
-                          "error": error or cut or None,
+                          "error": error or cut or red or None,
                           "tools": [t["name"] for t in ui.tools], "warnings": ui.warnings,
                           "workspace": str(cwd), "plan": bool(opts["plan"]),
                           "seconds": round(time.monotonic() - started, 1)},

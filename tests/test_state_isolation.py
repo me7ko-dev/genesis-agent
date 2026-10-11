@@ -20,6 +20,16 @@ from conftest import _PERSISTED_STATE
 
 from genesis_agent import config
 
+# Внася се ПРИ СЪБИРАНЕ, преди фикстурите на теста (ревю 2026-10-11): иначе
+# test_signing_keys_are_never_the_operators, пуснат сам, внасяше модула вече
+# с подменения GENESIS_HOME и минаваше и без пренасочването в conftest —
+# падаше само ако друг тест го е внесъл пръв. Сега пътят е вързан за
+# истинския дом при всеки ред на тестовете, както в пълния пакет.
+try:
+    import genesis_agent.cryptography_utils as _signing
+except ImportError:  # без `cryptography` (extra `signing`) няма и ключ
+    _signing = None  # type: ignore[assignment]
+
 
 def _real_data_dir_parts() -> set[str]:
     return {str(config.DATA_DIR)}
@@ -61,3 +71,17 @@ def test_each_test_gets_its_own_database() -> None:
     em._init_db()
     goals = [e["goal"] for e in em._fetch_all_episodes()]
     assert "проба за изолация" not in goals, goals
+
+
+def test_signing_keys_are_never_the_operators(tmp_path) -> None:
+    """e2e 2026-10-11: пълният пакет създаде ~/.genesis/private_key.pem.
+    cryptography_utils връзва пътя при внасяне, а GENESIS_KEY_DIR, зададен
+    в теста по-късно, не го мести — подписваше се с ключа на оператора."""
+    from pathlib import Path
+    if _signing is None:
+        pytest.skip("genesis_agent.cryptography_utils не се внася в тази среда")
+    cu = _signing
+    for path in (cu.KEY_DIR, cu.PRIVATE_KEY_PATH, cu.PUBLIC_KEY_PATH):
+        assert tmp_path in Path(path).parents, path
+    cu.sign_code("x = 1")
+    assert Path(cu.PRIVATE_KEY_PATH).exists()
