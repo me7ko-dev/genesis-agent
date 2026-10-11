@@ -27,7 +27,9 @@ CONFIRM/BLOCKED бариерата) и се записва в genesis_agent.memo
 
 from __future__ import annotations
 
+import os
 import re
+import stat
 import sys
 from collections.abc import Callable
 from functools import partial
@@ -39,6 +41,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from genesis_agent import sandbox
+from genesis_agent.code_edit import decode_text, displayable, encode_text, has_raw_bytes
 from genesis_agent.tool_schemas import load_tool_arguments
 
 # Паметта/уеб търсенето са meko-опционални — ако липсва зависимост (напр.
@@ -362,37 +365,147 @@ def _tool_read_file(arg: str, offset=None, limit=None) -> str:
     # и моделът виждаше „Permission denied“ (CI на Windows, 2026-10-07).
     if path.is_dir():
         return f"[READ_FILE] {path} е папка, не файл — ползвай LIST_DIR."
+    # Одит 2026-10-11: READ_FILE четеше ЦЕЛИЯ файл, за да покаже 8000 знака.
+    # FIFO в workspace-а висеше вечно (Ctrl-C затваря чата), /dev/zero изяждаше
+    # паметта, а лог от 300 MB струваше ~600–800 MB RSS — и с offset/limit.
+    # Затова: само обикновен файл (както mentions._read) и четене на парчета.
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        st = os.stat(path)
     except FileNotFoundError:
         return f"[READ_FILE] Файлът не съществува: {path}.{_did_you_mean(path)}"
     except OSError as e:
         return f"[READ_FILE] Грешка: {e}"
+    if not stat.S_ISREG(st.st_mode):
+        return (f"[READ_FILE] {path} не е обикновен файл (FIFO, устройство или сокет) — "
+                "не се чете: четенето би чакало вечно или нямало край.")
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(_READ_HEAD)
+            whole = len(head) >= st.st_size
+            # Двоичен файл (PNG, zip, sqlite) излизаше като 8000 знака боклук
+            # (одит 2026-10-11); @mentions вече го отказваше по същия признак.
+            # UTF-16/32 с BOM носят NUL, но са текст — decode_text ги чете.
+            text, encoding = decode_text(head, partial=not whole)
+            if encoding in ("utf-8", "cp1251") and b"\x00" in head[:8192]:
+                return (f"[READ_FILE] {path} е двоичен файл ({st.st_size} байта, "
+                        f"{path.suffix or 'без разширение'}) — не се показва. За "
+                        "съдържанието ползвай RUN_CMD с подходящ инструмент "
+                        "(file, unzip -l, sqlite3).")
+            enc_note = "" if encoding == "utf-8" else f"  (кодиране {encoding})"
+            if offset_i is not None or limit_i is not None:
+                return _read_range(fh, path, encoding, offset_i, limit_i,
+                                   enc_note, redirect)
+            total_lines = None
+            if not whole and st.st_size <= _COUNT_LINES_MAX:
+                total_lines = head.count(b"\n") + _count_rest(fh)
+    except OSError as e:
+        return f"[READ_FILE] Грешка: {e}"
+    # Кодирането се разпознава (code_edit.decode_text) и се казва в заглавието:
+    # cp1251 файл се показваше като „�������“, а моделът копираше това в
+    # WRITE_FILE и кирилицата изчезваше от диска (одит 2026-10-11).
+    text = displayable(text).replace("\r\n", "\n")
     _SEEN_PATHS.add(path.resolve())
-
-    if offset_i is not None or limit_i is not None:
-        lines = text.splitlines()
-        start = max(0, (offset_i or 1) - 1)
-        end = start + limit_i if limit_i else len(lines)
-        # Номерирани редове (както `cat -n`) — тук, за разлика от режима по
-        # подразбиране, точната позиция е ЦЯЛАТА цел на извикването: моделът
-        # е поискал точно този диапазон, защото гради EDIT_FILE anchor или
-        # обяснява нещо на потребителя по конкретен ред.
-        numbered = [f"{i:>5}\t{ln}" for i, ln in enumerate(lines[start:end], start + 1)]
-        chunk = "\n".join(numbered)
-        if len(chunk) > 8000:
-            chunk = chunk[:8000] + "\n… [отрязано, диапазонът е по-голям от 8000 символа]"
-        _log_episode(f"READ_FILE {path}", "прочетен (диапазон)", ["tool", "read_file"])
-        return (f"[READ_FILE: {path}]  (редове {start + 1}-{min(end, len(lines))} от {len(lines)})\n"
-                + chunk + redirect)
-
-    if len(text) > 8000:
-        total_lines = text.count("\n") + 1
+    if whole and not text.strip("\ufeff"):
+        text = "(празен файл)"
+    if len(text) > 8000 or not whole:
+        if whole:
+            total_lines = text.count("\n") + 1
+        lines_note = f", {total_lines} реда" if total_lines else ""
         text = (text[:8000]
-                + f"\n… [отрязано, общо {len(text)} символа, {total_lines} реда — "
+                + f"\n… [отрязано, общо {st.st_size} байта{lines_note} — "
                   f"за конкретен диапазон: READ_FILE: {path_str} | offset | limit]")
     _log_episode(f"READ_FILE {path}", "прочетен", ["tool", "read_file"])
-    return f"[READ_FILE: {path}]\n{text}{redirect}"
+    return f"[READ_FILE: {path}]{enc_note}\n{text}{redirect}"
+
+
+# Началото на файла, което READ_FILE чете по подразбиране: 8000 знака са
+# най-много 32000 байта (UTF-32), така че отрязването е по знаци, не по байтове.
+_READ_HEAD = 32_768
+# Над това броят на редовете в бележката не се смята — само байтовете.
+_COUNT_LINES_MAX = 512 * 1024 * 1024
+# Таван за едно парче от ред: минифициран файл от един ред не влиза цял в паметта.
+_LINE_PIECE = 1 << 20
+
+
+def _count_rest(fh) -> int:
+    """Редовете в остатъка на `fh` — на парчета, без да се делят."""
+    n, last = 0, b"\n"
+    while chunk := fh.read(_LINE_PIECE):
+        n += chunk.count(b"\n")
+        last = chunk[-1:]
+    return n + (last != b"\n")
+
+
+def _iter_lines(fh):
+    """Редовете от началото като байтове — делени САМО по `\n` (както rg и
+    EDIT_FILE), с най-много _LINE_PIECE байта от всеки."""
+    fh.seek(0)
+    while piece := fh.readline(_LINE_PIECE):
+        line = piece
+        while not piece.endswith(b"\n"):
+            piece = fh.readline(_LINE_PIECE)
+            if not piece:
+                break
+        yield line
+
+
+def _read_range(fh, path: Path, encoding: str, offset_i: int | None,
+                limit_i: int | None, enc_note: str, redirect: str) -> str:
+    """READ_FILE с offset/limit, без да държи файла в паметта.
+
+    Номерата са по `\n`, както в SEARCH_CODE и EDIT_FILE: str.splitlines()
+    броеше и \f, \x1c, U+2028 за край на ред, и READ_FILE ред 5 беше друг ред
+    (одит 2026-10-11). UTF-16/32 не се делят по байт `\n` — тях ги декодираме
+    цели (рядкост, и таванът е _STYLE_PROBE).
+    """
+    start = max(0, (offset_i or 1) - 1)
+    end = start + limit_i if limit_i else None
+    picked: list[str] = []
+    size = 0
+    total = 0
+    wide = encoding.startswith("utf-") and encoding != "utf-8"
+    if wide:
+        fh.seek(0)
+        text = decode_text(fh.read(_STYLE_PROBE), partial=True)[0]
+        lines = [ln + "\n" for ln in text.split("\n")]
+        if lines and lines[-1] == "\n":
+            lines.pop()
+        source = iter([ln.encode(encoding) for ln in lines])
+    else:
+        source = _iter_lines(fh)
+    for raw in source:
+        total += 1
+        if total <= start:
+            continue
+        if end is not None and total > end:
+            # Останалите редове само се броят — на парчета, без декодиране.
+            total += sum(1 for _ in source) if wide else _count_rest(fh)
+            break
+        if size <= 8000:
+            line = displayable(raw.decode(encoding, "surrogateescape"))
+            line = line.removesuffix("\n").removesuffix("\r")
+            picked.append(f"{total:>5}\t{line}")
+            size += len(picked[-1]) + 1
+    _SEEN_PATHS.add(path.resolve())
+    if start >= total:
+        return (f"[READ_FILE: {path}] Файлът има {total} реда — offset {start + 1} е след "
+                f"края. Прочети без offset или с offset ≤ {max(total, 1)}.{redirect}")
+    # Номерирани редове (както `cat -n`) — тук, за разлика от режима по
+    # подразбиране, точната позиция е ЦЯЛАТА цел на извикването: моделът
+    # е поискал точно този диапазон, защото гради EDIT_FILE anchor или
+    # обяснява нещо на потребителя по конкретен ред.
+    chunk = "\n".join(picked)
+    if len(chunk) > 8000:
+        chunk = chunk[:8000] + "\n… [отрязано, диапазонът е по-голям от 8000 символа]"
+    _log_episode(f"READ_FILE {path}", "прочетен (диапазон)", ["tool", "read_file"])
+    last = total if end is None else min(end, total)
+    return (f"[READ_FILE: {path}]  (редове {start + 1}-{last} от {total}){enc_note}\n"
+            + chunk + redirect)
+
+
+# Колко от съществуващ файл се чете, за да се познае кодирането му преди
+# WRITE_FILE — колкото и таванът на SEARCH_CODE (по-голям файл е генериран).
+_STYLE_PROBE = 2_000_000
 
 
 def _tool_write_file(arg: str, content: str) -> str:
@@ -437,9 +550,36 @@ def _tool_write_file(arg: str, content: str) -> str:
             content = detail
         elif not ok:
             lint_note = f"\n{detail}"
+    # Съществуващ файл се записва в СВОЕТО кодиране (одит 2026-10-11): cp1251
+    # файл, минал през READ→WRITE, излизаше с U+FFFD на мястото на всяка буква.
+    encoding = "utf-8"
+    if path.is_file():
+        try:
+            with open(path, "rb") as fh:
+                original, encoding = decode_text(fh.read(_STYLE_PROBE), partial=True)
+        except OSError:
+            original = ""
+        if has_raw_bytes(original) and "\ufffd" in content:
+            return (f"[WRITE_FILE: {path}] ❌ Файлът има байтове, които не са текст в "
+                    f"{encoding}, а в READ_FILE се виждат като „\ufffd“ — записът би ги "
+                    "заменил завинаги. Ползвай EDIT_FILE за частична промяна: тя ги пази.")
+        # Краищата на редовете и BOM-ът също са на файла (одит 2026-10-11):
+        # READ_FILE показва LF, моделът пише LF, и CRLF .bat излизаше изцяло с
+        # LF и без BOM — дифф на всеки ред и счупени GOTO етикети. Чист CRLF
+        # файл остава CRLF; смесеният получава LF, както EDIT_FILE го прави.
+        crlf = original.count("\r\n")
+        if crlf and crlf == original.count("\n"):
+            content = content.replace("\r\n", "\n").replace("\n", "\r\n")
+        if original.startswith("\ufeff") and not content.startswith("\ufeff"):
+            content = "\ufeff" + content
+    try:
+        data = encode_text(content, encoding)
+    except UnicodeEncodeError as e:
+        return (f"[WRITE_FILE: {path}] ❌ Файлът е в кодиране {encoding} и знакът "
+                f"{content[e.start:e.end]!r} няма място в него — махни го или го замени.")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        path.write_bytes(data)
     except OSError as e:
         return f"[WRITE_FILE] Грешка: {e}"
     _SEEN_PATHS.add(path.resolve())

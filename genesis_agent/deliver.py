@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from genesis_agent.code_edit import read_text_any
+
 REPORT_NAME = "GENESIS_REPORT.md"
 # A project above this is not a deliverable; it is a disk image with code in it.
 _MAX_INPUT_MB = 200
@@ -140,6 +142,7 @@ def project_files(root: Path, *, exclude: Path | None = None) -> tuple[list[Path
 # ── README ───────────────────────────────────────────────────────────────────
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+_FENCE = re.compile(r"^\s*(```|~~~)")   # същото като в mentions.py
 
 
 def readme_sections(root: Path) -> dict[str, str]:
@@ -148,15 +151,25 @@ def readme_sections(root: Path) -> dict[str, str]:
         p = root / name
         if p.is_file():
             try:
-                text = p.read_text(encoding="utf-8", errors="replace")
+                text = read_text_any(p)
             except OSError:
                 return {}
             break
     else:
         return {}
     lines = text.splitlines()
-    heads = [(i, len(m.group(1)), m.group(2).strip().lower())
-             for i, m in ((i, _HEADING.match(ln)) for i, ln in enumerate(lines)) if m]
+    # `# install deps` в ```bash блок не е заглавие (одит 2026-10-11): иначе
+    # „Как се пуска“ в отчета ставаше само „```bash“ — незатворена ограда,
+    # която поглъщаше останалото, а самите команди липсваха.
+    heads: list[tuple[int, int, str]] = []
+    fenced = False
+    for i, ln in enumerate(lines):
+        if _FENCE.match(ln):
+            fenced = not fenced
+            continue
+        m = None if fenced else _HEADING.match(ln)
+        if m:
+            heads.append((i, len(m.group(1)), m.group(2).strip().lower()))
     out: dict[str, str] = {}
     for k, (i, level, title) in enumerate(heads):
         # Тялото стига до следващото заглавие на същото или по-високо ниво —
@@ -186,7 +199,7 @@ def _guess_run(root: Path, files: list[str]) -> list[str]:
         steps.append("npm install")
         try:
             import json
-            scripts = json.loads((root / "package.json").read_text(encoding="utf-8")).get("scripts", {})
+            scripts = json.loads(read_text_any(root / "package.json")).get("scripts", {})
         except (OSError, ValueError, AttributeError):
             scripts = {}
         for s in ("start", "dev"):
@@ -213,7 +226,7 @@ def _guess_run(root: Path, files: list[str]) -> list[str]:
 
 def _read(p: Path) -> str:
     try:
-        return p.read_text(encoding="utf-8", errors="replace")
+        return read_text_any(p)
     except OSError:
         return ""
 
@@ -222,7 +235,7 @@ def _dependencies(root: Path, files: list[str]) -> list[str]:
     names = set(files)
     if "requirements.txt" in names:
         try:
-            lines = (root / "requirements.txt").read_text(encoding="utf-8", errors="replace").splitlines()
+            lines = read_text_any(root / "requirements.txt").splitlines()
         except OSError:
             return []
         return [ln.strip() for ln in lines if ln.strip() and not ln.lstrip().startswith(("#", "-"))]
@@ -232,14 +245,14 @@ def _dependencies(root: Path, files: list[str]) -> list[str]:
         except ImportError:
             return []
         try:
-            data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+            data = tomllib.loads(read_text_any(root / "pyproject.toml"))
         except (OSError, ValueError):
             return []
         return [str(d) for d in data.get("project", {}).get("dependencies", [])]
     if "package.json" in names:
         try:
             import json
-            data = json.loads((root / "package.json").read_text(encoding="utf-8"))
+            data = json.loads(read_text_any(root / "package.json"))
         except (OSError, ValueError):
             return []
         deps = data.get("dependencies", {}) if isinstance(data, dict) else {}
