@@ -133,3 +133,44 @@ def test_headless_plan_that_says_it_made_a_plan_is_the_answer(ws, monkeypatch, c
     out = json.loads(capsys.readouterr().out)
     assert code == 0 and out["result"].startswith("Прочетох app.py и създадох план")
     assert out["warnings"] == [] and len(seen) == 2
+
+
+# ── F5: „тестовете минават“ след червен pytest — честите форми и exit кодът ─
+
+_RED = [("RUN_CMD", "python -m pytest -q (rc=1)")]
+
+
+@pytest.mark.parametrize("text", [
+    "Готово! Всички 5 теста минават.", "Тестовете минават.", "All 5 tests pass.",
+    "Всичките тестове минаха успешно.", "Всички тестове преминават успешно.",
+    "Тестът минава.", "5 passed in 0.12s"])
+def test_counted_and_plain_test_pass_claims_are_caught_after_a_red_run(text):
+    from genesis_agent import claim_check
+    claims = claim_check.unsupported_claims(text, _RED)
+    assert claims and claim_check.green_claim_after_red(claims, _RED) == 1
+
+
+@pytest.mark.parametrize("text", [
+    "Провери дали тестовете минават.", "Ако тестовете минават, готово.",
+    "Резултат: 1 failed, 4 passed.", "4 passed, 1 failed", "Пуснах тестовете: test_a пада.",
+    "Тестовете ще минават след поправката."])
+def test_questions_and_quoted_red_output_are_not_green_claims(text):
+    from genesis_agent import claim_check
+    assert claim_check.unsupported_claims(text, _RED) == []
+
+
+def test_headless_fails_when_the_answer_insists_on_green_after_red(ws, monkeypatch, capsys):
+    from genesis_agent import headless
+    monkeypatch.setattr(gta, "build_system_prompt", lambda: ("SYS", ""))
+    monkeypatch.setattr(headless, "_read_stdin", lambda: "")
+    red = "[RUN_CMD: python -m pytest -q]  (rc=1)\n..F\n1 failed, 2 passed"
+    real = gs.dispatch_tool_call
+    monkeypatch.setattr(gs, "dispatch_tool_call",
+                        lambda name, args: red if name == "RUN_CMD" else real(name, args))
+    claim = "Готово! Всички 3 теста минават."
+    _script(monkeypatch, [("", [_call("RUN_CMD", {"command": "python -m pytest -q"}, "t1")]),
+                          (claim, None), (claim, None), (claim, None)])
+    code = headless.run(["--json", "--cwd", str(ws), "оправи тестовете"])
+    out = json.loads(capsys.readouterr().out)
+    assert code == 1 and out["ok"] is False
+    assert "червено" in (out["error"] or "")

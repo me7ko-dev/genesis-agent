@@ -1744,6 +1744,9 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                     with ui.thinking("Проверявам…", "aesthetic"):
                         response, tool_calls = ask_genesis(messages, tools=_turn_tools())
                     continue
+                _red_rc = claim_check.green_claim_after_red(_unsupported, _executed)
+                if _red_rc:
+                    ui.warn(f"{claim_check.RED_TESTS_WARNING} (rc={_red_rc}).")
                 break
             _text_note = ""
             for _r in tool_results:

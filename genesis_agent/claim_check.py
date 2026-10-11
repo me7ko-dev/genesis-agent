@@ -87,11 +87,19 @@ _CATEGORIES: tuple[tuple[str, re.Pattern[str], frozenset[str], frozenset[str]], 
         # Отделно от „пуснах“ (2026-10-11): „всички тестове минаха“ иска
         # ПОСЛЕДНОТО пускане на тестовете да е с rc=0. Измерено: pytest с rc=1
         # („1 failed, 1 passed“) минаваше като доказателство за „всички минаха“.
+        # Разширено 2026-10-11 (e2e): след pytest с rc=1 минаваха най-честите
+        # форми — „Всички 5 теста минават“, „Тестовете минават“, „All 5 tests
+        # pass“, „Всичките тестове минаха успешно“, „… преминават успешно“ —
+        # и `genesis -p` излизаше с 0. „дали/ако тестовете минават“ е въпрос,
+        # не твърдение; „1 failed, 4 passed“ е цитиран изход, не зелено.
         _PASS_KIND,
         re.compile(
-            r"\b(тестовете (?:вече |сега )?(?:минаха|минават успешно)|"
-            r"тестовете вече минават|всички тестове (?:минаха|минават)|"
-            r"tests? (?:now pass(?:es)?|passed)|all (?:the )?tests pass)\b",
+            r"(?<!дали )(?<!ако )(?<!дали всички )(?<!ако всички )"
+            r"\b((?:всички(?:те)? )?(?:\d+ )?(?:тестовете|тестове|теста|тестът)"
+            r" (?:вече |сега |успешно )?(?:минаха|минават|минава|мина|преминават|преминаха|преминава|премина)|"
+            r"tests? (?:now pass(?:es)?|passed)|"
+            r"all (?:the )?(?:\d+ )?tests (?:now )?pass(?:ed)?|"
+            r"(?<!failed, )(?<!error, )(?<!errors, )\d+ passed(?!,\s*\d+ (?:failed|errors?)))\b",
             re.IGNORECASE),
         frozenset({"RUN_CMD", "USE_SKILL", "DELEGATE"}),
         _TEST_WORDS,
@@ -256,6 +264,20 @@ def unsupported_claims(text: str, executed: list[tuple[str, str]]) -> list[Claim
         needed = " / ".join(sorted(ok_tools - {"USE_SKILL", "DELEGATE"}))
         found.append(Claim(kind=kind, quote=_quote(text, match), needed=needed))
     return found
+
+
+# Предупреждението, когато и след подканата отговорът твърди зелени тестове
+# срещу червено последно пускане. `genesis -p` го брои за неуспех (2026-10-11:
+# повторено „Всички тестове минават“ след pytest rc=1 даваше exit 0, ok:true).
+RED_TESTS_WARNING = "⚠ Отговорът твърди, че тестовете минават, а последното им пускане е червено"
+
+
+def green_claim_after_red(claims: list[Claim], executed: list[tuple[str, str]]) -> int:
+    """rc на последното тестово пускане, ако сред `claims` има „тестовете
+    минават“, а то е червено; иначе 0."""
+    if any(c.kind == _PASS_KIND for c in claims):
+        return _last_test_rc(executed)
+    return 0
 
 
 def nudge_text(claims: list[Claim]) -> str:
