@@ -292,18 +292,42 @@ def set_local_only(model_id: str | None) -> None:
         LOCAL_MODEL = os.environ.get("GENESIS_LOCAL_MODEL", "qwen2.5-coder:3b")
 
 
-def _local_available(model: str) -> bool:
-    """Проверява дали Ollama върви локално и има модела."""
-    if not model:
-        return False
+def _ollama_installed() -> list[str]:
+    """Имената (с таг) на инсталираните в локалния Ollama модели; [] без Ollama."""
     try:
         r = requests.get("http://localhost:11434/api/tags", timeout=2)
         if r.status_code == 200:
-            names = [m.get("name", "") for m in r.json().get("models", [])]
-            return any(model.split(":")[0] in n for n in names)
+            return [str(m.get("name", "")) for m in r.json().get("models", [])]
     except Exception:
+        return []
+    return []
+
+
+def _same_ollama_model(model: str, name: str) -> bool:
+    """Точно този таг; име без таг значи `:latest`, както го чете Ollama."""
+    return name == model or (":" not in model and name == f"{model}:latest")
+
+
+def _local_available(model: str) -> bool:
+    """Проверява дали Ollama върви локално и има ТОЧНО този модел.
+
+    Сравнението беше само по семейство (одит 2026-10-11): с инсталиран само
+    qwen2.5-coder:7b `qwen2.5-coder:3b` излизаше наличен, последната резерва
+    викаше липсващ модел и получаваше 404, а `/local_model_max` (qwen3:14b)
+    се включваше при инсталиран само qwen3:4b."""
+    if not model:
         return False
-    return False
+    return any(_same_ollama_model(model, n) for n in _ollama_installed())
+
+
+def _installed_local_tier() -> str | None:
+    """Първото инсталирано ниво от model_router.LOCAL_TIERS (от бързо към мощно)."""
+    try:
+        from genesis_agent.model_router import LOCAL_TIERS
+    except Exception:
+        return None
+    names = _ollama_installed()
+    return next((t for t in LOCAL_TIERS if any(_same_ollama_model(t, n) for n in names)), None)
 # Грешки, при които минаваме към следващия модел (вкл. остарял/невалиден модел).
 _FALLBACK_CODES = {400, 401, 402, 403, 404, 408, 429, 500, 502, 503}
 # Кодове, при които моделът/квотата е ВРЕМЕННО изчерпан → cooldown, не го пробвай пак веднага.
@@ -726,6 +750,13 @@ class Brain:
             self.local = None
             if use_local and _local_available(LOCAL_MODEL):
                 self.local = {"provider": "ollama_local", "model": LOCAL_MODEL}
+            elif use_local and os.environ.get("GENESIS_LOCAL_ONLY") != "1":
+                # Подразбиращият се модел липсва → инсталирано ниво вместо 404
+                # (одит 2026-10-11). Изрично избраният офлайн модел не се
+                # подменя: там честата грешка е по-добра от тиха смяна.
+                tier = _installed_local_tier()
+                if tier:
+                    self.local = {"provider": "ollama_local", "model": tier}
 
         # Последният модел НЕ се помни между сесиите (махнато 2026-09-23 по
         # искане на оператора): стартът е винаги default_model_id от

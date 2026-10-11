@@ -10,6 +10,9 @@ import pytest
 
 from genesis_agent import brain
 
+# Истинската проверка — автоматичната фикстура долу я подменя с „няма ollama“.
+_REAL_LOCAL_AVAILABLE = brain._local_available
+
 
 class FakeResp:
     def __init__(self, status: int, body, headers: dict | None = None) -> None:
@@ -451,3 +454,38 @@ def test_an_exported_vertex_project_still_wins_over_the_env_file(monkeypatch, tm
     monkeypatch.setattr(paths, "ENV_FILES", (str(env),))
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "exported")
     assert vertex_auth.projects() == ["exported"]
+
+
+# ── F10: локалният модел се търси по точен таг ──────────────────────────────
+
+@pytest.fixture
+def _ollama_tags(monkeypatch):
+    from genesis_agent import model_router
+    tags = FakeResp(200, {"models": [{"name": "qwen2.5-coder:7b"}, {"name": "qwen3:4b"},
+                                     {"name": "llama3:latest"}]})
+    monkeypatch.setattr(brain.requests, "get", lambda *a, **kw: tags)
+    monkeypatch.setattr(model_router.requests, "get", lambda *a, **kw: tags)
+    monkeypatch.setattr(model_router, "LOCAL_TIERS",
+                        ["qwen2.5-coder:3b", "qwen2.5-coder:7b", "qwen2.5-coder:14b"])
+    monkeypatch.setattr(brain, "_local_available", _REAL_LOCAL_AVAILABLE)
+    monkeypatch.delenv("GENESIS_LOCAL_ONLY", raising=False)
+
+
+def test_a_missing_tag_of_an_installed_family_is_not_available(_ollama_tags) -> None:
+    assert not brain._local_available("qwen2.5-coder:3b")
+    assert not brain._local_available(brain.LOCAL_TIER_MAX)       # qwen3:14b, има само :4b
+    assert brain._local_available("qwen2.5-coder:7b")
+    assert brain._local_available("llama3")                       # без таг = :latest
+    assert not brain._local_available("qwen3")                    # няма qwen3:latest
+
+
+def test_the_last_resort_is_an_installed_tier_not_a_missing_default(monkeypatch, _ollama_tags) -> None:
+    monkeypatch.setattr(brain, "LOCAL_MODEL", "qwen2.5-coder:3b")
+    b = brain.Brain()
+    assert b.local == {"provider": "ollama_local", "model": "qwen2.5-coder:7b"}
+
+
+def test_an_explicit_local_only_model_is_never_swapped(monkeypatch, _ollama_tags) -> None:
+    monkeypatch.setattr(brain, "LOCAL_MODEL", "qwen3:14b")
+    monkeypatch.setenv("GENESIS_LOCAL_ONLY", "1")
+    assert brain.Brain().local is None
