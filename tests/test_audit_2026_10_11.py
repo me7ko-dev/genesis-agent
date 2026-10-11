@@ -156,3 +156,59 @@ def test_a_home_mcp_server_does_not_import_a_module_planted_in_the_workspace(
     lines = mcp_client.start_all(ws)
     assert not marker.exists()
     assert any("fake: 2 инструмента" in line for line in lines), lines
+
+
+# ── Тайна по glob, разделени кавички и символна връзка в RUN_CMD ────────────
+
+@pytest.fixture
+def secret_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh" / "id_rsa").write_text("-----BEGIN KEY----- FAKEKEY", encoding="utf-8")
+    (home / ".ssh" / "id_ed25519").write_text("FAKEKEY", encoding="utf-8")
+    (home / ".aws").mkdir()
+    (home / ".aws" / "credentials").write_text("FAKEKEY", encoding="utf-8")
+    (home / ".genesis").mkdir()
+    for name in ("remote.json", ".env", "mcp_tokens.json"):
+        (home / ".genesis" / name).write_text("FAKEKEY", encoding="utf-8")
+    ws = home / "proj"
+    ws.mkdir()
+    (ws / "plain.txt").write_text("hello", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    return home, ws
+
+
+@pytest.mark.parametrize("command", [
+    "cat ~/.s?h/id_r?a",
+    "cat ~/.ss[h]/id_rs[a]",
+    "cat ~/.a?s/cred*",
+    "cat ~/.genesis/remote.jso?",
+    "cat ~/.genesis/.en?",
+    "cat ~/.genesis/mcp_tokens.jso[n]",
+    "cat ~/.s''sh/id_ed2551''9",
+])
+def test_a_secret_behind_a_glob_or_split_quotes_asks(secret_home, command) -> None:
+    """Одит 2026-10-11, възпроизведено: образецът гледаше само буквалния
+    текст, и `cat ~/.s?h/id_r?a` печаташе ключа в режим „deny“."""
+    _, ws = secret_home
+    assert sandbox.assess_command(command, cwd=ws).level == RiskLevel.CONFIRM
+
+
+def test_a_symlink_to_a_key_in_the_workspace_asks_in_run_cmd(secret_home, monkeypatch) -> None:
+    home, ws = secret_home
+    link = ws / "notes.txt"
+    try:
+        link.symlink_to(home / ".ssh" / "id_rsa")
+    except (OSError, NotImplementedError):
+        pytest.skip("no symlinks here")
+    monkeypatch.setattr(sandbox, "_POLICY", sandbox.SandboxPolicy(mode="deny"))
+    assert sandbox.assess_command("cat notes.txt", cwd=ws).level == RiskLevel.CONFIRM
+    res = sandbox.run_shell("cat notes.txt", cwd=ws)
+    assert res.blocked and "FAKEKEY" not in res.stdout
+
+
+@pytest.mark.parametrize("command", ["cat plain.txt", "cat *.txt", "ls -la", "grep -r hello ."])
+def test_ordinary_files_in_the_workspace_stay_safe(secret_home, command) -> None:
+    _, ws = secret_home
+    assert sandbox.assess_command(command, cwd=ws).level == RiskLevel.SAFE

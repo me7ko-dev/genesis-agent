@@ -1116,12 +1116,62 @@ def _inline_code_reasons(command: str) -> list[str]:
     return reasons
 
 
-def assess_command(command: str, cwd: Path | None = None) -> RiskVerdict:
+_SECRET_ARG_RX = re.compile(_SECRET_PATHS, re.IGNORECASE)
+_MAX_SECRET_GLOB = 300
+
+
+def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:
+    """Тайна, до която стигат АРГУМЕНТИТЕ на командата, а не само текстът ѝ.
+
+    Одит 2026-10-11, възпроизведено в режим „deny“: `cat ~/.s?h/id_r?a`,
+    `cat ~/.genesis/.en?`, `cat ~/.s''sh/id_ed2551''9` и `cat notes.txt`
+    (символна връзка към id_rsa в workspace-а) печатаха ключа — образецът
+    гледаше само буквалния текст. Тук всеки аргумент се чете без кавичките и
+    се разгъва както би го разгънал шелът (~, $VAR, glob), а всеки реален път
+    минава през sensitive_path_reason, която проследява и символните връзки.
+    """
+    import glob as _glob
+
+    base = cwd if (cwd and cwd.is_dir()) else Path.cwd()
+    seen = 0
+    for seg in _split_segments(command):
+        try:
+            tokens = _shlex_split_for_classification(seg)
+        except ValueError:
+            tokens = seg.split()
+        for tok in tokens:
+            if not tok or tok.startswith("-"):
+                continue
+            match = _SECRET_ARG_RX.search(tok.replace("\\", "/"))
+            if match and not _SENSITIVE_PATH_EXEMPT_RE.search(tok):
+                return f"достъп до чувствителен файл ({match.group(0)})"
+            expanded = os.path.expanduser(os.path.expandvars(tok))
+            if not os.path.isabs(expanded):
+                expanded = str(base / expanded)
+            if any(ch in tok for ch in "*?["):
+                try:
+                    paths = _glob.glob(expanded)[:_MAX_SECRET_GLOB - seen]
+                except (OSError, ValueError, re.error):
+                    paths = []
+            else:
+                paths = [expanded] if os.path.lexists(expanded) else []
+            for path in paths:
+                seen += 1
+                reason = sensitive_path_reason(path)
+                if reason:
+                    return reason
+            if seen >= _MAX_SECRET_GLOB:
+                return None
+    return None
+
+
+def assess_command(command: str, cwd: Path | None = None, *, arguments: bool = True) -> RiskVerdict:
     """Оценява риска на shell команда.
 
-    `cwd` е по избор и се ползва само за разгъването на относителни glob-ове в
-    прегледа на файловите операции — без него проверката пак работи, само
-    описанието на засегнатите файлове е по-бедно."""
+    `cwd` е по избор и се ползва за разгъването на относителни glob-ове — в
+    прегледа на файловите операции и в проверката за тайни в аргументите.
+    `arguments=False` — без тази проверка: за Python кода (assess_code) думите
+    не са аргументи на шел, а там тайните пази py_guard при изпълнение."""
     reasons: list[str] = []
     level = RiskLevel.SAFE
 
@@ -1158,6 +1208,14 @@ def assess_command(command: str, cwd: Path | None = None) -> RiskVerdict:
     if inline:
         reasons.extend(inline)
         level = RiskLevel(max(level, RiskLevel.CONFIRM))
+    if arguments and _SECRET_REASON not in reasons:
+        try:
+            secret = _secret_in_arguments(command, cwd)
+        except Exception:
+            secret = None
+        if secret:
+            reasons.append(secret)
+            level = RiskLevel(max(level, RiskLevel.CONFIRM))
     verdict = RiskVerdict(level, reasons)
     try:
         return verdict.merge(_assess_file_ops(command, cwd))
@@ -1285,7 +1343,7 @@ def _python_reads_sensitive_path(code: str) -> bool:
 
 def assess_code(code: str) -> RiskVerdict:
     """Оценява риска на Python код (проверява и shell, и Python образците)."""
-    verdict = assess_command(code)  # кодът може да съдържа shell чрез os.system и т.н.
+    verdict = assess_command(code, arguments=False)  # кодът може да съдържа shell (os.system)
     if verdict.level == RiskLevel.BLOCKED:
         return verdict
     reasons = list(verdict.reasons)
