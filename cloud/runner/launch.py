@@ -73,6 +73,9 @@ class Gateway:
     key_envs: tuple[str, ...]
     url: str = GATEWAY_URL
     budget: int = TASK_BUDGET
+    # GATEWAY_MODELS от същия файл, който чете и шлюзът — сървърът с плащане
+    # проверява, че всеки разрешен модел има своя цена (2026-10-11).
+    models: frozenset[str] | None = None
 
     @classmethod
     def from_keys_file(cls, keys: Path, usage: Path, **kw: Any) -> Gateway:
@@ -81,6 +84,7 @@ class Gateway:
         if len(secret) < 32:
             raise ValueError(f"{keys}: липсва GATEWAY_SECRET (поне 32 знака)")
         envs = tuple(gw.UPSTREAMS[p][1] for p in gw.served_providers(k))
+        kw.setdefault("models", gw.read_models(k))
         return cls(secret, usage, envs, **kw)
 
 

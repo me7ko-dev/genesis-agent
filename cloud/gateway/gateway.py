@@ -299,17 +299,42 @@ def served_providers(keys: dict[str, str]) -> list[str]:
     return [p for p, (_, env) in UPSTREAMS.items() if keys_for(keys, env)]
 
 
+# Кои модели пуска шлюзът: `доставчик/модел` или `доставчик/*`, със запетаи.
+# Без списък минаваше всеки модел, който кодът в контейнера поиска — openai/o1-pro
+# се таксуваше по `openai/*` (12 EUR на 1M изход) при ~50× по-висока цена на
+# доставчика (одит 2026-10-11). Плащането не тръгва без него (billing.check_models).
+MODELS_ENV = "GATEWAY_MODELS"
+
+
+def read_models(keys: dict[str, str]) -> frozenset[str] | None:
+    """Разрешените модели от ключовете, или None (без списък — всеки модел)."""
+    raw = keys.get(MODELS_ENV, "")
+    models = frozenset(m.strip() for m in raw.split(",") if m.strip())
+    for m in models:
+        provider, _, model = m.partition("/")
+        if provider not in UPSTREAMS or not model:
+            raise ValueError(f"{MODELS_ENV}: '{m}' трябва да е доставчик/модел или "
+                             f"доставчик/*, с доставчик от {', '.join(UPSTREAMS)}")
+    return models or None
+
+
+def model_allowed(models: frozenset[str] | None, provider: str, model: str) -> bool:
+    return models is None or f"{provider}/{model}" in models or f"{provider}/*" in models
+
+
 # ── HTTP ─────────────────────────────────────────────────────────────────────
 
 class Gateway:
     def __init__(self, secret: str, keys: dict[str, str], ledger: Ledger,
-                 opener: Any = urllib.request.urlopen) -> None:
+                 opener: Any = urllib.request.urlopen,
+                 models: frozenset[str] | None = None) -> None:
         if len(secret) < 32:
             raise ValueError("GATEWAY_SECRET трябва да е поне 32 знака")
         self.secret = secret
         self.keys = keys
         self.ledger = ledger
         self.opener = opener
+        self.models = models
 
     def forward(self, provider: str, body: bytes, grant: Grant) -> tuple[int, bytes]:
         base, env = UPSTREAMS[provider]
@@ -325,6 +350,8 @@ class Gateway:
         # таван и без сметка (2026-10-07). Genesis не ползва stream.
         if request.get("stream"):
             return 400, _err("stream не се поддържа през шлюза")
+        if not model_allowed(self.models, provider, model):
+            return 403, _err(f"моделът {provider}/{model} не е разрешен в шлюза ({MODELS_ENV})")
         # Таванът на отговора е за един избор, а доставчикът таксува n × max_tokens:
         # n=128 при бюджет 20 000 записа 2 555 876 токена, а балансът падна от
         # 26 на -605 кредита за един ход (одит 2026-10-11). Genesis иска един.
@@ -493,12 +520,14 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     keys = read_keys(a.keys)
     secret = os.environ.get("GATEWAY_SECRET") or keys.pop("GATEWAY_SECRET", "")
+    models = read_models(keys)
     ledger = Ledger(a.usage)
     ledger.load()
-    gw = Gateway(secret, keys, ledger)
+    gw = Gateway(secret, keys, ledger, models=models)
     server = make_server(gw, a.host, a.port)
-    log.info("шлюз на :%d, доставчици: %s", server.server_address[1],
-             ", ".join(served_providers(keys)) or "няма")
+    log.info("шлюз на :%d, доставчици: %s; модели: %s", server.server_address[1],
+             ", ".join(served_providers(keys)) or "няма",
+             ", ".join(sorted(models)) if models else "всички")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

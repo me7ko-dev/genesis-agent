@@ -146,6 +146,25 @@ def parse_prices(data: Any) -> Prices:
                   _offers("packs", data.get("packs", {})), _offers("plans", data.get("plans", {})))
 
 
+def check_models(prices: Prices, models: frozenset[str] | None) -> None:
+    """Плащането иска списък на моделите в шлюза и своя цена за всеки от тях.
+
+    Одит 2026-10-11: шлюзът пускаше всеки модел, а непознатият падаше към
+    `доставчик/*` или `default` — openai/o1-pro и openrouter/openai/o1-pro се
+    таксуваха по 12 EUR на 1M изход при цена на доставчика ~50× по-висока.
+    Сега операторът назовава моделите (GATEWAY_MODELS) и всеки има ред в
+    `models` — точен или `доставчик/*`, никога само `default`."""
+    if not models:
+        raise ValueError(f"плащането иска {gw.MODELS_ENV} в --env-file (напр. groq/*,"
+                         "openai/gpt-4o-mini): без него шлюзът пуска всеки модел, "
+                         "а цената му може да е над тарифата")
+    for m in sorted(models):
+        provider = m.partition("/")[0]
+        if m not in prices.models and f"{provider}/*" not in prices.models:
+            raise ValueError(f"{gw.MODELS_ENV}: '{m}' няма своя цена в models на цените — "
+                             "щеше да се таксува по default")
+
+
 def load_prices(path: Path = PRICES) -> Prices:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))

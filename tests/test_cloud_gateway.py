@@ -392,6 +392,39 @@ def test_a_single_choice_still_goes_through(tmp_path, extra) -> None:
     assert g.forward("groq", body, _grant(20_000))[0] == 200 and len(up.seen) == 1
 
 
+def test_only_listed_models_reach_the_provider(tmp_path) -> None:
+    """Одит 2026-10-11: шлюзът пускаше всеки модел (openai/o1-pro) — цената
+    на ход се смяташе по тарифа ~50× под тази на доставчика."""
+    keys = {"OPENAI_API_KEY": "k", "GROQ_API_KEY": "k",
+            "GATEWAY_MODELS": " groq/* , openai/gpt-4o-mini "}
+    models = gw.read_models(keys)
+    assert models == frozenset({"groq/*", "openai/gpt-4o-mini"})
+    up = FakeUpstream([(200, {"total_tokens": 1})] * 3)
+    g = gw.Gateway(SECRET, keys, gw.Ledger(tmp_path / "u.jsonl"), opener=up, models=models)
+
+    def ask(p: str, m: str) -> int:
+        return g.forward(p, json.dumps({"model": m}).encode(), _grant(20_000))[0]
+
+    assert ask("openai", "o1-pro") == 403 and ask("openai", "GPT-4o-mini") == 403
+    assert up.seen == []
+    assert ask("openai", "gpt-4o-mini") == 200 and ask("groq", "anything") == 200
+    assert g.ledger.reserved == {}
+
+
+def test_a_gateway_without_a_list_still_forwards_any_model(tmp_path) -> None:
+    assert gw.read_models({"GROQ_API_KEY": "k"}) is None
+    assert gw.read_models({"GATEWAY_MODELS": " , "}) is None
+    up = FakeUpstream([(200, {"total_tokens": 1})])
+    g = _gw_for(up, tmp_path)
+    assert g.forward("groq", json.dumps({"model": "x"}).encode(), _grant(1000))[0] == 200
+
+
+@pytest.mark.parametrize("bad", ["o1-pro", "nosuch/x", "openai/"])
+def test_a_malformed_model_list_is_refused(bad) -> None:
+    with pytest.raises(ValueError):
+        gw.read_models({"GATEWAY_MODELS": f"groq/*,{bad}"})
+
+
 def test_deeply_nested_json_is_a_400(tmp_path) -> None:
     """Одит 2026-10-11: RecursionError от json.loads не се хващаше."""
     up = FakeUpstream([])
