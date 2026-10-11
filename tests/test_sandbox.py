@@ -842,3 +842,26 @@ def test_encoded_powershell_is_judged_by_what_it_decodes_to(cmd) -> None:
 ])
 def test_powershell_without_encoded_command_is_not_flagged(cmd) -> None:
     assert sandbox.assess_command(cmd).level is SAFE
+
+
+@pytest.mark.parametrize("cmd", [
+    r"cmd /c rd /q/s C:\Users\roika",
+    r'cmd //c "rd /q/s C:\Users\roika"',
+    r"rd /q/s C:\Users\roika",
+    r"rd /Q/S C:\Users\roika",
+    r"cmd /c del /q/s/f C:\Users\roika\*",
+    r"rmdir /q/s C:\Users",
+])
+def test_concatenated_cmd_switches_on_home_are_blocked(cmd) -> None:
+    """cmd.exe приема слепени ключове (`/q/s`); проверката искаше по един на
+    дума и `rd /q/s C:\\Users\\roika` беше SAFE (2026-10-11)."""
+    assert sandbox.assess_command(cmd).level is BLOCKED
+
+
+@pytest.mark.parametrize("cmd", [
+    r"rd /q/s build",
+    r"cmd /c del /q/s/f .\build\*",
+    r"rd /Q/S D:\Work\app\build",
+])
+def test_concatenated_cmd_switches_on_a_project_folder_ask(cmd) -> None:
+    assert sandbox.assess_command(cmd).level is CONFIRM

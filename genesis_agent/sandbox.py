@@ -247,9 +247,10 @@ _WIN_BLOCK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # (и двата символа са не-word), затова тук е `(?:^|\s)-`.
     (_c(r"\bRemove-Item\b[^\n]*(?:^|\s)-(?:Recurse|Force)\b[^\n]*" + _WIN_ROOT),
      "Remove-Item -Recurse/-Force върху диск/системна/домашна директория"),
-    (_c(r"\b(del|erase)\b[^\n]*\s/s\b[^\n]*" + _WIN_ROOT),
+    # `(?:/[a-z])*` — слепените ключове на cmd.exe (`/q/s`), 2026-10-11.
+    (_c(r"\b(del|erase)\b[^\n]*\s(?:/[a-z])*/s\b[^\n]*" + _WIN_ROOT),
      "del /s върху диск/системна/домашна директория"),
-    (_c(r"\brd\b[^\n]*\s/s\b[^\n]*" + _WIN_ROOT),
+    (_c(r"\brd\b[^\n]*\s(?:/[a-z])*/s\b[^\n]*" + _WIN_ROOT),
      "rd /s върху диск/системна/домашна директория"),
     (_c(r"\bformat\s+[A-Za-z]:"),
      "форматиране на дял (format)"),
@@ -268,9 +269,9 @@ _WIN_BLOCK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 _WIN_CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (_c(r"\bRemove-Item\b[^\n]*(?:^|\s)-(?:Recurse|Force)\b"),
      "рекурсивно/принудително триене (Remove-Item)"),
-    (_c(r"\b(del|erase)\b[^\n]*\s/(s|q|f)\b"),
+    (_c(r"\b(del|erase)\b[^\n]*\s(?:/[a-z])*/(s|q|f)\b"),
      "принудително/рекурсивно триене (del)"),
-    (_c(r"\brd\b[^\n]*\s/s\b|\brmdir\b[^\n]*\s/s\b"),
+    (_c(r"\b(rd|rmdir)\b[^\n]*\s(?:/[a-z])*/s\b"),
      "триене на директория (rd /s)"),
     (_c(r"\breg\s+(delete|add|import)\b|\bSet-ItemProperty\b[^\n]*\bHK(LM|CU|CR|U|CC):"),
      "промяна на регистъра"),
@@ -981,7 +982,18 @@ def _catastrophic_rm_reason(command: str) -> str | None:
 _WIN_DELETE_VERBS = frozenset({"remove-item", "ri", "rm", "del", "erase", "rd", "rmdir"})
 _CMD_DELETE_VERBS = frozenset({"del", "erase", "rd", "rmdir"})
 _WIN_LAUNCHERS = frozenset({"powershell", "pwsh", "cmd"})
-_CMD_DELETE_FLAG = re.compile(r"^/[sqf]$", re.IGNORECASE)
+# Ключовете на cmd.exe, и слепени: `/q/s`, `/Q/S/F`, `/a:h/s`. Измерено
+# 2026-10-11: проверката искаше по един ключ на дума и `rd /q/s C:\Users\<име>`
+# беше SAFE, а `rd /s/q …` — BLOCKED само заради реда на ключовете.
+_CMD_SWITCHES = re.compile(r"^(?:/[a-z](?::[^/\s]*)?)+$", re.IGNORECASE)
+
+
+def _cmd_switch_letters(token: str) -> set[str]:
+    """Буквите на ключовете в една дума (`/q/s` → {q, s}); празно, ако думата
+    не е само ключове — `/c/Users/x` е път на Git Bash, не ключове."""
+    if not _CMD_SWITCHES.match(token):
+        return set()
+    return {m.lower() for m in re.findall(r"/([a-z])", token, re.IGNORECASE)}
 
 
 def _win_dangerous_flag(verb: str, flag: str) -> bool:
@@ -994,7 +1006,7 @@ def _win_dangerous_flag(verb: str, flag: str) -> bool:
         return True
     if verb == "rm" and re.fullmatch(r"-[a-z]*[rf][a-z]*", f) is not None and len(f) <= 5:
         return True                                   # `rm -rf` в Git Bash/PowerShell
-    return verb in _CMD_DELETE_VERBS and _CMD_DELETE_FLAG.match(f) is not None
+    return verb in _CMD_DELETE_VERBS and bool(_cmd_switch_letters(f) & {"s", "q", "f"})
 
 
 def _launcher_word(word: str) -> bool:
@@ -1021,7 +1033,7 @@ def _windows_delete_verdict(command: str) -> RiskVerdict:
             if not any(a.startswith(("-", "/")) and _win_dangerous_flag(verb, a) for a in args):
                 break
             for target in args:
-                if verb in _CMD_DELETE_VERBS and _CMD_DELETE_FLAG.match(target):
+                if verb in _CMD_DELETE_VERBS and _cmd_switch_letters(target):
                     continue
                 if target.startswith("-"):
                     continue
