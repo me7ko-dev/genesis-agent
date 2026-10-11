@@ -190,3 +190,39 @@ def test_another_process_environment_through_a_variable_asks(command) -> None:
 ])
 def test_ordinary_variables_and_environ_words_stay_safe(command) -> None:
     assert sandbox.assess_command(command).level == RiskLevel.SAFE, command
+
+
+# ── Сървърите от ~/.genesis/mcp.json и относителните пътища ─────────────────
+
+def test_a_relative_path_for_a_home_server_is_reported(tmp_path, monkeypatch, clean_mcp) -> None:
+    """Сървърите от ~/.genesis/mcp.json тръгват от празна временна папка:
+    `--db-path app.db` отваряше празна база там, която изчезва на изхода —
+    без нито дума (одит 2026-10-11)."""
+    import genesis_skills as gs
+    home = hooks._home()
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "mcp.json").write_text(json.dumps({"mcpServers": {"db": {
+        "command": sys.executable, "args": [str(_FAKE_MCP), "--db-path", "app.db"]}}}),
+        encoding="utf-8")
+    hooks.trust(home / "mcp.json")
+    monkeypatch.setattr(gs, "_WORKSPACE", tmp_path)
+    mcp_client.workspace = tmp_path
+    lines = mcp_client.start_all(tmp_path)
+    assert any("app.db" in line and "пълен път" in line for line in lines), lines
+    assert not any("@modelcontextprotocol" in line for line in lines)
+
+
+@pytest.mark.parametrize("args", [
+    ["-y", "@modelcontextprotocol/server-github"], ["mcp-server-fetch"], ["-m", "mcp_server_time"],
+    ["--from", "git+https://github.com/x/y.git", "srv"], ["pkg==1.2.3"], ["--port=8080"],
+    ["-m", "mcp_server.main"], ["--repo", "owner/repo"], ["--host", "api.example.com"],
+    ["/abs/app.db"], ["~/app.db"],
+])
+def test_ordinary_server_arguments_are_not_relative_paths(args) -> None:
+    assert mcp_client._relative_path_args(args) == []
+
+
+def test_relative_data_paths_are_found() -> None:
+    assert mcp_client._relative_path_args(
+        ["--db-path", "app.db", "--repository", ".", "--db=data/x.sqlite", "server.py"]) == \
+        ["app.db", ".", "data/x.sqlite", "server.py"]
