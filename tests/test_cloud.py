@@ -299,3 +299,25 @@ def test_a_lone_surrogate_from_the_container_reaches_the_store(monkeypatch, tmp_
     assert res.ok
     got = store.events(turn)
     assert got[0]["text"] == "a� b� \U0001f600" and got[0]["�"] == 1
+
+
+# ── task: задача без отговорил модел не е успех (D1, 2026-10-11) ─────────────
+
+def test_an_exhausted_chain_is_a_failed_task_not_a_paid_success(capsys, monkeypatch, tmp_path) -> None:
+    """Деплой одит 2026-10-11: от b9572f0 грешката на веригата идва през
+    ui.warn(), не като отговор. task.py гледаше само последния отговор и в
+    контейнера без ключове пишеше done ok:true — ходът се таксуваше като успех,
+    а history.json получаваше празен отговор."""
+    import genesis_terminal_agent as gta
+    from genesis_agent import sandbox
+    monkeypatch.setattr(sandbox, "_POLICY", sandbox._POLICY)
+    monkeypatch.setenv("GENESIS_WORKSPACE", str(tmp_path))
+    err = "[Грешка: цялата верига е изчерпана | последна: нито един модел няма API ключ]"
+    monkeypatch.setattr(gta, "ask_genesis", lambda m, tools=None: (err, None))
+    assert task.main(["направи CSV"]) == 1
+    lines = [json.loads(x) for x in capsys.readouterr().out.strip().splitlines()]
+    done = lines[-1]
+    assert done["kind"] == "done" and done["ok"] is False
+    assert done["error"].startswith("[Грешка: цялата верига")
+    # провален ход не пише в разговора празна реплика
+    assert not (tmp_path / task.HISTORY_FILE).exists()
