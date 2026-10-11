@@ -25,20 +25,25 @@ project, and totals. Runs against the real providers: it spends free quota.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from genesis_agent import repo_agent
-from genesis_agent.brain import Brain
-from genesis_agent.paths import project_python
+import bench_projects as bp
+
+from genesis_agent.paths import ensure_utf8_streams, project_python
+
+# Тежките модули (repo_agent, brain, config) се внасят чак в main(), СЛЕД
+# _isolate_memory(): config чете GENESIS_MEMORY_DIR при първото си внасяне.
 
 TEST = "test_app.py"
+TEST_TIMEOUT = 60
 
 # Projects whose test needs a package outside the standard library, and which
 # `genesis fix` must therefore test with the PROJECT'S Python, found on its own
@@ -187,33 +192,81 @@ PROJECTS: dict[str, tuple[str, dict[str, str]]] = {
 }
 
 
-class _Counting(Brain):
-    """Brain that sums the usage of every call, so tokens per fix are real."""
-    prompt = 0
-    completion = 0
-    pin: tuple[str, str] | None = None
+# Броячи за текущия проект: токени по usage, успешни извиквания на модела и
+# грешки на веригата. `calls == 0` значи, че моделът изобщо не отговори (няма
+# ключове, мрежа) — това не е неуспешна поправка (одит 2026-10-11).
+USAGE = {"prompt": 0, "completion": 0, "calls": 0, "errors": 0}
 
-    def __init__(self, *a, **kw) -> None:
-        super().__init__(*a, **kw)
-        if _Counting.pin:
-            p, m = _Counting.pin
-            self.chain = [{"provider": p, "model": m, "size_b": 0, "supports_tools": True}]
-            self.local = None
 
-    def complete(self, *a, **kw):
-        reply = super().complete(*a, **kw)
-        usage = getattr(reply, "usage", None) or {}
-        _Counting.prompt += usage.get("prompt_tokens", 0) or 0
-        _Counting.completion += usage.get("completion_tokens", 0) or 0
-        return reply
+def _counting_brain(brain_cls: type) -> type:
+    """Brain, който брои usage на всяко извикване — токените на поправка са истински."""
+
+    class _Counting(brain_cls):  # type: ignore[valid-type, misc]
+        pin: tuple[str, str] | None = None
+
+        def __init__(self, *a, **kw) -> None:
+            super().__init__(*a, **kw)
+            if _Counting.pin:
+                p, m = _Counting.pin
+                self.chain = [{"provider": p, "model": m, "size_b": 0, "supports_tools": True}]
+                self.local = None
+
+        def _error_result(self, msg: str):
+            USAGE["errors"] += 1
+            return super()._error_result(msg)
+
+        def complete(self, *a, **kw):
+            errors = USAGE["errors"]
+            reply = super().complete(*a, **kw)
+            if USAGE["errors"] == errors:
+                USAGE["calls"] += 1
+            usage = getattr(reply, "usage", None) or {}
+            USAGE["prompt"] += usage.get("prompt_tokens", 0) or 0
+            USAGE["completion"] += usage.get("completion_tokens", 0) or 0
+            return reply
+
+    return _Counting
+
+
+def _isolate_memory() -> Path | None:
+    """Временна памет за repair() в ТОЗИ процес, преди genesis_agent.config да
+    се е внесъл: без нея всяко извикване на инструмент ставаше епизод в
+    episodes.db на чекаута (одит 2026-10-11). bench_projects прави същото за
+    всеки пуск. None, ако операторът вече е задал своя GENESIS_MEMORY_DIR."""
+    if os.environ.get("GENESIS_MEMORY_DIR"):
+        return None
+    memory = Path(tempfile.mkdtemp(prefix="genesis-bench-fix-memory-"))
+    os.environ["GENESIS_MEMORY_DIR"] = str(memory)
+    return memory
+
+
+def _load_agent(model: str):
+    """repair() с броещия Brain и пясъчник, който отказва всяко CONFIRM.
+
+    Под bench_all stdin е конзолата (isatty → „interactive“), а stdout е
+    fix.log: CONFIRM (pip install, rm -rf __pycache__) питаше във файла и
+    чакаше на конзолата завинаги, без видим въпрос (одит 2026-10-11). Мярката
+    не бива да зависи от това дали някой седи пред нея — както чатът в
+    bench_projects, който получава тръба и отказва."""
+    from genesis_agent import repo_agent, sandbox
+    from genesis_agent.brain import Brain
+
+    sandbox.set_policy(sandbox.SandboxPolicy(mode="deny"))
+    counting = _counting_brain(Brain)
+    if model:
+        p, _, m = model.partition("/")
+        counting.pin = (p, m)
+    repo_agent.Brain = counting  # repair() builds its Brain through this name
+    return repo_agent.repair
 
 
 def _run_test(root: Path) -> bool:
     """The independent re-check, with the interpreter `genesis fix` itself
-    uses for the project — under pipx, `sys.executable` has none of its packages."""
-    r = subprocess.run([project_python(root), TEST], cwd=root, capture_output=True, text=True, timeout=60,
-                       check=False)
-    return r.returncode == 0 and "ALL OK" in r.stdout
+    uses for the project — under pipx, `sys.executable` has none of its packages.
+    С таван и убиване на цялото дърво: „поправка“ с безкраен цикъл чупеше целия
+    bench след 11 минути и губеше вече измереното (одит 2026-10-11)."""
+    rc, out = bp.run_capped([project_python(root), TEST], cwd=root, env=None, timeout=TEST_TIMEOUT)
+    return rc == 0 and "ALL OK" in out
 
 
 def _missing(root: Path, packages: tuple[str, ...]) -> list[str]:
@@ -221,12 +274,12 @@ def _missing(root: Path, packages: tuple[str, ...]) -> list[str]:
 
 
 def _imports(root: Path, package: str) -> bool:
-    r = subprocess.run([project_python(root), "-c", f"import {package}"], cwd=root,
-                       capture_output=True, timeout=60, check=False)
-    return r.returncode == 0
+    rc, _ = bp.run_capped([project_python(root), "-c", f"import {package}"], cwd=root, env=None,
+                          timeout=TEST_TIMEOUT)
+    return rc == 0
 
 
-def bench_one(name: str, task: str, files: dict[str, str], rounds: int) -> dict | None:
+def bench_one(name: str, task: str, files: dict[str, str], rounds: int, repair) -> dict | None:
     """One project. None when the machine lacks a package the project needs."""
     root = Path(tempfile.mkdtemp(prefix=f"bench_fix_{name}_"))
     for rel, content in files.items():
@@ -242,11 +295,11 @@ def bench_one(name: str, task: str, files: dict[str, str], rounds: int) -> dict 
     # rest get the plain-script command, with that same interpreter.
     test_command = None if needs else f'"{project_python(root)}" {TEST}'
 
-    _Counting.prompt = _Counting.completion = 0
+    USAGE.update(prompt=0, completion=0, calls=0, errors=0)
     t0 = time.time()
     try:
-        out = repo_agent.repair(root, task, test_command=test_command,
-                                max_rounds=rounds, on_status=lambda msg: None)
+        out = repair(root, task, test_command=test_command,
+                     max_rounds=rounds, on_status=lambda msg: None)
         reported, used_rounds = out.success, out.rounds
     except Exception as e:  # a crash is a failed fix, recorded as such
         reported, used_rounds = False, 0
@@ -258,72 +311,113 @@ def bench_one(name: str, task: str, files: dict[str, str], rounds: int) -> dict 
     shutil.rmtree(root, ignore_errors=True)
     return {"name": name, "fixed": passed, "reported": reported, "rounds": used_rounds,
             "test_touched": test_touched, "sec": round(elapsed, 1),
-            "prompt": _Counting.prompt, "completion": _Counting.completion}
+            "prompt": USAGE["prompt"], "completion": USAGE["completion"],
+            "infra": USAGE["calls"] == 0}
 
 
-def main() -> int:
+def _line(r: dict) -> str:
+    """Ред от отчета. Знакът е сам в колоната, бележките — накрая: „⚠️ пипна
+    теста“ беше по-широко от {flag:3} и разместваше реда (2026-10-11)."""
+    if r.get("infra"):
+        return f"  ⚠️  {r['name']:16} моделът не отговори — не се брои"
+    flag = "✅" if r["fixed"] else ("⚠️" if r["test_touched"] else "❌")
+    notes = (["пипна теста"] if r["test_touched"] else []) + \
+            (["каза „поправено“, не е"] if r["reported"] and not r["fixed"] else [])
+    return (f"  {flag}  {r['name']:16} рунда={r['rounds']:<2} {r['sec']:6.1f}s  "
+            f"токени={r['prompt'] + r['completion']:>7}" + (f"  ({'; '.join(notes)})" if notes else ""))
+
+
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--only", default="", help="comma-separated project names")
     ap.add_argument("--model", default="", help="provider/model to pin (default: the configured chain)")
     ap.add_argument("--rounds", type=int, default=6)
     ap.add_argument("--out", type=Path, help="папка за results.json (същият формат като bench_projects)")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
-    if args.model:
-        p, _, m = args.model.partition("/")
-        _Counting.pin = (p, m)
-    repo_agent.Brain = _Counting  # repair() builds its Brain through this name
+    # Пренасочен или пуснат през тръба stdout на български Windows е cp1251:
+    # първото „✅“ сриваше bench-а СЛЕД като вече е похарчил извиквания (2026-10-11).
+    ensure_utf8_streams()
+    # Имената се изчистват и проверяват ПРЕДИ първия проект: „median, pagination“
+    # падаше с KeyError след вече пуснатите (одит 2026-10-11).
+    names = [n.strip() for n in args.only.split(",") if n.strip()] or list(PROJECTS)
+    unknown = [n for n in names if n not in PROJECTS]
+    if unknown:
+        print(f"Няма такива проекти: {', '.join(unknown)} (има: {', '.join(PROJECTS)})")
+        return 2
+    out = args.out.expanduser() if args.out else None
 
-    names = [n for n in args.only.split(",") if n] or list(PROJECTS)
-    results = []
-    print(f"genesis fix — {len(names)} проекта, {args.model or 'конфигурираната верига'}\n")
+    memory = _isolate_memory()
+    try:
+        return _run(names, args.rounds, args.model, out, _load_agent(args.model))
+    finally:
+        if memory is not None:
+            os.environ.pop("GENESIS_MEMORY_DIR", None)
+            shutil.rmtree(memory, ignore_errors=True)
+
+
+def _run(names: list[str], rounds: int, model: str, out: Path | None, repair) -> int:
+    results: list[dict] = []
+    print(f"genesis fix — {len(names)} проекта, {model or 'конфигурираната верига'}\n")
     for name in names:
         task, files = PROJECTS[name]
-        r = bench_one(name, task, files, args.rounds)
+        r = bench_one(name, task, files, rounds, repair)
         if r is None:
             print(f"  ⏭  {name:16} пропуснат: Python-ът на проекта ({project_python()}) няма "
                   f"{', '.join(NEEDS[name])}", flush=True)
             continue
         results.append(r)
-        flag = "✅" if r["fixed"] else ("⚠️ пипна теста" if r["test_touched"] else "❌")
-        lie = "  (каза „поправено“, не е)" if r["reported"] and not r["fixed"] else ""
-        print(f"  {flag:3} {name:16} рунда={r['rounds']:<2} {r['sec']:6.1f}s  "
-              f"токени={r['prompt'] + r['completion']:>7}{lie}", flush=True)
+        print(_line(r), flush=True)
+        if out is not None:  # след всеки проект: спрян bench пази измереното
+            write_results(out, results, model, complete=False, quiet=True)
 
-    n = len(results)
+    counted = [r for r in results if not r.get("infra")]
+    infra = len(results) - len(counted)
+    if out is not None and results:
+        write_results(out, results, model)
+    n = len(counted)
     if not n:
-        print("\nНито един проект не е пуснат.")
+        print("\nНито един проект не е пуснат" + (f" — моделът не отговори ({infra})." if infra else "."))
         return 1
-    fixed = sum(r["fixed"] for r in results)
-    toks = sum(r["prompt"] + r["completion"] for r in results)
-    secs = sum(r["sec"] for r in results)
-    false_claims = sum(1 for r in results if r["reported"] and not r["fixed"])
+    fixed = sum(r["fixed"] for r in counted)
+    toks = sum(r["prompt"] + r["completion"] for r in counted)
+    secs = sum(r["sec"] for r in counted)
+    false_claims = sum(1 for r in counted if r["reported"] and not r["fixed"])
     print(f"\nПоправени: {fixed}/{n} ({round(100 * fixed / n)}%)  |  "
           f"средно {secs / n:.1f}s и {toks // n} токена на задача  |  "
-          f"фалшиво „поправено“: {false_claims}")
-    if args.out:
-        write_results(args.out, results, args.model)
-    return 0
+          f"фалшиво „поправено“: {false_claims}"
+          + (f"  |  без отговор от модела: {infra}" if infra else ""))
+    # Код 1 при неуспех, както bench_projects — самостоятелно пускане иначе
+    # винаги казваше „успех“ (2026-10-11).
+    return 0 if fixed == n and not infra else 1
 
 
 def summarize(results: list[dict]) -> dict[str, dict]:
-    """Като bench_projects.summarize — за да ги сравнява scripts/bench_all.py."""
-    return {r["name"]: {"runs": 1, "ok": int(r["fixed"]), "tests": float(r["fixed"]),
-                        "seconds": r["sec"], "tokens": r["prompt"] + r["completion"],
-                        "false_claim": bool(r["reported"] and not r["fixed"]),
-                        "test_touched": r["test_touched"]}
-            for r in results}
+    """Като bench_projects.summarize — за да ги сравнява scripts/bench_all.py.
+    Проект без отговор от модела е runs=0, infra=1: не е неуспешна поправка."""
+    out = {}
+    for r in results:
+        infra = bool(r.get("infra"))
+        out[r["name"]] = {"runs": 0 if infra else 1, "ok": int(r["fixed"] and not infra),
+                          "tests": float(r["fixed"] and not infra),
+                          "seconds": r["sec"], "tokens": r["prompt"] + r["completion"],
+                          "false_claim": bool(r["reported"] and not r["fixed"] and not infra),
+                          "test_touched": r["test_touched"], "infra": int(infra)}
+    return out
 
 
-def write_results(out: Path, results: list[dict], model: str) -> Path:
+def write_results(out: Path, results: list[dict], model: str, *, complete: bool = True,
+                  quiet: bool = False) -> Path:
     import json
     from datetime import datetime
     out.mkdir(parents=True, exist_ok=True)
     path = out / "results.json"
     path.write_text(json.dumps({"date": datetime.now().isoformat(timespec="seconds"),
-                                "model": model or "chain", "summary": summarize(results),
-                                "runs": results}, ensure_ascii=False, indent=1), encoding="utf-8")
-    print(f"Резултати: {path}")
+                                "model": model or "chain", "complete": complete,
+                                "summary": summarize(results), "runs": results},
+                               ensure_ascii=False, indent=1), encoding="utf-8")
+    if not quiet:
+        print(f"Резултати: {path}")
     return path
 
 
