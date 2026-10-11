@@ -174,6 +174,19 @@ _GENESIS_CONTROL = (
 )
 _CONTROL_REASON = "собствените команди/агенти на оператора (~/.genesis) — важат за всеки проект"
 
+# Ключът за подписа и записите за доверие (hooks/MCP) в ~/.genesis — трети
+# кръг (2026-10-11). Подписът пази hooks.json/mcp.json само докато командите
+# не стигат до тези два файла: с ключа и запис в trusted_hooks.json
+# подхвърленият hooks.json ставаше „доверен“ без /hooks trust. Вторият кръг
+# беше махнал `trusted_\w+.json` от образците и проследяваше само `cd`/`pushd`
+# — подшел, `env -C` и `sh -c` минаваха като SAFE (измерено, режим „deny“).
+# Тук: текстът на пътя (като в първия кръг, без голата дума — `grep -rn
+# trusted_hooks genesis_agent/` остава SAFE), а _secret_in_arguments проверява
+# реалния път спрямо всяка папка, която командата назовава.
+_TRUST_RECORDS = r"\.genesis\b[^\n]{0,40}?\b(?:trusted_\w+\.json|hooks_trust\.key)\b"
+_TRUST_REASON = "ключът или записите за доверие на Genesis (hooks/MCP) — с тях се подправя доверието"
+_TRUST_NAMES = ("hooks_trust.key",)
+
 # Опасни — изискват потвърждение (interactive) или отказ (autonomous).
 _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # И дългите форми: без `--(recursive|force)` тук `rm --recursive нещо`
@@ -210,6 +223,7 @@ _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (_c(_SECRET_PATHS),
      "достъп до чувствителни файлове (ключове/тайни)"),
     (_c(_GENESIS_CONTROL), _CONTROL_REASON),
+    (_c(_TRUST_RECORDS), _TRUST_REASON),
     # Качване на локален файл навън — пътят, по който тайна напуска машината.
     # localhost е изключен: така агентът тества собственото си API.
     (_c(r"\bcurl\b(?![^\n]*\b(?:localhost|127\.0\.0\.1)\b)[^\n]*\s(?:-T\s*\S|--upload-file\b"
@@ -1130,14 +1144,29 @@ _MAX_SECRET_GLOB = 300
 
 
 def _control_path_reason(path: str) -> str | None:
-    """Пътят е в ~/.genesis/commands или agents (и през $HOME, глоб или `cd`)."""
+    """Пътят е в ~/.genesis/commands или agents, или е ключът/записът за
+    доверие в ~/.genesis (и през $HOME, глоб, `cd`, подшел или `env -C`).
+
+    Трети кръг (2026-10-11): проверката по реален път пази и trusted_*.json и
+    hooks_trust.key, не само командите/агентите. Иначе `cd ~/.genesis; cp
+    /tmp/x trusted_*.json` и `cat ~/.genesis/trust''ed_hooks.json` минаваха
+    като SAFE (глоб/разделена кавичка — името не е буквално в текста), с тях
+    се подправяше доверието и подхвърленият hooks.json се пускаше."""
     from genesis_agent.paths import GENESIS_HOME
     try:
+        root = os.path.normcase(os.path.realpath(Path(GENESIS_HOME)))
         real = os.path.normcase(os.path.realpath(path))
         for sub in ("agents", "commands"):
-            top = os.path.normcase(os.path.realpath(Path(GENESIS_HOME) / sub))
+            top = os.path.join(root, os.path.normcase(sub))
             if real == top or real.startswith(top + os.sep):
                 return _CONTROL_REASON
+        # Ключът/записите за доверие — ТОЧНО в ~/.genesis, не по-дълбоко:
+        # подпапка на проект със същото име не е те.
+        if os.path.dirname(real) == root:
+            name = os.path.basename(real)
+            if name == os.path.normcase("hooks_trust.key") or (
+                    name.startswith(os.path.normcase("trusted_")) and name.endswith(".json")):
+                return _TRUST_REASON
     except (OSError, ValueError):
         pass
     return None
@@ -1150,25 +1179,29 @@ def _environ_of_unknown_process(text: str) -> bool:
     пуска, държат токените си (GITHUB_TOKEN от mcp.json) в средата и след exec
     отново са dumpable със същия uid. Одит 2026-10-11: `cat $p/env""iron`
     минаваше като SAFE — образецът искаше буквално `/proc/`. Само последното
-    име `environ` (или glob, който го хваща) след променлива: `$DIR/maps`,
-    `$CONDA_PREFIX/envs` са обикновени папки."""
-    import fnmatch
+    име `environ` (или glob около цялата дума: `environ*`) след променлива:
+    `$DIR/maps`, `$CONDA_PREFIX/envs` са обикновени папки.
+
+    Трети кръг (2026-10-11): по-рано `fnmatch('environ', last)` хващаше всеки
+    glob, чийто литерал е префикс на „environ“ — `$HOME/env*`, `$VENV/envi*`
+    (обикновено изброяване на виртуални среди) ставаха „тайна“. Сега литералът
+    без шаблонните знаци трябва да е цялата дума `environ`."""
     head, _, last = text.rpartition("/")
     if not head or not any(ch in head for ch in "$`"):
         return False
     if last == "environ":
         return True
-    return (any(ch in last for ch in "*?[") and len(last.strip("*?")) >= 2
-            and fnmatch.fnmatchcase("environ", last))
+    # glob около цялата дума: `environ`, `environ*`, `environ?` — но не `env*`.
+    return any(ch in last for ch in "*?[") and last.strip("*?[]") == "environ"
 
 
-def _cd_target(tokens: list[str], base: Path) -> Path | None:
-    """Папката след `cd`/`pushd` в този сегмент — за следващите сегменти."""
+_CD_CMDS = ("cd", "pushd", "chdir", "Set-Location", "sl")
+
+
+def _resolve_dir(raw: str, base: Path) -> Path | None:
+    """Разгъва папка-аргумент (~, $VAR, glob) спрямо `base`."""
     import glob as _glob
-    if not tokens or tokens[0] not in ("cd", "pushd", "chdir", "Set-Location", "sl"):
-        return None
-    args = [t for t in tokens[1:] if not t.startswith("-")]
-    target = os.path.expanduser(os.path.expandvars(args[0] if args else "~"))
+    target = os.path.expanduser(os.path.expandvars(raw))
     if not os.path.isabs(target):
         target = str(base / target)
     if any(ch in target for ch in "*?["):
@@ -1178,6 +1211,34 @@ def _cd_target(tokens: list[str], base: Path) -> Path | None:
             found = []
         target = found[0] if found else ""
     return Path(target) if target and os.path.isdir(target) else None
+
+
+def _cd_target(tokens: list[str], base: Path) -> Path | None:
+    """Папката, в която този сегмент влиза, за следващите сегменти: `cd`/
+    `pushd`, подшел `(cd …`, и `env -C DIR`/`env --chdir=DIR` (трети кръг,
+    2026-10-11 — тези маршрути минаваха покрай проследяването на `cd`)."""
+    if not tokens:
+        return None
+    head = tokens[0].lstrip("(").strip() or (tokens[1] if len(tokens) > 1 else "")
+    rest = tokens[1:] if tokens[0].lstrip("(").strip() else tokens[2:]
+    if head in _CD_CMDS:
+        args = [t for t in rest if not t.startswith("-")]
+        return _resolve_dir(args[0] if args else "~", base)
+    if head == "env":
+        i = 1
+        while i < len(tokens):
+            t = tokens[i]
+            if t == "-C" and i + 1 < len(tokens):
+                return _resolve_dir(tokens[i + 1], base)
+            if t.startswith("--chdir="):
+                return _resolve_dir(t.split("=", 1)[1], base)
+            if t == "--chdir" and i + 1 < len(tokens):
+                return _resolve_dir(tokens[i + 1], base)
+            if t.startswith("-") or "=" in t:   # флаг или VAR=value на env
+                i += 1
+                continue
+            break                               # командата след env — спираме
+    return None
 
 
 def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:
@@ -1193,6 +1254,10 @@ def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:
     Втори кръг (2026-10-11): относителните пътища се разгъват спрямо папката
     след `cd`/`pushd` (`cd ~/.gen*; cat hooks_trust.k*` минаваше като SAFE), и
     същото правило пази собствените команди/агенти на оператора.
+
+    Трети кръг (2026-10-11): папката важи и за ОСТАНАЛИТЕ думи в същия сегмент
+    (`env -C ~/.genesis cat hooks_t*`), не само за следващите — иначе `env -C`
+    и подшел заобикаляха проследяването.
     """
     import glob as _glob
 
@@ -1203,6 +1268,9 @@ def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:
             tokens = _shlex_split_for_classification(seg)
         except ValueError:
             tokens = seg.split()
+        moved = _cd_target(tokens, base)
+        if moved is not None:
+            base = moved                    # и за този сегмент, и за следващите
         for tok in tokens:
             if not tok or tok.startswith("-"):
                 continue
@@ -1235,9 +1303,6 @@ def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:
                     return reason
             if seen >= _MAX_SECRET_GLOB:
                 return None
-        moved = _cd_target(tokens, base)
-        if moved is not None:
-            base = moved
     return None
 
 

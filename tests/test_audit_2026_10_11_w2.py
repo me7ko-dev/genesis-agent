@@ -176,17 +176,23 @@ def test_azure_pipelines_folder_is_not_a_secret(tmp_path) -> None:
 @pytest.mark.parametrize("command", [
     'p=/proc/$(pgrep -f mcp-server); cat $p/env""iron',
     "cat \"$p\"/environ",
-    "cat ${dir}/env*",
+    "cat ${dir}/environ*",
 ])
 def test_another_process_environment_through_a_variable_asks(command) -> None:
     """MCP сървърите на Genesis пазят токените си в средата и след exec са
-    отново dumpable (същия uid) — `cat $p/env""iron` минаваше като SAFE."""
+    отново dumpable (същия uid) — `cat $p/env""iron` минаваше като SAFE.
+
+    Трети кръг (2026-10-11): glob-ът трябва да обхваща цялата дума `environ`
+    (`environ*`), не само неин префикс — по-рано `env*` се хващаше."""
     assert sandbox.assess_command(command).level == RiskLevel.CONFIRM
 
 
 @pytest.mark.parametrize("command", [
     'python3 -c "import os; print(os.environ)"', "ls $CONDA_PREFIX/envs",
     "cat $ASSETS/maps/level1.json", "ls ${dir}/environments",
+    # Обикновени glob-ове след променлива: изброяване на виртуални среди
+    # (`env*`, `envi*`) не е средата на процес (трети кръг, 2026-10-11).
+    "ls $HOME/env*", "ls $VENV/envi*",
 ])
 def test_ordinary_variables_and_environ_words_stay_safe(command) -> None:
     assert sandbox.assess_command(command).level == RiskLevel.SAFE, command
