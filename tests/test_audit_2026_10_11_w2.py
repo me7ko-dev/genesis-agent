@@ -226,3 +226,22 @@ def test_relative_data_paths_are_found() -> None:
     assert mcp_client._relative_path_args(
         ["--db-path", "app.db", "--repository", ".", "--db=data/x.sqlite", "server.py"]) == \
         ["app.db", ".", "data/x.sqlite", "server.py"]
+
+
+# ── Свободен текст в MCP аргументите не е път ───────────────────────────────
+
+@pytest.mark.parametrize("arguments", [
+    {"query": "how do I rotate the credentials in .env"},
+    {"sql": "SELECT * FROM credentials WHERE id = 1"},
+    {"title": "Leaked .npmrc token in CI logs"},
+])
+def test_free_text_mentioning_a_secret_name_does_not_ask(arguments) -> None:
+    assert mcp_client._secret_argument(arguments) is None
+
+
+@pytest.mark.parametrize("arguments", [
+    {"path": "~/.ssh/id_rsa"}, {"path": "/Users/x/My Keys/.env"}, {"path": ".env"},
+    {"uri": "file:///home/x/.aws/credentials"}, {"path": "C:\\Users\\x\\My Keys\\id_rsa"},
+])
+def test_a_path_to_a_secret_still_asks(arguments) -> None:
+    assert mcp_client._secret_argument(arguments)

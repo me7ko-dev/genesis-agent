@@ -870,6 +870,15 @@ def _secret_argument(arguments: Any, _budget: list[int] | None = None) -> str | 
         text = arguments.strip()
         if not text or len(text) > 4096 or "\n" in text:
             return None
+        # Изречение с интервали, което не започва като път, е свободен текст
+        # (заявка, SQL, заглавие на issue) — не път (2026-10-11): „rotate the
+        # credentials in .env“ в търсене караше read-only инструмент да пита,
+        # а в автономен режим — да бъде отказан. Пътят с интервали
+        # (`/Users/x/My Keys/.env`) започва от корен, `~` или буква на диск.
+        if any(ch.isspace() for ch in text) and not (
+                text.startswith(("/", "\\", "~", "file://", "./", "../", ".\\", "..\\"))
+                or re.match(r"^[A-Za-z]:[\\/]", text)):
+            return None
         from genesis_agent import sandbox
         path = os.path.expanduser(text.removeprefix("file://"))
         reason = sandbox.sensitive_path_reason(path)
