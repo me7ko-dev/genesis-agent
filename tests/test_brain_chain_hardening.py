@@ -250,3 +250,22 @@ def test_an_empty_but_paid_reply_is_recorded_in_the_budget(monkeypatch) -> None:
     rows = _usage_rows(monkeypatch)
     assert brain.Brain(use_local=False).complete([{"role": "user", "content": "hi"}]).raw_text == "от C"
     assert rows == [("A", 4096), ("C", 50)]
+
+
+# ── F5: повреден HTTP 200 не излиза от complete() като изключение ────────────
+
+@pytest.mark.parametrize("body, expected", [
+    ({"choices": [{"message": None, "finish_reason": "error",
+                   "error": {"code": 502, "message": "upstream error"}}]}, "от C"),
+    ({"choices": [{"message": {"role": "assistant",
+                               "content": [{"type": "text", "text": "здрасти"}, {"type": "image"}]},
+                   "finish_reason": "stop"}]}, "здрасти"),
+    ({"choices": [{"message": {"role": "assistant", "content": {"text": "?"}},
+                   "finish_reason": "stop"}]}, "от C"),
+], ids=["message-null", "content-parts", "content-dict"])
+def test_a_malformed_200_falls_through_or_is_read_as_text(monkeypatch, body, expected) -> None:
+    monkeypatch.setattr(brain, "_load_chain", lambda: chain(("openrouter", "A"), ("nvidia", "C")))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "o")
+    monkeypatch.setenv("NVIDIA_API_KEY", " n")
+    _route(monkeypatch, lambda p: FakeResp(200, body) if p["model"] == "A" else ok("от C"))
+    assert brain.Brain(use_local=False).complete([{"role": "user", "content": "hi"}]).raw_text == expected

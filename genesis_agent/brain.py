@@ -1127,9 +1127,20 @@ class Brain:
             choice = data["choices"][0]
             message = choice["message"]
             content = message.get("content")
+            # Съдържание като списък от части (`[{"type": "text", ...}]`) —
+            # някои OpenAI-съвместими шлюзове го връщат така; `.strip()` по-долу
+            # гърмеше с AttributeError, който излизаше от complete() и губеше
+            # целия ход (одит 2026-10-11). Друг тип не е текст → MALFORMED.
+            if isinstance(content, list):
+                content = "".join(str(part.get("text") or "") for part in content
+                                  if isinstance(part, dict))
+            elif content is not None and not isinstance(content, str):
+                raise TypeError(f"content е {type(content).__name__}")
             tool_calls = message.get("tool_calls") or None
             finish_reason = choice.get("finish_reason") or ""
-        except (ValueError, KeyError, IndexError, TypeError) as e:
+        # AttributeError: `"message": null` (OpenRouter при upstream грешка,
+        # одит 2026-10-11) — без него следващият модел не се пробваше изобщо.
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
             raise RuntimeError(f"HTTP_200_MALFORMED: {type(e).__name__}: {r.text[:150]}")
         if not content and not tool_calls:
             # Причината в лога (2026-09-30): ollama връщаше празно след 0.3 s в 13
