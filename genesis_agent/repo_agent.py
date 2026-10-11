@@ -35,7 +35,6 @@ import difflib
 import json
 import os
 import re
-import subprocess
 import tarfile
 import time
 from dataclasses import dataclass, field
@@ -43,6 +42,7 @@ from pathlib import Path
 
 from genesis_agent.brain import Brain
 from genesis_agent.repo_map import detect_project, repo_map
+from genesis_agent.review import safe_git
 from genesis_agent.tool_schemas import REPAIR_TOOLS, load_tool_arguments
 
 # Нарочно в HOME, а НЕ в DATA_DIR: при git checkout DATA_DIR сочи вътре в самото
@@ -240,22 +240,16 @@ def _drop_stale_bytecode(root: Path, rels: list[str]) -> None:
 
 def _git_raw(root: Path, *args: str) -> str:
     """Като _git, но без strip — за `-z` изход."""
-    try:
-        proc = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=30, check=False)
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
-    return proc.stdout if proc.returncode == 0 else ""
+    return safe_git(root, *args)[1]
 
 
 def _git(root: Path, *args: str) -> str:
-    """git output, or "" when this is not a repo / git is unavailable."""
-    try:
-        proc = subprocess.run(["git", "-C", str(root), *args],
-                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, check=False)
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
-    return proc.stdout.strip() if proc.returncode == 0 else ""
+    """git output, or "" when this is not a repo / git is unavailable.
+
+    През review.safe_git: `genesis fix` върви и върху изтеглени проекти, а
+    подхвърлен `.git/config` (core.fsmonitor, филтър, diff.external) пускаше
+    програма при `git status`/`git diff` (одит 2026-10-11, възпроизведено)."""
+    return safe_git(root, *args)[1].strip()
 
 
 def latest_checkpoint(root: Path) -> Path | None:
@@ -434,7 +428,7 @@ def project_diff(root: Path, checkpoint: Path | None, files: list[str]) -> str:
     if (root / ".git").exists():
         # Само пипнатите файлове: целият `git diff` показваше и некомитнатата
         # работа на човека като част от поправката (одит 2026-10-09).
-        d = _git(root, "diff", "--", *files) if files else ""
+        d = _git(root, "diff", "--no-ext-diff", "--no-textconv", "--", *files) if files else ""
         # `git diff` не вижда нови (неследени) файлове — помощен модул, нов
         # тест. Одит 2026-10-07: поправка САМО с нов файл даваше празен дифф.
         # Само новите файлове, които поправката е пипнала — не всеки неследен

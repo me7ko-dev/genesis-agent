@@ -143,6 +143,26 @@ _SECRET_PATHS = (
     r"|mcp_tokens\.json\b|\.genesis[/\\]checkpoints\b"
     r"|\.npmrc\b|\.pypirc\b|\.netrc\b|\.docker[/\\]config\.json|\.kube[/\\]config\b"
     r"|Login Data\b"
+    # Ключът, с който се подписва доверието за hooks/MCP (2026-10-11).
+    r"|hooks_trust\.key\b"
+    # Средата и паметта на друг процес (2026-10-11): `tr '\0' '\n' <
+    # /proc/$PPID/environ` печаташе API ключа, махнат от средата на детето.
+    r"|/proc/[^/\s]+/(?:environ|mem|maps)\b"
+    # Добре известни файлове с токени (2026-10-11): gcloud, Azure CLI, Vault,
+    # PostgreSQL. `.git-credentials` хваща `credentials\b` по-горе.
+    r"|\.config[/\\]gcloud\b|[/\\]Roaming[/\\]gcloud\b|\.azure(?:[/\\]|\b)"
+    r"|\.vault-token\b|\.pgpass\b|pgpass\.conf\b"
+)
+
+# Управляващите файлове на Genesis — пускат програми ИЗВЪН sandbox-а с целия
+# os.environ (hooks.json при всеки инструмент, mcp.json при всеки чат) или
+# решават кое е доверено. Измерено 2026-10-11: `printf … > ~/.genesis/hooks.json`
+# беше SAFE и в режим „deny“, а следващият инструмент пускаше подхвърлената
+# команда, която виждаше API ключа, скрит от самия RUN_CMD. Отделна причина, не
+# в _SECRET_PATHS: READ_FILE на тези файлове (за /hooks) остава без въпрос.
+_GENESIS_CONTROL = (
+    r"\.genesis\b[^\n]{0,40}?\b(?:hooks|mcp|settings|trusted_\w+)\.json\b"
+    r"|\btrusted_hooks\b|\.genesis[/\\](?:agents|commands)\b"
 )
 
 # Опасни — изискват потвърждение (interactive) или отказ (autonomous).
@@ -180,6 +200,8 @@ _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
      "git push (публикуване)"),
     (_c(_SECRET_PATHS),
      "достъп до чувствителни файлове (ключове/тайни)"),
+    (_c(_GENESIS_CONTROL),
+     "промяна на управляващ файл на Genesis (hooks/MCP/доверие) — пуска програми извън sandbox-а"),
     # Качване на локален файл навън — пътят, по който тайна напуска машината.
     # localhost е изключен: така агентът тества собственото си API.
     (_c(r"\bcurl\b(?![^\n]*\b(?:localhost|127\.0\.0\.1)\b)[^\n]*\s(?:-T\s*\S|--upload-file\b"
@@ -655,6 +677,15 @@ _CATASTROPHIC_ROOTS = frozenset({
 # не е. Затова се мери дълбочината, а не се изброяват имена.
 _HOME_PARENTS = ("/home/", "/users/", "/root/")
 
+# Нормализираните Windows корени (виж _normalise_target): `c:`, `c:/*`,
+# `c:/windows`, `c:/users`, `c:/program files (x86)`, `c:/users/<име>` и домът
+# през PowerShell/cmd (2026-10-11).
+_WIN_CRITICAL = re.compile(
+    r"^(?:[a-z]:(?:/\*?)?"
+    r"|[a-z]:/(?:windows|users|program files[^/]*|programdata)(?:/\*)?"
+    r"|[a-z]:/users/[^/]+(?:/\*)?"
+    r"|\$env:(?:userprofile|homepath|systemroot|windir)(?:/\*)?|%homedrive%%homepath%)$")
+
 _RECURSIVE_LONG = frozenset({"--recursive", "--force", "-R", "-r"})
 
 # Програми, които само подават командата нататък. Пропускат се, за да стигнем
@@ -717,6 +748,16 @@ def _normalise_target(token: str) -> str:
     """Токен от командния ред → сравним път. Маха кавичките и завършващия
     разделител; `~/` и `~` трябва да значат едно и също за проверката."""
     t = token.strip().strip("'\"")
+    # Дискът на Windows в четирите си изписвания — `C:\x`, `C:/x`, `/c/x` (Git
+    # Bash) и `/mnt/c/x` (WSL) — става едно: `c:/x`. Измерено 2026-10-11:
+    # `rm -rf /c/`, `rm -rf C:/` и `rm -rf /c/Users/ivan` бяха само CONFIRM, а
+    # RUN_CMD на Windows върви точно през Git Bash.
+    if re.match(r"^[A-Za-z]:(?:[\\/]|$)", t):
+        t = t.replace("\\", "/")
+    else:
+        drive = re.match(r"^/(?:mnt/)?([A-Za-z])(?=/|$)", t)
+        if drive:
+            t = f"{drive.group(1)}:{t[drive.end():] or '/'}"
     # `/home/./user` и `/home/user/../user` сочат същото място като
     # `/home/user`, но без канонизация се четат като по-дълбоки пътища и
     # проверката за дълбочина ги пропускаше.
@@ -858,6 +899,8 @@ def _critical_root_reason(target: str) -> str | None:
     for parent in _HOME_PARENTS:
         if norm.startswith(parent) and norm.count("/") == parent.count("/"):
             return f"цяла home директория ({target})"
+    if _WIN_CRITICAL.match(norm):
+        return f"критичен корен на Windows ({target})"
     return None
 
 
@@ -925,6 +968,69 @@ def _catastrophic_rm_reason(command: str) -> str | None:
                     return (f"рекурсивно триене на целите от тръбата, в която "
                             f"по-рано стои {upstream}")
     return None
+
+
+# ── Триене на Windows по смисъл, не по изписване (2026-10-11) ───────────────
+# Образците за Remove-Item искаха пълното име и пълните `-Recurse/-Force`
+# ПРЕДИ пътя, а del/rd — `/s` на cmd.exe. Измерено: `ri -r -fo C:\Users\ivan`,
+# `del -r -fo …`, `rd -r -fo C:\`, `erase -r -fo $env:USERPROFILE` и
+# `pwsh -c "ri -r -fo ~"` бяха SAFE — изпълняваха се и в режим „deny“.
+# PowerShell приема псевдонимите и всеки еднозначен префикс на параметъра,
+# затова глаголът тук е един, флаговете се четат по префикс където и да стоят,
+# а всяка цел минава през същата проверка за критичен корен като `rm`.
+_WIN_DELETE_VERBS = frozenset({"remove-item", "ri", "rm", "del", "erase", "rd", "rmdir"})
+_CMD_DELETE_VERBS = frozenset({"del", "erase", "rd", "rmdir"})
+_WIN_LAUNCHERS = frozenset({"powershell", "pwsh", "cmd"})
+_CMD_DELETE_FLAG = re.compile(r"^/[sqf]$", re.IGNORECASE)
+
+
+def _win_dangerous_flag(verb: str, flag: str) -> bool:
+    f = flag.lower()
+    if len(f) >= 2 and "-recurse".startswith(f):     # -r, -re, … -recurse
+        return True
+    if len(f) >= 3 and "-force".startswith(f):       # -fo … -force (`-f` е и -Filter)
+        return True
+    if f in ("--recursive", "--force"):
+        return True
+    if verb == "rm" and re.fullmatch(r"-[a-z]*[rf][a-z]*", f) is not None and len(f) <= 5:
+        return True                                   # `rm -rf` в Git Bash/PowerShell
+    return verb in _CMD_DELETE_VERBS and _CMD_DELETE_FLAG.match(f) is not None
+
+
+def _launcher_word(word: str) -> bool:
+    name = os.path.basename(word.replace("\\", "/")).lower()
+    return name.removesuffix(".exe") in _WIN_LAUNCHERS or word.startswith(("-", "/"))
+
+
+def _windows_delete_verdict(command: str) -> RiskVerdict:
+    """BLOCKED за рекурсивно/принудително триене на диск, системна папка или
+    дом; CONFIRM за всяко друго рекурсивно/принудително триене с тези глаголи."""
+    for statement in re.split(r"[;|&\n(){}]", command):
+        words = [w.strip("'\"`") for w in statement.split()]
+        words = [w for w in words if w]
+        for i, word in enumerate(words):
+            verb = word.lower()
+            if verb not in _WIN_DELETE_VERBS:
+                continue
+            # Глаголът е командата, не дума в текст: в началото на израза или
+            # след `powershell -c`, `cmd /c` и техните флагове.
+            before = words[:i]
+            if not all(_launcher_word(w) for w in before):
+                break
+            args = words[i + 1:]
+            if not any(a.startswith(("-", "/")) and _win_dangerous_flag(verb, a) for a in args):
+                break
+            for target in args:
+                if verb in _CMD_DELETE_VERBS and _CMD_DELETE_FLAG.match(target):
+                    continue
+                if target.startswith("-"):
+                    continue
+                reason = _critical_root_reason(target)
+                if reason:
+                    return RiskVerdict(RiskLevel.BLOCKED,
+                                       [f"рекурсивно/принудително триене ({word}) на {reason}"])
+            return RiskVerdict(RiskLevel.CONFIRM, [f"рекурсивно/принудително триене ({word})"])
+    return RiskVerdict(RiskLevel.SAFE, [])
 
 
 _INTERPRETERS = re.compile(r"^(python[\d.]*|py|pypy[\d.]*|perl|ruby|node|deno|bun)(\.exe)?$",
@@ -1010,12 +1116,62 @@ def _inline_code_reasons(command: str) -> list[str]:
     return reasons
 
 
-def assess_command(command: str, cwd: Path | None = None) -> RiskVerdict:
+_SECRET_ARG_RX = re.compile(_SECRET_PATHS, re.IGNORECASE)
+_MAX_SECRET_GLOB = 300
+
+
+def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:
+    """Тайна, до която стигат АРГУМЕНТИТЕ на командата, а не само текстът ѝ.
+
+    Одит 2026-10-11, възпроизведено в режим „deny“: `cat ~/.s?h/id_r?a`,
+    `cat ~/.genesis/.en?`, `cat ~/.s''sh/id_ed2551''9` и `cat notes.txt`
+    (символна връзка към id_rsa в workspace-а) печатаха ключа — образецът
+    гледаше само буквалния текст. Тук всеки аргумент се чете без кавичките и
+    се разгъва както би го разгънал шелът (~, $VAR, glob), а всеки реален път
+    минава през sensitive_path_reason, която проследява и символните връзки.
+    """
+    import glob as _glob
+
+    base = cwd if (cwd and cwd.is_dir()) else Path.cwd()
+    seen = 0
+    for seg in _split_segments(command):
+        try:
+            tokens = _shlex_split_for_classification(seg)
+        except ValueError:
+            tokens = seg.split()
+        for tok in tokens:
+            if not tok or tok.startswith("-"):
+                continue
+            match = _SECRET_ARG_RX.search(tok.replace("\\", "/"))
+            if match and not _SENSITIVE_PATH_EXEMPT_RE.search(tok):
+                return f"достъп до чувствителен файл ({match.group(0)})"
+            expanded = os.path.expanduser(os.path.expandvars(tok))
+            if not os.path.isabs(expanded):
+                expanded = str(base / expanded)
+            if any(ch in tok for ch in "*?["):
+                try:
+                    paths = _glob.glob(expanded)[:_MAX_SECRET_GLOB - seen]
+                except (OSError, ValueError, re.error):
+                    paths = []
+            else:
+                paths = [expanded] if os.path.lexists(expanded) else []
+            for path in paths:
+                seen += 1
+                reason = sensitive_path_reason(path)
+                if reason:
+                    return reason
+            if seen >= _MAX_SECRET_GLOB:
+                return None
+    return None
+
+
+def assess_command(command: str, cwd: Path | None = None, *, arguments: bool = True) -> RiskVerdict:
     """Оценява риска на shell команда.
 
-    `cwd` е по избор и се ползва само за разгъването на относителни glob-ове в
-    прегледа на файловите операции — без него проверката пак работи, само
-    описанието на засегнатите файлове е по-бедно."""
+    `cwd` е по избор и се ползва за разгъването на относителни glob-ове — в
+    прегледа на файловите операции и в проверката за тайни в аргументите.
+    `arguments=False` — без тази проверка: за Python кода (assess_code) думите
+    не са аргументи на шел, а там тайните пази py_guard при изпълнение."""
     reasons: list[str] = []
     level = RiskLevel.SAFE
 
@@ -1031,6 +1187,9 @@ def assess_command(command: str, cwd: Path | None = None) -> RiskVerdict:
     structural = _catastrophic_rm_reason(command)
     if structural:
         return RiskVerdict(RiskLevel.BLOCKED, [structural])
+    windows_delete = _windows_delete_verdict(command)
+    if windows_delete.level == RiskLevel.BLOCKED:
+        return windows_delete
 
     for rx, why in _BLOCK_PATTERNS:
         if rx.search(command):
@@ -1042,10 +1201,21 @@ def assess_command(command: str, cwd: Path | None = None) -> RiskVerdict:
         if rx.search(command):
             reasons.append(why)
             level = RiskLevel.CONFIRM
+    if windows_delete.level == RiskLevel.CONFIRM and level < RiskLevel.CONFIRM:
+        reasons.extend(windows_delete.reasons)
+        level = RiskLevel.CONFIRM
     inline = _inline_code_reasons(command)
     if inline:
         reasons.extend(inline)
         level = RiskLevel(max(level, RiskLevel.CONFIRM))
+    if arguments and _SECRET_REASON not in reasons:
+        try:
+            secret = _secret_in_arguments(command, cwd)
+        except Exception:
+            secret = None
+        if secret:
+            reasons.append(secret)
+            level = RiskLevel(max(level, RiskLevel.CONFIRM))
     verdict = RiskVerdict(level, reasons)
     try:
         return verdict.merge(_assess_file_ops(command, cwd))
@@ -1173,7 +1343,7 @@ def _python_reads_sensitive_path(code: str) -> bool:
 
 def assess_code(code: str) -> RiskVerdict:
     """Оценява риска на Python код (проверява и shell, и Python образците)."""
-    verdict = assess_command(code)  # кодът може да съдържа shell чрез os.system и т.н.
+    verdict = assess_command(code, arguments=False)  # кодът може да съдържа shell (os.system)
     if verdict.level == RiskLevel.BLOCKED:
         return verdict
     reasons = list(verdict.reasons)
@@ -1328,6 +1498,31 @@ def _windowsapps_last(path: str) -> str:
     return ";".join([p for p in parts if p not in apps] + apps)
 
 
+_ENVIRON_HIDDEN = False
+
+
+def _hide_own_environ() -> None:
+    """PR_SET_DUMPABLE=0 за процеса на Genesis (Linux), веднъж — преди първото дете.
+
+    Минималната среда на детето не значеше нищо, щом то чете средата на
+    родителя: `tr '\\0' '\\n' < /proc/$PPID/environ` печаташе API ключа
+    (одит 2026-10-11, възпроизведено). Недъмпваем процес има /proc/<pid>/
+    environ, mem и maps на root — дете със същия uid не ги отваря. При exec
+    детето отново е dumpable, така че инструментите му (gdb, py-spy върху
+    собствения му код) работят както преди. Образецът в _SECRET_PATHS е
+    вторият слой: той пита и за буквално изписан път."""
+    global _ENVIRON_HIDDEN
+    if _ENVIRON_HIDDEN or not sys.platform.startswith("linux"):
+        return
+    _ENVIRON_HIDDEN = True
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl(4, 0, 0, 0, 0)          # PR_SET_DUMPABLE = 4
+    except (OSError, AttributeError):
+        pass
+
+
 def _count_user_processes() -> int:
     """Груб брой на текущите процеси (за да не сваляме RLIMIT_NPROC под него)."""
     try:
@@ -1382,6 +1577,7 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
         except Exception:
             pass
     env = _build_env(policy, env_extra)
+    _hide_own_environ()
     # Ако NPROC е включен, капът е headroom над текущото натоварване.
     nproc_cap = (_count_user_processes() + policy.max_processes) if policy.max_processes > 0 else 0
     try:
@@ -1649,6 +1845,7 @@ def start_shell(command: str, *, cwd: Path | None = None, log: Path,
     allowed, reason = _decide(command, verdict, policy)
     if not allowed:
         return None, reason
+    _hide_own_environ()
     long_policy = replace(policy, cpu_seconds=max(policy.cpu_seconds, 3600))
     nproc_cap = (_count_user_processes() + policy.max_processes) if policy.max_processes > 0 else 0
     try:
@@ -1742,7 +1939,12 @@ _SECRET_REASON = "достъп до чувствителни файлове (к�
 _PROC_REASONS = ("стартиране на подпроцес", "стартиране на процес", "os.system (shell изпълнение)")
 # За пазача `credentials` е име на файл (`credentials`, `credentials.json`), не
 # всеки път с думата — `tests/test_credentials.py` е код (одит 2026-10-09).
-_GUARD_RX = _SECRET_PATHS.replace(r"|credentials\b", r"|(?:^|/)credentials(?:\.\w+)?$")
+# Пред думата — и `.`/`-`/`_`, отзад — разширения за данни, не за код
+# (2026-10-11): `~/.git-credentials`, gcloud `application_default_credentials.json`
+# и terraform `credentials.tfrc.json` се четяха от USE_SKILL по сглобен път.
+_GUARD_RX = _SECRET_PATHS.replace(
+    r"|credentials\b",
+    r"|(?:^|[/._-])credentials(?:\.(?:json|tfrc|ya?ml|toml|ini|cfg|conf|xml|db|txt|enc))*$")
 
 
 def _guard_script(run_dir: Path) -> Path | None:

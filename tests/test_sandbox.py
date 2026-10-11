@@ -732,3 +732,48 @@ def test_quotes_and_flag_spellings_do_not_hide_a_risky_command(command) -> None:
 def test_redirections_are_not_separators() -> None:
     assert sandbox._split_segments('ls 2>&1 | head; echo "a & b" && x &> f') == [
         "ls 2>&1 ", " head", ' echo "a & b" ', " x &> f"]
+
+
+# ── 2026-10-11: одит — Windows триене, което минаваше без въпрос ─────────────
+# Измерено: псевдонимите на PowerShell (ri/del/rd/erase) и съкратените флагове
+# (`-r -fo`) бяха SAFE — изпълняваха се и в режим „deny“; Git Bash коренът
+# (`/c/`, `C:/`) и `C:/Users/<име>` бяха само CONFIRM (в „allow“ се пускат сами).
+
+@pytest.mark.parametrize("cmd", [
+    r'powershell -c "Remove-Item -Recurse -Force C:\Users\ivan"',
+    r'powershell -c "Remove-Item C:\Users\ivan -Recurse -Force"',
+    r'powershell -c "Remove-Item -r -fo C:\Users\ivan"',
+    r'powershell -c "ri -Recurse -Force C:\Users\ivan"',
+    r'powershell -c "del -r -fo C:\Users\ivan"',
+    r'powershell -c "rd -r -fo C:\"',
+    r'powershell -c "erase -r -fo $env:USERPROFILE"',
+    r'pwsh -c "ri -r -fo ~"',
+    r'powershell -NoProfile -Command "rm -r -fo ~"',
+    r'powershell -c "Remove-Item -Recurse -Force C:/Users/ivan"',
+    r'cmd /c rd /s /q C:/Users/ivan',
+    r'cmd /c rd /s /q C:\Users\ivan',
+    "rm -rf /c/Users/ivan",
+    "rm -rf /c/",
+    "rm -rf C:/",
+    "rm -rf /mnt/c/Users/ivan",
+])
+def test_windows_aliases_and_drive_roots_are_blocked(cmd) -> None:
+    assert sandbox.assess_command(cmd).level is BLOCKED
+
+
+@pytest.mark.parametrize("cmd", [
+    r'powershell -c "ri -r -fo src"',
+    r'powershell -c "del -r -fo .\build"',
+    "rm -rf /c/Users/ivan/proj/build",
+    "rm -rf C:/Users/ivan/proj/build",
+])
+def test_windows_recursive_delete_of_a_project_folder_asks(cmd) -> None:
+    assert sandbox.assess_command(cmd).level is CONFIRM
+
+
+@pytest.mark.parametrize("cmd", [
+    "git rm --cached notes.txt", r'powershell -c "Get-ChildItem -r src"',
+    "echo del", "python -m pytest -q -r a",
+])
+def test_windows_delete_detection_keeps_ordinary_commands_safe(cmd) -> None:
+    assert sandbox.assess_command(cmd).level is SAFE
