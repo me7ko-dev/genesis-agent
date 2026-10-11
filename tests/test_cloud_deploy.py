@@ -217,6 +217,23 @@ def test_deploy_refuses_world_writable_code(tmp_path) -> None:
     assert "[сухо] не минава: test -z" in out, out
 
 
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() != 0, reason="chown иска root")
+def test_deploy_refuses_code_a_non_root_group_can_write(tmp_path) -> None:
+    """Вълна 5, 2026-10-11: проверката гледаше собственика и „други“, но не и
+    групата — root:1000 с g+w минаваше, а всеки от група 1000 пише в кода, който
+    genesis-web пуска като root (измерено: деплоят продължаваше)."""
+    repo = _copy_cloud(tmp_path)
+    target = repo / "cloud" / "web" / "server.py"
+    os.chown(target, 0, 1000)
+    target.chmod(0o664)
+    _, out, _, _ = _dry(tmp_path, SECRET, root=repo)
+    assert "[сухо] не минава: test -z" in out, out
+    # Група root с g+w е пак само root.
+    os.chown(target, 0, 0)
+    code, out, _, _ = _dry(tmp_path, SECRET, root=repo)
+    assert code == 0 and "test -z" not in out, out
+
+
 @pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() != 0, reason="иска root")
 def test_a_root_owned_checkout_passes(tmp_path) -> None:
     code, out, _, _ = _dry(tmp_path, SECRET, root=_copy_cloud(tmp_path))

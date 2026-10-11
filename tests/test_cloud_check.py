@@ -92,6 +92,21 @@ def test_what_the_check_itself_started_must_be_gone(machine, tmp_path) -> None:
     assert "task00000000" in str(e.value) and "live" not in str(e.value)
 
 
+def test_a_failing_docker_listing_is_not_nothing_left(machine, tmp_path, monkeypatch) -> None:
+    """Вълна 5, 2026-10-11: `docker ps` с грешка даваше празен списък и
+    проверката казваше „не остава контейнер или мрежа“, без да е видяла нищо."""
+    m = machine(leak=True)
+
+    def broken(*args: str, timeout: float = 60) -> subprocess.CompletedProcess[str]:
+        if args[0] == "ps" or args[:2] == ("network", "ls"):
+            return subprocess.CompletedProcess(["docker", *args], 1, "", "Cannot connect")
+        return m(*args, timeout=timeout)
+
+    monkeypatch.setattr(launch, "_docker", broken)
+    with pytest.raises(check.CheckFailed, match="списъкът на Docker"):
+        check.leftovers({f"{launch.TASK_PREFIX}task00000000"})
+
+
 def test_run_task_says_which_container_it_used(tmp_path, fake_docker) -> None:
     fake_docker.answers[("network", "create")] = (1, "", "pool exhausted")
     res = launch.run_task("x", tmp_path / "w")
