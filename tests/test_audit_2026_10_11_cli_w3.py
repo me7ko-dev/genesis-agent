@@ -5,7 +5,9 @@ from __future__ import annotations
 import os
 import subprocess
 
-from genesis_agent import deliver
+import pytest
+
+from genesis_agent import cli, deliver, repo_agent
 
 
 def _git(root, *a):
@@ -94,3 +96,26 @@ def test_export_uninitialised_submodule_dir_is_not_an_error(tmp_path):
     keep, _ = deliver.project_files(root)
     assert _rels(root, keep) == ["lib/util.py", "main.py"]
 
+
+# ── fix: описание с `--` и интервал преди пътя е грешка, не път ─────────────
+
+@pytest.fixture
+def fake_repair(monkeypatch):
+    seen: dict = {}
+
+    def repair(project, task, **kw):
+        seen.update(project=project, task=task, **kw)
+        return repo_agent.RepairOutcome(True, "ok")
+    monkeypatch.setattr(repo_agent, "repair", repair)
+    return seen
+
+
+def test_fix_quoted_dashes_description_before_the_path_is_refused(fake_repair, capsys):
+    assert cli.main(["fix", "--verbose flag is ignored", "./proj"]) == 2
+    assert "Непозната опция" in capsys.readouterr().out
+    assert fake_repair == {}
+
+
+def test_fix_quoted_dashes_description_after_the_path_still_works(fake_repair):
+    assert cli.main(["fix", "./proj", "--verbose flag is ignored"]) == 0
+    assert fake_repair["project"] == "./proj" and fake_repair["task"] == "--verbose flag is ignored"
