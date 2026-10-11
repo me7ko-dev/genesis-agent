@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from genesis_agent import chat_commands, hooks, mcp_client, sandbox
+from genesis_agent.sandbox import RiskLevel
 
 _FAKE_MCP = Path(__file__).parent / "fake_mcp_server.py"
 
@@ -116,3 +117,46 @@ def test_a_legacy_trust_record_says_why_it_is_no_longer_trust(tmp_path) -> None:
     assert "по-стара версия" in hooks.trust_problem(project)
 
 
+# ── Ключът за доверието зад cd и glob ───────────────────────────────────────
+
+def test_the_trust_key_behind_cd_and_a_glob_asks(tmp_path, monkeypatch) -> None:
+    """`cd ~/.gen*; cat hooks_trust.k*` минаваше като SAFE: аргументите се
+    разгъваха спрямо работната папка, не спрямо папката след `cd`."""
+    from genesis_agent import paths
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(paths, "GENESIS_HOME", home / ".genesis")
+    hooks.trust_key()
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    for command in ("cd ~/.gen*; cat hooks_trust.k*", "cd ~/.genesis && cat hooks_trust.key",
+                    "pushd ~/.genesis; cat hooks_trust.key"):
+        assert sandbox.assess_command(command, cwd=ws).level == RiskLevel.CONFIRM, command
+    assert sandbox.assess_command("cd sub; cat notes.txt", cwd=ws).level == RiskLevel.SAFE
+
+
+# ── Четене и споменаване на управляващите файлове не пита ───────────────────
+
+@pytest.mark.parametrize("command", [
+    "cat ~/.genesis/settings.json",
+    "ls .genesis/commands",
+    "grep -rn trusted_hooks genesis_agent/",
+    "grep -n hooks_trust.key genesis_agent/hooks.py",
+    "cp draft.md .genesis/commands/deploy.md",
+    "cat .genesis/hooks.json",
+])
+def test_reading_or_mentioning_genesis_files_stays_safe(command) -> None:
+    """Първият кръг питаше за всяко споменаване (и го наричаше „промяна“):
+    Genesis не можеше да работи по собственото си хранилище, нито да пише
+    командите на проекта с RUN_CMD. hooks.json/mcp.json вече са защитени от
+    подписа, не от думите в командата."""
+    assert sandbox.assess_command(command).level == RiskLevel.SAFE, command
+
+
+@pytest.mark.parametrize("command", [
+    "cp x.md ~/.genesis/commands/review.md",
+    "cp x.md $HOME/.genesis/agents/helper.md",
+    "cp x.md ~/.genesis/comm''ands/review.md",
+])
+def test_writing_the_operators_own_commands_still_asks(command) -> None:
+    assert sandbox.assess_command(command).level == RiskLevel.CONFIRM, command

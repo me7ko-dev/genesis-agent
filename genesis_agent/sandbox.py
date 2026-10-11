@@ -144,8 +144,10 @@ _SECRET_PATHS = (
     r"|mcp_tokens\.json\b|\.genesis[/\\]checkpoints\b"
     r"|\.npmrc\b|\.pypirc\b|\.netrc\b|\.docker[/\\]config\.json|\.kube[/\\]config\b"
     r"|Login Data\b"
-    # Ключът, с който се подписва доверието за hooks/MCP (2026-10-11).
-    r"|hooks_trust\.key\b"
+    # Ключът, с който се подписва доверието за hooks/MCP (2026-10-11). Само
+    # като път (с папка пред името): `grep -n hooks_trust.key hooks.py` питаше.
+    # `cd ~/.genesis; cat hooks_trust.key` хваща _secret_in_arguments.
+    r"|[/\\]hooks_trust\.key\b"
     # Средата и паметта на друг процес (2026-10-11): `tr '\0' '\n' <
     # /proc/$PPID/environ` печаташе API ключа, махнат от средата на детето.
     r"|/proc/[^/\s]+/(?:environ|mem|maps)\b"
@@ -155,16 +157,20 @@ _SECRET_PATHS = (
     r"|\.vault-token\b|\.pgpass\b|pgpass\.conf\b"
 )
 
-# Управляващите файлове на Genesis — пускат програми ИЗВЪН sandbox-а с целия
-# os.environ (hooks.json при всеки инструмент, mcp.json при всеки чат) или
-# решават кое е доверено. Измерено 2026-10-11: `printf … > ~/.genesis/hooks.json`
-# беше SAFE и в режим „deny“, а следващият инструмент пускаше подхвърлената
-# команда, която виждаше API ключа, скрит от самия RUN_CMD. Отделна причина, не
-# в _SECRET_PATHS: READ_FILE на тези файлове (за /hooks) остава без въпрос.
+# Собствените команди и агенти на оператора (~/.genesis/commands, agents) —
+# важат за всеки проект; `review.md` там подменя /review навсякъде.
+#
+# 2026-10-11, втори кръг: първата версия питаше за всяко споменаване на
+# hooks/mcp/settings/trusted_* (`cat ~/.genesis/settings.json`, `ls
+# .genesis/commands`, `grep -rn trusted_hooks genesis_agent/`) и пак се
+# заобикаляше с една кавичка (`hook''s.json`). hooks.json и mcp.json вече
+# се пускат само с подпис от /hooks trust, /mcp trust (hooks.py) — записът
+# им от команда не стига до нищо, затова тук са само папките на оператора.
 _GENESIS_CONTROL = (
-    r"\.genesis\b[^\n]{0,40}?\b(?:hooks|mcp|settings|trusted_\w+)\.json\b"
-    r"|\btrusted_hooks\b|\.genesis[/\\](?:agents|commands)\b"
+    r"(?:~|\$\{?HOME\}?|%USERPROFILE%|\$env:USERPROFILE|\bhome\(\))[^\n]{0,12}?"
+    r"\.genesis\W{1,4}(?:agents|commands)\b"
 )
+_CONTROL_REASON = "собствените команди/агенти на оператора (~/.genesis) — важат за всеки проект"
 
 # Опасни — изискват потвърждение (interactive) или отказ (autonomous).
 _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
@@ -201,8 +207,7 @@ _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
      "git push (публикуване)"),
     (_c(_SECRET_PATHS),
      "достъп до чувствителни файлове (ключове/тайни)"),
-    (_c(_GENESIS_CONTROL),
-     "промяна на управляващ файл на Genesis (hooks/MCP/доверие) — пуска програми извън sandbox-а"),
+    (_c(_GENESIS_CONTROL), _CONTROL_REASON),
     # Качване на локален файл навън — пътят, по който тайна напуска машината.
     # localhost е изключен: така агентът тества собственото си API.
     (_c(r"\bcurl\b(?![^\n]*\b(?:localhost|127\.0\.0\.1)\b)[^\n]*\s(?:-T\s*\S|--upload-file\b"
@@ -1118,7 +1123,40 @@ def _inline_code_reasons(command: str) -> list[str]:
 
 
 _SECRET_ARG_RX = re.compile(_SECRET_PATHS, re.IGNORECASE)
+_CONTROL_ARG_RX = re.compile(_GENESIS_CONTROL, re.IGNORECASE)
 _MAX_SECRET_GLOB = 300
+
+
+def _control_path_reason(path: str) -> str | None:
+    """Пътят е в ~/.genesis/commands или agents (и през $HOME, глоб или `cd`)."""
+    from genesis_agent.paths import GENESIS_HOME
+    try:
+        real = os.path.normcase(os.path.realpath(path))
+        for sub in ("agents", "commands"):
+            top = os.path.normcase(os.path.realpath(Path(GENESIS_HOME) / sub))
+            if real == top or real.startswith(top + os.sep):
+                return _CONTROL_REASON
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _cd_target(tokens: list[str], base: Path) -> Path | None:
+    """Папката след `cd`/`pushd` в този сегмент — за следващите сегменти."""
+    import glob as _glob
+    if not tokens or tokens[0] not in ("cd", "pushd", "chdir", "Set-Location", "sl"):
+        return None
+    args = [t for t in tokens[1:] if not t.startswith("-")]
+    target = os.path.expanduser(os.path.expandvars(args[0] if args else "~"))
+    if not os.path.isabs(target):
+        target = str(base / target)
+    if any(ch in target for ch in "*?["):
+        try:
+            found = sorted(_glob.glob(target))
+        except (OSError, ValueError, re.error):
+            found = []
+        target = found[0] if found else ""
+    return Path(target) if target and os.path.isdir(target) else None
 
 
 def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:
@@ -1130,6 +1168,10 @@ def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:
     гледаше само буквалния текст. Тук всеки аргумент се чете без кавичките и
     се разгъва както би го разгънал шелът (~, $VAR, glob), а всеки реален път
     минава през sensitive_path_reason, която проследява и символните връзки.
+
+    Втори кръг (2026-10-11): относителните пътища се разгъват спрямо папката
+    след `cd`/`pushd` (`cd ~/.gen*; cat hooks_trust.k*` минаваше като SAFE), и
+    същото правило пази собствените команди/агенти на оператора.
     """
     import glob as _glob
 
@@ -1143,26 +1185,36 @@ def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:
         for tok in tokens:
             if not tok or tok.startswith("-"):
                 continue
-            match = _SECRET_ARG_RX.search(tok.replace("\\", "/"))
+            text = tok.replace("\\", "/")
+            match = _SECRET_ARG_RX.search(text)
             if match and not _SENSITIVE_PATH_EXEMPT_RE.search(tok):
                 return f"достъп до чувствителен файл ({match.group(0)})"
+            if _CONTROL_ARG_RX.search(text):
+                return _CONTROL_REASON
             expanded = os.path.expanduser(os.path.expandvars(tok))
             if not os.path.isabs(expanded):
                 expanded = str(base / expanded)
             if any(ch in tok for ch in "*?["):
                 try:
                     paths = _glob.glob(expanded)[:_MAX_SECRET_GLOB - seen]
+                    if not paths:      # нов файл в папка зад glob: `~/.gen*/commands/x.md`
+                        paths = [os.path.join(d, os.path.basename(expanded))
+                                 for d in _glob.glob(os.path.dirname(expanded))[:20]]
                 except (OSError, ValueError, re.error):
                     paths = []
             else:
-                paths = [expanded] if os.path.lexists(expanded) else []
+                paths = [expanded]
             for path in paths:
                 seen += 1
-                reason = sensitive_path_reason(path)
+                reason = (sensitive_path_reason(path) if os.path.lexists(path) else None) \
+                    or _control_path_reason(path)
                 if reason:
                     return reason
             if seen >= _MAX_SECRET_GLOB:
                 return None
+        moved = _cd_target(tokens, base)
+        if moved is not None:
+            base = moved
     return None
 
 
@@ -1214,7 +1266,7 @@ def assess_command(command: str, cwd: Path | None = None, *, arguments: bool = T
             secret = _secret_in_arguments(command, cwd)
         except Exception:
             secret = None
-        if secret:
+        if secret and secret not in reasons:
             reasons.append(secret)
             level = RiskLevel(max(level, RiskLevel.CONFIRM))
     verdict = RiskVerdict(level, reasons)
