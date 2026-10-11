@@ -1,7 +1,7 @@
 """Ревю на инструментите от 2026-10-11 (втора вълна): CRLF и `$` в
 SEARCH_CODE, latin-1 байт, приет за cp1251, фалшиви cp1251 попадения в UTF-8
 файлове, прегледът преди WRITE_FILE, `glob` с `[ ]` при rg, кодирането след
-първите 32 KB, файлове само с CR. Всеки тест падаше на кода преди поправката,
+първите 32 KB. Всеки тест падаше на кода преди поправката,
 освен [python] вариантите на test_cp1251_pass_does_not_hit_utf8_files и двата
 теста за `glob`: там бъгът беше в rg, а Python пътят е мярката, с която rg
 трябва да съвпадне."""
@@ -138,12 +138,3 @@ def test_read_range_past_the_head_uses_the_whole_file_encoding(ws):
     assert "cp1251" in out.splitlines()[0]
     hit = repo_map.search_code("Грешка", ws)[0]
     assert hit.line == 8001 and hit.text in out
-
-
-# ── файл само с CR ───────────────────────────────────────────────────────────
-
-def test_read_file_shows_cr_only_file_as_lines(ws):
-    (ws / "old.txt").write_bytes(b"one\rtwo\rthree\r")
-    body = _body(gs._tool_read_file("old.txt"))
-    assert "\r" not in body
-    assert body.splitlines() == ["one", "two", "three"]
