@@ -654,8 +654,18 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
         say("⚠️  Без снимка и без git — промените НЯМА как да се върнат. "
             "Пусни с `--checkpoint`, ако искаш снимка.")
 
-    files_before = _fingerprint(root)
+    # Отпечатъкът е СЛЕД първия тестов пас, а каквото самият пас пипа (лог,
+    # .coverage, test.db, junit.xml) не се брои за промяна никога: одит
+    # 2026-10-11 — тест, който пише last_run.log, правеше „само описа“ на
+    # модела в ✅ и код 0 с `last_run.log` като „променен файл“.
+    pre_tests = _fingerprint(root)
     before = run_tests(root, cmd)
+    files_before = _fingerprint(root)
+    test_noise = {rel for rel in set(pre_tests) | set(files_before)
+                  if pre_tests.get(rel) != files_before.get(rel)}
+
+    def _changed_by_fix() -> list[str]:
+        return [rel for rel in _changed_since(root, files_before) if rel not in test_noise]
     if before.ran:
         say(f"🧪 Преди: {'минават ✅' if before.passed else 'падат ❌'}")
         if before.passed:
@@ -742,7 +752,7 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
             # ── No tools: the model considers itself done ───────────────────
             if not touched:
                 # Промяна с команда (`sed -i`, patch) също е промяна.
-                touched += _changed_since(root, files_before)
+                touched += _changed_by_fix()
             if not touched:
                 # It answered in prose without changing anything. Usually that
                 # means it wrote the fixed code INTO the reply and asked the
@@ -794,7 +804,7 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
     # пръв принцип е „ТЕСТОВЕТЕ СА ПРИСЪДАТА", присъда по остарели данни е
     # по-лоша от липсваща.
     # Промените с команди (RUN_CMD) не минават през touched — гледа се диска.
-    touched = sorted(set(touched) | set(_changed_since(root, files_before)))
+    touched = sorted(set(touched) | set(_changed_by_fix()))
     if touched and after is before and cmd:
         say("🧪 Рундовете свършиха — пускам тестовете за финална присъда…")
         _drop_stale_bytecode(root, touched)
