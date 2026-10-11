@@ -1143,6 +1143,25 @@ def _control_path_reason(path: str) -> str | None:
     return None
 
 
+def _environ_of_unknown_process(text: str) -> bool:
+    """`$p/environ`, `${d}/env*` — средата на процес по път, сглобен в шела.
+
+    PR_SET_DUMPABLE пази само процеса на Genesis. MCP сървърите, които той
+    пуска, държат токените си (GITHUB_TOKEN от mcp.json) в средата и след exec
+    отново са dumpable със същия uid. Одит 2026-10-11: `cat $p/env""iron`
+    минаваше като SAFE — образецът искаше буквално `/proc/`. Само последното
+    име `environ` (или glob, който го хваща) след променлива: `$DIR/maps`,
+    `$CONDA_PREFIX/envs` са обикновени папки."""
+    import fnmatch
+    head, _, last = text.rpartition("/")
+    if not head or not any(ch in head for ch in "$`"):
+        return False
+    if last == "environ":
+        return True
+    return (any(ch in last for ch in "*?[") and len(last.strip("*?")) >= 2
+            and fnmatch.fnmatchcase("environ", last))
+
+
 def _cd_target(tokens: list[str], base: Path) -> Path | None:
     """Папката след `cd`/`pushd` в този сегмент — за следващите сегменти."""
     import glob as _glob
@@ -1193,6 +1212,8 @@ def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:
                 return f"достъп до чувствителен файл ({match.group(0)})"
             if _CONTROL_ARG_RX.search(text):
                 return _CONTROL_REASON
+            if _environ_of_unknown_process(text):
+                return f"достъп до чувствителен файл (средата на процес: {tok[:60]})"
             expanded = os.path.expanduser(os.path.expandvars(tok))
             if not os.path.isabs(expanded):
                 expanded = str(base / expanded)

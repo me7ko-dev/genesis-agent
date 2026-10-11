@@ -169,3 +169,24 @@ def test_azure_pipelines_folder_is_not_a_secret(tmp_path) -> None:
     assert sandbox.assess_command("cat .azure-pipelines/ci.yml").level == RiskLevel.SAFE
     assert sandbox.sensitive_path_reason(tmp_path / ".azure" / "msal_token_cache.json")
     assert sandbox.assess_command("cat ~/.azure/accessTokens.json").level == RiskLevel.CONFIRM
+
+
+# ── /proc/<pid>/environ по сглобен път ──────────────────────────────────────
+
+@pytest.mark.parametrize("command", [
+    'p=/proc/$(pgrep -f mcp-server); cat $p/env""iron',
+    "cat \"$p\"/environ",
+    "cat ${dir}/env*",
+])
+def test_another_process_environment_through_a_variable_asks(command) -> None:
+    """MCP сървърите на Genesis пазят токените си в средата и след exec са
+    отново dumpable (същия uid) — `cat $p/env""iron` минаваше като SAFE."""
+    assert sandbox.assess_command(command).level == RiskLevel.CONFIRM
+
+
+@pytest.mark.parametrize("command", [
+    'python3 -c "import os; print(os.environ)"', "ls $CONDA_PREFIX/envs",
+    "cat $ASSETS/maps/level1.json", "ls ${dir}/environments",
+])
+def test_ordinary_variables_and_environ_words_stay_safe(command) -> None:
+    assert sandbox.assess_command(command).level == RiskLevel.SAFE, command
