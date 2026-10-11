@@ -5,7 +5,9 @@ from __future__ import annotations
 import os
 import subprocess
 
-from genesis_agent import deliver
+import pytest
+
+from genesis_agent import cli, deliver, repo_agent
 
 
 def _git(root, *a):
@@ -81,3 +83,21 @@ def test_gitignore_double_star_matches_at_the_top_too(tmp_path):
         (root / f).write_text("x\n", encoding="utf-8")
     keep, _ = deliver.project_files(root)
     assert _rels(root, keep) == [".gitignore", "main.py", "sub/only_top.txt"]
+
+
+# ── fix: описание в кавички, което започва с `--`, е текст ──────────────────
+
+@pytest.fixture
+def fake_repair(monkeypatch):
+    seen: dict = {}
+
+    def repair(project, task, **kw):
+        seen.update(project=project, task=task, **kw)
+        return repo_agent.RepairOutcome(True, "ok")
+    monkeypatch.setattr(repo_agent, "repair", repair)
+    return seen
+
+
+def test_fix_quoted_description_starting_with_dashes_is_the_task(fake_repair):
+    assert cli.main(["fix", "./proj", "--verbose flag is ignored"]) == 0
+    assert fake_repair["task"] == "--verbose flag is ignored"

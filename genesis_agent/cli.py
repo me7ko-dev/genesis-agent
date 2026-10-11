@@ -188,7 +188,10 @@ def _fix(args: list[str]) -> int:
             except ValueError:
                 print(f"--rounds иска число, не {rest[i]!r}")
                 return 2
-        elif a.startswith("--"):
+        # Аргумент с интервал е описание в кавички, не опция (преглед
+        # 2026-10-11: „--verbose не работи“ в кавички беше отказвано, а
+        # грешката съветваше да го сложиш в кавички).
+        elif a.startswith("--") and not any(c.isspace() for c in a):
             print(f"Непозната опция: {a}  (текст с `--` в описанието: сложи го в кавички "
                   f"или след `--`)\n\n{_FIX_USAGE}")
             return 2
