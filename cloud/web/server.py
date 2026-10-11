@@ -188,10 +188,16 @@ class App:
 
 # ── файлове: кодът в контейнера е чужд, всичко от /work е недоверено ────────
 
-def list_files(workspace: Path, limit: int | None = None) -> list[dict[str, Any]]:
-    """До `limit` файла (MAX_FILES по подразбиране)."""
-    limit = MAX_FILES if limit is None else limit
-    out: list[dict[str, Any]] = []
+# Ревю 2026-10-11: име извън UTF-8 (cp1251 от стар архив или от кода в
+# контейнера) идва от os.walk като lone surrogates. JSON-ът и zip-ът гърмяха с
+# тях, а пропускането им криеше файла без знак. Показва се с U+FFFD на
+# мястото на всеки невалиден байт; за четене остава истинското име.
+_SURROGATES = re.compile("[\ud800-\udfff]")
+
+
+def _walk(workspace: Path, limit: int) -> list[tuple[str, str, int]]:
+    """До `limit` файла като (показано име, истинско име, размер)."""
+    out: list[tuple[str, str, int]] = []
     if not workspace.is_dir():
         return out
     for root, dirs, files in os.walk(workspace, followlinks=False):
@@ -204,16 +210,27 @@ def list_files(workspace: Path, limit: int | None = None) -> list[dict[str, Any]
             if not stat.S_ISREG(st.st_mode):
                 continue  # символна връзка, fifo, устройство — не се дава
             rel = (rel_root / name).as_posix()
-            try:
-                rel.encode("utf-8")
-            except UnicodeEncodeError:
-                # Име извън UTF-8 (cp1251 от стар архив) — JSON-ът и zip-ът
-                # гърмяха и не се виждаше нито един файл (одит 2026-10-11).
-                continue
-            out.append({"path": rel, "size": st.st_size})
+            out.append((_SURROGATES.sub("\ufffd", rel), rel, st.st_size))
             if len(out) >= limit:
                 return out
     return out
+
+
+def list_files(workspace: Path, limit: int | None = None) -> list[dict[str, Any]]:
+    """До `limit` файла (MAX_FILES по подразбиране)."""
+    return [{"path": shown, "size": size}
+            for shown, _, size in _walk(workspace, MAX_FILES if limit is None else limit)]
+
+
+def find_file(workspace: Path, rel: str) -> Path | None:
+    """Като safe_file, но намира и файл, показан с U+FFFD вместо истинското му
+    име. При две имена с еднакъв показан вид се дава първото."""
+    p = safe_file(workspace, rel)
+    if p is None and "\ufffd" in rel:
+        real = next((r for shown, r, _ in _walk(workspace, MAX_ZIP_FILES)
+                     if shown == rel and r != rel), None)
+        p = safe_file(workspace, real) if real is not None else None
+    return p
 
 
 def safe_file(workspace: Path, rel: str) -> Path | None:
@@ -248,15 +265,15 @@ def read_file(path: Path) -> bytes:
 
 def zip_files(workspace: Path) -> bytes | None:
     """Всички файлове в един zip, или None ако са над тавана."""
-    files = list_files(workspace, MAX_ZIP_FILES + 1)
-    if len(files) > MAX_ZIP_FILES or sum(f["size"] for f in files) > MAX_ZIP_BYTES:
+    files = _walk(workspace, MAX_ZIP_FILES + 1)
+    if len(files) > MAX_ZIP_FILES or sum(size for _, _, size in files) > MAX_ZIP_BYTES:
         return None
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for f in files:
-            p = safe_file(workspace, f["path"])
+        for shown, real, _ in files:
+            p = safe_file(workspace, real)
             if p is not None:
-                z.writestr(f["path"], read_file(p))
+                z.writestr(shown, read_file(p))
     return buf.getvalue()
 
 
@@ -439,7 +456,7 @@ class Handler(BaseHTTPRequestHandler):
                     "Content-Disposition": "attachment; filename*=UTF-8''genesis-files.zip"})
                 return
             rel = unquote(m[2])
-            p = safe_file(ws, rel)
+            p = find_file(ws, rel)
             if p is None:
                 self._error(404, "няма такъв файл")
                 return
