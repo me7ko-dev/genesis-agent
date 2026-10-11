@@ -18,10 +18,22 @@ _RUN = re.compile(r"^\[RUN_CMD: ", re.MULTILINE)
 _PYTHON_CMD = re.compile(r"""(?:^|[\s"'/\\&|;(])(?:python(?:\d+(?:\.\d+)?)?|py|pytest)(?:\.exe)?(?=[\s"']|$)""",
                          re.IGNORECASE | re.MULTILINE)
 # Python команда, която не пуска кода: инсталация или проверка на версията.
-_NOT_A_RUN = re.compile(r"(?:^|\s)(?:-m\s+)?pip3?(?:\s|$)|--version\b|(?:^|\s)-V(?:\s|$)")
+# Гледа се САМО веднага след интерпретатора и във всеки сегмент на веригата
+# поотделно (bug fix, 2026-10-11). Измерено: търсено в целия ред,
+# `pip install -r requirements.txt && python solution.py` и
+# `python solution.py --version` оставяха „записан, но НЕ пуснат“.
+_NOT_A_RUN = re.compile(r"""["']?(?:\s+-\d+(?:\.\d+)?)?\s+(?:-m\s+pip3?\b|--version\b|-V(?:\s|$))""")
+_SEGMENT_SPLIT = re.compile(r"&&|\|\||[;|\n]")
 _CASES = ("по един случай за всяко правило или ограничение в условието, различен от примерите "
           "в заявката: по-сложен вход, граничните стойности и вход, който трябва да бъде "
           "отхвърлен")
+
+
+def _runs_python(command: str) -> bool:
+    """Поне един сегмент на веригата пуска Python код (не pip, не --version)."""
+    return any(not _NOT_A_RUN.match(seg, m.end())
+               for seg in _SEGMENT_SPLIT.split(command)
+               for m in _PYTHON_CMD.finditer(seg))
 
 
 class RunCheck:
@@ -49,7 +61,7 @@ class RunCheck:
         command = head[0].removeprefix("[RUN_CMD: ")
         started = len(head) == 2 and "\n[SANDBOX" not in head[0]
         if (self._unrun and _RUN.match(result) and started
-                and _PYTHON_CMD.search(command) and not _NOT_A_RUN.search(command)):
+                and _runs_python(command)):
             self._unrun.clear()
 
     def due(self) -> bool:
