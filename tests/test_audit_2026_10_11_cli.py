@@ -1,0 +1,392 @@
+"""Проверката 2026-10-11 на CLI повърхностите: `genesis fix`, `export`,
+`setup`, потребителските команди и първото пускане без ключове. Всеки тест
+пада без поправката си (пуснато срещу стария код)."""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import zipfile
+from pathlib import Path
+
+import pytest
+
+from genesis_agent import cli, deliver, repo_agent
+from genesis_agent import setup_wizard as sw
+
+PY = f'"{sys.executable}" -m pytest -q -p no:cacheprovider'
+
+
+def _git(root, *a):
+    subprocess.run(["git", "-C", str(root), *a], check=True, capture_output=True,
+                   env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+
+
+def _tc(name, args, i=0):
+    return {"id": f"c{i}", "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+
+
+class _Reply:
+    def __init__(self, tool_calls=None, raw_text=""):
+        self.tool_calls = tool_calls
+        self.raw_text = raw_text
+        self.code = ""
+
+
+def _brain(monkeypatch, replies, then=None):
+    it = iter(replies)
+    calls: list[int] = []
+
+    class B:
+        def __init__(self, **kw):
+            pass
+
+        def complete(self, *a, **kw):
+            calls.append(1)
+            return next(it, then or _Reply(raw_text="готово"))
+    monkeypatch.setattr(repo_agent, "Brain", B)
+    return calls
+
+
+CALC_BAD = "def add(a, b):\n    return a - b\n"
+TEST_CALC = "from calc import add\n\ndef test_add():\n    assert add(2, 3) == 5\n"
+
+
+@pytest.fixture
+def proj(tmp_path, monkeypatch):
+    monkeypatch.setattr(repo_agent, "CHECKPOINT_DIR", tmp_path / "cps")
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "calc.py").write_text(CALC_BAD, encoding="utf-8")
+    (root / "test_calc.py").write_text(TEST_CALC, encoding="utf-8")
+    return root
+
+
+# ── genesis fix: файл, който тестовете сами пишат, не е поправка ─────────────
+
+def test_a_log_written_by_the_tests_is_not_a_fix(proj, monkeypatch):
+    (proj / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    (proj / "run_tests.py").write_text(
+        "import pathlib, time\npathlib.Path('last_run.log').write_text(str(time.time_ns()))\n",
+        encoding="utf-8")
+    said: list[str] = []
+    calls = _brain(monkeypatch, [], then=_Reply(raw_text="Сменете a - b с a + b в calc.py."))
+    out = repo_agent.repair(proj, "add е грешна", test_command=f'"{sys.executable}" run_tests.py',
+                            max_rounds=3, on_status=said.append)
+    assert out.success is False
+    assert "last_run.log" not in out.files_touched
+    assert any("описа промяна" in s for s in said), "моделът трябва да бъде върнат да действа"
+    assert len(calls) == 3
+
+
+# ── genesis fix: изчерпана верига не е „описа, но не направи“ ───────────────
+
+_CHAIN_DOWN = "Error: цялата верига е изчерпана | последна: нито един модел няма API ключ"
+
+
+def test_exhausted_chain_stops_at_once_and_says_so(proj, monkeypatch):
+    said: list[str] = []
+    calls = _brain(monkeypatch, [], then=_Reply(raw_text=_CHAIN_DOWN))
+    out = repo_agent.repair(proj, "add е грешна", test_command=PY, max_rounds=6,
+                            on_status=said.append)
+    assert len(calls) == 1, "без нови минавания през цялата верига"
+    assert not any("описа промяна" in s for s in said)
+    assert out.success is False and "Нито един модел не отговори" in out.summary
+    assert "genesis setup" in out.summary
+
+
+def test_exhausted_chain_after_an_edit_still_gets_a_verdict(proj, monkeypatch):
+    calls = _brain(monkeypatch, [_Reply([_tc("WRITE_FILE", {"path": "notes.md", "content": "x\n"})])],
+                   then=_Reply(raw_text=_CHAIN_DOWN))
+    out = repo_agent.repair(proj, "add е грешна", test_command=PY, max_rounds=6,
+                            on_status=lambda m: None)
+    assert len(calls) == 2
+    assert out.success is False and "Нито един модел не отговори" in out.summary
+    assert out.files_touched == ["notes.md"] and out.tests_after is not out.tests_before
+
+
+# ── genesis fix --revert: без резервно копие няма връщане ────────────────────
+
+def _project_over_the_cap_after_snapshot(proj, monkeypatch):
+    (proj / "app.py").write_text("v = 1\n", encoding="utf-8")
+    repo_agent.create_checkpoint(proj)
+    (proj / "app.py").write_text("v = 1\n# два часа ръчна работа\n", encoding="utf-8")
+    (proj / "data.csv").write_bytes(b"x" * 3 * 1024 * 1024)
+    monkeypatch.setattr(repo_agent, "_MAX_SNAPSHOT_MB", 2)
+
+
+def test_revert_over_the_size_cap_still_keeps_the_overwritten_work(proj, monkeypatch):
+    _project_over_the_cap_after_snapshot(proj, monkeypatch)
+    msg = repo_agent.restore_checkpoint(proj)
+    assert (proj / "app.py").read_text(encoding="utf-8") == "v = 1\n"
+    assert "--revert" in msg and "Състоянието отпреди връщането" in msg
+    msg2 = repo_agent.restore_checkpoint(proj)      # връщането се връща
+    assert "ръчна работа" in (proj / "app.py").read_text(encoding="utf-8")
+    assert "създадени след снимката" not in msg2, "частичната снимка не е целият проект"
+
+
+def test_revert_refuses_when_no_backup_can_be_made(proj, monkeypatch):
+    _project_over_the_cap_after_snapshot(proj, monkeypatch)
+
+    def boom(*a):
+        raise OSError("диск пълен")
+    monkeypatch.setattr(repo_agent, "_backup_overwritten", boom)
+    msg = repo_agent.restore_checkpoint(proj)
+    assert msg.startswith("❌") and "нищо не е върнато" in msg
+    assert "ръчна работа" in (proj / "app.py").read_text(encoding="utf-8")
+
+
+# ── genesis fix: подпапка на git хранилище (monorepo) ───────────────────────
+
+def _monorepo(tmp_path):
+    mono = tmp_path / "mono"
+    backend = mono / "backend"
+    backend.mkdir(parents=True)
+    (backend / "calc.py").write_text(CALC_BAD, encoding="utf-8")
+    (backend / "test_calc.py").write_text(TEST_CALC, encoding="utf-8")
+    (mono / "README.md").write_text("mono\n", encoding="utf-8")
+    _git(mono, "init", "-q")
+    _git(mono, "add", "-A")
+    _git(mono, "commit", "-qm", "init")
+    return mono, backend
+
+
+_HUMAN = CALC_BAD + "\n\ndef HUMAN_WORK_IN_PROGRESS():\n    pass\n"
+_EDIT = _Reply([_tc("EDIT_FILE", {"path": "calc.py", "old": "a - b", "new": "a + b"})])
+
+
+def test_fix_in_a_subfolder_of_a_git_repo_sees_git(proj, tmp_path, monkeypatch):
+    _, backend = _monorepo(tmp_path)
+    (backend / "calc.py").write_text(_HUMAN, encoding="utf-8")   # некомитната работа
+    _brain(monkeypatch, [_EDIT])
+    said: list[str] = []
+    out = repo_agent.repair(backend, "add is wrong", test_command=PY, max_rounds=3,
+                            on_status=said.append)
+    assert out.success and out.checkpoint is not None, "мръсно хранилище → снимка"
+    assert "+    return a + b" in out.diff
+    assert "+def HUMAN_WORK_IN_PROGRESS" not in out.diff   # контекст може, добавен ред — не
+    assert not any("без git" in s for s in said)
+
+
+def test_clean_subfolder_fix_diff_comes_from_git(proj, tmp_path, monkeypatch):
+    _, backend = _monorepo(tmp_path)
+    _brain(monkeypatch, [_EDIT])
+    out = repo_agent.repair(backend, "add is wrong", test_command=PY, max_rounds=3,
+                            on_status=lambda m: None)
+    assert out.success and out.checkpoint is None
+    assert "+    return a + b" in out.diff
+    assert "връщане няма" not in repo_agent._undo_hint(backend, None, ["calc.py"])
+
+
+def test_fix_diff_does_not_show_human_work_in_the_same_file(proj, monkeypatch):
+    _git(proj, "init", "-q")
+    _git(proj, "add", "-A")
+    _git(proj, "commit", "-qm", "init")
+    (proj / "calc.py").write_text(_HUMAN, encoding="utf-8")
+    _brain(monkeypatch, [_EDIT])
+    out = repo_agent.repair(proj, "fix add", test_command=PY, max_rounds=3, on_status=lambda m: None)
+    assert out.success and out.checkpoint is not None
+    assert "+    return a + b" in out.diff and "+def HUMAN_WORK_IN_PROGRESS" not in out.diff
+
+
+# ── genesis export: каквото git пази само локално, остава локално ───────────
+
+def _shop(tmp_path):
+    root = tmp_path / "shop"
+    (root / "uploads").mkdir(parents=True)
+    (root / "htmlcov").mkdir()
+    (root / "manage.py").write_text("print('hi')\n", encoding="utf-8")
+    (root / ".gitignore").write_text("# локални\ndb.sqlite3\n*.log\nuploads/\n.coverage\nhtmlcov/\n",
+                                     encoding="utf-8")
+    (root / "db.sqlite3").write_bytes(b"SQLite format 3\x00 EGN 8001011234")
+    (root / "server.log").write_text("user@x.bg token=abc\n", encoding="utf-8")
+    (root / "uploads" / "passport_scan.jpg").write_bytes(b"\xff\xd8\xff")
+    (root / ".coverage").write_bytes(b"x")
+    (root / "htmlcov" / "index.html").write_text("<html></html>\n", encoding="utf-8")
+    return root
+
+
+def test_export_leaves_out_what_gitignore_ignores(tmp_path):
+    root = _shop(tmp_path)
+    _git(root, "init", "-q")
+    d = deliver.export(root, tmp_path / "out.zip", run_tests=False)
+    names = sorted(n.split("/", 1)[1] for n in zipfile.ZipFile(d.zip_path).namelist())
+    assert names == [".gitignore", "GENESIS_REPORT.md", "manage.py"]
+    for gone in ("db.sqlite3", "server.log", "uploads/", ".coverage", "htmlcov/"):
+        assert gone in d.report, gone
+
+
+def test_export_reads_gitignore_without_git(tmp_path):
+    root = _shop(tmp_path)
+    keep, withheld = deliver.project_files(root)
+    assert sorted(p.relative_to(root).as_posix() for p in keep) == [".gitignore", "manage.py"]
+    assert any(w.startswith("uploads/") for w in withheld)
+
+
+def test_export_withholds_keys_hard_coded_in_code_and_config(tmp_path):
+    root = tmp_path / "app"
+    root.mkdir()
+    # Сглобени, за да не стоят цели ключове в изходния код на теста.
+    groq, gh, aws = "gsk_" + "A1b2" * 6, "ghp_" + "Z9y8" * 9, "AKIA" + "QWERTYUIOP123456"
+    (root / "main.py").write_text("print('hi')\n", encoding="utf-8")
+    (root / "config.py").write_text(f'DEBUG = True\nGROQ_API_KEY = "{groq}"\n', encoding="utf-8")
+    (root / "settings.json").write_text(json.dumps({"token": gh}), encoding="utf-8")
+    (root / "aws.cfg").write_text(f"[default]\naws_access_key_id = {aws}\n", encoding="utf-8")
+    d = deliver.export(root, tmp_path / "out.zip", run_tests=False)
+    assert d.files == ["main.py"]
+    shipped = zipfile.ZipFile(d.zip_path).read("app/GENESIS_REPORT.md").decode()
+    for name in ("config.py", "settings.json", "aws.cfg"):
+        assert any(w.startswith(name) for w in d.withheld) and name in shipped, name
+    assert any("config.py" in w and "ред 2" in w and "gsk_" in w for w in d.withheld)
+    assert groq not in shipped, "отчетът не бива да носи самия ключ"
+
+
+# ── genesis setup: ключ, писан на кирилица или поставен с кавички ────────────
+
+class _Resp:
+    status_code = 200
+    text = ""
+
+
+@pytest.fixture
+def setup_env(tmp_path, monkeypatch):
+    from genesis_agent import paths
+    home = tmp_path / "gh"
+    home.mkdir()
+    envf = home / ".env"
+    monkeypatch.setattr(sw, "ENV_FILE", envf)
+    monkeypatch.setattr(paths, "ENV_FILE", envf)
+    monkeypatch.setattr(paths, "ENV_FILES", (str(tmp_path / "install.env"), str(envf)))
+    monkeypatch.setattr(sw, "ensure_genesis_home", lambda: home)
+    for v, *_ in sw.PROVIDERS + sw.PAID_PROVIDERS:
+        monkeypatch.delenv(v, raising=False)
+    sent: list[str] = []
+
+    def post(url, headers=None, **kw):
+        headers["Authorization"].encode("latin-1")   # както requests/http.client
+        sent.append(headers["Authorization"])
+        return _Resp()
+    monkeypatch.setattr(sw.requests, "post", post)
+    return envf, sent
+
+
+@pytest.mark.parametrize("raw", ["гск_abc123", "\u201cgsk_абв\u201d", "gsk_abc\u200b123x\u00e9"])
+def test_setup_key_outside_latin_does_not_crash(setup_env, raw):
+    ok, why = sw._test_key("http://x", sw._clean_key(raw), "m")
+    assert ok is False and "латин" in why
+
+
+def test_setup_cleans_quotes_zero_width_and_a_pasted_name(setup_env):
+    assert sw._clean_key("\u201cgsk_abc123\u201d") == "gsk_abc123"
+    assert sw._clean_key("GROQ_API_KEY=gsk_abc\u200b123") == "gsk_abc123"
+    assert sw._clean_key("'hf_x'") == "hf_x"
+
+
+def test_setup_keeps_the_good_keys_when_one_is_typed_in_cyrillic(setup_env, monkeypatch, capsys):
+    import builtins
+    envf, sent = setup_env
+    answers = iter(["hf_good123", "", "", "гск_typed_in_cyrillic", "", "", "n"])
+    monkeypatch.setattr(builtins, "input", lambda prompt="": next(answers, ""))
+    sw.run()
+    text = envf.read_text(encoding="utf-8")
+    assert "HF_TOKEN=hf_good123" in text and "GROQ_API_KEY" not in text
+    assert "латин" in capsys.readouterr().out
+    assert sent == ["Bearer hf_good123"], "ключ на кирилица не стига до мрежата"
+
+
+# ── genesis fix: непозната опция не е част от описанието на бъга ────────────
+
+@pytest.fixture
+def fake_repair(monkeypatch):
+    seen: dict = {}
+
+    def repair(project, task, **kw):
+        seen.update(project=project, task=task, **kw)
+        return repo_agent.RepairOutcome(True, "ok")
+    monkeypatch.setattr(repo_agent, "repair", repair)
+    return seen
+
+
+@pytest.mark.parametrize("argv", [
+    ["fix", "./proj", "бутонът не работи", "--chekpoint"],
+    ["fix", "./proj", "бутонът не работи", "--max-coding"],
+    ["fix", "./proj", "бутонът не работи", "--rounds"],
+    ["fix", "./proj", "бутонът не работи", "--test"],
+])
+def test_fix_refuses_an_unknown_or_incomplete_option(fake_repair, argv, capsys):
+    assert cli.main(argv) == 2
+    assert fake_repair == {}
+    out = capsys.readouterr().out
+    assert "Употреба" in out and argv[-1] in out
+
+
+def test_fix_options_may_come_before_the_path(fake_repair):
+    assert cli.main(["fix", "--checkpoint", "./proj", "бутонът не работи"]) == 0
+    assert fake_repair["project"] == "./proj" and fake_repair["task"] == "бутонът не работи"
+    assert fake_repair["checkpoint"] is True
+
+
+def test_fix_double_dash_keeps_the_rest_as_the_task(fake_repair):
+    assert cli.main(["fix", "./proj", "--", "флагът", "--verbose", "не", "работи"]) == 0
+    assert fake_repair["task"] == "флагът --verbose не работи"
+
+
+# ── /команди: кирилско име се изпълнява, а не отива при модела като текст ───
+
+def test_cyrillic_custom_command_runs_and_the_list_matches_the_dispatch(tmp_path):
+    from genesis_agent import chat_commands, paths
+    cmds = Path(paths.GENESIS_HOME) / "commands"
+    cmds.mkdir(parents=True)
+    (cmds / "преглед.md").write_text("Прегледай $ARGUMENTS и кажи грешките.", encoding="utf-8")
+    (cmds / "_draft.md").write_text("Draft $ARGUMENTS", encoding="utf-8")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    res = chat_commands.handle("/преглед app.py", messages=[], workspace=ws,
+                               out=lambda s: None, ask=lambda q: "")
+    assert res is not None and res.prompt == "Прегледай app.py и кажи грешките."
+    listed = chat_commands.custom_commands(ws)
+    assert "преглед" in listed
+    for name in listed:   # каквото се показва в /commands, това и тръгва
+        assert chat_commands._NAME.match(f"/{name} x"), name
+
+
+# ── първо пускане без ключове: едно изречение, не 38 реда „[Brain] ✗“ ───────
+
+def test_no_key_and_no_local_model_means_nothing_is_reachable(monkeypatch):
+    from genesis_agent import brain
+    monkeypatch.setattr(brain, "_load_keys", dict)
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+    assert brain.any_model_reachable() is False      # ollama: портът е затворен (conftest)
+    monkeypatch.setattr(brain, "_load_keys", lambda: {"GROQ_API_KEY": "gsk_x"})
+    assert brain.any_model_reachable() is True
+
+
+def test_first_message_without_keys_never_reaches_the_chain(monkeypatch, capsys):
+    import genesis_terminal_agent as gta
+    from genesis_agent import brain, chat_input, model_check, workspace_memory
+    monkeypatch.setattr(brain, "any_model_reachable", lambda: False, raising=False)
+    monkeypatch.setattr(gta, "print_minimal_banner", lambda: None)
+    monkeypatch.setattr(gta, "show_status_bar", lambda: None)
+    monkeypatch.setattr(gta, "build_system_prompt", lambda: ("system", ""))
+    monkeypatch.setattr(model_check, "needs_check", lambda: False)
+    lines = iter(["здравей", "exit"])
+    monkeypatch.setattr(chat_input, "read_message", lambda read: next(lines))
+    turns: list[str] = []
+    monkeypatch.setattr(gta, "run_turn", lambda messages, text, ui: turns.append(text) or messages)
+    captured: list[int] = []
+    monkeypatch.setattr(workspace_memory, "auto_capture", lambda convo: captured.append(1) or {})
+    monkeypatch.setattr(gta.sys, "argv", ["genesis"])
+    gta.main()
+    out = capsys.readouterr().out
+    assert turns == [] and captured == []
+    assert out.count("genesis setup") == 1 and "[Brain]" not in out
+
+
+def test_exit_after_only_chain_errors_does_not_run_auto_capture():
+    import genesis_terminal_agent as gta
+    convo = [{"role": "user", "content": "здравей"},
+             {"role": "assistant", "content": "[Грешка: цялата верига е изчерпана]"}]
+    assert gta._worth_capturing(convo) is False
+    assert gta._worth_capturing(convo + [{"role": "assistant", "content": "Здравей!"}]) is True

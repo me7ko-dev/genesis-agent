@@ -659,6 +659,41 @@ def _load_premium_chain() -> list[dict]:
     return out
 
 
+def any_model_reachable() -> bool:
+    """Има ли поне един модел, който Brain изобщо би извикал: ключ за доставчик
+    от някоя верига, проект за Vertex или локален Ollama.
+
+    Одит 2026-10-11: първо пускане без ключове — едно „здравей“ в чата минаваше
+    два пъти през цялата верига (25 реда „[Brain] ✗ … skip: no KEY“) и
+    завършваше с грешка; изходът правеше още 13. Чатът пита тук ПРЕДИ хода и
+    казва какво да се направи, вместо да вика модел, който няма как да отговори.
+    """
+    keys = _load_keys()
+    local_models = {LOCAL_MODEL}
+    for c in _load_chain() + _load_light_chain() + _load_coding_chain() + _load_premium_chain():
+        key_env = _PROVIDERS.get(c["provider"], ("", None))[1]
+        if key_env is None:          # ollama_local във веригата — решава пробата долу
+            local_models.add(c["model"])
+            continue
+        if c["provider"] == "vertex":
+            try:
+                from genesis_agent import vertex_auth
+                if vertex_auth.projects():
+                    return True
+            except Exception:
+                return True          # не знаем — по-добре опит, отколкото отказ
+            continue
+        if str(keys.get(key_env) or "").strip():
+            return True
+    # Една проба, не по една на модел: затворен порт на Windows чака ~2 s.
+    try:
+        r = requests.get("http://localhost:11434/api/tags", timeout=2)
+        names = [m.get("name", "") for m in r.json().get("models", [])] if r.status_code == 200 else []
+    except Exception:
+        return False
+    return any(m and m.split(":")[0] in n for m in local_models for n in names)
+
+
 class Brain:
     # Кеш за config.yaml tool_tag_prompt (виж _tool_tag_prompt).
     _TAG_PROMPT_CACHE: str | None = None

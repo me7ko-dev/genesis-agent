@@ -109,6 +109,8 @@ PAID_PROVIDERS: list[tuple[str, str, str, str, str]] = [
 
 def _test_anthropic_key(key: str, model: str) -> tuple[bool, str]:
     """Anthropic не е OpenAI-съвместим — собствена проба през Messages API."""
+    if not key.isascii():
+        return False, _NOT_LATIN
     try:
         import anthropic
     except ImportError:
@@ -150,6 +152,9 @@ def _test_key(base_url: str, key: str, model: str) -> tuple[bool, str]:
     apart from "the model I probed with no longer exists" — so it is consulted
     only on a 404/410, and only for providers that actually authenticate it.
     """
+    if not key.isascii():
+        return False, _NOT_LATIN
+
     def _probe() -> requests.Response | None:
         try:
             return requests.post(
@@ -161,7 +166,7 @@ def _test_key(base_url: str, key: str, model: str) -> tuple[bool, str]:
                       "max_tokens": 5},
                 timeout=30,
             )
-        except requests.RequestException:
+        except (requests.RequestException, UnicodeError):
             return None
 
     r = _probe()
@@ -190,6 +195,30 @@ def _test_key(base_url: str, key: str, model: str) -> tuple[bool, str]:
             pass
         return True, f"ключът минава · тестовият модел {model} вече не съществува"
     return False, f"HTTP {r.status_code}: {r.text[:90]}"
+
+
+_NOT_LATIN = "ключът съдържа знаци извън латиницата — пиши го на латинска подредба"
+# Кавички (и „умните“ от Word/чат), невидими знаци от копиране.
+_QUOTES = "\"'\u201c\u201d\u201e\u2018\u2019\u00ab\u00bb`"
+_INVISIBLE = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff\u00a0"))
+
+
+def _clean_key(raw: str) -> str:
+    """Ключът, както е поставен, без обвивката около него.
+
+    Одит 2026-10-11: ключ с кавички, нулева ширина или писан на кирилица
+    сриваше `genesis setup` с UnicodeEncodeError (заглавката на заявката е
+    latin-1) и всички вече въведени ключове се губеха. Тук се маха обвивката;
+    останалото извън ASCII `_test_key` отказва с човешко изречение."""
+    key = raw.translate(_INVISIBLE).strip().removeprefix("export ").strip()
+    name, sep, rest = key.partition("=")
+    if sep and name.strip().replace("_", "").isalnum() and name.strip().isupper():
+        key = rest.strip()      # поставено цяло `GROQ_API_KEY=gsk_…`
+    return key.strip(_QUOTES + " ")
+
+
+def _prompt_key(text: str) -> str:
+    return _clean_key(_prompt(text))
 
 
 def _prompt(text: str) -> str:
@@ -264,7 +293,7 @@ def run() -> int:
             print("✅" if ok else "❌", why)
             if ok:
                 # Working key: keep it unless the user deliberately replaces it.
-                key = _prompt("    [Enter] запази · или въведи нов ключ: ")
+                key = _prompt_key("    [Enter] запази · или въведи нов ключ: ")
                 if not key:
                     _keep(collected, var, current)
                     working += 1
@@ -274,14 +303,14 @@ def run() -> int:
                 # Broken key: replacing is the obvious move, so make that the
                 # default and require a deliberate choice to keep it.
                 print(f"    Вземи нов от: {url}")
-                key = _prompt("    Нов ключ (Enter = остави счупения): ")
+                key = _prompt_key("    Нов ключ (Enter = остави счупения): ")
                 if not key:
                     _keep(collected, var, current)
                     print("    оставен непроменен — този доставчик няма да работи\n")
                     continue
         else:
             print(f"  {name}  —  вземи ключ от: {url}")
-            key = _prompt(f"    {var} = ")
+            key = _prompt_key(f"    {var} = ")
             if not key:
                 print("    (пропуснат)\n")
                 continue
@@ -292,7 +321,7 @@ def run() -> int:
         if ok:
             collected[var] = key
             working += 1
-        else:
+        elif key.isascii():   # ключ на кирилица би сринал всяка заявка — не се пише
             keep = _prompt("    Да го запиша ли въпреки това? [y/N] ").lower()
             if keep.startswith("y"):
                 collected[var] = key
@@ -324,7 +353,7 @@ def run() -> int:
                            if base_url.startswith("native://")
                            else _test_key(base_url, current, model))
                 print("✅" if ok else "❌", why)
-                key = _prompt("    [Enter] запази · или въведи нов ключ: ")
+                key = _prompt_key("    [Enter] запази · или въведи нов ключ: ")
                 if not key:
                     # Ключ от средата на шела не се копира тихо във файла — както
                     # при безплатните (одит 2026-10-09).
@@ -333,7 +362,7 @@ def run() -> int:
                     continue
             else:
                 print(f"  {name}  —  вземи ключ от: {url}")
-                key = _prompt(f"    {var} = ")
+                key = _prompt_key(f"    {var} = ")
                 if not key:
                     print("    (пропуснат)\n")
                     continue
@@ -341,7 +370,8 @@ def run() -> int:
             ok, why = (_test_anthropic_key(key, model) if base_url.startswith("native://")
                        else _test_key(base_url, key, model))
             print("✅" if ok else "❌", why)
-            if ok or _prompt("    Да го запиша ли въпреки това? [y/N] ").lower().startswith("y"):
+            if ok or (key.isascii()
+                      and _prompt("    Да го запиша ли въпреки това? [y/N] ").lower().startswith("y")):
                 collected[var] = key
             print()
     else:

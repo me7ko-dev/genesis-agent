@@ -17,8 +17,12 @@ the recipient knows to supply their own.
 """
 from __future__ import annotations
 
+import contextlib
+import fnmatch
+import functools
 import os
 import re
+import subprocess
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -67,17 +71,35 @@ _SECRET_CONTENT = re.compile(rb"-----BEGIN [A-Z ]*PRIVATE KEY-----|\"private_key
 _SCAN_BYTES = 256 * 1024
 
 
-def _secret_file(p: Path, rel: str) -> bool:
+@functools.lru_cache(maxsize=1)
+def _api_token_bytes() -> re.Pattern[bytes]:
+    from genesis_agent.notifier import API_TOKEN_RE
+    return re.compile(API_TOKEN_RE.pattern.encode())
+
+
+def _secret_file(p: Path, rel: str) -> str | None:
+    """None — файлът може да замине; иначе как да се впише в „извън архива“."""
     from genesis_agent import sandbox
     if sandbox.sensitive_path_reason(rel) or sandbox.sensitive_path_reason(p.name):
-        return True
+        return rel
     if _EXPORT_SECRETS.search(rel):
-        return True
+        return rel
     try:
         with p.open("rb") as f:
-            return bool(_SECRET_CONTENT.search(f.read(_SCAN_BYTES)))
+            data = f.read(_SCAN_BYTES)
     except OSError:
-        return False
+        return None
+    if _SECRET_CONTENT.search(data):
+        return rel
+    # API ключ, вписан направо в кода или конфига (`GROQ_API_KEY = "gsk_…"`,
+    # `ghp_…` в settings.json, `AKIA…` в aws.cfg). Одит 2026-10-11: и трите
+    # заминаваха към клиента — пазеше се само блок PRIVATE KEY. Казва се къде
+    # е ключът (без самия него), за да го изнесе човекът в .env.
+    m = _api_token_bytes().search(data)
+    if m:
+        line = data.count(b"\n", 0, m.start()) + 1
+        return f"{rel} (съдържа ключ {m.group(0)[:4].decode('ascii', 'replace')}… на ред {line})"
+    return None
 
 
 _RUN_HEADINGS = ("how to run", "running", "usage", "quick start", "quickstart",
@@ -97,22 +119,103 @@ class Delivery:
 
 # ── Files ────────────────────────────────────────────────────────────────────
 
+_IGNORED = "игнориран от .gitignore"
+
+
+def _git_kept(root: Path) -> tuple[set[str], tuple[str, ...]] | None:
+    """Файловете, които git би запазил (следени + неследени неигнорирани),
+    спрямо `root`, и папките, приети цели (вложено хранилище: `sub/`).
+    None — проектът не е в git или git липсва."""
+    try:
+        proc = subprocess.run(["git", "-C", str(root), "ls-files", "-co", "--exclude-standard", "-z"],
+                              capture_output=True, timeout=30, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    entries = [e for e in proc.stdout.decode("utf-8", "replace").split("\0") if e]
+    if not entries:
+        # Папка, която обхващащо хранилище игнорира цялата (dotfiles репо в
+        # $HOME с `*` в .gitignore): git не казва нищо за проекта — тогава
+        # решава собственият му .gitignore, а не „всичко е игнорирано“.
+        return None
+    return ({e for e in entries if not e.endswith("/")},
+            tuple(e for e in entries if e.endswith("/")))
+
+
+def _gitignore_rules(root: Path) -> list[tuple[str, bool, bool]]:
+    """Минимален прочит на `.gitignore` в корена за проект без git:
+    (образец, само папка, закотвен). Отрицания (`!`) не се поддържат —
+    така се задържа повече, не по-малко."""
+    try:
+        text = (root / ".gitignore").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    rules = []
+    for line in text.splitlines():
+        pat = line.strip()
+        if not pat or pat.startswith(("#", "!")):
+            continue
+        dir_only = pat.endswith("/")
+        pat = pat.rstrip("/")
+        anchored = "/" in pat
+        pat = pat.lstrip("/")
+        if pat:
+            rules.append((pat, dir_only, anchored))
+    return rules
+
+
+def _matches_gitignore(rules: list[tuple[str, bool, bool]], rel: str, is_dir: bool) -> bool:
+    name = rel.rsplit("/", 1)[-1]
+    for pat, dir_only, anchored in rules:
+        if dir_only and not is_dir:
+            continue
+        if fnmatch.fnmatch(rel if anchored else name, pat):
+            return True
+    return False
+
+
 def project_files(root: Path, *, exclude: Path | None = None) -> tuple[list[Path], list[str]]:
     """(files to ship, secret files withheld) — both relative-sortable."""
     keep: list[Path] = []
     withheld: list[str] = []
+    # Каквото проектът сам не пуска в git — локалната база, логовете, качените
+    # от потребителите файлове, .coverage — не е за клиента. Одит 2026-10-11:
+    # db.sqlite3 с ЕГН, server.log с токени и uploads/passport_scan.jpg
+    # влизаха в архива, а отчетът мълчеше за тях.
+    git = _git_kept(root)
+    rules = [] if git is not None else _gitignore_rules(root)
+    kept_dirs: set[str] = set()
+    if git is not None:
+        for f in git[0]:
+            parts = f.split("/")[:-1]
+            kept_dirs.update("/".join(parts[:i]) for i in range(1, len(parts) + 1))
+
+    def ignored(rel: str, is_dir: bool) -> bool:
+        if git is None:
+            return bool(rules) and _matches_gitignore(rules, rel, is_dir)
+        if any(rel.startswith(d) or rel + "/" == d for d in git[1]):
+            return False
+        return rel not in (kept_dirs if is_dir else git[0])
+
     for dirpath, dirnames, filenames in os.walk(root):
         depth = len(Path(dirpath).relative_to(root).parts)
-        kept_dirs = []
+        kept_dirs_here = []
         for d in sorted(dirnames):
             if _skip_dir(Path(dirpath), d, depth):
+                continue
+            rel_d = (Path(dirpath) / d).relative_to(root).as_posix()
+            if ignored(rel_d, True):
+                with contextlib.suppress(OSError):
+                    if any(os.scandir(Path(dirpath) / d)):
+                        withheld.append(f"{rel_d}/ ({_IGNORED})")
                 continue
             if (Path(dirpath) / d).is_symlink():
                 withheld.append(f"{(Path(dirpath) / d).relative_to(root).as_posix()}/ "
                                 "(символна връзка — не е включена)")
                 continue
-            kept_dirs.append(d)
-        dirnames[:] = kept_dirs
+            kept_dirs_here.append(d)
+        dirnames[:] = kept_dirs_here
         for name in sorted(filenames):
             p = Path(dirpath) / name
             if name in _SKIP_NAMES or p.suffix in _SKIP_SUFFIXES:
@@ -132,8 +235,12 @@ def project_files(root: Path, *, exclude: Path | None = None) -> tuple[list[Path
                 continue
             if name == REPORT_NAME and p.parent == root:
                 continue  # regenerated below; an old one would be stale
-            if _secret_file(p, rel):
-                withheld.append(rel)
+            secret = _secret_file(p, rel)
+            if secret:
+                withheld.append(secret)
+                continue
+            if ignored(rel, False):
+                withheld.append(f"{rel} ({_IGNORED})")
                 continue
             keep.append(p)
     return keep, withheld
@@ -414,7 +521,8 @@ def build_report(root: Path, files: list[Path], withheld: list[str], *,
 
     if withheld:
         lines += ["## Нарочно извън архива", "",
-                  ("Файлове с ключове или тайни (получателят слага своите), символни връзки "
+                  ("Файлове с ключове или тайни (получателят слага своите), игнорираното "
+                   "от .gitignore (локални данни, логове, качени файлове), символни връзки "
                    "и имена, които не стават в zip:"), ""]
         lines += [f"- `{w}`" for w in withheld]
         lines.append("")
