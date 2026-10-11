@@ -200,3 +200,26 @@ def test_bracket_filenames_are_found_by_search_and_glob(ws, monkeypatch, engine)
     assert "page.tsx" in gs._tool_glob("pages/[id]/page.tsx")
     # Истинският клас знаци продължава да работи.
     assert "[slug].tsx" in gs._tool_glob("pages/[[]slug].tsx")
+
+
+# ── search-python-suffixes ───────────────────────────────────────────────────
+
+_NO_SUFFIX_OR_RARE = ["Dockerfile", "Makefile", "run.ps1", "run.bat", ".env.example",
+                      "pom.xml", "mod.mts", "mod.cjs"]
+
+
+@pytest.mark.parametrize("engine", ["rg", "python"])
+def test_search_engines_see_the_same_files(ws, monkeypatch, engine):
+    from genesis_agent import repo_map
+    if engine == "python":
+        monkeypatch.setattr(repo_map.shutil, "which", lambda _name: None)
+    elif not repo_map.shutil.which("rg"):
+        pytest.skip("няма rg")
+    for name in _NO_SUFFIX_OR_RARE:
+        (ws / name).write_text("API_PORT = 8080\n", encoding="utf-8")
+    (ws / "img.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + b"API_PORT\n")
+    hits = repo_map.search_code("API_PORT", ws)
+    found = sorted(os.path.basename(h.path) for h in hits)
+    assert found == sorted(_NO_SUFFIX_OR_RARE)
+    # Изрично подаден файл без разширение също се търси.
+    assert len(repo_map.search_code("API_PORT", ws / "Dockerfile")) == 1

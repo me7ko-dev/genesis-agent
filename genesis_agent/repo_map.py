@@ -39,8 +39,8 @@ _SKIP_DIRS = {
     "dist", "build", "target", ".next", ".tox", ".gradle", "vendor",
     "site-packages", ".verify_libs", ".idea", ".vscode",
 }
-# Extensions worth searching. Anything else is assumed to be data or a binary;
-# grepping a 40MB model checkpoint helps nobody.
+# Разширенията, които detect_project/REPO_MAP броят за код. SEARCH_CODE вече
+# не филтрира по тях (пропуска двоичните по NUL байт, като rg — 2026-10-11).
 _TEXT_SUFFIXES = {
     ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".rb", ".java",
     ".kt", ".c", ".h", ".cc", ".cpp", ".hpp", ".cs", ".php", ".swift", ".sh",
@@ -127,11 +127,11 @@ def _files(root: Path, pattern: str):
     return (p for p in root.rglob(pattern) if not p.is_dir() and not _skipped(p, root))
 
 
-def _iter_files(root: Path, glob: str | None = None):
+def _iter_files(root: Path, glob: str | None = None, *, any_suffix: bool = False):
     # Файл като корен е самият той — не шаблон по името му (виж search_code).
     files = [root] if root.is_file() else _walk(root) if glob is None else _files(root, glob)
     for p in files:
-        if glob is None and p.suffix.lower() not in _TEXT_SUFFIXES:
+        if glob is None and not any_suffix and p.suffix.lower() not in _TEXT_SUFFIXES:
             continue
         try:
             if p.stat().st_size > _MAX_FILE_BYTES:
@@ -148,10 +148,16 @@ def _search_python(root: Path, pattern: str, glob: str | None,
     except re.error as e:
         raise ValueError(f"невалиден regex: {e}") from e
     out: list[Match] = []
-    for p in _iter_files(root, glob):
+    # Без филтър по разширение — текст или двоичен се решава като при rg (NUL в
+    # първите 8 KB). Одит 2026-10-11: без rg (обичайното на Windows лаптопа)
+    # Dockerfile, Makefile, .ps1, .bat, .env.example, .xml, .mts, .cjs бяха
+    # „няма съвпадения“, а rg ги намираше 8 от 8.
+    for p in _iter_files(root, glob, any_suffix=True):
         try:
             raw = p.read_bytes()
         except OSError:
+            continue
+        if b"\x00" in raw[:8192] and not raw.startswith((b"\xff\xfe", b"\xfe\xff", b"\x00\x00\xfe\xff")):
             continue
         # Кодирането по файла (одит 2026-10-11): „Грешка“ в cp1251 файл даваше
         # „няма съвпадения … наистина го няма“. Редовете се делят само по `\n`,
