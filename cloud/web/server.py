@@ -142,6 +142,27 @@ class App:
                 ip_list.remove(stamp)
         return self.store.new_session(user_id)
 
+    def signup(self, code: str, email: str, password: str, ip: str) -> str:
+        """Регистрация с покана → жетон на сесия. ValueError с причината.
+
+        Същата спирачка като входа, на IP (2026-10-11): опитът се брои като
+        провал преди проверката и се маха само при успех — иначе поканите се
+        налучкваха без таван (6-ият грешен код от един IP е 429)."""
+        key = f"ip:{ip}"
+        stamp = time.time()
+        with self._lock:
+            now = time.time()
+            self._failures[key] = [t for t in self._failures.get(key, []) if now - t < LOGIN_WINDOW]
+            if len(self._failures[key]) >= LOGIN_FAILURES:
+                raise LoginBlocked
+            self._failures[key].append(stamp)
+        user_id = self.store.signup(code, email, password)
+        with self._lock:
+            ip_list = self._failures.get(key, [])
+            if stamp in ip_list:
+                ip_list.remove(stamp)
+        return self.store.new_session(user_id)
+
     # ── сваляне ─────────────────────────────────────────────────────────────
     def begin_download(self, chat_id: str) -> bool:
         """Сваляне само между ходовете — и ход не започва, докато трае.
@@ -537,6 +558,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._error(401, "грешен имейл или парола")
                 return
             self._json(200, {"ok": True}, {"Set-Cookie": self._cookie(token, SESSION_SECONDS)})
+            return
+        if path == "/api/signup":
+            try:
+                token = self.app.signup(str(body.get("code", "")), str(body.get("email", "")),
+                                        str(body.get("password", "")), self._ip())
+            except LoginBlocked:
+                self._error(429, "твърде много опити — опитай пак след 15 минути")
+                return
+            except ValueError as e:
+                self._error(400, str(e))
+                return
+            self._json(201, {"ok": True}, {"Set-Cookie": self._cookie(token, SESSION_SECONDS)})
             return
         user = self._user()
         if user is None:
