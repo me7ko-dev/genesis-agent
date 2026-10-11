@@ -61,6 +61,8 @@ def test_elide_saves_tokens_and_keeps_the_invariants(monkeypatch) -> None:
     """B.12 (2026-10-11): с изпускане на старите записи ходът е по-евтин, а
     системният промпт, задачата и последният pytest остават."""
     from genesis_agent import budget
+    # Базата е изрично „off“ — не каквото е изнесено в средата (2026-10-11).
+    monkeypatch.setattr(budget, "ELIDE_OLD_WRITES", 0)
     off = bh.run(files=5, rounds=24, seed=7)
     monkeypatch.setattr(budget, "ELIDE_OLD_WRITES", 1)
     monkeypatch.setattr(budget, "ELIDE_WRITE_ROUNDS", 6)
