@@ -195,9 +195,31 @@ class App:
 _SURROGATES = re.compile("[\ud800-\udfff]")
 
 
+def _shown(workspace: Path, rel: str, used: set[str]) -> str:
+    """Показаното име на `rel` — уникално в папката.
+
+    Ревю 2026-10-11: две имена, различни само по невалидните байтове (или
+    истинско „�.txt“ до невалидно), се показваха еднакво — find_file даваше
+    винаги първото, а files.zip пишеше два записа с едно име и при разархивиране
+    единият файл затриваше другия. При съвпадение се добавя „ (2)“, „ (3)“…
+    Проверява се и диска, не само обходеното: показано име никога не е името
+    на истински файл, затова safe_file(показано) не може да даде чужд файл."""
+    shown = _SURROGATES.sub("�", rel)
+    if shown == rel:
+        return rel
+    base = PurePosixPath(shown)
+    n = 1
+    while shown in used or os.path.lexists(workspace / shown):
+        n += 1
+        shown = str(base.with_name(f"{base.stem} ({n}){base.suffix}"))
+    used.add(shown)
+    return shown
+
+
 def _walk(workspace: Path, limit: int) -> list[tuple[str, str, int]]:
     """До `limit` файла като (показано име, истинско име, размер)."""
     out: list[tuple[str, str, int]] = []
+    used: set[str] = set()
     if not workspace.is_dir():
         return out
     for root, dirs, files in os.walk(workspace, followlinks=False):
@@ -210,7 +232,7 @@ def _walk(workspace: Path, limit: int) -> list[tuple[str, str, int]]:
             if not stat.S_ISREG(st.st_mode):
                 continue  # символна връзка, fifo, устройство — не се дава
             rel = (rel_root / name).as_posix()
-            out.append((_SURROGATES.sub("\ufffd", rel), rel, st.st_size))
+            out.append((_shown(workspace, rel, used), rel, st.st_size))
             if len(out) >= limit:
                 return out
     return out
@@ -224,7 +246,7 @@ def list_files(workspace: Path, limit: int | None = None) -> list[dict[str, Any]
 
 def find_file(workspace: Path, rel: str) -> Path | None:
     """Като safe_file, но намира и файл, показан с U+FFFD вместо истинското му
-    име. При две имена с еднакъв показан вид се дава първото."""
+    име. Показаните имена са уникални (_shown), затова съвпадението е едно."""
     p = safe_file(workspace, rel)
     if p is None and "\ufffd" in rel:
         real = next((r for shown, r, _ in _walk(workspace, MAX_ZIP_FILES)
