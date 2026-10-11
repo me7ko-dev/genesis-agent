@@ -239,7 +239,11 @@ _RESULT_PREFIX_RE = re.compile(r"\[([A-Z_]+)[:\]]\s*([^\]]*)")
 # Отказ на самия инструмент: `[WRITE_FILE: p] ❌ Файлът вече съществува…`,
 # `[WRITE_FILE] Грешка: [Errno 13]…`, `[EDIT_FILE: p] ❌ Anchor-ът…`. Дотук се
 # броеше за изпълнено и „записах app.py“ минаваше след отказан запис.
-_TOOL_REFUSED_RE = re.compile(r"^\[[A-Z_]+(?::[^\n]*?)?\]\s*(?:❌|Грешка)")
+# И отказите на портата преди инструмента (e2e 2026-10-11): hook на оператора
+# (`⛔ Спряно от hook`), режим план (`⏸`), спряно от оператора (`⏹`), пазачът
+# на маркера и обхватът на под-агента (`⛔`). Измерено: WRITE_FILE, спрян от
+# PreToolUse hook, и „Записах notes.md“ минаваше без подкана — файл нямаше.
+_TOOL_REFUSED_RE = re.compile(r"^\[[A-Z_]+(?::[^\n]*?)?\]\s*(?:❌|⛔|⏸|⏹|Грешка)")
 
 # Тестово пускане се познава по ГЛАВАТА на командата, не по думата „tests“
 # където и да е (bug fix, 2026-10-11). Измерено: `git add tests/ && git commit`
@@ -405,6 +409,14 @@ def counts_as_executed(name: str, args: str, result: str) -> tuple[str, str] | N
     result = (result or "").lstrip()
     if _TOOL_REFUSED_RE.match(result):
         return None
+    background = _RESULT_PREFIX_RE.match(result) if result.startswith("[RUN_BG:") else None
+    if name.upper() == "RUN_CMD" and background:
+        # Native RUN_CMD с background=true е фонова команда, не свършило
+        # пускане (e2e 2026-10-11). Измерено: pytest rc=1, после същият pytest
+        # във фона → „Всички тестове минават“ минаваше без подкана и без
+        # „⚠ червено“, а текстовият таг [RUN_BG: …] се хващаше — записът е
+        # същият като по текстовия път.
+        name, args = "RUN_BG", background.group(2).strip()
     head = _HEADER_RE.match(result) if name.upper() == "RUN_CMD" else None
     if head is None:
         # Без заглавие с rc командата не е тръгнала (отказ на sandbox-а) или е

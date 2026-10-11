@@ -2083,11 +2083,22 @@ class Brain:
                             only_unconfigured = False
                         if "cooling down" in last_error:
                             cooled.append((prov, model))
+                        # Грешка, която слага cooldown (429/402/503), купува втори
+                        # кръг само ако cooldown-ът свършва в паузата — затова
+                        # моделът влиза в `cooled`, не в retry_useful (e2e
+                        # 2026-10-11). Измерено: само groq с ключ, 429 без
+                        # подсказка (300 s) → 8 s пауза и кръг без нито една
+                        # заявка; 429 на A + отрязан WRITE_FILE на C → C се
+                        # питаше (и плащаше) втори път за същия сигурен провал.
+                        cools = not synthetic and any(f"HTTP_{c}" in last_error
+                                                      for c in (*_EXHAUST_CODES, 410))
+                        if cools:
+                            cooled.append((prov, model))
                         if not synthetic:
                             sent_any = True
                             last_real_error = last_error
                             if not _hit_output_cap(last_error):
-                                retry_useful = True
+                                retry_useful = retry_useful or not cools
                                 # Изяден таван не е болен доставчик (2026-10-11):
                                 # 5 отрязани големи WRITE_FILE на groq даваха
                                 # success_rate 0.0 и deprioritize_flaky го местеше

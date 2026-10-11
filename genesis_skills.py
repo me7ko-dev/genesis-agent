@@ -657,12 +657,19 @@ def _scaffold_tests(path: Path) -> str:
                 return ""
         except OSError:
             return ""
+    # Скелето е част от хода за /undo (e2e 2026-10-11): измерено — WRITE_FILE
+    # egn/tests/test_egn.py, после /undo триеше двата файла на модела, а
+    # egn/conftest.py, създаден тук, оставаше сирак в проекта.
+    from genesis_agent import edit_history
+    edit_history.record(conftest)
     try:
         conftest.write_text(
             "# Коренът на проекта е в sys.path на pytest, за да се внасят модулите\n"
             "# от корена в tests/ без sys.path хакове.\n", encoding="utf-8")
     except OSError:
         return ""
+    finally:
+        edit_history.forget_if_unchanged(conftest)
     _SEEN_PATHS.add(conftest)
     where = conftest.relative_to(root).as_posix()
     return (f"\n[скеле] Създаден е празен {where} — тестовете в {test_dir}/ внасят "

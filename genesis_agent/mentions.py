@@ -74,11 +74,17 @@ def _read(path: Path) -> str | None:
             raw = fh.read(_MAX_FILE + 1)
     except OSError:
         return None
-    if b"\x00" in raw[:8192]:
+    # Кодирането — както READ_FILE го разпознава (e2e 2026-10-11). Измерено:
+    # `@lib.py` в cp1251 стигаше до модела като „NAME = '�������'“, а UTF-16
+    # requirements.txt (`pip freeze >` в PowerShell) — „двоичен, не е прикачен“
+    # заради нулевите байтове, докато READ_FILE чете и двата.
+    from genesis_agent.code_edit import decode_text, displayable
+    text, encoding = decode_text(raw[:_MAX_FILE], partial=len(raw) > _MAX_FILE)
+    if b"\x00" in raw[:8192] and not encoding.startswith(("utf-16", "utf-32")):
         return None
     # CRLF → LF: файл от Windows иначе носи `\r` във всеки ред към модела
     # (CI на Windows, 2026-10-09) и харчи от тавана за нищо.
-    text = raw[:_MAX_FILE].decode("utf-8", errors="replace").replace("\r\n", "\n")
+    text = displayable(text).removeprefix("﻿").replace("\r\n", "\n")
     if len(raw) > _MAX_FILE:
         text += f"\n… [отрязано на {_MAX_FILE} байта — за останалото READ_FILE с offset]"
     return text

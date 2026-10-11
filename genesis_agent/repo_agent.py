@@ -464,18 +464,28 @@ def _diff_from_checkpoint(root: Path, checkpoint: Path, files: list[str]) -> str
     """Unified diff of `files` against the snapshot, for non-git projects."""
     if not files:
         return ""
+    from genesis_agent.code_edit import decode_text, displayable
+
+    # Двете страни — от байтове, със същото разпознаване на кодирането и без
+    # превод на краищата на редовете (e2e 2026-10-11). Измерено: `genesis fix`
+    # в мръсно дърво (тогава дифът е от снимката) на CRLF calc.py показваше
+    # ВСЕКИ ред за сменен — снимката пазеше `\r\n`, а read_text го правеше
+    # `\n`; cp1251 файл излизаше като „�����“ и от двете страни.
+    def text(raw: bytes) -> str:
+        return displayable(decode_text(raw)[0])
+
     out: list[str] = []
     with tarfile.open(checkpoint, "r:gz") as tar:
         for rel in sorted(set(files)):
             try:
                 member = tar.extractfile(f"./{rel}")
-                before = member.read().decode("utf-8", "replace") if member else ""
+                before = text(member.read()) if member else ""
             except KeyError:
                 before = ""  # file did not exist in the snapshot — newly created
             except (OSError, UnicodeDecodeError):
                 continue
             try:
-                after = (root / rel).read_text(encoding="utf-8", errors="replace")
+                after = text((root / rel).read_bytes())
             except OSError:
                 after = ""
             if before == after:
