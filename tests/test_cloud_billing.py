@@ -1537,6 +1537,12 @@ def test_a_turn_dropped_by_shutdown_is_never_charged(tmp_path) -> None:
     app.pool.shutdown(wait=True)
     assert app.store.turn(1, turn)["status"] == "failed"            # type: ignore[index]
     assert runner.kw == []
+    # Още без рестарт (ревю 2026-10-11): ход, който свършва при спирането,
+    # вика billing.settle, а той смята settle_after NULL за „дошъл ред“ —
+    # без drop_job таксуваше 2-те кредита на хода още тук. recover() отдолу
+    # го криеше: drop_unstarted_jobs маха реда и без drop_job.
+    billing.settle(app.store, app.prices, app.gateway.usage)  # type: ignore[arg-type, union-attr]
+    assert app.store.balance(1) == 100 * MICRO
     app.recover()
     assert app.store.balance(1) == 100 * MICRO
     assert app.store.unsettled() == [] and app.held(1) == 0
