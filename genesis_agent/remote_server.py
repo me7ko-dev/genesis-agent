@@ -80,6 +80,14 @@ _REPLY_BYTES = 512 * 1024
 # изгубен отговор не пуска хода втори път.
 _SENT_MIDS = 256
 _MID = re.compile(r"[A-Za-z0-9_-]{8,64}")
+# Видът на плика {"v":1,"n":…,"c":…} в суровите байтове (преглед 2026-10-11):
+# адрес над спирачката получава 429 веднага, без json.loads и опит за
+# отваряне — освен ако тялото не е точно плик (сдвоеният телефон зад същия
+# NAT минава). Без тази проверка всяка спряна заявка от 240 KiB струваше на
+# сървъра 10 ms вместо 1.5 ms преди спирачката да се премести след плика.
+_ENVELOPE_SHAPE = re.compile(
+    rb'\s*\{\s*"v"\s*:\s*\d{1,3}\s*,\s*"n"\s*:\s*"[A-Za-z0-9_=+/-]{1,64}"\s*,'
+    rb'\s*"c"\s*:\s*"[A-Za-z0-9_=+/-]+"\s*\}\s*')
 
 
 class ProtocolError(Exception):
@@ -323,7 +331,11 @@ class RemoteSession:
             first = self._events[0]["seq"] if self._events else self._seq + 1
             # Пропуснатото вече не е в дневника → телефонът получава целия
             # наличен дневник и знае, че трябва да го покаже наново.
-            reset = after + 1 < first or after > self._seq
+            # after <= 0 — телефон без история (студен старт): и той е reset,
+            # иначе над тавана щеше да тегли целия дневник от НАЙ-СТАРИТЕ
+            # страница по страница (преглед 2026-10-11: 450 инструмента без
+            # завъртян дневник — 7 страници, 3.3 MB вместо 1 страница 0.5 MB).
+            reset = after <= 0 or after + 1 < first or after > self._seq
             items = list(self._events) if reset else [e for e in self._events if e["seq"] > after]
             reply = {"events": items, "last": self._seq, "reset": reset,
                      "busy": self._busy, "epoch": self.epoch, "more": False}
@@ -771,7 +783,13 @@ class RemoteServer:
                 # телефон (30 POST-а text/plain) или съсед зад същия NAT
                 # заключваше сдвоения телефон. Заявка, която се отваря с ключа и
                 # минава ReplayGuard, не се спира; провалите се броят както
-                # преди и над 30/мин получават 429 без подробност.
+                # преди и над 30/мин получават 429 без подробност. Над
+                # спирачката само тяло с вида на плик стига до json.loads и
+                # ключа (_ENVELOPE_SHAPE); всичко друго — 429 веднага.
+                if server.too_many_failures(ip) and not _ENVELOPE_SHAPE.fullmatch(body):
+                    server.record_failure(ip)
+                    self._json(429, {"error": "slow_down"})
+                    return
                 try:
                     envelope = json.loads(body.decode("utf-8"))
                     response, rid = server.handle(envelope)

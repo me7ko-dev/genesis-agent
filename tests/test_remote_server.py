@@ -218,6 +218,27 @@ def test_a_cold_start_after_a_long_session_gets_a_bounded_reply() -> None:
     assert small["reset"] is False and len(small["events"]) == 3
 
 
+def test_a_cold_start_before_the_log_rotates_gets_one_bounded_page() -> None:
+    """Преглед 2026-10-11: докато дневникът не е завъртян (първото събитие е
+    1), `after=0` не беше reset — над тавана телефонът теглеше дневника от
+    НАЙ-СТАРИТЕ, 7 страници и 3.3 MB за 450 инструмента. Без история на
+    телефона — най-новите в една страница и reset."""
+    session, _ = _session()
+    ui = rs.RemoteTurnUI(session)
+    for i in range(450):
+        ui.tool("RUN_CMD", f"ред {i} " + "изход " * 1000)
+    ui.assistant("последно")
+    got = session.events_after(0)
+    assert got["events"][0]["seq"] > 1, "тестът иска страница под целия дневник"
+    assert got["reset"] is True and got["more"] is False
+    assert got["events"][-1]["text"] == "последно" and got["last"] == got["events"][-1]["seq"]
+    assert len(rs.utf8_bytes(json.dumps(got["events"], ensure_ascii=False))) <= \
+        rs._REPLY_BYTES + 8 * 1024
+    # Празен дневник: reset без събития, телефонът няма какво да подменя.
+    empty, _ = _session()
+    assert empty.events_after(0)["events"] == []
+
+
 def test_a_phone_that_slept_through_a_long_run_pages_from_where_it_was() -> None:
     """Одит 2026-10-11: телефонът е настигнал (after=N), заключва се, агентът
     прави 200 инструмента с кирилски изход. Над тавана сървърът пращаше
@@ -485,6 +506,31 @@ def test_failures_from_the_phones_address_do_not_lock_out_the_paired_phone(live)
     body = json.dumps(_client_seal(KEY, payload)).encode()
     assert _post(base, body)[0] == 200
     assert _post(base, body)[0] == 429
+
+
+def test_a_braked_address_gets_429_before_parsing_a_body_that_is_not_an_envelope(
+        live, monkeypatch) -> None:
+    """Преглед 2026-10-11: след преместването на спирачката след плика всяка
+    спряна заявка (240 KiB "[1,1,…]") минаваше през json.loads и handle() —
+    ~10 ms работа вместо 1.5 ms. Над спирачката само тяло с вида на плик
+    стига до ключа; сдвоеният телефон пак минава."""
+    base, _, _ = live
+    opened: list[int] = []
+    real = rs.RemoteServer.handle
+
+    def counting(self, envelope):
+        opened.append(1)
+        return real(self, envelope)
+
+    monkeypatch.setattr(rs.RemoteServer, "handle", counting)
+    codes = [_post(base, b"x")[0] for _ in range(31)]
+    assert codes[-1] == 429
+    before = len(opened)
+    junk = b"[" + b"1," * (120 * 1024) + b"1]"
+    assert [_post(base, junk)[0] for _ in range(5)] == [429] * 5
+    assert _post(base, json.dumps({"v": 1, "n": 1, "c": []}).encode())[0] == 429
+    assert len(opened) == before, "спряна заявка без вида на плик не се разчита"
+    assert _call(base, "status")["ok"]
 
 
 def test_deeply_nested_json_is_a_counted_failure_not_a_traceback(live, capsys) -> None:
