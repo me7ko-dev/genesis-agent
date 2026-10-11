@@ -31,7 +31,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+import re
 import threading
 import time
 from collections import deque
@@ -344,9 +346,9 @@ def _rotation_cooldown(kid: str, model: str, error: str) -> bool:
         return True
     if "HTTP_429" in error:
         if _note_key_429(kid, model):
-            _mark_exhausted(kid)
+            _mark_exhausted(kid, _cooldown_for(error))
         else:
-            _mark_exhausted(f"{kid}::{model}")
+            _mark_exhausted(f"{kid}::{model}", _cooldown_for(error))
         return True
     return False
 # 410 Gone = доставчикът е спрял модела завинаги (на живо 2026-09-23: NVIDIA
@@ -375,8 +377,50 @@ def _is_exhausted(key: str) -> bool:
     return True
 
 
-def _mark_exhausted(key: str) -> None:
-    _EXHAUSTED[key] = time.time() + _EXHAUST_COOLDOWN
+def _mark_exhausted(key: str, seconds: float | None = None) -> None:
+    _EXHAUSTED[key] = time.time() + (_EXHAUST_COOLDOWN if seconds is None else seconds)
+
+
+# Подсказката на сървъра кога да опитаме пак (одит 2026-10-11): Groq връща
+# 429 с `retry-after: 2` и „Please try again in 1.2s.“ за TPM лимит, а
+# веригата вадеше бързия стартов модел (0.4–1.5 s) за фиксирани 300 s и чатът
+# минаваше на ollama/nvidia (2–14 s на отговор) за 5 минути. Подсказката се
+# пренася в текста на грешката като `HTTP_429[retry=N]`, за да стигне до
+# complete() без нов канал; долната граница пази от удряне на модела в цикъл,
+# горната — от дневна квота, обявена като часове.
+_RETRY_HINT_MIN_S = 5
+_TRY_AGAIN_RE = re.compile(r"try again in\s+(?:(\d+)\s*m(?!s))?\s*(?:([\d.]+)\s*(ms|s))?",
+                           re.IGNORECASE)
+_RETRY_TAG_RE = re.compile(r"HTTP_429\[retry=(\d+)\]")
+
+
+def _retry_after_s(r: Any) -> float | None:
+    """Секунди до следващ опит според 429 отговора, или None без подсказка."""
+    headers = getattr(r, "headers", None) or {}
+    raw = headers.get("retry-after") or headers.get("Retry-After")
+    if raw:
+        try:
+            return max(0.0, float(str(raw).strip()))
+        except ValueError:
+            pass  # HTTP-дата — рядко при тези доставчици; остава текстът
+    m = _TRY_AGAIN_RE.search(getattr(r, "text", "") or "")
+    if not m or not (m.group(1) or m.group(2)):
+        return None
+    try:
+        seconds = float(m.group(1) or 0) * 60
+        if m.group(2):
+            seconds += float(m.group(2)) / (1000 if m.group(3).lower() == "ms" else 1)
+    except ValueError:
+        return None
+    return seconds
+
+
+def _cooldown_for(error: str) -> float:
+    """Cooldown за 429 с подсказка `HTTP_429[retry=N]` → clamp(N, 5, 300)."""
+    m = _RETRY_TAG_RE.search(error)
+    if not m:
+        return _EXHAUST_COOLDOWN
+    return float(min(max(int(m.group(1)), _RETRY_HINT_MIN_S), _EXHAUST_COOLDOWN))
 
 
 def _is_truncated(text: str) -> bool:
@@ -1114,6 +1158,10 @@ class Brain:
             payload.update(extra)
         r = _post_with_deadline(f"{base_url}/chat/completions", headers=headers,
                                 json=payload, timeout=timeout)
+        if r.status_code == 429:
+            hint = _retry_after_s(r)
+            tag = f"[retry={math.ceil(hint)}]" if hint is not None else ""
+            raise RuntimeError(f"HTTP_429{tag}: {r.text[:150]}")
         if r.status_code != 200:
             raise RuntimeError(f"HTTP_{r.status_code}: {r.text[:150]}")
         # Открито живо (design note, 2026-07-25, forge тест): някои доставчици връщат
@@ -1441,7 +1489,7 @@ class Brain:
             # on to the next provider rather than hammering a dead endpoint.
             if any(f"HTTP_{c}" in last for c in _KEY_DEAD_CODES) or (
                     "HTTP_429" in last and _note_key_429(kid, model)):
-                _mark_exhausted(kid)
+                _mark_exhausted(kid, _cooldown_for(last))
                 print(f"  [Brain] 🔑 {key_env} unavailable ({last[:60]}) → next provider")
             raise
 
@@ -1880,7 +1928,7 @@ class Brain:
                         # groq/B с по 300 s). Cooldown-ът на ключа покрива това.
                         for c in () if synthetic else _EXHAUST_CODES:
                             if f"HTTP_{c}" in last_error:
-                                _mark_exhausted(key)
+                                _mark_exhausted(key, _cooldown_for(last_error))
                                 break
                         if "HTTP_410" in last_error:
                             _EXHAUSTED[key] = time.time() + _GONE_COOLDOWN

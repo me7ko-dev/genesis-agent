@@ -269,3 +269,49 @@ def test_a_malformed_200_falls_through_or_is_read_as_text(monkeypatch, body, exp
     monkeypatch.setenv("NVIDIA_API_KEY", " n")
     _route(monkeypatch, lambda p: FakeResp(200, body) if p["model"] == "A" else ok("от C"))
     assert brain.Brain(use_local=False).complete([{"role": "user", "content": "hi"}]).raw_text == expected
+
+
+# ── F6: 429 с подсказка от сървъра (retry-after / „try again in 1.2s“) ───────
+
+_TPM = ("Rate limit reached for model openai/gpt-oss-120b on tokens per minute (TPM). "
+        "Please try again in 1.2s.")
+
+
+@pytest.mark.parametrize("headers, message, low, high", [
+    ({"retry-after": "2"}, _TPM, 1, 10),
+    ({}, _TPM, 1, 10),
+    ({}, "Rate limit reached. Please try again in 1m30.5s.", 85, 95),
+    ({}, "Rate limit reached. Please try again in 450ms.", 1, 10),
+    ({"retry-after": "86400"}, "daily quota", 299, 300),
+    ({}, "Rate limit exceeded", 299, 300),
+], ids=["header", "body-seconds", "body-minutes", "body-ms", "huge-header", "no-hint"])
+def test_a_429_cooldown_follows_the_servers_hint(monkeypatch, headers, message, low, high) -> None:
+    monkeypatch.setattr(brain, "_load_chain", lambda: chain(("groq", "A"), ("groq", "B")))
+    monkeypatch.setenv("GROQ_API_KEY", "g")
+    clock = [1_000_000.0]
+    monkeypatch.setattr(brain.time, "time", lambda: clock[0])
+
+    def handler(p):
+        if p["model"] == "A":
+            return FakeResp(429, {"error": {"message": message}}, headers=headers)
+        return ok("от " + p["model"])
+
+    _route(monkeypatch, handler)
+    assert brain.Brain(use_local=False).complete([{"role": "user", "content": "hi"}]).raw_text == "от B"
+    left = brain._EXHAUSTED["groq::A"] - clock[0]
+    assert low <= left <= high, left
+
+
+def test_a_short_429_lets_the_start_model_answer_again_seconds_later(monkeypatch) -> None:
+    monkeypatch.setattr(brain, "_load_chain", lambda: chain(("groq", "A"), ("groq", "B")))
+    monkeypatch.setenv("GROQ_API_KEY", "g")
+    clock = [1_000_000.0]
+    monkeypatch.setattr(brain.time, "time", lambda: clock[0])
+    answers = iter([FakeResp(429, {"error": {"message": _TPM}}, headers={"retry-after": "2"}),
+                    ok("от A")])
+    seen = _route(monkeypatch, lambda p: next(answers) if p["model"] == "A" else ok("от B"))
+    b = brain.Brain(use_local=False)
+    assert b.complete([{"role": "user", "content": "hi"}]).raw_text == "от B"
+    clock[0] += 11
+    assert b.complete([{"role": "user", "content": "hi"}]).raw_text == "от A"
+    assert [m for m, _ in seen] == ["A", "B", "A"]
