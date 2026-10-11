@@ -53,12 +53,23 @@ def save_history(workspace: Path, history: list[dict[str, str]]) -> None:
         path.parent.mkdir(exist_ok=True)
         path.write_text(json.dumps(history[-HISTORY_MAX_MESSAGES:], ensure_ascii=False),
                         encoding="utf-8")
-    except OSError:
+    except (OSError, ValueError):   # ValueError: lone surrogate в текста (2026-10-11)
         pass  # разговорът губи паметта си, задачата не бива да пада заради това
 
 
 def emit(kind: str, **data: Any) -> None:
-    print(json.dumps({"kind": kind, **data}, ensure_ascii=False), flush=True)
+    line = json.dumps({"kind": kind, **data}, ensure_ascii=False)
+    # Одит 2026-10-11: име на файл в cp1251 идва от LIST_DIR като lone
+    # surrogates и print() гърмеше с UnicodeEncodeError — целият ход в облака
+    # свършваше с грешка. Невалидното става U+FFFD.
+    try:
+        line.encode("utf-8")
+    except UnicodeEncodeError:
+        try:
+            line = line.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+        except UnicodeEncodeError:
+            line = line.encode("utf-8", "replace").decode("utf-8")
+    print(line, flush=True)
 
 
 def _log_lines(path: Path) -> int:

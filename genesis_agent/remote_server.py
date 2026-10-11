@@ -77,6 +77,22 @@ def _b64d(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
 
 
+def utf8_bytes(text: str) -> bytes:
+    """UTF-8 байтове и за текст с lone surrogates (име на файл в cp1251/cp866).
+
+    Одит 2026-10-11: os.listdir връща непрочитаемите байтове като \\udcXX и
+    .encode("utf-8") гърмеше — всеки отговор на `events` с такъв LIST_DIR
+    затваряше връзката. Байтовете се връщат каквито са били и невалидното става
+    U+FFFD; останали surrogates (не от файловата система) — „?“."""
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError:
+        try:
+            return text.encode("utf-8", "surrogateescape").decode("utf-8", "replace").encode("utf-8")
+        except UnicodeEncodeError:
+            return text.encode("utf-8", "replace")
+
+
 def key_id(key: bytes) -> str:
     """Отпечатък на ключа — телефонът проверява, че говори с СВОЯ компютър."""
     return hashlib.sha256(key).hexdigest()[:16]
@@ -166,7 +182,7 @@ class Cipher:
 
     def seal(self, payload: dict, aad: bytes) -> dict:
         nonce = secrets.token_bytes(12)
-        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        raw = utf8_bytes(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
         return {"v": PROTOCOL, "n": _b64e(nonce), "c": _b64e(self._aead.encrypt(nonce, raw, aad))}
 
     def open(self, envelope: Any, aad: bytes) -> dict:

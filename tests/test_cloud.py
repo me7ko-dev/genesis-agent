@@ -168,6 +168,14 @@ def test_an_empty_task_is_refused_without_calling_a_model(capsys, monkeypatch) -
     assert done["kind"] == "done" and not done["ok"]
 
 
+def test_a_non_utf8_file_name_does_not_fail_the_cloud_turn(capsys) -> None:
+    """Одит 2026-10-11: LIST_DIR с име в cp1251 даваше lone surrogates; print()
+    в emit гърмеше с UnicodeEncodeError и целият ход в облака свършваше с грешка."""
+    task.emit("tool", name="LIST_DIR", result="  report.xlsx\n  \udcee\udcf2.txt")
+    line = json.loads(capsys.readouterr().out.strip())
+    assert line["kind"] == "tool" and "report.xlsx" in line["result"] and ".txt" in line["result"]
+
+
 # ── egress: истинският процес на локален порт, без мрежа навън ────────────────
 
 async def _ask_proxy(request: bytes) -> bytes:

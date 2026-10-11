@@ -449,3 +449,19 @@ def test_serve_web_without_the_web_build_says_so(monkeypatch, capsys, no_listen)
     monkeypatch.setattr(rs, "_web_root", lambda: None)
     assert rs.serve(["--web"]) == 2
     assert "--web" in capsys.readouterr().out
+
+
+# ── a file name that is not UTF-8 ───────────────────────────────────────────
+
+def test_a_non_utf8_file_name_does_not_break_the_event_stream(live) -> None:
+    """Одит 2026-10-11: име на файл в cp1251 („отчет.txt“) стига до LIST_DIR като
+    lone surrogates; seal() гърмеше с UnicodeEncodeError и всяко `events after=0`
+    затваряше връзката — телефонът показваше „няма връзка“ до края на сесията."""
+    base, session, _ = live
+    rs.RemoteTurnUI(session).tool("LIST_DIR", "  main.py\n  \udcee\udcf2\udcf7\udce5\udcf2.txt")
+    rs.RemoteTurnUI(session).assistant("Готово.")
+    for _ in range(2):
+        got = _call(base, "events", after=0, wait=0)
+        tools = [e for e in got["events"] if e["type"] == "tool"]
+        assert tools and "main.py" in tools[0]["result"] and ".txt" in tools[0]["result"]
+        assert got["events"][-1]["text"] == "Готово."
