@@ -439,6 +439,7 @@ _BENCH_KNOWLEDGE = {
     "clients-migrate": ["bg_excel_csv_import", "bg_contact_form_phone"],
     "csv-sqlite": ["bg_excel_csv_import"], "shop-scraper": ["bg_shop_scrape_prices"],
     "cli-config": ["money_round_up_step"],
+    "shop-bot": ["telegram_bot_updates"], "expense-bot": ["telegram_bot_updates"],
 }
 
 
