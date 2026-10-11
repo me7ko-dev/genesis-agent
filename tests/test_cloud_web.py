@@ -12,6 +12,7 @@ import time
 import zipfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 
@@ -430,16 +431,23 @@ def test_a_non_utf8_file_name_does_not_hide_every_file(env) -> None:
     chat_id, _ = _chat_with_turn(cl)
     ws = app.workspace(1, chat_id)
     try:
-        os.close(os.open(os.fsencode(str(ws)) + b"/\xee\xf2\xf7\xe5\xf2.txt",
-                         os.O_CREAT | os.O_WRONLY))
+        fd = os.open(os.fsencode(str(ws)) + b"/\xee\xf2\xf7\xe5\xf2.txt",
+                     os.O_CREAT | os.O_WRONLY)
     except (OSError, ValueError):
         pytest.skip("файловата система тук не приема имена извън UTF-8")
+    os.write(fd, b"cp1251")
+    os.close(fd)
+    # Ревю 2026-10-11: файлът не се крие — показва се с U+FFFD на мястото на
+    # невалидните байтове и се тегли (поотделно и в zip-а) с истинското име.
+    shown = "�" * 5 + ".txt"
     code, data = cl.json("GET", f"/api/chats/{chat_id}/files")
-    assert code == 200 and [f["path"] for f in data["files"]] == ["out/result.csv"]
+    assert code == 200 and [f["path"] for f in data["files"]] == [shown, "out/result.csv"]
+    code, _, body = cl.req("GET", f"/api/chats/{chat_id}/files/{quote(shown)}")
+    assert code == 200 and body == b"cp1251"
     code, _, body = cl.req("GET", f"/api/chats/{chat_id}/files.zip")
     assert code == 200
     with zipfile.ZipFile(io.BytesIO(body)) as z:
-        assert z.namelist() == ["out/result.csv"]
+        assert z.namelist() == [shown, "out/result.csv"] and z.read(shown) == b"cp1251"
 
 
 def test_a_long_file_list_says_it_is_cut_and_the_zip_has_everything(env, monkeypatch) -> None:
@@ -527,6 +535,22 @@ def test_tampered_history_is_ignored_not_trusted(tmp_path) -> None:
     assert task.load_history(tmp_path) == [{"role": "user", "content": "ok"}]
     (tmp_path / ".genesis" / "history.json").write_text("{broken", encoding="utf-8")
     assert task.load_history(tmp_path) == []
+    # Ревю 2026-10-11: `[` * 200000, записан от кода в контейнера, хвърляше
+    # RecursionError и този чат падаше на всеки следващ ход.
+    (tmp_path / ".genesis" / "history.json").write_text("[" * 200_000, encoding="utf-8")
+    assert task.load_history(tmp_path) == []
+
+
+def test_a_lone_surrogate_in_a_reply_does_not_wipe_the_history(tmp_path) -> None:
+    """Ревю 2026-10-11: write_text отрязваше history.json и чак после
+    гърмеше на кодирането — един отговор с lone surrogate изтриваше целия
+    разговор."""
+    task.save_history(tmp_path, [{"role": "user", "content": "първо"}])
+    task.save_history(tmp_path, [{"role": "user", "content": "първо"},
+                                 {"role": "assistant", "content": "име \udcee.txt"}])
+    got = task.load_history(tmp_path)
+    assert got[0] == {"role": "user", "content": "първо"} and len(got) == 2
+    assert "\udcee" not in got[1]["content"]
 
 
 # ── одит 2026-10-07 ──────────────────────────────────────────────────────────
