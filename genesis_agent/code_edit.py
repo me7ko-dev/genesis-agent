@@ -58,19 +58,28 @@ _BOMS = ((b"\x00\x00\xfe\xff", "utf-32-be"), (b"\xff\xfe\x00\x00", "utf-32-le"),
 _ESCAPED = ("utf-8", "cp1251")
 _RAW_BYTE = re.compile("[\udc80-\udcff]")
 _NON_ASCII = bytes(range(0x80))
+_CYRILLIC_WORD = re.compile(rb"[\xc0-\xff]{3,}")
 
 
 def _looks_cp1251(raw: bytes) -> bool:
     """Кирилицата в cp1251 е 0xC0–0xFF; в UTF-8 половината не-ASCII байтове са
     продължения 0x80–0xBF. Мерено 2026-10-11: български текст в cp1251 дава
-    ≥90% байтове в 0xC0–0xFF, UTF-8 кирилица със случаен чужд байт — ~50%."""
+    ≥90% байтове в 0xC0–0xFF, UTF-8 кирилица със случаен чужд байт — ~50%.
+
+    Латиница в latin-1 също е 0xC0–0xFF (`é` = 0xE9), но буквите ѝ са сами
+    между ASCII, а кирилицата е цели думи. Ревю 2026-10-11: `Café` ставаше
+    „Cafй“. Мерено: в cp1251 81–100% от тези байтове са в поредици от ≥3 (без
+    файл само с „Да“), в немски, френски, испански и португалски — 0%."""
     if b"\x00" in raw:
         return False
     high = raw.translate(None, _NON_ASCII)
     if not high:
         return False
     upper = high.translate(None, bytes(range(0x80, 0xC0)))
-    return len(upper) / len(high) >= 0.7
+    if len(upper) / len(high) < 0.7:
+        return False
+    in_words = sum(len(m) for m in _CYRILLIC_WORD.findall(raw))
+    return in_words / len(upper) >= 0.5
 
 
 def decode_text(raw: bytes, *, partial: bool = False) -> tuple[str, str]:

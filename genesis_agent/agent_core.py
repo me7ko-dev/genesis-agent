@@ -291,8 +291,16 @@ def _diff_for_write(skills, args: dict) -> str | None:
     try:
         import difflib
 
+        from genesis_agent.code_edit import decode_text, displayable
+
         target = skills._resolve(path)
-        old_content = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else ""
+        # Старият файл се чете като в READ_FILE (ревю 2026-10-11): с utf-8 +
+        # replace cp1251 файл показваше всеки кирилски ред за променен
+        # („-�������“ / „+Здравей“), а на диска се сменя един ред.
+        old_content = ""
+        if target.is_file():
+            old_content = (displayable(decode_text(target.read_bytes())[0])
+                           .replace("\r\n", "\n").removeprefix("\ufeff"))
         if old_content == new_content:
             return None
         diff = difflib.unified_diff(

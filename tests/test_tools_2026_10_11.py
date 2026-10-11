@@ -1,6 +1,8 @@
 """Одит на инструментите 2026-10-11: кодировки (cp1251, BOM, CRLF, UTF-16),
 големи и двоични файлове, имена с `[ ]`. Всеки тест пада без поправката си
-(пуснато срещу стария код)."""
+(пуснато срещу стария код) — освен двата пазача, които минават и на него:
+test_search_engines_see_the_same_files[rg] и
+test_write_over_mixed_file_and_new_file_use_lf (ревю 2026-10-11)."""
 from __future__ import annotations
 
 import os
