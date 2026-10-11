@@ -1936,6 +1936,14 @@ def _no_model_guard() -> bool:
     skip: no KEY“ и кутия с грешка — първото, което вижда нов потребител след
     инсталацията. Тук то е едно изречение; в терминал се предлага настройката
     веднага и след нея съобщението тръгва нормално."""
+    # Закачен доставчик, който Brain не познава (GitHub Models, LM Studio,
+    # локален Ollama със свой модел), отговаря по стария път и сам казва
+    # грешката си. any_model_reachable() гледа само веригите на Brain —
+    # измерено 2026-10-11: без *_API_KEY пазачът спираше всяко съобщение,
+    # а ask_genesis би отговорил „Здравей от github“. Условието е същото
+    # като в ask_genesis.
+    if not _brain_handles(current_provider) and not os.environ.get("GENESIS_LOCAL_ONLY"):
+        return False
     try:
         from genesis_agent.brain import any_model_reachable
         if any_model_reachable():

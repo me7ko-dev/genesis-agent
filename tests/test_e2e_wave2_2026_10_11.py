@@ -93,3 +93,24 @@ def test_a_cut_turn_asks_only_once(ws, monkeypatch):
     assert ("warn", _CUT) in ui.log
     # Подканата остава в историята — следващото „продължи“ я вижда.
     assert any(m["role"] == "system" and "отрязан" in str(m["content"]) for m in msgs)
+
+
+# ── F2: пазачът „няма ключ“ не спира доставчик извън Brain ──────────────────
+
+@pytest.mark.parametrize("prov, model", [("github", "gpt-4o"), ("llmstudio", "local-model"),
+                                         ("ollama", "qwen3:8b")])
+def test_the_no_key_guard_lets_a_terminal_only_provider_answer(monkeypatch, prov, model):
+    from genesis_agent import brain
+    monkeypatch.setattr(brain, "any_model_reachable", lambda: False)
+    monkeypatch.delenv("GENESIS_LOCAL_ONLY", raising=False)
+    monkeypatch.setattr(gta, "current_provider", prov)
+    monkeypatch.setattr(gta, "current_model_id", model)
+    assert gta._no_model_guard() is False
+
+
+def test_the_no_key_guard_still_stops_a_brain_provider(monkeypatch, capsys):
+    from genesis_agent import brain
+    monkeypatch.setattr(brain, "any_model_reachable", lambda: False)
+    monkeypatch.setattr(gta, "current_provider", "groq")
+    monkeypatch.setattr(gta.sys.stdin, "isatty", lambda: False, raising=False)
+    assert gta._no_model_guard() is True
