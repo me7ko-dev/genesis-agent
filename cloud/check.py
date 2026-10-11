@@ -130,9 +130,14 @@ def leftovers(started: set[str]) -> tuple[list[str], list[str]]:
     „неуспешен“. Мрежата на задача е NETWORK_PREFIX + същия суфикс."""
     nets = {launch.NETWORK_PREFIX + c[len(launch.TASK_PREFIX):] for c in started}
     ps = launch._docker("ps", "-a", "--format", "{{.Names}}",
-                        "--filter", f"name=^{launch.TASK_PREFIX}").stdout.split()
-    ls = launch._docker("network", "ls", "--format", "{{.Name}}").stdout.split()
-    return sorted(c for c in ps if c in started), sorted(n for n in ls if n in nets)
+                        "--filter", f"name=^{launch.TASK_PREFIX}")
+    ls = launch._docker("network", "ls", "--format", "{{.Name}}")
+    # Вълна 5, 2026-10-11: паднал `docker ps`/`network ls` даваше празен
+    # списък и „✓ не остава контейнер или мрежа“ без нищо проверено.
+    for r in (ps, ls):
+        _ok(r.returncode == 0, "списъкът на Docker", (r.stderr or "").strip()[-200:])
+    return (sorted(c for c in ps.stdout.split() if c in started),
+            sorted(n for n in ls.stdout.split() if n in nets))
 
 
 def run_checks(jobs: Path, web: str | None, min_free_gb: float,

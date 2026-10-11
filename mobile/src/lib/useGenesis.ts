@@ -90,7 +90,7 @@ export function useGenesis(pairing: Pairing) {
           setEvents((cur) => mergeEvents(cur, reply.events, reset));
           // Своето балонче дойде → изпращането е прието, следващото със
           // същия текст е нов ход, не повторен опит (преглед 2026-10-11).
-          outbox.seen(reply.events);
+          outbox.seen(reply.events, reply.mids);
           setBusy(reply.busy);
           if (reply.state) setPhone(reply.state);
           setConnection('online');

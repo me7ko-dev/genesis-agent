@@ -325,6 +325,31 @@ def test_remembered_mids_are_bounded() -> None:
     assert "mid-00000000" not in server._sent and f"mid-{rs._SENT_MIDS + 4:08d}" in server._sent
 
 
+def test_events_name_the_accepted_mids() -> None:
+    """Вълна 5, 2026-10-11: телефонът забравяше `mid` само по своето балонче;
+    reset страница без него или „/clear“ (няма балонче) оставяха стария `mid`
+    и нарочното повторение се поглъщаше. Сега `events` носи приетите `mid`."""
+    gate = threading.Event()
+    session, _ = _session(Recorder(block=gate))
+    server = rs.RemoteServer(KEY, session, name="pc", clear=lambda: None)
+
+    def call(op: str, **args) -> dict:
+        return server.handle(_client_seal(KEY, _request(op, **args)))[0]
+
+    assert call("send", text="първо", mid="mid-first-01")["ok"]
+    assert call("send", text="второ", mid="mid-busy-001") == {"ok": False, "error": "busy"}
+    gate.set()
+    _wait_idle(session)
+    assert call("send", text="/clear", mid="mid-clear-01")["ok"]
+    mids = call("events", after=0)["mids"]
+    assert mids == ["mid-first-01", "mid-clear-01"], "„busy“ не е прието"
+    for i in range(rs._ACK_MIDS + 3):
+        call("send", text=f"т{i}", mid=f"mid-{i:08d}")
+        _wait_idle(session)
+    mids = call("events", after=0)["mids"]
+    assert len(mids) == rs._ACK_MIDS and mids[-1] == f"mid-{rs._ACK_MIDS + 2:08d}"
+
+
 def test_confirm_is_answered_from_the_phone() -> None:
     session, _ = _session(Recorder(confirm=True))
     session.send("clean")
@@ -718,3 +743,138 @@ def test_a_non_utf8_file_name_does_not_break_the_event_stream(live) -> None:
         tools = [e for e in got["events"] if e["type"] == "tool"]
         assert tools and "main.py" in tools[0]["result"] and ".txt" in tools[0]["result"]
         assert got["events"][-1]["text"] == "Готово."
+
+
+# ── Вълна 5 (2026-10-11): повторна проверка на вълна 4 ─────────────────────
+
+def test_a_single_huge_event_does_not_break_the_reply_cap() -> None:
+    """Едно събитие над тавана влизаше цяло: отговор от 600 000 знака даваше
+    1.2 MB при студен старт. Сега текстът се орязва и се белязва."""
+    for after in (0, 1):
+        session, _ = _session()
+        session.emit("user", text="кажи много")
+        session.emit("assistant", text="я" * 600_000)
+        got = session.events_after(after)
+        size = len(rs.utf8_bytes(json.dumps(got, ensure_ascii=False)))
+        assert size <= rs._REPLY_BYTES + 8 * 1024, (after, size)
+        last = got["events"][-1]
+        assert last["type"] == "assistant" and last["clipped"] is True
+        assert last["text"].startswith("яяя") and "терминала" in last["text"]
+        # Дневникът не се пипа: следващият отговор пак реже копие.
+        assert len(session._events[-1]["text"]) == 600_000
+    # Всяко поле от управляващи знаци (6 байта в JSON) също влиза.
+    session, _ = _session()
+    session.emit("assistant", text="\x01" * 300_000)
+    size = len(rs.utf8_bytes(json.dumps(session.events_after(0), ensure_ascii=False)))
+    assert size <= rs._REPLY_BYTES + 8 * 1024, size
+
+
+def _braked(base: str) -> None:
+    codes = [_post(base, b"x")[0] for _ in range(31)]
+    assert codes[-1] == 429
+
+
+def _raw_post(base: str, declared: int, sent: bytes, wait: float) -> tuple[bytes, float]:
+    """POST с обявена дължина `declared`, от която са пратени само `sent`."""
+    import socket
+    port = int(base.rsplit(":", 1)[1])
+    sock = socket.create_connection(("127.0.0.1", port), timeout=wait)
+    try:
+        sock.sendall(b"POST /api/v1 HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                     + f"Content-Length: {declared}\r\n\r\n".encode() + sent)
+        started = time.monotonic()
+        try:
+            got = sock.recv(4096)
+        except (TimeoutError, ConnectionError):
+            got = b""
+        return got, time.monotonic() - started
+    finally:
+        sock.close()
+
+
+def test_a_braked_address_is_refused_before_its_body_is_read(live) -> None:
+    """Преглед на вълна 4: над спирачката сървърът пак четеше цялото тяло
+    (до 256 KiB) — бавен клиент, който обяви 200 KiB и прати 1 KiB, държеше
+    нишка и място 30 s за всяка заявка. Преди вълна 4 спряният адрес получаваше
+    429 без четене. Сега стига началото на тялото: не е плик → 429 веднага."""
+    base, _, _ = live
+    _braked(base)
+    got, took = _raw_post(base, 200 * 1024, b"[" + b"1," * 512, wait=5)
+    assert got.startswith((b"HTTP/1.0 429", b"HTTP/1.1 429")), got[:40]
+    assert took < 2.0, took
+    # Сдвоеният телефон зад същия адрес пак минава.
+    assert _call(base, "status")["ok"]
+
+
+def test_a_braked_address_that_sends_no_body_is_dropped_fast(live) -> None:
+    base, _, _ = live
+    _braked(base)
+    _, took = _raw_post(base, 200 * 1024, b"", wait=10)
+    assert took < 5.0, took
+    assert _call(base, "status")["ok"]
+
+
+# Начало на плик: публично, ~30 байта, минава _ENVELOPE_HEAD.
+_ENVELOPE_PREFIX = b'{"v":1,"n":"abcdefgh","c":"' + b"A" * 200
+
+
+def _open_post(base: str, declared: int, sent: bytes):
+    import socket
+    port = int(base.rsplit(":", 1)[1])
+    sock = socket.create_connection(("127.0.0.1", port), timeout=10)
+    sock.sendall(b"POST /api/v1 HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                 + f"Content-Length: {declared}\r\n\r\n".encode() + sent)
+    return sock
+
+
+def _closed_within(sock, seconds: float, trickle: bytes = b"") -> float | None:
+    """След колко секунди сървърът отговаря или затваря (None — не го прави).
+    С `trickle` праща по един байт на 1.5 s, докато чака."""
+    started = time.monotonic()
+    try:
+        while time.monotonic() - started < seconds:
+            sock.settimeout(1.5)
+            try:
+                sock.recv(4096)
+                return time.monotonic() - started
+            except TimeoutError:
+                if trickle:
+                    sock.sendall(trickle)
+            except ConnectionError:
+                return time.monotonic() - started
+        return None
+    finally:
+        sock.close()
+
+
+def test_a_braked_envelope_prefix_that_stalls_is_dropped(live) -> None:
+    """Ревю на вълна 5 (2026-10-11): спрян адрес, пратил публичното начало на
+    плик и спрял, се четеше нататък с 30 s на всяко recv — държеше нишка и
+    място на адреса; 8 s по-късно връзката още беше отворена."""
+    base, _, _ = live
+    _braked(base)
+    took = _closed_within(_open_post(base, 200 * 1024, _ENVELOPE_PREFIX), 8)
+    assert took is not None and took < rs._BRAKED_READ_S + 1.5, took
+
+
+def test_a_braked_trickle_is_dropped_on_a_total_deadline(live) -> None:
+    """Таймаутът беше за едно recv: байт на 1.5 s не стигаше до 429 и след 12 s."""
+    base, _, _ = live
+    _braked(base)
+    took = _closed_within(_open_post(base, 200 * 1024, b"["), 9, trickle=b"1")
+    assert took is not None and took < rs._BRAKED_READ_S + 2, took
+
+
+def test_stalled_braked_envelopes_do_not_lock_out_the_phone(live) -> None:
+    """16 спрели начала на плик заемаха всички места на адреса: сдвоеният
+    телефон 3 s по-късно получаваше затворена връзка без отговор."""
+    base, _, _ = live
+    _braked(base)
+    socks = [_open_post(base, 200 * 1024, _ENVELOPE_PREFIX)
+             for _ in range(rs._QuietServer._MAX_PER_IP)]
+    try:
+        time.sleep(rs._BRAKED_READ_S + 1.5)
+        assert _call(base, "status")["ok"]
+    finally:
+        for sock in socks:
+            sock.close()
