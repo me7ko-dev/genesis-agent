@@ -215,6 +215,9 @@ def run(argv: list[str]) -> int:
     if not error and any(w.startswith("⏹ Прекъснато") for w in ui.warnings):
         error = "прекъснато (Ctrl-C)"
     cut = next((w for w in ui.warnings if "таван" in w), "") or (ui.warnings[-1] if ui.spun else "")
+    # Грешката на веригата идва като предупреждение, не като отговор (2026-10-11).
+    if not error:
+        error = next((w for w in ui.warnings if w.lstrip().startswith("[Грешка")), "")
     failed = bool(error or cut) or not answer.strip() or \
         answer.lstrip().startswith(("[Грешка", "Error:"))
     code = 130 if error.startswith("прекъснато") else (3 if ui.question and not failed else

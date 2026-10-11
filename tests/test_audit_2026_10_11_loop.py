@@ -222,3 +222,72 @@ def test_failing_tests_do_not_prove_that_the_tests_pass():
     # Текстовият път дава същото.
     assert claim_check.unsupported_claims(
         "Тестовете минаха.", claim_check.executed_from_text_results([res]))
+
+
+# ── A6: в режим план планът е отговорът, не „неизпълнено обещание“ ─────────
+
+_PLAN = ("План:\n1. Ще създам utils.py с функцията parse_price().\n"
+         "2. Ще напиша тестове в tests/test_utils.py.\n"
+         "Проверка: pytest -q. Рискове: няма.\nСлед одобрение ще създам файловете.")
+
+
+def _plan_replies():
+    return [("", [_call("READ_FILE", {"path": "app.py"}, "r1")]),
+            (_PLAN, None),
+            ("", [_call("WRITE_FILE", {"path": "utils.py", "content": "x=1\n"}, "w1")]),
+            ("Не мога да пиша в режим план.", None),
+            ("край", None)]
+
+
+def test_plan_mode_does_not_push_the_plan_into_execution(ws, monkeypatch):
+    from genesis_agent import plan_mode
+    plan_mode.set_active(True)
+    try:
+        seen = _script(monkeypatch, _plan_replies())
+        ui = _UI()
+        gta.run_turn(_fresh(), "добави parse_price", ui)
+    finally:
+        plan_mode.set_active(False)
+    assert len(seen) == 2
+    assert not [e for e in ui.log if e[0] == "warn"]
+
+
+def test_headless_plan_prints_the_plan(ws, monkeypatch, capsys):
+    from genesis_agent import headless
+    monkeypatch.setattr(gta, "build_system_prompt", lambda: ("SYS", ""))
+    monkeypatch.setattr(headless, "_read_stdin", lambda: "")
+    _script(monkeypatch, _plan_replies())
+    code = headless.run(["--plan", "--json", "--cwd", str(ws), "добави parse_price"])
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0 and "parse_price" in out["result"]
+    assert out["tools"] == ["READ_FILE"]
+
+
+# ── A8: грешка на веригата не е отговор на модела ──────────────────────────
+
+_CHAIN_ERR = "[Грешка: цялата верига е изчерпана | последна: groq 429]"
+
+
+def test_a_chain_error_ends_the_turn_without_nudges(ws, monkeypatch):
+    seen = _script(monkeypatch, [
+        ("", [_call("WRITE_FILE", {"path": "calc.py",
+                                   "content": "def add(a, b):\n    return a + b\n"}, "w1")]),
+        (_CHAIN_ERR, None), (_CHAIN_ERR, None), (_CHAIN_ERR, None)])
+    ui = _UI()
+    msgs = gta.run_turn(_fresh(), "напиши calc.py с add()", ui)
+    assert len(seen) == 2
+    assert ("warn", _CHAIN_ERR) in ui.log
+    assert not [m for m in msgs if m["role"] == "assistant"
+                and str(m.get("content") or "").startswith("[Грешка")]
+    # Свършеното преди грешката остава.
+    assert any(m["role"] == "tool" and "calc.py" in str(m["content"]) for m in msgs)
+
+
+def test_headless_reports_a_chain_error_as_the_error(ws, monkeypatch, capsys):
+    from genesis_agent import headless
+    monkeypatch.setattr(gta, "build_system_prompt", lambda: ("SYS", ""))
+    monkeypatch.setattr(headless, "_read_stdin", lambda: "")
+    _script(monkeypatch, [(_CHAIN_ERR, None)])
+    assert headless.run(["здравей", "--json", "--cwd", str(ws)]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["ok"] is False and "верига" in (out["error"] or "")

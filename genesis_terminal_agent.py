@@ -1537,6 +1537,14 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
             response, tool_calls = ask_genesis(messages, tools=_turn_tools())
 
         while True:
+            if not tool_calls and str(response or "").lstrip().startswith("[Грешка"):
+                # Грешка на веригата не е отговор на модела (bug fix, 2026-10-11).
+                # Измерено: след „[Грешка: цялата верига е изчерпана…]“ code_check
+                # пращаше подкана (още едно обръщение към изчерпаната верига), а
+                # грешката влизаше в историята като реплика на модела. Сега —
+                # само към оператора, без подкани, ходът спира тук.
+                ui.warn(response)
+                break
             ui.assistant(response)
             assistant_msg = {"role": "assistant", "content": response}
             if tool_calls:
@@ -1670,13 +1678,20 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                         with ui.thinking("Оправям според браузъра…", "aesthetic"):
                             response, tool_calls = ask_genesis(messages, tools=_turn_tools())
                         continue
-                if _run_check.due():
+                # В режим план планът от бъдещи стъпки („Ще създам…“) Е отговорът
+                # (bug fix, 2026-10-11): подканата за „неизпълнено обещание“ караше
+                # модела да изпълнява плана, записът се отказваше и `genesis -p
+                # --plan` печаташе отказа вместо плана. Кодът и приемните тестове
+                # нямат какво да проверят — нищо не е записано.
+                from genesis_agent import plan_mode
+                _planning = plan_mode.active()
+                if _run_check.due() and not _planning:
                     ui.warn("Написа код — казвам му да го пробва и извън примерите.")
                     messages.append({"role": "system", "content": _run_check.note()})
                     with ui.thinking("Пробвам кода…", "aesthetic"):
                         response, tool_calls = ask_genesis(messages, tools=_turn_tools())
                     continue
-                if _accept.due():
+                if _accept.due() and not _planning:
                     with ui.thinking("Приемни тестове само от заявката…", "dots2"):
                         _acc_note, _acc_line = _accept.check()
                     if _acc_line:
@@ -1686,7 +1701,7 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                         with ui.thinking("Сверявам със заявката…", "aesthetic"):
                             response, tool_calls = ask_genesis(messages, tools=_turn_tools())
                         continue
-                _promise = claim_check.unfinished_promise(response)
+                _promise = "" if _planning else claim_check.unfinished_promise(response)
                 if _promise and _promise_retries < 1:
                     _promise_retries += 1
                     ui.warn("Обещава работа и спира — казвам му да я направи.")
