@@ -910,3 +910,29 @@ def test_dot_segments_do_not_hide_a_critical_root(cmd) -> None:
 @pytest.mark.parametrize("cmd", ["rm -rf /c/Users/roika/proj/./build", "rm -rf ~/proj/../old"])
 def test_dot_segments_inside_a_project_still_ask(cmd) -> None:
     assert sandbox.assess_command(cmd).level is CONFIRM
+
+
+@pytest.mark.parametrize("cmd", [
+    r"rd /s /q C:\Users\roika\Projects\app\build",
+    r"Remove-Item -Recurse -Force C:\Users\roika\Projects\app\node_modules",
+    r"del /s /q C:\Users\roika\Projects\app\*.pyc",
+    r"Remove-Item -Force C:\Users\roika\Projects\app\out.txt",
+    r"Remove-Item C:\Users\roika\Projects\app\out.txt -Force",
+    r"Remove-Item -Recurse -Force $HOME\Projects\app\dist",
+    r"rd /s /q D:\Work\app\build",
+])
+def test_deleting_inside_a_project_under_users_asks_not_blocks(cmd) -> None:
+    """_WIN_ROOT нямаше край и всичко под C:\\Users беше BLOCKED — тоест всеки
+    проект на оператора, без възможност да одобри (2026-10-11)."""
+    assert sandbox.assess_command(cmd).level is CONFIRM
+
+
+@pytest.mark.parametrize("cmd", [
+    r"Remove-Item -Recurse -Force C:\Users\roika\*",
+    r'Remove-Item -Recurse -Force "C:\Program Files"',
+    r"rd /s /q C:\Windows\System32",
+    r"del /s /q C:\Users\roika",
+    "Remove-Item -Recurse -Force $HOME\\",
+])
+def test_deleting_a_windows_root_is_still_blocked(cmd) -> None:
+    assert sandbox.assess_command(cmd).level is BLOCKED

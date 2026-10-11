@@ -237,10 +237,16 @@ _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 # срещат случайно в POSIX команда, така че цената на безусловното включване е
 # нула, а ползата е, че една и съща команда се оценява еднакво навсякъде.
 
-# Корени, чието рекурсивно триене е катастрофа (не просто опасно).
+# Корени, чието рекурсивно триене е катастрофа (не просто опасно). Всеки
+# завършва с края на думата (2026-10-11): без него всичко ПОД C:\Users — тоест
+# всеки проект на оператора — беше BLOCKED и не можеше да се одобри, а
+# `rd /s /q C:\Users\<име>\Projects\app\build` е нормално чистене.
+_WIN_ROOT_END = r"[\\/]*\*?(?=[\s\"';|&)]|$)"
 _WIN_ROOT = (r"(?:[A-Za-z]:\\*(?:\s|$|[\"';*])"          # C:\ / C: / C:\\ (ескейпнато)
-             r"|[A-Za-z]:\\(?:Windows|Users|Program\s)"   # C:\Windows, C:\Users
-             r"|\$env:USERPROFILE|%USERPROFILE%|\$HOME"
+             r"|[A-Za-z]:[\\/](?:Windows(?:[\\/](?:System32|SysWOW64))?"
+             r"|Users(?:[\\/][^\\/\s\"';|&]+)?"            # C:\Users, C:\Users\<име>
+             r"|Program\sFiles(?:\s\(x86\))?|ProgramData)" + _WIN_ROOT_END +
+             r"|(?:\$env:USERPROFILE|%USERPROFILE%|\$HOME)" + _WIN_ROOT_END +
              r"|[A-Za-z]:\\\*)")
 
 _WIN_BLOCK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
