@@ -574,11 +574,17 @@ def _tool_write_file(arg: str, content: str) -> str:
             content = content.replace("\r\n", "\n").replace("\n", "\r\n")
         if original.startswith("\ufeff") and not content.startswith("\ufeff"):
             content = "\ufeff" + content
+    enc_note = ""
     try:
         data = encode_text(content, encoding)
     except UnicodeEncodeError as e:
-        return (f"[WRITE_FILE: {path}] ❌ Файлът е в кодиране {encoding} и знакът "
-                f"{content[e.start:e.end]!r} няма място в него — махни го или го замени.")
+        # Ревю 2026-10-11: отказът караше модела да маха „é“ от „Café“ и
+        # файл не можеше да се обърне в UTF-8. Съдържание, което не влиза в
+        # старото кодиране, не е върнат обратно сбъркан текст от READ_FILE
+        # (той е в старото кодиране), така че UTF-8 не губи нищо.
+        data = encode_text(content, "utf-8")
+        enc_note = (f" (файлът беше {encoding}, а {content[e.start:e.end]!r} няма място "
+                    "в него — записан е като UTF-8)")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
@@ -588,7 +594,7 @@ def _tool_write_file(arg: str, content: str) -> str:
     _log_episode(f"WRITE_FILE {path}", f"записани {len(content)} символа",
                  ["tool", "write_file"])
     from genesis_agent.web_check import web_note
-    return (f"[WRITE_FILE: {path}] ✓ записани {len(content)} символа{lint_note}"
+    return (f"[WRITE_FILE: {path}] ✓ записани {len(content)} символа{enc_note}{lint_note}"
             f"{_scaffold_tests(path)}{web_note(path)}{redirect}")
 
 
