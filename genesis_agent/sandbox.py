@@ -143,6 +143,19 @@ _SECRET_PATHS = (
     r"|mcp_tokens\.json\b|\.genesis[/\\]checkpoints\b"
     r"|\.npmrc\b|\.pypirc\b|\.netrc\b|\.docker[/\\]config\.json|\.kube[/\\]config\b"
     r"|Login Data\b"
+    # Ключът, с който се подписва доверието за hooks/MCP (2026-10-11).
+    r"|hooks_trust\.key\b"
+)
+
+# Управляващите файлове на Genesis — пускат програми ИЗВЪН sandbox-а с целия
+# os.environ (hooks.json при всеки инструмент, mcp.json при всеки чат) или
+# решават кое е доверено. Измерено 2026-10-11: `printf … > ~/.genesis/hooks.json`
+# беше SAFE и в режим „deny“, а следващият инструмент пускаше подхвърлената
+# команда, която виждаше API ключа, скрит от самия RUN_CMD. Отделна причина, не
+# в _SECRET_PATHS: READ_FILE на тези файлове (за /hooks) остава без въпрос.
+_GENESIS_CONTROL = (
+    r"\.genesis\b[^\n]{0,40}?\b(?:hooks|mcp|settings|trusted_\w+)\.json\b"
+    r"|\btrusted_hooks\b|\.genesis[/\\](?:agents|commands)\b"
 )
 
 # Опасни — изискват потвърждение (interactive) или отказ (autonomous).
@@ -180,6 +193,8 @@ _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
      "git push (публикуване)"),
     (_c(_SECRET_PATHS),
      "достъп до чувствителни файлове (ключове/тайни)"),
+    (_c(_GENESIS_CONTROL),
+     "промяна на управляващ файл на Genesis (hooks/MCP/доверие) — пуска програми извън sandbox-а"),
     # Качване на локален файл навън — пътят, по който тайна напуска машината.
     # localhost е изключен: така агентът тества собственото си API.
     (_c(r"\bcurl\b(?![^\n]*\b(?:localhost|127\.0\.0\.1)\b)[^\n]*\s(?:-T\s*\S|--upload-file\b"

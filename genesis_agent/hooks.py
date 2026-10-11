@@ -126,16 +126,52 @@ def stays_in_project(path: Path, root: Path) -> bool:
     return top in real.parents and not path.is_symlink() and not path.parent.is_symlink()
 
 
-def is_trusted(path: Path) -> bool:
+def _trust_key_file() -> Path:
+    return _home() / "hooks_trust.key"
+
+
+def trust_key() -> bytes:
+    """Ключът, с който се подписва всеки запис за доверие. Голият sha256 на
+    файла можеше да се сглоби от команда на модела (одит 2026-10-11:
+    `python3 -c` от RUN_CMD записа trusted_hooks.json сам и проектните hooks
+    станаха доверени без `/hooks trust`). Името е в _SECRET_PATHS на
+    sandbox-а, а py_guard не пуска до GENESIS_HOME изобщо."""
+    path = _trust_key_file()
     try:
-        return _trusted().get(_key(path)) == _digest(path)
+        data = path.read_bytes().strip()
+        if len(data) >= 32:
+            return data
+    except OSError:
+        pass
+    import secrets
+    data = secrets.token_hex(32).encode("ascii")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+    os.replace(tmp, path)
+    return data
+
+
+def _seal(path: Path) -> str:
+    import hmac
+    message = f"{_key(path)}\0{_digest(path)}".encode()
+    return hmac.new(trust_key(), message, hashlib.sha256).hexdigest()
+
+
+def is_trusted(path: Path) -> bool:
+    import hmac
+    try:
+        stored = _trusted().get(_key(path))
+        return isinstance(stored, str) and hmac.compare_digest(stored, _seal(path))
     except OSError:
         return False
 
 
 def trust(path: Path) -> None:
     data = _trusted()
-    data[_key(path)] = _digest(path)
+    data[_key(path)] = _seal(path)
     target = _trust_file()
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(target.name + ".tmp")
