@@ -376,3 +376,38 @@ def test_deeply_nested_json_is_a_400(tmp_path) -> None:
     up = FakeUpstream([])
     g = _gw_for(up, tmp_path)
     assert g.forward("groq", b"[" * 200_000, _grant(1000))[0] == 400 and up.seen == []
+
+
+# ── сметката чете само новото (деплой одит 2026-10-11) ───────────────────────
+
+def test_the_bill_reads_only_what_was_written_after_the_start(tmp_path) -> None:
+    """usage.jsonl расте без край; при 1M реда пълният прочит беше 3.3 s на ход."""
+    path = tmp_path / "usage.jsonl"
+    ledger = gw.Ledger(path)
+    for i in range(2000):
+        ledger.add(f"old-{i}", "groq", "m", {"prompt_tokens": 1, "completion_tokens": 1})
+    ledger.add("job-x", "groq", "m", {"prompt_tokens": 50, "completion_tokens": 50})  # преди старта
+    start = gw.usage_size(path)
+    ledger.add("job-x", "groq", "m", {"prompt_tokens": 7, "completion_tokens": 3})
+    assert gw.usage_for(path, "job-x", start)["total_tokens"] == 10
+    assert gw.usage_for(path, "job-x")["total_tokens"] == 110          # без start — всичко
+
+
+def test_a_rotated_usage_file_is_read_from_the_beginning(tmp_path) -> None:
+    path = tmp_path / "usage.jsonl"
+    gw.Ledger(path).add("job-x", "groq", "m", {"prompt_tokens": 7, "completion_tokens": 3})
+    assert gw.usage_for(path, "job-x", start=10 ** 9)["total_tokens"] == 10
+    assert gw.usage_for(tmp_path / "missing.jsonl", "job-x", start=5)["calls"] == 0
+
+
+def test_the_launcher_bills_from_the_size_before_the_container(monkeypatch, tmp_path) -> None:
+    g = _gw_config(tmp_path)
+    g.usage.write_text('{"job": "other", "total_tokens": 5}\n' * 10, encoding="utf-8")
+    size = g.usage.stat().st_size
+    seen: list[int] = []
+    real = gw.usage_for
+    monkeypatch.setattr(gw, "usage_for",
+                        lambda path, job, start=0: (seen.append(start), real(path, job, start))[1])
+    monkeypatch.setattr(launch.subprocess, "Popen", lambda argv, **kw: _Proc(argv, g.usage))
+    res = launch.run_task("задача", tmp_path / "ws", gateway=g)
+    assert seen == [size] and res.tokens["total_tokens"] == 100

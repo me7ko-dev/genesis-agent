@@ -1,62 +1,133 @@
-# Genesis онлайн — етап 1: всяка задача в затворен контейнер
+# Genesis онлайн — всяка задача в затворен контейнер
 
 ```
-браузър ─► (етап 2: сървър с вход) ─► launch.py ─► docker run genesis-runner  ◄── само /work
-                                                        │  мрежа genesis-jobs (--internal, без изход)
-                                                        ▼
-                                                  genesis-egress :3128 ─► само API на моделите, порт 443
+браузър ─► Caddy (HTTPS) ─► web/server.py ─► launch.py ─► docker run genesis-runner  ◄── само /work
+                                                              │  своя мрежа genesis-job-<id> (--internal)
+                                                              ▼
+                                       genesis-gateway :8090 ─► API на моделите (ключовете са тук)
+                                    (или genesis-egress :3128 ─► само API на моделите, порт 443)
 ```
+
+Всяка задача е в своя вътрешна мрежа, в която е само помощникът ѝ (шлюзът,
+или без шлюз — проксито). Другите задачи не се виждат, навън няма път.
 
 | Файл | Какво прави |
 |---|---|
 | `runner/task.py` | в контейнера: задача → агентният цикъл → JSON редове; последният е `done` с токени и секунди |
-| `runner/launch.py` | на сървъра: `docker run` с всички тавани, таймаут, събиране на събитията |
-| `egress/proxy.py` | единственият изход: `CONNECT` само към API на модели, порт 443 |
+| `runner/launch.py` | на сървъра: мрежа за задачата, `docker run` с всички тавани, таймаут, събиране на събитията |
+| `egress/proxy.py` | изходът в режим с прокси: `CONNECT` само към API на модели, порт 443 |
+| `gateway/gateway.py` | режим с шлюз: ключовете остават тук, задачата носи жетон; сметката |
 | `runner/task-requirements.txt` | библиотеките в образа (Excel, PDF, Word, снимки, pandas, pytest) — PyPI е затворен |
-| `build.sh`, `up.sh` | строене на образите; мрежите и проксито |
-| `web/server.py` | етап 2: вход, уеб чат, сваляне на файловете (само stdlib) |
+| `build.sh`, `up.sh` | строене на образите; мрежите и помощникът (шлюз или прокси) |
+| `deploy.sh`, `deploy/` | деплой с една команда; systemd, Caddyfile, daemon.json |
+| `check.py` | готова ли е машината — по истинския път на задача |
+| `backup.py` | копие на web.db и usage.jsonl, докато сървърът работи |
+| `web/server.py` | вход, уеб чат, сваляне на файловете (само stdlib) |
 | `web/store.py` | SQLite: хора (scrypt), сесии (SHA-256 на жетона), разговори, ходове |
 
-## Измерено тук (2026-09-24, Docker 29, без API ключове)
+## Измерено тук (2026-10-11, Docker 29.8.2, cgroup v1, без API ключове)
 
 | Проверка | Резултат |
 |---|---|
-| Направо навън от задача | няма изход — дори DNS не работи |
-| През проксито към `example.com` | 403 |
-| През проксито към `api.groq.com` | пуснато, тунелът е отворен |
+| Направо навън от задача | няма изход — „Network is unreachable“, дори DNS не работи |
+| Друга задача (по име и по IP) | недостъпна — името не се резолвира, IP-то е „unreachable“ |
+| Шлюзът от мрежата на задачата | 200; проксито (режим с прокси) — 403 за `example.com` |
 | 1 GB памет при таван 256 MB | убито, код 137 |
-| 500 процеса при таван 64 | спряно на 63 |
+| 500 процеса при таван 64 | спряно на 62 |
 | Запис извън `/work` | отказан (read-only) |
-| Потребител | 10001, без root, без capabilities |
-| Таймаут 3 s | контейнерът е убит за 3.2 s, нищо не остава живо |
-| Задача без работещ модел | `ok: false` с грешката — не се таксува като успех |
-| Образи | runner 587 MB, egress 177 MB |
+| Потребител | 10001, без root, без capabilities, no_new_privs |
+| Задача без работещ модел | `ok: false` с грешката — не се таксува като успех (и в режим с шлюз) |
+| SIGTERM на уеб сървъра посред задача | контейнерът и мрежата му изчезват за 0.6 s; ходът е „сървърът спря…“ |
+| Втори `serve` на зает порт | излиза с 1, не пипа ходовете и контейнерите на живия |
+| Мрежа за задача (create+connect+rm) | ~1.2 s на задача |
+| Сметката от usage.jsonl с 1M реда (200 MB) | 0.13 ms (преди: 3.55 s на всеки ход) |
+| Образи | runner 590 MB, egress 177 MB, gateway 177 MB; build.sh — 46 s |
 
-## На истинския сървър (Ubuntu, Docker)
+Изхода, помощника, таваните, правата и задачата без модел проверява
+`sudo python3 -m cloud.check` на машината.
+
+## На истинския сървър (Ubuntu 22.04/24.04)
 
 ```bash
-git clone https://github.com/me7ko-dev/genesis-agent && cd genesis-agent
-./cloud/build.sh          # ARM сървър: PLATFORM=manylinux2014_aarch64 ./cloud/build.sh
-./cloud/up.sh
-printf 'GROQ_API_KEY=...\nNVIDIA_API_KEY=...\n' > /srv/genesis/keys.env && chmod 600 /srv/genesis/keys.env
+sudo apt install -y docker.io python3 python3-pip git caddy   # Caddy: виж caddyserver.com/docs/install
+git clone https://github.com/me7ko-dev/genesis-agent /opt/genesis && cd /opt/genesis
+sudo mkdir -p /srv/genesis
+# ключовете остават в шлюза; GATEWAY_SECRET — поне 32 знака
+printf 'GATEWAY_SECRET=%s\nGROQ_API_KEY=...\nNVIDIA_API_KEY=...\n' "$(openssl rand -base64 48)" \
+  | sudo tee /srv/genesis/keys.env >/dev/null && sudo chmod 600 /srv/genesis/keys.env
+DEPLOY_DRY_RUN=1 ./cloud/deploy.sh                      # само показва стъпките
+sudo GENESIS_DOMAIN=genesis.example.com ./cloud/deploy.sh
+sudo python3 -m cloud.web.server add-user ivan@example.com   # бета: хората се добавят ръчно
+```
 
-# мярката за етап 1 — очаквано 12/12, както на лаптопа:
+`deploy.sh` е идемпотентен и спира на първата грешка: проверки (root, Docker,
+python3 ≥ 3.10 и pip, GATEWAY_SECRET, права на keys.env) → `git pull --ff-only`
+→ `build.sh` (етикети `:latest` и `:<git sha>`) → `/etc/docker/daemon.json`, ако
+го няма → `up.sh` → systemd → Caddy → `cloud/check.py` → `https://<домейн>/healthz`.
+
+- **Режимът** идва от keys.env: с `GATEWAY_SECRET` — шлюз (ключовете не влизат в
+  контейнера, проксито не се пуска); без него — прокси и `--env-file` в контейнера.
+- **systemd:** `genesis-net` (up.sh при всяко пускане; ако помощникът не е здрав,
+  уеб сървърът не тръгва), `genesis-web` (root: вика docker и дава папките на
+  uid 10001; `UMask=0077`; при спиране убива задачите си, `ExecStopPost` чисти
+  каквото е останало), `genesis-backup.timer` (на 6 часа). Логовете на уеб
+  сървъра са в journald (`journalctl -u genesis-web`; таван — `SystemMaxUse=`
+  в journald.conf). Зад Caddy там се вижда само 127.0.0.1 — истинският адрес е в
+  `/var/log/caddy/genesis.log`.
+- **Caddy:** `deploy/Caddyfile` — HSTS, gzip, тяло ≤ 1 MB, лог с ротация. Уеб
+  сървърът е с `--trust-proxy` (последният адрес в `X-Forwarded-For`), никога с
+  `--trust-cloudflare` (зад Caddy клиентът сам пише `CF-Connecting-IP`).
+- **daemon.json:** логове 5 × 10 MB и мрежи по /24 от 10.200.0.0/16 (по
+  подразбиране Docker има място за ~30 мрежи на задачи). Ако файлът вече има
+  нещо, `deploy.sh` не го пипа, а казва какво липсва. Важи за нови контейнери:
+  след промяна — `systemctl restart docker && ./cloud/up.sh`.
+- **Защитна стена:** само 22, 80, 443 (`ufw allow OpenSSH; ufw allow 80,443/tcp;
+  ufw enable`). Docker не публикува портове, затова заобикалянето на ufw тук не важи.
+- **gVisor (по-силна изолация):** инсталирай runsc и `GENESIS_RUNTIME=runsc ./cloud/deploy.sh`.
+  Тук не е мерено (няма runsc).
+- **Връщане назад:** `docker tag genesis-runner:<стар sha> genesis-runner:latest`
+  (същото за egress/gateway), после `./cloud/up.sh`.
+
+### Проверка и мярка
+
+```bash
+sudo python3 -m cloud.check --web http://127.0.0.1:8080     # код ≠ 0 при първия проблем
+# мярката за етап 1 — очаквано 12/12, както на лаптопа (режим с прокси, ключове в контейнера):
 docker run --rm --network genesis-jobs --env-file /srv/genesis/keys.env \
   -e HTTPS_PROXY=http://genesis-egress:3128 -e NO_PROXY=localhost,127.0.0.1 \
   --entrypoint python genesis-runner:latest /opt/bench_fix.py
-
-# една задача:
-python -m cloud.runner.launch --workspace /srv/jobs/1 --env-file /srv/genesis/keys.env \
-  "направи CSV с числата от 1 до 10 и техните квадрати"
+# една задача на ръка:
+python3 -m cloud.runner.launch --workspace /srv/jobs/1 --env-file /srv/genesis/keys.env \
+  --gateway-usage /srv/genesis/gateway/usage.jsonl "направи CSV с числата от 1 до 10 и техните квадрати"
 ```
 
-По-силна изолация: инсталирай gVisor и добави `--runtime runsc`.
+`genesis-jobs` е само за такива ръчни проверки: в нея е помощникът на режима
+(шлюзът или проксито). Задачите от `launch.py` са всяка в своя `genesis-job-<id>`.
+
+### Данни: копия, ротация, задържане
+
+- **Копие:** `genesis-backup.timer` → `python3 -m cloud.backup` → `/srv/backup/genesis/<време>/`
+  (web.db през онлайн backup API + `integrity_check`, копие на usage.jsonl, 14 дни,
+  права само за root). Извън машината — разкоментирай `ExecStartPost=rsync …` в
+  `genesis-backup.service` (Storage Box и SSH ключ — решение на оператора).
+- **Възстановяване:** `systemctl stop genesis-web`, копирай `web.db` от копието в
+  `/srv/genesis/web/`, `systemctl start genesis-web`, влез.
+- **usage.jsonl** е единственият запис за сметката — не се ротира с logrotate
+  (шлюзът зарежда бюджетите от него при старт; при 1M реда — 5 s). Веднъж в
+  месеца, без вървящи задачи: `systemctl stop genesis-web; docker stop genesis-gateway;
+  mv usage.jsonl usage-<месец>.jsonl; docker start genesis-gateway; systemctl start genesis-web`.
+- **Не се трие автоматично:** папките на разговорите в `/srv/jobs` и събитията
+  в web.db (до 8 MiB на ход). Колко дълго се пазят е решение на оператора —
+  `check.py` пада при под 5 GB свободни (`--min-free-gb`).
 
 ## Етап 2: вход, уеб чат, файлове
 
+На ръка (без systemd) — същото, което пуска `genesis-web.service`:
+
 ```bash
-python -m cloud.web.server add-user ivan@example.com      # бета: хората се добавят ръчно, печата парола
-python -m cloud.web.server serve --data /srv/genesis/web --jobs /srv/jobs   --env-file /srv/genesis/keys.env --trust-proxy           # 127.0.0.1:8080, отпред Caddy с HTTPS
+python3 -m cloud.web.server add-user ivan@example.com      # печата парола
+python3 -m cloud.web.server serve --data /srv/genesis/web --jobs /srv/jobs \
+  --env-file /srv/genesis/keys.env --gateway-usage /srv/genesis/gateway/usage.jsonl --trust-proxy
 ```
 
 Зад Cloudflare Tunnel — `--trust-cloudflare` (IP от `CF-Connecting-IP`); зад Caddy/nginx —
@@ -68,14 +139,12 @@ python -m cloud.web.server serve --data /srv/genesis/web --jobs /srv/jobs   --en
 По един ход на човек, общо `--workers` (2) контейнера. Файловете от контейнера
 са недоверени: сваля се само като прикачен файл, без символни връзки, без `..`,
 и само между ходовете. Чуждите разговори и файлове връщат 404. 5 грешни пароли
-за 15 мин → 429. Проверено: 40 теста (`tests/test_cloud_web.py`) и в браузър с
-демо runner (вход, задача, събития, CSV и zip, телефон 375 px).
+за 15 мин → 429.
 
-## Известно и отложено
-
-- ~~Ключовете са в контейнера~~ — решено с шлюза (виж по-долу).
-- **PyPI е затворен.** Каквото липсва в `task-requirements.txt`, не може да се
-  инсталира. Добавяй там и мери размера на образа.
+При старт сървърът първо заема порта, после убива останалите контейнери на
+задачи и маха мрежите им, и чак тогава маркира прекъснатите ходове като
+неуспешни. При SIGTERM спира текущите задачи. Освен това контейнерът сам спира
+30 s след своя таван (`GENESIS_TASK_DEADLINE`), ако никой друг не го спре.
 
 ## Шлюз за моделите (`gateway/`): ключовете не влизат в контейнера
 
@@ -84,22 +153,28 @@ python -m cloud.web.server serve --data /srv/genesis/web --jobs /srv/jobs   --en
                                          └─► /srv/genesis/gateway/usage.jsonl (сметката)
 ```
 
-В `keys.env` добави `GATEWAY_SECRET=` (поне 32 знака, напр. `openssl rand -base64 48`),
-`./cloud/up.sh` пуска шлюза, после:
-
-```bash
-python -m cloud.web.server serve ... --env-file /srv/genesis/keys.env   --gateway-usage /srv/genesis/gateway/usage.jsonl
-```
+В `keys.env` добави `GATEWAY_SECRET=` (поне 32 знака, напр. `openssl rand -base64 48`);
+`./cloud/up.sh` пуска шлюза вместо проксито и проверява, че е жив и отговаря
+(иначе код 1 и последните редове от лога му). Като root прави keys.env
+`root:10003 0640` — шлюзът (uid/gid 10003) го чете през групата, уеб сървърът като собственик.
 
 Контейнерът получава само `GENESIS_MODEL_GATEWAY` и подписан жетон
 (задача + срок = таймаутът + 1 мин + бюджет, по подразбиране 300 000 токена)
 вместо всеки ключ; прокси и `--env-file` няма. Шлюзът приема само
 `POST /<доставчик>/chat/completions`, слага ключа (ротира `_2`.. при 429/401),
 брои `usage` и при изчерпан бюджет връща 429. Сметката се чете от шлюза, не
-от `done` събитието на контейнера.
+от `done` събитието на контейнера — само редовете след старта на задачата.
 
 Измерено (2026-09-25, лаптоп, истински ключове само в шлюза): задача „направи
 squares.csv …" → готова за 3.2 s, 2 обръщения, 5 536 токена; шлюзът и задачата
 отчитат едно и също до токен. Тестове: `tests/test_cloud_gateway.py` (подправен
 жетон, изтекъл, чужда задача, бюджет, ротация, ключове извън `docker run`).
 
+## Известно и отложено
+
+- **PyPI е затворен.** Каквото липсва в `task-requirements.txt`, не може да се
+  инсталира. Добавяй там и мери размера на образа.
+- **Не е мерено тук:** bench_fix 12/12 (иска ключове и интернет), gVisor (няма
+  runsc), истински systemd (контейнерът тук няма systemd като PID 1 — единиците
+  минават `systemd-analyze verify`, командите им са пускани на ръка).
+- **Задържане на данни** (`/srv/jobs`, събития в web.db) и цени — решения на оператора.

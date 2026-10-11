@@ -616,3 +616,71 @@ def test_no_turn_starts_while_a_download_is_in_progress(env) -> None:
         app.end_download(chat_id)
     code, _ = cl.json("POST", f"/api/chats/{chat_id}/turns", {"text": "още"})
     assert code == 202
+
+
+# ── старт и спиране: без контейнери сираци (D4, деплой одит 2026-10-11) ───────
+
+def test_a_restart_kills_leftover_containers_before_failing_their_turns(tmp_path) -> None:
+    """Сираците се убиват ПРЕДИ ходовете им да станат „failed“: иначе човекът
+    пускаше нов ход в папката, в която старият контейнер още пишеше."""
+    store = Store(tmp_path / "db")
+    uid = store.add_user("a@b.c", PASSWORD)
+    turn = store.add_turn(store.new_chat(uid, "t"), "x")
+    seen: list[str] = []
+
+    def cleanup() -> int:
+        seen.append(store.turn(uid, turn)["status"])  # type: ignore[index]
+        return 1
+
+    web.App(store, tmp_path / "jobs", runner=FakeRunner(), cleanup=cleanup)
+    assert seen == ["queued"]
+    assert store.turn(uid, turn)["status"] == "failed"  # type: ignore[index]
+
+
+def test_the_default_cleanup_kills_task_containers(tmp_path, fake_docker) -> None:
+    web.App(Store(tmp_path / "db"), tmp_path / "jobs", runner=FakeRunner())
+    assert ["ps", "-aq", "--filter", "name=^genesis-task-"] in fake_docker.calls
+
+
+@pytest.mark.skipif(os.name == "nt", reason="SO_REUSEADDR на Windows позволява втори bind")
+def test_a_second_serve_on_a_busy_port_touches_nothing(tmp_path, fake_docker, capsys) -> None:
+    """Измерено 2026-10-11: втори `serve` на зает порт падаше с OSError 98, но
+    преди това правеше ходовете на живия сървър „failed“ — и той прие нов ход в
+    същия чат, докато старият контейнер още вървеше."""
+    import socket
+    store = Store(tmp_path / "web.db")
+    uid = store.add_user("a@b.c", PASSWORD)
+    turn = store.add_turn(store.new_chat(uid, "t"), "x")
+    store.set_status(turn, "running")
+    busy = socket.socket()
+    busy.bind(("127.0.0.1", 0))
+    busy.listen()
+    try:
+        code = web.main(["serve", "--data", str(tmp_path), "--jobs", str(tmp_path / "jobs"),
+                         "--port", str(busy.getsockname()[1]), "--insecure-cookie"])
+    finally:
+        busy.close()
+    assert code == 1 and "не може да се заеме" in capsys.readouterr().err
+    assert store.turn(uid, turn)["status"] == "running"  # type: ignore[index]
+    assert not any(c[:2] == ["rm", "-f"] or c[0] == "ps" for c in fake_docker.calls)
+
+
+def test_shutdown_stops_running_tasks_and_says_why(tmp_path) -> None:
+    store = Store(tmp_path / "db")
+    uid = store.add_user("a@b.c", PASSWORD)
+    chat = store.new_chat(uid, "t")
+    started = threading.Event()
+    killed = threading.Event()
+
+    def runner(text: str, workspace: Path, **kw: Any) -> launch.Result:
+        started.set()
+        killed.wait(5)                      # „контейнерът“ върви, докато не го убият
+        return launch.Result(False, False, 137, 1.0, error="Killed")
+
+    app = web.App(store, tmp_path / "jobs", runner=runner, recover=False,
+                  cleanup=lambda: (killed.set(), 0)[1])
+    turn = app.start_turn({"id": uid}, chat, "дълга задача")
+    assert turn is not None and started.wait(5)
+    app.shutdown()
+    t = store.turn(uid, turn)
+    assert t is not None and t["status"] == "failed" and "сървърът спря" in t["error"]

@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -106,6 +107,24 @@ def tokens_since(path: Path, skip_lines: int) -> dict[str, int]:
     return total
 
 
+def _arm_deadline(raw: str) -> threading.Timer | None:
+    """Вторият таван: процесът (и с него контейнерът) спира сам след `raw`
+    секунди. Първият е наблюдателят в launch.py, но той живее в уеб процеса —
+    деплой одит 2026-10-11: след SIGKILL на уеб сървъра контейнерът остана Up
+    без никакъв срок. os._exit, не изключение: кодът на агента може да хване
+    всяко изключение, а изход на PID-а спира целия контейнер."""
+    try:
+        seconds = float(raw)
+    except ValueError:
+        return None
+    if seconds <= 0:
+        return None
+    timer = threading.Timer(seconds, os._exit, args=(124,))
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     text = " ".join(argv).strip() or sys.stdin.read().strip()
@@ -116,6 +135,7 @@ def main(argv: list[str] | None = None) -> int:
 
     os.environ.setdefault("GENESIS_WORKSPACE", "/work")
     t0 = time.monotonic()
+    _arm_deadline(os.environ.get("GENESIS_TASK_DEADLINE", ""))
 
     import genesis_terminal_agent as gta
     from genesis_agent import budget, sandbox
@@ -127,6 +147,13 @@ def main(argv: list[str] | None = None) -> int:
     skip = _log_lines(log_path)
 
     last_reply = {"text": ""}
+    # Грешката на веригата идва през warn(), не като отговор: от b9572f0
+    # (2026-10-11) run_turn я праща към оператора и спира хода. Проверката само
+    # на last_reply вече не я хващаше — задача без нито един отговорил модел
+    # излизаше ok:true и се таксуваше като успех (измерено 2026-10-11 в
+    # контейнера без ключове: warn „[Грешка: цялата верига е изчерпана…]“, после
+    # done ok:true). Пази се първата такава грешка.
+    chain_error = {"text": ""}
 
     class JsonTurnUI(gta.TurnUI):
         def assistant(self, text: str) -> None:
@@ -144,6 +171,8 @@ def main(argv: list[str] | None = None) -> int:
             emit("warn", text=note)
 
         def warn(self, text: str) -> None:
+            if text.lstrip().startswith("[Грешка") and not chain_error["text"]:
+                chain_error["text"] = text.strip()
             emit("warn", text=text)
 
         def info(self, text: str) -> None:
@@ -164,6 +193,8 @@ def main(argv: list[str] | None = None) -> int:
     # платена.
     if ok and last_reply["text"].lstrip().startswith("[Грешка"):
         ok, error = False, last_reply["text"].strip()[:500]
+    if ok and chain_error["text"]:
+        ok, error = False, chain_error["text"][:500]
     if ok:
         save_history(workspace, [*history, {"role": "user", "content": text},
                                  {"role": "assistant", "content": last_reply["text"]}])

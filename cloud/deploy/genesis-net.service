@@ -1,0 +1,16 @@
+# Мрежите и помощникът на задачите (шлюз или прокси) при всяко пускане на
+# машината. cloud/up.sh е идемпотентен и свършва с грешка, ако помощникът не е
+# здрав — тогава genesis-web (Requires=) не тръгва.
+[Unit]
+Description=Genesis онлайн: мрежи и шлюз/прокси за задачите
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=@REPO@
+ExecStart=/bin/bash @REPO@/cloud/up.sh
+
+[Install]
+WantedBy=multi-user.target

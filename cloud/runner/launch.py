@@ -7,7 +7,9 @@
   - /tmp и домашна папка в паметта (tmpfs), всичко друго е само за четене;
   - 1 CPU, 1 GB RAM без swap, 256 процеса, 10 минути (по подразбиране);
   - без Linux capabilities, без повишаване на правата, потребител 10001;
-  - мрежа само през egress проксито (cloud/egress/proxy.py) → само API на модели.
+  - мрежа само през egress проксито (cloud/egress/proxy.py) → само API на модели,
+    или (режим с шлюз) само до шлюза — в СВОЯ вътрешна мрежа `genesis-job-…`,
+    която живее колкото задачата: другите задачи не се виждат.
 
 Изходът са JSON редовете от cloud/runner/task.py; последният е „done" с
 токените и секундите — по тях се таксува.
@@ -28,6 +30,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from cloud.gateway import gateway as gw
 
@@ -37,6 +40,15 @@ TASK_BUDGET = int(os.environ.get("GENESIS_TASK_BUDGET", "300000"))  # токен
 JOBS_NETWORK = os.environ.get("GENESIS_JOBS_NETWORK", "genesis-jobs")
 EGRESS_URL = os.environ.get("GENESIS_EGRESS_URL", "http://genesis-egress:3128")
 RUNNER_UID = 10001
+# Деплой одит 2026-10-11: всички задачи бяха в една обща genesis-jobs (ICC
+# включен) — задача на човек А прочете /work на човек Б през `http.server` по
+# име и по IP. Сега всяка задача е в своя --internal мрежа, в която е само
+# помощникът ѝ (шлюзът ИЛИ проксито). Измерено тук: другата задача → „Network is
+# unreachable“, името ѝ не се резолвира, шлюзът отговаря 200; цената е ~1.2 s
+# на задача (create + connect + disconnect + rm, Docker 29.8.2).
+TASK_PREFIX = "genesis-task-"
+NETWORK_PREFIX = "genesis-job-"
+LABEL = "genesis.task=1"
 
 
 @dataclass(frozen=True)
@@ -115,13 +127,73 @@ def _parse_event(raw: bytes) -> dict[str, Any] | None:
     return ev
 
 
+def _docker(*args: str, timeout: float = 60) -> subprocess.CompletedProcess[str]:
+    """Една `docker` команда без shell. Грешката е в returncode/stderr, не
+    изключение — извикващият решава дали тя спира задачата. Тестовете я
+    подменят (tests/conftest.py): нито един тест не пипа истинския Docker."""
+    argv = ["docker", *args]
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", check=False, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as e:
+        return subprocess.CompletedProcess(argv, 127, "", f"{type(e).__name__}: {e}")
+
+
+def helper_container(url: str) -> str:
+    """Името на контейнера зад адреса (http://genesis-gateway:8090 →
+    genesis-gateway): по това име той се включва в мрежата на задачата."""
+    return urlsplit(url).hostname or ""
+
+
+def open_task_network(network: str, helper: str) -> str:
+    """Създава вътрешната мрежа на задачата и включва помощника в нея.
+    Връща грешката ("" при успех) — без мрежа задачата не тръгва."""
+    r = _docker("network", "create", "--internal", "--label", LABEL, network)
+    if r.returncode:
+        return f"мрежата за задачата не се създаде: {r.stderr.strip()[-300:]}"
+    r = _docker("network", "connect", network, helper)
+    if r.returncode:
+        _docker("network", "rm", network)
+        return (f"{helper} не може да се включи в мрежата на задачата (пуснат ли е "
+                f"./cloud/up.sh?): {r.stderr.strip()[-300:]}")
+    return ""
+
+
+def close_task_network(network: str, name: str, helper: str) -> None:
+    """Махa контейнера (ако още е там), откача помощника и трие мрежата.
+    Грешките се пренебрегват: каквото остане, го чисти cleanup_leftovers."""
+    _docker("rm", "-f", name)
+    _docker("network", "disconnect", "-f", network, helper)
+    _docker("network", "rm", network)
+
+
+def cleanup_leftovers() -> int:
+    """Убива всички контейнери на задачи и трие мрежите им. Пуска се при старт
+    и спиране на уеб сървъра (и от systemd — cloud/deploy/genesis-web.service).
+
+    Деплой одит 2026-10-11: единственият таван беше таймерът в уеб процеса. При
+    SIGTERM/SIGKILL на сървъра контейнерът оставаше Up без срок (1 CPU, 1 GB), а
+    след рестарт ходът ставаше „failed“ и човекът пускаше втори контейнер в
+    същата папка. Връща колко контейнера е спрял."""
+    r = _docker("ps", "-aq", "--filter", f"name=^{TASK_PREFIX}")
+    ids = r.stdout.split() if r.returncode == 0 else []
+    if ids:
+        _docker("rm", "-f", *ids)
+    r = _docker("network", "ls", "--format", "{{.Name}}", "--filter", f"name={NETWORK_PREFIX}")
+    # Филтърът на Docker е подниз — `genesis-jobs` (ръчните проверки) не се пипа.
+    for net in (n for n in r.stdout.split() if r.returncode == 0 and n.startswith(NETWORK_PREFIX)):
+        attached = _docker("network", "inspect", "-f",
+                           "{{range .Containers}}{{.Name}} {{end}}", net)
+        for c in attached.stdout.split() if attached.returncode == 0 else []:
+            _docker("network", "disconnect", "-f", net, c)
+        _docker("network", "rm", net)
+    return len(ids)
+
+
 def _stop(proc: subprocess.Popen[bytes], name: str) -> None:
     """Спира контейнера и клиента `docker run` и ги изчаква. Само убиването
     на клиента не стига: контейнерът продължава без него."""
-    try:
-        subprocess.run(["docker", "kill", name], capture_output=True, check=False, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        pass
+    _docker("kill", name, timeout=30)
     try:
         proc.kill()
         proc.wait(timeout=30)
@@ -139,6 +211,11 @@ def docker_args(name: str, workspace: Path, text: str, *, limits: Limits | None 
     limits = limits or Limits()
     args = [
         "docker", "run", "--rm", "--name", name,
+        "--label", LABEL,
+        # --init: PID 1 е docker-init, а не python. Python като PID 1 пренебрегва
+        # SIGTERM, който `docker run` препраща, когато systemd спира уеб сървъра
+        # (деплой одит 2026-10-11) — с --init сигналът спира задачата.
+        "--init",
         "--network", network,
         "--cpus", limits.cpus,
         "--memory", limits.memory, "--memory-swap", limits.memory,
@@ -153,6 +230,9 @@ def docker_args(name: str, workspace: Path, text: str, *, limits: Limits | None 
         "-e", "HOME=/home/agent",
         "-e", "GENESIS_WORKSPACE=/work",
         "-e", "PYTHONIOENCODING=utf-8",
+        # Втори таван вътре в контейнера (task.py): ако уеб процесът умре и
+        # никой не убие контейнера, задачата пак свършва (+30 s след своя).
+        "-e", f"GENESIS_TASK_DEADLINE={limits.seconds + 30}",
     ]
     if gateway is not None:
         # Без прокси и без ключове: единственият адрес е шлюзът.
@@ -189,23 +269,45 @@ def prepare_workspace(workspace: Path) -> None:
 def run_task(text: str, workspace: Path, *, limits: Limits | None = None,
              on_event: Callable[[dict[str, Any]], None] | None = None,
              env_file: str | None = None, runtime: str | None = None,
-             image: str = IMAGE, gateway: Gateway | None = None) -> Result:
+             image: str = IMAGE, gateway: Gateway | None = None,
+             egress_url: str = EGRESS_URL) -> Result:
     limits = limits or Limits()
-    name = f"genesis-task-{uuid.uuid4().hex[:12]}"
+    suffix = uuid.uuid4().hex[:12]
+    name = f"{TASK_PREFIX}{suffix}"
+    network = f"{NETWORK_PREFIX}{suffix}"
+    helper = helper_container(gateway.url if gateway is not None else egress_url)
     prepare_workspace(workspace)
+    error = open_task_network(network, helper)
+    if error:
+        return Result(False, False, -1, 0.0, error=error)
+    try:
+        return _run_in(network, name, text, workspace, limits=limits, on_event=on_event,
+                       env_file=env_file, runtime=runtime, image=image, gateway=gateway,
+                       egress_url=egress_url)
+    finally:
+        close_task_network(network, name, helper)
+
+
+def _run_in(network: str, name: str, text: str, workspace: Path, *, limits: Limits,
+            on_event: Callable[[dict[str, Any]], None] | None, env_file: str | None,
+            runtime: str | None, image: str, gateway: Gateway | None,
+            egress_url: str) -> Result:
     token = ""
+    usage_start = 0
     if gateway is not None:
+        usage_start = gw.usage_size(gateway.usage)
         # Жетонът живее колкото задачата (+1 мин за последния отговор).
         token = gw.make_token(gateway.secret, name, budget=gateway.budget,
                               ttl=limits.seconds + 60)
     argv = docker_args(name, workspace, text, limits=limits, env_file=env_file,
-                       runtime=runtime, image=image, gateway=gateway, token=token)
+                       runtime=runtime, image=image, gateway=gateway, token=token,
+                       network=network, egress_url=egress_url)
     t0 = time.monotonic()
     timed_out = threading.Event()
 
     def _watchdog() -> None:
         timed_out.set()
-        subprocess.run(["docker", "kill", name], capture_output=True, check=False)
+        _docker("kill", name)
 
     timer = threading.Timer(limits.seconds, _watchdog)
     timer.start()
@@ -274,7 +376,7 @@ def run_task(text: str, workspace: Path, *, limits: Limits | None = None,
     done = next((e for e in reversed(events) if e.get("kind") == "done"), None)
     seconds = round(time.monotonic() - t0, 1)
     # С шлюз сметката е от шлюза — контейнерът може да каже каквото си иска.
-    billed = gw.usage_for(gateway.usage, name) if gateway is not None else None
+    billed = gw.usage_for(gateway.usage, name, usage_start) if gateway is not None else None
     if timed_out.is_set():
         return Result(False, True, code, seconds, error=f"прекъснато след {limits.seconds} s",
                       tokens=billed or {}, events=events)
