@@ -50,6 +50,11 @@ _CLIP_NOTICE_TEMPLATE = ("\n\n… [отрязани {cut} символа от с
                          "операторът вижда пълния изход] …\n\n")
 _DEDUP_NOTICE = ("[идентичен резултат — същото съдържание стои по-долу в този "
                  "разговор; не го извиквай пак, вече го имаш]")
+# Когато и по-новото копие е старо и свито (2026-10-11): READ_FILE от 6 650
+# знака стигаше до модела само като 2 074, а бележката забраняваше повторно
+# четене — EDIT_FILE иска точния текст, моделът трябваше да гадае.
+_DEDUP_NOTICE_CLIPPED = ("[идентичен резултат — по-новото копие по-долу също е "
+                         "съкратено; ако ти трябва цялото, извикай пак]")
 
 
 def clip_for_context(text: str, limit: int | None = None) -> str:
@@ -282,7 +287,10 @@ def budget_history(messages, *, fresh: int | None = None,
     out = []
     for i, m in enumerate(msgs):
         if i in duplicates:
-            m = {**m, "content": _DEDUP_NOTICE}
+            content = str(m.get("content", ""))
+            kept = latest_of[content]
+            clipped = kept in stale and len(content) > stale_limit
+            m = {**m, "content": _DEDUP_NOTICE_CLIPPED if clipped else _DEDUP_NOTICE}
         elif i in stale:
             content = str(m.get("content", ""))
             if len(content) > stale_limit:

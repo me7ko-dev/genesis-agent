@@ -276,6 +276,25 @@ class TestDuplicateResultsArePaidForOnce:
         assert "идентичен" in str(out[1]["content"])
         assert str(out[2]["content"]) == same
 
+    def test_no_do_not_reread_notice_when_the_kept_copy_is_clipped(self) -> None:
+        """2026-10-11: READ_FILE (6 650 знака), RUN_CMD, същият READ_FILE, още
+        два резултата → по-новото копие е старо и свито до 2 074 знака, пълното
+        тяло няма никъде, а бележката казваше „не го извиквай пак“."""
+        body = "def f():\n" + "    x = 1\n" * 665
+        out = budget.budget_history(self._msgs([body, "rc=0 " * 10, body, "a" * 8, "b" * 9]),
+                                    fresh=2, stale_limit=2000)
+        sent = [str(m["content"]) for m in out if m.get("role") == "tool"]
+        assert not any(body == s for s in sent)
+        assert not any("не го извиквай пак" in s for s in sent)
+        assert "извикай пак" in sent[0]
+
+    def test_the_do_not_reread_notice_stays_when_the_kept_copy_is_whole(self) -> None:
+        body = "def f():\n" + "    x = 1\n" * 665
+        out = budget.budget_history(self._msgs([body, "rc=0 " * 10, body]),
+                                    fresh=2, stale_limit=2000)
+        assert "не го извиквай пак" in str(out[1]["content"])
+        assert str(out[3]["content"]) == body
+
     def test_the_callers_history_is_still_not_mutated(self) -> None:
         same = "W" * 3000
         msgs = self._msgs([same, same])
