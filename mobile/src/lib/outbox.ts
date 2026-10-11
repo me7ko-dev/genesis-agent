@@ -41,7 +41,9 @@ export class Outbox {
     if (this.inFlight) return null;
     this.inFlight = true;
     const last = this.unsent;
-    const retry = last !== null && last.text === text && this.now() - last.at < RETRY_WINDOW_MS;
+    // Часовник, върнат назад, не е „в прозореца“ (вълна 5, 2026-10-11).
+    const age = last === null ? -1 : this.now() - last.at;
+    const retry = last !== null && last.text === text && age >= 0 && age < RETRY_WINDOW_MS;
     const mid = retry ? last.mid : this.newMid();
     // Прозорецът тече от последния опит: оператор, който натиска пак и пак
     // без връзка, не получава нов `mid` насред повторенията.
@@ -57,10 +59,19 @@ export class Outbox {
   }
 
   /** Новите събития от сървъра: собственото балонче с неизпратения текст
-   *  значи, че сървърът го е приел — следващото изпращане е нов ход. */
-  seen(events: readonly { type: string; text?: string }[]): void {
+   *  или `mid`-ът в списъка с приетите (`mids` на `events`) значи, че
+   *  сървърът го е приел — следващото изпращане е нов ход.
+   *
+   *  Вълна 5, 2026-10-11: само по балончето reset страница без него (дълъг
+   *  ход, докато телефонът е офлайн) и „/clear“ (няма балонче) оставяха
+   *  стария `mid`, а нарочното повторение в прозореца се поглъщаше. */
+  seen(events: readonly { type: string; text?: string }[], accepted?: readonly string[]): void {
     const pending = this.unsent;
     if (pending === null) return;
+    if (accepted?.includes(pending.mid)) {
+      this.unsent = null;
+      return;
+    }
     const text = pending.text.trim();
     if (events.some((e) => e.type === 'user' && (e.text ?? '').trim() === text)) this.unsent = null;
   }

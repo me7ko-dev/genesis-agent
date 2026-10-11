@@ -208,7 +208,7 @@ test('a stale mid is forgotten: a later message with the same text is a new turn
   assert.equal(turns, 5);
 
   const hook = readFileSync(new URL('../src/lib/useGenesis.ts', import.meta.url), 'utf8');
-  assert.match(hook, /outbox\.seen\(reply\.events\)/);
+  assert.match(hook, /outbox\.seen\(reply\.events[,)]/);
 });
 
 test('errors reach the operator in Bulgarian', () => {
@@ -248,4 +248,63 @@ test('"Нов разговор" is not offered while a turn runs, and its "busy"
   const hook = readFileSync(new URL('../src/lib/useGenesis.ts', import.meta.url), 'utf8');
   assert.doesNotMatch(hook, /const clear = useCallback\(\(\) => act\(\(\) => client\.clear\(\)\)/);
   assert.match(hook, /client\.clear\(\)\);\s+if \(reply && !reply\.ok\) setError\(replyErrorText\(reply\.error\)\)/);
+});
+
+test('a deliberate repeat after the server took the send is never swallowed by a stale mid', async () => {
+  // Вълна 5, 2026-10-11: сървърът (RemoteServer._sent) пази приетите mid без
+  // край, телефонът ги забравяше само по своето балонче или след прозореца.
+  // Измерено със сървър като _sent: (1) reset страница от най-новите събития
+  // без балончето (дълъг ход офлайн) и (2) „/clear“, което няма балонче —
+  // нарочното повторение в прозореца минаваше със стария mid и сървърът го
+  // поглъщаше; (3) часовник, върнат назад, удължаваше прозореца без край.
+  let clock = 1_000_000;
+  let n = 0;
+  const box = new Outbox(() => `mid-${++n}-xxxxxx`, () => clock);
+  const accepted = new Set<string>();
+  let turns = 0;
+  let drop = false;
+  const server = async (_: string, mid: string) => {
+    if (!accepted.has(mid)) {
+      turns += 1;
+      accepted.add(mid);
+    }
+    if (drop) throw new Error('lost');
+    return { ok: true };
+  };
+
+  // (1) Отговорът се губи, после идва reset страница без балончето, но с
+  // резултата на хода — и списъкът с приетите mid.
+  drop = true;
+  await assert.rejects(box.send('продължи', server));
+  drop = false;
+  box.seen([{ type: 'assistant', text: 'готово' }], [...accepted]);
+  await box.send('продължи', server);
+  assert.equal(turns, 2);
+
+  // (2) „/clear“ няма балонче — пак списъкът решава.
+  drop = true;
+  await assert.rejects(box.send('/clear', server));
+  drop = false;
+  box.seen([{ type: 'cleared' }], [...accepted]);
+  await box.send('/clear', server);
+  assert.equal(turns, 4);
+
+  // (3) Часовникът се връща назад с час: това не е „в прозореца“.
+  drop = true;
+  await assert.rejects(box.send('да', server));
+  drop = false;
+  clock -= 60 * 60 * 1000;
+  await box.send('да', server);
+  assert.equal(turns, 6);
+
+  // Повторен опит, който сървърът НЕ е приел, пази своя mid (без нов ход).
+  const offline = async (): Promise<{ ok: boolean }> => { throw new Error('offline'); };
+  await assert.rejects(box.send('пусни', offline));
+  box.seen([], [...accepted]);
+  const ids: string[] = [];
+  await box.send('пусни', async (_t, mid) => { ids.push(mid); return { ok: true }; });
+  assert.deepEqual(ids, [`mid-${n}-xxxxxx`]);
+
+  const hook = readFileSync(new URL('../src/lib/useGenesis.ts', import.meta.url), 'utf8');
+  assert.match(hook, /outbox\.seen\(reply\.events, reply\.mids\)/);
 });

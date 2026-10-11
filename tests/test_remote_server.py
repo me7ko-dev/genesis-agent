@@ -325,6 +325,31 @@ def test_remembered_mids_are_bounded() -> None:
     assert "mid-00000000" not in server._sent and f"mid-{rs._SENT_MIDS + 4:08d}" in server._sent
 
 
+def test_events_name_the_accepted_mids() -> None:
+    """Вълна 5, 2026-10-11: телефонът забравяше `mid` само по своето балонче;
+    reset страница без него или „/clear“ (няма балонче) оставяха стария `mid`
+    и нарочното повторение се поглъщаше. Сега `events` носи приетите `mid`."""
+    gate = threading.Event()
+    session, _ = _session(Recorder(block=gate))
+    server = rs.RemoteServer(KEY, session, name="pc", clear=lambda: None)
+
+    def call(op: str, **args) -> dict:
+        return server.handle(_client_seal(KEY, _request(op, **args)))[0]
+
+    assert call("send", text="първо", mid="mid-first-01")["ok"]
+    assert call("send", text="второ", mid="mid-busy-001") == {"ok": False, "error": "busy"}
+    gate.set()
+    _wait_idle(session)
+    assert call("send", text="/clear", mid="mid-clear-01")["ok"]
+    mids = call("events", after=0)["mids"]
+    assert mids == ["mid-first-01", "mid-clear-01"], "„busy“ не е прието"
+    for i in range(rs._ACK_MIDS + 3):
+        call("send", text=f"т{i}", mid=f"mid-{i:08d}")
+        _wait_idle(session)
+    mids = call("events", after=0)["mids"]
+    assert len(mids) == rs._ACK_MIDS and mids[-1] == f"mid-{rs._ACK_MIDS + 2:08d}"
+
+
 def test_confirm_is_answered_from_the_phone() -> None:
     session, _ = _session(Recorder(confirm=True))
     session.send("clean")

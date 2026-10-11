@@ -79,6 +79,9 @@ _REPLY_BYTES = 512 * 1024
 # Колко последни `mid` на `send` помним (2026-10-11): повторен опит след
 # изгубен отговор не пуска хода втори път.
 _SENT_MIDS = 256
+# Колко от тях идват с всеки отговор на `events` (`mids`): един телефон има
+# най-много един неизпратен `mid`, а 16 покриват и няколко телефона наведнъж.
+_ACK_MIDS = 16
 _MID = re.compile(r"[A-Za-z0-9_-]{8,64}")
 # Видът на плика {"v":1,"n":…,"c":…} в суровите байтове (преглед 2026-10-11):
 # адрес над спирачката получава 429 веднага, без json.loads и опит за
@@ -691,7 +694,14 @@ class RemoteServer:
                 wait = float(p.get("wait") or 0)
             except (TypeError, ValueError, OverflowError):   # "after": Infinity
                 return {"ok": False, "error": "bad_args"}
-            return {"ok": True, **s.events_after(after, wait)}
+            reply = {"ok": True, **s.events_after(after, wait)}
+            # Последните приети `mid` (вълна 5, 2026-10-11): телефонът по тях
+            # забравя повторения опит, и когато своето балонче не е в
+            # страницата (reset от най-новите, „/clear“ без балонче) — иначе
+            # нарочното повторение със стария `mid` се поглъщаше тук.
+            with self._send_lock:
+                reply["mids"] = list(self._sent)[-_ACK_MIDS:]
+            return reply
         if op == "confirm":
             return {"ok": s.answer(str(p.get("id") or ""), bool(p.get("allow")))}
         if op == "stop":
