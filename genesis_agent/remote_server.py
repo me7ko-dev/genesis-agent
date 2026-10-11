@@ -740,29 +740,59 @@ class _QuietServer(ThreadingHTTPServer):
     връзката — това е нормално, не грешка за печатане в терминала.
 
     Най-много _MAX_CONNECTIONS връзки наведнъж: над тях новата се затваря
-    веднага, вместо да ражда още една нишка (одит 2026-10-09)."""
+    веднага, вместо да ражда още една нишка (одит 2026-10-09). И най-много
+    _MAX_PER_IP от един адрес (одит 2026-10-11): 64 празни връзки от един
+    съсед без ключ заемаха всички места за 30 s и сдвоеният телефон не
+    можеше да влезе, а спирачката не виждаше провал."""
 
     _MAX_CONNECTIONS = 64
+    _MAX_PER_IP = 16
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._slots = threading.BoundedSemaphore(self._MAX_CONNECTIONS)
+        self._per_ip: dict[str, int] = {}
+        self._per_ip_lock = threading.Lock()
+
+    @staticmethod
+    def _ip(client_address: Any) -> str:
+        try:
+            return str(client_address[0])
+        except (TypeError, IndexError):
+            return ""
+
+    def _release(self, client_address: Any) -> None:
+        ip = self._ip(client_address)
+        with self._per_ip_lock:
+            left = self._per_ip.get(ip, 0) - 1
+            if left > 0:
+                self._per_ip[ip] = left
+            else:
+                self._per_ip.pop(ip, None)
+        self._slots.release()
 
     def process_request(self, request: Any, client_address: Any) -> None:
-        if not self._slots.acquire(blocking=False):
+        ip = self._ip(client_address)
+        with self._per_ip_lock:
+            full = self._per_ip.get(ip, 0) >= self._MAX_PER_IP
+            if not full and self._slots.acquire(blocking=False):
+                self._per_ip[ip] = self._per_ip.get(ip, 0) + 1
+            else:
+                full = True
+        if full:
             self.shutdown_request(request)
             return
         try:
             super().process_request(request, client_address)
         except Exception:
-            self._slots.release()
+            self._release(client_address)
             raise
 
     def process_request_thread(self, request: Any, client_address: Any) -> None:
         try:
             super().process_request_thread(request, client_address)
         finally:
-            self._slots.release()
+            self._release(client_address)
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         import sys

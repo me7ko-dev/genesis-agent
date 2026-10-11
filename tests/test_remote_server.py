@@ -377,6 +377,32 @@ def test_deeply_nested_json_is_a_counted_failure_not_a_traceback(live, capsys) -
     assert "Traceback" not in capsys.readouterr().err
 
 
+def test_one_address_cannot_take_every_connection_slot(live) -> None:
+    """Одит 2026-10-11: 64 празни връзки от един адрес без ключ заемаха всички
+    места за 30 s — сдвоеният телефон получаваше „RemoteDisconnected“, а
+    спирачката не виждаше нито един провал."""
+    import http.client
+    import socket
+    base, _, _ = live
+    port = int(base.rsplit(":", 1)[1])
+    try:
+        probe = socket.create_connection(("127.0.0.1", port), source_address=("127.0.0.2", 0))
+        probe.close()
+    except OSError:
+        pytest.skip("тук няма втори loopback адрес")
+    idle = [socket.create_connection(("127.0.0.1", port)) for _ in range(64)]
+    try:
+        time.sleep(0.3)
+        phone = http.client.HTTPConnection("127.0.0.1", port, timeout=5,
+                                           source_address=("127.0.0.2", 0))
+        phone.request("GET", "/api/hello")
+        assert phone.getresponse().status == 200
+        phone.close()
+    finally:
+        for sock in idle:
+            sock.close()
+
+
 def test_the_web_page_falls_back_to_a_landing_page(live) -> None:
     base, _, _ = live
     with urllib.request.urlopen(base + "/", timeout=5) as r:
