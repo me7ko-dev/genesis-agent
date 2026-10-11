@@ -450,6 +450,35 @@ def test_a_non_utf8_file_name_does_not_hide_every_file(env) -> None:
         assert z.namelist() == [shown, "out/result.csv"] and z.read(shown) == b"cp1251"
 
 
+def test_names_that_differ_only_in_invalid_bytes_stay_apart(env) -> None:
+    """Ревю 2026-10-11: \\xee.txt, \\xef.txt и истинско „�.txt“ се показваха
+    еднакво — /files с три еднакви реда, сваляше се само първият, а zip-ът
+    имаше три записа с едно име (при разархивиране оставаше един файл)."""
+    app, _, client = env
+    cl = client()
+    cl.login()
+    chat_id, _ = _chat_with_turn(cl)
+    ws = app.workspace(1, chat_id)
+    for raw, body in ((b"\xee.txt", b"ee"), (b"\xef.txt", b"ef")):
+        try:
+            fd = os.open(os.fsencode(str(ws)) + b"/" + raw, os.O_CREAT | os.O_WRONLY)
+        except (OSError, ValueError):
+            pytest.skip("файловата система тук не приема имена извън UTF-8")
+        os.write(fd, body)
+        os.close(fd)
+    (ws / "�.txt").write_bytes(b"real")
+    want = {"� (2).txt": b"ee", "� (3).txt": b"ef", "�.txt": b"real"}
+    code, data = cl.json("GET", f"/api/chats/{chat_id}/files")
+    assert code == 200 and [f["path"] for f in data["files"]] == [*want, "out/result.csv"]
+    for shown, body in want.items():
+        assert cl.req("GET", f"/api/chats/{chat_id}/files/{quote(shown)}")[::2] == (200, body)
+    code, _, zipped = cl.req("GET", f"/api/chats/{chat_id}/files.zip")
+    assert code == 200
+    with zipfile.ZipFile(io.BytesIO(zipped)) as z:
+        assert z.namelist() == [*want, "out/result.csv"]
+        assert all(z.read(n) == b for n, b in want.items())
+
+
 def test_a_long_file_list_says_it_is_cut_and_the_zip_has_everything(env, monkeypatch) -> None:
     """Одит 2026-10-11: списъкът и zip-ът спираха мълчаливо на 1000 файла —
     при 1500 в out/ result/report.pdf липсваше и от двете, без знак."""
