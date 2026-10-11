@@ -341,8 +341,9 @@ class TestOllamaCloudRotation:
         out = b._call_rotating("https://x", "OLLAMA_API_KEY", "m", [], None, ["k1", "k2"])
         assert out == ("from k2", None)
         assert calls == ["k1", "k2"]
-        assert brain_mod._is_exhausted("key::OLLAMA_API_KEY#1") is True
-        assert brain_mod._is_exhausted("key::OLLAMA_API_KEY#2") is False
+        # 429 спира двойката (ключ, модел), не целия ключ (одит 2026-10-11).
+        assert brain_mod._is_exhausted("key::OLLAMA_API_KEY#1::m") is True
+        assert brain_mod._is_exhausted("key::OLLAMA_API_KEY#2::m") is False
 
     def test_already_cooling_key_is_skipped_without_being_tried(self, monkeypatch) -> None:
         b = self._brain()
@@ -394,10 +395,10 @@ class TestOllamaCloudRotation:
         with pytest.raises(RuntimeError):
             b._call_rotating("https://x", "GROQ_API_KEY", "m", [], None, ["g1"])
 
-        assert brain_mod._is_exhausted("key::GROQ_API_KEY#1") is True
+        assert brain_mod._is_exhausted("key::GROQ_API_KEY#1::m") is True
         # A different provider's first key must be untouched.
-        assert brain_mod._is_exhausted("key::OPENROUTER_API_KEY#1") is False
-        assert brain_mod._is_exhausted("key::OLLAMA_API_KEY#1") is False
+        assert brain_mod._is_exhausted("key::OPENROUTER_API_KEY#1::m") is False
+        assert brain_mod._is_exhausted("key::OLLAMA_API_KEY#1::m") is False
 
 
 class TestNumberedKeys:

@@ -1,0 +1,138 @@
+"""Brain веригата през истинския HTTP път (одит 2026-10-11): всеки тест подменя
+само `_post_with_deadline` (мрежата) и веригата, а ключове, cooldown-и, превод
+на съобщенията и отчетът на разхода минават през истинския код."""
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from genesis_agent import brain
+
+
+class FakeResp:
+    def __init__(self, status: int, body, headers: dict | None = None) -> None:
+        self.status_code = status
+        self._body = body
+        self.headers = headers or {}
+        self.text = body if isinstance(body, str) else json.dumps(body)
+
+    def json(self):
+        return json.loads(self._body) if isinstance(self._body, str) else self._body
+
+
+def ok(content=None, tool_calls=None, finish="stop", usage=None) -> FakeResp:
+    msg: dict = {"role": "assistant", "content": content}
+    if tool_calls:
+        msg["tool_calls"] = tool_calls
+    return FakeResp(200, {"choices": [{"message": msg, "finish_reason": finish}],
+                          "usage": usage or {"prompt_tokens": 10, "completion_tokens": 5}})
+
+
+def chain(*entries) -> list[dict]:
+    return [{"provider": p, "model": m, "size_b": 120, "supports_tools": True} for p, m in entries]
+
+
+_KEY_ENVS = ("GROQ_API_KEY", "NVIDIA_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY",
+             "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION")
+
+
+@pytest.fixture(autouse=True)
+def _clean(monkeypatch, tmp_path):
+    monkeypatch.setattr(brain, "_EXHAUSTED", {})
+    monkeypatch.setattr(brain, "_KEY_429_MODELS", {})
+    monkeypatch.setattr(brain, "ENV_FILES", ())
+    monkeypatch.setattr("genesis_agent.paths.ENV_FILES", ())
+    monkeypatch.setattr(brain, "_local_available", lambda m: False)
+    for base in _KEY_ENVS:
+        monkeypatch.delenv(base, raising=False)
+        for i in range(2, 11):
+            monkeypatch.delenv(f"{base}_{i}", raising=False)
+    # Статистиката на доставчиците не бива да пренарежда фалшивите вериги.
+    monkeypatch.setattr("genesis_agent.provider_stats.deprioritize_flaky", lambda c: c)
+    yield
+
+
+def _route(monkeypatch, handler) -> list:
+    seen: list = []
+
+    def post(url, *, headers, json, timeout):
+        seen.append((json["model"], headers.get("Authorization", "")[-2:]))
+        return handler(json)
+
+    monkeypatch.setattr(brain, "_post_with_deadline", post)
+    return seen
+
+
+# ── F1: няколко ключа (GROQ_API_KEY + _2 + _3) ────────────────────────────────
+
+def test_a_tpm_429_on_one_model_does_not_take_down_every_key_for_every_model(monkeypatch) -> None:
+    monkeypatch.setattr(brain, "_load_chain",
+                        lambda: chain(("groq", "A"), ("groq", "B"), ("nvidia", "C")))
+    for k, v in (("GROQ_API_KEY", "g1"), ("GROQ_API_KEY_2", "g2"), ("GROQ_API_KEY_3", "g3"),
+                 ("NVIDIA_API_KEY", " n")):
+        monkeypatch.setenv(k, v)
+
+    def handler(payload):
+        if payload["model"] == "A":
+            return FakeResp(429, {"error": {"message": "Rate limit reached for model A (TPM)"}})
+        return ok("ok " + payload["model"])
+
+    seen = _route(monkeypatch, handler)
+    r = brain.Brain(use_local=False).complete([{"role": "user", "content": "hi"}])
+    assert r.raw_text == "ok B"
+    assert seen == [("A", "g1"), ("A", "g2"), ("A", "g3"), ("B", "g1")]
+    # Ключовете остават здрави за другите модели.
+    assert not any(brain._is_exhausted(f"key::GROQ_API_KEY#{i}") for i in (1, 2, 3))
+
+
+def test_a_second_models_429_on_the_same_key_still_stops_that_key(monkeypatch) -> None:
+    b = brain.Brain.__new__(brain.Brain)
+    b.timeout = 30
+
+    def fake_http(base_url, key, model, messages, timeout, tools=None, extra=None):
+        raise RuntimeError("HTTP_429: rate limited")
+
+    monkeypatch.setattr(b, "_http", fake_http)
+    for model in ("A", "B"):
+        with pytest.raises(RuntimeError):
+            b._call_rotating("https://x", "GROQ_API_KEY", model, [], None, ["g1", "g2"])
+    assert brain._is_exhausted("key::GROQ_API_KEY#1")
+    assert brain._is_exhausted("key::GROQ_API_KEY#2")
+
+
+def test_a_401_still_stops_the_whole_rotating_key_at_once(monkeypatch) -> None:
+    b = brain.Brain.__new__(brain.Brain)
+    b.timeout = 30
+    calls: list[str] = []
+
+    def fake_http(base_url, key, model, messages, timeout, tools=None, extra=None):
+        calls.append(key)
+        if key == "g1":
+            raise RuntimeError("HTTP_401: invalid key")
+        return "ok", None
+
+    monkeypatch.setattr(b, "_http", fake_http)
+    assert b._call_rotating("https://x", "GROQ_API_KEY", "A", [], None, ["g1", "g2"]) == ("ok", None)
+    assert brain._is_exhausted("key::GROQ_API_KEY#1")
+
+
+def test_a_vertex_429_on_one_model_leaves_the_project_for_another_model(monkeypatch) -> None:
+    from genesis_agent import vertex_auth
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "p1")
+    monkeypatch.setattr(vertex_auth, "auth_available", lambda: True)
+    monkeypatch.setattr(vertex_auth, "token", lambda p: "tok")
+    seen: list[str] = []
+
+    def fake_http(self, base_url, key, model, messages, timeout, tools=None, extra=None):
+        seen.append(model)
+        if model == "A":
+            raise RuntimeError("HTTP_429: RESOURCE_EXHAUSTED")
+        return "ok", None
+
+    monkeypatch.setattr(brain.Brain, "_http", fake_http)
+    b = brain.Brain(use_local=False)
+    with pytest.raises(RuntimeError, match="HTTP_429"):
+        b._call("vertex", "A", [{"role": "user", "content": "x"}])
+    assert b._call("vertex", "B", [{"role": "user", "content": "x"}]) == ("ok", None)
+    assert seen == ["A", "B"]

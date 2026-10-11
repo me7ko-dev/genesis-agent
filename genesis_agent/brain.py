@@ -328,6 +328,27 @@ def _note_key_429(key_id: str, model: str) -> bool:
     _KEY_429_MODELS[key_id] = seen
     return len(seen) >= 2
 _EXHAUST_COOLDOWN = 300  # секунди (5 мин) — колкото типичен OpenRouter free reset
+
+
+def _rotation_cooldown(kid: str, model: str, error: str) -> bool:
+    """Cooldown при въртене на ключове/проекти; True → пробвай следващия.
+
+    Одит 2026-10-11: _call_rotating и _call_vertex спираха ЦЕЛИЯ ключ при
+    първия 429 от който и да е модел. С GROQ_API_KEY + _2 + _3 един TPM 429 на
+    модел A изгаряше и трите ключа, и здравият groq/B (лекият модел) отпадаше
+    за 5 минути без нито една заявка. 429 вече спира само двойката
+    (ключ, модел); ключът спира при 401/402/403 или когато ВТОРИ модел под
+    него върне 429 — същото правило като в _call (_note_key_429)."""
+    if any(f"HTTP_{c}" in error for c in _KEY_DEAD_CODES):
+        _mark_exhausted(kid)
+        return True
+    if "HTTP_429" in error:
+        if _note_key_429(kid, model):
+            _mark_exhausted(kid)
+        else:
+            _mark_exhausted(f"{kid}::{model}")
+        return True
+    return False
 # 410 Gone = доставчикът е спрял модела завинаги (на живо 2026-09-23: NVIDIA
 # openai/gpt-oss-120b). Пет минути cooldown само го отлагат — пропуска се до
 # края на процеса.
@@ -1407,7 +1428,7 @@ class Brain:
         tried_any = False
         for idx, key in enumerate(keys, start=1):
             kid = f"key::{key_env}#{idx}"
-            if _is_exhausted(kid):
+            if _is_exhausted(kid) or _is_exhausted(f"{kid}::{model}"):
                 continue
             tried_any = True
             try:
@@ -1415,8 +1436,7 @@ class Brain:
             except RuntimeError as e:
                 last = str(e)
                 last_err = e
-                if any(f"HTTP_{c}" in last for c in _ROTATE_CODES):
-                    _mark_exhausted(kid)
+                if _rotation_cooldown(kid, model, last):
                     print(f"  [Brain] 🔑 {key_env}#{idx} unavailable ({last[:60]}) → next key")
                     continue
                 raise
@@ -1451,7 +1471,7 @@ class Brain:
         tried_any = False
         for idx, project in enumerate(project_list, start=1):
             kid = f"key::VERTEX#{idx}"
-            if _is_exhausted(kid):
+            if _is_exhausted(kid) or _is_exhausted(f"{kid}::{model}"):
                 continue
             access_token = vertex_auth.token(project)
             if not access_token:
@@ -1463,8 +1483,7 @@ class Brain:
             except RuntimeError as e:
                 last = str(e)
                 last_err = e
-                if any(f"HTTP_{c}" in last for c in _ROTATE_CODES):
-                    _mark_exhausted(kid)
+                if _rotation_cooldown(kid, model, last):
                     print(f"  [Brain] 🔑 vertex/{project} unavailable ({last[:60]}) → next")
                     continue
                 raise
