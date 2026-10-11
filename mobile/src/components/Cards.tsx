@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { todoSummary, type ChatItem } from '../lib/chat';
@@ -8,24 +8,28 @@ import { RichText } from './RichText';
 
 type Item<K extends ChatItem['kind']> = Extract<ChatItem, { kind: K }>;
 
-export function UserBubble({ item }: { item: Item<'user'> }) {
+// Картите са memo: chat.reuseItems пази същия обект за непроменен елемент, и
+// така ново „thinking“ не рисува пак всяка карта и не разбира Markdown-а
+// наново (одит 2026-10-11).
+
+export const UserBubble = memo(function UserBubble({ item }: { item: Item<'user'> }) {
   const theme = useTheme();
   return (
     <View style={[styles.user, { backgroundColor: theme.userBubble }]}>
       <Text selectable style={[styles.userText, { color: theme.userText }]}>{item.text}</Text>
     </View>
   );
-}
+});
 
-export function AssistantMessage({ item }: { item: Item<'assistant'> }) {
+export const AssistantMessage = memo(function AssistantMessage({ item }: { item: Item<'assistant'> }) {
   return (
     <View style={styles.assistant}>
       <RichText text={item.text} />
     </View>
   );
-}
+});
 
-export function ToolCard({ item }: { item: Item<'tool'> }) {
+export const ToolCard = memo(function ToolCard({ item }: { item: Item<'tool'> }) {
   const theme = useTheme();
   const [open, setOpen] = useState(false);
   const first = item.result.split('\n').find((l) => l.trim()) ?? '';
@@ -46,9 +50,9 @@ export function ToolCard({ item }: { item: Item<'tool'> }) {
       ) : null}
     </Pressable>
   );
-}
+});
 
-export function Note({ item }: { item: Item<'note'> }) {
+export const Note = memo(function Note({ item }: { item: Item<'note'> }) {
   const theme = useTheme();
   const color = item.tone === 'error' ? theme.danger
     : item.tone === 'info' || item.tone === 'progress' ? theme.muted : theme.warn;
@@ -65,7 +69,7 @@ export function Note({ item }: { item: Item<'note'> }) {
     return <Text selectable style={[mono, styles.progress, { color }]}>{item.text.trim()}</Text>;
   }
   return <Text selectable style={[styles.note, { color }]}>{icon ? `${icon} ` : ''}{item.text}</Text>;
-}
+});
 
 const TODO_MARK: Record<Todo['status'], string> = { pending: '☐', in_progress: '▶', completed: '☑' };
 
@@ -96,9 +100,11 @@ export function TodoPanel({ todos }: { todos: Todo[] }) {
   );
 }
 
-export function ConfirmCard({ item, onAnswer }: {
+export const ConfirmCard = memo(function ConfirmCard({ item, onAnswer }: {
   item: Item<'confirm'>;
-  onAnswer: (allow: boolean) => Promise<boolean>;
+  /** Стабилна функция (useGenesis.confirm), не нова стрелка на всеки рендер —
+   *  иначе memo не пази картата (2026-10-11). */
+  onAnswer: (id: string, allow: boolean) => Promise<boolean>;
 }) {
   const theme = useTheme();
   // One tap answers: the buttons go away at once, not when the server's
@@ -108,7 +114,7 @@ export function ConfirmCard({ item, onAnswer }: {
   const answer = async (allow: boolean) => {
     setSent(true);
     // Didn't reach the computer (offline) → the buttons come back to retry.
-    if (!(await onAnswer(allow))) setSent(false);
+    if (!(await onAnswer(item.id, allow))) setSent(false);
   };
   return (
     <View style={[styles.confirm, { backgroundColor: theme.surface, borderColor: pending ? theme.warn : theme.border }]}>
@@ -140,7 +146,7 @@ export function ConfirmCard({ item, onAnswer }: {
       )}
     </View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   user: { alignSelf: 'flex-end', maxWidth: '85%', borderRadius: 18, borderBottomRightRadius: 4, paddingHorizontal: 14, paddingVertical: 9 },
