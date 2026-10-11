@@ -133,6 +133,12 @@ def _isolated_operator_settings(monkeypatch, tmp_path):
     home = tmp_path / "genesis_home"
     home.mkdir(exist_ok=True)
     monkeypatch.setattr("genesis_agent.paths.GENESIS_HOME", home)
+    # .env файловете с ключовете (одит 2026-10-11): ENV_FILES се смята при
+    # внасяне от истинската ~/.genesis, така че Brain() и vertex_auth в тест
+    # четяха ключовете и проектите на оператора. brain го внася по име.
+    env_files = (str(tmp_path / "project.env"), str(home / ".env"))
+    monkeypatch.setattr("genesis_agent.paths.ENV_FILES", env_files)
+    monkeypatch.setattr("genesis_agent.brain.ENV_FILES", env_files)
     # Историята на чата: тестове с run_turn пишеха session_*.json и
     # by_workspace.json в истинската ~/.local/share/genesis-agent/history —
     # `genesis -c` после продължаваше тестов разговор (одит 2026-10-09).

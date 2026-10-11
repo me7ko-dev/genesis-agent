@@ -416,3 +416,38 @@ def test_a_plain_history_without_tools_is_sent_unchanged(monkeypatch) -> None:
     plain = [{"role": "system", "content": "sys"}, {"role": "user", "content": "здрасти"}]
     brain.Brain(use_local=False).complete(plain)
     assert sent[0]["messages"] == plain
+
+
+# ── F9: Vertex проектът от ~/.genesis/.env ───────────────────────────────────
+
+def test_a_vertex_project_set_only_in_the_env_file_is_used(monkeypatch, tmp_path) -> None:
+    from genesis_agent import paths, vertex_auth
+    env = tmp_path / ".env"
+    env.write_text("GOOGLE_CLOUD_PROJECT=my-proj\nGOOGLE_CLOUD_PROJECT_2=second\n"
+                   "GOOGLE_CLOUD_LOCATION=europe-west4\n", encoding="utf-8")
+    monkeypatch.setattr(brain, "ENV_FILES", (str(env),))
+    monkeypatch.setattr(paths, "ENV_FILES", (str(env),))
+    monkeypatch.setattr(vertex_auth, "auth_available", lambda: True)
+    monkeypatch.setattr(vertex_auth, "token", lambda p: "tok")
+    assert vertex_auth.projects() == ["my-proj", "second"]
+    assert vertex_auth.location() == "europe-west4"
+    urls: list[str] = []
+
+    def fake_http(self, base_url, key, model, messages, timeout, tools=None, extra=None):
+        urls.append(base_url)
+        return "ok", None
+
+    monkeypatch.setattr(brain.Brain, "_http", fake_http)
+    assert brain.Brain(use_local=False)._call("vertex", "google/gemini-2.5-pro",
+                                              [{"role": "user", "content": "x"}]) == ("ok", None)
+    assert urls == [("https://europe-west4-aiplatform.googleapis.com/v1beta1/projects/my-proj"
+                     "/locations/europe-west4/endpoints/openapi")]
+
+
+def test_an_exported_vertex_project_still_wins_over_the_env_file(monkeypatch, tmp_path) -> None:
+    from genesis_agent import paths, vertex_auth
+    env = tmp_path / ".env"
+    env.write_text("GOOGLE_CLOUD_PROJECT=from-file\n", encoding="utf-8")
+    monkeypatch.setattr(paths, "ENV_FILES", (str(env),))
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "exported")
+    assert vertex_auth.projects() == ["exported"]
