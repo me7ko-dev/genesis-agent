@@ -140,6 +140,55 @@ def _snapshot_filter(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
     return info
 
 
+def _new_checkpoint_path(root: Path) -> tuple[Path, str]:
+    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with _suppress_oserror():
+        os.chmod(CHECKPOINT_DIR, 0o700)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dest = CHECKPOINT_DIR / f"{root.name}-{stamp}.tar.gz"
+    n = 2
+    while dest.exists():   # две снимки в една секунда (напр. преди --revert)
+        dest = CHECKPOINT_DIR / f"{root.name}-{stamp}-{n}.tar.gz"
+        n += 1
+    return dest, stamp
+
+
+def _backup_overwritten(root: Path, cp: Path) -> Path | None:
+    """Снимка САМО на файловете, които връщането към `cp` ще презапише.
+
+    Резерва, когато пълната снимка преди --revert не става (над тавана, OSError):
+    одит 2026-10-11 — тогава `--revert` презаписваше ръчната работа след
+    снимката без никакво копие и пак казваше „✓“. Тези файлове са малко и
+    таванът не важи за тях. None — нищо не би се презаписало."""
+    changed: list[str] = []
+    with tarfile.open(cp, "r:gz") as tar:
+        for member in tar.getmembers():
+            if not member.isfile():
+                continue
+            rel = Path(member.name).as_posix().removeprefix("./")
+            target = root / rel
+            if target.is_symlink() or not target.is_file():
+                continue
+            try:
+                if target.stat().st_size == member.size:
+                    old = tar.extractfile(member)
+                    if old is not None and old.read() == target.read_bytes():
+                        continue
+            except OSError:
+                pass
+            changed.append(rel)
+    if not changed:
+        return None
+    dest, stamp = _new_checkpoint_path(root)
+    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as raw, tarfile.open(fileobj=raw, mode="w:gz") as tar:
+        for rel in changed:
+            tar.add(root / rel, arcname=f"./{rel}", recursive=False)
+    meta = {"project": str(root), "created": stamp, "partial": True, "files": changed}
+    dest.with_suffix(".json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    return dest
+
+
 def create_checkpoint(root: Path) -> Path:
     """Snapshot `root` so every change made afterwards can be undone."""
     root = Path(root).resolve()
@@ -157,15 +206,7 @@ def create_checkpoint(root: Path) -> Path:
         ensure_genesis_home()
     except Exception:
         pass
-    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with _suppress_oserror():
-        os.chmod(CHECKPOINT_DIR, 0o700)
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    dest = CHECKPOINT_DIR / f"{root.name}-{stamp}.tar.gz"
-    n = 2
-    while dest.exists():   # две снимки в една секунда (напр. преди --revert)
-        dest = CHECKPOINT_DIR / f"{root.name}-{stamp}-{n}.tar.gz"
-        n += 1
+    dest, stamp = _new_checkpoint_path(root)
     global _SNAPSHOT_ROOT
     _SNAPSHOT_ROOT = root
     try:
@@ -309,10 +350,15 @@ def restore_checkpoint(root: str | Path, checkpoint: str | Path | None = None) -
     # Каквото е направено след снимката (и от човека) се пази в нова снимка
     # преди връщането: --revert презаписваше и по-късната ръчна работа, без
     # връщане назад (одит 2026-10-09).
+    backup: Path | None
     try:
-        backup: Path | None = create_checkpoint(root)
-    except (RuntimeError, OSError):
-        backup = None
+        backup = create_checkpoint(root)
+    except (RuntimeError, OSError, tarfile.TarError):
+        try:
+            backup = _backup_overwritten(root, cp)
+        except (OSError, tarfile.TarError) as e:
+            return (f"❌ Не мога да запазя текущото състояние ({e}) — нищо не е върнато, "
+                    "за да не се загуби работата след снимката.")
     skipped: list[str] = []
     in_archive: set[str] = set()
     with tarfile.open(cp, "r:gz") as tar:
@@ -358,7 +404,13 @@ def restore_checkpoint(root: str | Path, checkpoint: str | Path | None = None) -
                     tar.extract(member, root)
             except (tarfile.TarError, OSError) as e:
                 skipped.append(f"{rel} ({type(e).__name__})")
-    created = _created_since(root, in_archive)
+    # Частичната резервна снимка (_backup_overwritten) не съдържа целия проект —
+    # всичко извън нея не е „създадено след снимката“.
+    try:
+        partial = bool(json.loads(cp.with_suffix(".json").read_text(encoding="utf-8")).get("partial"))
+    except (OSError, ValueError, AttributeError):
+        partial = False
+    created = [] if partial else _created_since(root, in_archive)
     age = ""
     with _suppress_oserror():
         hours = (time.time() - cp.stat().st_mtime) / 3600

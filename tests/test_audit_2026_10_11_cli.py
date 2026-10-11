@@ -107,6 +107,37 @@ def test_exhausted_chain_after_an_edit_still_gets_a_verdict(proj, monkeypatch):
     assert out.files_touched == ["notes.md"] and out.tests_after is not out.tests_before
 
 
+# ── genesis fix --revert: без резервно копие няма връщане ────────────────────
+
+def _project_over_the_cap_after_snapshot(proj, monkeypatch):
+    (proj / "app.py").write_text("v = 1\n", encoding="utf-8")
+    repo_agent.create_checkpoint(proj)
+    (proj / "app.py").write_text("v = 1\n# два часа ръчна работа\n", encoding="utf-8")
+    (proj / "data.csv").write_bytes(b"x" * 3 * 1024 * 1024)
+    monkeypatch.setattr(repo_agent, "_MAX_SNAPSHOT_MB", 2)
+
+
+def test_revert_over_the_size_cap_still_keeps_the_overwritten_work(proj, monkeypatch):
+    _project_over_the_cap_after_snapshot(proj, monkeypatch)
+    msg = repo_agent.restore_checkpoint(proj)
+    assert (proj / "app.py").read_text(encoding="utf-8") == "v = 1\n"
+    assert "--revert" in msg and "Състоянието отпреди връщането" in msg
+    msg2 = repo_agent.restore_checkpoint(proj)      # връщането се връща
+    assert "ръчна работа" in (proj / "app.py").read_text(encoding="utf-8")
+    assert "създадени след снимката" not in msg2, "частичната снимка не е целият проект"
+
+
+def test_revert_refuses_when_no_backup_can_be_made(proj, monkeypatch):
+    _project_over_the_cap_after_snapshot(proj, monkeypatch)
+
+    def boom(*a):
+        raise OSError("диск пълен")
+    monkeypatch.setattr(repo_agent, "_backup_overwritten", boom)
+    msg = repo_agent.restore_checkpoint(proj)
+    assert msg.startswith("❌") and "нищо не е върнато" in msg
+    assert "ръчна работа" in (proj / "app.py").read_text(encoding="utf-8")
+
+
 # ── genesis fix: подпапка на git хранилище (monorepo) ───────────────────────
 
 def _monorepo(tmp_path):
