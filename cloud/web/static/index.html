@@ -17,24 +17,59 @@
     <button type="submit">Вход</button>
     <p id="login-error" class="error" role="alert"></p>
   </form>
+  <form id="signup-form" class="card" hidden>
+    <h1>Регистрация с покана</h1>
+    <p class="muted">Поканата важи веднъж. Паролата — поне 10 знака.</p>
+    <label>Покана <input name="code" autocomplete="off" required></label>
+    <label>Имейл <input name="email" type="email" autocomplete="username" required></label>
+    <label>Парола <input name="password" type="password" autocomplete="new-password" minlength="10" required></label>
+    <button type="submit">Регистрация</button>
+    <p id="signup-error" class="error" role="alert"></p>
+    <button type="button" id="to-login" class="link">Имам профил — вход</button>
+  </form>
 </section>
 
 <section id="app" hidden>
   <aside>
     <button id="new-chat">+ Нов разговор</button>
     <ul id="chats"></ul>
-    <div class="me"><span id="me"></span> <button id="logout" class="link">Изход</button></div>
+    <div class="me">
+      <span id="me"></span> <span id="balance"></span><br>
+      <button id="account-link" class="link">Сметка</button> · <button id="logout" class="link">Изход</button>
+    </div>
   </aside>
   <main>
-    <div id="log" aria-live="polite"></div>
-    <div id="files" hidden>
-      <h2>Файлове <a id="zip" href="#">свали всички (zip)</a></h2>
-      <ul id="file-list"></ul>
+    <div id="chat-view">
+      <div id="log" aria-live="polite"></div>
+      <div id="files" hidden>
+        <h2>Файлове <a id="zip" href="#">свали всички (zip)</a></h2>
+        <ul id="file-list"></ul>
+      </div>
+      <form id="ask">
+        <textarea id="text" rows="3" maxlength="4000" placeholder="Какво да направя? (Ctrl+Enter праща)" required></textarea>
+        <button type="submit" id="send">Прати</button>
+      </form>
     </div>
-    <form id="ask">
-      <textarea id="text" rows="3" maxlength="4000" placeholder="Какво да направя? (Ctrl+Enter праща)" required></textarea>
-      <button type="submit" id="send">Прати</button>
-    </form>
+    <div id="account" hidden>
+      <h2>Сметка</h2>
+      <p id="paid-note" class="ok" role="status" hidden>Плащането е прието — кредитите идват до минута.</p>
+      <p id="billing-off" class="muted" hidden>Плащането не е включено — задачите са без такса.</p>
+      <div id="billing-on">
+        <p class="big"><span id="acc-balance"></span> кредита</p>
+        <label class="bar">Този месец: <span id="acc-month"></span>
+          <progress id="acc-month-bar" max="1" value="0"></progress></label>
+        <p id="acc-plan" class="muted"></p>
+        <div id="offers"></div>
+        <p id="stripe-off" class="muted" hidden>Зареждането с карта още не е включено — пиши ни.</p>
+      </div>
+      <p class="muted" id="acc-turns"></p>
+      <h3>История</h3>
+      <table id="history">
+        <thead><tr><th>Кога</th><th>Какво</th><th>Кредити</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p id="account-error" class="error" role="alert"></p>
+    </div>
   </main>
 </section>
 </body>

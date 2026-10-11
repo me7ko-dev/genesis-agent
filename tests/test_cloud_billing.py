@@ -1084,3 +1084,53 @@ def test_reconcile_from_the_cli(tmp_path, capsys) -> None:
     assert _cli(tmp_path, "reconcile", "--gateway-usage", str(usage)) == 0
     assert capsys.readouterr().out.split()[-1] == "0"
     assert s.balance(uid) == -(2 * MICRO + 100 * 80)
+
+
+# ── S10: /api/account ────────────────────────────────────────────────────────
+
+def test_credit_formatting() -> None:
+    f = billing.fmt_credits
+    assert (f(1), f(-370_000), f(12_345_678), f(0), f(-1), f(5_000)) == \
+        ("0.00", "-0.37", "12.35", "0.00", "0.00", "0.00")
+    assert f(15_000) == "0.02" and f(25_000) == "0.02"     # банково закръгляне
+    assert billing.parse_credits("12.5") == 12_500_000
+    assert billing.parse_credits("-0.000001") == -1
+
+
+def test_the_account_shows_only_my_rows(paid) -> None:
+    app, _, client = paid
+    app.store.add_entry(2, "admin:bob", "grant", 77 * MICRO, ref="тайна бележка")
+    app.store.add_entry(1, "turn:5", "charge", -370_000, turn_id=5, ref='[{"model": "x"}]')
+    cl = client()
+    cl.login()
+    code, a = cl.json("GET", "/api/account")
+    assert code == 200
+    assert a["email"] == "ana@example.com" and a["billing"] is True and a["stripe"] is False
+    assert a["balance"] == "99.63" and a["balance_micro"] == 100 * MICRO - 370_000
+    assert a["month_spent"] == "0.37" and a["monthly_cap"] == "2000.00"
+    assert a["turns_per_day"] == web.TURNS_PER_DAY and a["turns_today"] == 0
+    assert [(h["kind"], h["credits"], h["turn_id"]) for h in a["history"]] == \
+        [("charge", "-0.37", 5), ("grant", "100.00", None)]
+    raw = json.dumps(a, ensure_ascii=False)
+    assert "77.00" not in raw and "тайна" not in raw and "model" not in raw
+    # пакетите без stripe price не се предлагат (бутонът би дал 400)
+    assert a["packs"] == [{"id": "p5", "credits": 500, "price": "5.00 EUR"}]
+    assert cl.json("GET", "/api/me")[1] == {"email": "ana@example.com", "balance": "99.63"}
+    assert client().req("GET", "/api/account")[0] == 401
+
+
+def test_without_billing_the_account_says_so(plain) -> None:
+    _, client = plain
+    cl = client()
+    cl.login()
+    a = cl.json("GET", "/api/account")[1]
+    assert a["billing"] is False and a["packs"] == [] and a["history"] == []
+    assert cl.json("GET", "/api/me")[1] == {"email": "ana@example.com"}
+
+
+def test_the_page_has_the_account_and_signup_views(plain) -> None:
+    _, client = plain
+    _, _, html = client().req("GET", "/")
+    assert b'id="account"' in html and b'id="signup-form"' in html
+    js = client().req("GET", "/app.js")[2]
+    assert b"/api/account" in js and b"/api/checkout" in js and b".innerHTML" not in js

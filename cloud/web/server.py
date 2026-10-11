@@ -20,7 +20,10 @@
   - по един ход на човек, общо най-много `--workers` контейнера наведнъж;
   - файловете се сваля само като прикачени (никога не се показват в нашия
     произход), без символни връзки (кодът в контейнера е чужд) и само докато
-    в разговора не върви ход.
+    в разговора не върви ход;
+  - етап 3 (2026-10-11): спрян профил няма сесия; таксата е от шлюза, не от
+    контейнера; webhook-ът на Stripe е единственият POST без вход — пази го
+    подписът; админ командите са само в командния ред.
 """
 from __future__ import annotations
 
@@ -232,6 +235,34 @@ class App:
         return (pick("turns_per_day", self.turns_per_day),
                 pick("max_tokens_per_turn", self.max_tokens_per_turn),
                 pick("monthly_cap", self.monthly_cap))
+
+    def account_view(self, user: dict[str, Any]) -> dict[str, Any]:
+        """Сметката на ТОЗИ човек за страницата „Сметка“. Без `ref` (Stripe
+        номера, разбивка по модели) — те са за оператора."""
+        uid = user["id"]
+        account = self.store.account(uid)
+        per_day, max_tokens, cap = self.limits_for(account)
+        balance = self.store.balance(uid)
+        spent = self.store.month_spent(uid)
+        prices = self.prices
+
+        def offers(items: Any) -> list[dict[str, Any]]:
+            # Само купуваемите: без price id бутонът би дал 400.
+            return [{"id": o.id, "credits": o.credits, "price": o.price}
+                    for o in items.values() if o.stripe_price]
+
+        fmt = billing.fmt_credits
+        return {
+            "email": user["email"], "balance": fmt(balance), "balance_micro": balance,
+            "month_spent": fmt(spent), "monthly_cap": fmt(cap),
+            "turns_today": self.store.turns_today(uid), "turns_per_day": per_day,
+            "max_tokens_per_turn": max_tokens, "plan": account["plan"],
+            "billing": prices is not None, "stripe": self.stripe is not None,
+            "packs": offers(prices.packs) if prices else [],
+            "plans": offers(prices.plans) if prices else [],
+            "history": [{"at": e["created"], "kind": e["kind"], "credits": fmt(e["amount"]),
+                         "turn_id": e["turn_id"]} for e in self.store.ledger_entries(uid, 50)],
+        }
 
     def _affordable(self, user_id: int, cap: int, prices: billing.Prices, budget: int) -> int:
         """Колко токена може да плати човекът за следващия ход — или TurnRefused.
@@ -556,7 +587,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         store = self.app.store
         if path == "/api/me":
-            self._json(200, {"email": user["email"]})
+            me = {"email": user["email"]}
+            if self.app.prices is not None:
+                me["balance"] = billing.fmt_credits(store.balance(user["id"]))
+            self._json(200, me)
+        elif path == "/api/account":
+            self._json(200, self.app.account_view(user))
         elif path == "/api/chats":
             self._json(200, {"chats": store.chats(user["id"])})
         elif m := _CHAT.match(path):
