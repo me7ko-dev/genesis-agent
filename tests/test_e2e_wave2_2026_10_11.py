@@ -188,3 +188,20 @@ def test_headless_fails_when_the_answer_insists_on_green_after_red(ws, monkeypat
     out = json.loads(capsys.readouterr().out)
     assert code == 1 and out["ok"] is False
     assert "червено" in (out["error"] or "")
+
+
+# ── F6: отговорът на текстов ASK_USER продължава задачата, не е лек въпрос ──
+
+@pytest.mark.parametrize("native", [False, True], ids=["text-tag", "native"])
+def test_the_answer_to_ask_user_goes_back_to_the_strong_model(ws, monkeypatch, native):
+    from genesis_agent import model_router
+    monkeypatch.delenv("GENESIS_CHAT_ROUTING", raising=False)
+    question = "В какъв формат да е отчетът — CSV или JSON?"
+    first = (("", [_call("ASK_USER", {"question": question}, "q1")]) if native
+             else (f"[ASK_USER: {question}]", None))
+    _script(monkeypatch, [first])
+    ui = _UI()
+    msgs = gta.run_turn(_fresh(), "направи report.py, който пише отчета", ui)
+    assert any(e[0] == "asked" and question in e[1] for e in ui.log)
+    assert model_router.is_light_request("JSON")       # сам по себе си — лек
+    assert model_router.is_light_turn(list(msgs) + [{"role": "user", "content": "JSON"}]) is False
