@@ -258,13 +258,13 @@ class _KillableProc(_FakeProc):
         return -9 if self.killed else 0
 
 
-def test_any_error_in_the_read_loop_kills_and_waits_the_container(monkeypatch, tmp_path) -> None:
+def test_any_error_in_the_read_loop_kills_and_waits_the_container(monkeypatch, tmp_path,
+                                                                   fake_docker) -> None:
     """Ревю 2026-10-11: грешка от on_event (или от какъвто и да е ред) излизаше
     от run_task, finally спираше само наблюдателя и `docker run` оставаше да
     върви без таван. Сега контейнерът се убива (`docker kill <име>`), клиентът
     също, изчаква се — и грешката продължава нагоре."""
     procs: list[_KillableProc] = []
-    killed: list[list[str]] = []
 
     def popen(argv, **kw):
         procs.append(_KillableProc([json.dumps({"kind": "assistant", "text": "x"})]))
@@ -272,14 +272,13 @@ def test_any_error_in_the_read_loop_kills_and_waits_the_container(monkeypatch, t
         return procs[-1]
 
     monkeypatch.setattr(launch.subprocess, "Popen", popen)
-    monkeypatch.setattr(launch.subprocess, "run", lambda argv, **kw: killed.append(argv))
 
     def boom(ev):
         raise KeyboardInterrupt  # BaseException — не само Exception
 
     with pytest.raises(KeyboardInterrupt):
         launch.run_task("задача", tmp_path / "ws", on_event=boom)
-    assert killed == [["docker", "kill", procs[0].name]]
+    assert ["kill", procs[0].name] in fake_docker.calls
     assert procs[0].killed and procs[0].waited
 
 
@@ -321,3 +320,103 @@ def test_an_exhausted_chain_is_a_failed_task_not_a_paid_success(capsys, monkeypa
     assert done["error"].startswith("[Грешка: цялата верига")
     # провален ход не пише в разговора празна реплика
     assert not (tmp_path / task.HISTORY_FILE).exists()
+
+
+# ── всяка задача в своя мрежа (D2/D3, деплой одит 2026-10-11) ────────────────
+
+def _net_calls(fake_docker) -> list[list[str]]:
+    return [c for c in fake_docker.calls if c[0] in ("network", "rm")]
+
+
+def test_each_task_gets_its_own_internal_network_with_only_the_proxy(monkeypatch, tmp_path,
+                                                                     fake_docker) -> None:
+    """Измерено 2026-10-11: в общата genesis-jobs задача на А прочете /work на Б
+    през http.server (по име и по IP). Сега мрежата е на задачата и вътре е
+    само проксито."""
+    argvs: list[list[str]] = []
+
+    def popen(argv, **kw):
+        argvs.append(argv)
+        return _FakeProc([json.dumps({"kind": "done", "ok": True, "tokens": {}})])
+
+    monkeypatch.setattr(launch.subprocess, "Popen", popen)
+    assert launch.run_task("задача", tmp_path / "ws").ok
+    name = argvs[0][argvs[0].index("--name") + 1]
+    net = argvs[0][argvs[0].index("--network") + 1]
+    assert net.startswith(launch.NETWORK_PREFIX) and net != launch.JOBS_NETWORK
+    assert net.removeprefix(launch.NETWORK_PREFIX) == name.removeprefix(launch.TASK_PREFIX)
+    assert _net_calls(fake_docker) == [
+        ["network", "create", "--internal", "--label", launch.LABEL, net],
+        ["network", "connect", net, "genesis-egress"],
+        ["rm", "-f", name],
+        ["network", "disconnect", "-f", net, "genesis-egress"],
+        ["network", "rm", net],
+    ]
+
+
+def test_in_gateway_mode_the_task_network_has_the_gateway_and_no_proxy(monkeypatch, tmp_path,
+                                                                       fake_docker) -> None:
+    """D2: up.sh включваше проксито в genesis-jobs и в режим с шлюз — задачата
+    можеше да отвори CONNECT към openrouter.ai със свой ключ покрай шлюза."""
+    keys = tmp_path / "keys.env"
+    keys.write_text("GATEWAY_SECRET=" + "s" * 40 + "\nGROQ_API_KEY=k\n", encoding="utf-8")
+    g = launch.Gateway.from_keys_file(keys, tmp_path / "usage.jsonl")
+    monkeypatch.setattr(launch.subprocess, "Popen", lambda argv, **kw: _FakeProc(
+        [json.dumps({"kind": "done", "ok": True, "tokens": {}})]))
+    launch.run_task("задача", tmp_path / "ws", gateway=g)
+    connected = [c[3] for c in fake_docker.calls if c[:2] == ["network", "connect"]]
+    assert connected == ["genesis-gateway"]
+
+
+def test_the_task_network_is_removed_even_when_the_read_loop_fails(monkeypatch, tmp_path,
+                                                                   fake_docker) -> None:
+    monkeypatch.setattr(launch.subprocess, "Popen", lambda argv, **kw: _KillableProc(
+        [json.dumps({"kind": "assistant", "text": "x"})]))
+
+    def boom(ev):
+        raise RuntimeError("sqlite е заключена")
+
+    with pytest.raises(RuntimeError):
+        launch.run_task("задача", tmp_path / "ws", on_event=boom)
+    assert fake_docker.calls[-1][:2] == ["network", "rm"]
+
+
+def test_no_network_no_task(monkeypatch, tmp_path, fake_docker) -> None:
+    """Без своя мрежа задачата не тръгва — никога не пада обратно към общата."""
+    fake_docker.answers[("network", "connect")] = (1, "", "No such container: genesis-egress")
+    started: list[object] = []
+    monkeypatch.setattr(launch.subprocess, "Popen", lambda *a, **k: started.append(a))
+    res = launch.run_task("задача", tmp_path / "ws")
+    assert not res.ok and "genesis-egress" in res.error and "up.sh" in res.error
+    assert started == [] and fake_docker.calls[-1][:2] == ["network", "rm"]
+
+
+def test_cleanup_kills_task_containers_and_removes_only_task_networks(fake_docker) -> None:
+    fake_docker.answers[("ps",)] = (0, "abc123\ndef456\n", "")
+    fake_docker.answers[("network", "ls")] = (0, "genesis-job-1a2b\ngenesis-jobs\n", "")
+    fake_docker.answers[("network", "inspect")] = (0, "genesis-gateway ", "")
+    assert launch.cleanup_leftovers() == 2
+    assert ["ps", "-aq", "--filter", "name=^genesis-task-"] in fake_docker.calls
+    assert ["rm", "-f", "abc123", "def456"] in fake_docker.calls
+    assert ["network", "disconnect", "-f", "genesis-job-1a2b", "genesis-gateway"] in fake_docker.calls
+    removed = [c[2] for c in fake_docker.calls if c[:2] == ["network", "rm"]]
+    assert removed == ["genesis-job-1a2b"]      # genesis-jobs остава
+
+
+def test_the_container_stops_on_sigterm_and_on_its_own_deadline(tmp_path) -> None:
+    """D4: python като PID 1 пренебрегва SIGTERM от `docker run` → --init; и
+    втори срок вътре в контейнера, ако уеб процесът умре, без да го убие."""
+    args = _args(tmp_path, limits=launch.Limits(seconds=600))
+    assert "--init" in args and ("--label", launch.LABEL) in _pairs(args)
+    assert ("-e", "GENESIS_TASK_DEADLINE=630") in _pairs(args)
+
+
+def test_the_deadline_inside_the_container_ends_the_process(monkeypatch) -> None:
+    import os
+    import threading
+    hit = threading.Event()
+    monkeypatch.setattr(os, "_exit", lambda code: hit.set() if code == 124 else None)
+    timer = task._arm_deadline("0.05")
+    assert timer is not None and hit.wait(5)
+    assert task._arm_deadline("") is None and task._arm_deadline("x") is None
+    assert task._arm_deadline("0") is None

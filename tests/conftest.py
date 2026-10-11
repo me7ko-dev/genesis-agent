@@ -190,3 +190,31 @@ def _elide_off_like_the_default(monkeypatch):
     for module in (budget, config):
         monkeypatch.setattr(module, "ELIDE_OLD_WRITES", 0)
         monkeypatch.setattr(module, "ELIDE_WRITE_ROUNDS", 6)
+
+
+class FakeDocker:
+    """Записва `docker` командите вместо да ги пуска. `answers` — отговор по
+    префикс на аргументите: {("network", "create"): (1, "", "pool exhausted")}."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+        self.answers: dict[tuple[str, ...], tuple[int, str, str]] = {}
+
+    def __call__(self, *args: str, timeout: float = 60):
+        import subprocess
+        self.calls.append(list(args))
+        code, out, err = next((v for k, v in self.answers.items() if tuple(args[:len(k)]) == k),
+                              (0, "", ""))
+        return subprocess.CompletedProcess(["docker", *args], code, out, err)
+
+
+@pytest.fixture(autouse=True)
+def fake_docker(monkeypatch):
+    """Деплой 2026-10-11: launch.run_task вече създава мрежа за всяка задача, а
+    уеб сървърът при старт убива останали контейнери (`docker rm -f`). На
+    машина с истински Docker (като тази) тестът би спрял задачите на
+    оператора — затова всеки `docker` през launch._docker се записва тук."""
+    from cloud.runner import launch
+    fake = FakeDocker()
+    monkeypatch.setattr(launch, "_docker", fake)
+    return fake

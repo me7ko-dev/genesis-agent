@@ -29,6 +29,7 @@ import json
 import os
 import re
 import secrets
+import signal
 import stat
 import sys
 import threading
@@ -82,7 +83,8 @@ class App:
                  workers: int = 2, limits: launch.Limits | None = None,
                  env_file: str | None = None, runtime: str | None = None,
                  secure_cookie: bool = True, trust_proxy: bool | str = False,
-                 gateway: launch.Gateway | None = None) -> None:
+                 gateway: launch.Gateway | None = None, recover: bool = True,
+                 cleanup: Callable[[], int] | None = None) -> None:
         self.store = store
         self.jobs_dir = jobs_dir
         self.runner = runner
@@ -96,7 +98,29 @@ class App:
         self._failures: dict[str, list[float]] = {}
         self._lock = threading.Lock()
         self._downloading: set[str] = set()
-        store.fail_unfinished("сървърът беше рестартиран по време на задачата")
+        self._cleanup = cleanup or launch.cleanup_leftovers
+        self._stopping = threading.Event()
+        if recover:
+            self.recover()
+
+    # ── старт и спиране ─────────────────────────────────────────────────────
+    def recover(self) -> None:
+        """При старт: контейнерите от предишния процес се убиват, после ходовете
+        им стават „failed“ — в тази последователност, иначе човекът пуска нов
+        ход в папка, в която старият контейнер още пише (деплой одит 2026-10-11:
+        два genesis-task контейнера върху една jobs/1/<чат>). main() го вика
+        ЧАК след като портът е зает — втори `serve`, който пада с „Address
+        already in use“, не пипа ходовете и контейнерите на живия сървър."""
+        self._cleanup()
+        self.store.fail_unfinished("сървърът беше рестартиран по време на задачата")
+
+    def shutdown(self) -> None:
+        """SIGTERM/Ctrl+C: текущите задачи се спират (контейнерите им се убиват),
+        чакащите не тръгват. Без това контейнер оставаше Up без срок."""
+        self._stopping.set()
+        self.pool.shutdown(wait=False, cancel_futures=True)
+        self._cleanup()
+        self.pool.shutdown(wait=True)
 
     # ── вход ────────────────────────────────────────────────────────────────
     def _recent_failures(self, key: str) -> list[float]:
@@ -173,13 +197,21 @@ class App:
         return turn_id
 
     def _run(self, turn_id: int, text: str, workspace: Path) -> None:
+        if self._stopping.is_set():
+            # Ход, тръгнал след shutdown(), би пуснал контейнер след почистването.
+            self.store.finish_turn(turn_id, ok=False, tokens={}, seconds=0.0,
+                                   error="сървърът спря по време на задачата — пусни я пак")
+            return
         self.store.set_status(turn_id, "running")
         try:
             res = self.runner(text, workspace, limits=self.limits,
                               on_event=lambda e: self.store.add_event(turn_id, e),
                               env_file=self.env_file, runtime=self.runtime,
                               gateway=self.gateway)
-            self.store.finish_turn(turn_id, ok=res.ok, error=res.error,
+            error = res.error
+            if not res.ok and self._stopping.is_set():
+                error = "сървърът спря по време на задачата — пусни я пак"
+            self.store.finish_turn(turn_id, ok=res.ok, error=error,
                                    tokens=res.tokens, seconds=res.seconds)
         except Exception as e:
             self.store.finish_turn(turn_id, ok=False, error=f"{type(e).__name__}: {e}",
@@ -623,12 +655,31 @@ def main(argv: list[str] | None = None) -> int:
         gateway = launch.Gateway.from_keys_file(Path(a.env_file), a.gateway_usage)
     app = App(store, a.jobs, workers=a.workers, limits=launch.Limits(seconds=a.seconds),
               env_file=a.env_file, runtime=a.runtime, secure_cookie=not a.insecure_cookie,
-              trust_proxy="cloudflare" if a.trust_cloudflare else a.trust_proxy, gateway=gateway)
-    server = make_server(app, a.host, a.port)
+              trust_proxy="cloudflare" if a.trust_cloudflare else a.trust_proxy, gateway=gateway,
+              recover=False)
+    try:
+        server = make_server(app, a.host, a.port)
+    except OSError as e:
+        # Портът е зает (друг `serve` върви): нищо от неговото не се пипа.
+        print(f"{a.host}:{a.port} не може да се заеме: {e}", file=sys.stderr)
+        app.pool.shutdown(wait=False)
+        return 1
+    app.recover()
+    # systemd спира услугата със SIGTERM; без обработчик процесът умираше
+    # веднага и контейнерите оставаха (деплой одит 2026-10-11).
+    signal.signal(signal.SIGTERM, _interrupt)
     print(f"genesis web: http://{a.host}:{server.server_address[1]}", flush=True)
-    with contextlib.suppress(KeyboardInterrupt):
-        server.serve_forever()
+    try:
+        with contextlib.suppress(KeyboardInterrupt):
+            server.serve_forever()
+    finally:
+        server.server_close()
+        app.shutdown()
     return 0
+
+
+def _interrupt(signum: int, frame: object) -> None:
+    raise KeyboardInterrupt
 
 
 if __name__ == "__main__":
