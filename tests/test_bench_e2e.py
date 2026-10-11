@@ -12,6 +12,7 @@ OpenAI-съвместим доставчик в чужда папка. Тук т
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -54,12 +55,55 @@ def _run(argv: list[str], env: dict[str, str], cwd: Path, timeout: int = 600) ->
                           check=False)
 
 
+def _projects_argv(out: Path) -> list[str]:
+    return [str(ROOT / "scripts" / "bench_projects.py"), "--only", PROJECT, "--runs", "1",
+            "--out", str(out), "--test-python", sys.executable, "--timeout", str(CHAT_TIMEOUT)]
+
+
+def _fix_argv(out: Path) -> list[str]:
+    return [str(ROOT / "scripts" / "bench_fix.py"), "--only", "median", "--out", str(out)]
+
+
+def _both_benches(tmp_path: Path, url: str) -> tuple[subprocess.CompletedProcess, subprocess.CompletedProcess]:
+    """bench_fix и bench_projects едновременно, всеки със свой GENESIS_HOME,
+    GENESIS_DATA_DIR и cwd. Защо (2026-10-11): при отказ всеки чат чака
+    brain._ROUND_PAUSE_S = 8 s преди втория кръг; един след друг двата теста
+    с двата бенча бяха 18.5 s и 17.8 s от 45 s за файла. Изходът отива във
+    файлове, не в тръби — пълна тръба би спряла втория процес, докато чакаме
+    първия. Резултати: tmp_path/fix/out и tmp_path/projects/out."""
+    procs: dict[str, subprocess.Popen] = {}
+    with contextlib.ExitStack() as stack:
+        for name, argv in (("fix", _fix_argv), ("projects", _projects_argv)):
+            base = tmp_path / name
+            base.mkdir()
+            log = stack.enter_context(open(base / "bench.log", "wb"))
+            procs[name] = subprocess.Popen([sys.executable, *argv(base / "out")], cwd=base,
+                                           env=_env(base, url), stdin=subprocess.DEVNULL,
+                                           stdout=log, stderr=subprocess.STDOUT)
+            stack.callback(_kill, procs[name])
+        for proc in procs.values():
+            proc.wait(timeout=600)
+    done = {name: subprocess.CompletedProcess(proc.args, proc.returncode,
+                                              (tmp_path / name / "bench.log").read_text("utf-8", "replace"), "")
+            for name, proc in procs.items()}
+    return done["fix"], done["projects"]
+
+
+def _kill(proc: subprocess.Popen) -> None:
+    # Само при изключение (timeout): иначе процесът вече е приключил.
+    if proc.poll() is None:
+        proc.kill()
+        proc.wait()
+
+
+def _results(tmp_path: Path, name: str) -> dict:
+    return json.loads((tmp_path / name / "out" / "results.json").read_text("utf-8"))["runs"][0]
+
+
 def _bench_projects(tmp_path: Path, script: list[list[dict]]) -> tuple[subprocess.CompletedProcess, dict, list]:
     out = tmp_path / "out"
     with fp.FakeProvider(script) as fake:
-        proc = _run([str(ROOT / "scripts" / "bench_projects.py"), "--only", PROJECT, "--runs", "1",
-                     "--out", str(out), "--test-python", sys.executable,
-                     "--timeout", str(CHAT_TIMEOUT)], _env(tmp_path, fake.url), tmp_path)
+        proc = _run(_projects_argv(out), _env(tmp_path, fake.url), tmp_path)
         requests = list(fake.requests)
     results = json.loads((out / "results.json").read_text("utf-8"))
     return proc, results, requests
@@ -113,8 +157,7 @@ def test_bench_fix_through_the_real_repair_loop(tmp_path):
               [{"name": "WRITE_FILE", "arguments": {"path": "stats.py", "content": fixed}}]]
     out = tmp_path / "fix"
     with fp.FakeProvider(script) as fake:
-        proc = _run([str(ROOT / "scripts" / "bench_fix.py"), "--only", "median", "--out", str(out)],
-                    _env(tmp_path, fake.url), tmp_path)
+        proc = _run(_fix_argv(out), _env(tmp_path, fake.url), tmp_path)
         requests = list(fake.requests)
     detail = proc.stdout[-3000:] + proc.stderr[-2000:]
     # repair() сам пуска теста след записа и спира, щом е зелен.
@@ -130,8 +173,7 @@ def test_bench_fix_a_claimed_but_missing_fix_is_a_failure(tmp_path):
     # Моделът казва „Готово.“, без да пипне нищо: не е поправено, не е infra.
     out = tmp_path / "fix"
     with fp.FakeProvider([]) as fake:
-        proc = _run([str(ROOT / "scripts" / "bench_fix.py"), "--only", "median", "--out", str(out)],
-                    _env(tmp_path, fake.url), tmp_path)
+        proc = _run(_fix_argv(out), _env(tmp_path, fake.url), tmp_path)
     assert proc.returncode == 1, proc.stdout[-3000:] + proc.stderr[-2000:]
     r = json.loads((out / "results.json").read_text("utf-8"))["runs"][0]
     assert not r["fixed"] and not r["infra"], r
@@ -143,32 +185,21 @@ def test_an_empty_answer_is_a_model_failure_in_both_benches(tmp_path):
     # за infra („моделът не отговори“) и проектът изпадаше от сравнението в
     # bench_all — регресия до празни отговори нямаше как да се види
     # (измерено 2026-10-11 с този фалшив доставчик).
-    out = tmp_path / "fix"
     with fp.FakeProvider([], final="") as fake:
-        env = _env(tmp_path, fake.url)
-        fix = _run([str(ROOT / "scripts" / "bench_fix.py"), "--only", "median", "--out", str(out)],
-                   env, tmp_path)
-        projects = _run([str(ROOT / "scripts" / "bench_projects.py"), "--only", PROJECT, "--runs", "1",
-                         "--out", str(tmp_path / "out"), "--test-python", sys.executable,
-                         "--timeout", str(CHAT_TIMEOUT)], env, tmp_path)
-    r = json.loads((out / "results.json").read_text("utf-8"))["runs"][0]
+        fix, projects = _both_benches(tmp_path, fake.url)
+    r = _results(tmp_path, "fix")
     assert not r["fixed"] and not r["infra"], (r, fix.stdout[-2000:])
     assert fix.returncode == 1
-    run = json.loads((tmp_path / "out" / "results.json").read_text("utf-8"))["runs"][0]
-    assert not run["infra"] and run["passed"] < run["total"], run
+    run = _results(tmp_path, "projects")
+    assert not run["infra"] and run["passed"] < run["total"], (run, projects.stdout[-2000:])
     assert projects.returncode == 1
 
 
 def test_a_provider_that_is_down_is_infra_in_both_benches(tmp_path):
     # Обратната страна: нито един таксуван отговор → infra, не грешка на модела.
-    out = tmp_path / "fix"
-    env = _env(tmp_path, "http://127.0.0.1:9")      # нищо не слуша там
-    fix = _run([str(ROOT / "scripts" / "bench_fix.py"), "--only", "median", "--out", str(out)], env, tmp_path)
-    projects = _run([str(ROOT / "scripts" / "bench_projects.py"), "--only", PROJECT, "--runs", "1",
-                     "--out", str(tmp_path / "out"), "--test-python", sys.executable,
-                     "--timeout", str(CHAT_TIMEOUT)], env, tmp_path)
-    assert json.loads((out / "results.json").read_text("utf-8"))["runs"][0]["infra"] is True
-    assert json.loads((tmp_path / "out" / "results.json").read_text("utf-8"))["runs"][0]["infra"] is True
+    fix, projects = _both_benches(tmp_path, "http://127.0.0.1:9")      # нищо не слуша там
+    assert _results(tmp_path, "fix")["infra"] is True, fix.stdout[-2000:]
+    assert _results(tmp_path, "projects")["infra"] is True, projects.stdout[-2000:]
     assert fix.returncode == 1 and projects.returncode == 1
 
 
