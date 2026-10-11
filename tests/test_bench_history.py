@@ -81,3 +81,20 @@ def test_visibility_is_reported_per_request() -> None:
     res = bh.run(files=5, rounds=15, seed=7)
     assert all("files_visible" in r for r in res["per_request"])
     assert 0.0 <= res["files_visible_mean"] <= 1.0
+
+
+def test_zero_files_and_rounds_still_measure(capsys) -> None:
+    """--files 0 --rounds 0 падаше с KeyError: 0 рунда, нито един записан файл."""
+    assert bh.main(["--files", "0", "--rounds", "0"]) == 0
+    assert "1 файла" in capsys.readouterr().out
+
+
+def test_a_cp1251_stdout_does_not_crash_the_last_line(monkeypatch) -> None:
+    """Пренасочен stdout на български Windows: „✓“ сриваше последния ред (2026-10-11)."""
+    import io
+    import sys
+    raw = io.BytesIO()
+    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(raw, encoding="cp1251"))
+    assert bh.main(["--rounds", "6"]) == 0
+    sys.stdout.flush()
+    assert "✓" in raw.getvalue().decode("utf-8")
