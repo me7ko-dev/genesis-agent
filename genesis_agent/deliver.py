@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import fnmatch
+import functools
 import os
 import re
 import subprocess
@@ -68,17 +69,35 @@ _SECRET_CONTENT = re.compile(rb"-----BEGIN [A-Z ]*PRIVATE KEY-----|\"private_key
 _SCAN_BYTES = 256 * 1024
 
 
-def _secret_file(p: Path, rel: str) -> bool:
+@functools.lru_cache(maxsize=1)
+def _api_token_bytes() -> re.Pattern[bytes]:
+    from genesis_agent.notifier import API_TOKEN_RE
+    return re.compile(API_TOKEN_RE.pattern.encode())
+
+
+def _secret_file(p: Path, rel: str) -> str | None:
+    """None — файлът може да замине; иначе как да се впише в „извън архива“."""
     from genesis_agent import sandbox
     if sandbox.sensitive_path_reason(rel) or sandbox.sensitive_path_reason(p.name):
-        return True
+        return rel
     if _EXPORT_SECRETS.search(rel):
-        return True
+        return rel
     try:
         with p.open("rb") as f:
-            return bool(_SECRET_CONTENT.search(f.read(_SCAN_BYTES)))
+            data = f.read(_SCAN_BYTES)
     except OSError:
-        return False
+        return None
+    if _SECRET_CONTENT.search(data):
+        return rel
+    # API ключ, вписан направо в кода или конфига (`GROQ_API_KEY = "gsk_…"`,
+    # `ghp_…` в settings.json, `AKIA…` в aws.cfg). Одит 2026-10-11: и трите
+    # заминаваха към клиента — пазеше се само блок PRIVATE KEY. Казва се къде
+    # е ключът (без самия него), за да го изнесе човекът в .env.
+    m = _api_token_bytes().search(data)
+    if m:
+        line = data.count(b"\n", 0, m.start()) + 1
+        return f"{rel} (съдържа ключ {m.group(0)[:4].decode('ascii', 'replace')}… на ред {line})"
+    return None
 
 
 _RUN_HEADINGS = ("how to run", "running", "usage", "quick start", "quickstart",
@@ -214,8 +233,9 @@ def project_files(root: Path, *, exclude: Path | None = None) -> tuple[list[Path
                 continue
             if name == REPORT_NAME and p.parent == root:
                 continue  # regenerated below; an old one would be stale
-            if _secret_file(p, rel):
-                withheld.append(rel)
+            secret = _secret_file(p, rel)
+            if secret:
+                withheld.append(secret)
                 continue
             if ignored(rel, False):
                 withheld.append(f"{rel} ({_IGNORED})")

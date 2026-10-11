@@ -164,3 +164,21 @@ def test_export_reads_gitignore_without_git(tmp_path):
     keep, withheld = deliver.project_files(root)
     assert sorted(p.relative_to(root).as_posix() for p in keep) == [".gitignore", "manage.py"]
     assert any(w.startswith("uploads/") for w in withheld)
+
+
+def test_export_withholds_keys_hard_coded_in_code_and_config(tmp_path):
+    root = tmp_path / "app"
+    root.mkdir()
+    # Сглобени, за да не стоят цели ключове в изходния код на теста.
+    groq, gh, aws = "gsk_" + "A1b2" * 6, "ghp_" + "Z9y8" * 9, "AKIA" + "QWERTYUIOP123456"
+    (root / "main.py").write_text("print('hi')\n", encoding="utf-8")
+    (root / "config.py").write_text(f'DEBUG = True\nGROQ_API_KEY = "{groq}"\n', encoding="utf-8")
+    (root / "settings.json").write_text(json.dumps({"token": gh}), encoding="utf-8")
+    (root / "aws.cfg").write_text(f"[default]\naws_access_key_id = {aws}\n", encoding="utf-8")
+    d = deliver.export(root, tmp_path / "out.zip", run_tests=False)
+    assert d.files == ["main.py"]
+    shipped = zipfile.ZipFile(d.zip_path).read("app/GENESIS_REPORT.md").decode()
+    for name in ("config.py", "settings.json", "aws.cfg"):
+        assert any(w.startswith(name) for w in d.withheld) and name in shipped, name
+    assert any("config.py" in w and "ред 2" in w and "gsk_" in w for w in d.withheld)
+    assert groq not in shipped, "отчетът не бива да носи самия ключ"
