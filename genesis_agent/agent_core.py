@@ -304,7 +304,10 @@ def _diff_for_write(skills, args: dict) -> str | None:
         if target.is_file():
             old_content = (displayable(decode_text(target.read_bytes())[0])
                            .replace("\r\n", "\n"))
-            if old_content.startswith("\ufeff") and not new_content.startswith("\ufeff"):
+            # exact=true пише без BOM (2026-10-11) — прегледът показва махането.
+            exact = str(args.get("exact", "")).strip().lower() in ("true", "1", "yes")
+            if (old_content.startswith("\ufeff") and not new_content.startswith("\ufeff")
+                    and not exact):
                 new_content = "\ufeff" + new_content
         if old_content == new_content:
             return None

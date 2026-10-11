@@ -383,6 +383,35 @@ def test_the_cycle_guard_warns_then_stops_and_spares_progress():
         assert not g.observe("READ_FILE", {"path": "a"}, f"v{i}").stop
 
 
+def test_polling_a_silent_background_job_is_not_a_cycle():
+    """Ревю 2026-10-11: BG_OUTPUT (върви; нищо ново) ↔ `sleep 10` връщат всеки път
+    същото — кръгът спираше хода на петия извик, докато build-ът си вървеше."""
+    from genesis_agent.repeat_guard import RepeatGuard
+    for poll in (("RUN_CMD", {"command": "sleep 10"}, "[RUN_CMD: sleep 10]  (rc=0)"),
+                 ("RUN_CMD", {"command": "timeout /t 5"}, "[RUN_CMD: timeout /t 5]  (rc=0)")):
+        g = RepeatGuard()
+        for _ in range(6):
+            v = g.observe("BG_OUTPUT", {"id": "bg1"},
+                          "[BG_OUTPUT: bg1] (върви; npm run build)\n(нищо ново)")
+            assert not v.stop and v.note == ""
+            v = g.observe(*poll)
+            assert not v.stop and v.note == ""
+    g = RepeatGuard()    # таг-режим: командата е в заглавието на резултата
+    for _ in range(6):
+        assert not g.observe_text_result("[BG_OUTPUT: bg1] (върви; npm run build)\n(нищо ново)").note
+        assert not g.observe_text_result("[RUN_CMD: sleep 10]  (rc=0)").note
+    # Приключила задача ↔ същият sleep без промяна пак е кръг (sleep не спасява
+    # кръга на READ ↔ EDIT, а свършилата задача няма какво да чака).
+    g = RepeatGuard()
+    done = "[BG_OUTPUT: bg1] (приключи с код 1; npm run build)\n(нищо ново)"
+    seq = [("BG_OUTPUT", {"id": "bg1"}, done), ("READ_FILE", {"path": "a"}, "A")] * 3
+    assert any(g.observe(*c).stop for c in seq)
+    # Еднакво подред си остава въртене и при чакане (поведението от main).
+    g = RepeatGuard()
+    assert [g.observe("RUN_CMD", {"command": "sleep 1"}, "[RUN_CMD: sleep 1]  (rc=0)").stop
+            for _ in range(3)] == [False, False, True]
+
+
 # ── A11: pip и отказана команда не са „пуснат код“ ─────────────────────────
 
 @pytest.mark.parametrize("result", [

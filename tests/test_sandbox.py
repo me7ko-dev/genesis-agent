@@ -714,6 +714,24 @@ def test_a_secret_folder_named_without_a_slash_asks(command) -> None:
 
 
 @pytest.mark.parametrize("command", [
+    "ls .aws-sam/build", "cat .aws-sam/build/template.yaml", "cat .azure-pipelines.yml",
+    "cat azure-pipelines.yml", "ls .ssh-keygen-notes.md",
+])
+def test_project_files_that_only_start_like_a_secret_folder_stay_safe(command) -> None:
+    """Ревю 2026-10-11: `\\.aws\\b` хващаше и `.aws-sam/`, `.azure-pipelines.yml`."""
+    assert sandbox.assess_command(command).level == sandbox.RiskLevel.SAFE
+    assert sandbox.sensitive_path_reason(f"/w/proj/{command.split()[-1]}") is None
+
+
+@pytest.mark.parametrize("command", [
+    "cat ~/.aws/credentials", "ls ~/.aws", "ls ~/.azure", "cat ~/.azure/msal_token_cache.json",
+    'tar cz "~/.ssh"', "cat ~/.aws.bak/credentials", "ls ~/.gnupg; echo",
+])
+def test_the_real_secret_folders_still_ask(command) -> None:
+    assert sandbox.assess_command(command).level == sandbox.RiskLevel.CONFIRM
+
+
+@pytest.mark.parametrize("command", [
     "python3 -c \"import shutil; shutil.rmtree('/x')\"",
     "python -X utf8 -c \"import os; os.remove('a')\"",
     "python3 -u -c \"import subprocess; subprocess.run(['ls'])\"",

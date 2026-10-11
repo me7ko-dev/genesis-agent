@@ -1141,7 +1141,13 @@ def main(argv: list[str] | None = None) -> int:
         if not a.env_file:
             print("--gateway-usage иска --env-file с GATEWAY_SECRET", file=sys.stderr)
             return 2
-        gateway = launch.Gateway.from_keys_file(Path(a.env_file), a.gateway_usage)
+        try:
+            gateway = launch.Gateway.from_keys_file(Path(a.env_file), a.gateway_usage)
+            if prices is not None:
+                billing.check_models(prices, gateway.models)
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 2
     app = App(store, a.jobs, workers=a.workers, limits=launch.Limits(seconds=a.seconds),
               env_file=a.env_file, runtime=a.runtime, secure_cookie=not a.insecure_cookie,
               trust_proxy="cloudflare" if a.trust_cloudflare else a.trust_proxy, gateway=gateway,

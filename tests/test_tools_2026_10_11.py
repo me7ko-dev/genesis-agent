@@ -286,6 +286,39 @@ def test_write_over_bom_file_without_bom_in_content_adds_it_back(ws):
     assert (ws / "a.txt").read_bytes() == b"\xef\xbb\xbfx=2\n"
 
 
+def test_write_can_convert_crlf_to_lf_and_drop_a_bom(ws):
+    """Ревю 2026-10-11: „обърни run.sh в LF“ връщаше ✓, а файлът оставаше CRLF
+    (и BOM-ът се връщаше) — нито WRITE_FILE, нито EDIT_FILE можеха да го сменят."""
+    (ws / "run.sh").write_bytes(b"#!/bin/sh\r\necho hi\r\n")
+    gs._tool_read_file("run.sh")
+    out = gs.dispatch_tool_call("WRITE_FILE", {"path": "run.sh", "content": "#!/bin/sh\necho hi\n",
+                                               "exact": True})
+    assert "✓" in out and (ws / "run.sh").read_bytes() == b"#!/bin/sh\necho hi\n"
+    (ws / "package.json").write_bytes(b"\xef\xbb\xbf{}\n")
+    gs._tool_read_file("package.json")
+    gs.dispatch_tool_call("WRITE_FILE", {"path": "package.json", "content": "{}\n", "exact": "true"})
+    assert (ws / "package.json").read_bytes() == b"{}\n"
+
+
+def test_the_write_preview_shows_a_dropped_bom_only_with_exact(ws):
+    from genesis_agent import agent_core
+    (ws / "a.txt").write_bytes(b"\xef\xbb\xbfx\n")
+    assert agent_core._diff_for_write(gs, {"path": "a.txt", "content": "x\n"}) is None
+    assert agent_core._diff_for_write(gs, {"path": "a.txt", "content": "x\n", "exact": True})
+
+
+def test_write_says_when_it_kept_the_files_crlf_or_bom(ws):
+    """Без `exact` стилът на файла остава, но моделът вече го научава от резултата."""
+    (ws / "run.sh").write_bytes(b"\xef\xbb\xbf#!/bin/sh\r\necho hi\r\n")
+    gs._tool_read_file("run.sh")
+    out = gs.dispatch_tool_call("WRITE_FILE", {"path": "run.sh", "content": "#!/bin/sh\necho hi\n"})
+    assert (ws / "run.sh").read_bytes() == b"\xef\xbb\xbf#!/bin/sh\r\necho hi\r\n"
+    assert "CRLF" in out and "BOM" in out and "exact=true" in out
+    (ws / "a.txt").write_bytes(b"x\n")
+    gs._tool_read_file("a.txt")
+    assert "exact" not in gs.dispatch_tool_call("WRITE_FILE", {"path": "a.txt", "content": "y\n"})
+
+
 def test_write_over_utf16_file_keeps_it_readable(ws):
     (ws / "w.txt").write_bytes("hello\r\nсвят\r\n".encode("utf-16"))
     raw = _read_write(ws, "w.txt", "hello", "здравей")

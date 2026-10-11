@@ -915,9 +915,46 @@ def test_stripe_config_comes_only_from_the_environment() -> None:
 
 def _serve_args(tmp_path: Path) -> list[str]:
     keys = tmp_path / "keys.env"
-    keys.write_text("GATEWAY_SECRET=" + "s" * 40 + "\nGROQ_API_KEY=x\n", encoding="utf-8")
+    keys.write_text("GATEWAY_SECRET=" + "s" * 40 + "\nGROQ_API_KEY=x\nGATEWAY_MODELS=groq/*\n",
+                    encoding="utf-8")
     return ["serve", "--data", str(tmp_path), "--jobs", str(tmp_path / "jobs"), "--billing",
             "--gateway-usage", str(tmp_path / "u.jsonl"), "--env-file", str(keys)]
+
+
+@pytest.mark.parametrize("models", [
+    "",                                   # без списък шлюзът пуска всеки модел
+    "groq/*,openai/o1-pro",               # o1-pro щеше да се таксува по openai/* (12 EUR/1M)
+    "groq/*,openrouter/openai/o1-pro",    # openrouter няма ред — щеше да е default
+    "groq/*,nosuch/x",
+])
+def test_billing_needs_a_priced_model_allowlist(tmp_path, monkeypatch, capsys, models) -> None:
+    """Одит 2026-10-11: шлюзът пускаше всеки модел, а o1-pro се таксуваше
+    по 3/12 EUR на 1M — ~50× под цената на доставчика."""
+    started: list[bool] = []
+    monkeypatch.setattr(web, "make_server", lambda *a, **k: started.append(True))
+    prices = tmp_path / "prices.json"
+    prices.write_text(json.dumps({
+        "default": {"input": 300, "cached": 75, "output": 1200},
+        "models": {"groq/*": {"input": 80, "cached": 40, "output": 100},
+                   "openai/gpt-4o-mini": {"input": 20, "cached": 10, "output": 80}}}),
+        encoding="utf-8")
+    keys = tmp_path / "keys.env"
+    keys.write_text("GATEWAY_SECRET=" + "s" * 40 + "\nGROQ_API_KEY=x\nOPENAI_API_KEY=y\n"
+                    + (f"GATEWAY_MODELS={models}\n" if models else ""), encoding="utf-8")
+    args = ["serve", "--data", str(tmp_path), "--jobs", str(tmp_path / "jobs"), "--billing",
+            "--prices", str(prices), "--gateway-usage", str(tmp_path / "u.jsonl"),
+            "--env-file", str(keys)]
+    assert web.main(args) == 2 and started == []
+    assert "GATEWAY_MODELS" in capsys.readouterr().err
+
+
+def test_priced_models_pass_the_check() -> None:
+    p = billing.parse_prices({"default": {"input": 3, "cached": 1, "output": 9},
+                              "models": {"groq/*": {"input": 1, "cached": 1, "output": 1},
+                                         "openai/gpt-4o-mini": {"input": 1, "cached": 1, "output": 2}}})
+    billing.check_models(p, frozenset({"groq/*", "groq/llama-3.3-70b", "openai/gpt-4o-mini"}))
+    with pytest.raises(ValueError):
+        billing.check_models(p, frozenset({"openai/*"}))
 
 
 def test_serve_refuses_half_a_stripe_setup(tmp_path, monkeypatch, capsys) -> None:
