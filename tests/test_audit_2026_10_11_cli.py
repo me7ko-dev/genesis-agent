@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -299,3 +300,22 @@ def test_fix_options_may_come_before_the_path(fake_repair):
 def test_fix_double_dash_keeps_the_rest_as_the_task(fake_repair):
     assert cli.main(["fix", "./proj", "--", "флагът", "--verbose", "не", "работи"]) == 0
     assert fake_repair["task"] == "флагът --verbose не работи"
+
+
+# ── /команди: кирилско име се изпълнява, а не отива при модела като текст ───
+
+def test_cyrillic_custom_command_runs_and_the_list_matches_the_dispatch(tmp_path):
+    from genesis_agent import chat_commands, paths
+    cmds = Path(paths.GENESIS_HOME) / "commands"
+    cmds.mkdir(parents=True)
+    (cmds / "преглед.md").write_text("Прегледай $ARGUMENTS и кажи грешките.", encoding="utf-8")
+    (cmds / "_draft.md").write_text("Draft $ARGUMENTS", encoding="utf-8")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    res = chat_commands.handle("/преглед app.py", messages=[], workspace=ws,
+                               out=lambda s: None, ask=lambda q: "")
+    assert res is not None and res.prompt == "Прегледай app.py и кажи грешките."
+    listed = chat_commands.custom_commands(ws)
+    assert "преглед" in listed
+    for name in listed:   # каквото се показва в /commands, това и тръгва
+        assert chat_commands._NAME.match(f"/{name} x"), name
