@@ -98,14 +98,18 @@ def _send_telegram(text: str, token: str, chat_id: str) -> bool:
 # `git push https://me:ghp_…@github.com`, `Authorization: Bearer sk-ant-…`
 # заминаваха към Telegram (одит 2026-10-07). Тайните се маскират тук, на
 # изхода, независимо кой вика notify().
+# Познатите формати API ключове — споделени с `genesis export` (deliver.py),
+# който по тях задържа файл с ключ, вписан в кода (одит 2026-10-11).
+API_TOKEN_RE = re.compile(
+    r"\b(sk-[A-Za-z0-9_-]{8,}|sk-ant-[A-Za-z0-9_-]{8,}|ghp_[A-Za-z0-9]{16,}|gh[ousr]_[A-Za-z0-9]{16,}"
+    r"|github_pat_[A-Za-z0-9_]{20,}|hf_[A-Za-z0-9]{16,}|gsk_[A-Za-z0-9]{16,}|nvapi-[A-Za-z0-9_-]{16,}"
+    r"|xox[abpr]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,})")
 _SECRET_PATTERNS = [
     (re.compile(r"(://)[^/\s:@]+:[^/\s@]+@"), r"\1***@"),
     (re.compile(r"(?i)\b(bearer|token|basic)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 ***"),
     (re.compile(r"(?i)\b([A-Z0-9_]*(KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASS|PAT|DSN)[A-Z0-9_]*)\s*[=:]\s*\S+"),
      r"\1=***"),
-    (re.compile(r"\b(sk-[A-Za-z0-9_-]{8,}|sk-ant-[A-Za-z0-9_-]{8,}|ghp_[A-Za-z0-9]{16,}|gh[ousr]_[A-Za-z0-9]{16,}"
-                r"|github_pat_[A-Za-z0-9_]{20,}|hf_[A-Za-z0-9]{16,}|gsk_[A-Za-z0-9]{16,}|nvapi-[A-Za-z0-9_-]{16,}"
-                r"|xox[abpr]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,})"), "***"),
+    (API_TOKEN_RE, "***"),
 ]
 
 

@@ -46,11 +46,13 @@ class TestProgressIsNeverStopped:
             assert v.stop is False
             assert v.repeats == 1
 
-    def test_alternating_tools_never_trip_the_guard(self) -> None:
+    def test_alternating_tools_with_changing_results_never_trip_the_guard(self) -> None:
+        # До 2026-10-11 и еднаквите резултати не спираха тук; кръг без промяна
+        # (A, B, A, B, A) вече спира — виж test_audit_2026_10_11_loop (A10).
         g = RepeatGuard()
-        for _ in range(STOP_AT * 3):
-            assert g.observe("READ_FILE", {"path": "a"}, "A").stop is False
-            assert g.observe("READ_FILE", {"path": "b"}, "B").stop is False
+        for i in range(STOP_AT * 3):
+            assert g.observe("READ_FILE", {"path": "a"}, f"A{i}").stop is False
+            assert g.observe("READ_FILE", {"path": "b"}, f"B{i}").stop is False
 
     def test_a_different_argument_resets_the_streak(self) -> None:
         g = RepeatGuard()

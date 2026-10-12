@@ -17,12 +17,18 @@ the recipient knows to supply their own.
 """
 from __future__ import annotations
 
+import contextlib
+import fnmatch
+import functools
 import os
 import re
+import subprocess
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+
+from genesis_agent.code_edit import read_text_any
 
 REPORT_NAME = "GENESIS_REPORT.md"
 # A project above this is not a deliverable; it is a disk image with code in it.
@@ -48,7 +54,9 @@ def _skip_dir(parent: Path, name: str, depth: int) -> bool:
     return ((here / "pyvenv.cfg").is_file() or (here / "CACHEDIR.TAG").is_file()
             or (name == "target" and (parent / "Cargo.toml").is_file()))
 _SKIP_SUFFIXES = {".pyc", ".pyo"}
-_SKIP_NAMES = {".DS_Store", "Thumbs.db"}
+# `.git` като ФАЙЛ е указателят на submodule (`gitdir: ../.git/modules/…`) —
+# пътят е от машината на оператора и у клиента не води наникъде (2026-10-11).
+_SKIP_NAMES = {".DS_Store", "Thumbs.db", ".git"}
 
 # Тайни, които образецът на sandbox-а не познава (той пази команди, не
 # предаване). Одит 2026-10-07: `.envrc`, `.streamlit/secrets.toml`,
@@ -65,17 +73,244 @@ _SECRET_CONTENT = re.compile(rb"-----BEGIN [A-Z ]*PRIVATE KEY-----|\"private_key
 _SCAN_BYTES = 256 * 1024
 
 
-def _secret_file(p: Path, rel: str) -> bool:
+@functools.lru_cache(maxsize=1)
+def _api_token_bytes() -> re.Pattern[bytes]:
+    from genesis_agent.notifier import API_TOKEN_RE
+    return re.compile(API_TOKEN_RE.pattern.encode())
+
+
+# Образецът от notifier.py е за маскиране, където да хване повече не вреди;
+# тук хванатото изпада от архива. Преглед 2026-10-11: README с
+# `sk-your-api-key-here`, .env.example с `sk-your-key-here`, index.html и CSS
+# със SpinKit класове (`sk-fading-circle`, `sk-circle12`) и Firebase web
+# конфиг (`apiKey: "AIza…"`, публичен по замисъл) — всички задържани. Истински
+# ключ е случаен низ: има цифра, `sk-` ключът има и главна буква и поне 20
+# знака след `sk-`, и няма думи-образци.
+_PLACEHOLDER_WORDS = (b"your", b"here", b"example", b"xxxx", b"placeholder", b"dummy",
+                      b"changeme", b"replace", b"insert", b"redacted", b"fake")
+
+
+def _real_key(tok: bytes, data: bytes, at: int) -> bool:
+    low = tok.lower()
+    if any(w in low for w in _PLACEHOLDER_WORDS) or not re.search(rb"[0-9]", tok):
+        return False
+    if tok.startswith(b"sk-"):
+        return len(tok) >= 23 and re.search(rb"[A-Z]", tok) is not None
+    if tok.startswith(b"AIza"):
+        return not _firebase_web_key(data, at)
+    return True
+
+
+# Точните форми на ключовете по доставчик — втори път до горния, а не вместо
+# него: файлът се задържа, ако който и да е от двата намери ключ. Одит
+# 2026-10-11: горното правило иска цифра (и главна буква за `sk-`), а истински
+# ключове без такива заминаваха към клиента — DeepSeek `sk-<32 hex>`,
+# OpenRouter `sk-or-v1-<64 hex>` (доставчик на самия Genesis), Stripe
+# `sk_live_`/`rk_live_`, Cerebras `csk-`, всеки Hugging Face `hf_` (34 букви,
+# цифра няма), AWS `AKIA` без цифра. Формата е толкова тясна, че цифра не
+# трябва; образците се познават по думите в тях.
+_KEY_SHAPES = re.compile(
+    rb"(?<![A-Za-z0-9_-])(?:"
+    rb"sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{40,}"
+    rb"|sk-ant-(?:api|admin)\d\d-[A-Za-z0-9_-]{80,}"
+    rb"|sk-or-v1-[0-9a-f]{64}"
+    rb"|sk-[A-Za-z0-9]{48}"
+    rb"|sk-[0-9a-f]{32}"
+    rb"|csk-[a-z0-9]{40,}"
+    rb"|gsk_[A-Za-z0-9]{52}"
+    rb"|AIza[0-9A-Za-z_-]{35}"
+    rb"|gh[pousr]_[A-Za-z0-9]{36}"
+    rb"|github_pat_[A-Za-z0-9_]{82}"
+    rb"|[sr]k_live_[A-Za-z0-9]{24,}"
+    rb"|(?:AKIA|ASIA)[0-9A-Z]{16}"
+    rb"|nvapi-[A-Za-z0-9_-]{64}"
+    rb"|hf_[A-Za-z]{34}"
+    rb")(?![A-Za-z0-9_-])")
+# Образец: думи-образци навсякъде, `your`/`here`/`fake`/`key` като отделна част
+# (`sk-your-api-key-here`), или 6 еднакви знака подред (`AIzaSyXXXXXX…`,
+# `ghp_xxxxxx…`). В случаен ключ последното е ~1 на 10^4 и по-рядко.
+_PLACEHOLDER_RE = re.compile(
+    rb"(?i:example|placeholder|changeme|redacted|replace|insert|dummy)"
+    rb"|(?i:(?:^|[-_])(?:your|here|fake|key)(?:[-_]|$))"
+    rb"|(.)\1{5}")
+
+
+def _shaped_key(m: re.Match[bytes], data: bytes) -> bool:
+    tok = m.group(0)
+    if _PLACEHOLDER_RE.search(tok):
+        return False
+    return not (tok.startswith(b"AIza") and _firebase_web_key(data, m.start()))
+
+
+# Firebase web конфигът е публичен по замисъл, но изключението важи само за
+# него, не за целия файл. Одит 2026-10-11: `authDomain` където и да е във
+# файла (дори в коментар) пускаше всеки `AIza…` в него — и Gemini ключ до
+# firebaseConfig заминаваше към клиента. Сега ключът е публичен, само ако е
+# стойност на поле `apiKey` и най-близката обхващаща скоба — балансирана
+# `{…}` или `(…)`, така че `${env}` и FlutterFire `FirebaseOptions(...)` не я
+# объркват — съдържа поле на Firebase.
+_FIREBASE_FIELD_RE = re.compile(rb"authDomain|messagingSenderId|firebaseapp\.com")
+_APIKEY_FIELD_RE = re.compile(rb"""(?<![A-Za-z0-9_$])["']?apiKey["']?\s*[:=]\s*["'`]$""")
+
+
+def _enclosing(data: bytes, at: int) -> bytes:
+    """Текстът на най-близката незатворена `{…}`/`(…)` около позиция `at`."""
+    depth, i = 0, at - 1
+    while i >= 0:
+        c = data[i]
+        if c in b"})":
+            depth += 1
+        elif c in b"{(":
+            if depth == 0:
+                break
+            depth -= 1
+        i -= 1
+    if i < 0:
+        return b""
+    depth, j = 0, at
+    while j < len(data):
+        c = data[j]
+        if c in b"{(":
+            depth += 1
+        elif c in b"})":
+            if depth == 0:
+                break
+            depth -= 1
+        j += 1
+    return data[i:j + 1]
+
+
+def _firebase_web_key(data: bytes, at: int) -> bool:
+    line_start = data.rfind(b"\n", 0, at) + 1
+    return (_APIKEY_FIELD_RE.search(data[line_start:at]) is not None
+            and _FIREBASE_FIELD_RE.search(_enclosing(data, at)) is not None)
+
+
+def _find_key(data: bytes) -> re.Match[bytes] | None:
+    """Първият истински ключ в `data` по който и да е от двата пътя."""
+    found = [m for m in (
+        next((m for m in _KEY_SHAPES.finditer(data) if _shaped_key(m, data)), None),
+        next((m for m in _api_token_bytes().finditer(data)
+              if _real_key(m.group(0), data, m.start())), None),
+    ) if m is not None]
+    return min(found, key=lambda m: m.start()) if found else None
+
+
+# Последната част от името на променлива (флаг, параметър в адрес), която
+# носи тайна — цели части (`DB_PASSWORD`, `GITHUB_TOKEN`, `APIKEY`), не
+# поднизове: `PATH` и `COMPASS_URL` не са тайни. Ревю 2026-10-11: всяка част
+# от името спираше целия .mcp.json — `GOOGLE_APPLICATION_CREDENTIALS` (път),
+# `SSH_AUTH_SOCK`, `AUTH_MODE`, `TOKEN_URL`; затова само последната, а
+# CREDENTIALS вън — вписан JSON ключ хваща _SECRET_CONTENT.
+_SECRET_ENV_LAST = frozenset({"KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASS", "PAT",
+                              "DSN", "AUTH"})
+
+
+def _secret_env_name(name: str) -> bool:
+    parts = [p for p in re.split(r"[^A-Za-z0-9]+", name.upper()) if p]
+    return bool(parts) and (parts[-1] in _SECRET_ENV_LAST
+                            or parts[-1].endswith(("KEY", "TOKEN", "SECRET")))
+
+
+def _mcp_literal(value: object) -> str:
+    """Каквото mcp_client ще прати буквално: `${VAR}` е препратка, но
+    `${VAR:-тайна}` праща тайната, ако VAR липсва (mcp_client._expand) — ревю
+    2026-10-11. Цялата стойност `$API_KEY` и самото `Bearer` не са тайни."""
+    from genesis_agent.mcp_client import _VAR
+    text = _VAR.sub(lambda m: m.group(2) or "", str(value or "")).strip()
+    if re.fullmatch(r"\$[A-Z_][A-Z0-9_]*", text) or text.lower() in ("bearer", "basic", "token"):
+        return ""
+    return text
+
+
+def _url_secret(text: str) -> bool:
+    """Парола в адреса (`postgres://admin:S3cr3t@db`) или `?api_key=…`."""
+    from urllib.parse import parse_qsl, urlsplit
+    if "://" not in text:
+        return False
+    try:
+        parts = urlsplit(text)
+        password = parts.password
+    except ValueError:
+        return False
+    return bool(password) or any(v and _secret_env_name(k) for k, v in parse_qsl(parts.query))
+
+
+def _mcp_literal_secret(data: bytes) -> str | None:
+    """`сървър.headers.Authorization` / `сървър.env.DB_PASSWORD` / `сървър.args`
+    / `сървър.url`, ако .mcp.json на проекта носи самата тайна, а не `${ПРОМЕНЛИВА}`.
+
+    E2e 2026-10-11: MCP сървърите на проекта (mcp_client) се описват в
+    .mcp.json, а export го пращаше на клиента с `"Authorization": "Bearer
+    9f8e…"` и `"DB_PASSWORD": "Tr0ub4dor&3xyz"` — ключовете нямат формата,
+    която _find_key познава. Ревю 2026-10-11: и парола в DATABASE_URL, токен в
+    args (`--token ghp_…`) и в адреса (`?api_key=…`) минаваха."""
+    import json
+
+    from genesis_agent.code_edit import decode_text
+    from genesis_agent.mcp_client import _static_auth
+    try:
+        config = json.loads(decode_text(data)[0].lstrip("\ufeff"))
+    except ValueError:
+        return None
+    servers = config.get("mcpServers") if isinstance(config, dict) else None
+    if not isinstance(servers, dict):
+        return None
+    for name, server in servers.items():
+        if not isinstance(server, dict):
+            continue
+        for field_name, is_secret in (("headers", lambda k: _static_auth({k: ""})),
+                                      ("env", _secret_env_name)):
+            table = server.get(field_name)
+            if not isinstance(table, dict):
+                continue
+            for key, value in table.items():
+                literal = _mcp_literal(value)
+                if literal and (is_secret(str(key)) or _url_secret(literal)):
+                    return f"{name}.{field_name}.{key}"
+        if _url_secret(_mcp_literal(server.get("url"))):
+            return f"{name}.url"
+        args = server.get("args")
+        args = [str(a) for a in args] if isinstance(args, list) else []
+        for i, arg in enumerate(args):
+            # `--token X` и `--token=X`; `--token-file X` не е тайна.
+            flag, eq, value = arg.partition("=")
+            if not eq:
+                value = args[i + 1] if i + 1 < len(args) else ""
+                value = "" if value.startswith("-") else value
+            if (flag.startswith("-") and _secret_env_name(flag) and _mcp_literal(value)) \
+                    or _url_secret(_mcp_literal(arg)):
+                return f"{name}.args"
+    return None
+
+
+def _secret_file(p: Path, rel: str) -> str | None:
+    """None — файлът може да замине; иначе как да се впише в „извън архива“."""
     from genesis_agent import sandbox
     if sandbox.sensitive_path_reason(rel) or sandbox.sensitive_path_reason(p.name):
-        return True
+        return rel
     if _EXPORT_SECRETS.search(rel):
-        return True
+        return rel
     try:
         with p.open("rb") as f:
-            return bool(_SECRET_CONTENT.search(f.read(_SCAN_BYTES)))
+            data = f.read(_SCAN_BYTES)
     except OSError:
-        return False
+        return None
+    if _SECRET_CONTENT.search(data):
+        return rel
+    if p.name.lower() in (".mcp.json", "mcp.json"):
+        where = _mcp_literal_secret(data)
+        if where:
+            return f"{rel} (вписан ключ в {where} — сложи ${{ПРОМЕНЛИВА}} вместо него)"
+    # API ключ, вписан направо в кода или конфига (`GROQ_API_KEY = "gsk_…"`,
+    # `ghp_…` в settings.json, `AKIA…` в aws.cfg). Одит 2026-10-11: и трите
+    # заминаваха към клиента — пазеше се само блок PRIVATE KEY. Казва се къде
+    # е ключът (без самия него), за да го изнесе човекът в .env.
+    m = _find_key(data)
+    if m:
+        line = data.count(b"\n", 0, m.start()) + 1
+        return f"{rel} (съдържа ключ {m.group(0)[:4].decode('ascii', 'replace')}… на ред {line})"
+    return None
 
 
 _RUN_HEADINGS = ("how to run", "running", "usage", "quick start", "quickstart",
@@ -95,22 +330,144 @@ class Delivery:
 
 # ── Files ────────────────────────────────────────────────────────────────────
 
+_IGNORED = "игнориран от .gitignore"
+
+
+def _git_ls(root: Path) -> list[str] | None:
+    """`git ls-files -co --exclude-standard` в `root`; None — git отказа или липсва.
+    `core.fsmonitor=false`: вложеното хранилище е писано от модела, а
+    fsmonitor в неговия .git/config е команда, която git би пуснал."""
+    try:
+        proc = subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", str(root),
+                               "ls-files", "-co", "--exclude-standard", "-z"],
+                              capture_output=True, timeout=30, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return [e for e in proc.stdout.decode("utf-8", "replace").split("\0") if e]
+
+
+# Колко нива вложени хранилища се обхождат (submodule в submodule…).
+_NESTED_REPO_DEPTH = 8
+
+
+def _git_kept(root: Path) -> tuple[set[str], tuple[str, ...]] | None:
+    """Файловете, които git би запазил (следени + неследени неигнорирани),
+    спрямо `root`, и папките, приети цели. None — проектът не е в git или
+    git липсва."""
+    entries = _git_ls(root)
+    if not entries:
+        # Папка, която обхващащо хранилище игнорира цялата (dotfiles репо в
+        # $HOME с `*` в .gitignore): git не казва нищо за проекта — тогава
+        # решава собственият му .gitignore, а не „всичко е игнорирано“.
+        return None
+    return _kept_from(root, entries, 0)
+
+
+def _kept_from(root: Path, entries: list[str], depth: int) -> tuple[set[str], tuple[str, ...]]:
+    # Вложено хранилище git изрежда като папка: комитнато (gitlink/submodule)
+    # — `lib`, неследено — `sub/`. Преглед 2026-10-11: то не влизаше в
+    # приетите папки и цялото изпадаше като „игнорирано“. Одит 2026-10-11:
+    # прието цяло, то носеше и игнорираните си server.log и db.sqlite3 — затова
+    # вътре решава собственият му git. Цяло остава само ако git там откаже
+    # (None); празен списък значи „нищо за пазене“, не „пази всичко“.
+    files = {e for e in entries if not e.endswith("/") and not (root / e).is_dir()}
+    whole: list[str] = []
+    for entry in sorted(set(entries) - files):
+        d = entry.rstrip("/")
+        inner = (_git_ls(root / d) if depth < _NESTED_REPO_DEPTH and (root / d / ".git").exists()
+                 else None)
+        if inner is None:
+            whole.append(d + "/")
+            continue
+        sub_files, sub_whole = _kept_from(root / d, inner, depth + 1)
+        files.update(f"{d}/{f}" for f in sub_files)
+        whole.extend(f"{d}/{w}" for w in sub_whole)
+    return files, tuple(whole)
+
+
+def _gitignore_rules(root: Path) -> list[tuple[str, bool, bool]]:
+    """Минимален прочит на `.gitignore` в корена за проект без git:
+    (образец, само папка, закотвен). Отрицания (`!`) не се поддържат —
+    така се задържа повече, не по-малко."""
+    try:
+        text = (root / ".gitignore").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    rules = []
+    for line in text.splitlines():
+        pat = line.strip()
+        if not pat or pat.startswith(("#", "!")):
+            continue
+        dir_only = pat.endswith("/")
+        pat = pat.rstrip("/")
+        anchored = "/" in pat
+        pat = pat.lstrip("/")
+        if pat:
+            rules.append((pat, dir_only, anchored))
+    return rules
+
+
+def _matches_gitignore(rules: list[tuple[str, bool, bool]], rel: str, is_dir: bool) -> bool:
+    name = rel.rsplit("/", 1)[-1]
+    for pat, dir_only, anchored in rules:
+        if dir_only and not is_dir:
+            continue
+        # `**/` в git пасва и на нула папки (`**/*.log` хваща и `app.log` в
+        # корена, `a/**/b` — и `a/b`); fnmatch иска поне една `/`. Преглед
+        # 2026-10-11: логът в корена оставаше в архива без git.
+        pats = {pat, pat.replace("/**/", "/")}
+        if pat.startswith("**/"):
+            pats.add(pat[3:])
+        if any(fnmatch.fnmatch(rel if anchored else name, p) for p in pats):
+            return True
+    return False
+
+
 def project_files(root: Path, *, exclude: Path | None = None) -> tuple[list[Path], list[str]]:
     """(files to ship, secret files withheld) — both relative-sortable."""
     keep: list[Path] = []
     withheld: list[str] = []
+    # Каквото проектът сам не пуска в git — локалната база, логовете, качените
+    # от потребителите файлове, .coverage — не е за клиента. Одит 2026-10-11:
+    # db.sqlite3 с ЕГН, server.log с токени и uploads/passport_scan.jpg
+    # влизаха в архива, а отчетът мълчеше за тях.
+    git = _git_kept(root)
+    rules = [] if git is not None else _gitignore_rules(root)
+    kept_dirs: set[str] = set()
+    if git is not None:
+        # И родителите на приетите цели папки: submodule в `vendor/u` иначе
+        # изпадаше цял като „vendor/ (игнориран)“ (одит 2026-10-11).
+        for f in (*git[0], *git[1]):
+            parts = f.rstrip("/").split("/")[:-1]
+            kept_dirs.update("/".join(parts[:i]) for i in range(1, len(parts) + 1))
+
+    def ignored(rel: str, is_dir: bool) -> bool:
+        if git is None:
+            return bool(rules) and _matches_gitignore(rules, rel, is_dir)
+        if any(rel.startswith(d) or rel + "/" == d for d in git[1]):
+            return False
+        return rel not in (kept_dirs if is_dir else git[0])
+
     for dirpath, dirnames, filenames in os.walk(root):
         depth = len(Path(dirpath).relative_to(root).parts)
-        kept_dirs = []
+        kept_dirs_here = []
         for d in sorted(dirnames):
             if _skip_dir(Path(dirpath), d, depth):
+                continue
+            rel_d = (Path(dirpath) / d).relative_to(root).as_posix()
+            if ignored(rel_d, True):
+                with contextlib.suppress(OSError):
+                    if any(os.scandir(Path(dirpath) / d)):
+                        withheld.append(f"{rel_d}/ ({_IGNORED})")
                 continue
             if (Path(dirpath) / d).is_symlink():
                 withheld.append(f"{(Path(dirpath) / d).relative_to(root).as_posix()}/ "
                                 "(символна връзка — не е включена)")
                 continue
-            kept_dirs.append(d)
-        dirnames[:] = kept_dirs
+            kept_dirs_here.append(d)
+        dirnames[:] = kept_dirs_here
         for name in sorted(filenames):
             p = Path(dirpath) / name
             if name in _SKIP_NAMES or p.suffix in _SKIP_SUFFIXES:
@@ -130,8 +487,12 @@ def project_files(root: Path, *, exclude: Path | None = None) -> tuple[list[Path
                 continue
             if name == REPORT_NAME and p.parent == root:
                 continue  # regenerated below; an old one would be stale
-            if _secret_file(p, rel):
-                withheld.append(rel)
+            secret = _secret_file(p, rel)
+            if secret:
+                withheld.append(secret)
+                continue
+            if ignored(rel, False):
+                withheld.append(f"{rel} ({_IGNORED})")
                 continue
             keep.append(p)
     return keep, withheld
@@ -140,6 +501,7 @@ def project_files(root: Path, *, exclude: Path | None = None) -> tuple[list[Path
 # ── README ───────────────────────────────────────────────────────────────────
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+_FENCE = re.compile(r"^\s*(```|~~~)")   # същото като в mentions.py
 
 
 def readme_sections(root: Path) -> dict[str, str]:
@@ -148,15 +510,25 @@ def readme_sections(root: Path) -> dict[str, str]:
         p = root / name
         if p.is_file():
             try:
-                text = p.read_text(encoding="utf-8", errors="replace")
+                text = read_text_any(p)
             except OSError:
                 return {}
             break
     else:
         return {}
     lines = text.splitlines()
-    heads = [(i, len(m.group(1)), m.group(2).strip().lower())
-             for i, m in ((i, _HEADING.match(ln)) for i, ln in enumerate(lines)) if m]
+    # `# install deps` в ```bash блок не е заглавие (одит 2026-10-11): иначе
+    # „Как се пуска“ в отчета ставаше само „```bash“ — незатворена ограда,
+    # която поглъщаше останалото, а самите команди липсваха.
+    heads: list[tuple[int, int, str]] = []
+    fenced = False
+    for i, ln in enumerate(lines):
+        if _FENCE.match(ln):
+            fenced = not fenced
+            continue
+        m = None if fenced else _HEADING.match(ln)
+        if m:
+            heads.append((i, len(m.group(1)), m.group(2).strip().lower()))
     out: dict[str, str] = {}
     for k, (i, level, title) in enumerate(heads):
         # Тялото стига до следващото заглавие на същото или по-високо ниво —
@@ -186,7 +558,7 @@ def _guess_run(root: Path, files: list[str]) -> list[str]:
         steps.append("npm install")
         try:
             import json
-            scripts = json.loads((root / "package.json").read_text(encoding="utf-8")).get("scripts", {})
+            scripts = json.loads(read_text_any(root / "package.json")).get("scripts", {})
         except (OSError, ValueError, AttributeError):
             scripts = {}
         for s in ("start", "dev"):
@@ -213,7 +585,7 @@ def _guess_run(root: Path, files: list[str]) -> list[str]:
 
 def _read(p: Path) -> str:
     try:
-        return p.read_text(encoding="utf-8", errors="replace")
+        return read_text_any(p)
     except OSError:
         return ""
 
@@ -222,7 +594,7 @@ def _dependencies(root: Path, files: list[str]) -> list[str]:
     names = set(files)
     if "requirements.txt" in names:
         try:
-            lines = (root / "requirements.txt").read_text(encoding="utf-8", errors="replace").splitlines()
+            lines = read_text_any(root / "requirements.txt").splitlines()
         except OSError:
             return []
         return [ln.strip() for ln in lines if ln.strip() and not ln.lstrip().startswith(("#", "-"))]
@@ -232,14 +604,14 @@ def _dependencies(root: Path, files: list[str]) -> list[str]:
         except ImportError:
             return []
         try:
-            data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+            data = tomllib.loads(read_text_any(root / "pyproject.toml"))
         except (OSError, ValueError):
             return []
         return [str(d) for d in data.get("project", {}).get("dependencies", [])]
     if "package.json" in names:
         try:
             import json
-            data = json.loads((root / "package.json").read_text(encoding="utf-8"))
+            data = json.loads(read_text_any(root / "package.json"))
         except (OSError, ValueError):
             return []
         deps = data.get("dependencies", {}) if isinstance(data, dict) else {}
@@ -401,7 +773,8 @@ def build_report(root: Path, files: list[Path], withheld: list[str], *,
 
     if withheld:
         lines += ["## Нарочно извън архива", "",
-                  ("Файлове с ключове или тайни (получателят слага своите), символни връзки "
+                  ("Файлове с ключове или тайни (получателят слага своите), игнорираното "
+                   "от .gitignore (локални данни, логове, качени файлове), символни връзки "
                    "и имена, които не стават в zip:"), ""]
         lines += [f"- `{w}`" for w in withheld]
         lines.append("")

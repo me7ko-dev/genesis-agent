@@ -1,15 +1,29 @@
 #!/usr/bin/env bash
-# Строи трите образа (задачи, прокси, шлюз). Пуска се от корена на репото: ./cloud/build.sh
+# Строи трите образа (задачи, прокси, шлюз): ./cloud/build.sh — от която и да е папка.
 # Wheels се свалят за Python-а и процесора на ОБРАЗА, не на машината, която
 # строи (иначе cp311 wheels не стават за python:3.12). ARM сървър (Hetzner CAX):
 #   PLATFORM=manylinux2014_aarch64 ./cloud/build.sh
+# Всеки образ е с два етикета: :latest и :<git sha> — за връщане назад:
+#   docker tag genesis-runner:<стар sha> genesis-runner:latest
 set -euo pipefail
+# Деплой одит 2026-10-11: от друга папка падаше с „Directory '.' is not
+# installable“; на Ubuntu Server има python3, но не и `python`.
+cd "$(dirname "$0")/.."
+PYTHON="${PYTHON:-python3}"
+DOCKER="${DOCKER:-docker}"
 PLATFORM="${PLATFORM:-manylinux2014_x86_64}"
+# Ревю 2026-10-11: грешката на git се криеше и етикетът тихо ставаше :dev —
+# напр. root в чужда папка („dubious ownership“, git ≥ 2.35.2).
+if ! SHA="$(git rev-parse --short HEAD)"; then
+  echo "внимание: git rev-parse не мина — образите са само :latest и :dev (без връщане назад по sha)" >&2
+  SHA=dev
+fi
 rm -rf cloud/.wheels
-python -m pip wheel --quiet --no-deps --wheel-dir cloud/.wheels .
-python -m pip download --quiet --only-binary=:all: --dest cloud/.wheels \
+"$PYTHON" -m pip wheel --quiet --no-deps --wheel-dir cloud/.wheels .
+"$PYTHON" -m pip download --quiet --only-binary=:all: --dest cloud/.wheels \
   --python-version 3.12 --implementation cp --abi cp312 --platform "$PLATFORM" \
   cloud/.wheels/genesis_agent-*.whl -r cloud/runner/task-requirements.txt
-docker build -f cloud/runner/Dockerfile -t genesis-runner:latest .
-docker build -f cloud/egress/Dockerfile -t genesis-egress:latest .
-docker build -f cloud/gateway/Dockerfile -t genesis-gateway:latest .
+for image in runner egress gateway; do
+  "$DOCKER" build -f "cloud/$image/Dockerfile" -t "genesis-$image:latest" -t "genesis-$image:$SHA" .
+done
+echo "готово: genesis-{runner,egress,gateway}:latest = :$SHA"

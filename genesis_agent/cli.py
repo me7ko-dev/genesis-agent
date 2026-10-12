@@ -59,7 +59,10 @@ _FIX_USAGE = """Употреба:
   --no-diff          не печатай диффа накрая
   --checkpoint       снимка на проекта преди промените; `--revert` я връща
 
-Снимка се прави само с `--checkpoint`. Проект в git се връща с `git checkout .`.
+Опциите може да са преди или след пътя; описание, което съдържа `--`, сложи в
+кавички или след `--`.
+Снимка се прави само с `--checkpoint` (и сама, ако в git има некомитнати промени).
+Проект в git се връща с `git checkout -- <файловете>` — накрая се казва кои.
 """
 
 
@@ -148,13 +151,25 @@ def _fix(args: list[str]) -> int:
         print(result)
         return 1 if result.startswith("❌") else 0
 
-    project, rest = args[0], args[1:]
+    # Одит 2026-10-11: непозната опция (`--chekpoint`, `--max-coding`) или
+    # `--rounds` без стойност ставаха част от описанието на бъга — без грешка и
+    # без поисканата снимка; опция ПРЕДИ пътя ставаше „проектът“. Сега проектът е
+    # първият аргумент, който не е опция; непознатото е грешка, както в
+    # `genesis export`; след `--` всичко е текст на задачата.
+    project: str | None = None
+    rest = list(args)
     task_parts: list[str] = []
     test_command: str | None = None
     max_rounds, quality, show_diff, checkpoint = 8, None, True, False
     i = 0
     while i < len(rest):
         a = rest[i]
+        if a == "--":
+            task_parts += rest[i + 1:]
+            break
+        if a in ("--test", "--rounds") and i + 1 >= len(rest):
+            print(f"{a} иска стойност.\n\n{_FIX_USAGE}")
+            return 2
         if a == "--checkpoint":
             checkpoint = True
         elif a == "--max":
@@ -173,11 +188,23 @@ def _fix(args: list[str]) -> int:
             except ValueError:
                 print(f"--rounds иска число, не {rest[i]!r}")
                 return 2
+        # Аргумент с интервал е описание в кавички, не опция (преглед
+        # 2026-10-11: „--verbose не работи“ в кавички беше отказвано, а
+        # грешката съветваше да го сложиш в кавички).
+        elif a.startswith("--") and not any(c.isspace() for c in a):
+            print(f"Непозната опция: {a}  (текст с `--` в описанието: сложи го в кавички "
+                  f"или след `--`)\n\n{_FIX_USAGE}")
+            return 2
+        elif project is None:
+            project = a
         else:
             task_parts.append(a)
         i += 1
 
     task = " ".join(task_parts).strip()
+    if project is None:
+        print(f"Липсва пътят до проекта.\n\n{_FIX_USAGE}")
+        return 2
     if not task:
         print("Липсва описание на бъга.\n")
         print(_FIX_USAGE)

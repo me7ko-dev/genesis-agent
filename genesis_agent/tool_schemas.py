@@ -62,6 +62,7 @@ FULL_TOOLS: list[dict] = [
                 "properties": {
                     "path": {"type": "string"},
                     "content": {"type": "string"},
+                    "exact": {"type": "boolean", "description": "true: as given (CRLF→LF, no BOM)"},
                 },
                 "required": ["path", "content"],
             },
@@ -475,6 +476,57 @@ _JSON_ESCAPE = re.compile(r"\\(u[0-9a-fA-F]{4}|.)", re.DOTALL)
 # иначе `r"\bcat\d+\b"` стигаше до диска с два невидими \x08 знака.
 _KEEP_ESCAPES = {'"', "\\", "/", "n", "r", "t"}
 
+# Windows пътища със сурови `\` (2026-10-11). Поправката по-горе пази `\n`,
+# `\r`, `\t` като истински escape, затова `C:\Users\roika\new\tests` идваше
+# като `C:\Users<CR>oika<LF>ew<TAB>ests`: записът отиваше в „извън workspace“
+# въпрос, който терминалът показваше с изтрит начален ред (CR), и после падаше
+# с WinError 123. Управляващ знак в път никога не е нарочен, затова в `path`
+# всяка `\` е буквална, а в `command` — само в думи, започващи с `X:\`;
+# новият ред в многоредова команда и съдържанието на файл не се пипат.
+_PATH_KEYS = ("path", "cwd")
+_COMMAND_KEYS = ("command",)
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f]")
+_JSON_MEMBER = re.compile(r'"(path|cwd|command)"(\s*:\s*")((?:[^"\\]|\\.)*)"', re.DOTALL)
+_RAW_WIN_PATH = re.compile(r"[A-Za-z]:(?:\\[^\\\s\"'`;&|<>]*)+")
+_LITERAL_KEEP = {'"', "\\", "/"}
+
+
+def _repair_escapes(text: str, keep: set[str]) -> str:
+    """Невалидните (и неизброените в `keep`) escape-и → буквална `\\`."""
+    return _JSON_ESCAPE.sub(
+        lambda m: m.group(0) if m.group(1) in keep or len(m.group(1)) == 5
+        else "\\\\" + m.group(1), text)
+
+
+def _literal_path_escapes(text: str) -> str:
+    def literal(raw: str) -> str:
+        # `C:\\proj` е правилно ескейпнат път: `\n` след него е нов ред.
+        return raw if "\\\\" in raw else _repair_escapes(raw, _LITERAL_KEEP)
+
+    def in_command(raw: str) -> str:
+        # `cd C:\proj\nnpm test`: последното `\n` в думата е новият ред на
+        # многоредовата команда, а не папка — _RAW_WIN_PATH го поглъщаше заедно
+        # с `npm` и двата реда ставаха един път (2026-10-11, трета вълна; преди
+        # поправката тук JSON-ът се четеше правилно). Папка `\notes.txt` има
+        # разширение и остава буквална; по-ранните `\new\tests` — също.
+        head, _, last = raw.rpartition("\\")
+        if last[:1] != "n" or re.search(r"\.\w+$", last[1:]):
+            return literal(raw)
+        newline = "\\" + last
+        before, _, seg = head.rpartition("\\")
+        if seg == "r" and before:                    # `\r\n` — CRLF
+            head, newline = before, "\\r" + newline
+        return literal(head) + newline
+
+    def member(m: re.Match[str]) -> str:
+        key, body = m.group(1), m.group(3)
+        if key in _PATH_KEYS:
+            body = literal(body)
+        else:
+            body = _RAW_WIN_PATH.sub(lambda r: in_command(r.group(0)), body)
+        return f'"{key}"{m.group(2)}{body}"'
+    return _JSON_MEMBER.sub(member, text)
+
 
 def load_tool_arguments(raw) -> dict:
     """Аргументите на native tool_call като dict.
@@ -491,13 +543,19 @@ def load_tool_arguments(raw) -> dict:
     try:
         value = json.loads(text)
     except json.JSONDecodeError as first:
-        fixed = _JSON_ESCAPE.sub(
-            lambda m: m.group(0) if m.group(1) in _KEEP_ESCAPES or len(m.group(1)) == 5
-            else "\\\\" + m.group(1), text)
         try:
-            value = json.loads(fixed)
+            value = json.loads(_repair_escapes(text, _KEEP_ESCAPES))
         except json.JSONDecodeError:
             raise first from None
+    if isinstance(value, dict) and any(
+            isinstance(value.get(k), str) and _CONTROL_CHARS.search(value[k])
+            for k in (*_PATH_KEYS, *_COMMAND_KEYS)):
+        try:
+            literal = json.loads(_repair_escapes(_literal_path_escapes(text), _KEEP_ESCAPES))
+        except json.JSONDecodeError:
+            literal = None
+        if isinstance(literal, dict):
+            value = literal
     if not isinstance(value, dict):
         # Списък/число не е „празни аргументи“: с {} TODO_WRITE триеше списъка
         # (одит 2026-10-09). JSONDecodeError, за да го хващат всички callers.

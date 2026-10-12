@@ -341,8 +341,9 @@ class TestOllamaCloudRotation:
         out = b._call_rotating("https://x", "OLLAMA_API_KEY", "m", [], None, ["k1", "k2"])
         assert out == ("from k2", None)
         assert calls == ["k1", "k2"]
-        assert brain_mod._is_exhausted("key::OLLAMA_API_KEY#1") is True
-        assert brain_mod._is_exhausted("key::OLLAMA_API_KEY#2") is False
+        # 429 спира двойката (ключ, модел), не целия ключ (одит 2026-10-11).
+        assert brain_mod._is_exhausted("key::OLLAMA_API_KEY#1::m") is True
+        assert brain_mod._is_exhausted("key::OLLAMA_API_KEY#2::m") is False
 
     def test_already_cooling_key_is_skipped_without_being_tried(self, monkeypatch) -> None:
         b = self._brain()
@@ -394,10 +395,10 @@ class TestOllamaCloudRotation:
         with pytest.raises(RuntimeError):
             b._call_rotating("https://x", "GROQ_API_KEY", "m", [], None, ["g1"])
 
-        assert brain_mod._is_exhausted("key::GROQ_API_KEY#1") is True
+        assert brain_mod._is_exhausted("key::GROQ_API_KEY#1::m") is True
         # A different provider's first key must be untouched.
-        assert brain_mod._is_exhausted("key::OPENROUTER_API_KEY#1") is False
-        assert brain_mod._is_exhausted("key::OLLAMA_API_KEY#1") is False
+        assert brain_mod._is_exhausted("key::OPENROUTER_API_KEY#1::m") is False
+        assert brain_mod._is_exhausted("key::OLLAMA_API_KEY#1::m") is False
 
 
 class TestNumberedKeys:
@@ -549,10 +550,12 @@ class TestContextBudgetIsAppliedOnTheWayOut:
         b.complete(history)
 
         assert len(sent) == 1, "заявката трябва наистина да е стигнала до _http"
-        wire = sent[0]
-        assert len(str(wire[1]["content"])) < 800, "старият резултат трябва да е свит"
-        assert str(wire[1]["content"]).startswith("S0"), "началото се пази"
-        assert wire[-1]["content"] == history[-1]["content"], "последният остава пълен"
+        # Без tools role='tool' тръгва като текст (одит 2026-10-11) — сравнява
+        # се съдържанието след префикса на _sanitize_for_textmode.
+        wire = [str(m["content"]).removeprefix("[Резултат от tool]: ") for m in sent[0]]
+        assert len(wire[1]) < 800, "старият резултат трябва да е свит"
+        assert wire[1].startswith("S0"), "началото се пази"
+        assert wire[-1] == history[-1]["content"], "последният остава пълен"
         assert history == snapshot, "историята на извикващия не бива да се пипа"
 
 

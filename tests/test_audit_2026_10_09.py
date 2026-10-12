@@ -271,19 +271,31 @@ def test_bad_static_paths_get_the_app(tmp_path):
         httpd.shutdown()
 
 
-@pytest.mark.parametrize("payload", [{"op": "events", "after": 1e400, "rid": "abcdef0123456789"},
-                                     {"op": "status", "rid": "ключ-ключ-ключ"}])
-def test_malformed_authenticated_fields_get_an_answer(payload):
-    _server, httpd = _serve()
-    port = httpd.server_address[1]
+def _post_sealed(port: int, payload: dict) -> urllib.request.Request:
     body = json.dumps(rs.Cipher(KEY).seal({"ts": int(time.time() * 1000), **payload},
                                           rs._REQ_AAD)).encode()
-    req = urllib.request.Request(f"http://127.0.0.1:{port}/api/v1", data=body,
-                                 headers={"Content-Type": "application/json"})
+    return urllib.request.Request(f"http://127.0.0.1:{port}/api/v1", data=body,
+                                  headers={"Content-Type": "application/json"})
+
+
+def test_malformed_authenticated_fields_get_an_answer():
+    # rid, който не може да влезе в AAD на отговора — няма как да запечатаме,
+    # остава 401.
+    _server, httpd = _serve()
+    port = httpd.server_address[1]
     try:
         with pytest.raises(urllib.error.HTTPError) as err:
-            urllib.request.urlopen(req, timeout=5)
+            urllib.request.urlopen(_post_sealed(port, {"op": "status", "rid": "ключ-ключ-ключ"}), timeout=5)
         assert err.value.code == 401
+        # "after": Infinity с верния ключ: от 2026-10-11 грешката в заявката
+        # е в запечатания отговор (не 401 — телефонът го четеше като „сдвои
+        # отново“ и го броеше за спирачката). Важното от 10-09 остава: отговор
+        # има, без traceback.
+        rid = "abcdef0123456789"
+        with urllib.request.urlopen(_post_sealed(port, {"op": "events", "after": 1e400, "rid": rid}),
+                                    timeout=5) as r:
+            reply = rs.Cipher(KEY).open(json.loads(r.read()), rs._RES_AAD + rid.encode())
+        assert reply == {"ok": False, "error": "bad_args"}
     finally:
         httpd.shutdown()
 

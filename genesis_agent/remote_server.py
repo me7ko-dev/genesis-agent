@@ -34,6 +34,12 @@ Code на телефона управлява сесия, която тече д
 `events` носи и "state": {"plan": bool, "todos": [{content, status}]}; събитието
 "progress" е напредъкът на под-агент. `send` с "/plan", "/undo" … — командите на
 чата (phone_command), не текст за модела.
+
+2026-10-11: `events` с "more": true — отговорът е стигнал тавана, телефонът пита
+веднага пак от "last". `send` може да носи "mid" (идентификатор от телефона):
+повторен опит със същия "mid" получава първия отговор, без втори ход. Грешка в
+отворена заявка е {"ok": false, "error": "unknown_op"|"empty"|"bad_args"|…},
+не 401.
 """
 from __future__ import annotations
 
@@ -63,6 +69,35 @@ _MAX_WAIT_S = 25.0
 _CONFIRM_TIMEOUT_S = 300.0
 _EVENT_LOG = 1000
 _TOOL_PREVIEW = 4000
+# Таван на един отговор на `events` (одит 2026-10-11): студен старт след 1000
+# изхода на инструменти теглеше 7.3 MiB, а open() на телефона ги декодираше
+# 1.1 s (5 s без JIT, близо до Hermes) на JS нишката. Над тавана: при reset —
+# най-новите; иначе — НАЙ-СТАРИТЕ след `after` и "more", телефонът дотегля
+# (втори одит 2026-10-11: най-новите + reset губеха дупката и целия разговор
+# на телефон, събуден след ~130 инструмента).
+_REPLY_BYTES = 512 * 1024
+# Колко последни `mid` на `send` помним (2026-10-11): повторен опит след
+# изгубен отговор не пуска хода втори път.
+_SENT_MIDS = 256
+# Колко от тях идват с всеки отговор на `events` (`mids`): един телефон има
+# най-много един неизпратен `mid`, а 16 покриват и няколко телефона наведнъж.
+_ACK_MIDS = 16
+_MID = re.compile(r"[A-Za-z0-9_-]{8,64}")
+# Видът на плика {"v":1,"n":…,"c":…} в суровите байтове (преглед 2026-10-11):
+# адрес над спирачката получава 429 веднага, без json.loads и опит за
+# отваряне — освен ако тялото не е точно плик (сдвоеният телефон зад същия
+# NAT минава). Без тази проверка всяка спряна заявка от 240 KiB струваше на
+# сървъра 10 ms вместо 1.5 ms преди спирачката да се премести след плика.
+_ENVELOPE_SHAPE = re.compile(
+    rb'\s*\{\s*"v"\s*:\s*\d{1,3}\s*,\s*"n"\s*:\s*"[A-Za-z0-9_=+/-]{1,64}"\s*,'
+    rb'\s*"c"\s*:\s*"[A-Za-z0-9_=+/-]+"\s*\}\s*')
+# Началото на същия плик — първите _HEAD_BYTES байта на дълго тяло от спрян
+# адрес (вълна 5): `{"v":1,"n":"<до 64>","c":"` е под 100 байта и с интервали.
+_ENVELOPE_HEAD = re.compile(
+    rb'\s*\{\s*"v"\s*:\s*\d{1,3}\s*,\s*"n"\s*:\s*"[A-Za-z0-9_=+/-]{1,64}"\s*,'
+    rb'\s*"c"\s*:\s*"[A-Za-z0-9_=+/-]*')
+_HEAD_BYTES = 160
+_BRAKED_READ_S = 2.0
 
 
 class ProtocolError(Exception):
@@ -75,6 +110,22 @@ def _b64e(raw: bytes) -> str:
 
 def _b64d(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def utf8_bytes(text: str) -> bytes:
+    """UTF-8 байтове и за текст с lone surrogates (име на файл в cp1251/cp866).
+
+    Одит 2026-10-11: os.listdir връща непрочитаемите байтове като \\udcXX и
+    .encode("utf-8") гърмеше — всеки отговор на `events` с такъв LIST_DIR
+    затваряше връзката. Байтовете се връщат каквито са били и невалидното става
+    U+FFFD; останали surrogates (не от файловата система) — „?“."""
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError:
+        try:
+            return text.encode("utf-8", "surrogateescape").decode("utf-8", "replace").encode("utf-8")
+        except UnicodeEncodeError:
+            return text.encode("utf-8", "replace")
 
 
 def key_id(key: bytes) -> str:
@@ -166,7 +217,7 @@ class Cipher:
 
     def seal(self, payload: dict, aad: bytes) -> dict:
         nonce = secrets.token_bytes(12)
-        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        raw = utf8_bytes(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
         return {"v": PROTOCOL, "n": _b64e(nonce), "c": _b64e(self._aead.encrypt(nonce, raw, aad))}
 
     def open(self, envelope: Any, aad: bytes) -> dict:
@@ -242,6 +293,23 @@ class _Pending:
 TurnRunner = Callable[[str, Any], None]
 
 
+_CLIPPED_NOTE = "\n…[отрязано — целият текст е в терминала]"
+
+
+def _fit_event(event: dict) -> dict:
+    """Копие на събитие, орязано до _REPLY_BYTES: дългите текстове (над 1 KiB)
+    делят тавана по равно, по 6 байта на знак (най-лошото в JSON — `\\u0001`),
+    с място за кратките полета."""
+    long = [k for k, v in event.items() if isinstance(v, str) and len(v) > 1024]
+    share = (_REPLY_BYTES // 6 - 4096) // max(1, len(long)) - len(_CLIPPED_NOTE)
+    out = dict(event)
+    for k in long:
+        if len(out[k]) > share:
+            out[k] = out[k][:share] + _CLIPPED_NOTE
+            out["clipped"] = True
+    return out
+
+
 class RemoteSession:
     """Един разговор, споделен от всички сдвоени телефони.
 
@@ -290,10 +358,40 @@ class RemoteSession:
             first = self._events[0]["seq"] if self._events else self._seq + 1
             # Пропуснатото вече не е в дневника → телефонът получава целия
             # наличен дневник и знае, че трябва да го покаже наново.
-            reset = after + 1 < first or after > self._seq
+            # after <= 0 — телефон без история (студен старт): и той е reset,
+            # иначе над тавана щеше да тегли целия дневник от НАЙ-СТАРИТЕ
+            # страница по страница (преглед 2026-10-11: 450 инструмента без
+            # завъртян дневник — 7 страници, 3.3 MB вместо 1 страница 0.5 MB).
+            reset = after <= 0 or after + 1 < first or after > self._seq
             items = list(self._events) if reset else [e for e in self._events if e["seq"] > after]
             reply = {"events": items, "last": self._seq, "reset": reset,
-                     "busy": self._busy, "epoch": self.epoch}
+                     "busy": self._busy, "epoch": self.epoch, "more": False}
+        # Размерът се мери извън ключалката — emit() не чака сериализацията.
+        # reset: телефонът подменя всичко → най-новите. Иначе той вече показва
+        # всичко до `after` → най-старите след него, `last` = последното
+        # изпратено и "more": дупка няма, а всеки отговор е до тавана (одит
+        # 2026-10-11: 200 инструмента в заключен телефон — изчезваха 130
+        # събития и собствените му съобщения).
+        ordered = list(reversed(items)) if reset else items
+        kept, size, head = 0, 0, 0
+        for event in ordered:
+            size += len(utf8_bytes(json.dumps(event, ensure_ascii=False)))
+            if kept and size > _REPLY_BYTES:
+                break
+            kept += 1
+            head = head or size
+        if kept < len(items):
+            if reset:
+                reply["events"] = items[-kept:]
+            else:
+                reply["events"], reply["more"] = items[:kept], True
+                reply["last"] = items[kept - 1]["seq"]
+        if head > _REPLY_BYTES:
+            # Едно събитие над тавана влиза винаги (иначе телефонът не мърда)
+            # — значи таванът не важеше за него. Вълна 5, 2026-10-11:
+            # отговор от 600 000 знака при студен старт — 1.2 MB в един
+            # отговор. Сега дългите текстове се орязват до тавана.
+            reply["events"] = [_fit_event(ordered[0])]
         if self._state is not None:
             try:
                 reply["state"] = self._state()
@@ -546,6 +644,11 @@ class RemoteServer:
         self.web_root = web_root
         self._failures: dict[str, list[float]] = {}
         self._lock = threading.Lock()
+        # Приетите `send` по идентификатора от телефона (`mid`), за повторен
+        # опит след изгубен отговор (одит 2026-10-11: LAN прекъсне, телефонът
+        # казва „няма връзка“, операторът натиска пак — ходът вървеше два пъти).
+        self._sent: dict[str, dict] = {}
+        self._send_lock = threading.Lock()
 
     # -- заявки --
     def hello(self) -> dict:
@@ -554,7 +657,13 @@ class RemoteServer:
                 "name": self.name, "version": __version__}
 
     def handle(self, envelope: Any) -> tuple[dict, str]:
-        """(отговор, rid) за вече декодиран JSON плик. Хвърля ProtocolError."""
+        """(отговор, rid) за вече декодиран JSON плик. Хвърля ProtocolError
+        САМО за плик, който не се отваря с ключа или е стар/повторен.
+
+        Грешка в самата заявка (непозната операция, празно съобщение) идва в
+        запечатания отговор като {"ok": false, "error": …} — одит 2026-10-11:
+        беше 401, телефонът го показваше като „ключът вече не се приема,
+        сдвои отново“ и го броеше за спирачката срещу налучкване."""
         payload = self.cipher.open(envelope, _REQ_AAD)
         rid = self.replay.check(payload)
         return self._dispatch(payload), rid
@@ -565,19 +674,34 @@ class RemoteServer:
         if op == "status":
             return {"ok": True, **self.hello(), "busy": s.busy, **self.status()}
         if op == "send":
-            text = str(p.get("text") or "")
-            if len(text) > 20000:
-                return {"ok": False, "error": "too_long"}
-            if text.strip().lower() in ("/clear", "/нов"):
-                return self._dispatch({"op": "clear"})
-            return {"ok": True} if s.send(text) else {"ok": False, "error": "busy"}
+            mid = p.get("mid")
+            if not (isinstance(mid, str) and _MID.fullmatch(mid)):
+                return self._send(p)
+            with self._send_lock:
+                if mid in self._sent:
+                    return self._sent[mid]
+                reply = self._send(p)
+                # Само приетото: „busy“ не е изпълнено — повторният опит
+                # трябва да може да мине, щом ходът свърши.
+                if reply.get("ok"):
+                    self._sent[mid] = reply
+                    while len(self._sent) > _SENT_MIDS:
+                        del self._sent[next(iter(self._sent))]
+                return reply
         if op == "events":
             try:
                 after = int(p.get("after") or 0)
                 wait = float(p.get("wait") or 0)
-            except (TypeError, ValueError, OverflowError) as e:   # "after": Infinity
-                raise ProtocolError("bad events args") from e
-            return {"ok": True, **s.events_after(after, wait)}
+            except (TypeError, ValueError, OverflowError):   # "after": Infinity
+                return {"ok": False, "error": "bad_args"}
+            reply = {"ok": True, **s.events_after(after, wait)}
+            # Последните приети `mid` (вълна 5, 2026-10-11): телефонът по тях
+            # забравя повторения опит, и когато своето балонче не е в
+            # страницата (reset от най-новите, „/clear“ без балонче) — иначе
+            # нарочното повторение със стария `mid` се поглъщаше тук.
+            with self._send_lock:
+                reply["mids"] = list(self._sent)[-_ACK_MIDS:]
+            return reply
         if op == "confirm":
             return {"ok": s.answer(str(p.get("id") or ""), bool(p.get("allow")))}
         if op == "stop":
@@ -590,7 +714,20 @@ class RemoteServer:
                 self.clear()
             s.emit("cleared")
             return {"ok": True}
-        raise ProtocolError("unknown op")
+        # По-ново приложение с операция, която този `genesis serve` не знае.
+        return {"ok": False, "error": "unknown_op"}
+
+    def _send(self, p: dict) -> dict:
+        text = str(p.get("text") or "")
+        if len(text) > 20000:
+            return {"ok": False, "error": "too_long"}
+        # Python strip(), не JS trim(): "\x1c" или "\x85" минават trim() на
+        # телефона и тук са празно (одит 2026-10-11).
+        if not text.strip():
+            return {"ok": False, "error": "empty"}
+        if text.strip().lower() in ("/clear", "/нов"):
+            return self._dispatch({"op": "clear"})
+        return {"ok": True} if self.session.send(text) else {"ok": False, "error": "busy"}
 
     def seal(self, response: dict, rid: str) -> dict:
         return self.cipher.seal(response, _RES_AAD + rid.encode("ascii"))
@@ -665,13 +802,56 @@ class RemoteServer:
                 ctype = _CONTENT_TYPES.get(target.suffix.lower(), "application/octet-stream")
                 self._send(200, target.read_bytes(), ctype)
 
+            def _read_by(self, size: int, deadline: float) -> bytes:
+                """До `size` байта до `deadline` (time.monotonic) общо, не на recv."""
+                parts: list[bytes] = []
+                got = 0
+                try:
+                    while got < size:
+                        left = deadline - time.monotonic()
+                        if left <= 0:
+                            raise TimeoutError
+                        self.connection.settimeout(left)
+                        chunk = self.rfile.read1(size - got)
+                        if not chunk:
+                            break
+                        parts.append(chunk)
+                        got += len(chunk)
+                finally:
+                    self.connection.settimeout(self.timeout)
+                return b"".join(parts)
+
+            def _braked_body(self, length: int) -> bytes | None:
+                """Тялото от спрян адрес, ако започва като плик и идва цяло до
+                _BRAKED_READ_S; иначе None — 429, без да се чете останалото.
+
+                Вълна 5, 2026-10-11: над спирачката сървърът пак четеше цялото
+                тяло — клиент, обявил 200 KiB и пратил 1 KiB, държеше нишка и
+                едно от 16-те места на адреса 30 s на заявка (преди вълна 4:
+                429 без четене). Сега първите _HEAD_BYTES трябва да са начало
+                на плик. Ревю на вълна 5: таймаутът беше на recv, не общ —
+                байт на 1.5 s не стигаше до 429 и след 12 s, а публичното
+                начало на плик (~30 байта) и спиране държеше мястото с 30 s на
+                recv; 16 такива връзки заключваха сдвоения телефон зад същия
+                адрес. Сега целият прочит е до един общ срок; пликовете на
+                телефона са няколко KiB."""
+                deadline = time.monotonic() + _BRAKED_READ_S
+                want = min(length, _HEAD_BYTES)
+                try:
+                    head = self._read_by(want, deadline)
+                    whole = len(head) == length
+                    shape = _ENVELOPE_SHAPE if whole else _ENVELOPE_HEAD
+                    if len(head) != want or not shape.fullmatch(head):
+                        return None
+                    body = head + self._read_by(length - len(head), deadline)
+                except OSError:   # TimeoutError е OSError
+                    return None
+                return body if len(body) == length else None
+
             def do_POST(self) -> None:
                 ip = self.client_address[0]
                 if self.path.split("?", 1)[0] != "/api/v1":
                     self._json(404, {"error": "not_found"})
-                    return
-                if server.too_many_failures(ip):
-                    self._json(429, {"error": "slow_down"})
                     return
                 try:
                     length = int(self.headers.get("Content-Length") or 0)
@@ -681,15 +861,44 @@ class RemoteServer:
                     self._json(413, {"error": "size"})
                     return
                 try:
-                    body = self.rfile.read(length)
+                    if server.too_many_failures(ip):
+                        braked_body = self._braked_body(length)
+                        if braked_body is None:
+                            server.record_failure(ip)
+                            self.close_connection = True
+                            self._json(429, {"error": "slow_down"})
+                            return
+                        body = braked_body
+                    else:
+                        body = self.rfile.read(length)
                 except OSError:   # таймаут — броим го като провал за спирачката
                     server.record_failure(ip)
+                    self.close_connection = True
+                    return
+                # Спирачката е СЛЕД опита да отворим плика (одит 2026-10-11):
+                # преди беше първа и по адрес — страница в браузъра на самия
+                # телефон (30 POST-а text/plain) или съсед зад същия NAT
+                # заключваше сдвоения телефон. Заявка, която се отваря с ключа и
+                # минава ReplayGuard, не се спира; провалите се броят както
+                # преди и над 30/мин получават 429 без подробност. Над
+                # спирачката само тяло с вида на плик стига до json.loads и
+                # ключа (_ENVELOPE_SHAPE); всичко друго — 429 веднага.
+                if server.too_many_failures(ip) and not _ENVELOPE_SHAPE.fullmatch(body):
+                    server.record_failure(ip)
+                    self._json(429, {"error": "slow_down"})
                     return
                 try:
                     envelope = json.loads(body.decode("utf-8"))
                     response, rid = server.handle(envelope)
-                except (ProtocolError, ValueError, UnicodeDecodeError) as e:
+                # RecursionError: `[` × 200 000 без ключ — traceback в терминала
+                # на оператора на всяка заявка и без провал за спирачката (одит
+                # 2026-10-11).
+                except (ProtocolError, ValueError, UnicodeDecodeError, RecursionError) as e:
+                    braked = server.too_many_failures(ip)
                     server.record_failure(ip)
+                    if braked:
+                        self._json(429, {"error": "slow_down"})
+                        return
                     # Подробността е само вида на отказа („cannot open",
                     # „stale request"): полезна на своя телефон, безполезна
                     # на непознат, който няма ключа.
@@ -707,29 +916,59 @@ class _QuietServer(ThreadingHTTPServer):
     връзката — това е нормално, не грешка за печатане в терминала.
 
     Най-много _MAX_CONNECTIONS връзки наведнъж: над тях новата се затваря
-    веднага, вместо да ражда още една нишка (одит 2026-10-09)."""
+    веднага, вместо да ражда още една нишка (одит 2026-10-09). И най-много
+    _MAX_PER_IP от един адрес (одит 2026-10-11): 64 празни връзки от един
+    съсед без ключ заемаха всички места за 30 s и сдвоеният телефон не
+    можеше да влезе, а спирачката не виждаше провал."""
 
     _MAX_CONNECTIONS = 64
+    _MAX_PER_IP = 16
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._slots = threading.BoundedSemaphore(self._MAX_CONNECTIONS)
+        self._per_ip: dict[str, int] = {}
+        self._per_ip_lock = threading.Lock()
+
+    @staticmethod
+    def _ip(client_address: Any) -> str:
+        try:
+            return str(client_address[0])
+        except (TypeError, IndexError):
+            return ""
+
+    def _release(self, client_address: Any) -> None:
+        ip = self._ip(client_address)
+        with self._per_ip_lock:
+            left = self._per_ip.get(ip, 0) - 1
+            if left > 0:
+                self._per_ip[ip] = left
+            else:
+                self._per_ip.pop(ip, None)
+        self._slots.release()
 
     def process_request(self, request: Any, client_address: Any) -> None:
-        if not self._slots.acquire(blocking=False):
+        ip = self._ip(client_address)
+        with self._per_ip_lock:
+            full = self._per_ip.get(ip, 0) >= self._MAX_PER_IP
+            if not full and self._slots.acquire(blocking=False):
+                self._per_ip[ip] = self._per_ip.get(ip, 0) + 1
+            else:
+                full = True
+        if full:
             self.shutdown_request(request)
             return
         try:
             super().process_request(request, client_address)
         except Exception:
-            self._slots.release()
+            self._release(client_address)
             raise
 
     def process_request_thread(self, request: Any, client_address: Any) -> None:
         try:
             super().process_request_thread(request, client_address)
         finally:
-            self._slots.release()
+            self._release(client_address)
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         import sys
@@ -861,7 +1100,12 @@ def serve(args: list[str]) -> int:
                                          context=gta.context_info)
         state["messages"] = messages
         if prompt is not None:
-            state["messages"] = gta.run_turn(state["messages"], prompt, ui)
+            try:
+                state["messages"] = gta.run_turn(state["messages"], prompt, ui)
+            except Exception as e:
+                # Свършеното до грешката остава в разговора (одит 2026-10-11).
+                state["messages"] = gta.history_after_error(e, state["messages"])
+                raise
 
     def clear() -> None:
         # Както /clear в терминала: нов файл за историята (иначе следващият

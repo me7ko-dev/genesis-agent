@@ -90,6 +90,11 @@ def _loop(question: str, messages: list[dict], complete: Callable[..., Any],
     reads = 0
     last = ""
     for round_i in range(max_rounds):
+        # „Стоп“ на оператора спира и изследователя, както AGENT (bug fix,
+        # 2026-10-11). Измерено: след Стоп EXPLORE викаше модела и 10-те рунда.
+        if gs._cancelled():
+            return (f"[EXPLORE: {question[:80]}] ⏹ Спрян от оператора след {round_i} рунда "
+                    f"({reads} прегледа).{' Последно: ' + last[:_MAX_ANSWER] if last else ''}")
         final = round_i == max_rounds - 1
         if final:  # последният рунд — без инструменти: отговор с каквото е намерено
             messages.append({"role": "user", "content":

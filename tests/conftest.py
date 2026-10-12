@@ -86,6 +86,12 @@ _PERSISTED_STATE = (
     ("genesis_agent.embeddings", "SKILLS_INDEX", "skills.json"),
     ("genesis_agent.benchmark", "HISTORY", "benchmark_history.json"),
     ("genesis_agent.web_search", "CACHE_DIR", ".search_cache"),
+    # Ключът за подписване на умения (e2e 2026-10-11): пълният пакет създаде
+    # ~/.genesis/private_key.pem — пътят се връзва при внасяне, а тест, който
+    # задава само GENESIS_KEY_DIR, подписваше с ключа на оператора.
+    ("genesis_agent.cryptography_utils", "KEY_DIR", "keys"),
+    ("genesis_agent.cryptography_utils", "PRIVATE_KEY_PATH", "keys/private_key.pem"),
+    ("genesis_agent.cryptography_utils", "PUBLIC_KEY_PATH", "keys/public_key.pem"),
 )
 
 
@@ -133,6 +139,12 @@ def _isolated_operator_settings(monkeypatch, tmp_path):
     home = tmp_path / "genesis_home"
     home.mkdir(exist_ok=True)
     monkeypatch.setattr("genesis_agent.paths.GENESIS_HOME", home)
+    # .env файловете с ключовете (одит 2026-10-11): ENV_FILES се смята при
+    # внасяне от истинската ~/.genesis, така че Brain() и vertex_auth в тест
+    # четяха ключовете и проектите на оператора. brain го внася по име.
+    env_files = (str(tmp_path / "project.env"), str(home / ".env"))
+    monkeypatch.setattr("genesis_agent.paths.ENV_FILES", env_files)
+    monkeypatch.setattr("genesis_agent.brain.ENV_FILES", env_files)
     # Историята на чата: тестове с run_turn пишеха session_*.json и
     # by_workspace.json в истинската ~/.local/share/genesis-agent/history —
     # `genesis -c` после продължаваше тестов разговор (одит 2026-10-09).
@@ -163,3 +175,56 @@ def _isolated_operator_settings(monkeypatch, tmp_path):
     agents.progress = None
     from genesis_agent import mcp_client
     mcp_client.stop_all()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_stripe(monkeypatch):
+    """Stripe ключове от shell-а на разработчика не включват истинско плащане
+    в тест (2026-10-11): cloud/web/server.main чете STRIPE_* и
+    GENESIS_PUBLIC_URL от средата. Тестовете с Stripe ги задават сами, а
+    обръщенията към Stripe са винаги фалшив opener."""
+    for name in ("STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "GENESIS_PUBLIC_URL"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _elide_off_like_the_default(monkeypatch):
+    """B.12 (2026-10-11): config.py казва на оператора да пусне A/B с
+    GENESIS_ELIDE_OLD_WRITES=1; с изнесена такава променлива
+    test_bench_history (базата „off“) и test_budget (рундовете K) падаха при
+    верен код — стойностите се четат при внасяне на config. Тестовете
+    започват от подразбирането; който иска друго, го задава сам."""
+    monkeypatch.delenv("GENESIS_ELIDE_OLD_WRITES", raising=False)
+    monkeypatch.delenv("GENESIS_ELIDE_WRITE_ROUNDS", raising=False)
+    from genesis_agent import budget, config
+    for module in (budget, config):
+        monkeypatch.setattr(module, "ELIDE_OLD_WRITES", 0)
+        monkeypatch.setattr(module, "ELIDE_WRITE_ROUNDS", 6)
+
+
+class FakeDocker:
+    """Записва `docker` командите вместо да ги пуска. `answers` — отговор по
+    префикс на аргументите: {("network", "create"): (1, "", "pool exhausted")}."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+        self.answers: dict[tuple[str, ...], tuple[int, str, str]] = {}
+
+    def __call__(self, *args: str, timeout: float = 60):
+        import subprocess
+        self.calls.append(list(args))
+        code, out, err = next((v for k, v in self.answers.items() if tuple(args[:len(k)]) == k),
+                              (0, "", ""))
+        return subprocess.CompletedProcess(["docker", *args], code, out, err)
+
+
+@pytest.fixture(autouse=True)
+def fake_docker(monkeypatch):
+    """Деплой 2026-10-11: launch.run_task вече създава мрежа за всяка задача, а
+    уеб сървърът при старт убива останали контейнери (`docker rm -f`). На
+    машина с истински Docker (като тази) тестът би спрял задачите на
+    оператора — затова всеки `docker` през launch._docker се записва тук."""
+    from cloud.runner import launch
+    fake = FakeDocker()
+    monkeypatch.setattr(launch, "_docker", fake)
+    return fake

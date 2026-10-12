@@ -138,6 +138,23 @@ def test_done_ok_but_nonzero_exit_is_a_failure(monkeypatch, tmp_path) -> None:
     assert not res.ok
 
 
+def test_a_flood_of_events_is_capped_per_turn(monkeypatch, tmp_path) -> None:
+    """Одит 2026-10-11: таванът беше само на дължината на реда — 300 събития по
+    1 MiB дадоха 300 MiB web.db и 626 MiB RSS на уеб сървъра от един ход. Кодът в
+    контейнера е недоверен и пише в същия stdout."""
+    flood = [json.dumps({"kind": "tool", "name": "RUN_CMD", "result": "x" * 8000})] * 3000
+    done = json.dumps({"kind": "done", "ok": True, "tokens": {"total_tokens": 5}})
+    res, seen = _run(monkeypatch, tmp_path, [*flood, *[done] * 50])
+    assert len(seen) <= launch._MAX_EVENTS + 2 and len(res.events) == len(seen)
+    assert sum(len(json.dumps(e)) for e in seen) < launch._MAX_EVENT_BYTES + (1 << 20)
+    assert [e["kind"] for e in seen].count("done") == 1 and seen[-1]["kind"] == "done"
+    assert any(e["kind"] == "warn" and "отрязан" in e["text"] for e in seen)
+    assert res.ok and res.tokens == {"total_tokens": 5}
+    # Нормален ход не се пипа.
+    res, seen = _run(monkeypatch, tmp_path, [flood[0], done])
+    assert [e["kind"] for e in seen] == ["tool", "done"]
+
+
 def test_the_task_folder_is_created(monkeypatch, tmp_path) -> None:
     _run(monkeypatch, tmp_path, [])
     assert (tmp_path / "ws").is_dir()
@@ -166,6 +183,14 @@ def test_an_empty_task_is_refused_without_calling_a_model(capsys, monkeypatch) -
     assert task.main([]) == 2
     done = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert done["kind"] == "done" and not done["ok"]
+
+
+def test_a_non_utf8_file_name_does_not_fail_the_cloud_turn(capsys) -> None:
+    """Одит 2026-10-11: LIST_DIR с име в cp1251 даваше lone surrogates; print()
+    в emit гърмеше с UnicodeEncodeError и целият ход в облака свършваше с грешка."""
+    task.emit("tool", name="LIST_DIR", result="  report.xlsx\n  \udcee\udcf2.txt")
+    line = json.loads(capsys.readouterr().out.strip())
+    assert line["kind"] == "tool" and "report.xlsx" in line["result"] and ".txt" in line["result"]
 
 
 # ── egress: истинският процес на локален порт, без мрежа навън ────────────────
@@ -205,3 +230,193 @@ def test_a_huge_stderr_or_an_endless_line_does_not_stall_or_bloat(monkeypatch, t
     done = {"kind": "done", "ok": True, "error": "", "seconds": 1, "tokens": {}}
     res, seen = _run(monkeypatch, tmp_path, ["x" * 5000, json.dumps(done)], stderr="W" * 200_000)
     assert res.ok and [e["kind"] for e in seen] == ["done"]
+
+
+def test_a_deeply_nested_line_from_the_container_is_noise_not_a_crash(monkeypatch, tmp_path) -> None:
+    """Ревю 2026-10-11: ред `[` * 200000 (под тавана от 1 MiB) хвърляше
+    RecursionError от json.loads; той излизаше от run_task, наблюдателят се
+    спираше във finally, а `docker run` оставаше да работи без таван."""
+    done = {"kind": "done", "ok": True, "error": "", "seconds": 1, "tokens": {}}
+    res, seen = _run(monkeypatch, tmp_path, ["[" * 200_000, json.dumps(done)])
+    assert res.ok and [e["kind"] for e in seen] == ["done"]
+
+
+class _KillableProc(_FakeProc):
+    """_FakeProc, който помни kill() и wait() — за пътя с грешка."""
+
+    def __init__(self, lines: list[str]) -> None:
+        super().__init__(lines)
+        self.killed = False
+        self.waited = False
+        self.name = ""
+
+    def kill(self) -> None:
+        self.killed = True
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.waited = True
+        return -9 if self.killed else 0
+
+
+def test_any_error_in_the_read_loop_kills_and_waits_the_container(monkeypatch, tmp_path,
+                                                                   fake_docker) -> None:
+    """Ревю 2026-10-11: грешка от on_event (или от какъвто и да е ред) излизаше
+    от run_task, finally спираше само наблюдателя и `docker run` оставаше да
+    върви без таван. Сега контейнерът се убива (`docker kill <име>`), клиентът
+    също, изчаква се — и грешката продължава нагоре."""
+    procs: list[_KillableProc] = []
+
+    def popen(argv, **kw):
+        procs.append(_KillableProc([json.dumps({"kind": "assistant", "text": "x"})]))
+        procs[-1].name = argv[argv.index("--name") + 1]
+        return procs[-1]
+
+    monkeypatch.setattr(launch.subprocess, "Popen", popen)
+
+    def boom(ev):
+        raise KeyboardInterrupt  # BaseException — не само Exception
+
+    with pytest.raises(KeyboardInterrupt):
+        launch.run_task("задача", tmp_path / "ws", on_event=boom)
+    assert ["kill", procs[0].name] in fake_docker.calls
+    assert procs[0].killed and procs[0].waited
+
+
+def test_a_lone_surrogate_from_the_container_reaches_the_store(monkeypatch, tmp_path) -> None:
+    """Ревю 2026-10-11: `{"kind":"assistant","text":"\\udcee"}` ставаше lone
+    surrogate; store.add_event (json.dumps → sqlite) гърмеше с
+    UnicodeEncodeError и ходът падаше. Сега е U+FFFD, а истинските двойки
+    (емоджи) остават."""
+    from cloud.web.store import Store
+    store = Store(tmp_path / "web.db")
+    uid = store.add_user("ana@example.com", "correct-horse-battery")
+    turn = store.add_turn(store.new_chat(uid, "чат"), "задача")
+    line = '{"kind": "assistant", "text": "a\\udcee b\\uD800 \\ud83d\\ude00", "\\udcff": 1}'
+    done = json.dumps({"kind": "done", "ok": True, "tokens": {}})
+    monkeypatch.setattr(launch.subprocess, "Popen", lambda *a, **k: _FakeProc([line, done]))
+    res = launch.run_task("задача", tmp_path / "ws", on_event=lambda e: store.add_event(turn, e))
+    assert res.ok
+    got = store.events(turn)
+    assert got[0]["text"] == "a� b� \U0001f600" and got[0]["�"] == 1
+
+
+# ── task: задача без отговорил модел не е успех (D1, 2026-10-11) ─────────────
+
+def test_an_exhausted_chain_is_a_failed_task_not_a_paid_success(capsys, monkeypatch, tmp_path) -> None:
+    """Деплой одит 2026-10-11: от b9572f0 грешката на веригата идва през
+    ui.warn(), не като отговор. task.py гледаше само последния отговор и в
+    контейнера без ключове пишеше done ok:true — ходът се таксуваше като успех,
+    а history.json получаваше празен отговор."""
+    import genesis_terminal_agent as gta
+    from genesis_agent import sandbox
+    monkeypatch.setattr(sandbox, "_POLICY", sandbox._POLICY)
+    monkeypatch.setenv("GENESIS_WORKSPACE", str(tmp_path))
+    err = "[Грешка: цялата верига е изчерпана | последна: нито един модел няма API ключ]"
+    monkeypatch.setattr(gta, "ask_genesis", lambda m, tools=None: (err, None))
+    assert task.main(["направи CSV"]) == 1
+    lines = [json.loads(x) for x in capsys.readouterr().out.strip().splitlines()]
+    done = lines[-1]
+    assert done["kind"] == "done" and done["ok"] is False
+    assert done["error"].startswith("[Грешка: цялата верига")
+    # провален ход не пише в разговора празна реплика
+    assert not (tmp_path / task.HISTORY_FILE).exists()
+
+
+# ── всяка задача в своя мрежа (D2/D3, деплой одит 2026-10-11) ────────────────
+
+def _net_calls(fake_docker) -> list[list[str]]:
+    return [c for c in fake_docker.calls if c[0] in ("network", "rm")]
+
+
+def test_each_task_gets_its_own_internal_network_with_only_the_proxy(monkeypatch, tmp_path,
+                                                                     fake_docker) -> None:
+    """Измерено 2026-10-11: в общата genesis-jobs задача на А прочете /work на Б
+    през http.server (по име и по IP). Сега мрежата е на задачата и вътре е
+    само проксито."""
+    argvs: list[list[str]] = []
+
+    def popen(argv, **kw):
+        argvs.append(argv)
+        return _FakeProc([json.dumps({"kind": "done", "ok": True, "tokens": {}})])
+
+    monkeypatch.setattr(launch.subprocess, "Popen", popen)
+    assert launch.run_task("задача", tmp_path / "ws").ok
+    name = argvs[0][argvs[0].index("--name") + 1]
+    net = argvs[0][argvs[0].index("--network") + 1]
+    assert net.startswith(launch.NETWORK_PREFIX) and net != launch.JOBS_NETWORK
+    assert net.removeprefix(launch.NETWORK_PREFIX) == name.removeprefix(launch.TASK_PREFIX)
+    assert _net_calls(fake_docker) == [
+        ["network", "create", "--internal", "--label", launch.LABEL, net],
+        ["network", "connect", net, "genesis-egress"],
+        ["rm", "-f", name],
+        ["network", "disconnect", "-f", net, "genesis-egress"],
+        ["network", "rm", net],
+    ]
+
+
+def test_in_gateway_mode_the_task_network_has_the_gateway_and_no_proxy(monkeypatch, tmp_path,
+                                                                       fake_docker) -> None:
+    """D2: up.sh включваше проксито в genesis-jobs и в режим с шлюз — задачата
+    можеше да отвори CONNECT към openrouter.ai със свой ключ покрай шлюза."""
+    keys = tmp_path / "keys.env"
+    keys.write_text("GATEWAY_SECRET=" + "s" * 40 + "\nGROQ_API_KEY=k\n", encoding="utf-8")
+    g = launch.Gateway.from_keys_file(keys, tmp_path / "usage.jsonl")
+    monkeypatch.setattr(launch.subprocess, "Popen", lambda argv, **kw: _FakeProc(
+        [json.dumps({"kind": "done", "ok": True, "tokens": {}})]))
+    launch.run_task("задача", tmp_path / "ws", gateway=g)
+    connected = [c[3] for c in fake_docker.calls if c[:2] == ["network", "connect"]]
+    assert connected == ["genesis-gateway"]
+
+
+def test_the_task_network_is_removed_even_when_the_read_loop_fails(monkeypatch, tmp_path,
+                                                                   fake_docker) -> None:
+    monkeypatch.setattr(launch.subprocess, "Popen", lambda argv, **kw: _KillableProc(
+        [json.dumps({"kind": "assistant", "text": "x"})]))
+
+    def boom(ev):
+        raise RuntimeError("sqlite е заключена")
+
+    with pytest.raises(RuntimeError):
+        launch.run_task("задача", tmp_path / "ws", on_event=boom)
+    assert fake_docker.calls[-1][:2] == ["network", "rm"]
+
+
+def test_no_network_no_task(monkeypatch, tmp_path, fake_docker) -> None:
+    """Без своя мрежа задачата не тръгва — никога не пада обратно към общата."""
+    fake_docker.answers[("network", "connect")] = (1, "", "No such container: genesis-egress")
+    started: list[object] = []
+    monkeypatch.setattr(launch.subprocess, "Popen", lambda *a, **k: started.append(a))
+    res = launch.run_task("задача", tmp_path / "ws")
+    assert not res.ok and "genesis-egress" in res.error and "up.sh" in res.error
+    assert started == [] and fake_docker.calls[-1][:2] == ["network", "rm"]
+
+
+def test_cleanup_kills_task_containers_and_removes_only_task_networks(fake_docker) -> None:
+    fake_docker.answers[("ps",)] = (0, "abc123\ndef456\n", "")
+    fake_docker.answers[("network", "ls")] = (0, "genesis-job-1a2b\ngenesis-jobs\n", "")
+    fake_docker.answers[("network", "inspect")] = (0, "genesis-gateway ", "")
+    assert launch.cleanup_leftovers() == 2
+    assert ["ps", "-aq", "--filter", "name=^genesis-task-"] in fake_docker.calls
+    assert ["rm", "-f", "abc123", "def456"] in fake_docker.calls
+    assert ["network", "disconnect", "-f", "genesis-job-1a2b", "genesis-gateway"] in fake_docker.calls
+    removed = [c[2] for c in fake_docker.calls if c[:2] == ["network", "rm"]]
+    assert removed == ["genesis-job-1a2b"]      # genesis-jobs остава
+
+
+def test_the_container_stops_on_sigterm_and_on_its_own_deadline(tmp_path) -> None:
+    """D4: python като PID 1 пренебрегва SIGTERM от `docker run` → --init; и
+    втори срок вътре в контейнера, ако уеб процесът умре, без да го убие."""
+    args = _args(tmp_path, limits=launch.Limits(seconds=600))
+    assert "--init" in args and ("--label", launch.LABEL) in _pairs(args)
+    assert ("-e", "GENESIS_TASK_DEADLINE=630") in _pairs(args)
+
+
+def test_the_deadline_inside_the_container_ends_the_process(monkeypatch) -> None:
+    import os
+    import threading
+    hit = threading.Event()
+    monkeypatch.setattr(os, "_exit", lambda code: hit.set() if code == 124 else None)
+    timer = task._arm_deadline("0.05")
+    assert timer is not None and hit.wait(5)
+    assert task._arm_deadline("") is None and task._arm_deadline("x") is None
+    assert task._arm_deadline("0") is None

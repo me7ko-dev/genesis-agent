@@ -18,6 +18,8 @@ import re
 import sys
 from pathlib import Path
 
+from genesis_agent.code_edit import read_text_any
+
 # Import name → the name on PyPI, where the two differ. Only the common ones:
 # an unknown name falls back to itself, which is right for most packages.
 IMPORT_TO_PIP = {
@@ -231,7 +233,7 @@ def declared(root: Path) -> set[str] | None:
     for req in sorted(root.glob("requirements*.txt")):
         sources += 1
         try:
-            lines = req.read_text(encoding="utf-8", errors="replace").splitlines()
+            lines = read_text_any(req).splitlines()
         except OSError:
             continue
         for line in lines:
@@ -245,12 +247,12 @@ def declared(root: Path) -> set[str] | None:
     if pyproject.is_file():
         try:
             import tomllib  # type: ignore[import-not-found]
-            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            data = tomllib.loads(read_text_any(pyproject))
         except ImportError:
             # Python 3.10 няма tomllib: без него обявените зависимости „липсваха“
             # и отчетът на export лъжеше (одит 2026-10-09). Груб, но достатъчен прочит.
             try:
-                data = _toml_deps_fallback(pyproject.read_text(encoding="utf-8", errors="replace"))
+                data = _toml_deps_fallback(read_text_any(pyproject))
             except OSError:
                 data = {}
         except (OSError, ValueError):

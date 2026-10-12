@@ -43,11 +43,19 @@ def _status(raw: Any) -> str:
     return aliases.get(word, word)
 
 
-def parse_text(arg: str) -> list[dict[str, str]]:
-    """`[TODO_WRITE: …]`: JSON списък или редове `[ ] …` / `[~] …` / `[x] …`."""
+def parse_text(arg: str) -> list[dict[str, str]] | None:
+    """`[TODO_WRITE: …]`: JSON списък, `{"todos": […]}` или редове `[ ] …` /
+    `[~] …` / `[x] …`. None — JSON обект, който не е списък със задачи."""
     arg = arg.strip()
     try:
         loaded = json.loads(arg)
+        # Формата на native схемата (`{"todos": […]}`) и в текстов режим (bug
+        # fix, 2026-10-11): дотук ставаше ЕДНА задача със суровия JSON за текст
+        # и подменяше целия списък. Друг JSON обект се отказва, не се гадае.
+        if isinstance(loaded, dict):
+            loaded = loaded.get("todos")
+            if not isinstance(loaded, list):
+                return None
         if isinstance(loaded, list):
             return [i if isinstance(i, dict) else {"content": str(i)} for i in loaded]
     except ValueError:

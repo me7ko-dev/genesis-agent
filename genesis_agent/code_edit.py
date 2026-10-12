@@ -32,7 +32,9 @@ back in the tool result rather than assuming what it did.
 from __future__ import annotations
 
 import ast
+import codecs
 import difflib
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -40,6 +42,93 @@ from pathlib import Path
 _DIFF_CONTEXT = 3
 # How many candidate lines to name when an anchor doesn't match.
 _MAX_HINTS = 5
+
+
+# ── Кодиране ────────────────────────────────────────────────────────────────
+# Одит 2026-10-11: файл в cp1251 (обичаен за стари български проекти и
+# Notepad-а на Windows) READ_FILE показваше като „�������“, EDIT_FILE падаше с
+# „'utf-8' codec can't decode byte 0xc7“, а READ→WRITE заменяше на диска всяка
+# кирилска буква с U+FFFD — безвъзвратно. Един latin-1 байт (`©` = 0xA9) в иначе
+# UTF-8 .py файл го правеше нередактируем завинаги. Затова едно решение за
+# всички инструменти: какво е кодирането и как се записва обратно БАЙТ ПО БАЙТ.
+_BOMS = ((b"\x00\x00\xfe\xff", "utf-32-be"), (b"\xff\xfe\x00\x00", "utf-32-le"),
+         (b"\xfe\xff", "utf-16-be"), (b"\xff\xfe", "utf-16-le"))
+# При utf-8 и cp1251 непознатите байтове стават сурогати U+DC80–U+DCFF и при
+# запис се връщат същите байтове (cp1251 има дупка на 0x98).
+_ESCAPED = ("utf-8", "cp1251")
+_RAW_BYTE = re.compile("[\udc80-\udcff]")
+_NON_ASCII = bytes(range(0x80))
+_CYRILLIC_WORD = re.compile(rb"[\xc0-\xff]{3,}")
+
+
+def _looks_cp1251(raw: bytes) -> bool:
+    """Кирилицата в cp1251 е 0xC0–0xFF; в UTF-8 половината не-ASCII байтове са
+    продължения 0x80–0xBF. Мерено 2026-10-11: български текст в cp1251 дава
+    ≥90% байтове в 0xC0–0xFF, UTF-8 кирилица със случаен чужд байт — ~50%.
+
+    Латиница в latin-1 също е 0xC0–0xFF (`é` = 0xE9), но буквите ѝ са сами
+    между ASCII, а кирилицата е цели думи. Ревю 2026-10-11: `Café` ставаше
+    „Cafй“. Мерено: в cp1251 81–100% от тези байтове са в поредици от ≥3 (без
+    файл само с „Да“), в немски, френски, испански и португалски — 0%."""
+    if b"\x00" in raw:
+        return False
+    high = raw.translate(None, _NON_ASCII)
+    if not high:
+        return False
+    upper = high.translate(None, bytes(range(0x80, 0xC0)))
+    if len(upper) / len(high) < 0.7:
+        return False
+    in_words = sum(len(m) for m in _CYRILLIC_WORD.findall(raw))
+    return in_words / len(upper) >= 0.5
+
+
+def decode_text(raw: bytes, *, partial: bool = False) -> tuple[str, str]:
+    """(текст, кодиране) — `encode_text(текст, кодиране) == raw` винаги.
+
+    BOM-ът (UTF-8 или UTF-16/32) остава в текста като U+FEFF, за да се запише
+    обратно. `partial=True`: `raw` е само началото на файла — недовършена
+    последователност в края не е грешка в кодирането.
+    """
+    for bom, enc in _BOMS:
+        if raw.startswith(bom):
+            try:
+                return codecs.getincrementaldecoder(enc)().decode(raw, final=not partial), enc
+            except UnicodeDecodeError:
+                break
+    try:
+        return codecs.getincrementaldecoder("utf-8")().decode(raw, final=not partial), "utf-8"
+    except UnicodeDecodeError:
+        pass
+    if _looks_cp1251(raw):
+        return raw.decode("cp1251", "surrogateescape"), "cp1251"
+    return raw.decode("utf-8", "surrogateescape"), "utf-8"
+
+
+def encode_text(text: str, encoding: str) -> bytes:
+    """Обратното на decode_text. UnicodeEncodeError, ако знак няма място в
+    кодирането (емоджи в cp1251) — извикващият отказва записа."""
+    return text.encode(encoding, "surrogateescape" if encoding in _ESCAPED else "strict")
+
+
+def has_raw_bytes(text: str) -> bool:
+    """Има ли байтове, които не са текст в разпознатото кодиране."""
+    return bool(_RAW_BYTE.search(text))
+
+
+def displayable(text: str) -> str:
+    """Самотните сурогати не стигат до модела: чупят UTF-8 на JSON заявката."""
+    return _RAW_BYTE.sub("\ufffd", text)
+
+
+def read_text_any(path: str | Path) -> str:
+    """Текстът на файл за ЧЕТЕНЕ (не за запис обратно): без BOM, без сурогати.
+
+    Одит 2026-10-11: requirements.txt от `pip freeze >` в PowerShell 5.1 е
+    UTF-16 и export отчиташе „��r e q u e s t s“ като зависимост, а обявените
+    пакети — за липсващи; BOM пред pyproject.toml пък чупеше tomllib. pip
+    чете и двата файла без проблем.
+    """
+    return displayable(decode_text(Path(path).read_bytes())[0]).removeprefix("\ufeff")
 
 
 @dataclass
@@ -147,7 +236,7 @@ def _syntax_error(path: Path, text: str) -> str:
     try:
         # UTF-8 BOM (Notepad на Windows): Python го приема във файл, ast.parse в
         # низ — не; без това всяка редакция се отказваше като „чупи синтаксиса“.
-        ast.parse(text.removeprefix("\ufeff"))
+        ast.parse(displayable(text).removeprefix("\ufeff"))
     except SyntaxError as e:
         return f"{e.msg} (ред {e.lineno})"
     return ""
@@ -180,7 +269,10 @@ def edit_file(path: str | Path, old: str, new: str, *,
         # реално е записан файлът (моделът почти винаги пише `\n`), и `new`
         # получава същото третиране — иначе CRLF в new се удвояваше до
         # `\r\r\n`.
-        before = p.read_bytes().decode("utf-8")
+        #
+        # Кодирането се пази по същата логика (одит 2026-10-11): cp1251 или
+        # чужд байт в UTF-8 се записват обратно точно както са били.
+        before, encoding = decode_text(p.read_bytes())
     except FileNotFoundError:
         return EditResult(False, f"Файлът не съществува: {p} "
                                  "(за нов файл ползвай WRITE_FILE)")
@@ -192,7 +284,8 @@ def edit_file(path: str | Path, old: str, new: str, *,
     if not hits:
         return EditResult(False,
                           f"Anchor-ът не е намерен в {p.name}. Провери точния текст "
-                          f"(интервали и отстъпи също се броят)." + _near_misses(before, old))
+                          f"(интервали и отстъпи също се броят)."
+                          + displayable(_near_misses(before, old)))
     if len(hits) > 1 and not replace_all:
         where = ", ".join(f"L{n}" for n in hits[:_MAX_HINTS])
         return EditResult(False,
@@ -211,12 +304,18 @@ def edit_file(path: str | Path, old: str, new: str, *,
                           f"Промяната чупи синтаксиса на {p.name}: {err}. "
                           "ФАЙЛЪТ НЕ Е ПРОМЕНЕН — поправи редакцията и опитай пак.")
 
-    diff = _unified_diff(before, after, p.name)
     try:
-        # `newline=""` спира Python да преобразува каквото и да било при
-        # запис — извън заменения участък файлът излиза точно както е влязъл.
-        with p.open("w", encoding="utf-8", newline="") as f:
-            f.write(after)
+        data = encode_text(after, encoding)
+    except UnicodeEncodeError as e:
+        return EditResult(False,
+                          f"{p.name} е в кодиране {encoding} и знакът {after[e.start:e.end]!r} "
+                          "няма място в него. ФАЙЛЪТ НЕ Е ПРОМЕНЕН — ползвай знак, който "
+                          "кодирането има.")
+    diff = displayable(_unified_diff(before, after, p.name))
+    try:
+        # Байтове, не текстов режим: Python не преобразува нищо при запис —
+        # извън заменения участък файлът излиза точно както е влязъл.
+        p.write_bytes(data)
     except OSError as e:
         return EditResult(False, f"Грешка при запис: {e}")
 
@@ -224,6 +323,7 @@ def edit_file(path: str | Path, old: str, new: str, *,
     n = len(hits) if replace_all else 1
     return EditResult(
         True,
-        f"✓ {p} — {n} замяна(и), +{added}/-{removed} реда",
+        f"✓ {p} — {n} замяна(и), +{added}/-{removed} реда"
+        + ("" if encoding == "utf-8" else f" · кодиране {encoding} (запазено)"),
         diff=diff, replacements=n, lines_changed=(added, removed),
     )

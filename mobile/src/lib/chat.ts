@@ -55,12 +55,60 @@ export function toChatItems(events: GenesisEvent[]): ChatItem[] {
   return items;
 }
 
+/** Колкото пази и сървърът (remote_server._EVENT_LOG). */
+export const MAX_EVENTS = 1000;
+
 /** Merge a reply into what we have: by seq, no duplicates, in order. */
 export function mergeEvents(current: GenesisEvent[], incoming: GenesisEvent[], reset: boolean): GenesisEvent[] {
-  if (reset) return [...incoming].sort((a, b) => a.seq - b.seq);
+  if (reset) return trimEvents([...incoming].sort((a, b) => a.seq - b.seq));
   const last = current.length ? current[current.length - 1].seq : 0;
   const fresh = incoming.filter((e) => e.seq > last);
-  return fresh.length ? [...current, ...fresh] : current;
+  return fresh.length ? trimEvents([...current, ...fresh]) : current;
+}
+
+/** Само последните MAX_EVENTS и нищо преди последното "cleared" — то и без
+ *  това не се показва. Одит 2026-10-11: телефонът пазеше всяко събитие
+ *  завинаги (10 801 след ден работа, ~80 MB низове), а toChatItems минаваше
+ *  през всички на всяко допитване. "cleared" остава: по него е последният seq. */
+export function trimEvents(events: GenesisEvent[]): GenesisEvent[] {
+  let start = Math.max(0, events.length - MAX_EVENTS);
+  for (let i = events.length - 1; i > start; i--) {
+    if (events[i].type === 'cleared') {
+      start = i;
+      break;
+    }
+  }
+  return start ? events.slice(start) : events;
+}
+
+/** Новите елементи, но със СТАРИТЕ обекти там, където нищо не се е
+ *  променило — React.memo на картите тогава не ги рисува пак, а RichText не
+ *  разбира Markdown-а наново на всяко „thinking“ (одит 2026-10-11). Ако нищо
+ *  не е променено — същият масив. */
+export function reuseItems(previous: readonly ChatItem[], next: ChatItem[]): ChatItem[] {
+  if (!previous.length) return next;
+  const old = new Map(previous.map((item) => [item.key, item]));
+  let same = previous.length === next.length;
+  const out = next.map((item, i) => {
+    const before = old.get(item.key);
+    const kept = before !== undefined && sameItem(before, item) ? before : item;
+    if (kept !== previous[i]) same = false;
+    return kept;
+  });
+  return same ? (previous as ChatItem[]) : out;
+}
+
+function sameItem(a: ChatItem, b: ChatItem): boolean {
+  const ra = a as Record<string, unknown>;
+  const rb = b as Record<string, unknown>;
+  const keys = Object.keys(ra);
+  if (keys.length !== Object.keys(rb).length) return false;
+  return keys.every((k) => {
+    const x = ra[k];
+    const y = rb[k];
+    if (Array.isArray(x) && Array.isArray(y)) return x.length === y.length && x.every((v, i) => v === y[i]);
+    return x === y;
+  });
 }
 
 /** What the busy row says: the latest "thinking" label or sub-agent step of

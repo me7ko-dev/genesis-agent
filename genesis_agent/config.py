@@ -195,8 +195,16 @@ LOGS_DIR: Path = (Path.home() / ".genesis" / "logs") if _INSTALLED else PROJECT_
 # nobody can write survives exactly until the next `pip install --upgrade`
 # deletes it anyway. Same path as always in checkout mode: zero behavior
 # change for anyone running from a git clone.
-DATA_DIR: Path = (Path.home() / ".genesis" / "data") if _INSTALLED else (PROJECT_ROOT / "genesis_agent")
-if _INSTALLED:
+#
+# GENESIS_DATA_DIR премества и състоянието на веригата (2026-10-11): e2e тестът
+# на bench-а пуска истинския чат срещу фалшив доставчик и той записа
+# budget_log.jsonl, provider_stats.json и model_check.json в genesis_agent/ на
+# checkout-а — тоест в истинското състояние на оператора, от което веригата
+# после решава кой модел е мъртъв. GENESIS_MEMORY_DIR покриваше само паметта.
+_DATA_OVERRIDE = os.environ.get("GENESIS_DATA_DIR", "").strip()
+DATA_DIR: Path = (Path(_DATA_OVERRIDE).expanduser() if _DATA_OVERRIDE else
+                  (Path.home() / ".genesis" / "data") if _INSTALLED else (PROJECT_ROOT / "genesis_agent"))
+if _INSTALLED or _DATA_OVERRIDE:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # What Genesis remembers — conversations, episodes, work threads, decisions,
@@ -244,6 +252,19 @@ EXEC_TIMEOUT_SEC: int = _int_env("GENESIS_EXEC_TIMEOUT", 120, minimum=1)
 TOOL_RESULT_MAX_CHARS: int = _int_env("GENESIS_TOOL_RESULT_MAX_CHARS", 40000)
 STALE_TOOL_RESULT_MAX_CHARS: int = _int_env("GENESIS_STALE_TOOL_RESULT_MAX_CHARS", 2000)
 FRESH_TOOL_RESULTS: int = _int_env("GENESIS_FRESH_TOOL_RESULTS", 2)
+
+# B.12 (2026-10-11): в ИЗПРАТЕНОТО копие съдържанието на стари WRITE_FILE/
+# EDIT_FILE аргументи се заменя с маркер (budget._elide_old_writes). Офлайн
+# scripts/bench_history.py (seed 7, K=6): 5/15 рунда −29.6%, 5/24 −25.8%,
+# 8/40 −23.4%, 10/60 −24.5% промпт токени — но делът файлове, видими в
+# текущия си вид, пада средно за хода 92% → 65% (5/15) и 61% → 41% (8/40):
+# старият READ_FILE вече е свит и изпуснатият запис е бил единственото пълно
+# копие. Само правилото „по-нов запис на същия файл“ (K=∞) дава −1..−7% без
+# загуба на видимост. Затова е
+# ИЗКЛЮЧЕНО, докато A/B на лаптопа не покаже, че верните решения не падат:
+#   GENESIS_ELIDE_OLD_WRITES=1 python scripts/bench_all.py --steps projects,fix
+ELIDE_OLD_WRITES: int = _int_env("GENESIS_ELIDE_OLD_WRITES", 0)
+ELIDE_WRITE_ROUNDS: int = _int_env("GENESIS_ELIDE_WRITE_ROUNDS", 6, minimum=2)
 
 # Колко tool рунда има правото да направи агентът за ЕДНО съобщение, преди
 # цикълът да спре и да върне контрола. Това е предпазителят срещу зацикляне,

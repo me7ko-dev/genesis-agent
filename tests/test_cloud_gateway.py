@@ -350,3 +350,118 @@ def test_parallel_requests_cannot_overspend(tmp_path) -> None:
     assert results.count(200) == 1
     assert results.count(429) == 29
     assert g.ledger.reserved == {}
+
+
+@pytest.mark.parametrize("extra", [
+    {},                                                    # без таван — доставчикът слагаше своя
+    {"max_tokens": 200_000, "max_completion_tokens": 1},   # двата ключа — режеше се само единият
+    {"max_tokens": 200_000},
+    {"max_completion_tokens": 200_000},
+])
+def test_the_forwarded_body_always_carries_a_cap_within_the_budget(tmp_path, extra) -> None:
+    """Одит 2026-10-11: без max_tokens тялото минаваше непипнато (32 789 от
+    бюджет 6 000), а с двата ключа max_tokens=200000 стигаше до доставчика."""
+    up = FakeUpstream([(200, {"total_tokens": 1})])
+    g = _gw_for(up, tmp_path)
+    budget = 6000
+    body = json.dumps({"model": "m", "messages": [{"role": "user", "content": "hi"}], **extra}).encode()
+    assert g.forward("groq", body, _grant(budget))[0] == 200
+    sent = json.loads(up.seen[0].data)
+    caps = [sent[k] for k in ("max_tokens", "max_completion_tokens") if k in sent]
+    assert caps and all(isinstance(c, int) and 1 <= c <= budget for c in caps)
+
+
+@pytest.mark.parametrize("extra", [
+    {"n": 128}, {"n": 2, "max_tokens": 200_000}, {"best_of": 5}, {"n": "128"}, {"n": True},
+])
+def test_many_choices_cannot_multiply_the_cap(tmp_path, extra) -> None:
+    """Одит 2026-10-11: таванът е за един избор, доставчикът таксува n × max_tokens —
+    n=128 при бюджет 20 000 записа 2.5M токена."""
+    up = FakeUpstream([])
+    g = _gw_for(up, tmp_path)
+    body = json.dumps({"model": "m", "messages": [{"role": "user", "content": "hi"}], **extra}).encode()
+    assert g.forward("groq", body, _grant(20_000))[0] == 400 and up.seen == []
+    assert g.ledger.reserved == {}
+
+
+@pytest.mark.parametrize("extra", [{"n": 1}, {"n": None}, {"best_of": 1}])
+def test_a_single_choice_still_goes_through(tmp_path, extra) -> None:
+    up = FakeUpstream([(200, {"total_tokens": 5})])
+    g = _gw_for(up, tmp_path)
+    body = json.dumps({"model": "m", **extra}).encode()
+    assert g.forward("groq", body, _grant(20_000))[0] == 200 and len(up.seen) == 1
+
+
+def test_only_listed_models_reach_the_provider(tmp_path) -> None:
+    """Одит 2026-10-11: шлюзът пускаше всеки модел (openai/o1-pro) — цената
+    на ход се смяташе по тарифа ~50× под тази на доставчика."""
+    keys = {"OPENAI_API_KEY": "k", "GROQ_API_KEY": "k",
+            "GATEWAY_MODELS": " groq/* , openai/gpt-4o-mini "}
+    models = gw.read_models(keys)
+    assert models == frozenset({"groq/*", "openai/gpt-4o-mini"})
+    up = FakeUpstream([(200, {"total_tokens": 1})] * 3)
+    g = gw.Gateway(SECRET, keys, gw.Ledger(tmp_path / "u.jsonl"), opener=up, models=models)
+
+    def ask(p: str, m: str) -> int:
+        return g.forward(p, json.dumps({"model": m}).encode(), _grant(20_000))[0]
+
+    assert ask("openai", "o1-pro") == 403 and ask("openai", "GPT-4o-mini") == 403
+    assert up.seen == []
+    assert ask("openai", "gpt-4o-mini") == 200 and ask("groq", "anything") == 200
+    assert g.ledger.reserved == {}
+
+
+def test_a_gateway_without_a_list_still_forwards_any_model(tmp_path) -> None:
+    assert gw.read_models({"GROQ_API_KEY": "k"}) is None
+    assert gw.read_models({"GATEWAY_MODELS": " , "}) is None
+    up = FakeUpstream([(200, {"total_tokens": 1})])
+    g = _gw_for(up, tmp_path)
+    assert g.forward("groq", json.dumps({"model": "x"}).encode(), _grant(1000))[0] == 200
+
+
+@pytest.mark.parametrize("bad", ["o1-pro", "nosuch/x", "openai/"])
+def test_a_malformed_model_list_is_refused(bad) -> None:
+    with pytest.raises(ValueError):
+        gw.read_models({"GATEWAY_MODELS": f"groq/*,{bad}"})
+
+
+def test_deeply_nested_json_is_a_400(tmp_path) -> None:
+    """Одит 2026-10-11: RecursionError от json.loads не се хващаше."""
+    up = FakeUpstream([])
+    g = _gw_for(up, tmp_path)
+    assert g.forward("groq", b"[" * 200_000, _grant(1000))[0] == 400 and up.seen == []
+
+
+# ── сметката чете само новото (деплой одит 2026-10-11) ───────────────────────
+
+def test_the_bill_reads_only_what_was_written_after_the_start(tmp_path) -> None:
+    """usage.jsonl расте без край; при 1M реда пълният прочит беше 3.3 s на ход."""
+    path = tmp_path / "usage.jsonl"
+    ledger = gw.Ledger(path)
+    for i in range(2000):
+        ledger.add(f"old-{i}", "groq", "m", {"prompt_tokens": 1, "completion_tokens": 1})
+    ledger.add("job-x", "groq", "m", {"prompt_tokens": 50, "completion_tokens": 50})  # преди старта
+    start = gw.usage_size(path)
+    ledger.add("job-x", "groq", "m", {"prompt_tokens": 7, "completion_tokens": 3})
+    assert gw.usage_for(path, "job-x", start)["total_tokens"] == 10
+    assert gw.usage_for(path, "job-x")["total_tokens"] == 110          # без start — всичко
+
+
+def test_a_rotated_usage_file_is_read_from_the_beginning(tmp_path) -> None:
+    path = tmp_path / "usage.jsonl"
+    gw.Ledger(path).add("job-x", "groq", "m", {"prompt_tokens": 7, "completion_tokens": 3})
+    assert gw.usage_for(path, "job-x", start=10 ** 9)["total_tokens"] == 10
+    assert gw.usage_for(tmp_path / "missing.jsonl", "job-x", start=5)["calls"] == 0
+
+
+def test_the_launcher_bills_from_the_size_before_the_container(monkeypatch, tmp_path) -> None:
+    g = _gw_config(tmp_path)
+    g.usage.write_text('{"job": "other", "total_tokens": 5}\n' * 10, encoding="utf-8")
+    size = g.usage.stat().st_size
+    seen: list[int] = []
+    real = gw.usage_for
+    monkeypatch.setattr(gw, "usage_for",
+                        lambda path, job, start=0: (seen.append(start), real(path, job, start))[1])
+    monkeypatch.setattr(launch.subprocess, "Popen", lambda argv, **kw: _Proc(argv, g.usage))
+    res = launch.run_task("задача", tmp_path / "ws", gateway=g)
+    assert seen == [size] and res.tokens["total_tokens"] == 100

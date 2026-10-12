@@ -86,6 +86,9 @@ class _FakeSkills:
             def read_text(self, encoding="utf-8", errors="replace") -> str:
                 return self._content
 
+            def read_bytes(self) -> bytes:
+                return self._content.encode()
+
         return _Target(path in self.files, self.files.get(path, ""))
 
 

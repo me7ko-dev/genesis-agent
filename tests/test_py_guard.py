@@ -292,3 +292,27 @@ def test_approved_multiprocessing_with_spawn_works() -> None:
             "        print(sum(pool.map(sq, [1, 2])))\n")
     res = _run(code, policy=_ASKING)
     assert res.ok and res.stdout.strip() == "5", res.stderr
+
+
+@pytest.mark.parametrize("rel", [
+    (".git-credentials",),
+    (".config", "gcloud", "application_default_credentials.json"),
+    (".terraform.d", "credentials.tfrc.json"),
+    (".azure", "msal_token_cache.json"),
+    (".vault-token",),
+    (".pgpass",),
+])
+def test_well_known_token_files_are_refused_on_an_assembled_path(tmp_path, rel) -> None:
+    """Одит 2026-10-11, възпроизведено: `(?:^|/)credentials(?:\\.\\w+)?$` искаше
+    `/` точно преди думата и едно разширение — ~/.git-credentials, gcloud
+    application_default_credentials.json и terraform credentials.tfrc.json се
+    четяха от USE_SKILL, докато RUN_CMD и READ_FILE ги отказваха."""
+    target = tmp_path.joinpath(*rel)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("TOKEN-FAKE-123", encoding="utf-8")
+    # Всяка част сглобена от парчета по 3 знака: assess_code не вижда пътя,
+    # решава пазачът.
+    parts = ", ".join(" + ".join(repr(p[i:i + 3]) for i in range(0, len(p), 3)) for p in rel)
+    res = _run(f"import os\nprint(open(os.path.join({str(tmp_path)!r}, {parts})).read())\n")
+    assert not res.blocked
+    assert "TOKEN-FAKE-123" not in res.stdout and "отказан" in res.stderr, (res.stdout, res.stderr)

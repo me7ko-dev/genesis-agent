@@ -291,8 +291,24 @@ def _diff_for_write(skills, args: dict) -> str | None:
     try:
         import difflib
 
+        from genesis_agent.code_edit import decode_text, displayable
+
         target = skills._resolve(path)
-        old_content = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else ""
+        # Старият файл се чете като в READ_FILE (ревю 2026-10-11): с utf-8 +
+        # replace cp1251 файл показваше всеки кирилски ред за променен
+        # („-�������“ / „+Здравей“), а на диска се сменя един ред.
+        # BOM-ът остава, както в READ_FILE, а на новото съдържание се слага,
+        # както го прави самият запис: махнат само от старото, всеки преглед
+        # на BOM файл показваше ред 1 за променен (ревю 2026-10-11, трета вълна).
+        old_content = ""
+        if target.is_file():
+            old_content = (displayable(decode_text(target.read_bytes())[0])
+                           .replace("\r\n", "\n"))
+            # exact=true пише без BOM (2026-10-11) — прегледът показва махането.
+            exact = str(args.get("exact", "")).strip().lower() in ("true", "1", "yes")
+            if (old_content.startswith("\ufeff") and not new_content.startswith("\ufeff")
+                    and not exact):
+                new_content = "\ufeff" + new_content
         if old_content == new_content:
             return None
         diff = difflib.unified_diff(
@@ -465,6 +481,19 @@ def run_tool_loop(
                     args = load_tool_arguments(fn.get("arguments"))
                 except (json.JSONDecodeError, TypeError):
                     args = {}
+                if asked:
+                    # След ASK_USER нищо от същия рунд не тръгва, преди човекът
+                    # да отговори — същото като терминала и текстовите тагове
+                    # (bug fix, 2026-10-11). Измерено: [ASK_USER „Да трия ли?“,
+                    # RUN_CMD rm -rf build] тук пускаше и командата. Заместителят
+                    # пази двойката извикване/резултат цяла; on_tool_result не
+                    # се вика — неизпълненото не е резултат (capability_report
+                    # иначе би го броил за доказателство).
+                    messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
+                                     "name": name,
+                                     "content": f"[{name}] не е изпълнено — чака "
+                                                "отговора на оператора."})
+                    continue
                 diff = _diff_for_write(core.skills, args) if name == "WRITE_FILE" else None
                 result = core.skills.dispatch_tool_call(name, args or fn.get("arguments") or {})
                 page_check.observe(result)
@@ -482,7 +511,8 @@ def run_tool_loop(
                     spinning = verdict.note
                 elif verdict.note:
                     repeat_note = verdict.note
-                if _is_question(result):
+                # Само ASK_USER пита: прочетен файл с маркера в него не е въпрос.
+                if name == "ASK_USER" and _is_question(result):
                     asked = result
             if asked:
                 # Агентът е попитал → цикълът СПИРА и контролът се връща на

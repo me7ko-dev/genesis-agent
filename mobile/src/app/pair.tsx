@@ -8,7 +8,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { usePairing } from '../lib/pairing';
 import {
-  GenesisClient, ProtocolError, onLink, parsePairingUrl, takeLink, type Pairing,
+  GenesisClient, ProtocolError, onLink, pairingFrom, parsePairingUrl, takeLink, type Pairing,
 } from '../lib/protocol';
 import { random } from '../lib/random';
 import { mono, useTheme } from '../lib/theme';
@@ -51,7 +51,7 @@ export default function Pair() {
       if (status.app !== 'genesis' || status.key_id !== client.keyId()) {
         throw new ProtocolError('another computer', 'unauthorized');
       }
-      await pair({ ...pairing, name: status.name || pairing.name });
+      await pair(pairingFrom(pairing, status));
       setOffered(null);
       if (Platform.OS === 'web') window.history.replaceState(null, '', '/');
       // dismissTo, не replace: отворен от връзка, /pair е върху чата, и replace

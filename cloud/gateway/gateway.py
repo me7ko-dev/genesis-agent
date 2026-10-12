@@ -181,8 +181,13 @@ class Ledger:
         t = int(usage.get("total_tokens") or 0) or p + c
         details = usage.get("prompt_tokens_details")
         cached = int((details.get("cached_tokens") if isinstance(details, dict) else 0) or 0)
-        entry = {"job": job, "provider": provider, "model": model, "prompt_tokens": p,
-                 "completion_tokens": c, "total_tokens": t, "cached_tokens": cached}
+        entry: dict[str, Any] = {
+            "job": job, "provider": provider, "model": model, "prompt_tokens": p,
+            "completion_tokens": c, "total_tokens": t, "cached_tokens": cached,
+            # Оценка без `usage` от доставчика (2026-10-11): сметката не знае
+            # колко е вход и колко изход, затова таксува целия сбор по най-
+            # скъпата тарифа — флагът трябва да стигне до файла.
+            **({"estimated": True} if usage.get("estimated") else {})}
         with self.lock:
             self.jobs.setdefault(job, Usage()).add(entry)
             if self.path is not None:
@@ -190,15 +195,34 @@ class Ledger:
                     f.write(json.dumps({**entry, "at": time.time()}) + "\n")
 
 
-def usage_for(path: Path, job: str) -> dict[str, int]:
-    """Сборът за задача от JSONL файла — това чете сървърът за сметката."""
+def usage_size(path: Path) -> int:
+    """Докъде е файлът с разхода сега — оттук нататък чете usage_for."""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def usage_for(path: Path, job: str, start: int = 0) -> dict[str, int]:
+    """Сборът за задача от JSONL файла — това чете сървърът за сметката.
+
+    `start` е usage_size() преди задачата да тръгне: по-рано нейни редове няма.
+    Деплой одит 2026-10-11: файлът расте без край и при 1M реда целият прочит
+    струваше 3.3 s на всеки ход; от `start` — 0.13 ms (200 MB, измерено). Ако файлът е по-къс от `start` (сменен при
+    месечното архивиране), се чете отначало."""
     u = Usage()
     try:
-        with path.open(encoding="utf-8") as f:
-            for line in f:
+        with path.open("rb") as f:
+            if start <= f.seek(0, os.SEEK_END):
+                f.seek(start)
+            else:
+                f.seek(0)
+            for raw in f:
                 try:
-                    e = json.loads(line)
-                except ValueError:
+                    e = json.loads(raw.decode("utf-8"))
+                except ValueError:  # вкл. UnicodeDecodeError и средата на ред
+                    continue
+                if not isinstance(e, dict):
                     continue
                 if e.get("job") != job:
                     continue
@@ -206,6 +230,51 @@ def usage_for(path: Path, job: str) -> dict[str, int]:
     except OSError:
         pass
     return u.as_dict()
+
+
+def _count(v: Any) -> int:
+    """Брой токени от реда, или 0 — никога отрицателен, никога float."""
+    return v if type(v) is int and v > 0 else 0
+
+
+def usage_lines_by_job(path: Path, jobs: set[str],
+                       start: int = 0) -> dict[str, list[dict[str, Any]]]:
+    """Разходът на всяка от `jobs` по (доставчик, модел, оценка) — за сметката.
+
+    Сборът на usage_for не стига за цена: моделите струват различно, а
+    кешираният вход — по-малко (2026-10-11). Файлът се чете веднъж за всички
+    задачи (reconcile при старт иска много наведнъж). `start` — като при
+    usage_for: най-малкият usage_size() отпреди задачите (2026-10-11)."""
+    groups: dict[str, dict[tuple[str, str, bool], dict[str, Any]]] = {j: {} for j in jobs}
+    try:
+        with path.open("rb") as f:
+            if start <= f.seek(0, os.SEEK_END):
+                f.seek(start)
+            else:
+                f.seek(0)
+            for raw in f:
+                try:
+                    e = json.loads(raw.decode("utf-8"))
+                except (ValueError, RecursionError):  # вкл. UnicodeDecodeError
+                    continue
+                if not isinstance(e, dict) or e.get("job") not in groups:
+                    continue
+                est = bool(e.get("estimated"))
+                key = (str(e.get("provider", "")), str(e.get("model", "")), est)
+                g = groups[str(e["job"])].setdefault(key, {
+                    "provider": key[0], "model": key[1], "prompt_tokens": 0,
+                    "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0,
+                    "calls": 0, **({"estimated": True} if est else {})})
+                for k in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens"):
+                    g[k] += _count(e.get(k))
+                g["calls"] += 1
+    except OSError:
+        pass
+    return {j: list(g.values()) for j, g in groups.items()}
+
+
+def usage_lines(path: Path, job: str, start: int = 0) -> list[dict[str, Any]]:
+    return usage_lines_by_job(path, {job}, start)[job]
 
 
 def read_keys(path: Path) -> dict[str, str]:
@@ -230,17 +299,42 @@ def served_providers(keys: dict[str, str]) -> list[str]:
     return [p for p, (_, env) in UPSTREAMS.items() if keys_for(keys, env)]
 
 
+# Кои модели пуска шлюзът: `доставчик/модел` или `доставчик/*`, със запетаи.
+# Без списък минаваше всеки модел, който кодът в контейнера поиска — openai/o1-pro
+# се таксуваше по `openai/*` (12 EUR на 1M изход) при ~50× по-висока цена на
+# доставчика (одит 2026-10-11). Плащането не тръгва без него (billing.check_models).
+MODELS_ENV = "GATEWAY_MODELS"
+
+
+def read_models(keys: dict[str, str]) -> frozenset[str] | None:
+    """Разрешените модели от ключовете, или None (без списък — всеки модел)."""
+    raw = keys.get(MODELS_ENV, "")
+    models = frozenset(m.strip() for m in raw.split(",") if m.strip())
+    for m in models:
+        provider, _, model = m.partition("/")
+        if provider not in UPSTREAMS or not model:
+            raise ValueError(f"{MODELS_ENV}: '{m}' трябва да е доставчик/модел или "
+                             f"доставчик/*, с доставчик от {', '.join(UPSTREAMS)}")
+    return models or None
+
+
+def model_allowed(models: frozenset[str] | None, provider: str, model: str) -> bool:
+    return models is None or f"{provider}/{model}" in models or f"{provider}/*" in models
+
+
 # ── HTTP ─────────────────────────────────────────────────────────────────────
 
 class Gateway:
     def __init__(self, secret: str, keys: dict[str, str], ledger: Ledger,
-                 opener: Any = urllib.request.urlopen) -> None:
+                 opener: Any = urllib.request.urlopen,
+                 models: frozenset[str] | None = None) -> None:
         if len(secret) < 32:
             raise ValueError("GATEWAY_SECRET трябва да е поне 32 знака")
         self.secret = secret
         self.keys = keys
         self.ledger = ledger
         self.opener = opener
+        self.models = models
 
     def forward(self, provider: str, body: bytes, grant: Grant) -> tuple[int, bytes]:
         base, env = UPSTREAMS[provider]
@@ -250,12 +344,26 @@ class Gateway:
         try:
             request = json.loads(body)
             model = str(request.get("model", ""))
-        except (ValueError, AttributeError):
+        except (ValueError, AttributeError, RecursionError):   # "[" × 200 000 (2026-10-11)
             return 400, _err("невалиден JSON")
         # Поточен отговор не е JSON — `usage` се губеше и задачата харчеше без
         # таван и без сметка (2026-10-07). Genesis не ползва stream.
         if request.get("stream"):
             return 400, _err("stream не се поддържа през шлюза")
+        if not model_allowed(self.models, provider, model):
+            return 403, _err(f"моделът {provider}/{model} не е разрешен в шлюза ({MODELS_ENV})")
+        # Таванът на отговора е за един избор, а доставчикът таксува n × max_tokens:
+        # n=128 при бюджет 20 000 записа 2 555 876 токена, а балансът падна от
+        # 26 на -605 кредита за един ход (одит 2026-10-11). Genesis иска един.
+        for key in ("n", "best_of"):
+            if key in request and not (request[key] is None or
+                                       (type(request[key]) is int and request[key] == 1)):
+                return 400, _err(f"{key} различно от 1 не се поддържа през шлюза")
+        # Жетонът е проверен при заглавията, а тялото може да е идвало бавно
+        # (ревю 2026-10-11). Сметката на хода става окончателна след изтичането
+        # + UPSTREAM_TIMEOUT — заявка, тръгнала по-късно, би останала без такса.
+        if grant.expires < time.time():
+            return 401, _err("невалиден или изтекъл жетон")
         # Отговорът се ограничава до оставащото: проверяваше се само дали вече е
         # похарчено — заявка от 1.9 MB с max_tokens 64k минаваше и струваше 1.8×
         # бюджета (одит 2026-10-09). Промпт, по-голям от остатъка, не минава.
@@ -275,12 +383,19 @@ class Gateway:
     def _forward(self, provider: str, base: str, keys: list[str], body: bytes, model: str,
                  grant: Grant, estimate: int) -> tuple[int, bytes]:
         status, data = 502, _err("няма отговор")
+        # Един общ срок за всички ключове (ревю 2026-10-11): с N ключа и 429
+        # след 299 s разходът се записваше до N × 300 s след изтичането на
+        # жетона — след окончателната сметка на хода (billing.LATE_MARGIN).
+        deadline = time.monotonic() + UPSTREAM_TIMEOUT
         for key in keys:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
             req = urllib.request.Request(
                 f"{base}/chat/completions", data=body, method="POST",
                 headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"})
             try:
-                with self.opener(req, timeout=UPSTREAM_TIMEOUT) as r:
+                with self.opener(req, timeout=left) as r:
                     status, data = r.status, r.read()
             except urllib.error.HTTPError as e:
                 status, data = e.code, e.read()
@@ -302,25 +417,37 @@ class Gateway:
 
 
 def _cap_completion(request: dict, body: bytes, allowed: int) -> bytes:
-    """`max_tokens` (или `max_completion_tokens`) не над `allowed`."""
-    key = "max_completion_tokens" if "max_completion_tokens" in request else "max_tokens"
-    try:
-        current = int(request.get(key) or 4096)
-    except (TypeError, ValueError):
-        current = 4096
-    if current <= allowed:
-        return body
-    request[key] = max(1, allowed)
-    return json.dumps(request).encode()
+    """Всеки таван на отговора (`max_tokens`, `max_completion_tokens`) не над
+    `allowed`; без таван — изрично `max_tokens`.
+
+    Одит 2026-10-11: липсващ таван се приемаше за 4 096, но тялото оставаше
+    непипнато и доставчикът слагаше своя (32 789 от бюджет 6 000); с двата
+    ключа се режеше само `max_completion_tokens`, а `max_tokens=200000` минаваше."""
+    allowed = max(1, allowed)
+    keys = [k for k in ("max_tokens", "max_completion_tokens") if k in request] or ["max_tokens"]
+    changed = False
+    for key in keys:
+        try:
+            current = int(request.get(key) or 4096)
+        except (TypeError, ValueError, OverflowError):
+            current = 4096
+        capped = max(1, min(current, allowed))
+        if request.get(key) != capped or type(request.get(key)) is not int:
+            request[key] = capped
+            changed = True
+    return json.dumps(request).encode() if changed else body
 
 
 def _estimate(request: dict, body: bytes) -> int:
-    """Горна оценка на заявката: промптът (~3 байта на токен) + таванът на
-    отговора (`max_tokens`, иначе 4 096)."""
-    try:
-        cap = int(request.get("max_tokens") or request.get("max_completion_tokens") or 4096)
-    except (TypeError, ValueError):
-        cap = 4096
+    """Горна оценка на заявката: промптът (~3 байта на токен) + по-големият от
+    таваните на отговора (иначе 4 096)."""
+    caps = []
+    for key in ("max_tokens", "max_completion_tokens"):
+        try:
+            caps.append(int(request.get(key) or 0))
+        except (TypeError, ValueError, OverflowError):
+            pass
+    cap = max(caps, default=0) or 4096
     return len(body) // 3 + max(1, min(cap, 64_000))
 
 
@@ -393,12 +520,14 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     keys = read_keys(a.keys)
     secret = os.environ.get("GATEWAY_SECRET") or keys.pop("GATEWAY_SECRET", "")
+    models = read_models(keys)
     ledger = Ledger(a.usage)
     ledger.load()
-    gw = Gateway(secret, keys, ledger)
+    gw = Gateway(secret, keys, ledger, models=models)
     server = make_server(gw, a.host, a.port)
-    log.info("шлюз на :%d, доставчици: %s", server.server_address[1],
-             ", ".join(served_providers(keys)) or "няма")
+    log.info("шлюз на :%d, доставчици: %s; модели: %s", server.server_address[1],
+             ", ".join(served_providers(keys)) or "няма",
+             ", ".join(sorted(models)) if models else "всички")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

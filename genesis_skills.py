@@ -27,9 +27,13 @@ CONFIRM/BLOCKED бариерата) и се записва в genesis_agent.memo
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import stat
 import sys
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 
 # Уверяваме се, че genesis_agent/ пакетът е импортируем (мостът стои в root-а).
@@ -38,6 +42,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from genesis_agent import sandbox
+from genesis_agent.code_edit import decode_text, displayable, encode_text, has_raw_bytes
 from genesis_agent.tool_schemas import load_tool_arguments
 
 # Паметта/уеб търсенето са meko-опционални — ако липсва зависимост (напр.
@@ -102,6 +107,8 @@ _CANCEL: Callable[[], bool] | None = None
 def _set_cancel(check: Callable[[], bool] | None) -> None:
     global _CANCEL
     _CANCEL = check
+    # И за вече работеща команда, не само преди следващия инструмент (2026-10-11).
+    sandbox.cancel_check = check
 
 
 def _cancelled() -> bool:
@@ -361,40 +368,162 @@ def _tool_read_file(arg: str, offset=None, limit=None) -> str:
     # и моделът виждаше „Permission denied“ (CI на Windows, 2026-10-07).
     if path.is_dir():
         return f"[READ_FILE] {path} е папка, не файл — ползвай LIST_DIR."
+    # Одит 2026-10-11: READ_FILE четеше ЦЕЛИЯ файл, за да покаже 8000 знака.
+    # FIFO в workspace-а висеше вечно (Ctrl-C затваря чата), /dev/zero изяждаше
+    # паметта, а лог от 300 MB струваше ~600–800 MB RSS — и с offset/limit.
+    # Затова: само обикновен файл (както mentions._read) и четене на парчета.
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        st = os.stat(path)
     except FileNotFoundError:
         return f"[READ_FILE] Файлът не съществува: {path}.{_did_you_mean(path)}"
     except OSError as e:
         return f"[READ_FILE] Грешка: {e}"
+    if not stat.S_ISREG(st.st_mode):
+        return (f"[READ_FILE] {path} не е обикновен файл (FIFO, устройство или сокет) — "
+                "не се чете: четенето би чакало вечно или нямало край.")
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(_READ_HEAD)
+            whole = len(head) >= st.st_size
+            # Двоичен файл (PNG, zip, sqlite) излизаше като 8000 знака боклук
+            # (одит 2026-10-11); @mentions вече го отказваше по същия признак.
+            # UTF-16/32 с BOM носят NUL, но са текст — decode_text ги чете.
+            text, encoding = decode_text(head, partial=not whole)
+            if not whole and encoding == "utf-8" and st.st_size <= _STYLE_PROBE:
+                # Кодирането — по целия файл, както SEARCH_CODE и WRITE_FILE
+                # (ревю 2026-10-11): ASCII в първите 32 KB и cp1251 след тях
+                # даваше „�“ в READ_FILE с offset, а SEARCH_CODE — текста.
+                encoding = decode_text(head + fh.read())[1]
+                fh.seek(len(head))
+                if encoding != "utf-8":
+                    text = head.decode(encoding, "surrogateescape")
+            if encoding in ("utf-8", "cp1251") and b"\x00" in head[:8192]:
+                return (f"[READ_FILE] {path} е двоичен файл ({st.st_size} байта, "
+                        f"{path.suffix or 'без разширение'}) — не се показва. За "
+                        "съдържанието ползвай RUN_CMD с подходящ инструмент "
+                        "(file, unzip -l, sqlite3).")
+            enc_note = "" if encoding == "utf-8" else f"  (кодиране {encoding})"
+            if offset_i is not None or limit_i is not None:
+                return _read_range(fh, path, encoding, offset_i, limit_i,
+                                   enc_note, redirect)
+            total_lines = None
+            if not whole and st.st_size <= _COUNT_LINES_MAX:
+                total_lines = head.count(b"\n") + _count_rest(fh)
+    except OSError as e:
+        return f"[READ_FILE] Грешка: {e}"
+    # Кодирането се разпознава (code_edit.decode_text) и се казва в заглавието:
+    # cp1251 файл се показваше като „�������“, а моделът копираше това в
+    # WRITE_FILE и кирилицата изчезваше от диска (одит 2026-10-11).
+    # Самотен `\r` (стар Mac) остава `\r`: превърнат в `\n`, READ→WRITE
+    # пренаписваше байтовете на файла (WRITE_FILE връща само чист CRLF), а
+    # диапазонът, SEARCH_CODE и прегледът преди WRITE_FILE виждаха един ред
+    # (ревю 2026-10-11, трета вълна) — един изглед за всички е по-важен.
+    text = displayable(text).replace("\r\n", "\n")
     _SEEN_PATHS.add(path.resolve())
-
-    if offset_i is not None or limit_i is not None:
-        lines = text.splitlines()
-        start = max(0, (offset_i or 1) - 1)
-        end = start + limit_i if limit_i else len(lines)
-        # Номерирани редове (както `cat -n`) — тук, за разлика от режима по
-        # подразбиране, точната позиция е ЦЯЛАТА цел на извикването: моделът
-        # е поискал точно този диапазон, защото гради EDIT_FILE anchor или
-        # обяснява нещо на потребителя по конкретен ред.
-        numbered = [f"{i:>5}\t{ln}" for i, ln in enumerate(lines[start:end], start + 1)]
-        chunk = "\n".join(numbered)
-        if len(chunk) > 8000:
-            chunk = chunk[:8000] + "\n… [отрязано, диапазонът е по-голям от 8000 символа]"
-        _log_episode(f"READ_FILE {path}", "прочетен (диапазон)", ["tool", "read_file"])
-        return (f"[READ_FILE: {path}]  (редове {start + 1}-{min(end, len(lines))} от {len(lines)})\n"
-                + chunk + redirect)
-
-    if len(text) > 8000:
-        total_lines = text.count("\n") + 1
+    if whole and not text.strip("\ufeff"):
+        text = "(празен файл)"
+    if len(text) > 8000 or not whole:
+        if whole:
+            total_lines = text.count("\n") + 1
+        lines_note = f", {total_lines} реда" if total_lines else ""
         text = (text[:8000]
-                + f"\n… [отрязано, общо {len(text)} символа, {total_lines} реда — "
+                + f"\n… [отрязано, общо {st.st_size} байта{lines_note} — "
                   f"за конкретен диапазон: READ_FILE: {path_str} | offset | limit]")
     _log_episode(f"READ_FILE {path}", "прочетен", ["tool", "read_file"])
-    return f"[READ_FILE: {path}]\n{text}{redirect}"
+    return f"[READ_FILE: {path}]{enc_note}\n{text}{redirect}"
 
 
-def _tool_write_file(arg: str, content: str) -> str:
+# Началото на файла, което READ_FILE чете по подразбиране: 8000 знака са
+# най-много 32000 байта (UTF-32), така че отрязването е по знаци, не по байтове.
+_READ_HEAD = 32_768
+# Над това броят на редовете в бележката не се смята — само байтовете.
+_COUNT_LINES_MAX = 512 * 1024 * 1024
+# Таван за едно парче от ред: минифициран файл от един ред не влиза цял в паметта.
+_LINE_PIECE = 1 << 20
+
+
+def _count_rest(fh) -> int:
+    """Редовете в остатъка на `fh` — на парчета, без да се делят."""
+    n, last = 0, b"\n"
+    while chunk := fh.read(_LINE_PIECE):
+        n += chunk.count(b"\n")
+        last = chunk[-1:]
+    return n + (last != b"\n")
+
+
+def _iter_lines(fh):
+    """Редовете от началото като байтове — делени САМО по `\n` (както rg и
+    EDIT_FILE), с най-много _LINE_PIECE байта от всеки."""
+    fh.seek(0)
+    while piece := fh.readline(_LINE_PIECE):
+        line = piece
+        while not piece.endswith(b"\n"):
+            piece = fh.readline(_LINE_PIECE)
+            if not piece:
+                break
+        yield line
+
+
+def _read_range(fh, path: Path, encoding: str, offset_i: int | None,
+                limit_i: int | None, enc_note: str, redirect: str) -> str:
+    """READ_FILE с offset/limit, без да държи файла в паметта.
+
+    Номерата са по `\n`, както в SEARCH_CODE и EDIT_FILE: str.splitlines()
+    броеше и \f, \x1c, U+2028 за край на ред, и READ_FILE ред 5 беше друг ред
+    (одит 2026-10-11). UTF-16/32 не се делят по байт `\n` — тях ги декодираме
+    цели (рядкост, и таванът е _STYLE_PROBE).
+    """
+    start = max(0, (offset_i or 1) - 1)
+    end = start + limit_i if limit_i else None
+    picked: list[str] = []
+    size = 0
+    total = 0
+    wide = encoding.startswith("utf-") and encoding != "utf-8"
+    if wide:
+        fh.seek(0)
+        text = decode_text(fh.read(_STYLE_PROBE), partial=True)[0]
+        lines = [ln + "\n" for ln in text.split("\n")]
+        if lines and lines[-1] == "\n":
+            lines.pop()
+        source = iter([ln.encode(encoding) for ln in lines])
+    else:
+        source = _iter_lines(fh)
+    for raw in source:
+        total += 1
+        if total <= start:
+            continue
+        if end is not None and total > end:
+            # Останалите редове само се броят — на парчета, без декодиране.
+            total += sum(1 for _ in source) if wide else _count_rest(fh)
+            break
+        if size <= 8000:
+            line = displayable(raw.decode(encoding, "surrogateescape"))
+            line = line.removesuffix("\n").removesuffix("\r")
+            picked.append(f"{total:>5}\t{line}")
+            size += len(picked[-1]) + 1
+    _SEEN_PATHS.add(path.resolve())
+    if start >= total:
+        return (f"[READ_FILE: {path}] Файлът има {total} реда — offset {start + 1} е след "
+                f"края. Прочети без offset или с offset ≤ {max(total, 1)}.{redirect}")
+    # Номерирани редове (както `cat -n`) — тук, за разлика от режима по
+    # подразбиране, точната позиция е ЦЯЛАТА цел на извикването: моделът
+    # е поискал точно този диапазон, защото гради EDIT_FILE anchor или
+    # обяснява нещо на потребителя по конкретен ред.
+    chunk = "\n".join(picked)
+    if len(chunk) > 8000:
+        chunk = chunk[:8000] + "\n… [отрязано, диапазонът е по-голям от 8000 символа]"
+    _log_episode(f"READ_FILE {path}", "прочетен (диапазон)", ["tool", "read_file"])
+    last = total if end is None else min(end, total)
+    return (f"[READ_FILE: {path}]  (редове {start + 1}-{last} от {total}){enc_note}\n"
+            + chunk + redirect)
+
+
+# Колко от съществуващ файл се чете, за да се познае кодирането му преди
+# WRITE_FILE — колкото и таванът на SEARCH_CODE (по-голям файл е генериран).
+_STYLE_PROBE = 2_000_000
+
+
+def _tool_write_file(arg: str, content: str, exact: bool = False) -> str:
     path, redirect = _resolve_noted(arg, redirect=False)
     if not arg.strip() or path.is_dir():
         # Иначе write_text върху папка → „Permission denied“, а моделът го
@@ -436,16 +565,65 @@ def _tool_write_file(arg: str, content: str) -> str:
             content = detail
         elif not ok:
             lint_note = f"\n{detail}"
+    # Съществуващ файл се записва в СВОЕТО кодиране (одит 2026-10-11): cp1251
+    # файл, минал през READ→WRITE, излизаше с U+FFFD на мястото на всяка буква.
+    encoding = "utf-8"
+    kept: list[str] = []
+    if path.is_file():
+        try:
+            with open(path, "rb") as fh:
+                original, encoding = decode_text(fh.read(_STYLE_PROBE), partial=True)
+        except OSError:
+            original = ""
+        if has_raw_bytes(original) and "\ufffd" in content:
+            return (f"[WRITE_FILE: {path}] ❌ Файлът има байтове, които не са текст в "
+                    f"{encoding}, а в READ_FILE се виждат като „\ufffd“ — записът би ги "
+                    "заменил завинаги. Ползвай EDIT_FILE за частична промяна: тя ги пази.")
+        # Краищата на редовете и BOM-ът също са на файла (одит 2026-10-11):
+        # READ_FILE показва LF, моделът пише LF, и CRLF .bat излизаше изцяло с
+        # LF и без BOM — дифф на всеки ред и счупени GOTO етикети. Чист CRLF
+        # файл остава CRLF; смесеният получава LF, както EDIT_FILE го прави.
+        # Ревю 2026-10-11: така „обърни run.sh в LF“ / „махни BOM-а“ не ставаше
+        # с никой файлов инструмент, а WRITE_FILE отчиташе ✓ с файла непроменен.
+        # `exact` пише точно даденото, а запазеното се казва в резултата.
+        if not exact:
+            crlf = original.count("\r\n")
+            if crlf and crlf == original.count("\n") and content.replace("\r\n", "").count("\n"):
+                content = content.replace("\r\n", "\n").replace("\n", "\r\n")
+                kept.append("CRLF краищата")
+            if original.startswith("\ufeff") and not content.startswith("\ufeff"):
+                content = "\ufeff" + content
+                kept.append("BOM-ът")
+    enc_note = (f" (запазени {' и '.join(kept)} на файла; exact=true пише точно "
+                "даденото — напр. за LF или без BOM)") if kept else ""
+    try:
+        data = encode_text(content, encoding)
+    except UnicodeEncodeError as e:
+        # Ревю 2026-10-11: отказът караше модела да маха „é“ от „Café“ и
+        # файл не можеше да се обърне в UTF-8. Съдържание, което не влиза в
+        # старото кодиране, не е върнат обратно сбъркан текст от READ_FILE
+        # (той е в старото кодиране), така че UTF-8 не губи нищо.
+        try:
+            data = encode_text(content, "utf-8")
+        except UnicodeEncodeError as e2:
+            # Самотен сурогат (половин емоджи от JSON, `\ud83d`) няма място и в
+            # UTF-8: без това излизаше суровата английска грешка на кодека от
+            # dispatch_tool_call (ревю 2026-10-11, трета вълна).
+            return (f"[WRITE_FILE: {path}] ❌ Знакът {content[e2.start:e2.end]!r} не е "
+                    "текст в никое кодиране (половин емоджи?) — махни го или го замени. "
+                    "ФАЙЛЪТ НЕ Е ПРОМЕНЕН.")
+        enc_note += (f" (файлът беше {encoding}, а {content[e.start:e.end]!r} няма място "
+                    "в него — записан е като UTF-8)")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        path.write_bytes(data)
     except OSError as e:
         return f"[WRITE_FILE] Грешка: {e}"
     _SEEN_PATHS.add(path.resolve())
     _log_episode(f"WRITE_FILE {path}", f"записани {len(content)} символа",
                  ["tool", "write_file"])
     from genesis_agent.web_check import web_note
-    return (f"[WRITE_FILE: {path}] ✓ записани {len(content)} символа{lint_note}"
+    return (f"[WRITE_FILE: {path}] ✓ записани {len(content)} символа{enc_note}{lint_note}"
             f"{_scaffold_tests(path)}{web_note(path)}{redirect}")
 
 
@@ -487,12 +665,19 @@ def _scaffold_tests(path: Path) -> str:
                 return ""
         except OSError:
             return ""
+    # Скелето е част от хода за /undo (e2e 2026-10-11): измерено — WRITE_FILE
+    # egn/tests/test_egn.py, после /undo триеше двата файла на модела, а
+    # egn/conftest.py, създаден тук, оставаше сирак в проекта.
+    from genesis_agent import edit_history
+    edit_history.record(conftest)
     try:
         conftest.write_text(
             "# Коренът на проекта е в sys.path на pytest, за да се внасят модулите\n"
             "# от корена в tests/ без sys.path хакове.\n", encoding="utf-8")
     except OSError:
         return ""
+    finally:
+        edit_history.forget_if_unchanged(conftest)
     _SEEN_PATHS.add(conftest)
     where = conftest.relative_to(root).as_posix()
     return (f"\n[скеле] Създаден е празен {where} — тестовете в {test_dir}/ внасят "
@@ -1158,6 +1343,9 @@ def _before_tool(name: str, args: dict) -> str | None:
             return blocked
     except Exception as e:
         return f"[{name}] ⛔ Проверката преди инструмента се провали ({e}) — не е изпълнен."
+    elided = _copies_elided_mark(name, args)
+    if elided:
+        return elided
     if name in ("WRITE_FILE", "EDIT_FILE") and args.get("path"):
         try:
             from genesis_agent import edit_history
@@ -1182,6 +1370,32 @@ def _before_tool(name: str, args: dict) -> str | None:
         except Exception:
             pass
     return None
+
+
+def _copies_elided_mark(name: str, args: dict) -> str | None:
+    """Отказва запис, който носи маркера за изпуснато от историята (B.12).
+
+    budget._elide_old_writes заменя съдържанието на стари записи в изпратеното
+    копие с маркер; в текстов режим слаб модел вижда
+    WRITE_FILE({path, content: <маркер>…}) и може да го препише като „код“ —
+    файлът би станал един ред бележка. Пазачът е в кода, не в промпта, и е
+    винаги включен, независимо от GENESIS_ELIDE_OLD_WRITES (2026-10-11): двата
+    пътя (native и текстови тагове) стигат дотук с нормализирани аргументи.
+    RUN_CMD/RUN_BG също — heredoc в команда е същият запис по друг път.
+    Хваща се формата на маркера, не голото му име (budget.carries_elided_mark)
+    — иначе търсене или commit съобщение, които го назовават, се отказваха."""
+    if name in ("WRITE_FILE", "EDIT_FILE"):
+        text = str(args.get("content", "")) + str(args.get("new", ""))
+    elif name in ("RUN_CMD", "RUN_BG"):
+        text = str(args.get("command", "")) + str(args.get("arg", ""))
+    else:
+        return None
+    from genesis_agent.budget import carries_elided_mark
+    if not carries_elided_mark(text):
+        return None
+    target = args.get("path") or args.get("command") or args.get("arg") or ""
+    return (f"[{name}: {str(target)[:120]}] ⛔ Това е маркер за изпуснато от историята, "
+            f"не съдържание — прочети файла с READ_FILE и напиши истинския код.")
 
 
 def _may_change_files(name: str, args: dict) -> bool:
@@ -1243,6 +1457,48 @@ def parse_and_execute_readonly_tools(response_text: str) -> list[str]:
     return [r for _, r in results]
 
 
+# Claude (през `claude -p`, 2026-10-12) понякога пише ПЪРВИЯ инструмент в
+# своя собствен XML формат, а останалите — с нашите тагове. Измерено на 30
+# сурови отговора от bench (vat/eik/iban ×2): 6 започваха с
+# `<invoke name="WRITE_FILE">път</parameter>` / `<invoke name="RUN_CMD">pwd</invoke>`;
+# всеки струваше рунд („първият ми WRITE_FILE беше с грешен синтаксис“), а
+# отговор САМО с XML не съдържаше `[TAG:` — нямаше подкана и ходът свършваше
+# без нито един инструмент (vat-check 0/1). Превръщат се само имената на
+# нашите инструменти; всичко друго остава текст.
+_XML_TOOLS = ("WRITE_FILE|EDIT_FILE|READ_FILE|RUN_CMD|RUN_BG|LIST_DIR|SEARCH_CODE|GLOB|"
+              "REPO_MAP|WEB_SEARCH|WEB_FETCH|ASK_USER|EXPLORE|TODO_WRITE|BG_OUTPUT|BG_KILL")
+_XML_BLOCK_OPEN_RE = re.compile(
+    r'<invoke name="(?P<tool>WRITE_FILE|EDIT_FILE)">\s*'
+    r'(?:<parameter name="(?:path|file_path)">)?\s*(?P<path>[^\n<\]]+?)\s*'
+    r'(?:</parameter>|</invoke>)?[ \t]*\n'
+    r'(?:\s*<parameter name="(?:content|body)">)?')
+_XML_BLOCK_CLOSE_RE = re.compile(r"\n?[ \t]*</(?:parameter|invoke)>\s*(?=\[END_(?:WRITE|EDIT)\])")
+_XML_SIMPLE_RE = re.compile(
+    r'<invoke name="(?P<tool>' + _XML_TOOLS + r')">\s*'
+    r'(?:<parameter name="\w+">)?(?P<arg>.*?)\s*(?:</parameter>\s*)?</invoke>', re.DOTALL)
+_XML_TAIL_RE = re.compile(r"\s*</parameter>\s*</invoke>\s*\]")
+_XML_WRAPPER_RE = re.compile(r"</?function_calls>\s*")
+
+
+def _normalize_xml_tool_calls(text: str) -> str:
+    """XML формата на Claude за нашите инструменти → нашите тагове."""
+    if "<invoke" not in text and "</parameter>" not in text and "</invoke>" not in text:
+        return text
+    text = _XML_WRAPPER_RE.sub("", text)
+    text = _XML_BLOCK_OPEN_RE.sub(lambda m: f"[{m.group('tool')}: {m.group('path')}]\n", text)
+    text = _XML_BLOCK_CLOSE_RE.sub("\n", text)
+    text = _XML_TAIL_RE.sub("]", text)
+    original = text
+
+    def simple(m: re.Match) -> str:
+        tag = f"[{m.group('tool')}: {m.group('arg')}]"
+        # Същата команда и като XML, и като таг („<invoke name="RUN_CMD">pwd</invoke>
+        # [RUN_CMD: pwd]“) — веднъж, не два пъти (команда със страничен ефект).
+        return "" if tag in original else tag
+
+    return _XML_SIMPLE_RE.sub(simple, text)
+
+
 def parse_and_execute_tools(response_text: str) -> list[str]:
     """
     Извлича и изпълнява всички тул-тагове в реда, в който се появяват.
@@ -1260,9 +1516,17 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
     """
     if not response_text:
         return []
+    response_text = _normalize_xml_tool_calls(response_text)
 
-    # (позиция_в_текста, изход) — сортира се по позиция, после се връщат само изходите.
-    results: list[tuple[int, str]] = []
+    # (позиция_в_текста, име, действие) — НИЩО не се изпълнява, докато не са
+    # събрани всички тагове и не е решено влагането. После се изпълняват в
+    # реда на позицията (bug fix, 2026-10-11). Дотук всяка група (блокове →
+    # USE_SKILL → едноредови → BROWSER_READ …) се ИЗПЪЛНЯВАШЕ в свой проход и
+    # само резултатите се сортираха: „[RUN_CMD: cp app.py app.bak]“ преди
+    # „[WRITE_FILE: app.py]“ правеше копието СЛЕД презаписа (измерено:
+    # app.bak = „PRICE = 0“), а върнатите резултати лъжеха модела, че копието
+    # е първо. Същото за READ_FILE преди EDIT_FILE — четенето виждаше новото.
+    actions: list[tuple[int, str, Callable[[], str]]] = []
 
     # ── 1. Блокови тагове: събираме кандидатите, после решаваме влагането ────
     # (start, end, kind, match) за трите блокови типа, подредени по позиция.
@@ -1279,28 +1543,32 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
     def _inside_block(pos: int) -> bool:
         return any(s <= pos < e for s, e in consumed_spans)
 
+    def _edit_action(m: re.Match) -> str:
+        body = m.group("body")
+        if _EDIT_SEPARATOR not in body:
+            return (f"[EDIT_FILE: {m.group('path').strip()}] ❌ Липсва разделителят "
+                    f"{_EDIT_SEPARATOR} между стария и новия текст.")
+        old_part, new_part = body.split(_EDIT_SEPARATOR, 1)
+        return _safe_tool("EDIT_FILE", _tool_edit_file, m.group("path"),
+                          _strip_one_newline(old_part), _strip_one_newline(new_part))
+
     for start, end, kind, m in block_candidates:
         if _inside_block(start):
             continue  # вложен в вече приет блок → това е текст, не тул
         consumed_spans.append((start, end))
         if kind == "WRITE_FILE":
-            results.append((start, _safe_tool("WRITE_FILE", _tool_write_file,
-                                              m.group("path"), m.group("body"))))
+            # Новият ред веднага след тага е синтаксис, не съдържание
+            # (2026-10-12): моделите почти винаги го пишат, и всеки файл
+            # започваше с празен ред — а `#!/bin/sh` на втори ред не е shebang.
+            # Само един и само отпред; краят на файла остава какъвто е написан.
+            actions.append((start, kind, partial(
+                _safe_tool, "WRITE_FILE", _tool_write_file, m.group("path"),
+                m.group("body").removeprefix("\r\n").removeprefix("\n"))))
         elif kind == "EDIT_FILE":
-            body = m.group("body")
-            if _EDIT_SEPARATOR not in body:
-                results.append((start,
-                                (f"[EDIT_FILE: {m.group('path').strip()}] ❌ Липсва разделителят "
-                                 f"{_EDIT_SEPARATOR} между стария и новия текст.")))
-            else:
-                old_part, new_part = body.split(_EDIT_SEPARATOR, 1)
-                results.append((start, _safe_tool("EDIT_FILE", _tool_edit_file,
-                                                  m.group("path"),
-                                                  _strip_one_newline(old_part),
-                                                  _strip_one_newline(new_part))))
+            actions.append((start, kind, partial(_edit_action, m)))
         else:  # USE_SKILL
-            results.append((start, _safe_tool("USE_SKILL", _tool_use_skill,
-                                              m.group("name"), m.group("body"))))
+            actions.append((start, kind, partial(
+                _safe_tool, "USE_SKILL", _tool_use_skill, m.group("name"), m.group("body"))))
 
     # ── 1b. USE_SKILL БЕЗ затварящ [END_USE_SKILL] ──────────────────────────
     # Най-скъпият пропуск в целия парсер (bug fix, 2026-09-20). driver кодът е
@@ -1315,10 +1583,7 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
     # пише същото пак — и рундовете изгарят, без нито един скил да е тръгнал.
     # Тук consume-ваме САМО самия таг (не остатъка от отговора), за да могат
     # другите тагове след него пак да се изпълнят.
-    for m in _BARE_USE_SKILL_RE.finditer(response_text):
-        if _inside_block(m.start()):
-            continue
-        consumed_spans.append((m.start(), m.end()))
+    def _bare_skill_action(m: re.Match) -> str:
         out = _safe_tool("USE_SKILL", _tool_use_skill, m.group("name"), "")
         # Изпълнено е — но ако моделът е искал да ВИКА нещо от умението, нека
         # научи точния синтаксис, вместо да гадае пак следващия рунд. Само при
@@ -1327,36 +1592,52 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
         if not any(marker in out for marker in _USE_SKILL_FAILURES):
             out += ("\n(Без driver код — блокът не беше затворен. За да извикаш функция "
                     "от умението: [USE_SKILL: име]<твоят код>[END_USE_SKILL].)")
-        results.append((m.start(), out))
+        return out
+
+    for m in _BARE_USE_SKILL_RE.finditer(response_text):
+        if _inside_block(m.start()):
+            continue
+        consumed_spans.append((m.start(), m.end()))
+        actions.append((m.start(), "USE_SKILL", partial(_bare_skill_action, m)))
 
     # ── 2. Едноредови тулове — прескачаме тези вътре в блоков таг ───────────
     for m in _SIMPLE_RE.finditer(response_text):
         if _inside_block(m.start()):
             continue
-        fn = _SIMPLE_DISPATCH[m.group("tool")]
-        results.append((m.start(), _safe_tool(m.group("tool"), fn, m.group("arg"))))
+        tool = m.group("tool")
+        actions.append((m.start(), tool, partial(
+            _safe_tool, tool, _SIMPLE_DISPATCH[tool], m.group("arg"))))
 
-    # 3. BROWSER_READ — без аргумент.
-    for m in _BROWSER_READ_RE.finditer(response_text):
-        if _inside_block(m.start()):
+    # 3. BROWSER_READ — без аргумент. 3b. REPO_MAP без аргумент — картира
+    # текущия workspace. 4. TASK_LIST без аргумент — показва отворените нишки.
+    no_arg: tuple[tuple[str, re.Pattern, Callable[[], str]], ...] = (
+        ("BROWSER_READ", _BROWSER_READ_RE, partial(_safe_tool, "BROWSER_READ", _tool_browser_read)),
+        ("REPO_MAP", _REPO_MAP_RE, partial(_safe_tool, "REPO_MAP", _tool_repo_map, "")),
+        ("TASK_LIST", _TASK_LIST_RE, partial(_safe_tool, "TASK_LIST", _tool_task_list, "open")))
+    for name, rx, thunk in no_arg:
+        for m in rx.finditer(response_text):
+            if _inside_block(m.start()):
+                continue
+            actions.append((m.start(), name, thunk))
+
+    # Изпълняваме по позиция в текста (sort е стабилен; позициите не се дублират).
+    actions.sort(key=lambda a: a[0])
+    results: list[str] = []
+    asked = False
+    for _pos, name, thunk in actions:
+        if asked:
+            # Таговете СЛЕД ASK_USER чакат отговора (bug fix, 2026-10-11).
+            # Измерено: „[ASK_USER: Да презапиша ли notes.txt?]“ + WRITE_FILE
+            # в същата реплика записваше файла, преди операторът да отговори.
+            # Резултат-заместител вместо мълчание — моделът трябва да знае, че
+            # не е направено.
+            results.append(f"[{name}] не е изпълнено — чака отговора на оператора.")
             continue
-        results.append((m.start(), _safe_tool("BROWSER_READ", _tool_browser_read)))
-
-    # 3b. REPO_MAP без аргумент — картира текущия workspace.
-    for m in _REPO_MAP_RE.finditer(response_text):
-        if _inside_block(m.start()):
-            continue
-        results.append((m.start(), _safe_tool("REPO_MAP", _tool_repo_map, "")))
-
-    # 4. TASK_LIST без аргумент — [TASK_LIST] показва отворените нишки.
-    for m in _TASK_LIST_RE.finditer(response_text):
-        if _inside_block(m.start()):
-            continue
-        results.append((m.start(), _safe_tool("TASK_LIST", _tool_task_list, "open")))
-
-    # Подреждаме по позиция в текста, връщаме само низовете.
-    results.sort(key=lambda t: t[0])
-    return [r for _, r in results]
+        out = thunk()
+        results.append(out)
+        if name == "ASK_USER" and ASK_USER_MARKER in out:
+            asked = True
+    return results
 
 
 # Всяко скоби-подобно "[ГЛАВНИ_БУКВИ:" или "[ГЛАВНИ_БУКВИ]" в текста — независимо
@@ -1374,7 +1655,9 @@ def looks_like_attempted_tool_tag(response_text: str) -> bool:
     истински таг не е разпознат от parse_and_execute_tools за него."""
     if not response_text:
         return False
-    return bool(_ATTEMPTED_TAG_RE.search(response_text))
+    # `<invoke name="…">`, останал след _normalize_xml_tool_calls, също е опит
+    # за инструмент — иначе ходът свършваше тихо (2026-10-12, виж горе).
+    return bool(_ATTEMPTED_TAG_RE.search(response_text) or "<invoke name=" in response_text)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1396,8 +1679,17 @@ def dispatch_tool_call(name: str, arguments) -> str:
     if isinstance(arguments, str):
         try:
             arguments = load_tool_arguments(arguments)
-        except (ValueError, TypeError):
-            return f"[{name}] Невалидни аргументи (не са валиден JSON): {arguments[:200]}"
+        except (ValueError, TypeError) as e:
+            msg = f"[{name}] Невалидни аргументи (не са валиден JSON): {arguments[:200]}"
+            # JSON, свършил посред низ/обект, е отрязан на изходния таван
+            # (ревю 2026-10-11): Brain го връща, щом го отреже всеки модел, и
+            # без тази подсказка моделът пращаше същия голям запис пак.
+            if isinstance(e, json.JSONDecodeError) and (
+                    e.msg.startswith("Unterminated string") or e.pos >= len(arguments.rstrip())):
+                msg += ("\nАргументите са отрязани — по-дълги са от изходния таван на "
+                        "модела. Раздели записа: по-малки файлове или WRITE_FILE с "
+                        "началото и EDIT_FILE за останалото.")
+            return msg
     if not isinstance(arguments, dict):
         arguments = {}
     blocked = _before_tool(name, arguments)
@@ -1412,7 +1704,9 @@ def _dispatch(name: str, arguments: dict) -> str:
             return _tool_read_file(arguments.get("path", ""),
                                    arguments.get("offset"), arguments.get("limit"))
         if name == "WRITE_FILE":
-            return _tool_write_file(arguments.get("path", ""), arguments.get("content", ""))
+            return _tool_write_file(arguments.get("path", ""), arguments.get("content", ""),
+                                    str(arguments.get("exact", "")).strip().lower()
+                                    in ("true", "1", "yes"))
         if name == "EDIT_FILE":
             return _tool_edit_file(arguments.get("path", ""),
                                    arguments.get("old", ""),

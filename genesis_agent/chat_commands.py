@@ -17,7 +17,13 @@ from typing import Any
 
 BUILTIN = ("/init", "/memory", "/plan", "/undo", "/compact", "/hooks", "/commands", "/bg", "/mcp",
            "/agents", "/todos", "/context")
-_NAME = re.compile(r"^/([A-Za-z0-9][\w-]{0,40})(?:\s+(.*))?$", re.DOTALL)
+# Буква или цифра в която и да е азбука, после букви/цифри/_/-. Одит
+# 2026-10-11: правилото искаше ASCII първи знак, а /commands показваше
+# `преглед.md` като /преглед — и /преглед отиваше при модела като обикновен
+# текст. Списъкът (custom_commands) и изпълнението ползват едно и също правило.
+_STEM = r"[^\W_][\w-]{0,40}"
+_NAME = re.compile(rf"^/({_STEM})(?:\s+(.*))?$", re.DOTALL)
+_STEM_RE = re.compile(rf"^{_STEM}$")
 _YES = ("", "да", "д", "d", "da", "y", "yes")
 
 
@@ -34,9 +40,14 @@ def _home() -> Path:
 
 # Имената, които чатът обработва преди тези команди — файл с такова име
 # никога не би тръгнал, затова не се и показва (одит 2026-10-08).
+# И кирилските им имена (e2e 2026-10-11): /commands показваше `задачи.md`,
+# `предай.md`, `макскод.md`…, а написани те пускаха вградената команда —
+# /предай правеше zip, /макскод включваше кодинг режима.
 RESERVED = {"help", "clear", "model", "models", "agent", "backup", "status", "history",
             "export", "update", "skills", "tasks", "done", "drop", "state", "maxcoding",
-            "local_model_max", "local_model_normal", "exit", "quit"}
+            "local_model_max", "local_model_normal", "exit", "quit",
+            "задачи", "умения", "предай", "ъпдейт", "макскод", "готово",
+            "локален_макс", "локален_нормал"}
 
 
 def command_dirs(workspace: Path) -> list[Path]:
@@ -53,7 +64,8 @@ def custom_commands(workspace: Path) -> dict[str, Path]:
     for folder in command_dirs(workspace):
         if folder.is_dir():
             for f in sorted(folder.glob("*.md")):
-                if f.stem.lower() not in builtin:
+                # `_draft.md`, `my cmd.md` не стават команда — не се и показват.
+                if f.stem.lower() not in builtin and _STEM_RE.match(f.stem):
                     found.setdefault(f.stem.lower(), f)
     return found
 

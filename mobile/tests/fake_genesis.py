@@ -33,6 +33,12 @@ def main() -> None:
             agents._say("↳ reviewer: чета diff-а")
             ui.assistant("Под-агентът свърши.")
             return
+        if text == "много":
+            # Дълъг ход с кирилски изход: повече от един отговор (_REPLY_BYTES).
+            for i in range(200):
+                ui.tool("RUN_CMD", f"ред {i} " + "изход " * 700)
+            ui.assistant("Готово с много.")
+            return
         if text == "опасно":
             allowed = session.confirm("rm -rf build", ["изтрива папка"], timeout=10)
             ui.info(f"allowed={allowed}")

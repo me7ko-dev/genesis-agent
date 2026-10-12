@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -36,7 +37,9 @@ def load_history(workspace: Path) -> list[dict[str, str]]:
     """Последните съобщения от разговора, в рамките на таваните."""
     try:
         raw = json.loads((workspace / HISTORY_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
+        # RecursionError: `[` * 200000, записан от кода в контейнера, иначе
+        # събаряше този чат на всеки следващ ход (ревю 2026-10-11).
         return []
     msgs = [{"role": m["role"], "content": m["content"]} for m in raw
             if isinstance(m, dict) and m.get("role") in ("user", "assistant")
@@ -50,15 +53,30 @@ def load_history(workspace: Path) -> list[dict[str, str]]:
 def save_history(workspace: Path, history: list[dict[str, str]]) -> None:
     path = workspace / HISTORY_FILE
     try:
+        # Кодира се ПРЕДИ записа: write_text отрязваше файла и чак после
+        # гърмеше на lone surrogate — един такъв отговор изтриваше целия
+        # разговор (ревю 2026-10-11). Невалидното става „?“, ходът се пази.
+        data = json.dumps(history[-HISTORY_MAX_MESSAGES:],
+                          ensure_ascii=False).encode("utf-8", "replace")
         path.parent.mkdir(exist_ok=True)
-        path.write_text(json.dumps(history[-HISTORY_MAX_MESSAGES:], ensure_ascii=False),
-                        encoding="utf-8")
-    except OSError:
+        path.write_bytes(data)
+    except (OSError, ValueError):
         pass  # разговорът губи паметта си, задачата не бива да пада заради това
 
 
 def emit(kind: str, **data: Any) -> None:
-    print(json.dumps({"kind": kind, **data}, ensure_ascii=False), flush=True)
+    line = json.dumps({"kind": kind, **data}, ensure_ascii=False)
+    # Одит 2026-10-11: име на файл в cp1251 идва от LIST_DIR като lone
+    # surrogates и print() гърмеше с UnicodeEncodeError — целият ход в облака
+    # свършваше с грешка. Невалидното става U+FFFD.
+    try:
+        line.encode("utf-8")
+    except UnicodeEncodeError:
+        try:
+            line = line.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+        except UnicodeEncodeError:
+            line = line.encode("utf-8", "replace").decode("utf-8")
+    print(line, flush=True)
 
 
 def _log_lines(path: Path) -> int:
@@ -89,6 +107,24 @@ def tokens_since(path: Path, skip_lines: int) -> dict[str, int]:
     return total
 
 
+def _arm_deadline(raw: str) -> threading.Timer | None:
+    """Вторият таван: процесът (и с него контейнерът) спира сам след `raw`
+    секунди. Първият е наблюдателят в launch.py, но той живее в уеб процеса —
+    деплой одит 2026-10-11: след SIGKILL на уеб сървъра контейнерът остана Up
+    без никакъв срок. os._exit, не изключение: кодът на агента може да хване
+    всяко изключение, а изход на PID-а спира целия контейнер."""
+    try:
+        seconds = float(raw)
+    except ValueError:
+        return None
+    if seconds <= 0:
+        return None
+    timer = threading.Timer(seconds, os._exit, args=(124,))
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     text = " ".join(argv).strip() or sys.stdin.read().strip()
@@ -99,6 +135,7 @@ def main(argv: list[str] | None = None) -> int:
 
     os.environ.setdefault("GENESIS_WORKSPACE", "/work")
     t0 = time.monotonic()
+    _arm_deadline(os.environ.get("GENESIS_TASK_DEADLINE", ""))
 
     import genesis_terminal_agent as gta
     from genesis_agent import budget, sandbox
@@ -110,6 +147,13 @@ def main(argv: list[str] | None = None) -> int:
     skip = _log_lines(log_path)
 
     last_reply = {"text": ""}
+    # Грешката на веригата идва през warn(), не като отговор: от b9572f0
+    # (2026-10-11) run_turn я праща към оператора и спира хода. Проверката само
+    # на last_reply вече не я хващаше — задача без нито един отговорил модел
+    # излизаше ok:true и се таксуваше като успех (измерено 2026-10-11 в
+    # контейнера без ключове: warn „[Грешка: цялата верига е изчерпана…]“, после
+    # done ok:true). Пази се първата такава грешка.
+    chain_error = {"text": ""}
 
     class JsonTurnUI(gta.TurnUI):
         def assistant(self, text: str) -> None:
@@ -127,6 +171,8 @@ def main(argv: list[str] | None = None) -> int:
             emit("warn", text=note)
 
         def warn(self, text: str) -> None:
+            if text.lstrip().startswith("[Грешка") and not chain_error["text"]:
+                chain_error["text"] = text.strip()
             emit("warn", text=text)
 
         def info(self, text: str) -> None:
@@ -147,6 +193,8 @@ def main(argv: list[str] | None = None) -> int:
     # платена.
     if ok and last_reply["text"].lstrip().startswith("[Грешка"):
         ok, error = False, last_reply["text"].strip()[:500]
+    if ok and chain_error["text"]:
+        ok, error = False, chain_error["text"][:500]
     if ok:
         save_history(workspace, [*history, {"role": "user", "content": text},
                                  {"role": "assistant", "content": last_reply["text"]}])

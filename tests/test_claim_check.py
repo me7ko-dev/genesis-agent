@@ -194,3 +194,304 @@ class TestAPromiseAtTheEndIsNotWork:
 
     def test_a_finished_answer_is_left_alone(self) -> None:
         assert claim_check.unfinished_promise("Създадох index.html и styles.css. Сайтът е готов.") == ""
+
+
+# ── Одит 2026-10-11 (вълна 4): rc-то решава, а не текстът на изхода ─────────
+
+def _run(cmd: str, rc: object, out: str = "") -> tuple[str, str] | None:
+    """Записът, както го прави цикълът от резултата на genesis_skills._tool_run_cmd."""
+    return claim_check.counts_as_executed("RUN_CMD", cmd, f"[RUN_CMD: {cmd}]  (rc={rc})\n{out}")
+
+
+def _executed(*entries: tuple[str, str] | None) -> list[tuple[str, str]]:
+    return [e for e in entries if e]
+
+
+def _kinds(text: str, executed: list[tuple[str, str]]) -> list[str]:
+    return [c.kind for c in unsupported_claims(text, executed)]
+
+
+_GREEN_WITH_TRACEBACK = ("tests/test_log.py::test_logs_error PASSED\n"
+                         "Traceback (most recent call last):\n  File \"app.py\"\nValueError\n"
+                         "5 passed in 0.12s")
+
+
+class TestTheRcHeaderDecides:
+    """A1/A4: rc в заглавието казва, че командата е тръгнала и как е свършила."""
+
+    def test_a_green_run_that_logs_a_traceback_still_counts(self) -> None:
+        executed = _executed(_run("pytest -q", 0, _GREEN_WITH_TRACEBACK))
+        assert executed == [("RUN_CMD", "pytest -q")]
+        assert unsupported_claims("Пуснах тестовете. Всички тестове минаха.", executed) == []
+
+    def test_a_green_run_after_a_red_one_is_the_last_word(self) -> None:
+        executed = _executed(_run("pytest -q", 1, "1 failed, 4 passed"),
+                             _run("pytest -q", 0, _GREEN_WITH_TRACEBACK))
+        claims = unsupported_claims("Всички тестове минаха.", executed)
+        assert claims == []
+        assert claim_check.green_claim_after_red(claims, executed) == 0
+
+    def test_a_green_unittest_that_prints_a_missing_file_still_counts(self) -> None:
+        executed = _executed(_run("python -m unittest", 0, "файлът не съществува\nOK"))
+        assert executed == [("RUN_CMD", "python -m unittest")]
+
+    def test_a_multiline_command_reads_the_real_rc(self) -> None:
+        # Изход без белег за червено: червено го казва само rc-то (2026-10-11 —
+        # с „1 failed“ тестът минаваше и при напълно изхвърлено rc).
+        for cmd in ("cd app\npytest -q", "cd app\nnpm test"):
+            executed = _executed(_run("pytest -q", 0, "5 passed"),
+                                 _run(cmd, 1, "AssertionError [ERR_ASSERTION]: 3 == 4"))
+            claims = unsupported_claims("Всички тестове минаха.", executed)
+            assert [c.kind for c in claims] == ["минаващи тестове"], cmd
+            assert claim_check.green_claim_after_red(claims, executed) == 1, cmd
+
+    def test_a_timed_out_test_run_is_not_green(self) -> None:
+        executed = _executed(_run("pytest -q", 1, "1 failed"),
+                             _run("pytest -q", None, "Timeout след 120s"))
+        claims = unsupported_claims("Всички тестове минаха.", executed)
+        assert [c.kind for c in claims] == ["минаващи тестове"]
+        assert claim_check.green_claim_after_red(claims, executed) == -1
+
+    def test_a_timed_out_install_proves_nothing(self) -> None:
+        executed = _executed(_run("pip install requests", None, "Timeout след 120s"))
+        assert _kinds("Инсталирах пакета requests.", executed) == ["инсталация"]
+
+    def test_a_blocked_command_without_a_header_is_still_not_executed(self) -> None:
+        assert claim_check.counts_as_executed(
+            "RUN_CMD", "pytest", "[RUN_CMD: pytest]\n[SANDBOX BLOCKED] не") is None
+
+    def test_the_command_comes_from_the_header_not_from_args(self) -> None:
+        # scripts/capability_report.py подава като args целия резултат.
+        result = "[RUN_CMD: pytest -q]  (rc=1)\n1 failed"
+        assert claim_check.counts_as_executed("RUN_CMD", result[:200], result) \
+            == ("RUN_CMD", "pytest -q (rc=1)")
+
+
+class TestOnlyATestRunProvesTests:
+    """A2: паднала команда, която не пуска тестове, не доказва „пуснах тестовете“."""
+
+    def test_failed_builds_and_installs_do_not_prove_a_test_run(self) -> None:
+        for cmd in ("npm run build", "make build", "python setup.py build", "cargo build",
+                    "go build ./...", "npm install", "python app.py"):
+            executed = _executed(_run(cmd, 1, "error"))
+            assert _kinds("Пуснах тестовете, един пада.", executed) == ["пускане на тестове"], cmd
+
+    def test_a_failing_test_run_still_proves_the_run(self) -> None:
+        executed = _executed(_run("pytest -q", 1, "1 failed, 4 passed"))
+        assert unsupported_claims("Пуснах тестовете, един пада.", executed) == []
+
+
+class TestTheRcOfAPipeIsNotTheRunners:
+    """A3: rc на `| tail`, `|| true`, `; echo` е на опашката, не на pytest."""
+
+    def test_a_red_run_behind_a_pipe_is_red(self) -> None:
+        for cmd in ("python -m pytest -q | tail -5", "pytest -q | tee out.log",
+                    "pytest -q || true", "pytest -q; echo done", "pytest -q & echo done"):
+            executed = _executed(_run(cmd, 0, "1 failed, 4 passed"))
+            claims = unsupported_claims("Всички тестове минаха.", executed)
+            assert [c.kind for c in claims] == ["минаващи тестове"], cmd
+            assert claim_check.green_claim_after_red(claims, executed) == 1, cmd
+
+    def test_a_piped_red_run_does_not_cover_an_earlier_red_one(self) -> None:
+        executed = _executed(_run("pytest -q", 1, "1 failed"),
+                             _run("pytest -q | tail -3", 0, "1 failed, 4 passed"))
+        assert _kinds("Всички тестове минаха.", executed) == ["минаващи тестове"]
+
+    def test_other_runners_piped_red_are_red(self) -> None:
+        for cmd, out in (("python -m unittest 2>&1 | tail", "FAILED (failures=1)"),
+                         ("go test ./... | tail", "--- FAIL: TestX\nFAIL\tpkg 0.1s"),
+                         ("npx jest | tail", "Tests:       1 failed, 3 passed"),
+                         ("cargo test | tail", "test result: FAILED. 3 passed; 1 failed")):
+            assert _run(cmd, 0, out) == ("RUN_CMD", f"{cmd} (rc=1)"), cmd
+
+    def test_a_piped_green_run_is_green(self) -> None:
+        assert _run("pytest -q 2>&1 | tail -3", 0, "5 passed") == ("RUN_CMD", "pytest -q 2>&1 | tail -3")
+
+    def test_a_failing_commit_after_green_tests_is_not_a_red_test_run(self) -> None:
+        executed = _executed(_run("pytest -q && git commit -m x", 1, "5 passed\nnothing to commit"))
+        assert unsupported_claims("Всички тестове минаха.", executed) == []
+
+    def test_a_pure_and_chain_keeps_the_runners_rc(self) -> None:
+        assert _run("cd app && pytest -q 2>&1", 1, "") == ("RUN_CMD", "cd app && pytest -q 2>&1 (rc=1)")
+        # Дума „FAILED“ в лога на зелено пускане с доверен rc не е червено.
+        out = "WARNING FAILED to connect, retrying\n3 passed, 1 xfailed\nXFAIL test_x"
+        assert _run("cd app && pytest -q", 0, out) == ("RUN_CMD", "cd app && pytest -q")
+
+
+class TestTheLastCommandOwnsTheRc:
+    """rc на верига е на последната ѝ команда (`;`, нов ред, `&`, `|`, `&&`).
+    Преглед 2026-10-11: при `source .venv/bin/activate; pytest -q` rc=4
+    (ImportError в conftest) се изхвърляше и червеното минаваше за зелено."""
+
+    def test_a_runner_after_a_semicolon_keeps_its_rc(self) -> None:
+        for cmd, rc, out in (
+                ("source .venv/bin/activate; pytest -q", 4,
+                 "ImportError while loading conftest '/app/tests/conftest.py'."),
+                ("cd app; pytest -q", 5, "no tests ran in 0.01s"),
+                ("cd app; npm test", 1, "AssertionError [ERR_ASSERTION]: 3 == 4"),
+                ("cd app & npm test", 1, "AssertionError [ERR_ASSERTION]: 3 == 4"),
+                ("cat cases.txt | pytest -q", 2, "ERROR: usage")):
+            entry = _run(cmd, rc, out)
+            assert entry == ("RUN_CMD", f"{cmd} (rc={rc})"), cmd
+            claims = unsupported_claims("Всички тестове минаха.", _executed(entry))
+            assert [c.kind for c in claims] == ["минаващи тестове"], cmd
+            assert claim_check.green_claim_after_red(claims, _executed(entry)) == rc, cmd
+
+    def test_a_runner_after_or_does_not_own_a_green_rc(self) -> None:
+        # `make lint || pytest`: при зелен lint pytest не тръгва, rc=0 не е негово.
+        assert _run("make lint || pytest -q", 0, "1 failed") == ("RUN_CMD", "make lint || pytest -q (rc=1)")
+
+    def test_a_backgrounded_runner_does_not_own_the_rc(self) -> None:
+        # `pytest &` връща 0 веднага — rc-то не е на тестовете.
+        assert _run("pytest -q &", 0, "1 failed") == ("RUN_CMD", "pytest -q & (rc=1)")
+
+
+class TestTextPathKeepsTheWholeCommand:
+    """A5: `[^\\]]*` режеше `[ -d tests ] && pytest -q` до `[ -d tests `."""
+
+    def test_a_bracket_in_the_command_does_not_hide_the_test_run(self) -> None:
+        executed = claim_check.executed_from_text_results([
+            "[RUN_CMD: pytest -q]  (rc=0)\n5 passed",
+            "[RUN_CMD: [ -d tests ] && pytest -q]  (rc=1)\n1 failed",
+        ])
+        assert executed[-1] == ("RUN_CMD", "[ -d tests ] && pytest -q (rc=1)")
+        assert _kinds("Всички тестове минаха.", executed) == ["минаващи тестове"]
+
+
+class TestRunsThatRunNoTests:
+    """A6: rc=0 на команда, която не пуска тестове, не скрива червено пускане."""
+
+    def test_check_and_no_run_flags_are_not_test_runs(self) -> None:
+        for cmd in ("cargo check", "python manage.py check", "pytest --collect-only -q",
+                    "pytest --version", "python -m pytest --co"):
+            assert not claim_check.is_test_run(cmd), cmd
+            executed = _executed(_run("cargo test", 1, "1 failed"), _run(cmd, 0, "ok"))
+            assert _kinds("Всички тестове минаха.", executed) == ["минаващи тестове"], cmd
+
+    def test_make_and_npm_check_are_still_test_runs(self) -> None:
+        for cmd in ("make check", "npm run check", "python manage.py test"):
+            assert claim_check.is_test_run(cmd), cmd
+
+
+class TestNeverWeakerThanBefore:
+    """Вълна 5 (2026-10-11): таблица от 58 случая main / преди вълна 4 / сега.
+    Тези бяха по-слаби от преди: rc≠0 без белег в изхода, когато пускачът
+    не е последен, и честен смесен отчет без нито едно пускане."""
+
+    def test_a_failing_runner_before_another_command_stays_red(self) -> None:
+        for cmd, rc, out in (
+                ("pytest -q && git commit -am x", 4,
+                 "ImportError while loading conftest '/app/tests/conftest.py'."),
+                ("pytest -q && git commit -am x", 5, "no tests ran in 0.01s"),
+                ("set -o pipefail; pytest -q | tee log.txt", 1, "Traceback (most recent call last):"),
+                ("npm test && npm run build", 1, "npm ERR! Test failed.")):
+            entry = _run(cmd, rc, out)
+            assert entry == ("RUN_CMD", f"{cmd} (rc={rc})"), cmd
+            claims = unsupported_claims("Всички тестове минаха.", _executed(entry))
+            assert claim_check.green_claim_after_red(claims, _executed(entry)) == rc, cmd
+
+    def test_a_green_summary_keeps_a_later_failure_off_the_tests(self) -> None:
+        for cmd, out in (("pytest -q && git commit -am x", "5 passed in 0.1s\nnothing to commit"),
+                         ("npx jest && npm run build", "Tests:       4 passed, 4 total\nerror TS2304"),
+                         ("python -m unittest && make dist", "Ran 4 tests in 0.01s\n\nOK\nmake: *** Error"),
+                         ("cargo test && cargo build --release", "test result: ok. 3 passed\nerror[E0425]")):
+            assert _run(cmd, 1, out) == ("RUN_CMD", cmd), cmd
+
+    def test_a_backgrounded_runner_without_a_result_is_not_green(self) -> None:
+        executed = _executed(_run("pytest -q &", 0, ""))
+        claims = unsupported_claims("Всички тестове минаха.", executed)
+        assert claim_check.green_claim_after_red(claims, executed) == -1
+
+    def test_a_mixed_report_still_needs_a_test_run(self) -> None:
+        nothing = _executed(_run("ls", 0, "app.py"))
+        for text in ("Тестовете минаха, освен test_vat.", "4 tests passed, 1 failed."):
+            claims = unsupported_claims(text, nothing)
+            assert [c.kind for c in claims] == ["пускане на тестове"], text
+            assert claim_check.green_claim_after_red(claims, nothing) == 0, text
+            red = _executed(_run("pytest -q", 1, "1 failed, 4 passed"))
+            assert unsupported_claims(text, red) == [], text
+
+    def test_one_claim_for_a_run_and_a_mixed_report(self) -> None:
+        assert _kinds("Пуснах тестовете: тестовете минаха, освен test_vat.", []) \
+            == ["пускане на тестове"]
+
+
+class TestGreenSummariesOfOtherRunners:
+    """Ревю на вълна 5 (2026-10-11): зелен итог, който _GREEN_OUTPUT_RE не
+    познаваше, оставяше rc≠0 на падналия `git commit` след пускача — честното
+    „Всички тестове минават“ ставаше „⚠ червено“ (main и вълна 4: зелено).
+    Измерено с node --test (и `# pass 35` на mobile/), Maven, Gradle, dotnet, bun."""
+
+    _GREEN = (
+        ("npm test && git commit -am wip", 1,
+         "ℹ tests 5\nℹ pass 5\nℹ fail 0\nnothing to commit, working tree clean"),
+        ("npm test && git commit -am wip", 1, "# tests 35\n# pass 35\n# fail 0\nnothing to commit"),
+        ("mvn test && git commit -am wip", 1,
+         ("[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0\n[INFO] BUILD SUCCESS\n"
+          "nothing to commit")),
+        ("./gradlew test && git commit -am wip", 1, "BUILD SUCCESSFUL in 3s\nnothing to commit"),
+        ("dotnet test && git commit -am wip", 1,
+         "Passed!  - Failed:     0, Passed:     5, Skipped:     0, Total:     5\nnothing to commit"),
+        ("dotnet test && git push", 128,
+         ("Passed!  - Failed:     0, Passed:     5, Skipped:     0, Total:     5\n"
+          "fatal: could not read Username")),
+        ("bun test && git commit -am wip", 1, " 5 pass\n 0 fail\nRan 5 tests\nnothing to commit"),
+    )
+
+    # Същите пускачи, червени: rc е на пускача (git не тръгва след `&&`).
+    _RED = (
+        ("npm test && git commit -am wip", 1, "ℹ tests 5\nℹ pass 4\nℹ fail 1"),
+        ("npm test && git commit -am wip", 1, "# tests 35\n# pass 34\n# fail 1"),
+        ("mvn test && git commit -am wip", 1,
+         "[ERROR] Tests run: 5, Failures: 1, Errors: 0, Skipped: 0\n[INFO] BUILD FAILURE"),
+        ("./gradlew test && git commit -am wip", 1, "3 tests completed, 1 failed\nBUILD FAILED"),
+        ("dotnet test && git commit -am wip", 1,
+         "Failed!  - Failed:     1, Passed:     4, Skipped:     0, Total:     5"),
+        ("bun test && git commit -am wip", 1, " 4 pass\n 1 fail\nRan 5 tests"),
+    )
+
+    def test_a_green_runner_before_a_failing_command_stays_green(self) -> None:
+        for cmd, rc, out in self._GREEN:
+            executed = _executed(_run(cmd, rc, out))
+            assert executed == [("RUN_CMD", cmd)], (cmd, out)
+            assert unsupported_claims("Всички тестове минават.", executed) == [], cmd
+
+    def test_the_same_runners_red_stay_red(self) -> None:
+        for cmd, rc, out in self._RED:
+            executed = _executed(_run(cmd, rc, out))
+            assert executed == [("RUN_CMD", f"{cmd} (rc={rc})")], (cmd, out)
+            claims = unsupported_claims("Всички тестове минават.", executed)
+            assert claim_check.green_claim_after_red(claims, executed) == rc, cmd
+
+
+class TestTwoRunnersInOneChain:
+    """Ревю на вълна 5 (2026-10-11): зелен итог на първия пускач изтриваше
+    rc≠0 на втория, който не е печатал червен белег (`jest: not found`,
+    ImportError в conftest, „no tests ran“, грешка на tsc в `npm test`).
+    Преди вълна 4 и четирите бяха червени."""
+
+    def test_a_green_first_runner_does_not_hide_the_second(self) -> None:
+        for cmd, rc, out in (
+                ("pytest -q && npm test && git push", 127, "5 passed in 0.1s\nsh: 1: jest: not found"),
+                ("pytest -q tests/unit && pytest -q tests/integration && git commit -am x", 4,
+                 "5 passed in 0.1s\nImportError while loading conftest '/app/conftest.py'."),
+                ("pytest -q tests/unit && pytest -q tests/integration && git commit -am x", 5,
+                 "5 passed in 0.1s\nno tests ran in 0.01s"),
+                ("cd api && pytest -q && cd ../web && npm test && cd ..", 1,
+                 "12 passed in 0.3s\nsrc/app.ts(3,1): error TS2304: Cannot find name 'x'.")):
+            executed = _executed(_run(cmd, rc, out))
+            assert executed == [("RUN_CMD", f"{cmd} (rc={rc})")], cmd
+            claims = unsupported_claims("Всички тестове минават.", executed)
+            assert claim_check.green_claim_after_red(claims, executed) == rc, cmd
+
+    def test_two_green_runners_with_rc_zero_are_green(self) -> None:
+        cmd = "pytest -q && npm test && git push"
+        assert _run(cmd, 0, "5 passed\nTests: 3 passed") == ("RUN_CMD", cmd)
+
+
+def test_not_all_tests_pass_with_nothing_run_is_not_a_claim() -> None:
+    """Ревю на вълна 5 (2026-10-11): „Не всички тестове минават.“ без нито
+    едно пускане даваше подкана „пускане на тестове“; на main и преди
+    вълна 4 — нищо. Отрицанието не твърди и пускане."""
+    nothing = _executed(_run("ls", 0, "app.py"))
+    assert unsupported_claims("Не всички тестове минават.", nothing) == []

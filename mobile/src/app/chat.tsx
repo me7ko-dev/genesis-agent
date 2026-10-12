@@ -7,6 +7,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AssistantMessage, ConfirmCard, Note, TodoPanel, ToolCard, UserBubble } from '../components/Cards';
 import type { ChatItem } from '../lib/chat';
+import { MAX_MESSAGE, trimDraft } from '../lib/messages';
 import { usePairing } from '../lib/pairing';
 import type { Pairing } from '../lib/protocol';
 import { useTheme } from '../lib/theme';
@@ -45,9 +46,11 @@ function Chat({ pairing }: { pairing: Pairing }) {
     if (atBottom.current) list.current?.scrollToEnd({ animated: true });
   };
 
+  // g.sending: второ докосване, докато първото е на път, не прави нищо (одит
+  // 2026-10-11: две докосвания през 150 ms пускаха хода два пъти).
   const submit = async () => {
-    const text = draft.trim();
-    if (!text || g.busy) return;
+    const text = trimDraft(draft);
+    if (!text || g.busy || g.sending) return;
     atBottom.current = true;
     if (await g.send(text)) setDraft('');
   };
@@ -95,9 +98,12 @@ function Chat({ pairing }: { pairing: Pairing }) {
           {g.status?.workspace ? (
             <Text style={[styles.menuInfo, { color: theme.muted }]} numberOfLines={2}>📁 {g.status.workspace}</Text>
           ) : null}
-          <MenuItem label="Нов разговор" onPress={() => { setMenuOpen(false); g.clear(); }} />
+          {/* Насред хода компютърът отказва всичко тук ("busy") — „Нов
+              разговор“ се предлагаше и мълчаливо не правеше нищо (одит
+              2026-10-11). */}
           {g.busy ? null : (
             <>
+              <MenuItem label="Нов разговор" onPress={() => { setMenuOpen(false); g.clear(); }} />
               <MenuItem label={g.plan ? 'Изпълни плана (/plan)' : 'Режим план (/plan)'} onPress={() => command('/plan')} />
               <MenuItem label="Върни последните промени (/undo)" onPress={() => command('/undo')} />
               <MenuItem label="Задачи (/todos)" onPress={() => command('/todos')} />
@@ -141,7 +147,7 @@ function Chat({ pairing }: { pairing: Pairing }) {
               case 'assistant': return <AssistantMessage item={item} />;
               case 'tool': return <ToolCard item={item} />;
               case 'note': return <Note item={item} />;
-              case 'confirm': return <ConfirmCard item={item} onAnswer={(allow) => g.confirm(item.id, allow)} />;
+              case 'confirm': return <ConfirmCard item={item} onAnswer={g.confirm} />;
             }
           }}
           ListFooterComponent={
@@ -158,10 +164,21 @@ function Chat({ pairing }: { pairing: Pairing }) {
 
         <TodoPanel todos={g.todos} />
 
+        {/* Близо до тавана — колко остава; над него сървърът отказваше с
+            „too_long“, а голямо поставяне даваше „server error 413“ (одит
+            2026-10-11). maxLength брои UTF-16, тоест никога не пуска повече
+            знаци, отколкото сървърът брои. */}
+        {draft.length > MAX_MESSAGE - 2000 ? (
+          <Text style={[styles.counter, { color: draft.length >= MAX_MESSAGE ? theme.danger : theme.muted }]}>
+            {draft.length} / {MAX_MESSAGE} знака
+          </Text>
+        ) : null}
+
         <View style={[styles.composer, { borderColor: theme.border, backgroundColor: theme.surface }]}>
           <TextInput
             value={draft}
             onChangeText={setDraft}
+            maxLength={MAX_MESSAGE}
             placeholder={g.busy ? 'Genesis работи…' : 'Съобщение към Genesis'}
             placeholderTextColor={theme.muted}
             multiline
@@ -177,8 +194,9 @@ function Chat({ pairing }: { pairing: Pairing }) {
             </Pressable>
           ) : (
             <Pressable accessibilityRole="button" accessibilityLabel="Изпрати" onPress={submit}
-              disabled={!draft.trim() || g.connection !== 'online'}
-              style={[styles.send, { backgroundColor: theme.accent, opacity: draft.trim() && g.connection === 'online' ? 1 : 0.4 }]}>
+              disabled={!trimDraft(draft) || g.sending || g.connection !== 'online'}
+              style={[styles.send, { backgroundColor: theme.accent,
+                opacity: trimDraft(draft) && !g.sending && g.connection === 'online' ? 1 : 0.4 }]}>
               <Text style={[styles.sendText, { color: theme.accentText }]}>↑</Text>
             </Pressable>
           )}
@@ -231,6 +249,7 @@ const styles = StyleSheet.create({
   thinking: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6 },
   thinkingText: { fontSize: 14 },
   error: { paddingHorizontal: 16, paddingBottom: 6, fontSize: 13 },
+  counter: { paddingHorizontal: 18, paddingBottom: 4, fontSize: 12, textAlign: 'right' },
   composer: { flexDirection: 'row', alignItems: 'flex-end', gap: 8, margin: 10, marginTop: 0, padding: 6, paddingLeft: 14, borderRadius: 22, borderWidth: StyleSheet.hairlineWidth },
   input: { flex: 1, fontSize: 16, maxHeight: 140, paddingTop: 8, paddingBottom: 8 },
   send: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },

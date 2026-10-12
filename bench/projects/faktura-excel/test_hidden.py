@@ -9,6 +9,23 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
 
+# Шрифт с кирилица за тестовата PDF фактура. Беше само „C:/Windows/Fonts/
+# arial.ttf“ — под Linux (облачният контейнер, тази машина) скритите тестове
+# падаха с TTFError още в подготовката и bench броеше проекта за провал на
+# модела (2026-10-12, claude_cli: 13/14, единственият „провал“ — този).
+_FONTS = ("C:/Windows/Fonts/arial.ttf",
+          "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+          "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+          "/Library/Fonts/Arial Unicode.ttf", "/System/Library/Fonts/Supplemental/Arial.ttf")
+
+
+def _register_font() -> None:
+    font = next((f for f in _FONTS if Path(f).exists()), None)
+    if font is None:
+        pytest.skip("няма шрифт с кирилица за тестовата фактура")
+    pdfmetrics.registerFont(TTFont("Arial", font))
+
+
 LINES = [
     "ФАКТУРА",
     "Оригинал",
@@ -31,7 +48,7 @@ LINES = [
 
 @pytest.fixture
 def real_pdf(tmp_path: Path) -> Path:
-    pdfmetrics.registerFont(TTFont("Arial", "C:/Windows/Fonts/arial.ttf"))
+    _register_font()
     path = tmp_path / "real.pdf"
     c = canvas.Canvas(str(path), pagesize=A4)
     c.setFont("Arial", 11)
@@ -48,7 +65,7 @@ def two_column_pdf(tmp_path: Path) -> Path:
     """Втора, различна фактура (2026-09-30): евро, „7.1.2026г.“, номерът на реда
     на заглавието, доставчик и получател на един ред — pdfplumber ги слива с
     един интервал. Проверява правилата, не стойностите на първата фактура."""
-    pdfmetrics.registerFont(TTFont("Arial", "C:/Windows/Fonts/arial.ttf"))
+    _register_font()
     path = tmp_path / "two.pdf"
     c = canvas.Canvas(str(path), pagesize=A4)
     c.setFont("Arial", 11)

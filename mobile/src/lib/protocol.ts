@@ -139,6 +139,14 @@ export function parsePairingUrl(raw: string): Pairing | null {
   return { base, key: params.k, name: cleanName(params.n) || base };
 }
 
+/** Какво се записва след успешна проверка: името, което компютърът казва,
+ *  изчистено като това от връзката. То се показва в заглавката и в
+ *  предупреждението „Ще замени сдвояването с …“ (одит 2026-10-11: пазеше се
+ *  сурово — с U+202E, нови редове и 300 знака). */
+export function pairingFrom(pairing: Pairing, status: StatusReply): Pairing {
+  return { ...pairing, name: cleanName(status.name) || pairing.name };
+}
+
 /** The computer's name as shown: no control or bidi characters, one line, at
  *  most 40 characters — a link could otherwise push the real address off the
  *  "Сдвои?" card with newlines or reverse it with U+202E (audit 2026-10-09). */
@@ -239,9 +247,12 @@ export type ErrorKind = 'network' | 'unauthorized' | 'clock' | 'protocol' | 'ser
 
 export class ProtocolError extends Error {
   kind: ErrorKind;
-  constructor(message: string, kind: ErrorKind) {
+  /** HTTP кодът, ако е имало такъв (429 спирачка, 413 твърде голямо…). */
+  status?: number;
+  constructor(message: string, kind: ErrorKind, status?: number) {
     super(message);
     this.kind = kind;
+    this.status = status;
   }
 }
 
@@ -276,6 +287,13 @@ export type EventsReply = {
   busy: boolean;
   epoch: string;
   state?: PhoneState;
+  /** Отговорът е стигнал тавана на сървъра: питай веднага пак от `last`
+   *  (2026-10-11). По-старите сървъри не го пращат. */
+  more?: boolean;
+  /** Последните приети `mid` на `send` (вълна 5, 2026-10-11): по тях
+   *  outbox.seen забравя повторения опит. По-старите сървъри не ги пращат. */
+  mids?: string[];
+  error?: string;
 };
 
 export type StatusReply = {
@@ -347,8 +365,8 @@ export class GenesisClient {
     }
     // The server's brake after failed attempts from this address — temporary,
     // retry later; it says nothing about our key (unpairing over it lost the pairing).
-    if (response.status === 429) throw new ProtocolError('too many failed attempts — wait a minute', 'network');
-    if (response.status !== 200) throw new ProtocolError(`server error ${response.status}`, 'server');
+    if (response.status === 429) throw new ProtocolError('too many failed attempts — wait a minute', 'network', 429);
+    if (response.status !== 200) throw new ProtocolError(`server error ${response.status}`, 'server', response.status);
     return open(this.key, data as Envelope, RES_AAD + rid) as T;
   }
 
@@ -356,12 +374,21 @@ export class GenesisClient {
     return this.call<StatusReply>('status');
   }
 
-  events(after: number, waitSeconds: number): Promise<EventsReply> {
-    return this.call<EventsReply>('events', { after, wait: waitSeconds }, (waitSeconds + 10) * 1000);
+  async events(after: number, waitSeconds: number): Promise<EventsReply> {
+    const reply = await this.call<EventsReply>('events', { after, wait: waitSeconds }, (waitSeconds + 10) * 1000);
+    // Грешка в заявката вече идва запечатана, не като 401 (2026-10-11) —
+    // отговор без събития не бива да стига до mergeEvents.
+    if (!reply.ok || !Array.isArray(reply.events)) {
+      throw new ProtocolError(reply.error ?? 'bad events reply', 'server');
+    }
+    return reply;
   }
 
-  send(text: string): Promise<{ ok: boolean; error?: string }> {
-    return this.call('send', { text });
+  /** `mid` — идентификаторът на съобщението от телефона: повторен опит със
+   *  същия след изгубен отговор получава първия отговор, ходът не тръгва
+   *  втори път (2026-10-11). */
+  send(text: string, mid?: string): Promise<{ ok: boolean; error?: string }> {
+    return this.call('send', mid ? { text, mid } : { text });
   }
 
   confirm(id: string, allow: boolean): Promise<{ ok: boolean }> {
