@@ -34,6 +34,18 @@ test('the app setting and GENESIS_EXE win over everything', () => {
   assert.deepEqual(list.slice(0, 3), ['P:\\mine.exe', 'E:\\g.exe', pipx]);
 });
 
+test('the window never runs itself as the agent', () => {
+  // 2026-10-12, this laptop: started in its own folder, `where genesis` listed
+  // the window's Genesis.exe first (case-blind) → „genesis спря (код 0)“.
+  const app = join(local, 'Programs', 'genesis-desktop', 'Genesis.exe');
+  const onPath = [join(local, 'programs', 'genesis-desktop', 'genesis.exe'), pipx, installer];
+  const list = exeCandidates({ env: { LOCALAPPDATA: local }, home, onPath, self: app });
+  assert.equal(list[0], pipx);
+  assert.ok(list.every((c) => c.toLowerCase() !== app.toLowerCase()), list.join(' | '));
+  // Nor as the app's own setting.
+  assert.equal(exeCandidates({ preferred: app, env: { LOCALAPPDATA: local }, home, onPath: [], self: app })[0], pipx);
+});
+
 test('only an .exe from where.exe counts (not genesis.cmd or a blank line)', () => {
   const cmd = join(home, 'bin', 'genesis.cmd');
   const list = exeCandidates({ env: { LOCALAPPDATA: local }, home, onPath: [cmd, ` ${pipx}\r`] });

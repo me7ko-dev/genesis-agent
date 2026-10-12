@@ -9,7 +9,7 @@
  * GENESIS_INSTALL_DIR is no choice of the user's: `scripts/install.ps1` sets
  * it on every install, and it pointed at that same old folder.
  */
-import { join } from 'node:path';
+import { join, normalize } from 'node:path';
 
 export interface ExeSources {
   /** The app's own setting (`settings.exe`). */
@@ -18,18 +18,29 @@ export interface ExeSources {
   home: string;
   /** The lines of `where.exe genesis`: what the terminal runs comes first. */
   onPath: string[];
+  /**
+   * The window's own executable (`process.execPath`) — never the agent.
+   * 2026-10-12, this laptop: the shortcut starts the window in its own folder,
+   * `where.exe` looks in the current folder first, and Windows names are
+   * case-blind, so `genesis` found the window's `Genesis.exe`. It ran itself
+   * as `Genesis.exe serve …`, the second window quit at once (one instance),
+   * and the user saw „genesis спря (код 0)“.
+   */
+  self?: string;
 }
 
 export function exeCandidates(s: ExeSources): string[] {
   const local = s.env.LOCALAPPDATA || join(s.home, 'AppData', 'Local');
+  const self = s.self && normalize(s.self).toLowerCase();
+  const notSelf = (c: string) => !self || normalize(c).toLowerCase() !== self;
   const list = [
     s.preferred,
     s.env.GENESIS_EXE,
-    s.onPath.map((l) => l.trim()).find((l) => l.toLowerCase().endsWith('.exe')),
+    s.onPath.map((l) => l.trim()).find((l) => l.toLowerCase().endsWith('.exe') && notSelf(l)),
     // pipx's folder, for a window started before `pipx ensurepath` reached PATH.
     join(s.env.PIPX_BIN_DIR || join(s.home, '.local', 'bin'), 'genesis.exe'),
     s.env.GENESIS_INSTALL_DIR && join(s.env.GENESIS_INSTALL_DIR, 'genesis.exe'),
     join(local, 'Programs', 'Genesis', 'genesis.exe'),
   ];
-  return list.filter((c): c is string => !!c);
+  return list.filter((c): c is string => !!c && notSelf(c));
 }

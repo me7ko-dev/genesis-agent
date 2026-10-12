@@ -28,11 +28,14 @@ export function genesisHome(): string {
 /** Where genesis.exe is: see `exeCandidates` for the order. */
 export async function findExe(preferred?: string): Promise<string | undefined> {
   const onPath = await new Promise<string[]>((resolve) => {
-    execFile('where.exe', ['genesis'], { windowsHide: true }, (err, out) => {
+    // From home, not the window's own folder: `where` looks in the current
+    // folder first, and that is where the window's Genesis.exe is (see exe.ts).
+    execFile('where.exe', ['genesis'], { windowsHide: true, cwd: homedir() }, (err, out) => {
       resolve(err ? [] : String(out).split(/\r?\n/));
     });
   });
-  return exeCandidates({ preferred, env: process.env, home: homedir(), onPath }).find((c) => existsSync(c));
+  return exeCandidates({ preferred, env: process.env, home: homedir(), onPath, self: process.execPath })
+    .find((c) => existsSync(c));
 }
 
 const bindCache = new Map<string, { mtime: number; ok: boolean }>();
