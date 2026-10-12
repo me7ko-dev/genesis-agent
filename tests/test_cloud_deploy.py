@@ -149,7 +149,9 @@ def _dry(tmp_path: Path, keys: str | None,
     out = tmp_path / "out"
     env = {**os.environ, "DEPLOY_DRY_RUN": "1", "DEPLOY_DRY_DIR": str(out), "DOCKER": str(fake),
            "PYTHON": str(fake), "SYSTEMCTL": str(fake), "FAKE_LOG": str(log),
-           "GENESIS_KEYS": str(keys_path), "GENESIS_DOMAIN": "genesis.example.com"}
+           "GENESIS_KEYS": str(keys_path), "GENESIS_DOMAIN": "genesis.example.com",
+           # не /srv/genesis/monitor.env на машината, на която вървят тестовете
+           "GENESIS_MONITOR_ENV": str(tmp_path / "monitor.env")}
     p = subprocess.run([str(BASH), str(root / "cloud" / "deploy.sh")], capture_output=True,
                        check=False, text=True, encoding="utf-8", env=env, cwd=tmp_path, timeout=60)
     calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
@@ -179,6 +181,33 @@ def test_dry_deploy_without_a_secret_is_proxy_mode(tmp_path) -> None:
     assert code == 0 and "режим: proxy" in out, out
     args = (files / "genesis-web").read_text(encoding="utf-8")
     assert "--env-file" in args and "--gateway-usage" not in args
+
+
+def test_dry_deploy_installs_and_starts_the_monitor_timer(tmp_path) -> None:
+    """Аларми (2026-10-12): таймерът на 5 мин се слага и пуска с деплоя."""
+    code, out, files, _ = _dry(tmp_path, SECRET)
+    assert code == 0, out
+    assert "няма " + str(tmp_path / "monitor.env") in out and "само в журнала" in out
+    service = (files / "genesis-monitor.service").read_text(encoding="utf-8")
+    assert "@REPO@" not in service and f"WorkingDirectory={ROOT}" in service
+    assert "-m cloud.monitor --once" in service and "UMask=0077" in service
+    assert "OnUnitActiveSec=5min" in (files / "genesis-monitor.timer").read_text(encoding="utf-8")
+    enable = next(line for line in out.splitlines() if " enable " in line)
+    start = next(line for line in out.splitlines() if " start genesis-backup.timer" in line)
+    assert "genesis-monitor.timer" in enable and "genesis-monitor.timer" in start
+
+
+def test_deploy_refuses_a_monitor_config_others_can_read(tmp_path) -> None:
+    """В monitor.env е паролата за SMTP или жетонът на бота в адреса на webhook-а."""
+    config = tmp_path / "monitor.env"
+    config.write_text("MONITOR_WEBHOOK_URL=https://hooks.example.com/secret\n", encoding="utf-8")
+    config.chmod(0o644)
+    code, out, _, _ = _dry(tmp_path, SECRET)
+    assert code == 1 and "трябва да е 600" in out, out
+    config.chmod(0o600)
+    code, out, _, calls = _dry(tmp_path, SECRET)
+    assert code == 0 and f"аларми: {config}" in out, out
+    assert any(c[:1] == ["-c"] and "load_settings" in c[1] and c[-1] == str(config) for c in calls)
 
 
 def test_the_web_unit_cleans_up_and_keeps_the_database_private() -> None:

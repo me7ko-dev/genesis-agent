@@ -124,6 +124,15 @@ CREATE TABLE IF NOT EXISTS invites (
     used_by INTEGER,
     used_at REAL
 );
+-- Заключен вход (2026-10-12, за cloud/monitor.py): броячът на грешните опити
+-- е в паметта на сървъра и наблюдението не го вижда. По един ред на ключ
+-- (имейл или IP) на прозорец — без имейла и адреса, само вида.
+CREATE TABLE IF NOT EXISTS lockouts (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL,            -- email | ip | signup
+    created REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS lockouts_created ON lockouts(created);
 """
 
 KINDS = ("charge", "purchase", "subscription", "grant", "adjust")
@@ -560,6 +569,14 @@ class Store:
                 "(SELECT 1 FROM ledger l WHERE l.event_id = 'turn:' || t.id) ORDER BY t.id"
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ── заключен вход (за наблюдението) ───────────────────────────────────
+    def add_lockout(self, kind: str, now: float | None = None) -> None:
+        """Ред „ключ от вид `kind` се заключи“. Пази се 30 дни."""
+        stamp = time.time() if now is None else now
+        with self._db() as c:
+            c.execute("INSERT INTO lockouts (kind, created) VALUES (?, ?)", (kind, stamp))
+            c.execute("DELETE FROM lockouts WHERE created < ?", (stamp - 30 * 86400,))
 
     # ── покани ─────────────────────────────────────────────────────────────
     def new_invites(self, n: int, credits_micro: int = 0, note: str = "") -> list[str]:

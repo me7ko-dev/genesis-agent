@@ -1,0 +1,10 @@
+[Unit]
+Description=Genesis онлайн: наблюдение на 5 минути
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

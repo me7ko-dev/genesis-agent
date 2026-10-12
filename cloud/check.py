@@ -89,11 +89,13 @@ def _ok(cond: bool, what: str, detail: str = "") -> None:
         raise CheckFailed(f"{what}{': ' + detail if detail else ''}")
 
 
-def helper() -> tuple[str, str]:
-    """(режим, адрес) според това кой помощник върви — както го е пуснал up.sh."""
+def helper(timeout: float = 60) -> tuple[str, str]:
+    """(режим, адрес) според това кой помощник върви — както го е пуснал up.sh.
+    `timeout` е за всяко `docker` (cloud/monitor.py подава по-кратък)."""
     for mode, url in (("gateway", launch.GATEWAY_URL), ("proxy", launch.EGRESS_URL)):
         name = launch.helper_container(url)
-        r = launch._docker("inspect", "-f", "{{.State.Running}} {{.State.Restarting}}", name)
+        r = launch._docker("inspect", "-f", "{{.State.Running}} {{.State.Restarting}}", name,
+                           timeout=timeout)
         if r.returncode == 0:
             _ok(r.stdout.strip() == "true false", f"{name} не е Up",
                 f"Running/Restarting = {r.stdout.strip()} (docker logs {name})")
@@ -138,6 +140,21 @@ def leftovers(started: set[str]) -> tuple[list[str], list[str]]:
         _ok(r.returncode == 0, "списъкът на Docker", (r.stderr or "").strip()[-200:])
     return (sorted(c for c in ps.stdout.split() if c in started),
             sorted(n for n in ls.stdout.split() if n in nets))
+
+
+def free_gb(path: Path) -> float:
+    """Свободните GB на диска на `path` (или на папката над него, ако още я няма)."""
+    return shutil.disk_usage(path if path.exists() else path.parent).free / 2 ** 30
+
+
+def web_health(web: str, timeout: float = 10) -> None:
+    """/healthz на уеб сървъра → 200, иначе CheckFailed. Вика го и cloud/monitor.py."""
+    try:
+        with urllib.request.urlopen(f"{web.rstrip('/')}/healthz", timeout=timeout) as resp:
+            status = resp.status
+    except OSError as e:
+        raise CheckFailed(f"уеб сървърът {web}: {e}") from None
+    _ok(status == 200, f"уеб сървърът {web}", f"HTTP {status}")
 
 
 def run_checks(jobs: Path, web: str | None, min_free_gb: float,
@@ -187,16 +204,11 @@ def run_checks(jobs: Path, web: str | None, min_free_gb: float,
     left, nets = leftovers(started)
     _ok(not left and not nets, "след задачите остана нещо", f"контейнери {left}, мрежи {nets}")
     say("✓ не остава контейнер или мрежа")
-    free = shutil.disk_usage(jobs if jobs.exists() else jobs.parent).free / 2 ** 30
+    free = free_gb(jobs)
     _ok(free >= min_free_gb, f"място за {jobs}", f"{free:.1f} GB < {min_free_gb} GB")
     say(f"✓ свободно за задачите: {free:.1f} GB")
     if web:
-        try:
-            with urllib.request.urlopen(f"{web.rstrip('/')}/healthz", timeout=10) as resp:
-                status = resp.status
-        except OSError as e:
-            raise CheckFailed(f"уеб сървърът {web}: {e}") from None
-        _ok(status == 200, f"уеб сървърът {web}", f"HTTP {status}")
+        web_health(web)
         say(f"✓ уеб сървърът отговаря ({web})")
 
 

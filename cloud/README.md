@@ -22,6 +22,7 @@
 | `deploy.sh`, `deploy/` | деплой с една команда; systemd, Caddyfile, daemon.json |
 | `check.py` | готова ли е машината — по истинския път на задача |
 | `backup.py` | копие на web.db и usage.jsonl, докато сървърът работи |
+| `monitor.py` | наблюдение на 5 мин и аларма (имейл/webhook) само при смяна |
 | `web/server.py` | вход, уеб чат, сваляне на файловете (само stdlib) |
 | `web/store.py` | SQLite: хора (scrypt), сесии (SHA-256 на жетона), разговори, ходове, сметка, покани |
 | `web/billing.py`, `web/prices.json` | етап 3: цени, такса на ход от шлюза, Stripe (само stdlib) |
@@ -73,7 +74,8 @@ keys.env) → `git pull --ff-only`
 - **systemd:** `genesis-net` (up.sh при всяко пускане; ако помощникът не е здрав,
   уеб сървърът не тръгва), `genesis-web` (root: вика docker и дава папките на
   uid 10001; `UMask=0077`; при спиране убива задачите си, `ExecStopPost` чисти
-  каквото е останало), `genesis-backup.timer` (на 6 часа). Логовете на уеб
+  каквото е останало), `genesis-backup.timer` (на 6 часа), `genesis-monitor.timer`
+  (на 5 минути — виж „Наблюдение и аларми“). Логовете на уеб
   сървъра са в journald (`journalctl -u genesis-web`; таван — `SystemMaxUse=`
   в journald.conf). Зад Caddy там се вижда само 127.0.0.1 — истинският адрес е в
   `/var/log/caddy/genesis.log`.
@@ -122,6 +124,56 @@ python3 -m cloud.runner.launch --workspace /srv/jobs/1 --env-file /srv/genesis/k
 - **Не се трие автоматично:** папките на разговорите в `/srv/jobs` и събитията
   в web.db (до 8 MiB на ход). Колко дълго се пазят е решение на оператора —
   `check.py` пада при под 5 GB свободни (`--min-free-gb`).
+
+### Наблюдение и аларми (2026-10-12)
+
+`genesis-monitor.timer` пуска `python3 -m cloud.monitor --once` на 5 минути. Аларма
+се праща **само при смяна** (наред → проблем и проблем → наред), всички промени от
+едно пускане — в едно съобщение на канал. Състоянието е в
+`/srv/genesis/web/monitor-state.json`.
+
+| Проверка | Проблем е, когато |
+|---|---|
+| уеб сървърът | `/healthz` не е 200 (`check.web_health`) |
+| шлюзът/проксито | не е Up или се рестартира (`check.helper`) |
+| диск | под `MONITOR_MIN_FREE_GB` (5) за `/srv/jobs` или `/srv/genesis/web` |
+| провалени ходове | над `MONITOR_MAX_FAILED_TURNS` (10) за последния час |
+| разход | таксувани кредити за последния час над `MONITOR_MAX_USER_CREDITS_HOUR` (200) на човек или `MONITOR_MAX_TOTAL_CREDITS_HOUR` (1000) общо; човекът е с номера си (`users`), не с имейла |
+| заключени входове | над `MONITOR_MAX_LOCKOUTS_HOUR` (20) за последния час — по един на имейл/IP/покана на 15 мин (таблица `lockouts` в web.db) |
+| висящи задачи | контейнер `genesis-task-*` по-стар от `MONITOR_TASK_SECONDS` (600, като `--seconds` на сървъра) + 2 мин |
+| резервно копие | последното е по-старо от `MONITOR_MAX_BACKUP_HOURS` (13) или няма нито едно |
+
+```bash
+sudo install -m 600 cloud/deploy/monitor.env.example /srv/genesis/monitor.env
+sudo nano /srv/genesis/monitor.env              # webhook (Slack/Discord/Telegram) и/или SMTP
+sudo python3 -m cloud.monitor --once --dry-run  # всички проверки + какво би пратил; нищо не праща
+sudo systemctl start genesis-monitor.service    # едно истинско пускане
+journalctl -u genesis-monitor -n 30             # какво е видял и пратил
+systemctl list-timers 'genesis-*'
+```
+
+- **Канали:** `MONITOR_WEBHOOK_URL` с `MONITOR_WEBHOOK_FORMAT` `text` (Slack,
+  Mattermost), `discord` или `telegram` (+ `MONITOR_TELEGRAM_CHAT_ID`, адресът е
+  `https://api.telegram.org/bot<жетон>/sendMessage`); имейл — `MONITOR_SMTP_HOST`,
+  `_PORT`, `_TLS` (starttls/ssl/none), `_USER`, `_PASSWORD`, `_FROM`, `_TO`. Може и
+  двата. Без `monitor.env` алармите са само в журнала.
+- **Тайните:** `deploy.sh` иска файла `600` и го проверява (грешна стойност спира
+  деплоя; адрес на webhook с интервал или управляващ знак също). Паролата и
+  адресът на webhook-а не се печатат — в грешките са `***`; `--dry-run` показва
+  само хоста.
+- **Паднал канал:** всеки канал помни какво е стигнало до него (`channels` в
+  `monitor-state.json`). Падналият остава със старото състояние и следващото
+  пускане опитва пак само по него, а `genesis-monitor.service` е `failed`
+  (`systemctl --failed`). Работещият канал не получава повторно същото и
+  получава „наред“ при оправяне.
+- **Висящ Docker:** всяко `docker` от наблюдението е с таван 15 с, пускането —
+  с `TimeoutStartSec=300`; алармата „шлюзът/проксито“ и „висящи задачи“ тръгва
+  и когато демонът не отговаря.
+- **Нова машина:** до първото копие (таймерът е на 6 ч) „резервно копие“ е
+  проблем — `sudo systemctl start genesis-backup.service` веднъж след деплоя.
+- Проверено (2026-10-12): `tests/test_cloud_monitor.py` — фалшиви Docker, SMTP,
+  webhook и часовник; `systemd-analyze verify` на единиците. С истински SMTP и
+  Telegram не е мерено (тук няма такива).
 
 ## Етап 2: вход, уеб чат, файлове
 
