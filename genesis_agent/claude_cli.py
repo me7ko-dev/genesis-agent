@@ -53,9 +53,8 @@ _AUTH_RE = re.compile(r"not logged in|/login|login expired|authentication|"
                       r"oauth token|invalid api key|\b401\b|\b403\b", re.IGNORECASE)
 _BUSY_RE = re.compile(r"overloaded|\b529\b|\b503\b", re.IGNORECASE)
 
-# Позиционният аргумент е на английски: под Windows `claude` често е .cmd и
-# минава през cmd.exe, а кирилица в командния ред там се чупи (CLAUDE.md).
-_INSTRUCTION = "Answer the conversation on stdin. Reply only with your next message."
+# Командният ред е само ASCII: под Windows `claude` често е .cmd и минава през
+# cmd.exe, а кирилица там се чупи (CLAUDE.md). Текстът идва през stdin.
 
 
 def cli_path() -> str | None:
@@ -92,10 +91,16 @@ _ROLE_LABEL = {"user": "Оператор", "assistant": "Genesis (ти)", "syste
                "tool": "Резултат от инструмент"}
 
 
-def render(messages: list[dict]) -> tuple[str, str]:
-    """(системен промпт, текст за stdin). Водещите system съобщения са промптът;
-    останалото е разговорът като текст — `-p` приема един вход, а историята
-    трябва да стигне цяла (без --resume: Genesis сам реже и свива историята)."""
+def render_blocks(messages: list[dict]) -> tuple[str, list[str]]:
+    """(системен промпт, блоковете за stdin). Водещите system съобщения са
+    промптът; останалото е разговорът — по един текстов блок на съобщение.
+    Без --resume: Genesis сам реже и свива историята.
+
+    По блок, не един общ текст (мерено 2026-10-12, claude 2.1.296): кешът на
+    Anthropic търси съвпадение само по граници на блокове. С един текст всеки
+    ход записваше целия разговор в кеша наново и не четеше нищо от него
+    (orders-api: 20–30K записани на ход, прочетен само системният промпт); с
+    блокове вторият ход чете 17 646 и записва 6 548 вместо 24 203."""
     system: list[str] = []
     turns: list[tuple[str, str]] = []
     leading = True
@@ -118,12 +123,26 @@ def render(messages: list[dict]) -> tuple[str, str]:
         if text:
             turns.append((role, text))
     if len(turns) == 1 and turns[0][0] == "user":
-        return "\n\n".join(system), turns[0][1]
-    body = "\n\n".join(f"=== {_ROLE_LABEL.get(r, r)} ===\n{t}" for r, t in turns)
+        return "\n\n".join(system), [turns[0][1]]
     head = ("Това е разговорът досега. Ти си Genesis. Напиши САМО следващия си "
             "отговор — на последното съобщение — в същия формат (инструментите "
-            "с техните тагове), без да повтаряш разговора.\n\n")
-    return "\n\n".join(system), head + body
+            "с техните тагове), без да повтаряш разговора.")
+    return "\n\n".join(system), [head] + [f"=== {_ROLE_LABEL.get(r, r)} ===\n{t}"
+                                           for r, t in turns]
+
+
+def render(messages: list[dict]) -> tuple[str, str]:
+    """(системен промпт, разговорът като един текст) — за четене и тестове."""
+    system, blocks = render_blocks(messages)
+    return system, "\n\n".join(blocks)
+
+
+def stdin_message(blocks: list[str]) -> bytes:
+    """Едно потребителско съобщение във формата stream-json, по блок на ход.
+    ensure_ascii: под Windows stdin минава и през .cmd обвивката."""
+    content = [{"type": "text", "text": b} for b in blocks if b] or [{"type": "text", "text": "."}]
+    return (json.dumps({"type": "user", "message": {"role": "user", "content": content}})
+            + "\n").encode("ascii")
 
 
 def _classify(text: str) -> str:
@@ -138,7 +157,8 @@ def _classify(text: str) -> str:
 
 
 def _parse(stdout: str) -> dict[str, Any] | None:
-    """Последният ред, който е JSON обект (предупреждения отгоре не пречат)."""
+    """Редът с резултата (`"type": "result"`). В stream-json преди него идват
+    init и самото съобщение — те не са отговорът; предупреждения не пречат."""
     for line in reversed(stdout.strip().splitlines()):
         line = line.strip()
         if line.startswith("{"):
@@ -146,13 +166,9 @@ def _parse(stdout: str) -> dict[str, Any] | None:
                 data = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(data, dict):
+            if isinstance(data, dict) and data.get("type") == "result":
                 return data
-    try:
-        data = json.loads(stdout)
-    except ValueError:
-        return None
-    return data if isinstance(data, dict) else None
+    return None
 
 
 def usage_of(data: dict[str, Any]) -> dict[str, int] | None:
@@ -174,17 +190,19 @@ def complete(messages: list[dict], model: str = DEFAULT_MODEL,
     path = cli_path()
     if not path:
         raise RuntimeError("skip: няма `claude` CLI в PATH (инсталирай Claude Code и влез с /login)")
-    system, prompt = render(messages)
+    system, blocks = render_blocks(messages)
     workdir = tempfile.mkdtemp(prefix="genesis-claude-")
     try:
         sp = Path(workdir) / "system.txt"
         sp.write_text(system or "Ти си Genesis, асистент за програмиране.", encoding="utf-8")
-        argv = [path, "-p", _INSTRUCTION, "--safe-mode", "--tools", "",
+        # stream-json на входа иска stream-json и --verbose на изхода (claude 2.1.296).
+        argv = [path, "-p", "--safe-mode", "--tools", "",
                 "--disallowedTools", "mcp__*", "--system-prompt-file", str(sp),
                 "--no-session-persistence", "--max-turns", "1",
-                "--output-format", "json", "--model", model or DEFAULT_MODEL]
+                "--input-format", "stream-json", "--output-format", "stream-json",
+                "--verbose", "--model", model or DEFAULT_MODEL]
         try:
-            proc = subprocess.run(argv, input=prompt.encode("utf-8"), capture_output=True,
+            proc = subprocess.run(argv, input=stdin_message(blocks), capture_output=True,
                                   timeout=timeout or TIMEOUT, env=child_env(), cwd=workdir,
                                   check=False)
         except subprocess.TimeoutExpired as e:
@@ -236,8 +254,11 @@ def auth_method(timeout: int = 20) -> str | None:
                               env=child_env(), check=False)
     except (OSError, subprocess.TimeoutExpired):
         return None
-    data = _parse(proc.stdout.decode("utf-8", errors="replace"))
-    if not data:
+    try:
+        data = json.loads(proc.stdout.decode("utf-8", errors="replace"))
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
         return None
     if not data.get("loggedIn", True):
         return "none"

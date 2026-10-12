@@ -33,8 +33,11 @@ class FakeClaude:
         system = ""
         if "--system-prompt-file" in argv:
             system = Path(argv[argv.index("--system-prompt-file") + 1]).read_text(encoding="utf-8")
+        raw = kw.get("input", b"").decode("ascii")          # stream-json, само ASCII
+        message = json.loads(raw)["message"]
+        blocks = [b["text"] for b in message["content"]]
         self.calls.append({"argv": list(argv), "env": kw.get("env"), "cwd": kw.get("cwd"),
-                           "stdin": kw.get("input", b"").decode("utf-8"), "system": system})
+                           "stdin": "\n\n".join(blocks), "blocks": blocks, "system": system})
         out = self.stdout if self.stdout is not None else json.dumps(self.payload, ensure_ascii=False)
         return subprocess.CompletedProcess(argv, self.rc, out.encode("utf-8"), self.stderr.encode("utf-8"))
 
@@ -99,6 +102,8 @@ def test_claude_runs_as_a_pure_text_model_with_our_prompt(fake, monkeypatch):
     assert argv[argv.index("--tools") + 1] == ""          # без инструментите на Claude Code
     assert argv[argv.index("--disallowedTools") + 1] == "mcp__*"
     assert argv[argv.index("--model") + 1] == "opus"
+    assert argv[argv.index("--input-format") + 1] == "stream-json"
+    assert argv[argv.index("--output-format") + 1] == "stream-json" and "--verbose" in argv
     assert "--bare" not in argv                           # --bare не чете абонамента
     assert all(a.isascii() for a in argv[1:] if not a.startswith(("/", "C:")))  # cmd.exe
     assert call["system"] == "Ти си Genesis."
@@ -139,6 +144,38 @@ def test_output_that_is_not_json_is_classified_from_stderr(fake):
 def test_a_warning_line_before_the_json_does_not_hide_the_answer(fake):
     fake.stdout = "warning: something\n" + json.dumps(fake.payload)
     assert claude_cli.complete([{"role": "user", "content": "x"}])[0] == "готово"
+
+
+def test_the_answer_is_the_result_line_not_the_stream_before_it(fake):
+    """stream-json пише init и съобщението на модела преди резултата."""
+    fake.stdout = "\n".join([
+        json.dumps({"type": "system", "subtype": "init", "model": "sonnet"}),
+        json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "чернова"}]}}),
+        json.dumps(fake.payload),
+        ""])
+    assert claude_cli.complete([{"role": "user", "content": "x"}])[0] == "готово"
+
+
+def test_a_stream_without_a_result_line_is_classified_from_stderr(fake):
+    fake.stdout = json.dumps({"type": "system", "subtype": "init"})
+    fake.stderr, fake.rc = "Error: Not logged in", 1
+    with pytest.raises(RuntimeError, match="HTTP_401"):
+        claude_cli.complete([{"role": "user", "content": "x"}])
+
+
+def test_each_turn_is_its_own_block_so_the_next_call_reuses_the_cache(fake):
+    """Кешът съвпада само по граници на блокове (мерено 2026-10-12): с един
+    общ текст всеки ход записваше целия разговор наново. Блоковете на хода
+    трябва да са начало на блоковете на следващия."""
+    history = [{"role": "system", "content": "SYS"},
+               {"role": "user", "content": "направи a.py"},
+               {"role": "assistant", "content": "[WRITE_FILE: a.py]\nx = 1\n[END_WRITE]"},
+               {"role": "system", "content": "[Резултат] записан"}]
+    claude_cli.complete(history)
+    claude_cli.complete(history + [{"role": "assistant", "content": "[RUN_CMD: pytest]"},
+                                   {"role": "system", "content": "[Резултат] 3 passed"}])
+    first, second = fake.calls[0]["blocks"], fake.calls[1]["blocks"]
+    assert len(first) == 4 and second[:len(first)] == first and len(second) == 6
 
 
 def test_without_the_cli_the_chain_moves_on(monkeypatch):
