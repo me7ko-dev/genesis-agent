@@ -59,6 +59,13 @@ bg_phone_numbers: booking-form 20/20 ×2, customers-sqlite ×2); `bench_fix` **1
 записи) 15/16 при −0.4% токени (кратки задачи), офлайн −23…−30% в дългите → **включено
 по подразбиране** (`GENESIS_ELIDE_OLD_WRITES=0` го спира).
 
+**Claude с API ключа (2026-10-12):** `/model` → „Anthropic (API ключ, платен)“ или
+`GENESIS_START_PROVIDER=anthropic` (+ `GENESIS_START_MODEL=claude-sonnet-5`). Преди
+ключът стигаше само до `--max`. Моделите идват живо от ключа; избраният модел носи
+effort-а и native tools от `premium_models`, другите платени не влизат във веригата.
+Пробвано с истинския ключ само с кратък отговор (sonnet-5, 31 токена); bench с ключа
+още не е пускан — първото пускане да е кратко (ЕГН задача).
+
 **Чеклист на лаптопа (по ред):**
 1. `py -m pipx install --force "git+https://github.com/me7ko-dev/genesis-agent@claude/mega-upgrade-oct11"`
    (или `git pull` в checkout-а) → `genesis --version` показва новия комит.

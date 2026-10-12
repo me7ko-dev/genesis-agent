@@ -443,6 +443,25 @@ def _post(base: str, body: bytes) -> tuple[int, dict]:
         return e.code, json.loads(e.read())
 
 
+def _post_unread(base: str, body: bytes) -> int:
+    """Статусът на заявка, чието тяло сървърът нарочно не дочита (спрян адрес,
+    тяло без вида на плик → 429 и затваряне, вълна 5).
+
+    Затваряне с непрочетени байтове на Windows е RST и той може да изпревари
+    429-а при клиента: на лаптопа (Python 3.14) urllib падаше с WinError 10053
+    в getresponse — тестът за спряно тяло без вида на плик 3 от 3 пъти, този за
+    дълбокия JSON понякога; в CI на Windows (3.12) минаваха (2026-10-12).
+    И в двата случая сървърът е отказал, без да чете, затова RST се брои за 429."""
+    try:
+        return _post(base, body)[0]
+    except ConnectionError:                       # RST при четене на отговора
+        return 429
+    except urllib.error.URLError as e:            # RST, докато тялото се праща
+        if isinstance(e.reason, ConnectionError):
+            return 429
+        raise
+
+
 def _call(base: str, op: str, key: bytes = KEY, **args) -> dict:
     payload = _request(op, **args)
     status, env = _post(base, json.dumps(_client_seal(key, payload)).encode())
@@ -534,7 +553,7 @@ def test_failures_from_the_phones_address_do_not_lock_out_the_paired_phone(live)
 
 
 def test_a_braked_address_gets_429_before_parsing_a_body_that_is_not_an_envelope(
-        live, monkeypatch) -> None:
+        live, monkeypatch, capsys) -> None:
     """Преглед 2026-10-11: след преместването на спирачката след плика всяка
     спряна заявка (240 KiB "[1,1,…]") минаваше през json.loads и handle() —
     ~10 ms работа вместо 1.5 ms. Над спирачката само тяло с вида на плик
@@ -552,17 +571,20 @@ def test_a_braked_address_gets_429_before_parsing_a_body_that_is_not_an_envelope
     assert codes[-1] == 429
     before = len(opened)
     junk = b"[" + b"1," * (120 * 1024) + b"1]"
-    assert [_post(base, junk)[0] for _ in range(5)] == [429] * 5
+    assert [_post_unread(base, junk) for _ in range(5)] == [429] * 5
     assert _post(base, json.dumps({"v": 1, "n": 1, "c": []}).encode())[0] == 429
     assert len(opened) == before, "спряна заявка без вида на плик не се разчита"
     assert _call(base, "status")["ok"]
+    # Срив на нишката също затваря връзката, а _post_unread брои RST за 429.
+    assert "Traceback" not in capsys.readouterr().err
 
 
 def test_deeply_nested_json_is_a_counted_failure_not_a_traceback(live, capsys) -> None:
     """Одит 2026-10-11: `[` × 200 000 без ключ даваше RecursionError — traceback
     в терминала на оператора на всяка заявка и нито един провал за спирачката."""
     base, _, _ = live
-    codes = [_post(base, b"[" * 200_000)[0] for _ in range(35)]
+    # След спирачката тялото не се дочита — на Windows понякога RST (виж _post_unread).
+    codes = [_post_unread(base, b"[" * 200_000) for _ in range(35)]
     assert codes[0] == 401 and codes[-1] == 429
     assert "Traceback" not in capsys.readouterr().err
 
