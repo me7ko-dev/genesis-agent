@@ -1457,6 +1457,48 @@ def parse_and_execute_readonly_tools(response_text: str) -> list[str]:
     return [r for _, r in results]
 
 
+# Claude (през `claude -p`, 2026-10-12) понякога пише ПЪРВИЯ инструмент в
+# своя собствен XML формат, а останалите — с нашите тагове. Измерено на 30
+# сурови отговора от bench (vat/eik/iban ×2): 6 започваха с
+# `<invoke name="WRITE_FILE">път</parameter>` / `<invoke name="RUN_CMD">pwd</invoke>`;
+# всеки струваше рунд („първият ми WRITE_FILE беше с грешен синтаксис“), а
+# отговор САМО с XML не съдържаше `[TAG:` — нямаше подкана и ходът свършваше
+# без нито един инструмент (vat-check 0/1). Превръщат се само имената на
+# нашите инструменти; всичко друго остава текст.
+_XML_TOOLS = ("WRITE_FILE|EDIT_FILE|READ_FILE|RUN_CMD|RUN_BG|LIST_DIR|SEARCH_CODE|GLOB|"
+              "REPO_MAP|WEB_SEARCH|WEB_FETCH|ASK_USER|EXPLORE|TODO_WRITE|BG_OUTPUT|BG_KILL")
+_XML_BLOCK_OPEN_RE = re.compile(
+    r'<invoke name="(?P<tool>WRITE_FILE|EDIT_FILE)">\s*'
+    r'(?:<parameter name="(?:path|file_path)">)?\s*(?P<path>[^\n<\]]+?)\s*'
+    r'(?:</parameter>|</invoke>)?[ \t]*\n'
+    r'(?:\s*<parameter name="(?:content|body)">)?')
+_XML_BLOCK_CLOSE_RE = re.compile(r"\n?[ \t]*</(?:parameter|invoke)>\s*(?=\[END_(?:WRITE|EDIT)\])")
+_XML_SIMPLE_RE = re.compile(
+    r'<invoke name="(?P<tool>' + _XML_TOOLS + r')">\s*'
+    r'(?:<parameter name="\w+">)?(?P<arg>.*?)\s*(?:</parameter>\s*)?</invoke>', re.DOTALL)
+_XML_TAIL_RE = re.compile(r"\s*</parameter>\s*</invoke>\s*\]")
+_XML_WRAPPER_RE = re.compile(r"</?function_calls>\s*")
+
+
+def _normalize_xml_tool_calls(text: str) -> str:
+    """XML формата на Claude за нашите инструменти → нашите тагове."""
+    if "<invoke" not in text and "</parameter>" not in text and "</invoke>" not in text:
+        return text
+    text = _XML_WRAPPER_RE.sub("", text)
+    text = _XML_BLOCK_OPEN_RE.sub(lambda m: f"[{m.group('tool')}: {m.group('path')}]\n", text)
+    text = _XML_BLOCK_CLOSE_RE.sub("\n", text)
+    text = _XML_TAIL_RE.sub("]", text)
+    original = text
+
+    def simple(m: re.Match) -> str:
+        tag = f"[{m.group('tool')}: {m.group('arg')}]"
+        # Същата команда и като XML, и като таг („<invoke name="RUN_CMD">pwd</invoke>
+        # [RUN_CMD: pwd]“) — веднъж, не два пъти (команда със страничен ефект).
+        return "" if tag in original else tag
+
+    return _XML_SIMPLE_RE.sub(simple, text)
+
+
 def parse_and_execute_tools(response_text: str) -> list[str]:
     """
     Извлича и изпълнява всички тул-тагове в реда, в който се появяват.
@@ -1474,6 +1516,7 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
     """
     if not response_text:
         return []
+    response_text = _normalize_xml_tool_calls(response_text)
 
     # (позиция_в_текста, име, действие) — НИЩО не се изпълнява, докато не са
     # събрани всички тагове и не е решено влагането. После се изпълняват в
@@ -1514,8 +1557,13 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
             continue  # вложен в вече приет блок → това е текст, не тул
         consumed_spans.append((start, end))
         if kind == "WRITE_FILE":
+            # Новият ред веднага след тага е синтаксис, не съдържание
+            # (2026-10-12): моделите почти винаги го пишат, и всеки файл
+            # започваше с празен ред — а `#!/bin/sh` на втори ред не е shebang.
+            # Само един и само отпред; краят на файла остава какъвто е написан.
             actions.append((start, kind, partial(
-                _safe_tool, "WRITE_FILE", _tool_write_file, m.group("path"), m.group("body"))))
+                _safe_tool, "WRITE_FILE", _tool_write_file, m.group("path"),
+                m.group("body").removeprefix("\r\n").removeprefix("\n"))))
         elif kind == "EDIT_FILE":
             actions.append((start, kind, partial(_edit_action, m)))
         else:  # USE_SKILL
@@ -1607,7 +1655,9 @@ def looks_like_attempted_tool_tag(response_text: str) -> bool:
     истински таг не е разпознат от parse_and_execute_tools за него."""
     if not response_text:
         return False
-    return bool(_ATTEMPTED_TAG_RE.search(response_text))
+    # `<invoke name="…">`, останал след _normalize_xml_tool_calls, също е опит
+    # за инструмент — иначе ходът свършваше тихо (2026-10-12, виж горе).
+    return bool(_ATTEMPTED_TAG_RE.search(response_text) or "<invoke name=" in response_text)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
