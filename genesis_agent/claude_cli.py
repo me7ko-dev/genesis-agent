@@ -199,7 +199,23 @@ def complete(messages: list[dict], model: str = DEFAULT_MODEL,
     text = result if isinstance(result, str) else None
     if text is None:   # RuntimeError, не TypeError: веригата на Brain хваща само него
         raise RuntimeError("HTTP_500: claude CLI върна отговор без текст")
+    _log_reply(text)
     return text, usage_of(data)
+
+
+def _log_reply(text: str) -> None:
+    """GENESIS_CLAUDE_CLI_LOG=<файл> — суровите отговори, по един JSON ред.
+    Чатът показва отговора през Markdown, който може да скрие част от него
+    (2026-10-12: провал на vat-check, при който от панела не личеше какво точно
+    е написал моделът). Само при изрично зададен файл; нищо по подразбиране."""
+    path = (os.environ.get("GENESIS_CLAUDE_CLI_LOG") or "").strip()
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
 
 
 def auth_method(timeout: int = 20) -> str | None:

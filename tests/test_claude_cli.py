@@ -215,3 +215,11 @@ def test_no_key_guard_lets_the_subscription_answer(fake, monkeypatch):
     monkeypatch.setattr(gta, "current_provider", "claude_cli")
     monkeypatch.setattr("genesis_agent.brain.any_model_reachable", lambda: False)
     assert gta._no_model_guard() is False
+
+
+def test_the_raw_reply_log_is_written_only_when_asked(fake, monkeypatch, tmp_path):
+    claude_cli.complete([{"role": "user", "content": "x"}])        # без настройка — нищо
+    log = tmp_path / "replies.jsonl"
+    monkeypatch.setenv("GENESIS_CLAUDE_CLI_LOG", str(log))
+    claude_cli.complete([{"role": "user", "content": "x"}])
+    assert [json.loads(line)["text"] for line in log.read_text(encoding="utf-8").splitlines()] == ["готово"]
