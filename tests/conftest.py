@@ -193,7 +193,9 @@ def _elide_off_like_the_default(monkeypatch):
     GENESIS_ELIDE_OLD_WRITES=1; с изнесена такава променлива
     test_bench_history (базата „off“) и test_budget (рундовете K) падаха при
     верен код — стойностите се четат при внасяне на config. Тестовете
-    започват от подразбирането; който иска друго, го задава сам."""
+    започват изключено (подразбирането е включено от 2026-10-12 — така
+    историите в старите тестове остават байт по байт); който иска друго,
+    го задава сам."""
     monkeypatch.delenv("GENESIS_ELIDE_OLD_WRITES", raising=False)
     monkeypatch.delenv("GENESIS_ELIDE_WRITE_ROUNDS", raising=False)
     from genesis_agent import budget, config
