@@ -8,8 +8,8 @@ import { logLine } from '../src/main/logline.ts';
 test('the pairing key never reaches the log', () => {
   // 2026-10-12, live check: the 2026-10-09 link format (`&k=`) showed the key in the log drawer.
   const key = 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCdE';
-  assert.equal(logLine(`Връзка: genesisremote://pair#u=http%3A%2F%2F127.0.0.1%3A62016&k=${key}&n=METKO`),
-    'Връзка: genesisremote://pair#u=http%3A%2F%2F127.0.0.1%3A62016&k=•••&n=METKO');
+  assert.equal(logLine(`Връзка: genesisremote://pair#u=http%3A%2F%2F127.0.0.1%3A62016&k=${key}&n=PC`),
+    'Връзка: genesisremote://pair#u=http%3A%2F%2F127.0.0.1%3A62016&k=•••&n=PC');
   // The older `#k=` form and a key at the end of the line too.
   assert.equal(logLine(`http://192.168.1.5:8765/#k=${key}`), 'http://192.168.1.5:8765/#k=•••');
   assert.ok(!logLine(`…?u=x&k=${key}`)!.includes(key));
