@@ -386,3 +386,37 @@ def test_the_example_config_is_valid() -> None:
         defaults.max_total_spend, defaults.max_lockouts, defaults.task_seconds,
         defaults.max_backup_hours)
     assert read_keys(example) == {}         # всичко в примера е коментар
+
+
+def _unit_timeout() -> float:
+    unit = Path(__file__).resolve().parent.parent / "cloud" / "deploy" / "genesis-monitor.service"
+    (value,) = [ln.split("=", 1)[1] for ln in unit.read_text(encoding="utf-8").splitlines()
+                if ln.startswith("TimeoutStartSec=")]
+    return float(value)
+
+
+@pytest.mark.parametrize("ids", ["", "abc123\ndef456\nghi789\n"])
+def test_a_hung_docker_still_leaves_time_to_send_the_alert(env, monkeypatch, ids) -> None:
+    """Ревю 2026-10-12: с 60 с на всяко `docker` при висящ демон проверките
+    траеха 180 с, а TimeoutStartSec=120 — systemd убиваше пускането преди
+    пращането и алармата за висящия Docker не тръгваше никога. Тук всяко
+    `docker` „виси“ до своя таван (като launch._docker при TimeoutExpired);
+    сборът с /healthz и пращането трябва да е под тавана на единицата."""
+    from cloud.runner import launch
+    spent: list[float] = []
+
+    def hung(*args: str, timeout: float = 60) -> Any:
+        import subprocess
+        spent.append(timeout)
+        if args[:1] == ("ps",) and ids:     # ps отговаря, inspect-ите висят
+            return subprocess.CompletedProcess(["docker", *args], 0, ids, "")
+        return subprocess.CompletedProcess(["docker", *args], 127, "",
+                                           f"TimeoutExpired: timed out after {timeout} seconds")
+
+    monkeypatch.setattr(launch, "_docker", hung)
+    found = env.findings()
+    assert not found["helper"].ok and not found["stuck"].ok
+    assert "Docker не отговаря" in found["stuck"].detail or not ids
+    # /healthz до 10 с; имейл: свързване, STARTTLS, вход, пращане; webhook.
+    worst = sum(spent) + 10 + 5 * monitor.SEND_TIMEOUT
+    assert worst + 30 <= _unit_timeout(), (spent, worst)

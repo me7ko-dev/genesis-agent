@@ -62,6 +62,13 @@ STUCK_MARGIN = 120
 LABELS = {"web": "уеб сървърът", "helper": "шлюзът/проксито", "disk": "диск",
           "turns": "провалени ходове", "spend": "разход", "lockouts": "заключени входове",
           "stuck": "висящи задачи", "backup": "резервно копие"}
+# Таван на всяко `docker` от наблюдението (2026-10-12, ревю): с 60-те секунди
+# на launch._docker висящ демон изяждаше 180 с (два inspect + ps) — над
+# TimeoutStartSec на genesis-monitor.service, и systemd убиваше пускането
+# преди пращането. Здрав Docker отговаря на inspect/ps за под секунда.
+DOCKER_TIMEOUT = 15
+# Таван на всяка стъпка на SMTP (свързване, STARTTLS, вход, пращане) и на webhook-а.
+SEND_TIMEOUT = 20
 WEBHOOK_FORMATS = ("text", "discord", "telegram")
 SMTP_TLS = ("starttls", "ssl", "none")
 
@@ -228,14 +235,20 @@ def _docker_time(value: str) -> float:
 
 
 def check_stuck(s: Settings, now: float) -> tuple[bool, str]:
-    r = launch._docker("ps", "-aq", "--filter", f"name=^{launch.TASK_PREFIX}")
+    r = launch._docker("ps", "-aq", "--filter", f"name=^{launch.TASK_PREFIX}",
+                       timeout=DOCKER_TIMEOUT)
     if r.returncode:
         raise check.CheckFailed(f"docker ps: {(r.stderr or '').strip()[-200:]}")
     limit = s.task_seconds + STUCK_MARGIN
     stuck = []
     ids = r.stdout.split()
     for cid in ids:
-        r = launch._docker("inspect", "-f", "{{.Name}} {{.Created}}", cid)
+        r = launch._docker("inspect", "-f", "{{.Name}} {{.Created}}", cid,
+                           timeout=DOCKER_TIMEOUT)
+        if r.returncode == 127:
+            # Изтекъл таван (или няма docker): следващите inspect-и биха висели
+            # също — по DOCKER_TIMEOUT на контейнер, над тавана на единицата.
+            raise check.CheckFailed(f"Docker не отговаря: {(r.stderr or '').strip()[-200:]}")
         if r.returncode:     # махнат между ps и inspect — нормален край на задача
             continue
         name, created = r.stdout.split()
@@ -258,7 +271,7 @@ def check_backup(dest: Path, s: Settings, now: float) -> tuple[bool, str]:
 
 
 def _helper() -> tuple[bool, str]:
-    mode, url = check.helper()
+    mode, url = check.helper(timeout=DOCKER_TIMEOUT)
     return True, f"режим {mode}, {launch.helper_container(url)} е Up"
 
 
@@ -383,9 +396,9 @@ def send_mail(s: Settings, subject: str, body: str, *, smtp: Callable[..., Any] 
     msg.set_content(body)
     context = ssl.create_default_context()
     if s.smtp_tls == "ssl":
-        conn = smtp_ssl(s.smtp_host, s.smtp_port, timeout=20, context=context)
+        conn = smtp_ssl(s.smtp_host, s.smtp_port, timeout=SEND_TIMEOUT, context=context)
     else:
-        conn = smtp(s.smtp_host, s.smtp_port, timeout=20)
+        conn = smtp(s.smtp_host, s.smtp_port, timeout=SEND_TIMEOUT)
     with conn:
         if s.smtp_tls == "starttls":
             conn.starttls(context=context)
@@ -407,7 +420,7 @@ def send_webhook(s: Settings, subject: str, body: str, *,
     data = json.dumps(webhook_payload(s, f"{subject}\n\n{body}"), ensure_ascii=False).encode()
     req = urllib.request.Request(s.webhook_url, data=data, method="POST", headers={
         "Content-Type": "application/json; charset=utf-8", "User-Agent": "genesis-monitor"})
-    with urlopen(req, timeout=20) as resp:
+    with urlopen(req, timeout=SEND_TIMEOUT) as resp:
         status = resp.status
     if not 200 <= status < 300:
         raise OSError(f"HTTP {status}")

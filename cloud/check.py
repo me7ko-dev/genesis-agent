@@ -89,11 +89,13 @@ def _ok(cond: bool, what: str, detail: str = "") -> None:
         raise CheckFailed(f"{what}{': ' + detail if detail else ''}")
 
 
-def helper() -> tuple[str, str]:
-    """(режим, адрес) според това кой помощник върви — както го е пуснал up.sh."""
+def helper(timeout: float = 60) -> tuple[str, str]:
+    """(режим, адрес) според това кой помощник върви — както го е пуснал up.sh.
+    `timeout` е за всяко `docker` (cloud/monitor.py подава по-кратък)."""
     for mode, url in (("gateway", launch.GATEWAY_URL), ("proxy", launch.EGRESS_URL)):
         name = launch.helper_container(url)
-        r = launch._docker("inspect", "-f", "{{.State.Running}} {{.State.Restarting}}", name)
+        r = launch._docker("inspect", "-f", "{{.State.Running}} {{.State.Restarting}}", name,
+                           timeout=timeout)
         if r.returncode == 0:
             _ok(r.stdout.strip() == "true false", f"{name} не е Up",
                 f"Running/Restarting = {r.stdout.strip()} (docker logs {name})")
