@@ -137,7 +137,7 @@ jobs:
 
   # Genesis Desktop (desktop/): the Electron window around `genesis serve`.
   # Built here, not on the operator's machine: Smart App Control blocks a
-  # freshly built, unsigned installer there. Not part of the release yet.
+  # freshly built, unsigned installer there. Its installer rides in the release.
   desktop:
     runs-on: windows-latest
     defaults:
@@ -167,8 +167,12 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [windows, android]
+    # The window's installer goes along when its build passed; a broken
+    # desktop build never holds back genesis.exe and the phone app.
+    if: >-
+      !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+      && needs.windows.result == 'success' && needs.android.result == 'success'
+    needs: [windows, android, desktop]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -181,6 +185,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: genesis-remote-android
+          path: dist
+      - uses: actions/download-artifact@v4
+        if: needs.desktop.result == 'success'
+        with:
+          name: genesis-desktop-setup
           path: dist
 
       # One immutable release per build. `gh release create` with files
@@ -200,12 +209,22 @@ jobs:
 
           Inside the app, \`/update\` does the same.
 
+          **Windows window** — Genesis-Setup-*.exe below (when it is there): the
+          Genesis window, around the \`genesis\` installed above.
+
           **Phone** — run \`genesis serve\` on the computer and scan the QR code.
           Android: install genesis-remote-android.apk below. iPhone: open the QR
           code with the camera (web app), or build it in Xcode — see docs/MOBILE.md."
+          setup=()
+          for f in dist/Genesis-Setup-*.exe; do
+            [ -e "$f" ] || continue
+            (cd dist && sha256sum -b "${f#dist/}" > "${f#dist/}.sha256")
+            setup+=("$f" "$f.sha256")
+          done
           gh release create "$tag" \
             dist/genesis-windows-x64.zip dist/genesis-windows-x64.zip.sha256 \
             dist/genesis-remote-android.apk dist/genesis-remote-android.apk.sha256 \
+            "${setup[@]}" \
             --target "$GITHUB_SHA" --title "Genesis ${short}" --notes "$notes" --latest
 
       # Older builds are noise in the releases list; the last five stay so
