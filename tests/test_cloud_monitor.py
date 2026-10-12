@@ -4,6 +4,7 @@
 часовникът (`now`). Нищо не стига до мрежата и до истинския /srv."""
 from __future__ import annotations
 
+import http.client
 import json
 import time
 import urllib.error
@@ -472,3 +473,32 @@ def test_a_state_file_from_before_channels_does_not_resend(env) -> None:
     env.state.write_text(json.dumps({"checks": state["checks"]}), encoding="utf-8")
     assert env.run(after=300) == 0 and len(env.sent) == 1
     assert json.loads(env.state.read_text(encoding="utf-8"))["channels"]["webhook"]["web"]["ok"] is False
+
+
+@pytest.mark.parametrize("error", [
+    lambda: http.client.InvalidURL(
+        f"URL can't contain control characters. '/bot{TOKEN}\\n/sendMessage' (found at least '\\n')"),
+    lambda: http.client.IncompleteRead(b"partial"),
+    lambda: http.client.RemoteDisconnected("Remote end closed connection without response"),
+])
+def test_an_http_client_error_is_a_failed_delivery_without_the_token(error) -> None:
+    """Ревю 2026-10-12: http.client.HTTPException не е OSError — излизаше от
+    send() с traceback (и жетона на Telegram в журнала), а цикълът без
+    --once свършваше."""
+    def urlopen(req: Any, timeout: float = 0) -> Any:
+        raise error()
+
+    s = monitor.Settings(webhook_url=TELEGRAM, webhook_format="telegram", telegram_chat_id="42")
+    errors = monitor.send(s, "t", "b", urlopen=urlopen)
+    assert len(errors) == 1 and errors[0].startswith("webhook: ")
+    assert TOKEN not in errors[0] and "SECRET" not in errors[0]
+
+
+@pytest.mark.parametrize("url", [f"https://api.telegram.org/bot{TOKEN} x/sendMessage",
+                                 f"https://api.telegram.org/bot{TOKEN}\t/sendMessage",
+                                 f"https://api.telegram.org/bot{TOKEN}\x7f/sendMessage"])
+def test_a_webhook_url_with_spaces_or_control_characters_is_refused(url) -> None:
+    with pytest.raises(ValueError) as got:
+        monitor.load_settings({"MONITOR_WEBHOOK_URL": url, "MONITOR_WEBHOOK_FORMAT": "telegram",
+                               "MONITOR_TELEGRAM_CHAT_ID": "1"})
+    assert "MONITOR_WEBHOOK_URL" in str(got.value) and TOKEN not in str(got.value)

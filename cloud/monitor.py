@@ -32,6 +32,7 @@ webhook, Docker и часовник: аларма при наред → проб
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import smtplib
@@ -160,6 +161,10 @@ def load_settings(env: dict[str, str]) -> Settings:
     )
     if s.webhook_url and urlsplit(s.webhook_url).scheme not in ("https", "http"):
         raise ValueError("MONITOR_WEBHOOK_URL трябва да е https://…")
+    if any(c.isspace() or not c.isprintable() for c in s.webhook_url):
+        # http.client не го праща (InvalidURL), а в грешката е пътят — за
+        # Telegram жетонът (ревю 2026-10-12). Адресът не се печата и тук.
+        raise ValueError("MONITOR_WEBHOOK_URL съдържа интервал или управляващ знак")
     if s.webhook_format not in WEBHOOK_FORMATS:
         raise ValueError(f"MONITOR_WEBHOOK_FORMAT е някое от {', '.join(WEBHOOK_FORMATS)}")
     if s.webhook_format == "telegram" and not s.telegram_chat_id:
@@ -458,6 +463,11 @@ def send(s: Settings, subject: str, body: str, *, smtp: Callable[..., Any] = smt
             send_webhook(s, subject, body, urlopen=urlopen)
         except (OSError, ValueError) as e:     # HTTPError/URLError са OSError
             errors.append(f"webhook: {type(e).__name__}: {_redact(str(e), s.secrets())}")
+        except http.client.HTTPException as e:
+            # Не е OSError (ревю 2026-10-12: InvalidURL, IncompleteRead излизаха с
+            # traceback). Само името: в InvalidURL е repr на пътя с жетона, а
+            # repr-ът (\n вместо нов ред) не се хваща от _redact.
+            errors.append(f"webhook: {type(e).__name__}")
     return errors
 
 
