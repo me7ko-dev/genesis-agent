@@ -143,6 +143,25 @@ Optional paid tier, off unless you ask for it — see [MAX mode](#max-mode):
 | OpenAI | `OPENAI_API_KEY` |
 | DeepSeek | `DEEPSEEK_API_KEY` |
 
+**Your Claude subscription (no API key).** If Claude Code is installed and you
+are logged in with your own Pro/Max plan (`claude` → `/login`), Genesis can use
+it as its model: pick **Claude (абонамент, claude CLI)** in `/model`, or start
+with it:
+
+```bash
+export GENESIS_START_PROVIDER=claude_cli   # PowerShell: $env:GENESIS_START_PROVIDER="claude_cli"
+export GENESIS_START_MODEL=sonnet          # or opus / haiku
+genesis
+```
+
+Genesis runs the unmodified `claude -p` as a plain text model (its own tools,
+MCP, CLAUDE.md and hooks off) and keeps its own tools and sandbox. It never
+reads your Claude credentials, and it removes `ANTHROPIC_API_KEY` from that
+process so the key cannot be billed instead of the plan. This is for your own
+personal use on your own machine. The online service (`cloud/`) never uses it,
+because a subscription may not serve other people. Usage counts toward your
+plan's limits; when the limit is hit, Genesis moves on to the next model.
+
 **One key per provider.** Genesis does not rotate multiple accounts of the same
 provider to multiply a quota — that violates most providers' terms of service.
 Resilience comes from breadth instead. See [SECURITY.md](SECURITY.md).

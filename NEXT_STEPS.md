@@ -38,6 +38,13 @@ bench харнесът минава до край срещу фалшив дос
 (всеки с цена) стигат до доставчика; WRITE_FILE `exact=true` сменя CRLF→LF/маха BOM;
 чакане на фонова задача не е „зацикляне“; `.aws-sam/`, `.azure-pipelines.yml` не са тайни.
 
+**Claude абонаментът като мозък (2026-10-12):** `GENESIS_START_PROVIDER=claude_cli`
+(+ `GENESIS_START_MODEL=sonnet|opus|haiku`) или `/model` → „Claude (абонамент)“.
+Вика немодифицирания `claude -p` като текстов модел (`--safe-mode`, `--tools ""`),
+без `ANTHROPIC_API_KEY` в средата (иначе таксува ключа); в облака — отказ. Мерено
+тук: ЕГН задача през `genesis -p` 65 s, 24 passed. На лаптопа: `claude auth status`
+трябва да казва `claude.ai`, после същите стъпки отдолу с тази променлива.
+
 **Чеклист на лаптопа (по ред):**
 1. `py -m pipx install --force "git+https://github.com/me7ko-dev/genesis-agent@claude/mega-upgrade-oct11"`
    (или `git pull` в checkout-а) → `genesis --version` показва новия комит.
