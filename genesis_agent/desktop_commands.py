@@ -15,6 +15,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import time
 from collections import defaultdict
 from collections.abc import Callable
@@ -300,7 +301,10 @@ def _close(arg: dict, drop: bool) -> dict:
     ids = [i for i in str(arg.get("ids") or "").replace(",", " ").split() if i]
     if not ids:
         return {"ok": False, "error": "Дай номер: /done 3 (готово) или /drop 3 (изхвърли)"}
-    return {"ok": True, "text": "\n".join(wm.close_thread(i, drop=drop) for i in ids)}
+    # Без етикета за модела ([DONE]/[DROP]/[TASK_UPDATE]) — прозорецът го показваше
+    # буквално: „[TASK_UPDATE] Няма нишка #999.“ (проба 2026-10-12).
+    lines = (re.sub(r"^\[[A-Z_]+\]\s*", "", wm.close_thread(i, drop=drop)) for i in ids)
+    return {"ok": True, "text": "\n".join(lines)}
 
 
 def cmd_done(arg: dict, _ctx: CommandContext) -> dict:
@@ -390,6 +394,20 @@ def cmd_update(_arg: dict, _ctx: CommandContext) -> dict:
     return out
 
 
+def cmd_export(arg: dict, ctx: CommandContext) -> dict:
+    """/export: проектът за предаване — zip + GENESIS_REPORT.md (deliver.py),
+    без модел. Беше само в терминала; приложението го няма до 2026-10-12."""
+    if ctx.busy():
+        return {"ok": False, "error": "busy"}
+    from genesis_agent.deliver import export, summary
+    try:
+        d = export(_gta().WORKSPACE, str(arg.get("out") or "") or None,
+                   run_tests=arg.get("tests", True) is not False)
+    except (ValueError, OSError) as e:
+        return {"ok": False, "error": str(e)[:400]}
+    return {"ok": True, "text": summary(d), "zip": str(d.zip_path), "tests_passed": d.tests_passed}
+
+
 COMMANDS: dict[str, Callable[[dict, CommandContext], dict]] = {
     "status": cmd_status,
     "usage": cmd_usage,
@@ -407,6 +425,7 @@ COMMANDS: dict[str, Callable[[dict, CommandContext], dict]] = {
     "load_history": cmd_load_history,
     "backup": cmd_backup,
     "update": cmd_update,
+    "export": cmd_export,
 }
 
 

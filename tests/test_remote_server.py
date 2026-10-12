@@ -743,6 +743,32 @@ def test_the_phone_stop_interrupts_a_running_command(monkeypatch, tmp_path) -> N
     assert tools and "Спряно от оператора" in tools[-1]["result"]
 
 
+def test_the_window_sees_which_tool_is_running(monkeypatch, tmp_path) -> None:
+    """Проба на приложението 2026-10-12: докато `sleep 60` вървеше, прозорецът
+    показваше само „Genesis мисли...“ — събитие идваше чак след инструмента."""
+    from collections import deque
+
+    import genesis_terminal_agent as gta
+
+    monkeypatch.setattr(gta, "HISTORY_DIR", tmp_path)
+    monkeypatch.setattr(gta, "_remember", lambda *a: None)
+    gta.genesis_skills.set_workspace(tmp_path)
+    call = {"id": "c1", "type": "function",
+            "function": {"name": "RUN_CMD", "arguments": json.dumps({"command": "echo hi"})}}
+    replies = iter([("", [call]), ("готово", [])])
+    monkeypatch.setattr(gta, "ask_genesis", lambda *a, **k: next(replies))
+    session = rs.RemoteSession(lambda text, ui: gta.run_turn(
+        deque([{"role": "system", "content": "s"}], maxlen=50), text, ui))
+    assert session.send("пусни го")
+    deadline = time.monotonic() + 20
+    while session.busy and time.monotonic() < deadline:
+        time.sleep(0.05)
+    events = session.events_after(0)["events"]
+    kinds = [(e["type"], e.get("label") or e.get("name")) for e in events]
+    assert ("thinking", "RUN_CMD: echo hi") in kinds, kinds
+    assert kinds.index(("thinking", "RUN_CMD: echo hi")) < kinds.index(("tool", "RUN_CMD"))
+
+
 def test_a_replay_is_still_rejected_after_a_restart(tmp_path) -> None:
     """Одит 2026-10-07: видяното беше само в паметта — след рестарт на
     `genesis serve` записано съобщение се изпълняваше пак."""

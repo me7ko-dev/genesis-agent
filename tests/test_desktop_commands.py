@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import ClassVar
 
 import pytest
@@ -91,6 +92,31 @@ def test_load_history_refuses_paths_and_busy(tmp_path, monkeypatch) -> None:
     assert dc.run("load_history", {"file": "../session_x.json"}, ctx)["ok"] is False
     busy, _, _ = _ctx(busy=True)
     assert dc.run("load_history", {"file": "session_x.json"}, busy) == {"ok": False, "error": "busy"}
+
+
+def test_export_zips_the_project_from_the_window(tmp_path, monkeypatch) -> None:
+    """Проба 2026-10-12: /export (zip + отчет за предаване) беше само в терминала."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "app.py").write_text("print(1)\n", encoding="utf-8")
+    monkeypatch.setattr(gta, "WORKSPACE", proj)
+    ctx, _, _ = _ctx()
+    r = dc.run("export", {"tests": False}, ctx)
+    assert r["ok"] and Path(r["zip"]).is_file() and Path(r["zip"]).parent == tmp_path
+    assert r["text"].startswith("📦") and r["tests_passed"] is None
+    busy, _, _ = _ctx(busy=True)
+    assert dc.run("export", {}, busy) == {"ok": False, "error": "busy"}
+    (tmp_path / "empty").mkdir()
+    monkeypatch.setattr(gta, "WORKSPACE", tmp_path / "empty")
+    r = dc.run("export", {"tests": False}, ctx)
+    assert r["ok"] is False and "няма файлове" in r["error"]
+
+
+def test_done_shows_no_tag_meant_for_the_model() -> None:
+    """Проба 2026-10-12: прозорецът показваше „[TASK_UPDATE] Няма нишка #999.“"""
+    ctx, _, _ = _ctx()
+    text = dc.run("done", {"ids": "999"}, ctx)["text"]
+    assert text and not text.startswith("[") and "999" in text
 
 
 def test_set_model_and_toggles(monkeypatch) -> None:

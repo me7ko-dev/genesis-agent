@@ -497,6 +497,10 @@ class RemoteTurnUI:
         clipped = len(result) > _TOOL_PREVIEW
         self._s.emit("tool", name=name, result=result[:_TOOL_PREVIEW], clipped=clipped)
 
+    def tool_start(self, name: str, detail: str) -> None:
+        # Етикетът на хода, докато инструментът върви („RUN_CMD: pytest -q“).
+        self._s.emit("thinking", label=f"{name}: {detail}" if detail else name)
+
     def asked(self, question: str) -> None:
         self._s.emit("asked", text=question)
 
