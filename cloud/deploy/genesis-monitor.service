@@ -1,0 +1,19 @@
+# Наблюдение и аларми (cloud/monitor.py), пуска се от genesis-monitor.timer.
+# Каналът (SMTP/webhook) и праговете са в /srv/genesis/monitor.env (root, 600) —
+# виж cloud/deploy/monitor.env.example. Без него алармите са само в журнала:
+# journalctl -u genesis-monitor
+[Unit]
+Description=Genesis онлайн: наблюдение и аларми
+After=genesis-web.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO@
+Environment=PYTHONUNBUFFERED=1
+# monitor-state.json до web.db — само за root, като базата.
+UMask=0077
+ExecStart=/usr/bin/python3 -m cloud.monitor --once --config /srv/genesis/monitor.env --data /srv/genesis/web --jobs /srv/jobs --backup /srv/backup/genesis --web http://127.0.0.1:8080
+TimeoutStartSec=120
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
