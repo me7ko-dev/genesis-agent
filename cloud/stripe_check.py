@@ -379,12 +379,12 @@ def run_simulate(a: argparse.Namespace, environ: Mapping[str, str], opener: Open
         failed.append("чужд подпис не е отказан")
     # 2. Истинският подпис — точно един ред, точно кредитите на пакета.
     header = sign(payload, secret)
-    code, data = _post(url, payload, header, opener)
+    delivered, data = _post(url, payload, header, opener)
     note = data.get("note") or data.get("error") or ""
     got = rows()
-    ok = code == 200 and len(got) == 1 and got[0]["amount"] == want
-    print(f"  доставка: {code} {note}")
-    if code == 400:
+    ok = delivered == 200 and len(got) == 1 and got[0]["amount"] == want
+    print(f"  доставка: {delivered} {note}")
+    if delivered == 400:
         failed.append("сървърът не прие подписа — STRIPE_WEBHOOK_SECRET тук и в сървъра е различен")
     elif "друг режим" in str(note):
         failed.append("сървърът върви с live ключ — тестово събитие не зарежда")
@@ -392,14 +392,25 @@ def run_simulate(a: argparse.Namespace, environ: Mapping[str, str], opener: Open
         failed.append(f"очаквах един ред stripe:{session} с +{offer.credits} кредита, "
                       f"а редовете са {len(got)} (--data на същия сървър ли е?)")
     # 3. Повторът (Stripe праща пак при таймаут) — не зарежда втори път.
-    code, _ = _post(url, payload, header, opener)
-    again = rows()
-    ok = code == 200 and len(again) == len(got)
-    # Бележката на сървъра е „заредено“ и при повтор — броят се редовете.
-    print(f"  повторна доставка: {code} — "
-          f"{'редът вече е, не е заредено втори път' if ok else 'ЗАРЕДИ ВТОРИ ПЪТ'}")
-    if not ok:
-        failed.append("повторът е зареден втори път")
+    # 2026-10-12: преди всеки отговор ≠ 200 се отчиташе „ЗАРЕДИ ВТОРИ ПЪТ“ — и
+    # при грешна whsec (400 и на двете) до вярната диагноза излизаше фалшива
+    # тревога. Двойно зареждане е само повече редове; отказ е отделна грешка,
+    # а след неприета доставка повторът нищо не казва — пропуска се.
+    if delivered != 200:
+        print("  повторна доставка: пропусната — първата не е приета")
+    else:
+        code, _ = _post(url, payload, header, opener)
+        again = rows()
+        # Бележката на сървъра е „заредено“ и при повтор — броят се редовете.
+        if len(again) > len(got):
+            print(f"  повторна доставка: {code} — ЗАРЕДИ ВТОРИ ПЪТ")
+            failed.append("повторът е зареден втори път")
+        elif code != 200:
+            print(f"  повторна доставка: {code} — отказана (не е заредено пак)")
+            failed.append(f"повторът върна {code} — Stripe ще го праща отново, "
+                          "виж лога на сървъра")
+        else:
+            print(f"  повторна доставка: {code} — редът вече е, не е заредено втори път")
     after = store.balance(uid)
     print(f"  баланс: {billing.fmt_credits(before)} → {billing.fmt_credits(after)} кредита "
           f"(+{billing.fmt_credits(after - before)}, очаквано +{billing.fmt_credits(want)})")

@@ -152,8 +152,36 @@ def test_simulate_credits_exactly_once(tmp_path, server, capsys) -> None:
 def test_simulate_with_another_secret_credits_nothing(tmp_path, server, capsys) -> None:
     store, start = server
     assert _simulate(tmp_path, start(), secret="whsec_from_another_listen") == 1
-    assert "STRIPE_WEBHOOK_SECRET" in capsys.readouterr().err
+    out = capsys.readouterr()
+    assert "STRIPE_WEBHOOK_SECRET" in out.err
+    # 2026-10-12: повторът също връщаше 400 и се отчиташе „ЗАРЕДИ ВТОРИ ПЪТ“ —
+    # фалшива тревога до вярната диагноза, а не беше заредено нищо.
+    assert "втори път" not in out.out + out.err
     assert store.balance(1) == 0
+
+
+def test_simulate_a_rejected_replay_is_not_a_double_credit(tmp_path, server, capsys) -> None:
+    """Доставката минава, повторът връща 503 — грешка е, но не двойно зареждане."""
+    import urllib.request
+    store, start = server
+    port = start()
+    posts: list[int] = []
+
+    def opener(req: Any, timeout: float = 0) -> Any:
+        posts.append(1)
+        if len(posts) == 3:
+            raise urllib.error.HTTPError(req.full_url, 503, "busy", None,  # type: ignore[arg-type]
+                                         io.BytesIO(b"{}"))
+        return urllib.request.urlopen(req, timeout=timeout)
+
+    rc = sc.main(["simulate", "ana@example.com", "--data", str(tmp_path),
+                  "--url", f"http://127.0.0.1:{port}", "--prices", str(_prices_file(tmp_path))],
+                 environ={"STRIPE_WEBHOOK_SECRET": WHSEC}, opener=opener)
+    out = capsys.readouterr()
+    assert rc == 1
+    assert "втори път" not in out.out + out.err
+    assert "повторът върна 503" in out.err
+    assert len(_purchases(store)) == 1
 
 
 def test_simulate_tells_a_live_server_apart(tmp_path, server, capsys) -> None:
