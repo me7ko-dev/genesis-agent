@@ -7,6 +7,16 @@
 > нещо се свърши, обнови бележката накратко: зачеркни или изтрий готовото,
 > не трупай нов текст.
 
+## Приложението за компютър (desktop/) — PR #60, 2026-10-12
+
+Клон `feat/desktop-oct12` = Genesis Desktop (Electron, от 25.09) + main след
+PR #59, нагоден към новия протокол (`more`, `epoch`, `mid`, `state`),
+командите на чата в менюто, абонаментът Claude като АБОНАМЕНТ, не PAID.
+Състоянието е в `desktop/SESSION_NOTES.md`. Сглобява се само в CI
+(`native.yml` dispatch — задачи `windows` + `desktop`), не на лаптопа (SAC).
+Прозорецът пуска `genesis` от PATH (pipx), не стария `Programs\Genesis`.
+PR #60 е слят на 12.10; pipx на лаптопа е `@main`. Остава: инсталаторът в release.
+
 ## Мега-ъпгрейд 2026-10-11 (клон `claude/mega-upgrade-oct11`) — първо това на лаптопа
 
 Пет вълни агенти: одит с доказано пускане → поправка с тест, който пада преди
@@ -69,7 +79,8 @@ effort-а и native tools от `premium_models`, другите платени �
 още не е пускан — първото пускане да е кратко (ЕГН задача).
 
 **Чеклист на лаптопа (по ред):**
-1. `py -m pipx install --force "git+https://github.com/me7ko-dev/genesis-agent@claude/mega-upgrade-oct11"`
+1. `pipx runpip genesis-agent install --force-reinstall --no-deps "git+https://github.com/me7ko-dev/genesis-agent@main"`
+   (само пакетът — венвът пази добавките и pytest/ruff за bench-а)
    (или `git pull` в checkout-а) → `genesis --version` показва новия комит.
 2. `python scripts/bench_all.py` — регресия спрямо 2026-09-30 ли? Регресия → поправка преди сливане.
 3. ~~Б.12 A/B~~ — включено по подразбиране (2026-10-12, мерено с Claude, виж горе). С
