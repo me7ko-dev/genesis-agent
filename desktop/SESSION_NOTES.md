@@ -43,17 +43,31 @@
   `GENESIS_EXE` → `genesis` от PATH (каквото пуска терминалът: pipx
   `~\.local\bin`) → папката на pipx → инсталатора. Проверено с пускане:
   `exe = C:\Users\roika\.local\bin\genesis.exe`, `commands: false`.
-- pipx Genesis (клон `claude/mega-upgrade-oct11`, f8f08d7) **няма** `--bind` и
-  операцията `command` — те са само в този клон. С него чатът работи, а
-  /usage, /model, /status казват „обнови Genesis“ и бутонът „⚡ днес“ липсва.
-  Пълно ще стане, когато PR #60 влезе в main и pipx се преинсталира (НЕ докато
-  върви bench — той ползва pipx Python-а).
-- Снимки с двигателя от клона (CI артефакт, `GENESIS_EXE=…`), всичко изглежда
-  добре: главен екран, /model (Claude абонамент „готов“), моделите на Claude
-  със значка АБОНАМЕНТ, резервната верига, /status, /usage. Кликовете — през
-  `npx electron . --remote-debugging-port=9333` и CDP скрипт (без промяна в кода).
-- Прекият път „Genesis Agent“ (Start менюто) още отваря стария
-  `Programs\Genesis\genesis.exe` — не е пипан.
+- Клонът е обновен с main два пъти (92f539a: PR #61; 5a0b5ed: PR #62 Anthropic в
+  /model, PR #63 буквални `\n`) — значи е „main + прозорецът“.
+- **Лаптопът, 12.10 ~21:05 (по молба на потребителя „сложи всичко“):**
+  - Инсталирано приложение: `Genesis-Setup-0.1.0.exe /S` от CI (run 38277783199,
+    000ba92); в `app.asar` има `PIPX_BIN_DIR`.
+  - pipx Genesis = **5a0b5ed (`feat/desktop-oct12`)**: `pipx runpip genesis-agent
+    install --force-reinstall --no-deps "git+…@feat/desktop-oct12"` — само пакетът,
+    венвът остава (добавките anthropic/fastapi/numpy/scikit-learn/uvicorn + pytest,
+    ruff, mypy за bench-а не се губят; `pipx install --force` би ги изтрил).
+    pipx_metadata вече сочи този клон. Чакано е bench-ът (свърши 20:36) и чужд pytest
+    с pipx Python-а да свършат. Връщане: същото с `@f8f08d7`.
+    **След сливане на PR #60 → същата команда с `@main`.**
+  - Прекият път „Genesis Agent“ (Start менюто) → `~\.local\bin\genesis.exe`
+    (беше `Programs\Genesis\genesis.exe`; иконата още е от там).
+  - Резервата `Programs\Genesis` = CI сборка на 5a0b5ed (Native apps 38287850817,
+    `--version` казва b86f740 = пробното сливане на GitHub, същият код); старата
+    от 24.09 е в `Programs\Genesis.bak-2026-09-24`. Пуска се (SAC не я спира).
+  - Проверено на инсталираното приложение (CDP, `--remote-debugging-port=9333`):
+    `exe = ~\.local\bin\genesis.exe`, `commands: true`, /model (+ „Anthropic
+    (API ключ, платен)“ готов), моделите на Claude със значка АБОНАМЕНТ, /usage,
+    истинско съобщение → „здравей“.
+- Внимание при проверки: `timeout N Genesis.exe` спира само главния процес —
+  агентът остава (спирай с `taskkill /T` по pid-а на главния). Приложението е
+  с един прозорец: второ пускане излиза веднага. Екранът на лаптопа беше 640×480
+  (дистанционно) → прозорецът стои на минимума 760×520 — не е бъг.
 
 ## Направено
 - Backend (`genesis_agent/remote_server.py`): опция `--bind`, за да слуша само на
@@ -142,10 +156,9 @@
 ## Зависимости
 - Нужен е CLI-ят Genesis: приложението пуска същия `genesis`, който пуска
   терминалът (PATH; на лаптопа — pipx в `~\.local\bin`), а
-  `%LOCALAPPDATA%\Programs\Genesis\genesis.exe` (24.09, от `feat/desktop-app`)
-  е само резерва. Прекият път „Genesis Agent“ още отваря него.
-- С genesis без `features: ["commands"]` (и сегашния pipx) приложението работи,
-  а `/` командите казват „обнови Genesis“.
+  `%LOCALAPPDATA%\Programs\Genesis\genesis.exe` е само резерва.
+- С genesis без `features: ["commands"]` (pipx от main преди PR #60) приложението
+  работи, а `/` командите казват „обнови Genesis“.
 
 ## Следващи стъпки
 1. Потребителят да пробва приложението и да каже какво да се промени

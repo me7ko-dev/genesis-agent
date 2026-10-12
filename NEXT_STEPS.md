@@ -15,8 +15,9 @@ PR #59, нагоден към новия протокол (`more`, `epoch`, `mid
 Състоянието е в `desktop/SESSION_NOTES.md`. Сглобява се само в CI
 (`native.yml` dispatch — задачи `windows` + `desktop`), не на лаптопа (SAC).
 Прозорецът пуска `genesis` от PATH (pipx), не стария `Programs\Genesis`.
-Остава: PR #60 → main само с „да“; после pipx от main (не докато върви
-bench), за да знае и командите на прозореца; инсталаторът да влезе в release.
+На лаптопа (12.10): pipx е от **този клон** (main + прозорецът) — не го връщай
+на main, преди PR #60 да е слят, иначе прозорецът губи /usage, /model, /status.
+Остава: PR #60 → main само с „да“; после pipx `@main`; инсталаторът в release.
 
 ## Мега-ъпгрейд 2026-10-11 (клон `claude/mega-upgrade-oct11`) — първо това на лаптопа
 
