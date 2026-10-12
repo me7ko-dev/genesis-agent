@@ -427,11 +427,16 @@ def test_an_unrelated_request_gets_nothing(_shipped_skills) -> None:
     assert sl.domain_context("напиши rate limiter с asyncio и тестове") == ""
 
 
+# Телефоните (2026-10-12): booking-form падаше на „0898/123-456“ (19/20),
+# customers-sqlite нормализира същите изписвания — и двете вече получават
+# bg_phone_numbers; другите задачи — нищо ново.
 _BENCH_KNOWLEDGE = {
-    "booking-form": "web_site_2026", "egn-check": "bg_egn_validate_and_decode",
-    "eik-check": "bg_eik_bulstat_validate", "euro-convert": "bg_euro_bgn_conversion",
-    "faktura-excel": "bg_invoice_fields", "iban-check": "bg_iban_validate",
-    "vat-check": "bg_vat_number_validate", "workdays": "bg_working_days",
+    "booking-form": ["web_site_2026", "bg_phone_numbers"],
+    "customers-sqlite": ["bg_phone_numbers"],
+    "egn-check": ["bg_egn_validate_and_decode"],
+    "eik-check": ["bg_eik_bulstat_validate"], "euro-convert": ["bg_euro_bgn_conversion"],
+    "faktura-excel": ["bg_invoice_fields"], "iban-check": ["bg_iban_validate"],
+    "vat-check": ["bg_vat_number_validate"], "workdays": ["bg_working_days"],
 }
 
 
@@ -445,7 +450,8 @@ def test_every_bench_task_gets_exactly_its_knowledge(_shipped_skills) -> None:
     got = {t.parent.name: re.findall(r"библиотеката: (\S+)", sl.domain_context(t.read_text("utf-8")))
            for t in sorted(bench.glob("*/task.txt"))}
     assert len(got) >= 16
-    assert got == {name: [_BENCH_KNOWLEDGE[name]] if name in _BENCH_KNOWLEDGE else [] for name in got}
+    assert {k: sorted(v) for k, v in got.items()} == {
+        name: sorted(_BENCH_KNOWLEDGE.get(name, [])) for name in got}
 
 
 def test_shared_words_without_a_whole_trigger_are_not_a_match(_shipped_skills) -> None:
@@ -606,17 +612,12 @@ def test_another_word_form_still_gets_the_verified_rules(_shipped_skills, query,
 def test_stemming_changes_no_bench_task_knowledge(_shipped_skills, project) -> None:
     """Кое знание получава всяка задача от bench-а — същото като преди _stem
     (2026-10-07). Нов тригер тук е фалшива тревога, която bench-ът е мерил без."""
-    expected = {
-        "booking-form": "web_site_2026", "egn-check": "bg_egn_validate_and_decode",
-        "eik-check": "bg_eik_bulstat_validate", "euro-convert": "bg_euro_bgn_conversion",
-        "faktura-excel": "bg_invoice_fields", "iban-check": "bg_iban_validate",
-        "vat-check": "bg_vat_number_validate", "workdays": "bg_working_days",
-    }.get(project)
+    expected = _BENCH_KNOWLEDGE.get(project, [])
     task = sl.Path(__file__).resolve().parent.parent / "bench" / "projects" / project / "task.txt"
     text = sl.domain_context(task.read_text(encoding="utf-8"))
-    if expected:
-        assert f"библиотеката: {expected}" in text
-    else:
+    for name in expected:
+        assert f"библиотеката: {name}" in text
+    if not expected:
         assert text == ""
 
 
@@ -630,3 +631,22 @@ def test_a_shared_stem_is_not_a_whole_trigger(_shipped_skills, query) -> None:
     """Одит 2026-10-07: „работи“ (глагол) ≈ „работни“ и „основните“ ≈ „основа“
     през пълната основа подаваха правилата за работни дни / фактури."""
     assert sl.domain_context(query) == ""
+
+
+def test_the_phone_skill_passes_its_self_test(_shipped_skills, tmp_path) -> None:
+    """2026-10-12: booking-form отхвърляше „0898/123-456“ (скрит тест 19/20)."""
+    import subprocess
+    import sys
+    script = tmp_path / "bg_phone_numbers.py"
+    script.write_text(sl.skill_view("bg_phone_numbers")["code"], encoding="utf-8")
+    r = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
+                       encoding="utf-8", timeout=60, check=False)
+    assert r.returncode == 0 and r.stdout.strip() == "OK", r.stderr
+
+
+@pytest.mark.parametrize("query", [
+    "направи сайт за кафене с телефон за контакт в долната част",
+    "добави поле за номер на поръчка",
+])
+def test_a_phone_in_passing_does_not_bring_the_numbering_plan(_shipped_skills, query) -> None:
+    assert "bg_phone_numbers" not in sl.domain_context(query)

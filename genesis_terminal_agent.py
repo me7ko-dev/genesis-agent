@@ -1525,7 +1525,9 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
             knowledge = ""
     if knowledge:
         content = f"{user_input}\n\n{knowledge}"
-        ui.info(f"📚 проверено знание: {head.split(': ', 1)[-1]}")
+        names = [line.split(": ", 1)[-1] for line in knowledge.splitlines()
+                 if line.startswith("## Проверено ")]   # знание + ръководство (2026-10-12)
+        ui.info(f"📚 проверено знание: {', '.join(names) or head.split(': ', 1)[-1]}")
     content += extra
     # Без таван до края на хода: deque(maxlen) изхвърляше посред задачата
     # системния промпт и самата заявка (виж agent_core.bounded_history).
