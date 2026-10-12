@@ -215,6 +215,7 @@ button.chip:hover { border-color: var(--line-2); color: var(--text); }
 .note { margin-left: 42px; display: flex; gap: 8px; align-items: flex-start; font-size: 13px; color: var(--text-2); }
 .note svg { flex: none; margin-top: 3px; }
 .note.info { color: var(--muted); }
+.note.progress { color: var(--muted); font-style: italic; }
 .note.warn svg { color: var(--warn); }
 .note.error { color: var(--error); }
 .note.asked {
@@ -366,6 +367,8 @@ button.chip:hover { border-color: var(--line-2); color: var(--text); }
 
 button.chip { cursor: pointer; }
 .chip.usage, .chip.usage svg { color: var(--accent); }
+.chip.plan, .chip.plan svg { color: var(--warn); }
+.chip.todos { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .sheet-back {
   position: fixed; inset: var(--titlebar) 0 0 0; z-index: 25; background: rgba(0, 0, 0, .5);
@@ -408,6 +411,7 @@ button.chip { cursor: pointer; }
 .badge.free { color: var(--ok); border-color: rgba(74, 222, 128, .35); background: rgba(74, 222, 128, .08); }
 .badge.paid { color: var(--warn); border-color: rgba(251, 191, 36, .35); background: rgba(251, 191, 36, .08); }
 .badge.on { color: var(--accent); border-color: rgba(94, 234, 212, .4); background: rgba(94, 234, 212, .08); }
+.badge.sub { color: #f0a06a; border-color: rgba(240, 160, 106, .4); background: rgba(240, 160, 106, .08); }
 
 /* usage */
 .money {

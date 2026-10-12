@@ -31,6 +31,15 @@ KNOWN_QUOTAS: dict[str, dict[str, Any]] = {
     "cerebras": {"tokens": 1_000_000, "days": 1, "label": "1M токена на ден"},
 }
 
+# Доставчици с абонамент (2026-10-12, PR #59: Claude през `claude` CLI). Токените
+# им не се плащат на парче, затова /usage не ги брои като платени — иначе
+# „$0“ в горната лента изчезваше още при първия ход с абонамента.
+SUBSCRIPTION_PROVIDERS = frozenset({"claude_cli"})
+
+
+def no_per_token_cost(provider: str, model: str) -> bool:
+    return provider in SUBSCRIPTION_PROVIDERS or _gta().is_free_model(provider, model)
+
 
 @dataclass
 class CommandContext:
@@ -72,6 +81,7 @@ def cmd_status(_arg: dict, ctx: CommandContext) -> dict:
         "provider_name": _provider_name(prov),
         "model": gta.current_model_id,
         "free": gta.is_free_model(prov, gta.current_model_id),
+        "subscription": prov in SUBSCRIPTION_PROVIDERS,
         "coding_mode": bool(gta._CODING_MODE),
         "local_only": gta._LOCAL_ONLY_MODEL,
         "elapsed": gta.get_elapsed_time(),
@@ -184,14 +194,14 @@ def usage_report(entries: Any, *, days: int = 30, today: date | None = None,
 
 def cmd_usage(arg: dict, _ctx: CommandContext) -> dict:
     from genesis_agent import budget
-    gta = _gta()
     try:
         days = max(7, min(90, int(arg.get("days") or 30)))
     except (TypeError, ValueError):
         days = 30
-    report = usage_report(budget._read_entries() or [], days=days, is_free=gta.is_free_model)
+    report = usage_report(budget._read_entries() or [], days=days, is_free=no_per_token_cost)
     for row in report["providers"] + report["quotas"]:
         row["name"] = _provider_name(row["provider"])
+        row["subscription"] = row["provider"] in SUBSCRIPTION_PROVIDERS
     return report
 
 
@@ -201,13 +211,15 @@ def cmd_models(_arg: dict, _ctx: CommandContext) -> dict:
     gta = _gta()
     chain = [{"provider": fb["provider"], "name": _provider_name(fb["provider"]), "model": fb["model"],
               "free": gta.is_free_model(fb["provider"], fb["model"]),
+              "subscription": fb["provider"] in SUBSCRIPTION_PROVIDERS,
               "active": fb["provider"] == gta.current_provider and fb["model"] == gta.current_model_id}
              for fb in gta.FALLBACK_CHAIN]
     providers = []
     for key in gta.PROVIDERS:
         ready, hint = gta.provider_ready(key)
         providers.append({"provider": key, "name": _provider_name(key), "ready": ready,
-                          "hint": "" if ready else hint, "active": key == gta.current_provider})
+                          "hint": "" if ready else hint, "active": key == gta.current_provider,
+                          "subscription": key in SUBSCRIPTION_PROVIDERS})
     return {"ok": True, "chain": chain, "providers": providers,
             "current": {"provider": gta.current_provider, "model": gta.current_model_id}}
 
@@ -223,8 +235,8 @@ def cmd_provider_models(arg: dict, _ctx: CommandContext) -> dict:
         return {"ok": False, "error": "Ollama работи, но няма изтеглени модели (ollama pull <модел>)."}
     if not models:
         return {"ok": False, "error": "Доставчикът не върна модели. Провери ключа и връзката."}
-    return {"ok": True, "provider": key, "models": [
-        {"model": m, "free": gta.is_free_model(key, m),
+    return {"ok": True, "provider": key, "subscription": key in SUBSCRIPTION_PROVIDERS, "models": [
+        {"model": m, "free": gta.is_free_model(key, m), "subscription": key in SUBSCRIPTION_PROVIDERS,
          "active": key == gta.current_provider and m == gta.current_model_id} for m in models]}
 
 

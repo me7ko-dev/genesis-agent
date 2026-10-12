@@ -18,12 +18,23 @@ export type GenesisEvent = {
   label?: string;
 };
 
+/** The agent's task list (the TODO tool), sent with every `events` reply. */
+export type Todo = { content: string; status: 'pending' | 'in_progress' | 'completed' };
+
+/** Plan mode and the task list — "state" in the server's `events` reply. */
+export type AgentState = { plan: boolean; todos: Todo[] };
+
 export type EventsBatch = {
   events: GenesisEvent[];
   last: number;
   reset: boolean;
   busy: boolean;
   epoch: string;
+  /** The reply hit its size cap: ask again at once, from `last` (server 2026-10-11). */
+  more?: boolean;
+  /** The last accepted `mid`s of `send` (see Backend.send). */
+  mids?: string[];
+  state?: AgentState;
 };
 
 export type Phase =
@@ -45,6 +56,10 @@ export type BackendState = {
   busy: boolean;
   /** The agent answers `/` commands itself (genesis_agent/desktop_commands.py). */
   commands?: boolean;
+  /** Plan mode (/plan): the agent only reads and plans. */
+  plan?: boolean;
+  /** The agent's task list for the running turn. */
+  todos?: Todo[];
 };
 
 export type Settings = {
@@ -66,8 +81,8 @@ export type UsageReport = CommandResult & {
   days: number;
   periods: { today: UsagePeriod; week: UsagePeriod; month: UsagePeriod; all: UsagePeriod };
   daily: { day: string; calls: number; tokens: number }[];
-  providers: { provider: string; name: string; calls: number; tokens: number; week: number; today: number; free: boolean }[];
-  models: { provider: string; model: string; calls: number; tokens: number; free: boolean }[];
+  providers: { provider: string; name: string; calls: number; tokens: number; week: number; today: number; free: boolean; subscription?: boolean }[];
+  models: { provider: string; model: string; calls: number; tokens: number; free: boolean; subscription?: boolean }[];
   paid_tokens: number;
   quotas: { provider: string; name: string; limit: number; spent: number; left: number; label: string; period: string }[];
   since: string | null;
@@ -79,6 +94,8 @@ export type StatusReport = CommandResult & {
   provider_name: string;
   model: string;
   free: boolean;
+  /** Paid by subscription (Claude through the `claude` CLI), not per token. */
+  subscription?: boolean;
   coding_mode: boolean;
   local_only: string | null;
   elapsed: string;
@@ -91,14 +108,15 @@ export type StatusReport = CommandResult & {
 };
 
 export type ModelsReport = CommandResult & {
-  chain: { provider: string; name: string; model: string; free: boolean; active: boolean }[];
-  providers: { provider: string; name: string; ready: boolean; hint: string; active: boolean }[];
+  chain: { provider: string; name: string; model: string; free: boolean; active: boolean; subscription?: boolean }[];
+  providers: { provider: string; name: string; ready: boolean; hint: string; active: boolean; subscription?: boolean }[];
   current: { provider: string; model: string };
 };
 
 export type ProviderModels = CommandResult & {
   provider: string;
-  models: { model: string; free: boolean; active: boolean }[];
+  subscription?: boolean;
+  models: { model: string; free: boolean; active: boolean; subscription?: boolean }[];
 };
 
 export type HistoryReport = CommandResult & {

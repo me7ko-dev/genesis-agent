@@ -1,10 +1,10 @@
-import type { GenesisEvent } from '../../shared/types';
+import type { GenesisEvent, Todo } from '../../shared/types';
 
 export type ChatItem =
   | { kind: 'user'; key: string; text: string; ts: number }
   | { kind: 'assistant'; key: string; text: string; ts: number }
   | { kind: 'tool'; key: string; name: string; result: string; clipped: boolean; ts: number }
-  | { kind: 'note'; key: string; tone: 'info' | 'warn' | 'error' | 'asked'; text: string; ts: number }
+  | { kind: 'note'; key: string; tone: 'info' | 'warn' | 'error' | 'asked' | 'progress'; text: string; ts: number }
   | { kind: 'confirm'; key: string; id: string; operation: string; reasons: string[];
       state: 'pending' | 'allowed' | 'denied'; note: string; ts: number };
 
@@ -33,6 +33,7 @@ export function toChatItems(events: GenesisEvent[]): ChatItem[] {
       case 'warn':
       case 'error':
       case 'asked':
+      case 'progress':   // a sub-agent's step (server 2026-10-09)
         items.push({ kind: 'note', key, tone: e.type, text: e.text ?? '', ts });
         break;
       case 'confirm':
@@ -63,15 +64,25 @@ export function mergeEvents(current: GenesisEvent[], incoming: GenesisEvent[], r
   return fresh.length ? [...current, ...fresh] : current;
 }
 
-/** The running turn: its latest "thinking" label and when it started. */
+/** The running turn: its latest "thinking" label (or a sub-agent's step —
+ *  a sub-agent works for minutes and "Мисли…" said nothing) and when it started. */
 export function turnInfo(events: GenesisEvent[]): { label: string; since: number } {
   let label = '';
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
-    if (e.type === 'thinking' && !label) label = e.label ?? '';
+    if ((e.type === 'thinking' || e.type === 'progress') && !label) {
+      label = (e.type === 'thinking' ? e.label : e.text)?.trim() ?? '';
+    }
     if (e.type === 'user') return { label: label || 'Мисли…', since: e.ts };
   }
   return { label: label || 'Мисли…', since: Date.now() };
+}
+
+/** The task list in one line: "2/5 · пусни тестовете" (the item in work). */
+export function todoSummary(todos: Todo[]): string {
+  const done = todos.filter((t) => t.status === 'completed').length;
+  const current = todos.find((t) => t.status === 'in_progress') ?? todos.find((t) => t.status === 'pending');
+  return `${done}/${todos.length}${current ? ` · ${current.content}` : ''}`;
 }
 
 /** The pending confirmation, if the agent is waiting for one. */

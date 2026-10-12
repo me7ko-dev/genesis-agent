@@ -1,4 +1,4 @@
-import { ArrowDown, Cpu, Folder, PanelLeftClose, PanelLeftOpen, RotateCw, X, Zap } from 'lucide-react';
+import { ArrowDown, ClipboardList, Cpu, Folder, ListChecks, PanelLeftClose, PanelLeftOpen, RotateCw, X, Zap } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { BackendState, CommandResult, GenesisEvent, Settings, UsageReport } from '../shared/types';
 import { Composer } from './components/Composer';
@@ -6,7 +6,7 @@ import { AssistantMessage, ConfirmCard, Note, Thinking, ToolCard, UserMessage } 
 import { explain, fmtTokens, Sheet, toggleMessage, type SheetView } from './components/Panels';
 import { EmptyChat, Failed, Logo, Missing, Starting, Welcome } from './components/Screens';
 import { Sidebar } from './components/Sidebar';
-import { mergeEvents, pendingConfirm, shortPath, toChatItems, turnInfo } from './lib/chat';
+import { mergeEvents, pendingConfirm, shortPath, toChatItems, todoSummary, turnInfo } from './lib/chat';
 
 const api = window.genesis;
 
@@ -90,6 +90,11 @@ export function App() {
   }, [flash]);
 
   const command = useCallback((name: string, arg: string) => {
+    // The chat's own commands (genesis_agent/chat_commands.py) travel as text:
+    // the agent runs them in the turn and answers in the conversation.
+    const chat = ['/plan', '/undo', '/compact', '/context', '/todos', '/review', '/bg',
+                  '/agents', '/memory', '/init', '/commands', '/hooks', '/mcp'];
+    if (chat.includes(name)) return false;
     // Everything but the window's own commands needs a genesis.exe that knows them.
     const local = ['/clear', '/stop', '/folder', '/terminal', '/logs', '/help'];
     if (!local.includes(name) && ready && !state.commands) {
@@ -240,6 +245,18 @@ export function App() {
         {ready && state.commands && today !== null && (
           <button className="chip usage" title="Разход (/usage)" onClick={() => setSheet({ view: 'usage' })}>
             <Zap size={13} /> {fmtTokens(today.tokens)} днес{today.free && ' · $0'}
+          </button>
+        )}
+        {ready && state.plan && (
+          <button className="chip plan" title="Режим план: Genesis само чете и планира. /plan пак — изпълнява"
+                  onClick={() => void send('/plan')}>
+            <ClipboardList size={13} /> План
+          </button>
+        )}
+        {ready && state.todos && state.todos.length > 0 && (
+          <button className="chip todos" title={state.todos.map((t) => `${t.status === 'completed' ? '✓' : t.status === 'in_progress' ? '▶' : '○'} ${t.content}`).join('\n')}
+                  onClick={() => void send('/todos')}>
+            <ListChecks size={13} /> {todoSummary(state.todos)}
           </button>
         )}
         <span className={`status-dot ${state.phase} ${state.busy ? 'busy' : ''}`}

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timedelta
+from typing import ClassVar
 
 import pytest
 
@@ -103,3 +104,25 @@ def test_set_model_and_toggles(monkeypatch) -> None:
     assert (gta.current_provider, gta.current_model_id) == ("ollama", "qwen")
     status = dc.run("status", {}, ctx)
     assert status["model"] == "qwen" and status["context_window"] > 0
+
+
+def test_usage_subscription_tokens_are_not_paid(monkeypatch) -> None:
+    """2026-10-12: Claude през абонамента (claude_cli) не се плаща на токен."""
+    from genesis_agent import budget
+    entries = [_entry(TODAY, "claude_cli", "opus", 1000, 100), _entry(TODAY, "openai", "gpt", 10, 1)]
+    monkeypatch.setattr(budget, "_read_entries", lambda: entries)
+    monkeypatch.setattr(dc, "_gta", lambda: _FakeGta())
+    r = dc.cmd_usage({"days": 7}, None)  # type: ignore[arg-type]
+    assert r["ok"] and r["paid_tokens"] == 11
+    rows = {x["provider"]: x for x in r["providers"]}
+    assert rows["claude_cli"]["free"] is True and rows["claude_cli"]["subscription"] is True
+    assert rows["openai"]["free"] is False and rows["openai"]["subscription"] is False
+
+
+class _FakeGta:
+    PROVIDERS: ClassVar[dict] = {"claude_cli": {"name": "🟠 Claude (абонамент, claude CLI)"},
+                                 "openai": {"name": "OpenAI"}}
+
+    @staticmethod
+    def is_free_model(_p: str, _m: str) -> bool:
+        return False

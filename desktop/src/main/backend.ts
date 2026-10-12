@@ -8,6 +8,7 @@
  */
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { homedir } from 'node:os';
@@ -234,19 +235,41 @@ export class Backend extends EventEmitter {
 
   private async pump(gen: number): Promise<void> {
     let failures = 0;
+    // Right after a (re)connect and while the server says "more": ask at once.
+    let atOnce: boolean = true;
     while (gen === this.generation && this.client) {
       try {
-        const reply = await this.client.call<EventsBatch & { ok: boolean }>(
-          'events', { after: this.after, wait: 20 }, 35_000);
+        const reply: EventsBatch & { ok: boolean } = await this.client.call<EventsBatch & { ok: boolean }>(
+          'events', { after: this.after, wait: atOnce ? 0 : 20 }, 35_000);
         failures = 0;
         if (gen !== this.generation) return;
-        const reset = reply.reset || (this.epoch !== '' && reply.epoch !== this.epoch);
+        // A restarted agent numbers its events from 1 again: what it just sent
+        // was filtered by our old `after`, so start over from 0 (as mobile does).
+        if (this.epoch !== '' && reply.epoch !== this.epoch) {
+          this.epoch = reply.epoch;
+          this.after = 0;
+          this.eventLog = [];
+          atOnce = true;
+          continue;
+        }
+        // Over the size cap the server sends the oldest after `after` and
+        // "more": fetch the rest at once instead of waiting 20 s per page.
+        atOnce = !!reply.more;
+        const reset = reply.reset;
         this.epoch = reply.epoch;
         this.after = reply.last;
         this.eventLog = reset ? reply.events : [...this.eventLog, ...reply.events];
         if (this.eventLog.length > EVENT_LOG) this.eventLog = this.eventLog.slice(-EVENT_LOG);
         const wasBusy = this.state.busy;
-        if (wasBusy !== reply.busy) this.set({ ...this.state, busy: reply.busy });
+        const next = { ...this.state, busy: reply.busy };
+        if (reply.state) {
+          next.plan = !!reply.state.plan;
+          next.todos = Array.isArray(reply.state.todos) ? reply.state.todos : [];
+        }
+        if (wasBusy !== reply.busy || next.plan !== this.state.plan
+            || JSON.stringify(next.todos) !== JSON.stringify(this.state.todos)) {
+          this.set(next);
+        }
         if (reply.events.length || reset) {
           this.emit('events', { ...reply, reset } satisfies EventsBatch);
         }
@@ -289,7 +312,23 @@ export class Backend extends EventEmitter {
     }
   }
 
-  send(text: string) { return this.op('send', { text }); }
+  /** `mid` names the message: a retry after a lost reply gets the first
+   *  answer back instead of starting the turn twice (server 2026-10-11). */
+  async send(text: string): Promise<SendResult> {
+    const mid = randomBytes(12).toString('base64url');
+    for (let attempt = 0; ; attempt++) {
+      if (!this.client) return { ok: false, error: 'not_ready' };
+      try {
+        return await this.client.call<SendResult>('send', { text, mid });
+      } catch (e) {
+        if (e instanceof ProtocolError && e.kind === 'network' && attempt < 2) {
+          await sleep(500 * (attempt + 1));
+          continue;
+        }
+        return { ok: false, error: (e as Error).message };
+      }
+    }
+  }
   stop() { return this.op('stop'); }
   clear() { return this.op('clear'); }
   confirm(id: string, allow: boolean) { return this.op('confirm', { id, allow }); }

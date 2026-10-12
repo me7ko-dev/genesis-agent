@@ -235,7 +235,7 @@ function UsageView({ onOpen }: { onOpen: (s: SheetView) => void }) {
           <tbody>
             {data.models.map((m) => (
               <tr key={`${m.provider}/${m.model}`}>
-                <td className="mono">{m.model} {m.free ? <span className="badge free">FREE</span> : <span className="badge paid">PAID</span>}</td>
+                <td className="mono">{m.model} <Badge of={m} /></td>
                 <td>{data.providers.find((x) => x.provider === m.provider)?.name ?? m.provider}</td>
                 <td className="num">{full(m.calls)}</td>
                 <td className="num">{fmtTokens(m.tokens)}</td>
@@ -309,7 +309,7 @@ function ProviderBars({ rows, total }: { rows: UsageReport['providers']; total: 
     <div className="hbars">
       {rows.map((r) => (
         <div className="hbar" key={r.provider} title={`${r.name}: ${full(r.tokens)} токена, ${full(r.calls)} обръщения`}>
-          <div className="hbar-name">{r.name} {r.free ? <span className="badge free">FREE</span> : <span className="badge paid">PAID</span>}</div>
+          <div className="hbar-name">{r.name} <Badge of={r} /></div>
           <div className="hbar-track"><div className="hbar-fill" style={{ width: `${(r.tokens / top) * 100}%` }} /></div>
           <div className="hbar-val"><b>{fmtTokens(r.tokens)}</b> <span className="muted">{total ? Math.round((r.tokens / total) * 100) : 0}%</span></div>
         </div>
@@ -339,7 +339,7 @@ function StatusView({ onFlash, onOpen }: { onFlash: (t: string) => void; onOpen:
   return (
     <div className="status">
       <div className="kv">
-        <span>Модел</span><b className="mono">{data.model} {data.free ? <span className="badge free">FREE</span> : <span className="badge paid">PAID</span>}</b>
+        <span>Модел</span><b className="mono">{data.model} <Badge of={data} /></b>
         <span>Доставчик</span><b>{data.local_only ? `Само локален: ${data.local_only}` : data.provider_name}</b>
         <span>Работна папка</span><b className="mono small">{data.workspace}</b>
         <span>Сесия</span><b>{data.elapsed} · {data.messages} съобщения</b>
@@ -408,7 +408,7 @@ function ModelsView({ tab: initial, onFlash, onClose }: { tab: 'pick' | 'chain';
             {data.chain.map((c) => (
               <li key={`${c.provider}/${c.model}`} className={c.active ? 'active' : ''}>
                 <span className="muted">{c.name}</span> <span className="mono">{c.model}</span>
-                {c.free ? <span className="badge free">FREE</span> : <span className="badge paid">PAID</span>}
+                <Badge of={c} />
                 {c.active && <span className="badge on">сега</span>}
               </li>
             ))}
@@ -470,7 +470,7 @@ function ProviderPicker({ provider, name, onBack, onPicked, onFlash }: {
             {list.map((m) => (
               <button key={m.model} className={m.active ? 'active' : ''} onClick={() => void pick(m.model)}>
                 <span className="mono">{m.model}</span>
-                {m.free ? <span className="badge free">FREE</span> : <span className="badge paid">PAID</span>}
+                <Badge of={m} />
                 {m.active && <span className="badge on">сега</span>}
               </button>
             ))}
@@ -556,6 +556,12 @@ function UpdateView({ onTerminal, onFlash }: { onTerminal: () => void; onFlash: 
       )}
     </div>
   );
+}
+
+/** FREE / PAID / АБОНАМЕНТ (Claude through the `claude` CLI is paid monthly, not per token). */
+function Badge({ of }: { of: { free: boolean; subscription?: boolean } }) {
+  if (of.subscription) return <span className="badge sub">АБОНАМЕНТ</span>;
+  return of.free ? <span className="badge free">FREE</span> : <span className="badge paid">PAID</span>;
 }
 
 // ── /help ────────────────────────────────────────────────────────────────────

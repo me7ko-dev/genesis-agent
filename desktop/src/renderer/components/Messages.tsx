@@ -1,4 +1,5 @@
 import {
+  Activity,
   Brain, Check, ChevronRight, CircleHelp, File, FilePen, Folder, GitBranch, Globe, Info,
   Save, Search, ShieldAlert, Sparkles, Terminal, TriangleAlert, Wrench, X,
 } from 'lucide-react';
@@ -93,7 +94,7 @@ export function ToolCard({ item }: { item: Extract<ChatItem, { kind: 'tool' }> }
   );
 }
 
-const NOTE_ICON = { info: Info, warn: TriangleAlert, error: TriangleAlert, asked: CircleHelp } as const;
+const NOTE_ICON = { info: Info, warn: TriangleAlert, error: TriangleAlert, asked: CircleHelp, progress: Activity } as const;
 
 export function Note({ item }: { item: Extract<ChatItem, { kind: 'note' }> }) {
   const Icon = NOTE_ICON[item.tone];
