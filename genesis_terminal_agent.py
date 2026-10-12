@@ -1180,6 +1180,11 @@ def show_agent_menu():
     if 1 <= msel <= len(models):
         current_provider = pk
         current_model_id = models[msel-1]
+        # Леката работа в Brain също да знае за абонамента (claude_cli.chosen).
+        if pk == "claude_cli":
+            os.environ["GENESIS_CLAUDE_CLI_ACTIVE"] = "1"
+        else:
+            os.environ.pop("GENESIS_CLAUDE_CLI_ACTIVE", None)
         console.print(f"[green]✓ {current_model_id}[/]")
 
 # ── Main Loop ─────────────────────────────────────────────────────────────────
