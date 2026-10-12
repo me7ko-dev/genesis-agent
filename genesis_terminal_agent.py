@@ -498,6 +498,13 @@ def provider_ready(provider_key: str) -> tuple[bool, str]:
     return bool(KEYS.get(key_env)), f"липсва {key_env}"
 
 
+# Не са модели за разговор: глас, транскрипция, класификатори, ембединги,
+# картинки. Проба на приложението 2026-10-12: /model на Groq предлагаше
+# whisper, orpheus и prompt-guard — изборът им чупеше чата.
+_NOT_CHAT = re.compile(r"whisper|orpheus|tts|transcribe|prompt-guard|llama-guard|embed|"
+                       r"rerank|moderation|dall-e|playai", re.IGNORECASE)
+
+
 def fetch_models(provider_key):
     if provider_key in MODELS_CACHE:
         return MODELS_CACHE[provider_key]
@@ -522,7 +529,8 @@ def fetch_models(provider_key):
             r = requests.get(f"{p['base_url']}/models",
                              headers={"Authorization": f"Bearer {key}"}, timeout=10)
             if r.status_code == 200:
-                models = sorted([m.get("id","") for m in r.json().get("data",[])])
+                models = sorted(m.get("id", "") for m in r.json().get("data", [])
+                                if not _NOT_CHAT.search(m.get("id", "")))
                 if models:
                     MODELS_CACHE[provider_key] = models
                     return models
@@ -936,6 +944,27 @@ def _restore_session(loaded: list, system_prompt: str) -> "deque":
     return restored_history(loaded, system_prompt, maxlen=_HISTORY_MAXLEN)
 
 
+def _tool_detail(args: object) -> str:
+    """Какво прави инструментът, на един ред: командата, файлът, заявката."""
+    if not isinstance(args, dict):
+        return ""
+    for key in ("command", "path", "file", "query", "url", "question", "pattern", "task"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            text = " ".join(value.split())
+            return text if len(text) <= 80 else f"{text[:79]}…"
+    return ""
+
+
+def _memory_note(saved: dict) -> str:
+    """„1 решение, 2 нишки“ — какво auto_capture запомни. Беше „0т/1р/0п“
+    (неразбираемо в прозореца, проба 2026-10-12) и „1 нишки“ на изход."""
+    words = (("threads", "нишка", "нишки"), ("decisions", "решение", "решения"),
+             ("preferences", "предпочитание", "предпочитания"))
+    return ", ".join(f"{saved[k]} {one if saved[k] == 1 else many}"
+                     for k, one, many in words if saved.get(k))
+
+
 def _compact_messages(messages: "deque") -> "deque":
     """Ако историята е пораснала над прага, обобщава по-старата част с евтин
     модел и я заменя с едно system резюме. Безопасно — при грешка просто
@@ -1235,6 +1264,10 @@ class TurnUI:
 
     def tool(self, name: str, result: str) -> None: ...
 
+    def tool_start(self, name: str, detail: str) -> None:
+        """Инструментът тръгва (телефонът и прозорецът го показват, докато
+        върви). Терминалът — нищо: спинер би закрил въпросите на sandbox-а."""
+
     def asked(self, question: str) -> None: ...
 
     def spinning(self, note: str) -> None: ...
@@ -1267,6 +1300,11 @@ class _WatchedUI(TurnUI):
 
     def tool(self, name: str, result: str) -> None:
         self.inner.tool(name, result)
+
+    def tool_start(self, name: str, detail: str) -> None:
+        start = getattr(self.inner, "tool_start", None)   # UI-ите не наследяват всички TurnUI
+        if start is not None:
+            start(name, detail)
 
     def asked(self, question: str) -> None:
         self.stopped_for = "ask"
@@ -1668,6 +1706,10 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                         messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                                          "name": name, "content": _held})
                         continue
+                    if _tc_i not in _prefetched:
+                        # Телефонът/прозорецът виждат какво върви (проба 2026-10-12:
+                        # `sleep 60` минаваше като „Genesis мисли...“).
+                        ui.tool_start(name, _tool_detail(args))
                     result = (_prefetched[_tc_i] if _tc_i in _prefetched
                               else genesis_skills.dispatch_tool_call(name, call_args))
                     _page_check.observe(result)
@@ -1718,6 +1760,10 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
 
             # Стар text-tag режим — моделът не поддържа native tool-calling
             # (или просто избра да не вика нищо тази реплика).
+            # Таговете тръгват наведнъж: телефонът/прозорецът виждат поне първия.
+            _first = re.search(r"\[([A-Z_]{3,}):\s*([^\]\n]{0,200})", response or "")
+            if _first:
+                ui.tool_start(_first.group(1), _tool_detail({"command": _first.group(2)}))
             tool_results = parse_and_execute_tools(response)
             _executed.extend(claim_check.executed_from_text_results(tool_results))
             for _r in tool_results:
@@ -1873,8 +1919,7 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
             from genesis_agent import workspace_memory as _wm
             saved = _wm.auto_capture(pre_compact)
             if any(saved.values()):
-                ui.info(f"🧠 Запомнено преди компресията: "
-                        f"{saved['threads']}т/{saved['decisions']}р/{saved['preferences']}п")
+                ui.info(f"🧠 Запомнено преди компресията: {_memory_note(saved)}")
         except Exception:
             pass
 
@@ -2512,10 +2557,7 @@ def main():
             with console.status("[dim]Запомням какво свършихме...[/]", spinner="dots"):
                 saved = _wm.auto_capture(list(convo))
             if any(saved.values()):
-                console.print(
-                    f"[dim]🧠 Запомнено: {saved['threads']} нишки, "
-                    f"{saved['decisions']} решения, {saved['preferences']} предпочитания[/]"
-                )
+                console.print(f"[dim]🧠 Запомнено: {_memory_note(saved)}[/]")
     except Exception:
         pass
 

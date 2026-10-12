@@ -155,7 +155,12 @@ def update_thread(thread_id: Any, status: str = "", next_step: str = "", notes: 
         tid = int(str(thread_id).strip().lstrip("#"))
     except (ValueError, TypeError):
         return f"[TASK_UPDATE] Невалиден id: {thread_id!r} (очаквам число, виж TASK_LIST)."
-    status = _clean(status, 20).lower()
+    status = _clean(status, 20).lower().replace("-", "_").replace(" ", "_")
+    # Думите на TODO_WRITE и близките им: проба 2026-10-12 — gpt-oss-120b
+    # пишеше "completed" и губеше извикване за отказа.
+    status = {"completed": "done", "complete": "done", "finished": "done", "closed": "done",
+              "in_progress": "open", "pending": "open", "todo": "open", "active": "open",
+              "stuck": "blocked", "waiting": "blocked"}.get(status, status)
     if status and status not in STATUSES:
         return f"[TASK_UPDATE] Невалиден статус {status!r}. Позволени: {', '.join(STATUSES)}."
     sets: list[str] = []

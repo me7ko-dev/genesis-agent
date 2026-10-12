@@ -1874,7 +1874,13 @@ def _dispatch(name: str, arguments: dict) -> str:
             return _tool_agent(str(arguments.get("agent", "") or ""),
                                str(arguments.get("task", "") or ""))
         if name == "TODO_WRITE":
-            return _todos().write(arguments.get("todos", []))
+            # Без "todos" — отказ, не празен списък (проба 2026-10-12: липсващ
+            # ключ мълчаливо изтриваше задачите). Друго име — само ако е списък.
+            todo_list = arguments.get("todos")
+            for alias in ("tasks", "items"):
+                if todo_list is None and isinstance(arguments.get(alias), list):
+                    todo_list = arguments[alias]
+            return _todos().write(todo_list)
         if name == "WEB_FETCH":
             return _tool_web_fetch(str(arguments.get("url", "") or ""))
         if name.startswith("mcp__"):
