@@ -227,6 +227,11 @@ def _print_skip(provider: str, model: str, error: str, seconds: float) -> None:
     нито една причина за ollama. Грешките на ниво ключ (429 на ключ) си имат
     свой ред в _call и не минават оттук.
     """
+    # Липсващ ключ е настройка, не отпадане (2026-10-12): с Claude абонамента
+    # и без безплатни ключове всяка лека задача при изход печаташе 13 реда
+    # „skip: no GROQ_API_KEY configured“, а истинските причини се губеха в тях.
+    if error.startswith("skip: no ") and error.rstrip().endswith("configured"):
+        return
     reason = " ".join(error.split())[:80]
     print(f"  [Brain] ✗ {provider}/{model} след {seconds:.1f}s: {reason} → следващ")
 
@@ -763,6 +768,14 @@ class Brain:
             already = {(c["provider"], c["model"]) for c in fast}
             self.chain = fast + [c for c in self.chain
                                  if (c["provider"], c["model"]) not in already]
+            # Операторът е избрал Claude абонамента (2026-10-12): леката работа
+            # (памет, резюмета, граф) има последна резерва в haiku. Без безплатни
+            # ключове паметта иначе тихо не се записваше — цялата лека верига
+            # беше „skip: no KEY“. Отзад: безплатните пак са първи.
+            from genesis_agent import claude_cli
+            if claude_cli.chosen() and claude_cli.available():
+                self.chain.append({"provider": "claude_cli", "model": "haiku",
+                                   "size_b": 0, "supports_tools": False})
         self.quality = (quality or os.environ.get("GENESIS_QUALITY") or "").strip().lower()
         self.premium: list[dict] = []
         self._premium_meta: dict[tuple[str, str], dict] = {}

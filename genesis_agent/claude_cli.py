@@ -70,6 +70,13 @@ def available() -> bool:
     return cli_path() is not None
 
 
+def chosen() -> bool:
+    """Избрал ли е операторът абонамента: при старта (GENESIS_START_PROVIDER)
+    или от `/model` по време на сесията (терминалът задава GENESIS_CLAUDE_CLI_ACTIVE)."""
+    return (os.environ.get("GENESIS_START_PROVIDER", "").strip() == PROVIDER
+            or os.environ.get("GENESIS_CLAUDE_CLI_ACTIVE") == "1")
+
+
 def child_env(base: dict[str, str] | None = None) -> dict[str, str]:
     """Средата за `claude`: без ключа на Anthropic и без чуждите ключове."""
     env = dict(os.environ if base is None else base)

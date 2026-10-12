@@ -1206,6 +1206,11 @@ def show_agent_menu():
     if 1 <= msel <= len(models):
         current_provider = pk
         current_model_id = models[msel-1]
+        # Леката работа в Brain също да знае за абонамента (claude_cli.chosen).
+        if pk == "claude_cli":
+            os.environ["GENESIS_CLAUDE_CLI_ACTIVE"] = "1"
+        else:
+            os.environ.pop("GENESIS_CLAUDE_CLI_ACTIVE", None)
         console.print(f"[green]✓ {current_model_id}[/]")
 
 # ── Main Loop ─────────────────────────────────────────────────────────────────
@@ -1546,7 +1551,9 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
             knowledge = ""
     if knowledge:
         content = f"{user_input}\n\n{knowledge}"
-        ui.info(f"📚 проверено знание: {head.split(': ', 1)[-1]}")
+        names = [line.split(": ", 1)[-1] for line in knowledge.splitlines()
+                 if line.startswith("## Проверено ")]   # знание + ръководство (2026-10-12)
+        ui.info(f"📚 проверено знание: {', '.join(names) or head.split(': ', 1)[-1]}")
     content += extra
     # Без таван до края на хода: deque(maxlen) изхвърляше посред задачата
     # системния промпт и самата заявка (виж agent_core.bounded_history).
