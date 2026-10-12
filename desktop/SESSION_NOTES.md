@@ -1,6 +1,6 @@
 # Genesis Desktop: докъде сме стигнали
 
-Последно обновено: 2026-09-25
+Последно обновено: 2026-10-12
 
 ## Какво е това
 Настолно приложение за Windows (Electron + React + Vite) около Genesis агента,
@@ -8,11 +8,52 @@
 говори с него по криптирания протокол на `remote_server.py` (същия като на мобилното приложение).
 
 ## Къде се намира
-- Worktree: `C:\Users\roika\Projects\genesis-desktop`, клон `feat/desktop-app`
-  (rebase върху `origin/main` c80cfa4, качен в origin)
+- Worktree: `C:\Users\roika\Projects\genesis-desktop`, клон **`feat/desktop-oct12`**
+  (= старият `feat/desktop-app` + merge на `origin/main` 0365470 след PR #59; качен в origin)
+- **PR #60** към main: https://github.com/me7ko-dev/genesis-agent/pull/60 — чака „да“ от потребителя
 - Основното репо: `C:\Users\roika\Projects\genesis-agent` (GitHub: me7ko-dev/genesis-agent)
 - Кодът на приложението: `desktop/`
-- Commit-ите са качени в клона. **Няма PR и нищо не е влязло в main.**
+
+## 2026-10-12: върху новия Genesis (мега-ъпгрейдът, PR #59)
+Потребителят поиска приложението да „работи с новата версия на Genesis“.
+- Merge на main в клона: конфликтите в `remote_server.py` са разрешени така, че
+  остават и `--bind` + операцията `command`, и новото от main (`--web`,
+  `replay_path`, `reset_usage()`, `unknown_op` вместо ProtocolError).
+  `ServeOptions` има `web`. Тестът за непозната операция е сверен.
+- Клиентът (`backend.ts`) говори протокола от 2026-10-11: `events` с `more`
+  (дотегля веднага), нов `epoch` → от 0, `send` с `mid` (повтаря при мрежова
+  грешка, без втори ход), `state` (план + задачи) в `BackendState`.
+- Прозорец: бележка и име на хода от `progress` (под-агент); чипове „План“ и
+  „2/5 · задача“ в горната лента (клик → `/plan` / `/todos`); командите на
+  чата (/plan, /undo, /compact, /context, /todos, /review, /bg, /agents,
+  /memory, /init, /commands, /hooks, /mcp) в менюто — `command()` в App.tsx
+  ги връща като текст и агентът им отговаря в разговора (phone_command).
+- Абонаментът Claude (`claude_cli`): `SUBSCRIPTION_PROVIDERS` в
+  `desktop_commands.py` — не е „платени токени“ в /usage; значка АБОНАМЕНТ
+  (`Badge` в Panels.tsx) вместо FREE/PAID.
+- Проверено: ruff чист, mypy чист за двата модула, `npm run typecheck`,
+  `npm test` 11/11, `npm run build`; pytest за remote_server + desktop_commands
+  73 минават (2 падат и на main на Windows: `braked_address…`, `deeply_nested_json…`).
+- CI: `gh workflow run native.yml --ref feat/desktop-oct12` → артефакти
+  `genesis-windows-x64` и `genesis-desktop-setup` (вж. „Инсталирано“ по-долу).
+- **Кой двигател тръгва** (поправено 12.10 вечерта, `src/main/exe.ts` + `tests/exe.test.ts`):
+  прозорецът пускаше стария `Programs\Genesis\genesis.exe` (24.09), защото
+  папката на инсталатора и `GENESIS_INSTALL_DIR` (слага я `install.ps1`, сочеше
+  същата стара папка) бяха преди PATH. Сега редът е: настройката `exe` →
+  `GENESIS_EXE` → `genesis` от PATH (каквото пуска терминалът: pipx
+  `~\.local\bin`) → папката на pipx → инсталатора. Проверено с пускане:
+  `exe = C:\Users\roika\.local\bin\genesis.exe`, `commands: false`.
+- pipx Genesis (клон `claude/mega-upgrade-oct11`, f8f08d7) **няма** `--bind` и
+  операцията `command` — те са само в този клон. С него чатът работи, а
+  /usage, /model, /status казват „обнови Genesis“ и бутонът „⚡ днес“ липсва.
+  Пълно ще стане, когато PR #60 влезе в main и pipx се преинсталира (НЕ докато
+  върви bench — той ползва pipx Python-а).
+- Снимки с двигателя от клона (CI артефакт, `GENESIS_EXE=…`), всичко изглежда
+  добре: главен екран, /model (Claude абонамент „готов“), моделите на Claude
+  със значка АБОНАМЕНТ, резервната верига, /status, /usage. Кликовете — през
+  `npx electron . --remote-debugging-port=9333` и CDP скрипт (без промяна в кода).
+- Прекият път „Genesis Agent“ (Start менюто) още отваря стария
+  `Programs\Genesis\genesis.exe` — не е пипан.
 
 ## Направено
 - Backend (`genesis_agent/remote_server.py`): опция `--bind`, за да слуша само на
@@ -99,11 +140,12 @@
 - Подписване на инсталатора
 
 ## Зависимости
-- Нужен е CLI-ят Genesis в `%LOCALAPPDATA%\Programs\Genesis\genesis.exe`.
-  Сега там е сглобеният в CI от `feat/desktop-app` (има `--bind` и командите).
-  Прекият път „Genesis Agent“ отваря него (терминала).
-- С по-стар genesis.exe (без `features: ["commands"]`) приложението работи, а
-  `/` командите казват „обнови Genesis“.
+- Нужен е CLI-ят Genesis: приложението пуска същия `genesis`, който пуска
+  терминалът (PATH; на лаптопа — pipx в `~\.local\bin`), а
+  `%LOCALAPPDATA%\Programs\Genesis\genesis.exe` (24.09, от `feat/desktop-app`)
+  е само резерва. Прекият път „Genesis Agent“ още отваря него.
+- С genesis без `features: ["commands"]` (и сегашния pipx) приложението работи,
+  а `/` командите казват „обнови Genesis“.
 
 ## Следващи стъпки
 1. Потребителят да пробва приложението и да каже какво да се промени

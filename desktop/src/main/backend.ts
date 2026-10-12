@@ -14,6 +14,7 @@ import { createServer } from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { BackendState, CommandResult, EventsBatch, GenesisEvent, SendResult } from '../shared/types';
+import { exeCandidates } from './exe';
 import { b64d, GenesisClient, keyId, ProtocolError } from './protocol';
 
 const START_TIMEOUT_MS = 90_000;
@@ -24,22 +25,14 @@ export function genesisHome(): string {
   return process.env.GENESIS_HOME || join(homedir(), '.genesis');
 }
 
-/** Where genesis.exe is: the app's own setting, then the installer's places, then PATH. */
+/** Where genesis.exe is: see `exeCandidates` for the order. */
 export async function findExe(preferred?: string): Promise<string | undefined> {
-  const local = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local');
-  const candidates = [
-    preferred,
-    process.env.GENESIS_EXE,
-    process.env.GENESIS_INSTALL_DIR && join(process.env.GENESIS_INSTALL_DIR, 'genesis.exe'),
-    join(local, 'Programs', 'Genesis', 'genesis.exe'),
-  ];
-  for (const c of candidates) if (c && existsSync(c)) return c;
-  return new Promise((resolve) => {
+  const onPath = await new Promise<string[]>((resolve) => {
     execFile('where.exe', ['genesis'], { windowsHide: true }, (err, out) => {
-      const first = err ? '' : String(out).split(/\r?\n/).find((l) => l.toLowerCase().endsWith('.exe'));
-      resolve(first || undefined);
+      resolve(err ? [] : String(out).split(/\r?\n/));
     });
   });
+  return exeCandidates({ preferred, env: process.env, home: homedir(), onPath }).find((c) => existsSync(c));
 }
 
 const bindCache = new Map<string, { mtime: number; ok: boolean }>();

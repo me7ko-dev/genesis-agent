@@ -49,7 +49,7 @@ function useCommand<T extends CommandResult>(name: string, arg?: Record<string, 
 
 export function explain(error?: string): string {
   if (error === 'old_agent') {
-    return 'Инсталираният genesis.exe е по-стара версия и не знае тази команда. Обнови Genesis или я пусни в терминала.';
+    return 'Пуснатият Genesis още не знае тази команда на прозореца. Обнови Genesis или я пусни в терминала.';
   }
   if (error === 'busy') return 'Genesis работи по задача. Изчакай да свърши или я спри с Esc.';
   return error || 'Нещо се обърка.';
