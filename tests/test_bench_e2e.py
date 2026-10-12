@@ -217,7 +217,7 @@ def test_bench_all_dry_run_plans_against_the_baseline_and_runs_nothing(tmp_path)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert str(base / "results.json") in proc.stdout
     assert f"{len(every)} проекта" in proc.stdout
-    assert "GENESIS_ACCEPTANCE=1" in proc.stdout and "bench_fix.py" in proc.stdout
+    assert "GENESIS_ACCEPTANCE=0" in proc.stdout and "bench_fix.py" in proc.stdout
     assert not out.exists()
     assert not (tmp_path / "data" / "budget_log.jsonl").exists()
 

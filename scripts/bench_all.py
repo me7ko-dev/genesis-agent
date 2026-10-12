@@ -16,7 +16,7 @@ Steps (each a subprocess with THIS checkout's code, so a crash in one does not
 stop the others; its full output goes to <out>/<step>.log, its stdin is empty):
 
   projects    bench_projects.py --runs N           all bench/projects/ incl. new ones
-  acceptance  the same with GENESIS_ACCEPTANCE=1   decides whether acceptance tests stay
+  acceptance  the same with GENESIS_ACCEPTANCE=0   do the acceptance tests still earn their cost
   fix         bench_fix.py                         `genesis fix` on 13 planted bugs
   fcc         bench_fcc.py --only <hard 30>        the hardest freeCodeCamp tasks
 
@@ -234,10 +234,11 @@ def plan(args: argparse.Namespace, out: Path, home: Path) -> list[Step]:
                                        find_baseline(home, "projects", exclude=out, want=want))
         steps.append(Step("acceptance",
                           [py, str(SCRIPTS / "bench_projects.py"), "--runs", runs, "--out", str(d)],
-                          env={"GENESIS_ACCEPTANCE": "1"}, out=d, baseline=base,
+                          env={"GENESIS_ACCEPTANCE": "0"}, out=d, baseline=base,
                           baseline_info=("projects от това пускане" if "projects" in wanted and not given["acceptance"]
                                          else describe_baseline(base, want)),
-                          note="сравнено с projects от СЪЩОТО пускане: само разликата от приемните тестове"))
+                          note="БЕЗ приемните тестове, сравнено с projects от СЪЩОТО пускане "
+                               "(там са включени за безплатните модели): само разликата от тях"))
     if "fix" in wanted:
         d = out / "fix"
         want = planned("fix")
@@ -382,7 +383,7 @@ def report(results: list[dict], out: Path) -> str:
         tok = f"{c['now']['tokens']:.0f}" + (_pct(n["tokens"], b["tokens"]) if b else "")
         reg = ", ".join(c["regressed"]) or "няма"
         if r["step"] == "acceptance" and c["regressed"]:
-            reg = "влошиха: " + reg   # шум между два пуска, не регресия на кода
+            reg = "без тях падат: " + reg   # приемните тестове помагат, не регресия на кода
         lines.append(f"| {r['step']} | {ok} | {sec} | {tok} | {base} | {reg} |")
     lines.append("")
     for r in results:
@@ -415,16 +416,19 @@ def _acceptance_tail(results: list[dict]) -> str:
     if not acc:
         return ""
     c = acc["compare"]
+    # Стъпката е БЕЗ приемните тестове (2026-10-12: включени по подразбиране за
+    # безплатните модели), базата е projects от същото пускане — С тях. Затова
+    # „regressed“ тук значи „без тях пада“, а „improved“ — „без тях минава“.
     tail = ""
-    if c["improved"]:
-        tail += (" Приемните тестове поправиха " + ", ".join(c["improved"])
-                 + " — остават (при цената в таблицата).")
     if c["regressed"]:
+        tail += (" Без приемните тестове падат " + ", ".join(c["regressed"])
+                 + " — остават (при цената в таблицата).")
+    if c["improved"]:
         # Пропуснат пуск на runs=2 е обичаен шум на модела, не регресия на
         # кода — до 2026-10-11 това даваше „❌ РЕГРЕСИЯ — acceptance“ и код 1.
-        tail += " Приемните тестове влошиха: " + ", ".join(c["regressed"]) + " (не е регресия на кода)."
+        tail += " Без приемните тестове минават: " + ", ".join(c["improved"]) + " (не е регресия на кода)."
     if not tail:
-        tail = " Приемните тестове не поправиха нищо в това пускане — кандидат за махане (NEXT_STEPS Б.4)."
+        tail = " Приемните тестове не промениха нищо в това пускане — кандидат за изключване (NEXT_STEPS Б.4)."
     return tail
 
 
