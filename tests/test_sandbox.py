@@ -1175,3 +1175,13 @@ def test_windows_appdata_deletes_are_blocked_in_every_spelling(cmd):
 def test_windows_project_cleanup_under_users_asks(cmd):
     from genesis_agent import sandbox
     assert sandbox.assess_command(cmd).level == sandbox.RiskLevel.CONFIRM
+
+
+def test_the_windows_job_is_a_no_op_off_windows(monkeypatch):
+    """_WinJob (2026-10-12) е само за Windows: другаде не пипа нищо и не гърми."""
+    from genesis_agent import sandbox
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    job = sandbox._WinJob(12345)
+    assert job.handle is None
+    job.terminate()
+    job.close()
