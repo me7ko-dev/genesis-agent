@@ -106,7 +106,7 @@ def test_claude_runs_as_a_pure_text_model_with_our_prompt(fake, monkeypatch):
     assert argv[argv.index("--output-format") + 1] == "stream-json" and "--verbose" in argv
     assert "--bare" not in argv                           # --bare не чете абонамента
     assert all(a.isascii() for a in argv[1:] if not a.startswith(("/", "C:")))  # cmd.exe
-    assert call["system"] == "Ти си Genesis."
+    assert call["system"] == "Ти си Genesis." + claude_cli.HARNESS_NOTE
     assert call["stdin"] == "здравей"
     assert "ANTHROPIC_API_KEY" not in call["env"]
     assert not Path(call["cwd"]).exists()                 # празна временна папка, махната
@@ -276,3 +276,55 @@ def test_a_missing_key_is_not_printed_as_a_dropped_model(capsys):
     brain._print_skip("groq", "m", "HTTP_429: slow down", 0.1)
     out = capsys.readouterr().out
     assert "GROQ_API_KEY" not in out and "HTTP_429" in out
+
+
+# ── кешът: веднъж пратеното не се пипа (2026-10-12) ──────────────────────────
+
+def _long_session(rounds: int) -> list[dict]:
+    """Ход с дълги резултати: budget_history свива всички освен последните 2."""
+    msgs = [{"role": "system", "content": "SYS"}, {"role": "user", "content": "направи shop/"}]
+    for i in range(rounds):
+        msgs.append({"role": "assistant", "content": f"[RUN_CMD: pytest -k t{i}]"})
+        msgs.append({"role": "system", "content": f"[Резултат]: RUN_CMD {i}\n" + "x" * 5000})
+    return msgs
+
+
+def test_old_tool_results_reach_claude_whole_so_the_prefix_stays_cached(fake, clean_cooldowns):
+    """orders-api с абонамента: 5-и и 6-и ход записваха по 25–30K в кеша и
+    четяха само системния промпт — budget_history свиваше поредния стар
+    резултат и сменяше вече пратени байтове."""
+    b = brain.Brain(pin_model=("claude_cli", "sonnet"), use_local=False)
+    b.complete(_long_session(5))
+    b.complete(_long_session(6))
+    first, second = fake.calls[0]["blocks"], fake.calls[1]["blocks"]
+    assert second[:len(first)] == first
+    assert all(len(blk) > 5000 for blk in first if "[Резултат]: RUN_CMD" in blk)
+
+
+def test_the_window_moves_in_steps_so_the_cut_point_holds_between_turns():
+    from genesis_agent.budget import cache_stable_history
+    sent = [cache_stable_history(_long_session(r), max_chars=10**9) for r in range(16, 21)]
+    starts = {next(m["content"] for m in s if m["role"] == "assistant") for s in sent}
+    assert len(starts) <= 2                       # по едно съобщение → 5 различни начала
+    assert all(len(s) <= 30 for s in sent)
+    assert all(s[1]["content"] == "направи shop/" for s in sent)   # задачата остава
+
+
+def test_a_history_too_long_for_claude_falls_back_to_the_clipped_one(fake, clean_cooldowns):
+    from genesis_agent.budget import cache_stable_history
+    assert cache_stable_history(_long_session(5), max_chars=1000) is None
+    b = brain.Brain(pin_model=("claude_cli", "sonnet"), use_local=False)
+    huge = _long_session(4)
+    huge[3]["content"] = "[Резултат]: RUN_CMD 0\n" + "y" * 400_000
+    b.complete(huge)
+    assert len(fake.calls[0]["stdin"]) < 100_000
+
+
+def test_claude_is_told_its_own_environment_is_not_the_project(fake):
+    """claude добавя своята работна папка и scratchpad; Claude пишеше там
+    (2026-10-12, bench orders-api) — отказ от sandbox-а и пропилян ход."""
+    claude_cli.complete([{"role": "system", "content": "Работна папка: /p"},
+                         {"role": "user", "content": "x"}])
+    system = fake.calls[0]["system"]
+    assert system.startswith("Работна папка: /p")
+    assert "scratchpad" in system and "НЕ са твоите" in system

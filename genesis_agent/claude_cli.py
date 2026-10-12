@@ -87,6 +87,16 @@ def child_env(base: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+# `claude` добавя към нашия промпт и своята среда: работна папка (временната
+# genesis-claude-…), scratchpad, git, прокси. Мерено 2026-10-12, bench с
+# абонамента: 2 от 3 пуска на orders-api/inventory-pkg губят ход заради нея —
+# LIST_DIR на /tmp/genesis-claude-…, и WRITE_FILE в scratchpad-а на claude
+# извън проекта (sandbox-ът го отказва, следващият RUN_CMD няма файла).
+HARNESS_NOTE = ("\n\n[Среда] Работната папка, scratchpad-ът, git и другите сведения "
+                "за средата, които `claude` добавя, НЕ са твоите: там нищо не се "
+                "чете и не се пише. Твоят проект е работната папка на Genesis от "
+                "този промпт; файловете се пишат само там, с таговете на Genesis.")
+
 _ROLE_LABEL = {"user": "Оператор", "assistant": "Genesis (ти)", "system": "Система",
                "tool": "Резултат от инструмент"}
 
@@ -194,7 +204,8 @@ def complete(messages: list[dict], model: str = DEFAULT_MODEL,
     workdir = tempfile.mkdtemp(prefix="genesis-claude-")
     try:
         sp = Path(workdir) / "system.txt"
-        sp.write_text(system or "Ти си Genesis, асистент за програмиране.", encoding="utf-8")
+        sp.write_text((system or "Ти си Genesis, асистент за програмиране.") + HARNESS_NOTE,
+                      encoding="utf-8")
         # stream-json на входа иска stream-json и --verbose на изхода (claude 2.1.296).
         argv = [path, "-p", "--safe-mode", "--tools", "",
                 "--disallowedTools", "mcp__*", "--system-prompt-file", str(sp),
