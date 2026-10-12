@@ -70,3 +70,39 @@ def test_the_newline_right_after_the_write_tag_is_not_content(ws):
     assert (ws / "run.sh").read_text(encoding="utf-8").startswith("#!/bin/sh")
     gs.parse_and_execute_tools("[WRITE_FILE: same.txt]inline\n[END_WRITE]")
     assert (ws / "same.txt").read_text(encoding="utf-8") == "inline\n"
+
+
+# ── пълното XML извикване (bench_fix с claude_cli, 2026-10-12: 0/13 преди) ────
+
+def test_a_full_xml_edit_with_named_parameters_edits_the_file(ws):
+    (ws / "stats.py").write_text("def median(s):\n    return s[len(s) // 2]\n", encoding="utf-8")
+    reply = ('<invoke name="EDIT_FILE">\n<parameter name="path">stats.py</parameter>\n'
+             '<parameter name="old_string">    return s[len(s) // 2]</parameter>\n'
+             '<parameter name="new_string">    mid = len(s) // 2\n    return s[mid]</parameter>\n</invoke>')
+    out = gs.parse_and_execute_tools(reply)
+    assert len(out) == 1 and "✓" in out[0], out
+    assert (ws / "stats.py").read_text(encoding="utf-8") == (
+        "def median(s):\n    mid = len(s) // 2\n    return s[mid]\n")
+
+
+def test_a_full_xml_write_and_read(ws):
+    gs.parse_and_execute_tools('<invoke name="WRITE_FILE"><parameter name="file_path">a.py</parameter>'
+                               '<parameter name="content">x = 1\n</parameter></invoke>')
+    assert (ws / "a.py").read_text(encoding="utf-8") == "x = 1\n"
+    out = gs.parse_and_execute_tools('<tool_call>READ_FILE</tool_call>\n<arg name="path">a.py</arg>')
+    assert len(out) == 1 and "x = 1" in out[0]
+
+
+def test_a_full_xml_command_runs_and_background_means_run_bg():
+    assert gs._normalize_xml_tool_calls(
+        '<invoke name="RUN_CMD"><parameter name="command">pytest -q</parameter></invoke>'
+    ) == "[RUN_CMD: pytest -q]"
+    assert gs._normalize_xml_tool_calls(
+        '<invoke name="RUN_CMD"><parameter name="command">npm run dev</parameter>'
+        '<parameter name="background">true</parameter></invoke>') == "[RUN_BG: npm run dev]"
+
+
+def test_an_invented_tool_stays_text_and_gets_the_nudge():
+    text = '<invoke name="RUN_TESTS"><parameter name="command">pytest</parameter></invoke>'
+    assert gs._normalize_xml_tool_calls(text) == text
+    assert gs.looks_like_attempted_tool_tag(text)
