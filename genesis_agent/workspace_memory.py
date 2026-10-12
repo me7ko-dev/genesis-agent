@@ -18,19 +18,30 @@ KV реда. Нищо за това какво реално работи пот�
 самия Genesis през новите tool-ове (REMEMBER / TASK_ADD / TASK_UPDATE), не
 само от кода — затова всяка публична функция е защитена срещу боклук вход
 (празни низове, невалиден статус, прекалено дълъг текст).
+
+Нишките и решенията са на ПАПКАТА, в която се работи (колона `workspace`);
+предпочитанията са общи. До 2026-09-26 всичко беше общо, а инсталираният
+Genesis работи там, където е пуснат — нова празна папка получаваше „Взети
+решения: създаден money.py …“ от друг проект, моделът търсеше несъществуващия
+файл и спираше на пазача за повторения, без да напише ред (bench_projects,
+euro-convert). Старите записи без папка не се показват никъде — не се знае
+на кой проект са.
 """
 from __future__ import annotations
 
 import logging
+import os
+import re
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
-from genesis_agent.config import DATA_DIR
+from genesis_agent.config import MEMORY_DIR
 
 log = logging.getLogger("genesis.workspace_memory")
 
-DB_PATH = DATA_DIR / "workspace_memory.db"
+DB_PATH = MEMORY_DIR / "workspace_memory.db"
 
 STATUSES = ("open", "blocked", "done")
 _MAX_TEXT = 2000  # рязък таван — LLM понякога праща цял абзац за "заглавие"
@@ -63,10 +74,42 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+_workspace: str | None = None
+
+
+def _norm(path: Any) -> str:
+    """Един и същ низ за една и съща папка: абсолютен път, без разлика в
+    регистъра на Windows (`C:\\Users` и `c:\\users` е едно място)."""
+    p = Path(path).expanduser()
+    try:
+        p = p.resolve()
+    except OSError:
+        pass
+    return os.path.normcase(str(p))
+
+
+def set_workspace(path: Any) -> None:
+    """Папката, чиито нишки и решения се четат и пишат. Вика се от
+    genesis_skills.set_workspace — там, където инструментите получават своята."""
+    global _workspace
+    _workspace = _norm(path) if path else None
+
+
+def current_workspace() -> str:
+    if _workspace is None:
+        from genesis_agent.paths import workspace_dir
+        return _norm(workspace_dir())
+    return _workspace
+
+
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.executescript(_SCHEMA)
+    for table in ("threads", "decisions"):
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table});")}
+        if "workspace" not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN workspace TEXT NOT NULL DEFAULT '';")
     return conn
 
 
@@ -82,21 +125,26 @@ def add_thread(title: str, next_step: str = "", notes: str = "") -> str:
     title = _clean(title, 300)
     if not title:
         return "[TASK_ADD] Празно заглавие — нищо не е добавено."
+    ws = current_workspace()
     with _conn() as c:
-        row = c.execute(
-            "SELECT id, status FROM threads WHERE lower(title) = lower(?);", (title,)
-        ).fetchone()
+        # Сравнение в Python, не със SQL lower(): той сгъва само ASCII и
+        # „Миграция“/„миграция“ ставаха две нишки. Затворена нишка със същото
+        # заглавие е стара работа — новата задача е отворена, не „вече съществува“.
+        key = title.casefold()
+        row = next((r for r in c.execute(
+            "SELECT id, status, title FROM threads WHERE workspace = ? AND status != 'done';",
+            (ws,)) if r[2].casefold() == key), None)
         if row:
             # Съществува — обновяваме следващата стъпка вместо да дублираме.
-            c.execute(
-                "UPDATE threads SET next_step = ?, updated_at = ? WHERE id = ?;",
-                (_clean(next_step) or "", _now(), row[0]),
-            )
+            # Празна нова стъпка не трие записаната (auto_capture подава "").
+            if _clean(next_step):
+                c.execute("UPDATE threads SET next_step = ?, updated_at = ? WHERE id = ?;",
+                          (_clean(next_step), _now(), row[0]))
             return f"[TASK_ADD] Нишка #{row[0]} вече съществува ({row[1]}) — обнових следващата стъпка."
         cur = c.execute(
-            "INSERT INTO threads (title, status, next_step, notes, created_at, updated_at)"
-            " VALUES (?, 'open', ?, ?, ?, ?);",
-            (title, _clean(next_step), _clean(notes), _now(), _now()),
+            "INSERT INTO threads (title, status, next_step, notes, created_at, updated_at, workspace)"
+            " VALUES (?, 'open', ?, ?, ?, ?, ?);",
+            (title, _clean(next_step), _clean(notes), _now(), _now(), ws),
         )
         return f"[TASK_ADD] ✓ Нишка #{cur.lastrowid}: {title}"
 
@@ -123,17 +171,18 @@ def update_thread(thread_id: Any, status: str = "", next_step: str = "", notes: 
     sets.append("updated_at = ?"); params.append(_now())
     params.append(tid)
     with _conn() as c:
-        cur = c.execute(f"UPDATE threads SET {', '.join(sets)} WHERE id = ?;", params)
+        params.append(current_workspace())
+        cur = c.execute(f"UPDATE threads SET {', '.join(sets)} WHERE id = ? AND workspace = ?;", params)
         if cur.rowcount == 0:
             return f"[TASK_UPDATE] Няма нишка #{tid}."
     return f"[TASK_UPDATE] ✓ Нишка #{tid} обновена."
 
 
 def list_threads(status: str = "open", limit: int = 20) -> list[dict]:
-    q = "SELECT id, title, status, next_step, notes, updated_at FROM threads"
-    params: list = []
+    q = "SELECT id, title, status, next_step, notes, updated_at FROM threads WHERE workspace = ?"
+    params: list = [current_workspace()]
     if status and status != "all":
-        q += " WHERE status = ?"; params.append(status)
+        q += " AND status = ?"; params.append(status)
     q += " ORDER BY updated_at DESC LIMIT ?;"
     params.append(int(limit))
     with _conn() as c:
@@ -167,7 +216,10 @@ def _is_semantic_dup(text: str, existing: list[str]) -> str | None:
     """
     if not existing:
         return None
-    norm = lambda s: "".join(ch.lower() for ch in s if ch.isalnum() or ch.isspace()).strip()
+    # Регистър, интервали и точката накрая — нищо повече. Махането на всички
+    # знаци сливаше „C#“ с „C++“, „1.5 секунди“ с „15 секунди“, „<= 4“ с „>= 4“.
+    def norm(s: str) -> str:
+        return " ".join(s.casefold().split()).rstrip(".!;, ")
     n_new = norm(text)
     for e in existing:
         if norm(e) == n_new:
@@ -187,8 +239,8 @@ def add_decision(what: str, why: str = "") -> str:
     if dup:
         return f"[REMEMBER] Вече е записано (като «{dup[:60]}») — пропуснато."
     with _conn() as c:
-        c.execute("INSERT INTO decisions (what, why, created_at) VALUES (?, ?, ?);",
-                  (what, _clean(why, 500), _now()))
+        c.execute("INSERT INTO decisions (what, why, created_at, workspace) VALUES (?, ?, ?, ?);",
+                  (what, _clean(why, 500), _now(), current_workspace()))
     return f"[REMEMBER] ✓ Записано решение: {what[:80]}"
 
 
@@ -223,8 +275,9 @@ def set_preference(topic: str, value: str) -> str:
 def list_decisions(limit: int = 10) -> list[dict]:
     with _conn() as c:
         rows = c.execute(
-            "SELECT what, why, created_at FROM decisions ORDER BY id DESC LIMIT ?;",
-            (int(limit),),
+            "SELECT what, why, created_at FROM decisions WHERE workspace = ?"
+            " ORDER BY id DESC LIMIT ?;",
+            (current_workspace(), int(limit)),
         ).fetchall()
     return [{"what": r[0], "why": r[1], "created_at": r[2]} for r in rows]
 
@@ -293,14 +346,44 @@ _CAPTURE_PROMPT = """Ти си извличащ модул. От разгово�
 
 Правила:
 - decisions: какво е РЕШЕНО (не какво е обсъдено), с причината.
-- preferences: как потребителят иска нещата да се правят — включително корекции,
-  които е направил на асистента. Формулирай ги като трайно правило.
+- preferences: как потребителят иска нещата да се правят ВЪВ ВСЕКИ проект (език,
+  стил, начин на работа) — включително корекции, които е направил на асистента.
+  Формулирай ги като трайно правило. Имена на файлове, функции, модули и
+  изисквания на ТОЗИ проект не са предпочитания — те са decisions.
 - threads: работа, която НЕ е завършена. next_step да е конкретно действие.
 - Ако някоя категория е празна — върни празен списък. НЕ измисляй.
 - Не включвай еднократни факти, дреболии или неща, верни само за този разговор.
 - Пиши на езика, на който говори ПОТРЕБИТЕЛЯТ в разговора (обикновено български).
   Този текст се показва на него в следващата сесия, не на друг модел.
 """
+
+
+# Preferences go into EVERY later session, so the extractor's word is not
+# enough: on 2026-09-28 one site task became 11 "preferences" in one pass
+# (index.html/styles.css, SVG, SEO, "premium modern"), and a Python task the
+# next day opened with them. A preference is kept only when the operator said
+# something general, and a pass that yields this many is a project's spec.
+_GENERAL_MARKERS = ("винаги", "никога", "всеки път", "от сега", "отсега", "занапред",
+                    "предпочитам", "не обичам", "не искам", "always", "never",
+                    "from now on", "every time", "i prefer")
+_MAX_PREFS_PER_CAPTURE = 2
+
+
+# Чатът лепи провереното знание от библиотеката под заявката на оператора
+# (run_turn → domain_context). То НЕ е казано от оператора: 15K знака уеб
+# ръководство съдържат „никога“ и отключваха глобални предпочитания от една
+# задача за сайт (одит 2026-10-07 — точно случаят от 2026-09-28).
+_INJECTED = re.compile(r"\n\n## Проверено (ръководство|знание) от библиотеката:.*", re.DOTALL)
+
+
+def operator_text(content: Any) -> str:
+    """Само каквото операторът е написал — без приложеното знание."""
+    return _INJECTED.sub("", str(content or ""))
+
+
+def _operator_spoke_generally(convo: list[dict]) -> bool:
+    said = " ".join(operator_text(m["content"]).lower() for m in convo if m.get("role") == "user")
+    return any(marker in said for marker in _GENERAL_MARKERS)
 
 
 def auto_capture(messages: list[dict], max_chars: int = 6000) -> dict:
@@ -319,7 +402,8 @@ def auto_capture(messages: list[dict], max_chars: int = 6000) -> dict:
     if len(convo) < 2:
         return written
 
-    text = "\n".join(f"{m['role']}: {str(m['content'])[:1200]}" for m in convo)[-max_chars:]
+    text = "\n".join(f"{m['role']}: {(operator_text(m['content']) if m['role'] == 'user' else str(m['content']))[:1200]}"
+                     for m in convo)[-max_chars:]
 
     # Показваме какво ВЕЧЕ е записано, за да преизползва съществуващите
     # формулировки вместо да измисля синоними ("стил на комуникация" срещу
@@ -371,10 +455,16 @@ def auto_capture(messages: list[dict], max_chars: int = 6000) -> dict:
             if isinstance(d, dict) and d.get("what"):
                 add_decision(d["what"], d.get("why", ""))
                 written["decisions"] += 1
-        for p in (data.get("preferences") or [])[:10]:
-            if isinstance(p, dict) and p.get("topic") and p.get("value"):
-                set_preference(p["topic"], p["value"])
-                written["preferences"] += 1
+        new_prefs = [p for p in (data.get("preferences") or [])
+                     if isinstance(p, dict) and p.get("topic") and p.get("value")]
+        if len(new_prefs) > _MAX_PREFS_PER_CAPTURE or not _operator_spoke_generally(convo):
+            if new_prefs:
+                log.info("auto_capture: %d preference(s) not kept — a task's requirements, "
+                         "not something the operator said in general", len(new_prefs))
+            new_prefs = []
+        for p in new_prefs:
+            set_preference(p["topic"], p["value"])
+            written["preferences"] += 1
         for t in (data.get("threads") or [])[:10]:
             if isinstance(t, dict) and t.get("title"):
                 add_thread(t["title"], t.get("next_step", ""))
@@ -419,19 +509,24 @@ def close_thread(thread_id: Any, drop: bool = False) -> str:
     if not drop:
         return update_thread(tid, status="done")
     with _conn() as c:
-        cur = c.execute("DELETE FROM threads WHERE id = ?;", (tid,))
+        # Само в ТОЗИ workspace: `/tasks` показва само неговите нишки, а номер
+        # от друг проект се триеше тихо (одит 2026-10-07).
+        cur = c.execute("DELETE FROM threads WHERE id = ? AND workspace = ?;",
+                        (tid, current_workspace()))
         if cur.rowcount == 0:
             return f"[DROP] Няма нишка #{tid}."
     return f"[DROP] ✓ Нишка #{tid} изтрита."
 
 
 def stats() -> dict:
+    ws = (current_workspace(),)
+    count = "SELECT COUNT(*) FROM threads WHERE workspace = ? AND status = '{}';"
     with _conn() as c:
         return {
-            "open": c.execute("SELECT COUNT(*) FROM threads WHERE status='open';").fetchone()[0],
-            "blocked": c.execute("SELECT COUNT(*) FROM threads WHERE status='blocked';").fetchone()[0],
-            "done": c.execute("SELECT COUNT(*) FROM threads WHERE status='done';").fetchone()[0],
-            "decisions": c.execute("SELECT COUNT(*) FROM decisions;").fetchone()[0],
+            "open": c.execute(count.format("open"), ws).fetchone()[0],
+            "blocked": c.execute(count.format("blocked"), ws).fetchone()[0],
+            "done": c.execute(count.format("done"), ws).fetchone()[0],
+            "decisions": c.execute("SELECT COUNT(*) FROM decisions WHERE workspace = ?;", ws).fetchone()[0],
             "preferences": c.execute("SELECT COUNT(*) FROM preferences;").fetchone()[0],
         }
 

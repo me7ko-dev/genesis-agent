@@ -64,11 +64,16 @@ def red_zone_elevation_granted() -> bool:
 _HUMAN_TARGET = (
     r"(?:people|persons?|humans?|someone|somebody|anyone|civilians?|"
     r"children|child|kids?|victims?|famil(?:y|ies)|neighbou?rs?|"
-    r"хора(?:та)?|човек(?:а|ът)?|деца|дете|някого|някой|семейств\w*|съсед\w*)"
+    r"хора(?:та)?|човек(?:а|ът)?|деца(?:та)?|дете(?:то)?|жени(?:те)?|мъже(?:те)?|някого|някой|семейств\w*|съсед\w*)"
 )
+# Изброени форми, не `\w*` след корена: `harm\w*` хваща и „harmonize people's
+# schedules“, `изби\w*` — „избира хора“ (одит 2026-10-07 намери обратното:
+# „убийте хората“, „hurting people“, „poisoning children“ минаваха).
 _HARM_ACT = (
-    r"(?:harm|hurt|injure|maim|kill|kills|killing|murder|assassinat\w*|poison|"
-    r"навред\w*|нараня\w*|уби(?:й|ва|ване|ец|я|ем)?|избий|отрови)"
+    r"(?:harm(?:s|ed|ing)?|hurt(?:s|ing)?|injur(?:e|es|ed|ing)|maim(?:s|ed|ing)?|"
+    r"kill(?:s|ed|ing)?|murder(?:s|ed|ing)?|assassinat\w*|poison(?:s|ed|ing)?|"
+    r"навред\w*|нараня\w*|нарани(?:те|ш|м)?|уби(?:й|йте|ва\w*|ване|ец|я|ем|ят|е|ете)?|"
+    r"избий(?:те)?|избива\w*|отров(?:и|ете|ям|ят|ява\w*))"
 )
 # Техническият смисъл на "kill" има свой обект. Изречение като "kill the
 # process that people started" съдържа и глагола, и думата "people" на 17
@@ -118,13 +123,26 @@ def validate_goal_ethics(goal: str) -> None:
     # Техническото "убий процеса" се маха първо; каквото остане, се проверява.
     # "kill the process, then kill people" пак се хваща — втората клауза остава.
     cleaned = _TECHNICAL_KILL_RE.sub(" ", goal or "")
-    if _HARM_RE.search(cleaned):
+    # И с кирилските двойници на латинските букви сменени: „kіll pеople“.
+    if _HARM_RE.search(cleaned) or _HARM_RE.search(cleaned.translate(_CONFUSABLES)):
         raise GenesisDNAError("GENE-ETHICS: Goal violates the humanity shield.")
+
+
+_CONFUSABLES = str.maketrans("аеорсхуікмтнвАЕОРСХУІКМТНВ", "aeopcxyikmthbAEOPCXYIKMTHB")
+# Регистърът на Windows: и съкращенията, с които `reg add HKLM\...` стига
+# дотам през shell. NFKC преди търсенето — `winreg.ＨKEY_LOCAL_MACHINE`
+# (пълноширинно Ｈ) Python чете като HKEY_LOCAL_MACHINE (одит 2026-10-07).
+_RED_ZONE_RE = re.compile(r"HKEY_|\bHK(?:LM|CU|CR|CC)\b")
+
+
+def _touches_registry(code: str) -> bool:
+    import unicodedata
+    return bool(_RED_ZONE_RE.search(unicodedata.normalize("NFKC", code or "")))
 
 
 def validate_skill_payload(goal: str, code: str) -> None:
     validate_goal_ethics(goal)
-    if "HKEY_" in code and not red_zone_elevation_granted():
+    if _touches_registry(code) and not red_zone_elevation_granted():
         raise GenesisDNAError("GENE-SECURITY: Red Zone access locked.")
 
 
@@ -146,7 +164,7 @@ def validate_code_before_execution(code: str) -> str | None:
     which neither caller caught — an uncaught exception straight out of a
     mission's code-execution step instead of the intended failure result
     (bug found writing executor tests, 2026-09-18)."""
-    if "HKEY_" in code and not red_zone_elevation_granted():
+    if _touches_registry(code) and not red_zone_elevation_granted():
         return "GENE-SECURITY: Red Zone access locked."
     return None
 

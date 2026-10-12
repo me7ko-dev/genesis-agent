@@ -16,9 +16,9 @@
 
 import sqlite3
 
-from genesis_agent.config import DATA_DIR
+from genesis_agent.config import MEMORY_DIR
 
-DB_PATH = str(DATA_DIR / "conversation_memory.db")
+DB_PATH = str(MEMORY_DIR / "conversation_memory.db")
 
 # --------------------------------------------------------------
 # Инициализация на базата

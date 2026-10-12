@@ -45,8 +45,17 @@ _SCAN_JS = """
         const text = (el.innerText || el.value || el.getAttribute('aria-label') ||
                       el.getAttribute('placeholder') || '').trim().slice(0, 80);
         const name = el.getAttribute('name') || el.id || '';
+        // ВСИЧКИ етикети за проверката на безопасността — не първия непразен.
+        const lbl = (el.labels ? Array.from(el.labels).map(l => l.innerText).join(' ') : '');
+        const labels = [el.innerText, el.value, el.getAttribute('aria-label'), el.getAttribute('title'),
+                        el.getAttribute('placeholder'), el.getAttribute('name'), el.id, lbl]
+                       .filter(Boolean).join(' | ').slice(0, 300);
+        const auto = el.getAttribute('autocomplete') || '';
+        const form = el.closest('form');
+        const secure = !!(form && form.querySelector(
+            'input[type=password], [autocomplete^="cc-"], [autocomplete*=" cc-"]'));
         const r = el.getBoundingClientRect();
-        out.push({i, tag, type, text, name,
+        out.push({i, tag, type, text, name, labels, auto, secure,
                    x: Math.round(r.x), y: Math.round(r.y),
                    w: Math.round(r.width), h: Math.round(r.height)});
         i += 1;
@@ -215,18 +224,20 @@ def click(target: str) -> str:
         return f"[BROWSER_CLICK] Не намерих елемент, съвпадащ с: {target!r}. Виж номерата от [BROWSER_READ]."
 
     label = el["text"] or el["name"] or target
-    is_submit_near_password = False
+    is_submit_near_password = bool(el.get("secure"))
     try:
-        is_submit_near_password = bool(_page.evaluate(
+        is_submit_near_password = is_submit_near_password or bool(_page.evaluate(
             "(idx) => { const el = document.querySelector(`[data-genesis-idx=\"${idx}\"]`); "
             "const form = el && el.closest('form'); "
-            "return !!(form && form.querySelector('input[type=password]')); }",
+            "return !!(form && form.querySelector("
+            "'input[type=password], [autocomplete^=\"cc-\"], [autocomplete*=\" cc-\"]')); }",
             el["i"],
         ))
     except Exception:
         pass
 
-    verdict = sandbox.assess_browser_click(label, is_submit_near_password)
+    verdict = sandbox.assess_browser_click(" | ".join(filter(None, [label, el.get("labels", "")])),
+                                           is_submit_near_password)
     allowed, reason = sandbox._decide(f"BROWSER_CLICK {label}", verdict, sandbox.get_policy())
     if not allowed:
         return f"[BROWSER_CLICK: {label}] {reason}"
@@ -253,7 +264,9 @@ def type_text(arg: str) -> str:
         return f"[BROWSER_TYPE] Не намерих поле, съвпадащо с: {target!r}. Виж номерата от [BROWSER_READ]."
 
     field_label = el["name"] or el["text"] or target
-    verdict = sandbox.assess_browser_field(el["type"], field_label)
+    verdict = sandbox.assess_browser_field(
+        el["type"], " | ".join(filter(None, [field_label, el.get("text", ""), el.get("labels", "")])),
+        el.get("auto", ""))
     allowed, reason = sandbox._decide(f"BROWSER_TYPE {field_label}", verdict, sandbox.get_policy())
     if not allowed:
         return f"[BROWSER_TYPE: {field_label}] {reason}"

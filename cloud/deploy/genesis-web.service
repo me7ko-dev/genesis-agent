@@ -1,0 +1,33 @@
+# Уеб сървърът на Genesis онлайн. cloud/deploy.sh слага @REPO@ (папката с
+# репото — сървърът е само stdlib и върви оттам) и пише аргументите на режима
+# в /etc/default/genesis-web (GENESIS_WEB_ARGS).
+#
+# root: сървърът вика docker и дава папките на задачите на uid 10001 (без това
+# ги прави 777). keys.env е root:10003 0640 (cloud/up.sh).
+[Unit]
+Description=Genesis онлайн: вход, чат, задачи
+Requires=docker.service genesis-net.service
+After=docker.service genesis-net.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO@
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/etc/default/genesis-web
+# web.db държи scrypt хешове; с umask 022 се създаваше 0644 (одит 2026-10-11).
+UMask=0077
+ExecStart=/usr/bin/python3 -m cloud.web.server serve --data /srv/genesis/web --jobs /srv/jobs --trust-proxy $GENESIS_WEB_ARGS
+# SIGTERM: сървърът сам спира задачите си. Ако бъде убит (SIGKILL след
+# TimeoutStopSec), контейнерите и мрежите им се махат тук — иначе оставаха Up
+# без срок (деплой одит 2026-10-11).
+ExecStopPost=/usr/bin/python3 -c "from cloud.runner.launch import cleanup_leftovers; cleanup_leftovers()"
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

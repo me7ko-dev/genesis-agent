@@ -26,7 +26,7 @@ from genesis_agent.config import MAX_LLM_RETRIES, PROJECT_ROOT
 from genesis_agent.executor import run_python_subprocess
 from genesis_agent.skill_loader import SKILLS_ROOT
 from genesis_agent.skills_manager import save_skill, slugify
-from genesis_agent.tool_schemas import MISSION_TOOLS
+from genesis_agent.tool_schemas import MISSION_TOOLS, load_tool_arguments
 from genesis_agent.verifier import verify_skill
 
 
@@ -101,6 +101,7 @@ def run_orchestrated(goal: str, *, max_rounds: int | None = None,
 
     # 1b. TDD: Tester пише тестовете ПРЕДИ кода.
     tests_block = ""
+    tests = ""
     if tdd:
         tests = _write_tests_first(brain, goal)
         if tests:
@@ -152,10 +153,11 @@ def run_orchestrated(goal: str, *, max_rounds: int | None = None,
                     fn = tc.get("function", {}) or {}
                     name = fn.get("name", "")
                     try:
-                        args = _json.loads(fn.get("arguments") or "{}")
+                        args = load_tool_arguments(fn.get("arguments"))
                     except (_json.JSONDecodeError, TypeError):
                         args = {}
-                    tool_out = genesis_skills.dispatch_tool_call(name, args)
+                    # Счупени аргументи → суровият низ: моделът получава „Невалидни аргументи“
+                    tool_out = genesis_skills.dispatch_tool_call(name, args or fn.get("arguments") or {})
                     messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                                       "name": name, "content": tool_out[:4000]})
             except Exception as _e:
@@ -175,6 +177,18 @@ def run_orchestrated(goal: str, *, max_rounds: int | None = None,
         result = run_python_subprocess(code)
         vres = verify_skill(code)
 
+        if result.ok and vres.method == "self_test_passed" and tests:
+            # TDD: тестовете на Tester-а трябва реално да минат срещу кода — не
+            # само собствените asserts на Coder-а (одит 2026-10-07: `fib(n) = n`
+            # с `assert fib(1)==1` минаваше, а `assert fib(10)==55` не беше пуснат).
+            tdd_run = run_python_subprocess(f"{code}\n\n{tests}\nprint('OK')")
+            if not tdd_run.ok:
+                last_error = (tdd_run.stderr or tdd_run.stdout)[-1500:]
+                messages.append({"role": "assistant", "content": reply.raw_text})
+                messages.append({"role": "user", "content": (
+                    "Тестовете на Tester-а падат срещу кода ти:\n"
+                    f"{last_error}\nПоправи кода (не тестовете) и върни целия скрипт.")})
+                continue
         if result.ok and vres.method == "self_test_passed":
             slug = slugify(goal)
             try:

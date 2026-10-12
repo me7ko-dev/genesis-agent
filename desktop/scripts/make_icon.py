@@ -1,5 +1,6 @@
 """Draws the app icon (build/icon.ico, build/public/icon.png) — run once after a design change."""
 import math
+from itertools import pairwise
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter
@@ -10,7 +11,7 @@ STOPS = [(0.0, (94, 234, 212)), (0.55, (96, 165, 250)), (1.0, (192, 132, 252))]
 
 
 def grad(t: float) -> tuple[int, int, int]:
-    for (a, ca), (b, cb) in zip(STOPS, STOPS[1:]):
+    for (a, ca), (b, cb) in pairwise(STOPS):
         if t <= b:
             k = (t - a) / (b - a)
             return tuple(round(x + (y - x) * k) for x, y in zip(ca, cb))

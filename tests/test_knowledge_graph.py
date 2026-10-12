@@ -156,11 +156,48 @@ def test_parse_llm_json_plain_object() -> None:
     assert kg._parse_llm_json('{"a": 1}') == {"a": 1}
 
 
-def test_load_recovers_from_corrupt_json_file(tmp_path, monkeypatch) -> None:
+def test_a_corrupt_graph_is_set_aside_not_overwritten(tmp_path, monkeypatch) -> None:
+    """Одит 2026-10-07: нечетим файл се четеше като празен граф и следващото
+    сливане го записваше върху истинския (100 обекта → 1)."""
     path = tmp_path / "knowledge_graph.json"
-    path.write_text("{not valid json")
+    path.write_text('{"entities": {"a": {"name": "A"}')
     monkeypatch.setattr(kg, "GRAPH_PATH", path)
-    assert kg._load() == kg._empty_graph()
+    assert kg.graph_briefing() == ""
+    _stub_brain(monkeypatch, {"entities": [{"name": "Redis", "type": "db"}]})
+    graph = kg.compact_and_graph_memory("transcript")
+    assert list(graph["entities"]) == ["redis"]
+    assert (tmp_path / "knowledge_graph.json.corrupt").read_text().startswith('{"entities"')
+
+
+def test_bulgarian_names_get_their_own_keys(tmp_path, monkeypatch) -> None:
+    _isolate(monkeypatch, tmp_path)
+    assert kg._dedup_key("Базата данни") == kg._dedup_key("базата-данни") != kg._dedup_key("Потребител")
+    _stub_brain(monkeypatch, {"states": [{"entity": "Базата данни", "status": "счупена"},
+                                         {"entity": "Плащания", "status": "готови"}]})
+    kg.compact_and_graph_memory("t")
+    brief = kg.graph_briefing()
+    assert "Базата данни: счупена" in brief and "Плащания: готови" in brief
+
+
+def test_odd_section_shapes_do_not_lose_the_round(tmp_path, monkeypatch) -> None:
+    _isolate(monkeypatch, tmp_path)
+    _stub_brain(monkeypatch, {"entities": ["AuthToken", {"name": "Redis"}],
+                              "relations": [["A", "USES", "B"]],
+                              "states": {"Auth": "broken"}})
+    graph = kg.compact_and_graph_memory("t")
+    assert list(graph["entities"]) == ["redis"]
+
+
+def test_states_are_per_workspace_and_capped(tmp_path, monkeypatch) -> None:
+    _isolate(monkeypatch, tmp_path)
+    _stub_brain(monkeypatch, {"states": [{"entity": "DB", "status": "счупена"}]})
+    kg.compact_and_graph_memory("t", workspace="/proj/a")
+    assert "DB: счупена" in kg.graph_briefing(workspace="/proj/a")
+    assert kg.graph_briefing(workspace="/proj/b") == ""
+    _stub_brain(monkeypatch, {"states": [{"entity": f"s{i}", "status": "ok"} for i in range(150)]})
+    graph = kg.compact_and_graph_memory("t", workspace="/proj/a")
+    assert len(graph["states"]) <= kg._MAX_STATES_STORED
+    assert len(kg.graph_briefing(workspace="/proj/a").splitlines()) <= 12
 
 
 class TestNeverRaisesOnBadModelOutput:

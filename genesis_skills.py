@@ -27,9 +27,13 @@ CONFIRM/BLOCKED бариерата) и се записва в genesis_agent.memo
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import stat
 import sys
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 
 # Уверяваме се, че genesis_agent/ пакетът е импортируем (мостът стои в root-а).
@@ -38,6 +42,8 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from genesis_agent import sandbox
+from genesis_agent.code_edit import decode_text, displayable, encode_text, has_raw_bytes
+from genesis_agent.tool_schemas import load_tool_arguments
 
 # Паметта/уеб търсенето са meko-опционални — ако липсва зависимост (напр.
 # scikit-learn), мостът пак работи, само без логване/търсене.
@@ -75,18 +81,203 @@ _WORKSPACE = _PROJECT_ROOT
 # гаранцията точно за случая, в който тя има значение.
 _SEEN_PATHS: set[Path] = set()
 
+# Докато работи под-агент (genesis_agent.agents): името му и инструментите,
+# които има. Проверява се в общата бариера _before_tool — и за текстовите
+# тагове, и за native извикванията, — а не само в списъка схеми, който моделът
+# вижда: модел, който напише таг извън списъка си, иначе би го изпълнил.
+_AGENT_SCOPE: tuple[str, frozenset[str]] | None = None
+
+
+def _agent_scope() -> tuple[str, frozenset[str]] | None:
+    return _AGENT_SCOPE
+
+
+def _set_agent_scope(scope: tuple[str, frozenset[str]] | None) -> None:
+    global _AGENT_SCOPE
+    _AGENT_SCOPE = scope
+
+
+# „Стоп“ на оператора (бутонът на телефона) за текущия ход. Проверява се преди
+# ВСЕКИ инструмент — и в под-агентите, и по двата пътя. Дотогава се гледаше
+# само веднъж на рунд: след „Стоп“ рундът довършваше всичките си записи, а
+# под-агентът — всичките си 15 рунда (одит 2026-10-09).
+_CANCEL: Callable[[], bool] | None = None
+
+
+def _set_cancel(check: Callable[[], bool] | None) -> None:
+    global _CANCEL
+    _CANCEL = check
+    # И за вече работеща команда, не само преди следващия инструмент (2026-10-11).
+    sandbox.cancel_check = check
+
+
+def _cancelled() -> bool:
+    try:
+        return bool(_CANCEL and _CANCEL())
+    except Exception:
+        return False
+
 
 def set_workspace(path) -> None:
     """Задава работната директория (вика се от genesis_terminal_agent.py)."""
     global _WORKSPACE
     _WORKSPACE = Path(path)
     _SEEN_PATHS.clear()
+    try:  # паметта за работата (нишки, решения) е на същата папка
+        from genesis_agent import workspace_memory
+        workspace_memory.set_workspace(path)
+    except Exception:
+        pass
 
 
 def _resolve(path_str: str) -> Path:
     """Разрешава път — относителните са спрямо workspace-а."""
+    return _resolve_noted(path_str)[0]
+
+
+def _resolve_noted(path_str: str, *, redirect: bool = True) -> tuple[Path, str]:
+    """Като _resolve, но абсолютен път с правописна грешка в пътя до
+    workspace-а се пренасочва в него — и бележката го казва на модела.
+
+    NEXT_STEPS В.9: моделът пише `...\\Projects\\genittest\\egn.py` при
+    workspace `...\\Projects\\genitest`; sandbox-ът правилно спира записа
+    извън workspace-а, но рундът се губи, а следващият често повтаря същото.
+    Пренасочва се САМО когато папката с грешката не съществува и всяка част
+    до нея е буквена грешка на частта от workspace-а (виж _is_typo) — не
+    `genitest2` или `genitest-old`, които може да са нарочна съседна папка.
+
+    `redirect=False` (запис и редакция): пътят остава какъвто е — записът
+    извън workspace-а пита както винаги, а бележката казва кой е вероятният
+    път. Одит 2026-10-07: workspace `api-v1`, WRITE_FILE `…/api-v2/app.py` се
+    пренасочваше и ПРЕЗАПИСВАШЕ `api-v1/app.py` без въпрос — запис по догадка
+    не бива да минава покрай потвърждението.
+    """
     p = Path(path_str.strip()).expanduser()
-    return p if p.is_absolute() else (_WORKSPACE / p)
+    if not p.is_absolute():
+        return _WORKSPACE / p, ""
+    fixed = _typo_into_workspace(p)
+    if fixed is None:
+        return p, ""
+    if not redirect:
+        return p, (f"\n[път] {p} изглежда като workspace-а с правописна грешка — "
+                   f"вероятно имаше предвид {fixed}. Пиши пътищата спрямо workspace-а "
+                   "(относителни).")
+    return fixed, (f"\n[път] {p} не съществува — това е workspace-ът с правописна "
+                   f"грешка, ползван е {fixed}. Пиши пътищата спрямо workspace-а "
+                   "(относителни), не абсолютни.")
+
+
+def _is_typo(a: str, b: str) -> bool:
+    """Две имена на папки, които са една и съща с буквена грешка.
+
+    Разлика само в регистъра, или разстояние ≤2 (вмъкване, изтриване, замяна,
+    размяна на съседни) при имена от ≥4 знака. НЕ е грешка, ако едното е
+    продължение на другото (`app` → `app2`, `site` → `site-old`): това е друга
+    папка със смисъл, а не изпусната буква.
+    """
+    if a == b:
+        return True
+    # Различни числа са различни неща, не грешка: `api-v1`/`api-v2`,
+    # `report2025`/`report2026`, `proj1`/`proj2`.
+    if re.sub(r"\D", "", a) != re.sub(r"\D", "", b):
+        return False
+    if a.lower() == b.lower():
+        return True
+    if min(len(a), len(b)) < 4:
+        return False
+    la, lb = a.lower(), b.lower()
+    if la.startswith(lb) or lb.startswith(la) or la.endswith(lb) or lb.endswith(la):
+        return False
+    return _edit_distance(la, lb, limit=2) <= min(2, max(len(a), len(b)) // 4)
+
+
+def _edit_distance(a: str, b: str, limit: int) -> int:
+    """Damerau-Levenshtein (с размяна на съседни), спира над `limit`."""
+    if abs(len(a) - len(b)) > limit:
+        return limit + 1
+    prev2: list[int] = []
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb))
+            if i > 1 and j > 1 and ca == b[j - 2] and a[i - 2] == cb:
+                cur[j] = min(cur[j], prev2[j - 2] + 1)
+        if min(cur) > limit:
+            return limit + 1
+        prev2, prev = prev, cur
+    return prev[-1]
+
+
+def _typo_into_workspace(p: Path) -> Path | None:
+    """Пътят в workspace-а, който `p` очевидно е имал предвид — или None."""
+    if p.exists():
+        return None
+    try:
+        ws = _WORKSPACE.resolve()
+    except OSError:
+        return None
+    anchor = p.parent
+    while not anchor.exists():
+        if anchor.parent == anchor:
+            return None
+        anchor = anchor.parent
+    try:
+        ws_rest = ws.relative_to(anchor.resolve()).parts
+        rest = p.relative_to(anchor).parts
+    except (ValueError, OSError):
+        return None
+    if not ws_rest or len(rest) <= len(ws_rest):
+        return None
+    if not all(_is_typo(a, b) for a, b in zip(rest, ws_rest)):
+        return None
+    return ws.joinpath(*rest[len(ws_rest):])
+
+
+# Папки, в които „може би имаше предвид“ не търси: огромни и никога не са
+# мястото, където моделът мисли, че е файлът му.
+_SKIP_DIRS = {".git", ".hg", ".venv", "venv", "node_modules", "__pycache__",
+              ".mypy_cache", ".pytest_cache", ".ruff_cache", "dist", "build"}
+
+
+def _did_you_mean(path: Path, *, limit: int = 3) -> str:
+    """Подсказка за липсващ файл: същото име другаде в workspace-а или
+    близко име в същата папка. Празно, ако няма нищо правдоподобно.
+
+    Без нея „Файлът не съществува“ води до GLOB/LIST_DIR рунд само за да се
+    намери, че файлът е в `src/`, или че се казва `utils.py`, а не `util.py`.
+    """
+    import difflib
+    import os
+    found: list[str] = []
+    try:
+        ws = _WORKSPACE.resolve()
+        seen = 0
+        for dirpath, dirnames, filenames in os.walk(ws):
+            dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+            seen += len(filenames)
+            if path.name in filenames:
+                cand = Path(dirpath) / path.name
+                if cand != path:
+                    found.append(str(cand.relative_to(ws)))
+            if seen > 5000 or len(found) >= limit:
+                break
+        # Съседите се изброяват само в workspace-а и никога в папка с ключове:
+        # „Може би: ~/.ssh/id_ed25519_work_github?“ издаваше имената им.
+        parent_ok = (path.parent.is_dir() and path.parent.resolve().is_relative_to(ws)
+                     and not sandbox.sensitive_path_reason(path.parent.as_posix() + "/"))
+        if len(found) < limit and parent_ok:
+            names = [e.name for e in path.parent.iterdir()][:2000]
+            for n in difflib.get_close_matches(path.name, names, n=limit, cutoff=0.75):
+                cand = path.parent / n
+                rel = str(cand.relative_to(ws)) if cand.is_relative_to(ws) else str(cand)
+                if rel not in found:
+                    found.append(rel)
+    except OSError:
+        return ""
+    if not found:
+        return ""
+    return " Може би: " + ", ".join(found[:limit]) + "?"
 
 
 def _sensitive_root_refusal(tool: str, root: Path) -> str | None:
@@ -160,7 +351,7 @@ def _tool_read_file(arg: str, offset=None, limit=None) -> str:
     except (TypeError, ValueError):
         limit_i = None
 
-    path = _resolve(path_str)
+    path, redirect = _resolve_noted(path_str)
     # Четенето на ключове минава през СЪЩОТО решение като `cat ~/.genesis/.env`
     # (design note, 2026-09-20). Дотук не минаваше през нищо: shell пътят беше
     # с гейт, а инструментът — не, тоест по-лесният път беше отворен. А
@@ -173,41 +364,172 @@ def _tool_read_file(arg: str, offset=None, limit=None) -> str:
         allowed, reason = sandbox._decide(f"READ_FILE {path}", verdict, sandbox.get_policy())
         if not allowed:
             return f"[READ_FILE] {reason}"
+    # Преди четенето: на Windows папка дава PermissionError, не IsADirectoryError,
+    # и моделът виждаше „Permission denied“ (CI на Windows, 2026-10-07).
+    if path.is_dir():
+        return f"[READ_FILE] {path} е папка, не файл — ползвай LIST_DIR."
+    # Одит 2026-10-11: READ_FILE четеше ЦЕЛИЯ файл, за да покаже 8000 знака.
+    # FIFO в workspace-а висеше вечно (Ctrl-C затваря чата), /dev/zero изяждаше
+    # паметта, а лог от 300 MB струваше ~600–800 MB RSS — и с offset/limit.
+    # Затова: само обикновен файл (както mentions._read) и четене на парчета.
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        st = os.stat(path)
     except FileNotFoundError:
-        return f"[READ_FILE] Файлът не съществува: {path}"
+        return f"[READ_FILE] Файлът не съществува: {path}.{_did_you_mean(path)}"
     except OSError as e:
         return f"[READ_FILE] Грешка: {e}"
+    if not stat.S_ISREG(st.st_mode):
+        return (f"[READ_FILE] {path} не е обикновен файл (FIFO, устройство или сокет) — "
+                "не се чете: четенето би чакало вечно или нямало край.")
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(_READ_HEAD)
+            whole = len(head) >= st.st_size
+            # Двоичен файл (PNG, zip, sqlite) излизаше като 8000 знака боклук
+            # (одит 2026-10-11); @mentions вече го отказваше по същия признак.
+            # UTF-16/32 с BOM носят NUL, но са текст — decode_text ги чете.
+            text, encoding = decode_text(head, partial=not whole)
+            if not whole and encoding == "utf-8" and st.st_size <= _STYLE_PROBE:
+                # Кодирането — по целия файл, както SEARCH_CODE и WRITE_FILE
+                # (ревю 2026-10-11): ASCII в първите 32 KB и cp1251 след тях
+                # даваше „�“ в READ_FILE с offset, а SEARCH_CODE — текста.
+                encoding = decode_text(head + fh.read())[1]
+                fh.seek(len(head))
+                if encoding != "utf-8":
+                    text = head.decode(encoding, "surrogateescape")
+            if encoding in ("utf-8", "cp1251") and b"\x00" in head[:8192]:
+                return (f"[READ_FILE] {path} е двоичен файл ({st.st_size} байта, "
+                        f"{path.suffix or 'без разширение'}) — не се показва. За "
+                        "съдържанието ползвай RUN_CMD с подходящ инструмент "
+                        "(file, unzip -l, sqlite3).")
+            enc_note = "" if encoding == "utf-8" else f"  (кодиране {encoding})"
+            if offset_i is not None or limit_i is not None:
+                return _read_range(fh, path, encoding, offset_i, limit_i,
+                                   enc_note, redirect)
+            total_lines = None
+            if not whole and st.st_size <= _COUNT_LINES_MAX:
+                total_lines = head.count(b"\n") + _count_rest(fh)
+    except OSError as e:
+        return f"[READ_FILE] Грешка: {e}"
+    # Кодирането се разпознава (code_edit.decode_text) и се казва в заглавието:
+    # cp1251 файл се показваше като „�������“, а моделът копираше това в
+    # WRITE_FILE и кирилицата изчезваше от диска (одит 2026-10-11).
+    # Самотен `\r` (стар Mac) остава `\r`: превърнат в `\n`, READ→WRITE
+    # пренаписваше байтовете на файла (WRITE_FILE връща само чист CRLF), а
+    # диапазонът, SEARCH_CODE и прегледът преди WRITE_FILE виждаха един ред
+    # (ревю 2026-10-11, трета вълна) — един изглед за всички е по-важен.
+    text = displayable(text).replace("\r\n", "\n")
     _SEEN_PATHS.add(path.resolve())
-
-    if offset_i is not None or limit_i is not None:
-        lines = text.splitlines()
-        start = max(0, (offset_i or 1) - 1)
-        end = start + limit_i if limit_i else len(lines)
-        # Номерирани редове (както `cat -n`) — тук, за разлика от режима по
-        # подразбиране, точната позиция е ЦЯЛАТА цел на извикването: моделът
-        # е поискал точно този диапазон, защото гради EDIT_FILE anchor или
-        # обяснява нещо на потребителя по конкретен ред.
-        numbered = [f"{i:>5}\t{ln}" for i, ln in enumerate(lines[start:end], start + 1)]
-        chunk = "\n".join(numbered)
-        if len(chunk) > 8000:
-            chunk = chunk[:8000] + "\n… [отрязано, диапазонът е по-голям от 8000 символа]"
-        _log_episode(f"READ_FILE {path}", "прочетен (диапазон)", ["tool", "read_file"])
-        return (f"[READ_FILE: {path}]  (редове {start + 1}-{min(end, len(lines))} от {len(lines)})\n"
-                + chunk)
-
-    if len(text) > 8000:
-        total_lines = text.count("\n") + 1
+    if whole and not text.strip("\ufeff"):
+        text = "(празен файл)"
+    if len(text) > 8000 or not whole:
+        if whole:
+            total_lines = text.count("\n") + 1
+        lines_note = f", {total_lines} реда" if total_lines else ""
         text = (text[:8000]
-                + f"\n… [отрязано, общо {len(text)} символа, {total_lines} реда — "
+                + f"\n… [отрязано, общо {st.st_size} байта{lines_note} — "
                   f"за конкретен диапазон: READ_FILE: {path_str} | offset | limit]")
     _log_episode(f"READ_FILE {path}", "прочетен", ["tool", "read_file"])
-    return f"[READ_FILE: {path}]\n{text}"
+    return f"[READ_FILE: {path}]{enc_note}\n{text}{redirect}"
 
 
-def _tool_write_file(arg: str, content: str) -> str:
-    path = _resolve(arg)
+# Началото на файла, което READ_FILE чете по подразбиране: 8000 знака са
+# най-много 32000 байта (UTF-32), така че отрязването е по знаци, не по байтове.
+_READ_HEAD = 32_768
+# Над това броят на редовете в бележката не се смята — само байтовете.
+_COUNT_LINES_MAX = 512 * 1024 * 1024
+# Таван за едно парче от ред: минифициран файл от един ред не влиза цял в паметта.
+_LINE_PIECE = 1 << 20
+
+
+def _count_rest(fh) -> int:
+    """Редовете в остатъка на `fh` — на парчета, без да се делят."""
+    n, last = 0, b"\n"
+    while chunk := fh.read(_LINE_PIECE):
+        n += chunk.count(b"\n")
+        last = chunk[-1:]
+    return n + (last != b"\n")
+
+
+def _iter_lines(fh):
+    """Редовете от началото като байтове — делени САМО по `\n` (както rg и
+    EDIT_FILE), с най-много _LINE_PIECE байта от всеки."""
+    fh.seek(0)
+    while piece := fh.readline(_LINE_PIECE):
+        line = piece
+        while not piece.endswith(b"\n"):
+            piece = fh.readline(_LINE_PIECE)
+            if not piece:
+                break
+        yield line
+
+
+def _read_range(fh, path: Path, encoding: str, offset_i: int | None,
+                limit_i: int | None, enc_note: str, redirect: str) -> str:
+    """READ_FILE с offset/limit, без да държи файла в паметта.
+
+    Номерата са по `\n`, както в SEARCH_CODE и EDIT_FILE: str.splitlines()
+    броеше и \f, \x1c, U+2028 за край на ред, и READ_FILE ред 5 беше друг ред
+    (одит 2026-10-11). UTF-16/32 не се делят по байт `\n` — тях ги декодираме
+    цели (рядкост, и таванът е _STYLE_PROBE).
+    """
+    start = max(0, (offset_i or 1) - 1)
+    end = start + limit_i if limit_i else None
+    picked: list[str] = []
+    size = 0
+    total = 0
+    wide = encoding.startswith("utf-") and encoding != "utf-8"
+    if wide:
+        fh.seek(0)
+        text = decode_text(fh.read(_STYLE_PROBE), partial=True)[0]
+        lines = [ln + "\n" for ln in text.split("\n")]
+        if lines and lines[-1] == "\n":
+            lines.pop()
+        source = iter([ln.encode(encoding) for ln in lines])
+    else:
+        source = _iter_lines(fh)
+    for raw in source:
+        total += 1
+        if total <= start:
+            continue
+        if end is not None and total > end:
+            # Останалите редове само се броят — на парчета, без декодиране.
+            total += sum(1 for _ in source) if wide else _count_rest(fh)
+            break
+        if size <= 8000:
+            line = displayable(raw.decode(encoding, "surrogateescape"))
+            line = line.removesuffix("\n").removesuffix("\r")
+            picked.append(f"{total:>5}\t{line}")
+            size += len(picked[-1]) + 1
+    _SEEN_PATHS.add(path.resolve())
+    if start >= total:
+        return (f"[READ_FILE: {path}] Файлът има {total} реда — offset {start + 1} е след "
+                f"края. Прочети без offset или с offset ≤ {max(total, 1)}.{redirect}")
+    # Номерирани редове (както `cat -n`) — тук, за разлика от режима по
+    # подразбиране, точната позиция е ЦЯЛАТА цел на извикването: моделът
+    # е поискал точно този диапазон, защото гради EDIT_FILE anchor или
+    # обяснява нещо на потребителя по конкретен ред.
+    chunk = "\n".join(picked)
+    if len(chunk) > 8000:
+        chunk = chunk[:8000] + "\n… [отрязано, диапазонът е по-голям от 8000 символа]"
+    _log_episode(f"READ_FILE {path}", "прочетен (диапазон)", ["tool", "read_file"])
+    last = total if end is None else min(end, total)
+    return (f"[READ_FILE: {path}]  (редове {start + 1}-{last} от {total}){enc_note}\n"
+            + chunk + redirect)
+
+
+# Колко от съществуващ файл се чете, за да се познае кодирането му преди
+# WRITE_FILE — колкото и таванът на SEARCH_CODE (по-голям файл е генериран).
+_STYLE_PROBE = 2_000_000
+
+
+def _tool_write_file(arg: str, content: str, exact: bool = False) -> str:
+    path, redirect = _resolve_noted(arg, redirect=False)
+    if not arg.strip() or path.is_dir():
+        # Иначе write_text върху папка → „Permission denied“, а моделът го
+        # чете като защитена папка и спира да пита (виж load_tool_arguments).
+        return (f"[WRITE_FILE] ❌ Няма име на файл: path е „{arg}“ ({path} е папка). "
+                "Дай пълния път до файла, напр. faktura/extract.py.")
     resolved = path.resolve() if path.exists() else None
     # WRITE_FILE презаписва ЦЕЛИЯ файл. Върху нещо, което моделът никога не е
     # видяло в тази сесия, това е сляпо унищожаване на неизвестно съдържание —
@@ -226,10 +548,10 @@ def _tool_write_file(arg: str, content: str) -> str:
         inside = False
     if not inside:
         verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM,
-                                      [f"запис извън workspace: {path}"])
+                                      [f"запис извън workspace: {path}" + redirect.replace("\n", " ")])
         allowed, reason = sandbox._decide(f"WRITE_FILE {path}", verdict, sandbox.get_policy())
         if not allowed:
-            return f"[WRITE_FILE] {reason}"
+            return f"[WRITE_FILE] {reason}{redirect}"
     # Ruff pre-check преди диска, само за .py (design note, 2026-07-29): не
     # блокираме записа при unfixable проблеми (моделът изрично поиска точно
     # това съдържание) — но ако ruff го оправи автоматично, пишем ФИКСНАТАТА
@@ -243,15 +565,123 @@ def _tool_write_file(arg: str, content: str) -> str:
             content = detail
         elif not ok:
             lint_note = f"\n{detail}"
+    # Съществуващ файл се записва в СВОЕТО кодиране (одит 2026-10-11): cp1251
+    # файл, минал през READ→WRITE, излизаше с U+FFFD на мястото на всяка буква.
+    encoding = "utf-8"
+    kept: list[str] = []
+    if path.is_file():
+        try:
+            with open(path, "rb") as fh:
+                original, encoding = decode_text(fh.read(_STYLE_PROBE), partial=True)
+        except OSError:
+            original = ""
+        if has_raw_bytes(original) and "\ufffd" in content:
+            return (f"[WRITE_FILE: {path}] ❌ Файлът има байтове, които не са текст в "
+                    f"{encoding}, а в READ_FILE се виждат като „\ufffd“ — записът би ги "
+                    "заменил завинаги. Ползвай EDIT_FILE за частична промяна: тя ги пази.")
+        # Краищата на редовете и BOM-ът също са на файла (одит 2026-10-11):
+        # READ_FILE показва LF, моделът пише LF, и CRLF .bat излизаше изцяло с
+        # LF и без BOM — дифф на всеки ред и счупени GOTO етикети. Чист CRLF
+        # файл остава CRLF; смесеният получава LF, както EDIT_FILE го прави.
+        # Ревю 2026-10-11: така „обърни run.sh в LF“ / „махни BOM-а“ не ставаше
+        # с никой файлов инструмент, а WRITE_FILE отчиташе ✓ с файла непроменен.
+        # `exact` пише точно даденото, а запазеното се казва в резултата.
+        if not exact:
+            crlf = original.count("\r\n")
+            if crlf and crlf == original.count("\n") and content.replace("\r\n", "").count("\n"):
+                content = content.replace("\r\n", "\n").replace("\n", "\r\n")
+                kept.append("CRLF краищата")
+            if original.startswith("\ufeff") and not content.startswith("\ufeff"):
+                content = "\ufeff" + content
+                kept.append("BOM-ът")
+    enc_note = (f" (запазени {' и '.join(kept)} на файла; exact=true пише точно "
+                "даденото — напр. за LF или без BOM)") if kept else ""
+    try:
+        data = encode_text(content, encoding)
+    except UnicodeEncodeError as e:
+        # Ревю 2026-10-11: отказът караше модела да маха „é“ от „Café“ и
+        # файл не можеше да се обърне в UTF-8. Съдържание, което не влиза в
+        # старото кодиране, не е върнат обратно сбъркан текст от READ_FILE
+        # (той е в старото кодиране), така че UTF-8 не губи нищо.
+        try:
+            data = encode_text(content, "utf-8")
+        except UnicodeEncodeError as e2:
+            # Самотен сурогат (половин емоджи от JSON, `\ud83d`) няма място и в
+            # UTF-8: без това излизаше суровата английска грешка на кодека от
+            # dispatch_tool_call (ревю 2026-10-11, трета вълна).
+            return (f"[WRITE_FILE: {path}] ❌ Знакът {content[e2.start:e2.end]!r} не е "
+                    "текст в никое кодиране (половин емоджи?) — махни го или го замени. "
+                    "ФАЙЛЪТ НЕ Е ПРОМЕНЕН.")
+        enc_note += (f" (файлът беше {encoding}, а {content[e.start:e.end]!r} няма място "
+                    "в него — записан е като UTF-8)")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        path.write_bytes(data)
     except OSError as e:
         return f"[WRITE_FILE] Грешка: {e}"
     _SEEN_PATHS.add(path.resolve())
     _log_episode(f"WRITE_FILE {path}", f"записани {len(content)} символа",
                  ["tool", "write_file"])
-    return f"[WRITE_FILE: {path}] ✓ записани {len(content)} символа{lint_note}"
+    from genesis_agent.web_check import web_note
+    return (f"[WRITE_FILE: {path}] ✓ записани {len(content)} символа{enc_note}{lint_note}"
+            f"{_scaffold_tests(path)}{web_note(path)}{redirect}")
+
+
+_PYTEST_CONFIGS = (("pytest.ini", ""), ("pyproject.toml", "[tool.pytest"),
+                   ("setup.cfg", "[tool:pytest]"), ("tox.ini", "[pytest]"))
+
+
+def _scaffold_tests(path: Path) -> str:
+    """Първият тест в подпапка на проект без pytest настройка → празен
+    conftest.py в корена, за да вижда тестът модулите от корена.
+
+    NEXT_STEPS Г.10: проектът за ЕГН загуби 4 рунда по импорти, преди
+    подсказката в RUN_CMD (_import_path_hint) да се появи — тя идва чак СЛЕД
+    падналия pytest. Тук се слага преди първото пускане. Само ако коренът няма
+    conftest.py и никаква pytest настройка: в съществуващ проект пътят вече е
+    решен по някакъв начин и не е наша работа да го сменяме.
+    """
+    if path.suffix != ".py" or not (path.name.startswith("test_") or path.name.endswith("_test.py")):
+        return ""
+    try:
+        root = _WORKSPACE.resolve()
+        rel = path.resolve().relative_to(root)
+    except (ValueError, OSError):
+        return ""
+    if len(rel.parts) < 2 or rel.parts[0] in _SKIP_DIRS:
+        return ""
+    # Проектът е папката над `tests/` — `egn/tests/test_egn.py` → `egn/`, не
+    # коренът на workspace-а (там conftest-ът не помага на `pytest` в `egn/`).
+    idx = next((i for i, part in enumerate(rel.parts[:-1]) if part in ("tests", "test")), 0)
+    project = root.joinpath(*rel.parts[:idx])
+    test_dir = rel.parts[idx]
+    conftest = project / "conftest.py"
+    if conftest.exists():
+        return ""
+    for name, section in _PYTEST_CONFIGS:
+        cfg = project / name
+        try:
+            if cfg.is_file() and (not section or section in cfg.read_text(encoding="utf-8", errors="replace")):
+                return ""
+        except OSError:
+            return ""
+    # Скелето е част от хода за /undo (e2e 2026-10-11): измерено — WRITE_FILE
+    # egn/tests/test_egn.py, после /undo триеше двата файла на модела, а
+    # egn/conftest.py, създаден тук, оставаше сирак в проекта.
+    from genesis_agent import edit_history
+    edit_history.record(conftest)
+    try:
+        conftest.write_text(
+            "# Коренът на проекта е в sys.path на pytest, за да се внасят модулите\n"
+            "# от корена в tests/ без sys.path хакове.\n", encoding="utf-8")
+    except OSError:
+        return ""
+    finally:
+        edit_history.forget_if_unchanged(conftest)
+    _SEEN_PATHS.add(conftest)
+    where = conftest.relative_to(root).as_posix()
+    return (f"\n[скеле] Създаден е празен {where} — тестовете в {test_dir}/ внасят "
+            "модулите до него директно (`from x import y`), без sys.path хакове.")
 
 
 def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False) -> str:
@@ -260,7 +690,7 @@ def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False
     Минава през същата CONFIRM бариера като WRITE_FILE при запис извън
     workspace-а — редакцията е по-малка по обхват, но не е по-малко реална.
     """
-    path = _resolve(path_arg)
+    path, redirect = _resolve_noted(path_arg, redirect=False)
     # Същата бариера като при READ_FILE, по същата причина — и намерена по
     # същия начин: `EDIT_FILE` връща unified diff, а диффът носи КОНТЕКСТНИ
     # редове. Редакция на `.env` с произволна котва връща в отговора реда
@@ -278,17 +708,18 @@ def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False
         inside = False
     if not inside:
         verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM,
-                                      [f"редакция извън workspace: {path}"])
+                                      [f"редакция извън workspace: {path}" + redirect.replace("\n", " ")])
         allowed, reason = sandbox._decide(f"EDIT_FILE {path}", verdict, sandbox.get_policy())
         if not allowed:
-            return f"[EDIT_FILE] {reason}"
+            return f"[EDIT_FILE] {reason}{redirect}"
 
     from genesis_agent.code_edit import edit_file
     res = edit_file(path, old, new, replace_all=replace_all)
     if not res.ok:
         _log_episode(f"EDIT_FILE {path}", f"отказана: {res.detail[:200]}",
                      ["tool", "edit_file", "rejected"])
-        return f"[EDIT_FILE: {path}] ❌ {res.detail}"
+        hint = _did_you_mean(path) if not path.exists() else ""
+        return f"[EDIT_FILE: {path}] ❌ {res.detail}{hint}{redirect}"
     _SEEN_PATHS.add(path.resolve())
     _log_episode(f"EDIT_FILE {path}", res.detail, ["tool", "edit_file"])
     # Диффът се връща на модела нарочно: така следващият рунд вижда какво РЕАЛНО
@@ -305,7 +736,8 @@ def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False
             ruff_note = lint_note(path.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             pass
-    return f"[EDIT_FILE: {path}] {res.detail}\n{diff}{ruff_note}"
+    from genesis_agent.web_check import web_note
+    return f"[EDIT_FILE: {path}] {res.detail}\n{diff}{ruff_note}{web_note(path)}{redirect}"
 
 
 def _tool_search_code(arg: str, path: str = "", glob: str = "") -> str:
@@ -313,6 +745,13 @@ def _tool_search_code(arg: str, path: str = "", glob: str = "") -> str:
     if not pattern:
         return "[SEARCH_CODE] Празен шаблон."
     from genesis_agent.repo_map import search_code
+    # Шаблон, подаден като път (`site/**/*.html`): 2026-09-28 моделът получи
+    # два пъти „няма такъв път“ и загуби два рунда. Частта до първия `*`/`?`
+    # е папката, останалото — филтърът по име.
+    if path and not glob and any(ch in path for ch in "*?"):
+        parts = Path(path.strip()).parts
+        cut = next(i for i, p in enumerate(parts) if any(ch in p for ch in "*?"))
+        path, glob = str(Path(*parts[:cut])) if cut else "", parts[-1]
     root = _resolve(path) if path else _WORKSPACE
     refusal = _sensitive_root_refusal("SEARCH_CODE", root)
     if refusal:
@@ -371,7 +810,9 @@ def _tool_glob(arg: str) -> str:
     except (ValueError, FileNotFoundError) as e:
         return f"[GLOB: {pattern}] {e}"
     if not hits:
-        return f"[GLOB: {pattern}] Няма файлове по този шаблон в {root}."
+        empty = root.is_dir() and not any(root.iterdir())
+        return (f"[GLOB: {pattern}] Няма файлове по този шаблон в {root}."
+                + (" Папката е празна — създай нужните файлове с WRITE_FILE." if empty else ""))
     _log_episode(f"GLOB {pattern}", f"{len(hits)} файла", ["tool", "glob"])
     lines = [f"[GLOB: {pattern}] {len(hits)} файла в {root}"] + [f"  {h}" for h in hits]
     return "\n".join(lines)
@@ -410,9 +851,47 @@ def _tool_run_cmd(arg: str) -> str:
         parts.append(out[:6000])
     if err:
         parts.append("stderr:\n" + err[:2000])
+    hint = _import_path_hint(out + "\n" + err, Path(_WORKSPACE)) or _missing_package_hint(out + "\n" + err)
+    if hint:
+        parts.append(hint)
     _log_episode(f"RUN_CMD {command}", "ok" if res.ok else f"rc={res.returncode}",
                  ["tool", "run_cmd"])
     return "\n".join(parts)
+
+
+def _import_path_hint(output: str, root: Path) -> str:
+    """Подсказка, когато pytest не вижда модул, който си стои в корена.
+
+    Измерено 2026-09-25 (проект за ЕГН): тестовете в tests/ не намираха egn.py
+    от корена, моделът опита четири пъти по различен начин (~4 рунда) и накрая
+    сложи sys.path хак в самия тест. Стандартното решение е един празен
+    conftest.py — механизъм тук, а не ред в промпта, защото кой модел ще се
+    падне във веригата не се знае.
+    """
+    m = re.search(r"No module named '([\w.]+)'", output)
+    if not m or (root / "conftest.py").exists():
+        return ""
+    name = m.group(1).split(".")[0]
+    if not ((root / f"{name}.py").is_file() or (root / name / "__init__.py").is_file()):
+        return ""
+    return (f"[подсказка] `{name}` е в корена на проекта, но pytest не го вижда от tests/. "
+            "Решение: празен conftest.py в корена (или `pythonpath = .` в pytest.ini) — "
+            "не sys.path хакове в тестовете.")
+
+
+def _missing_package_hint(output: str) -> str:
+    """`No module named 'docx'` → точното име в PyPI (`python-docx`) и с кой
+    Python да се инсталира. Без нея моделът гадае `pip install docx` (друг,
+    стар пакет) или инсталира в Python-а на Genesis, не на проекта."""
+    if "No module named" not in output:
+        return ""
+    try:
+        from genesis_agent.paths import project_python
+        from genesis_agent.py_deps import missing_module_hint
+        py = project_python(_WORKSPACE)
+        return missing_module_hint(output, Path(_WORKSPACE), f'"{py}"' if " " in py else py)
+    except Exception:
+        return ""
 
 
 # Маркер, по който агентният цикъл разпознава "агентът чака отговор" и спира,
@@ -470,9 +949,13 @@ def _tool_research(arg: str) -> str:
 
 
 def _tool_list_dir(arg: str) -> str:
-    path = _resolve(arg)
+    path, redirect = _resolve_noted(arg)
     if not path.is_dir():
-        return f"[LIST_DIR] Не е директория: {path}"
+        if sandbox.sensitive_path_reason(path) or sandbox.sensitive_path_reason(path.as_posix() + "/"):
+            return f"[LIST_DIR] Не е директория: {path}"
+        if path.is_file():
+            return f"[LIST_DIR] {path} е файл, не папка — ползвай READ_FILE."
+        return f"[LIST_DIR] Не е директория: {path}.{_did_you_mean(path)}"
     # Изброяването на `~/.ssh` не дава съдържание, но дава ИМЕНАТА на ключовете
     # — първата стъпка на всяко "кое има смисъл да прочета". Същият пазач,
     # който вече стои на READ_FILE и EDIT_FILE (design note, 2026-09-20);
@@ -492,7 +975,15 @@ def _tool_list_dir(arg: str) -> str:
         entries = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
     except OSError as e:
         return f"[LIST_DIR] Грешка: {e}"
-    lines = [f"[LIST_DIR: {path}]"]
+    lines = [f"[LIST_DIR: {path}]{redirect}"]
+    if not entries:
+        # Само заглавието, без нито един ред, моделът чете като „инструментът
+        # не отговори“ и пита отново. Измерено 2026-09-28 (bench_projects):
+        # 3 от първите 6 пуска — groq gpt-oss-120b вика LIST_DIR три пъти върху
+        # новата празна папка, пазачът за повторения спира хода и не е написан
+        # нито ред код (0/1 скрити).
+        lines.append("  (папката е празна — няма файлове за четене; създай нужните с WRITE_FILE)")
+        return "\n".join(lines)
     # Не `e` — точно това име държи изключението по-горе.
     for entry in entries[:200]:
         marker = "📁" if entry.is_dir() else "📄"
@@ -665,11 +1156,16 @@ _USE_SKILL_FAILURES = ("Няма достатъчно близко умение"
 _EDIT_SEPARATOR = "---GENESIS-REPLACE-WITH---"
 _EDIT_RE = re.compile(r"\[EDIT_FILE:\s*(?P<path>[^\]]+)\](?P<body>.*?)\[END_EDIT\]",
                       re.DOTALL)
+# Аргументът може да носи скоби до две нива: `app/[id]/page.tsx` (Next.js),
+# `sys.argv[1:]`, `[ -f x ]`. С `[^\]]+` (до 2026-10-07) всичко се режеше на
+# първата `]` — файлът „не съществуваше“, а командата падаше с незатворени кавички.
+_BRACKETS = r"\[(?:[^\[\]]|\[[^\[\]]*\])*\]"
 _SIMPLE_RE = re.compile(
     r"\[(?P<tool>READ_FILE|RUN_CMD|WEB_SEARCH|LIST_DIR|DELEGATE|RESEARCH|BROWSE|ASK_USER|"
     r"SEARCH_CODE|REPO_MAP|GLOB|"
-    r"BROWSER_CLICK|BROWSER_TYPE|REMEMBER|TASK_ADD|TASK_UPDATE|TASK_LIST):"
-    r"\s*(?P<arg>[^\]]+)\]"
+    r"BROWSER_CLICK|BROWSER_TYPE|REMEMBER|TASK_ADD|TASK_UPDATE|TASK_LIST|"
+    r"RUN_BG|BG_OUTPUT|BG_KILL|MCP|EXPLORE|WEB_FETCH|AGENT|TODO_WRITE):"
+    r"\s*(?P<arg>(?:[^\[\]]|" + _BRACKETS + r")+)\]"
 )
 # REPO_MAP без аргумент = текущият workspace (както BROWSER_READ/TASK_LIST).
 _REPO_MAP_RE = re.compile(r"\[REPO_MAP\]")
@@ -696,7 +1192,52 @@ _SIMPLE_DISPATCH: dict[str, Callable[..., str]] = {
     "TASK_ADD": _tool_task_add,
     "TASK_UPDATE": _tool_task_update,
     "TASK_LIST": _tool_task_list,
+    "RUN_BG": lambda arg: _tool_run_bg(arg),
+    "BG_OUTPUT": lambda arg="": _background().output(arg),
+    "BG_KILL": lambda arg: _background().kill(arg),
+    "MCP": lambda arg: _mcp().call_text_tag(arg),
+    "EXPLORE": lambda arg: _tool_explore(arg),
+    "WEB_FETCH": lambda arg: _tool_web_fetch(arg),
+    "AGENT": lambda arg: _tool_agent(*(part.strip() for part in arg.partition("|")[::2])),
+    "TODO_WRITE": lambda arg: _todos().write(arg),
 }
+
+
+def _tool_agent(name: str, task: str) -> str:
+    """Собствен под-агент от .genesis/agents/ — задачата в отделен разговор."""
+    from genesis_agent import agents
+    return agents.run(name, task, Path(_WORKSPACE))
+
+
+def _todos():
+    from genesis_agent import todos
+    return todos
+
+
+def _tool_web_fetch(url: str) -> str:
+    from genesis_agent.web_fetch import web_fetch
+    return web_fetch(url)
+
+
+def _tool_explore(question: str) -> str:
+    """Под-агент, който само чете — отговорът без файловете в историята."""
+    from genesis_agent.explore import explore
+    return explore(question, str(_WORKSPACE))
+
+
+def _mcp():
+    from genesis_agent import mcp_client
+    return mcp_client
+
+
+def _background():
+    from genesis_agent import background
+    return background
+
+
+def _tool_run_bg(arg: str) -> str:
+    """Фонова команда (dev сървър, watcher) — същата бариера като RUN_CMD."""
+    return _background().start(arg, cwd=Path(_WORKSPACE))
 
 
 _READONLY_RE = re.compile(
@@ -725,10 +1266,178 @@ def _safe_tool(name: str, fn: Callable[..., str], *args) -> str:
     native function-calling, тоест на слабия/локалния резервен слой — точно там,
     където устойчивостта трябва да е по-голяма, а не по-малка.
     """
+    payload = _text_args(name, args)
+    blocked = _before_tool(name, payload)
+    if blocked:
+        return blocked
     try:
-        return fn(*args)
+        out = fn(*args)
     except Exception as e:
-        return f"[{name}] Грешка при изпълнение: {e}"
+        out = f"[{name}] Грешка при изпълнение: {e}"
+    return _after_tool(name, payload, out)
+
+
+def _text_args(name: str, args: tuple) -> dict:
+    """The text-tag arguments in the shape the native path has (for hooks)."""
+    if name == "EDIT_FILE" and len(args) >= 3:
+        return {"path": str(args[0]).strip(), "old": args[1], "new": args[2]}
+    if name in ("WRITE_FILE", "EDIT_FILE", "READ_FILE", "LIST_DIR") and args:
+        return {"path": str(args[0]).strip(), **({"content": args[1]} if name == "WRITE_FILE"
+                                                  and len(args) > 1 else {})}
+    if name in ("RUN_CMD", "RUN_BG") and args:
+        return {"command": str(args[0])}
+    if name == "WEB_FETCH" and args:  # hooks виждат {url} и по двата пътя
+        return {"url": str(args[0]).strip()}
+    return {"arg": " | ".join(str(a) for a in args)}
+
+
+def _hook_view(name: str, args: dict) -> tuple[str, dict]:
+    """Как hooks виждат извикването: `[RUN_BG: …]` е RUN_CMD във фона —
+    hook с matcher RUN_CMD не бива да се заобикаля с другото име (одит 2026-10-08)."""
+    if name == "RUN_BG":
+        return "RUN_CMD", {"command": args.get("arg", args.get("command", "")), "background": True}
+    if name == "MCP":
+        # `[MCP: github.create_issue | {...}]` — за hooks същото като native
+        # `mcp__github__create_issue`: matcher mcp__github__.* се заобикаляше
+        # с текстовия таг (одит 2026-10-08).
+        head, _, raw = str(args.get("arg", "")).partition("|")
+        from genesis_agent import mcp_client
+        found = mcp_client._find(head.strip())
+        server, _, tool = head.strip().partition(".")
+        qualified = found[1].qualified if found else \
+            f"mcp__{mcp_client._safe(server)}__{mcp_client._safe(tool)}"
+        try:
+            parsed = load_tool_arguments(raw.strip()) if raw.strip() else {}
+        except (ValueError, TypeError):
+            parsed = {"arg": raw.strip()}
+        return qualified, parsed if isinstance(parsed, dict) else {"arg": raw.strip()}
+    if name == "EXPLORE" and "arg" in args:
+        return name, {"question": args["arg"]}
+    if name == "AGENT" and "arg" in args:
+        agent, _, task = str(args["arg"]).partition("|")
+        return name, {"agent": agent.strip(), "task": task.strip()}
+    return name, args
+
+
+def _before_tool(name: str, args: dict) -> str | None:
+    """One gate for both paths (text tags and native calls): plan mode, the
+    operator's PreToolUse hooks, and the /undo snapshot of a file about to
+    change. Never raises — and fails CLOSED: an error in the gate refuses the
+    tool (it used to be swallowed and the tool ran past a hook that had
+    just blocked it — audit 2026-10-08)."""
+    if _cancelled():
+        return f"[{name}] ⏹ Спряно от оператора — не е изпълнено."
+    try:
+        hook_name, hook_args = _hook_view(name, args)
+        scope = _AGENT_SCOPE
+        if scope is not None and hook_name not in scope[1] and name not in scope[1]:
+            return (f"[{name}] ⛔ Под-агентът „{scope[0]}“ няма този инструмент. "
+                    f"Има: {', '.join(sorted(scope[1])) or 'никакви'}.")
+        from genesis_agent import plan_mode
+        refusal = plan_mode.refusal(name, args)
+        if refusal:
+            return refusal
+        from genesis_agent import hooks
+        blocked = hooks.pre_tool(hook_name, hook_args)
+        if blocked:
+            return blocked
+    except Exception as e:
+        return f"[{name}] ⛔ Проверката преди инструмента се провали ({e}) — не е изпълнен."
+    elided = _copies_elided_mark(name, args)
+    if elided:
+        return elided
+    if name in ("WRITE_FILE", "EDIT_FILE") and args.get("path"):
+        try:
+            from genesis_agent import edit_history
+            edit_history.record(_resolve_noted(str(args["path"]), redirect=False)[0])
+        except Exception:
+            pass
+    elif _may_change_files(name, args):
+        # Команда, умение, MCP: пипат файлове, които никой не е назовал —
+        # снимка на проекта преди и след тях, за /undo (2026-10-09).
+        try:
+            from genesis_agent import edit_history
+            if name == "RUN_BG" or (name == "RUN_CMD" and str(args.get("background", "")).strip()
+                                    .lower() in ("true", "1", "yes")):
+                # Фонова: пише и след края на хода — снимка не помага. Ходът се
+                # маркира в background.start, когато процесът наистина тръгне.
+                pass
+            else:
+                # Командите и уменията минават през sandbox: снимката — когато
+                # процесът тръгне, след одобрението (одит 2026-10-09).
+                edit_history.before_command(Path(_WORKSPACE),
+                                            at_exec=name in ("RUN_CMD", "USE_SKILL"))
+        except Exception:
+            pass
+    return None
+
+
+def _copies_elided_mark(name: str, args: dict) -> str | None:
+    """Отказва запис, който носи маркера за изпуснато от историята (B.12).
+
+    budget._elide_old_writes заменя съдържанието на стари записи в изпратеното
+    копие с маркер; в текстов режим слаб модел вижда
+    WRITE_FILE({path, content: <маркер>…}) и може да го препише като „код“ —
+    файлът би станал един ред бележка. Пазачът е в кода, не в промпта, и е
+    винаги включен, независимо от GENESIS_ELIDE_OLD_WRITES (2026-10-11): двата
+    пътя (native и текстови тагове) стигат дотук с нормализирани аргументи.
+    RUN_CMD/RUN_BG също — heredoc в команда е същият запис по друг път.
+    Хваща се формата на маркера, не голото му име (budget.carries_elided_mark)
+    — иначе търсене или commit съобщение, които го назовават, се отказваха."""
+    if name in ("WRITE_FILE", "EDIT_FILE"):
+        text = str(args.get("content", "")) + str(args.get("new", ""))
+    elif name in ("RUN_CMD", "RUN_BG"):
+        text = str(args.get("command", "")) + str(args.get("arg", ""))
+    else:
+        return None
+    from genesis_agent.budget import carries_elided_mark
+    if not carries_elided_mark(text):
+        return None
+    target = args.get("path") or args.get("command") or args.get("arg") or ""
+    return (f"[{name}: {str(target)[:120]}] ⛔ Това е маркер за изпуснато от историята, "
+            f"не съдържание — прочети файла с READ_FILE и напиши истинския код.")
+
+
+def _may_change_files(name: str, args: dict) -> bool:
+    from genesis_agent import plan_mode
+    if name in plan_mode.READ_ONLY_TOOLS or name in ("BG_KILL", "REMEMBER", "TASK_ADD",
+                                                     "TASK_UPDATE", "TODO_WRITE"):
+        return False
+    if name.startswith(("BROWSE", "BROWSER_")):
+        return False
+    if name.startswith("mcp__"):
+        try:
+            from genesis_agent import mcp_client
+            return not mcp_client.is_read_only(name)
+        except Exception:
+            return True
+    return True
+
+
+def _after_tool(name: str, args: dict, result: str) -> str:
+    try:
+        from genesis_agent import hooks
+        hook_name, hook_args = _hook_view(name, args)
+        out = hooks.post_tool(hook_name, hook_args, result)
+    except Exception:
+        out = result
+    # СЛЕД PostToolUse hooks: `ruff format` след EDIT_FILE иначе изглеждаше
+    # като чужда промяна и /undo оставяше файла (одит 2026-10-09).
+    if name in ("WRITE_FILE", "EDIT_FILE") and args.get("path"):
+        try:  # отказан/неуспешен запис не е промяна за /undo
+            from genesis_agent import edit_history
+            edit_history.forget_if_unchanged(_resolve_noted(str(args["path"]), redirect=False)[0])
+        except Exception:
+            pass
+    elif _may_change_files(name, args) and not (
+            name == "RUN_BG" or (name == "RUN_CMD" and str(args.get("background", "")).strip()
+                                 .lower() in ("true", "1", "yes"))):
+        try:  # какво промени командата — само между двете снимки
+            from genesis_agent import edit_history
+            edit_history.after_command()
+        except Exception:
+            pass
+    return out
 
 
 def parse_and_execute_readonly_tools(response_text: str) -> list[str]:
@@ -748,6 +1457,48 @@ def parse_and_execute_readonly_tools(response_text: str) -> list[str]:
     return [r for _, r in results]
 
 
+# Claude (през `claude -p`, 2026-10-12) понякога пише ПЪРВИЯ инструмент в
+# своя собствен XML формат, а останалите — с нашите тагове. Измерено на 30
+# сурови отговора от bench (vat/eik/iban ×2): 6 започваха с
+# `<invoke name="WRITE_FILE">път</parameter>` / `<invoke name="RUN_CMD">pwd</invoke>`;
+# всеки струваше рунд („първият ми WRITE_FILE беше с грешен синтаксис“), а
+# отговор САМО с XML не съдържаше `[TAG:` — нямаше подкана и ходът свършваше
+# без нито един инструмент (vat-check 0/1). Превръщат се само имената на
+# нашите инструменти; всичко друго остава текст.
+_XML_TOOLS = ("WRITE_FILE|EDIT_FILE|READ_FILE|RUN_CMD|RUN_BG|LIST_DIR|SEARCH_CODE|GLOB|"
+              "REPO_MAP|WEB_SEARCH|WEB_FETCH|ASK_USER|EXPLORE|TODO_WRITE|BG_OUTPUT|BG_KILL")
+_XML_BLOCK_OPEN_RE = re.compile(
+    r'<invoke name="(?P<tool>WRITE_FILE|EDIT_FILE)">\s*'
+    r'(?:<parameter name="(?:path|file_path)">)?\s*(?P<path>[^\n<\]]+?)\s*'
+    r'(?:</parameter>|</invoke>)?[ \t]*\n'
+    r'(?:\s*<parameter name="(?:content|body)">)?')
+_XML_BLOCK_CLOSE_RE = re.compile(r"\n?[ \t]*</(?:parameter|invoke)>\s*(?=\[END_(?:WRITE|EDIT)\])")
+_XML_SIMPLE_RE = re.compile(
+    r'<invoke name="(?P<tool>' + _XML_TOOLS + r')">\s*'
+    r'(?:<parameter name="\w+">)?(?P<arg>.*?)\s*(?:</parameter>\s*)?</invoke>', re.DOTALL)
+_XML_TAIL_RE = re.compile(r"\s*</parameter>\s*</invoke>\s*\]")
+_XML_WRAPPER_RE = re.compile(r"</?function_calls>\s*")
+
+
+def _normalize_xml_tool_calls(text: str) -> str:
+    """XML формата на Claude за нашите инструменти → нашите тагове."""
+    if "<invoke" not in text and "</parameter>" not in text and "</invoke>" not in text:
+        return text
+    text = _XML_WRAPPER_RE.sub("", text)
+    text = _XML_BLOCK_OPEN_RE.sub(lambda m: f"[{m.group('tool')}: {m.group('path')}]\n", text)
+    text = _XML_BLOCK_CLOSE_RE.sub("\n", text)
+    text = _XML_TAIL_RE.sub("]", text)
+    original = text
+
+    def simple(m: re.Match) -> str:
+        tag = f"[{m.group('tool')}: {m.group('arg')}]"
+        # Същата команда и като XML, и като таг („<invoke name="RUN_CMD">pwd</invoke>
+        # [RUN_CMD: pwd]“) — веднъж, не два пъти (команда със страничен ефект).
+        return "" if tag in original else tag
+
+    return _XML_SIMPLE_RE.sub(simple, text)
+
+
 def parse_and_execute_tools(response_text: str) -> list[str]:
     """
     Извлича и изпълнява всички тул-тагове в реда, в който се появяват.
@@ -765,9 +1516,17 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
     """
     if not response_text:
         return []
+    response_text = _normalize_xml_tool_calls(response_text)
 
-    # (позиция_в_текста, изход) — сортира се по позиция, после се връщат само изходите.
-    results: list[tuple[int, str]] = []
+    # (позиция_в_текста, име, действие) — НИЩО не се изпълнява, докато не са
+    # събрани всички тагове и не е решено влагането. После се изпълняват в
+    # реда на позицията (bug fix, 2026-10-11). Дотук всяка група (блокове →
+    # USE_SKILL → едноредови → BROWSER_READ …) се ИЗПЪЛНЯВАШЕ в свой проход и
+    # само резултатите се сортираха: „[RUN_CMD: cp app.py app.bak]“ преди
+    # „[WRITE_FILE: app.py]“ правеше копието СЛЕД презаписа (измерено:
+    # app.bak = „PRICE = 0“), а върнатите резултати лъжеха модела, че копието
+    # е първо. Същото за READ_FILE преди EDIT_FILE — четенето виждаше новото.
+    actions: list[tuple[int, str, Callable[[], str]]] = []
 
     # ── 1. Блокови тагове: събираме кандидатите, после решаваме влагането ────
     # (start, end, kind, match) за трите блокови типа, подредени по позиция.
@@ -784,28 +1543,32 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
     def _inside_block(pos: int) -> bool:
         return any(s <= pos < e for s, e in consumed_spans)
 
+    def _edit_action(m: re.Match) -> str:
+        body = m.group("body")
+        if _EDIT_SEPARATOR not in body:
+            return (f"[EDIT_FILE: {m.group('path').strip()}] ❌ Липсва разделителят "
+                    f"{_EDIT_SEPARATOR} между стария и новия текст.")
+        old_part, new_part = body.split(_EDIT_SEPARATOR, 1)
+        return _safe_tool("EDIT_FILE", _tool_edit_file, m.group("path"),
+                          _strip_one_newline(old_part), _strip_one_newline(new_part))
+
     for start, end, kind, m in block_candidates:
         if _inside_block(start):
             continue  # вложен в вече приет блок → това е текст, не тул
         consumed_spans.append((start, end))
         if kind == "WRITE_FILE":
-            results.append((start, _safe_tool("WRITE_FILE", _tool_write_file,
-                                              m.group("path"), m.group("body"))))
+            # Новият ред веднага след тага е синтаксис, не съдържание
+            # (2026-10-12): моделите почти винаги го пишат, и всеки файл
+            # започваше с празен ред — а `#!/bin/sh` на втори ред не е shebang.
+            # Само един и само отпред; краят на файла остава какъвто е написан.
+            actions.append((start, kind, partial(
+                _safe_tool, "WRITE_FILE", _tool_write_file, m.group("path"),
+                m.group("body").removeprefix("\r\n").removeprefix("\n"))))
         elif kind == "EDIT_FILE":
-            body = m.group("body")
-            if _EDIT_SEPARATOR not in body:
-                results.append((start,
-                                (f"[EDIT_FILE: {m.group('path').strip()}] ❌ Липсва разделителят "
-                                 f"{_EDIT_SEPARATOR} между стария и новия текст.")))
-            else:
-                old_part, new_part = body.split(_EDIT_SEPARATOR, 1)
-                results.append((start, _safe_tool("EDIT_FILE", _tool_edit_file,
-                                                  m.group("path"),
-                                                  _strip_one_newline(old_part),
-                                                  _strip_one_newline(new_part))))
+            actions.append((start, kind, partial(_edit_action, m)))
         else:  # USE_SKILL
-            results.append((start, _safe_tool("USE_SKILL", _tool_use_skill,
-                                              m.group("name"), m.group("body"))))
+            actions.append((start, kind, partial(
+                _safe_tool, "USE_SKILL", _tool_use_skill, m.group("name"), m.group("body"))))
 
     # ── 1b. USE_SKILL БЕЗ затварящ [END_USE_SKILL] ──────────────────────────
     # Най-скъпият пропуск в целия парсер (bug fix, 2026-09-20). driver кодът е
@@ -820,10 +1583,7 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
     # пише същото пак — и рундовете изгарят, без нито един скил да е тръгнал.
     # Тук consume-ваме САМО самия таг (не остатъка от отговора), за да могат
     # другите тагове след него пак да се изпълнят.
-    for m in _BARE_USE_SKILL_RE.finditer(response_text):
-        if _inside_block(m.start()):
-            continue
-        consumed_spans.append((m.start(), m.end()))
+    def _bare_skill_action(m: re.Match) -> str:
         out = _safe_tool("USE_SKILL", _tool_use_skill, m.group("name"), "")
         # Изпълнено е — но ако моделът е искал да ВИКА нещо от умението, нека
         # научи точния синтаксис, вместо да гадае пак следващия рунд. Само при
@@ -832,36 +1592,52 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
         if not any(marker in out for marker in _USE_SKILL_FAILURES):
             out += ("\n(Без driver код — блокът не беше затворен. За да извикаш функция "
                     "от умението: [USE_SKILL: име]<твоят код>[END_USE_SKILL].)")
-        results.append((m.start(), out))
+        return out
+
+    for m in _BARE_USE_SKILL_RE.finditer(response_text):
+        if _inside_block(m.start()):
+            continue
+        consumed_spans.append((m.start(), m.end()))
+        actions.append((m.start(), "USE_SKILL", partial(_bare_skill_action, m)))
 
     # ── 2. Едноредови тулове — прескачаме тези вътре в блоков таг ───────────
     for m in _SIMPLE_RE.finditer(response_text):
         if _inside_block(m.start()):
             continue
-        fn = _SIMPLE_DISPATCH[m.group("tool")]
-        results.append((m.start(), _safe_tool(m.group("tool"), fn, m.group("arg"))))
+        tool = m.group("tool")
+        actions.append((m.start(), tool, partial(
+            _safe_tool, tool, _SIMPLE_DISPATCH[tool], m.group("arg"))))
 
-    # 3. BROWSER_READ — без аргумент.
-    for m in _BROWSER_READ_RE.finditer(response_text):
-        if _inside_block(m.start()):
+    # 3. BROWSER_READ — без аргумент. 3b. REPO_MAP без аргумент — картира
+    # текущия workspace. 4. TASK_LIST без аргумент — показва отворените нишки.
+    no_arg: tuple[tuple[str, re.Pattern, Callable[[], str]], ...] = (
+        ("BROWSER_READ", _BROWSER_READ_RE, partial(_safe_tool, "BROWSER_READ", _tool_browser_read)),
+        ("REPO_MAP", _REPO_MAP_RE, partial(_safe_tool, "REPO_MAP", _tool_repo_map, "")),
+        ("TASK_LIST", _TASK_LIST_RE, partial(_safe_tool, "TASK_LIST", _tool_task_list, "open")))
+    for name, rx, thunk in no_arg:
+        for m in rx.finditer(response_text):
+            if _inside_block(m.start()):
+                continue
+            actions.append((m.start(), name, thunk))
+
+    # Изпълняваме по позиция в текста (sort е стабилен; позициите не се дублират).
+    actions.sort(key=lambda a: a[0])
+    results: list[str] = []
+    asked = False
+    for _pos, name, thunk in actions:
+        if asked:
+            # Таговете СЛЕД ASK_USER чакат отговора (bug fix, 2026-10-11).
+            # Измерено: „[ASK_USER: Да презапиша ли notes.txt?]“ + WRITE_FILE
+            # в същата реплика записваше файла, преди операторът да отговори.
+            # Резултат-заместител вместо мълчание — моделът трябва да знае, че
+            # не е направено.
+            results.append(f"[{name}] не е изпълнено — чака отговора на оператора.")
             continue
-        results.append((m.start(), _safe_tool("BROWSER_READ", _tool_browser_read)))
-
-    # 3b. REPO_MAP без аргумент — картира текущия workspace.
-    for m in _REPO_MAP_RE.finditer(response_text):
-        if _inside_block(m.start()):
-            continue
-        results.append((m.start(), _safe_tool("REPO_MAP", _tool_repo_map, "")))
-
-    # 4. TASK_LIST без аргумент — [TASK_LIST] показва отворените нишки.
-    for m in _TASK_LIST_RE.finditer(response_text):
-        if _inside_block(m.start()):
-            continue
-        results.append((m.start(), _safe_tool("TASK_LIST", _tool_task_list, "open")))
-
-    # Подреждаме по позиция в текста, връщаме само низовете.
-    results.sort(key=lambda t: t[0])
-    return [r for _, r in results]
+        out = thunk()
+        results.append(out)
+        if name == "ASK_USER" and ASK_USER_MARKER in out:
+            asked = True
+    return results
 
 
 # Всяко скоби-подобно "[ГЛАВНИ_БУКВИ:" или "[ГЛАВНИ_БУКВИ]" в текста — независимо
@@ -879,7 +1655,9 @@ def looks_like_attempted_tool_tag(response_text: str) -> bool:
     истински таг не е разпознат от parse_and_execute_tools за него."""
     if not response_text:
         return False
-    return bool(_ATTEMPTED_TAG_RE.search(response_text))
+    # `<invoke name="…">`, останал след _normalize_xml_tool_calls, също е опит
+    # за инструмент — иначе ходът свършваше тихо (2026-10-12, виж горе).
+    return bool(_ATTEMPTED_TAG_RE.search(response_text) or "<invoke name=" in response_text)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -899,24 +1677,44 @@ def dispatch_tool_call(name: str, arguments) -> str:
     връща — всички текущи callers правят json.loads() сами, но подаването на
     низ иначе гърми с неясното "'str' object has no attribute 'get'"."""
     if isinstance(arguments, str):
-        import json as _json
         try:
-            arguments = _json.loads(arguments or "{}")
-        except (ValueError, TypeError):
-            return f"[{name}] Невалидни аргументи (не са валиден JSON): {arguments[:200]}"
+            arguments = load_tool_arguments(arguments)
+        except (ValueError, TypeError) as e:
+            msg = f"[{name}] Невалидни аргументи (не са валиден JSON): {arguments[:200]}"
+            # JSON, свършил посред низ/обект, е отрязан на изходния таван
+            # (ревю 2026-10-11): Brain го връща, щом го отреже всеки модел, и
+            # без тази подсказка моделът пращаше същия голям запис пак.
+            if isinstance(e, json.JSONDecodeError) and (
+                    e.msg.startswith("Unterminated string") or e.pos >= len(arguments.rstrip())):
+                msg += ("\nАргументите са отрязани — по-дълги са от изходния таван на "
+                        "модела. Раздели записа: по-малки файлове или WRITE_FILE с "
+                        "началото и EDIT_FILE за останалото.")
+            return msg
     if not isinstance(arguments, dict):
         arguments = {}
+    blocked = _before_tool(name, arguments)
+    if blocked:
+        return blocked
+    return _after_tool(name, arguments, _dispatch(name, arguments))
+
+
+def _dispatch(name: str, arguments: dict) -> str:
     try:
         if name == "READ_FILE":
             return _tool_read_file(arguments.get("path", ""),
                                    arguments.get("offset"), arguments.get("limit"))
         if name == "WRITE_FILE":
-            return _tool_write_file(arguments.get("path", ""), arguments.get("content", ""))
+            return _tool_write_file(arguments.get("path", ""), arguments.get("content", ""),
+                                    str(arguments.get("exact", "")).strip().lower()
+                                    in ("true", "1", "yes"))
         if name == "EDIT_FILE":
             return _tool_edit_file(arguments.get("path", ""),
                                    arguments.get("old", ""),
                                    arguments.get("new", ""),
-                                   bool(arguments.get("replace_all", False)))
+                                   # „false“ като низ е истина в Python: заменяше
+                                   # всички съвпадения вместо отказ (одит 2026-10-09)
+                                   str(arguments.get("replace_all", "")).strip().lower()
+                                   in ("true", "1", "yes"))
         if name == "SEARCH_CODE":
             return _tool_search_code(arguments.get("pattern", ""),
                                      arguments.get("path", "") or "",
@@ -928,7 +1726,25 @@ def dispatch_tool_call(name: str, arguments) -> str:
             path = arguments.get("path", "") or ""
             return _tool_glob(f"{pattern} | {path}" if path else pattern)
         if name == "RUN_CMD":
+            # „false“ като низ е истина в Python — фонът само при изрично да (одит 2026-10-08)
+            if str(arguments.get("background", "")).strip().lower() in ("true", "1", "yes"):
+                return _tool_run_bg(arguments.get("command", ""))
             return _tool_run_cmd(arguments.get("command", ""))
+        if name == "EXPLORE":
+            return _tool_explore(str(arguments.get("question", "") or ""))
+        if name == "AGENT":
+            return _tool_agent(str(arguments.get("agent", "") or ""),
+                               str(arguments.get("task", "") or ""))
+        if name == "TODO_WRITE":
+            return _todos().write(arguments.get("todos", []))
+        if name == "WEB_FETCH":
+            return _tool_web_fetch(str(arguments.get("url", "") or ""))
+        if name.startswith("mcp__"):
+            return _mcp().call(name, arguments)
+        if name == "BG_OUTPUT":
+            return _background().output(str(arguments.get("id", "") or ""))
+        if name == "BG_KILL":
+            return _background().kill(str(arguments.get("id", "") or ""))
         if name == "ASK_USER":
             return _tool_ask_user(arguments.get("question", ""),
                                   arguments.get("options"))

@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import logging
+import posixpath
+import re
 from collections import defaultdict
 from datetime import date, datetime, timezone
 from typing import Any
@@ -24,6 +26,8 @@ log = logging.getLogger("genesis.budget")
 
 from genesis_agent.config import (
     DATA_DIR,
+    ELIDE_OLD_WRITES,
+    ELIDE_WRITE_ROUNDS,
     FRESH_TOOL_RESULTS,
     STALE_TOOL_RESULT_MAX_CHARS,
     TOOL_RESULT_MAX_CHARS,
@@ -36,6 +40,19 @@ LOG_PATH = DATA_DIR / "budget_log.jsonl"
 # пътят ги слага като role="tool"; и двата трябва да минават през бюджета,
 # иначе половината фронтенди го заобикалят тихо.
 _TEXT_RESULT_PREFIX = "[Резултат]:"
+# Инструкцията, която терминалът добавя след текстовите резултати. Държи се тук,
+# за да може budget_history да я махне от СТАРИТЕ резултати (2026-10-11): 444
+# знака в края изяждаха опашката на middle-out свиването — от изхода на pytest
+# оставаха 286 знака срещу 728 при native, и всеки стар резултат я плащаше пак.
+# Нужна е само на последния рунд.
+TEXT_RESULT_FOLLOWUP = (
+    "\n\nАко тези резултати вече изпълняват заявката на потребителя "
+    "напълно — дай КРАТКО финално обобщение БЕЗ никакви нови tool тагове. "
+    "Викай нов tool САМО ако наистина има следваща реална стъпка. "
+    "ВАЖНО: ако някоя команда е отказана от оператора (SANDBOX DECLINED), "
+    "но ДРУГ резултат по-горе вече доказва, че целта е постигната (напр. "
+    "командата вече работи правилно) — не настоявай за отказаната команда, "
+    "просто отчети успех с наличните доказателства.")
 
 # Под този размер дедупликацията не си струва — препратката е по-дълга от
 # самото съдържание ("✓ записано", "OK", кратък git status).
@@ -47,6 +64,11 @@ _CLIP_NOTICE_TEMPLATE = ("\n\n… [отрязани {cut} символа от с
                          "операторът вижда пълния изход] …\n\n")
 _DEDUP_NOTICE = ("[идентичен резултат — същото съдържание стои по-долу в този "
                  "разговор; не го извиквай пак, вече го имаш]")
+# Когато и по-новото копие е старо и свито (2026-10-11): READ_FILE от 6 650
+# знака стигаше до модела само като 2 074, а бележката забраняваше повторно
+# четене — EDIT_FILE иска точния текст, моделът трябваше да гадае.
+_DEDUP_NOTICE_CLIPPED = ("[идентичен резултат — по-новото копие по-долу също е "
+                         "съкратено; ако ти трябва цялото, извикай пак]")
 
 
 def clip_for_context(text: str, limit: int | None = None) -> str:
@@ -86,12 +108,158 @@ def clip_for_context(text: str, limit: int | None = None) -> str:
     )
 
 
+def _without_followup(content: str) -> str:
+    return content.removesuffix(TEXT_RESULT_FOLLOWUP)
+
+
 def _is_tool_result(msg: dict) -> bool:
     """Съобщение, което носи ИЗХОД от инструмент — по който и от двата пътя."""
     if msg.get("role") == "tool":
         return True
     return (msg.get("role") == "system"
             and str(msg.get("content", "")).startswith(_TEXT_RESULT_PREFIX))
+
+
+# Колко съобщения тръгват към модела — колкото беше deque(maxlen=30) на
+# фронтендите. Досега таванът беше самият deque и режеше отпред посред хода:
+# системния промпт, после заявката (виж request_window).
+MAX_SENT_MESSAGES = 30
+
+
+def request_window(messages, limit: int = MAX_SENT_MESSAGES) -> list[dict]:
+    """Най-много `limit` съобщения към модела — без да се губи задачата.
+
+    Водещите system съобщения и последното user съобщение (заявката, по която
+    се работи) остават винаги; от останалото — най-новото, от цял рунд (без
+    tool резултат, чието извикване е отрязано). 2026-09-30: без user
+    съобщение ollama само „зарежда“ модела (done_reason=load, prompt=0) и
+    отговаря празно — 13 от 210 bench разговора минаха на 8× по-бавния
+    NVIDIA до края си, а той продължаваше без задачата."""
+    msgs = list(messages)
+    if limit <= 0 or len(msgs) <= limit:
+        return msgs
+    lead = 0
+    while lead < len(msgs) and msgs[lead].get("role") == "system":
+        lead += 1
+    users = [i for i in range(lead, len(msgs)) if msgs[i].get("role") == "user"]
+    task = users[-1] if users else None
+    pinned = msgs[:lead] + ([msgs[task]] if task is not None else [])
+    before = msgs[lead:task] if task is not None else []
+    after = msgs[task + 1:] if task is not None else msgs[lead:]
+    room = max(limit - len(pinned), 0)
+    after = _whole_rounds(after[-room:] if room else [])
+    room -= len(after)
+    before = _whole_rounds(before[-room:] if room > 0 else [])
+    return msgs[:lead] + before + ([msgs[task]] if task is not None else []) + after
+
+
+def _whole_rounds(tail: list[dict]) -> list[dict]:
+    while tail and tail[0].get("role") == "tool":
+        tail = tail[1:]
+    return tail
+
+
+# Маркерът за изпуснато съдържание (B.12, 2026-10-11). Сглобява се, вместо да
+# стои буквално: genesis_skills._before_tool отказва запис, който го съдържа
+# (слаб модел в текстов режим вижда WRITE_FILE({..., content: <маркер>}) и го
+# копира като „код“), а Genesis редактира и собствения си код — буквален низ
+# тук би блокирал всяко самопоправяне на този файл.
+ELIDED_TAG = "genesis:" + "elided"
+ELIDED_MARK = "⟦" + ELIDED_TAG
+# Какво е „копие на маркера“ (ревю 2026-10-11): голото ASCII име се срещаше в
+# легитимни команди и бележки — търсене за него, commit съобщение, .md, която
+# го описва — и пазачът ги отказваше с подвеждащото „прочети файла“. Хваща се
+# само формата, която _elide_old_writes слага: „⟦“ + името, или името + брой
+# символи (същото, без скобата — heredoc в команда, сдъвкан до ASCII).
+_ELIDED_COPY = re.compile(re.escape(ELIDED_MARK) + "|" + re.escape(ELIDED_TAG) + r"\s+\d+(?:\s|$)")
+_ELIDE_KEYS = ("content", "old", "new")
+_ELIDE_MIN_CHARS = 300
+
+
+def carries_elided_mark(text: str) -> bool:
+    """Дали текстът носи маркера, който _elide_old_writes слага на мястото на
+    съдържанието (а не само назовава името му)."""
+    return bool(_ELIDED_COPY.search(text))
+
+
+def _norm_path(path: str) -> str:
+    p = posixpath.normpath(path.replace("\\", "/"))
+    return p.removeprefix("./")
+
+
+def _function_of(tc: Any) -> dict:
+    fn = tc.get("function") if isinstance(tc, dict) else None
+    return fn if isinstance(fn, dict) else {}
+
+
+def _parse_args(raw: Any) -> dict | None:
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str):
+        return None
+    try:
+        args = json.loads(raw)
+    except ValueError:  # отрязан JSON (виж brain._has_cut_tool_arguments) — не се пипа
+        return None
+    return args if isinstance(args, dict) else None
+
+
+def _elide_old_writes(messages: list[dict], k: int) -> list[dict]:
+    """Съдържанието на стари WRITE_FILE/EDIT_FILE аргументи → кратък маркер.
+
+    Защо: файлът, който моделът е написал, пътува в аргументите на неговото
+    извикване и се праща наново на всеки рунд, докато не изпадне от прозореца.
+    bench_history (2026-10-11, seed 7) до рунд ~15 — 48% от заявката. Изпуска
+    се, когато (а) по-късен WRITE_FILE пише същия път (старото вече не е
+    текущо), или (б) извикването е на ≥ k рунда назад. Пътища, различни само
+    по изписване, не се смятат за същия файл — безопасен пропуск.
+
+    Само в изпратеното копие: входът не се мутира; ролите, id-тата, броят
+    извиквания и tool съобщенията остават същите, тоест сдвояването при всеки
+    доставчик (OpenAI, Anthropic tool_use/tool_result, текстов режим) е
+    непокътнато. Текущият рунд не се пипа никога (k ≥ 2)."""
+    k = max(int(k), 2)
+    rounds = [i for i, m in enumerate(messages)
+              if isinstance(m, dict) and m.get("role") == "assistant"
+              and isinstance(m.get("tool_calls"), list) and m["tool_calls"]]
+    if len(rounds) < 2:
+        return list(messages)
+    # Последният индекс, на който се пише всеки път — „по-късен запис“.
+    last_write: dict[str, tuple[int, int]] = {}
+    for i in rounds:
+        for j, tc in enumerate(messages[i]["tool_calls"]):
+            fn = _function_of(tc)
+            args = _parse_args(fn.get("arguments"))
+            if fn.get("name") == "WRITE_FILE" and args and isinstance(args.get("path"), str):
+                last_write[_norm_path(args["path"])] = (i, j)
+    out = list(messages)
+    for age, i in enumerate(reversed(rounds)):
+        if age == 0:
+            continue
+        msg = messages[i]
+        calls = []
+        changed = False
+        for j, tc in enumerate(msg["tool_calls"]):
+            fn = _function_of(tc)
+            raw = fn.get("arguments")
+            args = _parse_args(raw)
+            path = args.get("path") if args else None
+            if (args and fn.get("name") in ("WRITE_FILE", "EDIT_FILE") and isinstance(path, str)
+                    and (age >= k or last_write.get(_norm_path(path), (i, j)) > (i, j))):
+                new_args = {key: (f"{ELIDED_MARK} {len(v)} символа — НЕ е съдържание; "
+                                  f"текущият вид: READ_FILE {path}⟧"
+                                  if key in _ELIDE_KEYS and isinstance(v, str)
+                                  and len(v) >= _ELIDE_MIN_CHARS else v)
+                            for key, v in args.items()}
+                if new_args != args:
+                    packed: Any = (new_args if isinstance(raw, dict)
+                                   else json.dumps(new_args, ensure_ascii=False))
+                    tc = {**tc, "function": {**fn, "arguments": packed}}
+                    changed = True
+            calls.append(tc)
+        if changed:
+            out[i] = {**msg, "tool_calls": calls}
+    return out
 
 
 def budget_history(messages, *, fresh: int | None = None,
@@ -119,8 +287,12 @@ def budget_history(messages, *, fresh: int | None = None,
     fresh = FRESH_TOOL_RESULTS if fresh is None else fresh
     stale_limit = STALE_TOOL_RESULT_MAX_CHARS if stale_limit is None else stale_limit
     msgs = list(messages)
+    # Първо, за да важи и за ранните изходи по-долу (B.12, изключено по
+    # подразбиране — виж config.ELIDE_OLD_WRITES).
+    if ELIDE_OLD_WRITES:
+        msgs = _elide_old_writes(msgs, ELIDE_WRITE_ROUNDS)
     if stale_limit <= 0:
-        return msgs
+        return request_window(msgs)
 
     result_idx = [i for i, m in enumerate(msgs) if isinstance(m, dict) and _is_tool_result(m)]
     stale = set(result_idx[:-fresh] if fresh > 0 else result_idx)
@@ -140,18 +312,24 @@ def budget_history(messages, *, fresh: int | None = None,
     duplicates = {i for i in result_idx
                   if latest_of.get(str(msgs[i].get("content", ""))) not in (None, i)}
     if not stale and not duplicates:
-        return msgs
+        return request_window(msgs)
 
     out = []
     for i, m in enumerate(msgs):
         if i in duplicates:
-            m = {**m, "content": _DEDUP_NOTICE}
+            content = str(m.get("content", ""))
+            kept = latest_of[content]
+            clipped = kept in stale and len(_without_followup(content)) > stale_limit
+            m = {**m, "content": _DEDUP_NOTICE_CLIPPED if clipped else _DEDUP_NOTICE}
         elif i in stale:
             content = str(m.get("content", ""))
+            if m.get("role") == "system" and content.endswith(TEXT_RESULT_FOLLOWUP):
+                content = _without_followup(content)
+                m = {**m, "content": content}
             if len(content) > stale_limit:
                 m = {**m, "content": clip_for_context(content, limit=stale_limit)}
         out.append(m)
-    return out
+    return request_window(out)
 
 
 def record_usage(*, provider: str, model: str, prompt_tokens: int,
@@ -196,10 +374,13 @@ def _read_entries():
                 if not line:
                     continue
                 try:
-                    yield json.loads(line)
+                    entry = json.loads(line)
                 except Exception as e:
                     log.debug("budget: пропускам развален JSONL ред: %s", e)
                     continue
+                # Валиден JSON, но не запис (`7`, `[...]`) сриваше `genesis budget`.
+                if isinstance(entry, dict):
+                    yield entry
     except OSError as e:
         log.debug("budget: не мога да прочета %s: %s", LOG_PATH, e)
         return
@@ -245,6 +426,8 @@ def range_totals(days: int = 7) -> dict:
         "calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
         "cached_read_tokens": 0, "cached_write_tokens": 0,
         "by_provider": defaultdict(lambda: {"calls": 0, "total_tokens": 0})}
+    # Таван: `genesis budget 1000000` гърмеше с OverflowError (преди година 1).
+    days = max(1, min(int(days), 36_500))
     cutoff = datetime.now(timezone.utc).date() - timedelta(days=days - 1)
     for e in _read_entries():
         ts = e.get("ts", "")

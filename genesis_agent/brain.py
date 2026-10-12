@@ -31,7 +31,10 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+import re
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -43,8 +46,9 @@ import yaml
 from genesis_agent.paths import (
     CONFIG_PATH,
     ENV_FILES,
-    _strip_inline_comment,
+    env_value,
 )
+from genesis_agent.tool_schemas import load_tool_arguments
 
 # Extra ollama_cloud keys an operator may add THEMSELVES to their own
 # gitignored ~/.genesis/.env — OLLAMA_API_KEY_2 through _10. Not suggested,
@@ -57,6 +61,36 @@ log = logging.getLogger("genesis.brain")
 CLOUD_TIMEOUT = 90
 LOCAL_TIMEOUT = 240  # локалният 3B модел на слаб GPU е бавен — даваме му време
 RETRY_ROUNDS = 2  # колко пъти да обходим цялата верига при пълен провал
+_ROUND_PAUSE_S = 8  # пауза между два кръга по веригата
+# Общ краен срок на едно обръщение = timeout × това. `timeout` на requests е
+# между два пакета, не общ: OpenRouter държи връзката жива с празни редове,
+# докато безплатният модел чака, и обръщението висеше без край (2026-09-25:
+# проба спря 40 мин след 429-ци, 0 CPU, отворена HTTPS връзка; сутринта —
+# 1 299 s). ×4 оставя място за дълъг легитимен отговор (16k токена).
+_TOTAL_DEADLINE_FACTOR = 4
+
+
+def _post_with_deadline(url: str, *, headers: dict, json: dict, timeout: int) -> Any:
+    """requests.post с общ краен срок: след него → requests Timeout (→ следващ
+    модел във веригата). Нишката се изоставя (daemon) — сокетът се затваря,
+    когато сървърът приключи; процесът не я чака при изход."""
+    box: dict[str, Any] = {}
+
+    def _run() -> None:
+        try:
+            box["r"] = requests.post(url, headers=headers, json=json, timeout=timeout)
+        except BaseException as e:  # предава се на викащия
+            box["e"] = e
+
+    worker = threading.Thread(target=_run, daemon=True, name="genesis-http")
+    worker.start()
+    deadline = timeout * _TOTAL_DEADLINE_FACTOR
+    worker.join(deadline)
+    if worker.is_alive():
+        raise requests.exceptions.Timeout(f"няма отговор за {deadline} s (общ краен срок)")
+    if "e" in box:
+        raise box["e"]
+    return box["r"]
 
 # Таван на изходните токени за OpenAI-съвместимите доставчици. 4096 е стойността,
 # с която проектът работи от началото — оставена е като подразбиране нарочно
@@ -173,10 +207,73 @@ _PROVIDERS = {
     # в `_call` и свой модул (genesis_agent.vertex_auth), вместо ред тук с
     # фиксиран base_url. key_env сочи проекта — „конфигуриран" значи „има проект".
     "vertex": ("dynamic://vertex", "GOOGLE_CLOUD_PROJECT"),
+    # Claude през официалния `claude` CLI с абонамента на оператора (2026-10-12,
+    # genesis_agent/claude_cli.py). Без ключ: входът е на `claude` (/login).
+    # Не е в нито една верига от config.yaml — само ръчен избор (`/model` или
+    # GENESIS_START_PROVIDER), и никога в облака (виж _call_claude_cli).
+    "claude_cli": ("native://claude_cli", None),
 }
 
 # Кои доставчици се викат през native SDK вместо през OpenAI-съвместим HTTP.
 _NATIVE_PROVIDERS = {"anthropic"}
+
+
+def _print_skip(provider: str, model: str, error: str, seconds: float) -> None:
+    """Един ред, когато модел отпадне и веригата продължи.
+
+    Досега се печаташе само кой е отговорил („↪ модел: …“), не защо горният
+    е отпаднал. 2026-09-25 (ЕГН проект): 24 от 42 обръщения отидоха на
+    nvidia ultra (5–10× по-бавен), 399 s за малка задача, а в лога нямаше
+    нито една причина за ollama. Грешките на ниво ключ (429 на ключ) си имат
+    свой ред в _call и не минават оттук.
+    """
+    reason = " ".join(error.split())[:80]
+    print(f"  [Brain] ✗ {provider}/{model} след {seconds:.1f}s: {reason} → следващ")
+
+
+def _is_transient(error: str) -> bool:
+    return any(error.startswith(f"HTTP_{c}") for c in _TRANSIENT_CODES)
+
+
+def _hit_output_cap(error: str) -> bool:
+    """Отговор, отрязан на тавана на изходните токени (HTTP_TRUNCATED) — лимит на
+    модела за дълъг отговор, не болен доставчик. Същото понятие, по което
+    complete() не праща втори кръг и пази отрязания tool_call (2026-10-11):
+    празен отговор с finish_reason=length остава обикновен провал, както в базата."""
+    return "HTTP_TRUNCATED" in error
+
+
+def _openai_usage(usage: Any) -> Any:
+    """usage от OpenAI-съвместим отговор + `cached_read_tokens` за budget.py.
+
+    Ollama Cloud кешира префикса сам и връща колко е прочетено от кеша в
+    `prompt_tokens_details.cached_tokens` (измерено 2026-09-25: 4 064 от 4 089
+    на второто обръщение със същия системен промпт). Досега полето не се
+    четеше и `genesis budget` показваше кеш 0 при всички освен Anthropic.
+    Groq (gpt-oss) и NVIDIA не го връщат — тогава usage остава както е.
+    """
+    if not isinstance(usage, dict):
+        return usage
+    details = usage.get("prompt_tokens_details")
+    cached = details.get("cached_tokens") if isinstance(details, dict) else None
+    if not cached:
+        return usage
+    return {**usage, "cached_read_tokens": int(cached)}
+
+
+def provider_base_url(provider: str) -> str:
+    """Адресът, на който се вика доставчикът.
+
+    Онлайн услугата (cloud/gateway): задачата е в контейнер без изход навън и
+    без истински ключове. `GENESIS_MODEL_GATEWAY` я праща към шлюза на сървъра
+    (`<шлюз>/<доставчик>/chat/completions`), който слага ключа и брои токените.
+    Само отдалечените OpenAI-съвместими — локалният, native и Vertex не минават.
+    """
+    base_url = _PROVIDERS[provider][0]
+    gateway = os.environ.get("GENESIS_MODEL_GATEWAY", "").strip().rstrip("/")
+    if gateway and base_url.startswith("https://") and provider not in _NATIVE_PROVIDERS:
+        return f"{gateway}/{provider}"
+    return base_url
 
 # Локалният модел (собственият мозък на Genesis). Празно → изключен.
 LOCAL_MODEL = os.environ.get("GENESIS_LOCAL_MODEL", "qwen2.5-coder:3b")
@@ -209,18 +306,45 @@ def set_local_only(model_id: str | None) -> None:
         LOCAL_MODEL = os.environ.get("GENESIS_LOCAL_MODEL", "qwen2.5-coder:3b")
 
 
-def _local_available(model: str) -> bool:
-    """Проверява дали Ollama върви локално и има модела."""
-    if not model:
-        return False
+def _ollama_installed() -> list[str]:
+    """Имената (с таг) на инсталираните в локалния Ollama модели; [] без Ollama."""
     try:
         r = requests.get("http://localhost:11434/api/tags", timeout=2)
         if r.status_code == 200:
-            names = [m.get("name", "") for m in r.json().get("models", [])]
-            return any(model.split(":")[0] in n for n in names)
+            return [str(m.get("name", "")) for m in r.json().get("models", [])]
     except Exception:
+        return []
+    return []
+
+
+def _same_ollama_model(model: str, name: str) -> bool:
+    """Точно този таг; име без таг значи `:latest`, както го чете Ollama."""
+    return name == model or (":" not in model and name == f"{model}:latest")
+
+
+def _local_available(model: str) -> bool:
+    """Проверява дали Ollama върви локално и има ТОЧНО този модел.
+
+    Сравнението беше само по семейство (одит 2026-10-11): с инсталиран само
+    qwen2.5-coder:7b `qwen2.5-coder:3b` излизаше наличен, последната резерва
+    викаше липсващ модел и получаваше 404, а `/local_model_max` (qwen3:14b)
+    се включваше при инсталиран само qwen3:4b."""
+    if not model:
         return False
-    return False
+    return any(_same_ollama_model(model, n) for n in _ollama_installed())
+
+
+def _installed_local_tier(names: list[str] | None = None) -> str | None:
+    """Първото инсталирано ниво от model_router.LOCAL_TIERS (от бързо към мощно).
+
+    `names` — вече прочетеният /api/tags, за да не се пита Ollama втори път."""
+    try:
+        from genesis_agent.model_router import LOCAL_TIERS
+    except Exception:
+        return None
+    if names is None:
+        names = _ollama_installed()
+    return next((t for t in LOCAL_TIERS if any(_same_ollama_model(t, n) for n in names)), None)
 # Грешки, при които минаваме към следващия модел (вкл. остарял/невалиден модел).
 _FALLBACK_CODES = {400, 401, 402, 403, 404, 408, 429, 500, 502, 503}
 # Кодове, при които моделът/квотата е ВРЕМЕННО изчерпан → cooldown, не го пробвай пак веднага.
@@ -229,12 +353,57 @@ _EXHAUST_CODES = {429, 402, 503}
 # се спира целият ключ. 503 „претоварен" НЕ е тук (bench 2026-09-23): той е за
 # един модел, а спирането на ключа прати 0/21 и на здравия nemotron-super под
 # същия NVIDIA ключ. 503 остава cooldown само за модела (в complete()).
-_KEY_DEAD_CODES = {429, 402, 401, 403}
+_KEY_DEAD_CODES = {402, 401, 403}
+# 429 е за МОДЕЛ при Groq/Cerebras/OpenRouter (лимитите им са по модел), а за
+# целия ключ — при дневна квота. Одит 2026-10-07: един 429 спираше ключа и
+# здравите groq/B и groq/C не бяха пробвани. Ключът спира едва когато ВТОРИ
+# различен модел под него върне 429 в рамките на cooldown-а.
+_KEY_429_MODELS: dict[str, dict[str, float]] = {}
+# При въртене на няколко ключа/проекта 429 праща към СЛЕДВАЩИЯ ключ веднага —
+# там цената е само един опит с друг ключ, не загубен здрав модел.
+_ROTATE_CODES = _KEY_DEAD_CODES | {429}
+
+
+def _note_key_429(key_id: str, model: str) -> bool:
+    """Записва 429 за модел под ключ; True, ако вече е за ≥2 модела (→ целият ключ)."""
+    now = time.time()
+    seen = {m: t for m, t in _KEY_429_MODELS.get(key_id, {}).items() if now - t < _EXHAUST_COOLDOWN}
+    seen[model] = now
+    _KEY_429_MODELS[key_id] = seen
+    return len(seen) >= 2
 _EXHAUST_COOLDOWN = 300  # секунди (5 мин) — колкото типичен OpenRouter free reset
+
+
+def _rotation_cooldown(kid: str, model: str, error: str) -> bool:
+    """Cooldown при въртене на ключове/проекти; True → пробвай следващия.
+
+    Одит 2026-10-11: _call_rotating и _call_vertex спираха ЦЕЛИЯ ключ при
+    първия 429 от който и да е модел. С GROQ_API_KEY + _2 + _3 един TPM 429 на
+    модел A изгаряше и трите ключа, и здравият groq/B (лекият модел) отпадаше
+    за 5 минути без нито една заявка. 429 вече спира само двойката
+    (ключ, модел); ключът спира при 401/402/403 или когато ВТОРИ модел под
+    него върне 429 — същото правило като в _call (_note_key_429)."""
+    if any(f"HTTP_{c}" in error for c in _KEY_DEAD_CODES):
+        _mark_exhausted(kid)
+        return True
+    if "HTTP_429" in error:
+        if _note_key_429(kid, model):
+            _mark_exhausted(kid, _cooldown_for(error))
+        else:
+            _mark_exhausted(f"{kid}::{model}", _cooldown_for(error))
+        return True
+    return False
 # 410 Gone = доставчикът е спрял модела завинаги (на живо 2026-09-23: NVIDIA
 # openai/gpt-oss-120b). Пет минути cooldown само го отлагат — пропуска се до
 # края на процеса.
 _GONE_COOLDOWN = 24 * 3600
+# Сървърна грешка, която обикновено минава за секунди → същият модел още веднъж,
+# след кратка пауза, преди следващия във веригата. Измерено в bench-а 26–30.09:
+# 131 от 286 отговора на NVIDIA/OpenRouter (медиана 29 s / 17.6 s) дойдоха след
+# HTTP 500 на ollama (медиана 3.5 s), а следващият опит на ollama мина в 104 от
+# 139 случая. „празен отговор“ НЕ е тук: повторен е празен и 70 от 70 пъти.
+_TRANSIENT_CODES = {500, 502, 504}
+_TRANSIENT_PAUSE_S = 2.0
 
 # Модул-ниво: изчерпани модели (survive-ва между мисии в един процес, напр. маратона).
 _EXHAUSTED: dict[str, float] = {}
@@ -250,8 +419,50 @@ def _is_exhausted(key: str) -> bool:
     return True
 
 
-def _mark_exhausted(key: str) -> None:
-    _EXHAUSTED[key] = time.time() + _EXHAUST_COOLDOWN
+def _mark_exhausted(key: str, seconds: float | None = None) -> None:
+    _EXHAUSTED[key] = time.time() + (_EXHAUST_COOLDOWN if seconds is None else seconds)
+
+
+# Подсказката на сървъра кога да опитаме пак (одит 2026-10-11): Groq връща
+# 429 с `retry-after: 2` и „Please try again in 1.2s.“ за TPM лимит, а
+# веригата вадеше бързия стартов модел (0.4–1.5 s) за фиксирани 300 s и чатът
+# минаваше на ollama/nvidia (2–14 s на отговор) за 5 минути. Подсказката се
+# пренася в текста на грешката като `HTTP_429[retry=N]`, за да стигне до
+# complete() без нов канал; долната граница пази от удряне на модела в цикъл,
+# горната — от дневна квота, обявена като часове.
+_RETRY_HINT_MIN_S = 5
+_TRY_AGAIN_RE = re.compile(r"try again in\s+(?:(\d+)\s*m(?!s))?\s*(?:([\d.]+)\s*(ms|s))?",
+                           re.IGNORECASE)
+_RETRY_TAG_RE = re.compile(r"HTTP_429\[retry=(\d+)\]")
+
+
+def _retry_after_s(r: Any) -> float | None:
+    """Секунди до следващ опит според 429 отговора, или None без подсказка."""
+    headers = getattr(r, "headers", None) or {}
+    raw = headers.get("retry-after") or headers.get("Retry-After")
+    if raw:
+        try:
+            return max(0.0, float(str(raw).strip()))
+        except ValueError:
+            pass  # HTTP-дата — рядко при тези доставчици; остава текстът
+    m = _TRY_AGAIN_RE.search(getattr(r, "text", "") or "")
+    if not m or not (m.group(1) or m.group(2)):
+        return None
+    try:
+        seconds = float(m.group(1) or 0) * 60
+        if m.group(2):
+            seconds += float(m.group(2)) / (1000 if m.group(3).lower() == "ms" else 1)
+    except ValueError:
+        return None
+    return seconds
+
+
+def _cooldown_for(error: str) -> float:
+    """Cooldown за 429 с подсказка `HTTP_429[retry=N]` → clamp(N, 5, 300)."""
+    m = _RETRY_TAG_RE.search(error)
+    if not m:
+        return _EXHAUST_COOLDOWN
+    return float(min(max(int(m.group(1)), _RETRY_HINT_MIN_S), _EXHAUST_COOLDOWN))
 
 
 def _is_truncated(text: str) -> bool:
@@ -267,6 +478,23 @@ def _is_truncated(text: str) -> bool:
     целия LLM път до тази поправка.
     """
     return text.count("```") % 2 == 1
+
+
+def _has_cut_tool_arguments(tool_calls: Any) -> bool:
+    """True ако аргументите на някой tool_call не са цял JSON (отрязани).
+
+    Със същия парсер като цикъла (ревю 2026-10-11): plain json.loads отхвърляше
+    `"\\d{4}"` от регекс код, който load_tool_arguments поправя — цял call с
+    finish_reason=length падаше като HTTP_TRUNCATED към следващия модел."""
+    for tc in tool_calls or []:
+        fn = tc.get("function") if isinstance(tc, dict) else None
+        args = fn.get("arguments") if isinstance(fn, dict) else None
+        if isinstance(args, str) and args.strip():
+            try:
+                load_tool_arguments(args)
+            except ValueError:
+                return True
+    return False
 
 
 def _load_keys() -> dict[str, str]:
@@ -285,11 +513,15 @@ def _load_keys() -> dict[str, str]:
         p = Path(envf)
         if not p.exists():
             continue
-        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+        # Същото четене като paths.read_env_files (одит 2026-10-11): с utf-8
+        # .env от PowerShell 5.1 започваше с BOM и първият ключ ставаше
+        # „\ufeffGROQ_API_KEY“ — терминалът го показваше активен, а Brain
+        # мълчаливо прескачаше groq; `"sk-proj #1"` се режеше до `sk-proj` → 401.
+        for line in p.read_text(encoding="utf-8-sig", errors="replace").splitlines():
             line = line.strip().removeprefix("export ").strip()
             if "=" in line and not line.startswith("#"):
                 k, v = line.split("=", 1)
-                keys.setdefault(k.strip(), _strip_inline_comment(v.strip()).strip('"').strip("'"))
+                keys.setdefault(k.strip(), env_value(v))
     for k, v in os.environ.items():
         # Exported-but-empty is not an override — it falls through to the file,
         # exactly as get_secret does.
@@ -348,16 +580,24 @@ def _load_chain() -> list[dict]:
     # Мъртвите според последната `genesis models --check` (404/410) се
     # прескачат, докато следваща проверка не ги види живи — без да се пипа
     # config.yaml. Зает (429/503) не е мъртъв и остава.
-    try:
-        from genesis_agent.model_check import dead_models
-        dead = dead_models()
-    except Exception as e:
-        log.debug("_load_chain: model_check недостъпен (%s)", e)
-        dead = set()
+    dead = _dead_models()
 
     # Само доставчици, които знаем как да викаме.
     return [c for c in chain
             if c["provider"] in _PROVIDERS and (c["provider"], c["model"]) not in dead]
+
+
+def _dead_models() -> set:
+    """Мъртвите според последната `genesis models --check` — за ВСИЧКИ вериги.
+    Одит 2026-10-07: филтърът беше само в _load_chain, а coding/light веригите
+    слагаха мъртвия модел първи и го викаха при всяко обръщение (404 не дава
+    cooldown)."""
+    try:
+        from genesis_agent.model_check import dead_models
+        return set(dead_models())
+    except Exception as e:
+        log.debug("model_check недостъпен (%s)", e)
+        return set()
 
 
 def _load_coding_chain() -> list[dict]:
@@ -379,9 +619,10 @@ def _load_coding_chain() -> list[dict]:
     except Exception:
         return []
     out: list[dict] = []
+    dead = _dead_models()
     for entry in (cfg.get("models", {}) or {}).get("coding_models", []) or []:
         provider, model = entry.get("provider"), entry.get("model")
-        if not provider or not model or provider not in _PROVIDERS:
+        if not provider or not model or provider not in _PROVIDERS or (provider, model) in dead:
             continue
         out.append({"provider": provider, "model": model,
                     "size_b": entry.get("size_b", 0),
@@ -398,9 +639,10 @@ def _load_light_chain() -> list[dict]:
     except Exception:
         return []
     out: list[dict] = []
+    dead = _dead_models()
     for entry in (cfg.get("models", {}) or {}).get("light_models", []) or []:
         provider, model = entry.get("provider"), entry.get("model")
-        if provider in _PROVIDERS and model:
+        if provider in _PROVIDERS and model and (provider, model) not in dead:
             out.append({"provider": provider, "model": model,
                         "size_b": entry.get("size_b", 0),
                         "supports_tools": bool(entry.get("supports_tools", False))})
@@ -438,6 +680,47 @@ def _load_premium_chain() -> list[dict]:
     return out
 
 
+def any_model_reachable() -> bool:
+    """Има ли поне един модел, който Brain изобщо би извикал: ключ за доставчик
+    от някоя верига, проект за Vertex или локален Ollama.
+
+    Одит 2026-10-11: първо пускане без ключове — едно „здравей“ в чата минаваше
+    два пъти през цялата верига (25 реда „[Brain] ✗ … skip: no KEY“) и
+    завършваше с грешка; изходът правеше още 13. Чатът пита тук ПРЕДИ хода и
+    казва какво да се направи, вместо да вика модел, който няма как да отговори.
+    """
+    keys = _load_keys()
+    local_models = {LOCAL_MODEL}
+    # Избран Claude абонамент (GENESIS_START_PROVIDER=claude_cli) не е в нито
+    # една верига от config.yaml, а отговаря без ключ — стига CLI-то да е тук.
+    if os.environ.get("GENESIS_START_PROVIDER", "").strip() == "claude_cli":
+        from genesis_agent import claude_cli
+        if claude_cli.available():
+            return True
+    for c in _load_chain() + _load_light_chain() + _load_coding_chain() + _load_premium_chain():
+        key_env = _PROVIDERS.get(c["provider"], ("", None))[1]
+        if key_env is None:          # ollama_local във веригата — решава пробата долу
+            local_models.add(c["model"])
+            continue
+        if c["provider"] == "vertex":
+            try:
+                from genesis_agent import vertex_auth
+                if vertex_auth.projects():
+                    return True
+            except Exception:
+                return True          # не знаем — по-добре опит, отколкото отказ
+            continue
+        if str(keys.get(key_env) or "").strip():
+            return True
+    # Една проба, не по една на модел: затворен порт на Windows чака ~2 s.
+    try:
+        r = requests.get("http://localhost:11434/api/tags", timeout=2)
+        names = [m.get("name", "") for m in r.json().get("models", [])] if r.status_code == 200 else []
+    except Exception:
+        return False
+    return any(m and m.split(":")[0] in n for m in local_models for n in names)
+
+
 class Brain:
     # Кеш за config.yaml tool_tag_prompt (виж _tool_tag_prompt).
     _TAG_PROMPT_CACHE: str | None = None
@@ -451,6 +734,7 @@ class Brain:
         self._fail_count = 0
         self._last_usage: dict | None = None
         self._last_local_error: str | None = None
+        self._cut_reply: tuple[str, list | None] | None = None  # виж _http, HTTP_TRUNCATED
         # min_size_b (design note, 2026-07-25): филтрира облачната верига по размер —
         # различни контексти искат различно качество/скорост:
         # терминален чат ≥32B, умения/самонадграждане ≥120B (виж config.yaml
@@ -527,8 +811,23 @@ class Brain:
             # откаже. use_local=False изрично го изключва напълно (за
             # self-modification — виж genesis_agent/self_modify.py).
             self.local = None
-            if use_local and _local_available(LOCAL_MODEL):
+            # ЕДНА проба на /api/tags (ревю 2026-10-11): _local_available и
+            # _installed_local_tier питаха поотделно, а ask_genesis строи силен
+            # Brain всеки ход — при висящ Ollama 4 s на ход вместо 2 s.
+            installed = _ollama_installed() if use_local else []
+            if any(_same_ollama_model(LOCAL_MODEL, n) for n in installed):
                 self.local = {"provider": "ollama_local", "model": LOCAL_MODEL}
+            elif installed and os.environ.get("GENESIS_LOCAL_ONLY") != "1" \
+                    and "GENESIS_LOCAL_MODEL" not in os.environ:
+                # Подразбиращият се модел липсва → инсталирано ниво вместо 404
+                # (одит 2026-10-11). Изрично избраният модел (офлайн режим или
+                # GENESIS_LOCAL_MODEL) не се подменя: там честата грешка е
+                # по-добра от тиха смяна. Проверката е за наличие, не за
+                # истинност: GENESIS_LOCAL_MODEL="" изключва локалния модел и
+                # не бива да го включва обратно с друго ниво (ревю 2026-10-11).
+                tier = _installed_local_tier(installed)
+                if tier:
+                    self.local = {"provider": "ollama_local", "model": tier}
 
         # Последният модел НЕ се помни между сесиите (махнато 2026-09-23 по
         # искане на оператора): стартът е винаги default_model_id от
@@ -838,10 +1137,29 @@ class Brain:
         if len(rest) <= threshold:
             return messages
 
-        old_part = rest[:-keep_recent]
-        recent_part = rest[-keep_recent:]
+        # Срезът не бива да пада между извикване и неговите tool резултати:
+        # `[system, резюме, tool(c5), …]` е невалидна история (400 от всеки
+        # доставчик, после веригата пада надолу на всяко следващо обръщение).
+        # Затова срезът се мести назад до асистента, който ги е поискал.
+        cut = len(rest) - keep_recent
+        while cut > 0 and rest[cut].get("role") == "tool":
+            cut -= 1
+        if cut <= 0:
+            return messages
+        old_part = rest[:cut]
+        recent_part = rest[cut:]
+        # Предишното резюме влиза цяло (до 3000 знака) и ПЪРВО; само обикновените
+        # реплики се режат до 500 (bug fix, 2026-10-11). Измерено: резюме от 586
+        # знака, завършващо с „РЕШЕНИЕ: базата е PostgreSQL 16“, стигаше до
+        # обобщаващия модел отрязано на 500 — решението изчезваше при следващото
+        # компактиране (на ~3 хода), всеки път по малко от по-ранния разговор.
+        def _is_summary(m: dict) -> bool:
+            return (m.get("role") == "system"
+                    and str(m.get("content", "")).startswith("## Резюме на по-ранния разговор:"))
         transcript = "\n".join(
-            f"{m.get('role', '?')}: {str(m.get('content', ''))[:500]}" for m in old_part
+            [f"system: {str(m.get('content', ''))[:3000]}" for m in old_part if _is_summary(m)]
+            + [f"{m.get('role', '?')}: {str(m.get('content', ''))[:500]}" for m in old_part
+               if not _is_summary(m)]
         )
         maxlen = getattr(messages, "maxlen", None)
 
@@ -951,12 +1269,12 @@ class Brain:
             payload["tool_choice"] = "auto"
         if extra:
             payload.update(extra)
-        r = requests.post(
-            f"{base_url}/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=timeout,
-        )
+        r = _post_with_deadline(f"{base_url}/chat/completions", headers=headers,
+                                json=payload, timeout=timeout)
+        if r.status_code == 429:
+            hint = _retry_after_s(r)
+            tag = f"[retry={math.ceil(hint)}]" if hint is not None else ""
+            raise RuntimeError(f"HTTP_429{tag}: {r.text[:150]}")
         if r.status_code != 200:
             raise RuntimeError(f"HTTP_{r.status_code}: {r.text[:150]}")
         # Открито живо (design note, 2026-07-25, forge тест): някои доставчици връщат
@@ -970,12 +1288,34 @@ class Brain:
             choice = data["choices"][0]
             message = choice["message"]
             content = message.get("content")
+            # Съдържание като списък от части (`[{"type": "text", ...}]`) —
+            # някои OpenAI-съвместими шлюзове го връщат така; `.strip()` по-долу
+            # гърмеше с AttributeError, който излизаше от complete() и губеше
+            # целия ход (одит 2026-10-11). Друг тип не е текст → MALFORMED.
+            if isinstance(content, list):
+                content = "".join(str(part.get("text") or "") for part in content
+                                  if isinstance(part, dict))
+            elif content is not None and not isinstance(content, str):
+                raise TypeError(f"content е {type(content).__name__}")
             tool_calls = message.get("tool_calls") or None
             finish_reason = choice.get("finish_reason") or ""
-        except (ValueError, KeyError, IndexError, TypeError) as e:
+        # AttributeError: `"message": null` (OpenRouter при upstream грешка,
+        # одит 2026-10-11) — без него следващият модел не се пробваше изобщо.
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
             raise RuntimeError(f"HTTP_200_MALFORMED: {type(e).__name__}: {r.text[:150]}")
         if not content and not tool_calls:
-            raise RuntimeError("празен отговор")
+            # Причината в лога (2026-09-30): ollama връщаше празно след 0.3 s в 13
+            # от 210 bench разговора, до края им — а редът не казваше защо.
+            usage = data.get("usage") or {}
+            # Празният отговор също е платен (одит 2026-10-11: gpt-oss изяжда
+            # тавана в размисъл — out=4096, content="" — а редът не стигаше до
+            # budget_log, защото usage се записваше чак след тази проверка).
+            self._last_usage = _openai_usage(data.get("usage"))
+            self._usage_attempt = getattr(self, "_attempt_id", None)
+            raise RuntimeError(f"празен отговор (finish_reason={finish_reason or '—'}, "
+                               f"prompt={usage.get('prompt_tokens', '?')}, "
+                               f"out={usage.get('completion_tokens', '?')}, "
+                               f"reasoning={len(message.get('reasoning') or '')} знака)")
         # Ударен таван на изходните токени (design note, 2026-08-12): досега
         # `finish_reason` не се четеше НИКЪДЕ и отрязан отговор се връщаше като
         # нормален. Ако при това код-оградата е останала незатворена, счупен
@@ -986,14 +1326,23 @@ class Brain:
         # каква е реалната причина, вместо мистериозен SyntaxError два слоя
         # по-надолу. НЕ съвпада с _EXHAUST_CODES (429/402/503) нарочно — таванът
         # не е изчерпана квота и не бива да вкарва модела в cooldown.
-        if finish_reason == "length" and _is_truncated(content or ""):
+        # Същото за аргументите на tool_call (одит 2026-10-11): WRITE_FILE,
+        # отрязан на 4096, стигаше до цикъла като „невалидни аргументи“ и
+        # моделът пренаписваше същия голям файл в същия таван рунд след рунд.
+        cut_args = finish_reason == "length" and _has_cut_tool_arguments(tool_calls)
+        if cut_args or (finish_reason == "length" and _is_truncated(content or "")):
+            self._last_usage = _openai_usage(data.get("usage"))
+            self._usage_attempt = getattr(self, "_attempt_id", None)
+            # Отрязаният call се пази: ако го отреже ВСЕКИ модел, complete() го
+            # връща на цикъла вместо „Error“ (ревю 2026-10-11, виж там).
+            self._cut_reply = ((content or "").strip(), tool_calls) if cut_args else None
             raise RuntimeError(
                 f"HTTP_TRUNCATED: отговорът е отрязан на тавана от {_output_cap(model)} "
-                f"токена, посред код-ограда (finish_reason=length). Вдигни го с "
+                f"токена, посред код-ограда или tool_call (finish_reason=length). Вдигни го с "
                 f"`max_tokens:` за модела в config.yaml, ако доставчикът го позволява."
             )
         # usage липсва при локален Ollama /v1 понякога — None е ОК, budget.py го обработва.
-        self._last_usage = data.get("usage")
+        self._last_usage = _openai_usage(data.get("usage"))
         return (content or "").strip(), tool_calls
 
     # ── Anthropic native (Messages API) ──────────────────────────────────────────
@@ -1008,12 +1357,23 @@ class Brain:
         """(system, messages) в Anthropic формат."""
         system_parts: list[str] = []
         out: list[dict] = []
+        leading = True
         for m in messages:
             role = m.get("role")
             content = m.get("content") or ""
-            if role == "system":
+            if role == "system" and leading:
                 if content:
                     system_parts.append(content)
+                continue
+            leading = False
+            if role == "system":
+                # System съобщение СЛЕД разговора (резултат в текстов режим,
+                # подкана на claim_check/code_check) е ход към модела, не част от
+                # системния промпт: иначе разговорът свършваше с assistant ход —
+                # prefill, който claude-opus-5/sonnet-5 отказват с 400, а кешът
+                # на system блока се пренаписваше на всеки рунд (одит 2026-10-07).
+                if content:
+                    out.append({"role": "user", "content": f"[system] {content}"})
             elif role == "tool":
                 out.append({"role": "user", "content": [{
                     "type": "tool_result",
@@ -1038,10 +1398,27 @@ class Brain:
                     out.append({"role": "assistant", "content": blocks})
             else:
                 out.append({"role": "user", "content": content or "(празно)"})
-        # Разговорът трябва да започва с user ход.
-        while out and out[0]["role"] != "user":
-            out.pop(0)
-        return "\n\n".join(system_parts), out
+        # Разговорът трябва да започва с user ход, и tool_result без своя
+        # tool_use (изпаднал при рязане на историята) дава 400 на всеки ход.
+        # Двете се повтарят, докато нищо не се променя: махането на водещ
+        # assistant може да осироти резултатите му (преглед 2026-10-07).
+        while True:
+            while out and out[0]["role"] != "user":
+                out.pop(0)
+            asked = {b["id"] for m in out if m["role"] == "assistant"
+                     for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_use"}
+            cleaned: list[dict] = []
+            for m in out:
+                if m["role"] == "user" and isinstance(m["content"], list):
+                    kept = [b for b in m["content"]
+                            if not (b.get("type") == "tool_result" and b.get("tool_use_id") not in asked)]
+                    if not kept:
+                        continue
+                    m = {**m, "content": kept}
+                cleaned.append(m)
+            if len(cleaned) == len(out) and (not cleaned or cleaned[0]["role"] == "user"):
+                return "\n\n".join(system_parts), cleaned
+            out = cleaned
 
     @staticmethod
     def _to_anthropic_tools(tools: list[dict]) -> list[dict]:
@@ -1118,6 +1495,27 @@ class Brain:
         except anthropic.APIConnectionError as e:
             raise RuntimeError(f"мрежа: {e}") from e
 
+        usage = getattr(resp, "usage", None)
+        # Прочетените от кеша токени се отчитат ОТДЕЛНО, за да е проверимо, че
+        # кеширането работи: ако `cached_read_tokens` стои на нула при
+        # повтарящи се заявки, нещо мълчаливо разваля префикса (променлив
+        # системен промпт, различен набор инструменти) — и това се вижда в
+        # `genesis budget`, вместо да се приема на доверие. Записва се ПРЕДИ
+        # проверката за отказ: отказаният отговор също е платен.
+        cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+        cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        # input_tokens на Anthropic е БЕЗ кеша, prompt_tokens на OpenAI — с него.
+        # Тук се привежда към OpenAI смисъла, иначе отчетът казваше „кеш 7500%
+        # от prompt“ (одит 2026-10-07).
+        self._last_usage = {
+            "prompt_tokens": (getattr(usage, "input_tokens", 0) or 0) + cache_read + cache_write,
+            "completion_tokens": getattr(usage, "output_tokens", 0) or 0,
+            "cached_read_tokens": cache_read,
+            "cached_write_tokens": cache_write,
+        } if usage else None
+        # Отказан/отрязан отговор по-долу пак е платен — complete() го записва.
+        self._usage_attempt = getattr(self, "_attempt_id", None) if usage else None
+
         if getattr(resp, "stop_reason", "") == "refusal":
             # Не е техническа грешка — моделът е отказал темата. Като RuntimeError,
             # за да продължи веригата към следващия модел вместо да върне празно.
@@ -1132,18 +1530,6 @@ class Brain:
                 tool_calls.append({"id": block.id, "type": "function",
                                    "function": {"name": block.name,
                                                 "arguments": json.dumps(block.input)}})
-        usage = getattr(resp, "usage", None)
-        # Прочетените от кеша токени се отчитат ОТДЕЛНО, за да е проверимо, че
-        # кеширането работи: ако `cached_read_tokens` стои на нула при
-        # повтарящи се заявки, нещо мълчаливо разваля префикса (променлив
-        # системен промпт, различен набор инструменти) — и това се вижда в
-        # `genesis budget`, вместо да се приема на доверие.
-        self._last_usage = {
-            "prompt_tokens": getattr(usage, "input_tokens", 0) or 0,
-            "completion_tokens": getattr(usage, "output_tokens", 0) or 0,
-            "cached_read_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
-            "cached_write_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
-        } if usage else None
 
         text = "".join(text_parts).strip()
         if not text and not tool_calls:
@@ -1160,10 +1546,44 @@ class Brain:
             )
         return text, (tool_calls or None)
 
+    def _cooldown_left(self, provider: str, model: str) -> float:
+        """Секунди, след които (provider, model) пак може да тръгне; 0 — веднага.
+
+        Огледало на проверките в _call/_call_rotating/_call_vertex: свободни
+        трябва да са моделът и поне един негов ключ (с двойката ключ::модел).
+        Ревю 2026-10-11: паузата между кръговете гледаше най-ранния край в
+        ЦЕЛИЯ _EXHAUSTED — чужд модел, лекият модел или чужд ключ#n даваха
+        8 s пауза и втори кръг без нито една заявка."""
+        now = time.time()
+
+        def left(k: str) -> float:
+            return max(0.0, _EXHAUSTED.get(k, now) - now)
+
+        key_env = _PROVIDERS.get(provider, ("", None))[1]
+        if provider == "vertex":
+            try:
+                from genesis_agent import vertex_auth
+                kids = [f"key::VERTEX#{i}" for i in range(1, len(vertex_auth.projects()) + 1)]
+            except Exception:
+                kids = []
+        elif provider == "claude_cli":
+            kids = ["key::claude_cli"]   # лимитът на абонамента (_call_claude_cli)
+        elif not key_env:
+            kids = []
+        elif provider not in _NATIVE_PROVIDERS and len(self._numbered_keys(key_env)) > 1:
+            kids = [f"key::{key_env}#{i}" for i in range(1, len(self._numbered_keys(key_env)) + 1)]
+        else:
+            kids = [f"key::{key_env}"]
+        key_wait = min((max(left(k), left(f"{k}::{model}")) for k in kids), default=0.0)
+        return max(left(f"{provider}::{model}"), key_wait)
+
     def _call(self, provider: str, model: str, messages: list[dict],
              tools: list[dict] | None = None,
              extra: dict[str, Any] | None = None) -> tuple[str, list | None]:
-        base_url, key_env = _PROVIDERS[provider]
+        key_env = _PROVIDERS[provider][1]
+        base_url = provider_base_url(provider)
+        if provider == "claude_cli":
+            return self._call_claude_cli(model, messages)
         if provider == "vertex":
             # Адресът и токенът се смятат при извикване (проект + локация +
             # OAuth), затова Vertex не минава през общия път с фиксиран
@@ -1216,8 +1636,9 @@ class Brain:
             # 429/402 (quota gone) or 401/403 (bad or forbidden key): this
             # provider is unusable for a while. Mark it and let the chain move
             # on to the next provider rather than hammering a dead endpoint.
-            if any(f"HTTP_{c}" in last for c in _KEY_DEAD_CODES):
-                _mark_exhausted(kid)
+            if any(f"HTTP_{c}" in last for c in _KEY_DEAD_CODES) or (
+                    "HTTP_429" in last and _note_key_429(kid, model)):
+                _mark_exhausted(kid, _cooldown_for(last))
                 print(f"  [Brain] 🔑 {key_env} unavailable ({last[:60]}) → next provider")
             raise
 
@@ -1241,7 +1662,7 @@ class Brain:
         tried_any = False
         for idx, key in enumerate(keys, start=1):
             kid = f"key::{key_env}#{idx}"
-            if _is_exhausted(kid):
+            if _is_exhausted(kid) or _is_exhausted(f"{kid}::{model}"):
                 continue
             tried_any = True
             try:
@@ -1249,14 +1670,42 @@ class Brain:
             except RuntimeError as e:
                 last = str(e)
                 last_err = e
-                if any(f"HTTP_{c}" in last for c in _KEY_DEAD_CODES):
-                    _mark_exhausted(kid)
+                if _rotation_cooldown(kid, model, last):
                     print(f"  [Brain] 🔑 {key_env}#{idx} unavailable ({last[:60]}) → next key")
                     continue
                 raise
         if not tried_any:
             raise RuntimeError(f"HTTP_429: all configured {key_env}* are cooling down")
         raise last_err or RuntimeError(f"HTTP_502: {key_env} key rotation exhausted")
+
+    def _call_claude_cli(self, model: str, messages: list[dict]) -> tuple[str, list | None]:
+        """Claude през `claude -p` с абонамента на оператора — текстов модел:
+        инструментите са таговете на Genesis, не native tool_calls.
+
+        В облака (GENESIS_MODEL_GATEWAY) се отказва: абонаментът е за личната
+        употреба на оператора, не за задачи на други хора (правилата на
+        Anthropic, проверено 2026-10-12)."""
+        if os.environ.get("GENESIS_MODEL_GATEWAY", "").strip():
+            raise RuntimeError("skip: claude абонаментът не се ползва в онлайн услугата")
+        from genesis_agent import claude_cli
+        if any(m.get("role") == "tool" or m.get("tool_calls") for m in messages):
+            messages = self._sanitize_for_textmode(messages)
+        kid = f"key::{claude_cli.PROVIDER}"
+        if _is_exhausted(kid):
+            raise RuntimeError("HTTP_429: claude абонаментът е на пауза (лимит), cooling down")
+        try:
+            text, usage = claude_cli.complete(messages, model)
+        except RuntimeError as e:
+            last = str(e)
+            # Лимитът на абонамента е за целия акаунт, не за модел: друг модел
+            # през същия вход пак ще удари стената. 401 — входът липсва.
+            if "HTTP_429" in last or any(f"HTTP_{c}" in last for c in _KEY_DEAD_CODES):
+                _mark_exhausted(kid, _cooldown_for(last))
+                print(f"  [Brain] 🔑 claude абонамент недостъпен ({last[:80]}) → следващ")
+            raise
+        self._last_usage = usage
+        self._usage_attempt = getattr(self, "_attempt_id", None) if usage else None
+        return text, None
 
     def _call_vertex(self, model: str, messages: list[dict],
                       tools: list[dict] | None,
@@ -1283,12 +1732,14 @@ class Brain:
 
         last_err: Exception | None = None
         tried_any = False
+        no_token = False
         for idx, project in enumerate(project_list, start=1):
             kid = f"key::VERTEX#{idx}"
-            if _is_exhausted(kid):
+            if _is_exhausted(kid) or _is_exhausted(f"{kid}::{model}"):
                 continue
             access_token = vertex_auth.token(project)
             if not access_token:
+                no_token = True
                 continue
             tried_any = True
             try:
@@ -1297,13 +1748,18 @@ class Brain:
             except RuntimeError as e:
                 last = str(e)
                 last_err = e
-                if any(f"HTTP_{c}" in last for c in _KEY_DEAD_CODES):
-                    _mark_exhausted(kid)
+                if _rotation_cooldown(kid, model, last):
                     print(f"  [Brain] 🔑 vertex/{project} unavailable ({last[:60]}) → next")
                     continue
                 raise
         if not tried_any:
-            raise RuntimeError("skip: no usable Vertex credentials (ADC not configured or all cooling down)")
+            # „cooling down“ само когато наистина всеки проект е в cooldown
+            # (ревю 2026-10-11): при изтекли ADC веригата броеше Vertex за
+            # охлаждащ се с 0 s оставащи — 8 s пауза, празен втори кръг и
+            # „най-рано след 0 s“ вместо истинските 290 s на другите модели.
+            if no_token:
+                raise RuntimeError("skip: no usable Vertex credentials (ADC not configured or expired)")
+            raise RuntimeError("skip: every Vertex project is cooling down")
         raise last_err or RuntimeError("HTTP_502: vertex project rotation exhausted")
 
     def _call_local(self, messages: list[dict], attempts: int = 1) -> tuple[str, str] | None:
@@ -1476,6 +1932,11 @@ class Brain:
         messages = budget_history(messages)
 
         last_error = "неизвестна грешка"
+        # Последната ИСТИНСКА грешка (тръгнала заявка). `last_error` се
+        # презаписва и от синтетичните „skip: no KEY“ след нея — измерено
+        # 2026-10-11: groq 429 и ollama_cloud отрязан → операторът и
+        # `genesis -p --json` виждаха „последна: skip: no HF_TOKEN configured“.
+        last_real_error = ""
         local_only = os.environ.get("GENESIS_LOCAL_ONLY") == "1"
 
         # LOCAL-ONLY: изричен офлайн режим — никога не пипа облака.
@@ -1539,7 +2000,15 @@ class Brain:
             )
         else:
             ordered_chain = chain
-            messages_notools = messages
+            # Без tools, но с native tool история (лекият чат маршрут след
+            # tool ход): role='tool' без декларирани 'tools' е 400 при много
+            # доставчици и винаги при Anthropic, тоест ходът падаше по цялата
+            # лека верига и ескалираше (одит 2026-10-11). Чиста текстова
+            # история остава байт по байт същата.
+            messages_notools = (self._sanitize_for_textmode(messages)
+                                if any(m.get("role") == "tool" or m.get("tool_calls")
+                                       for m in messages)
+                                else messages)
 
         # An explicit pin outranks any reordering above (tools-capability sort
         # or deprioritize_flaky), in EITHER branch. The operator picked that
@@ -1560,6 +2029,7 @@ class Brain:
                              if (c["provider"], c["model"]) != avoid]
 
         n = len(ordered_chain)
+        cut_hit: tuple | None = None  # (отговор, usage, запис) на първия отрязан tool_call
         if n > 0:
             # ВИНАГИ отгоре надолу, прескачайки временно изчерпаните.
             #
@@ -1575,18 +2045,55 @@ class Brain:
             # Обхождане отгоре дава и залепване (докато моделът работи, той
             # отговаря), и самолечение (щом cooldown-ът мине, се връщаме на
             # най-добрия наличен), без нищо да се помни между извикванията.
-            for round_i in range(RETRY_ROUNDS):
+            # Леката работа (light=True) обхожда веригата веднъж: викащият има
+            # своя резерва — терминалът ескалира към силния Brain, резюмето и
+            # паметта просто се пропускат. С два кръга „здрасти“ при паднала
+            # мрежа чакаше 8 s в лекия Brain и още 8 s в силния — 10 заявки и
+            # 16 s преди какъвто и да е отговор (одит 2026-10-11).
+            rounds = 1 if self.light else RETRY_ROUNDS
+            for round_i in range(rounds):
+                # Кръг, в който НИТО един модел няма ключ, не се повтаря: паузата
+                # и новите кръгове не могат да добавят ключ. Без ключове всяко
+                # съобщение чакаше 16 s, преди да каже нещо (2026-10-09, `genesis -p`
+                # на чиста инсталация).
+                only_unconfigured = True
+                sent_any = False  # тръгнала ли е поне една истинска заявка
+                # Нов кръг има смисъл само след грешка, която може да мине:
+                # HTTP_TRUNCATED не слага cooldown и същата заявка се реже пак.
+                retry_useful = False
+                cooled: list[tuple[str, str]] = []  # пропуснати заради cooldown
                 for step in range(n):
                     attempt = ordered_chain[step]
                     prov, model = attempt["provider"], attempt["model"]
                     key = f"{prov}::{model}"
                     if _is_exhausted(key):
+                        only_unconfigured = False
+                        cooled.append((prov, model))
                         continue  # временно изчерпан → пропускаме
                     use_tools = tools if (tools and attempt.get("supports_tools")) else None
                     msgs = messages if use_tools else messages_notools
                     t0 = time.time()
+                    self._attempt_id = (prov, model)
+                    self._usage_attempt = None
+                    self._cut_reply = None
                     try:
-                        raw_text, tool_calls = self._call(prov, model, msgs, tools=use_tools)
+                        try:
+                            raw_text, tool_calls = self._call(prov, model, msgs, tools=use_tools)
+                        except RuntimeError as e:
+                            if not _is_transient(str(e)):
+                                raise
+                            # В статистиката влиза само крайният изход на
+                            # обръщението: 500 + провал на повторния опит се
+                            # броеше за два провала и сваляше ollama в края на
+                            # веригата за 15 мин (bench 2026-09-30: 78 отговора
+                            # на NVIDIA без нито един опит на ollama срещу 25).
+                            reason = " ".join(str(e).split())[:80]
+                            print(f"  [Brain] ↻ {prov}/{model} след {time.time() - t0:.1f}s: "
+                                  f"{reason} → същият пак след {_TRANSIENT_PAUSE_S:.0f}s")
+                            time.sleep(_TRANSIENT_PAUSE_S)
+                            t0 = time.time()
+                            raw_text, tool_calls = self._call(prov, model, msgs, tools=use_tools)
+                        sent_any = True
                         self._record_stat(prov, time.time() - t0, True)
                         self._fail_count = 0
                         self.current = attempt
@@ -1601,27 +2108,114 @@ class Brain:
                         return type("Obj", (object,), {"raw_text": raw_text, "code": code,
                                                        "usage": self._last_usage, "tool_calls": tool_calls})
                     except requests.exceptions.RequestException as e:
-                        last_error = f"мрежа: {e}"
+                        only_unconfigured = False
+                        sent_any = True
+                        retry_useful = True
+                        last_error = last_real_error = f"мрежа: {e}"
                         self._fail_count += 1
                         self._record_stat(prov, time.time() - t0, False)
+                        _print_skip(prov, model, last_error, time.time() - t0)
                         continue
                     except RuntimeError as e:
                         last_error = str(e)
-                        self._fail_count += 1
-                        self._record_stat(prov, time.time() - t0, False)
+                        # Пропуск без заявка („skip: няма ключ“, „cooling down“) не
+                        # е провал на доставчика — в статистиката влизат само
+                        # истински обръщения (одит 2026-10-07: 3 провала на groq
+                        # за 1 заявка).
+                        synthetic = last_error.startswith("skip:") or "cooling down" in last_error
+                        if not (last_error.startswith("skip:") and "configured" in last_error):
+                            only_unconfigured = False
+                        if "cooling down" in last_error:
+                            cooled.append((prov, model))
+                        # Грешка, която слага cooldown (429/402/503), купува втори
+                        # кръг само ако cooldown-ът свършва в паузата — затова
+                        # моделът влиза в `cooled`, не в retry_useful (e2e
+                        # 2026-10-11). Измерено: само groq с ключ, 429 без
+                        # подсказка (300 s) → 8 s пауза и кръг без нито една
+                        # заявка; 429 на A + отрязан WRITE_FILE на C → C се
+                        # питаше (и плащаше) втори път за същия сигурен провал.
+                        cools = not synthetic and any(f"HTTP_{c}" in last_error
+                                                      for c in (*_EXHAUST_CODES, 410))
+                        if cools:
+                            cooled.append((prov, model))
+                        if not synthetic:
+                            sent_any = True
+                            last_real_error = last_error
+                            if not _hit_output_cap(last_error):
+                                retry_useful = retry_useful or not cools
+                                # Изяден таван не е болен доставчик (2026-10-11):
+                                # 5 отрязани големи WRITE_FILE на groq даваха
+                                # success_rate 0.0 и deprioritize_flaky го местеше
+                                # последен за 15 мин за всички без пин (genesis
+                                # fix, леката верига, компресията). Разходът пак
+                                # се записва по-долу.
+                                self._fail_count += 1
+                                self._record_stat(prov, time.time() - t0, False)
+                            elif cut_hit is None and getattr(self, "_cut_reply", None):
+                                cut_hit = (self._cut_reply, self._last_usage, attempt)
+                            # Отрязан/отказан отговор е платен — разходът се записва.
+                            if getattr(self, "_usage_attempt", None) == (prov, model):
+                                previous, self.current = getattr(self, "current", None), attempt
+                                self._log_usage()
+                                self.current = previous
+                        self._usage_attempt = None
+                        _print_skip(prov, model, last_error, time.time() - t0)
                         # При 429/503/402 → маркирай изчерпан за cooldown (спестява безсмислени опити).
-                        for c in _EXHAUST_CODES:
+                        # Без заявка (synthetic) — не: „GROQ_API_KEY … cooling
+                        # down“ започва с HTTP_429 и всеки модел под ключа
+                        # получаваше свежи 300 s, тоест оставаше извън веригата
+                        # до 5 мин след като ключът се възстанови (одит
+                        # 2026-10-11: ключ с 1 s оставащ cooldown → groq/A и
+                        # groq/B с по 300 s). Cooldown-ът на ключа покрива това.
+                        for c in () if synthetic else _EXHAUST_CODES:
                             if f"HTTP_{c}" in last_error:
-                                _mark_exhausted(key)
+                                _mark_exhausted(key, _cooldown_for(last_error))
                                 break
                         if "HTTP_410" in last_error:
                             _EXHAUSTED[key] = time.time() + _GONE_COOLDOWN
                             print(f"  [Brain] ⛔ {prov}/{model} е спрян от доставчика (410) — "
                                   "пропускам го; махни го от config.yaml")
                         continue
-                if round_i + 1 < RETRY_ROUNDS:
+                if only_unconfigured:
+                    last_error = "нито един модел няма API ключ — пусни `genesis setup`"
+                    break
+                if sent_any and not retry_useful and not any(
+                        self._cooldown_left(p, m) <= _ROUND_PAUSE_S for p, m in cooled):
+                    # Всяка изпратена заявка е отрязана на тавана (ревю
+                    # 2026-10-11): втори кръг е още веднъж цялата верига,
+                    # платена, след 8 s — със същия сигурен провал. Само за
+                    # изпратените: модел, пропуснат заради cooldown, който
+                    # свършва в паузата (Groq TPM 429 с 5 s), може да напише
+                    # файла цял — за него вторият кръг остава (ревю 2026-10-11,
+                    # регресия на F4 спрямо базовия клон).
+                    break
+                if not sent_any:
+                    # Кръг без нито една заявка — всичко е в cooldown или без
+                    # ключ. Нов кръг помага само ако някой cooldown свършва
+                    # по време на паузата (одит 2026-10-11: всички модели с
+                    # ~290 s оставащи → 0 заявки, 8 s чакане и „неизвестна
+                    # грешка“).
+                    wait = min((self._cooldown_left(p, m) for p, m in cooled), default=None)
+                    if wait is not None:
+                        last_error = (f"всички модели са в cooldown "
+                                      f"(най-рано след {math.ceil(wait)} s)")
+                    if wait is None or wait > _ROUND_PAUSE_S:
+                        break
+                if round_i + 1 < rounds:
                     print("  [Brain] Всички облачни модели заети/изчерпани, кратка пауза и нов кръг...")
-                    time.sleep(8)
+                    time.sleep(_ROUND_PAUSE_S)
+
+        if cut_hit is not None:
+            # Файл, по-голям от тавана на ВСЕКИ модел (ревю 2026-10-11): преди
+            # F4 отрязаният WRITE_FILE стигаше до цикъла с „Невалидни
+            # аргументи“ и моделът можеше да раздели записа; с HTTP_TRUNCATED
+            # ходът свършваше с „Error“ след 2 кръга × веригата. Връща се
+            # първият отрязан call — локалният модел (без native tools, по-малък
+            # таван) няма да напише същия файл цял.
+            (raw_text, tool_calls), usage, self.current = cut_hit
+            print("  [Brain] ✂ всеки модел отряза tool_call на тавана → към цикъла")
+            return type("Obj", (object,), {"raw_text": raw_text, "code": "",
+                                           "usage": usage, "tool_calls": tool_calls})
 
         # ПОСЛЕДНА РЕЗЕРВА: локалният собствен мозък — само ако облакът напълно
         # отказа (или изобщо няма конфигурирани облачни модели).
@@ -1634,9 +2228,11 @@ class Brain:
                 raw_text, code = hit
                 return type("Obj", (object,), {"raw_text": raw_text, "code": code,
                                                "usage": self._last_usage, "tool_calls": None})
-            last_error = self._last_local_error or last_error
+            if self._last_local_error:
+                last_error = last_real_error = self._last_local_error
 
-        return self._error_result(f"Error: цялата верига е изчерпана | последна: {last_error}")
+        return self._error_result(
+            f"Error: цялата верига е изчерпана | последна: {last_real_error or last_error}")
 
     def _error_result(self, msg: str):
         return type("Obj", (object,), {"raw_text": msg, "code": "", "usage": None, "tool_calls": None})

@@ -210,6 +210,31 @@ class TestBudgetHistory:
         assert len(out[1]["content"]) < 1100, "старият текстов резултат трябва да е свит"
         assert out[3]["content"] == msgs[3]["content"], "последният остава пълен"
 
+    def test_a_stale_text_result_keeps_its_end_not_the_instruction_suffix(self) -> None:
+        """2026-10-11: 444-знаковата инструкция в края на „[Резултат]:“ изяждаше
+        опашката на middle-out свиването — от реалния резултат оставаха 286
+        знака срещу 728 при native. Краят (traceback, обобщение) е решаващият."""
+        summary = ("=" * 20 + " short test summary info " + "=" * 20 + "\n"
+                   + "FAILED tests/test_x.py::test_y - AssertionError: 41 != 42\n" * 9
+                   + "1 failed, 99 passed in 3.21s")[-600:]
+        result = "[RUN_CMD: python -m pytest -q]\n" + "." * 9000 + "\n" + summary
+        msgs = [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "T"},
+            {"role": "assistant", "content": "[RUN_CMD: python -m pytest -q]"},
+            {"role": "system", "content": "[Резултат]:\n" + result + budget.TEXT_RESULT_FOLLOWUP},
+            {"role": "assistant", "content": "a"},
+            {"role": "system", "content": "[Резултат]:\nok" + budget.TEXT_RESULT_FOLLOWUP},
+            {"role": "assistant", "content": "b"},
+            {"role": "system", "content": "[Резултат]:\nok2" + budget.TEXT_RESULT_FOLLOWUP},
+        ]
+        out = budget.budget_history(msgs, fresh=2, stale_limit=2000)
+        stale = str(out[3]["content"])
+        assert stale.endswith(summary)
+        assert budget.TEXT_RESULT_FOLLOWUP.strip() not in stale
+        assert len(stale) <= 2100
+        assert str(out[-1]["content"]).endswith(budget.TEXT_RESULT_FOLLOWUP), "последният я пази"
+
     def test_a_short_history_is_returned_as_is(self) -> None:
         msgs = self._history(1, size=50)
         assert budget.budget_history(msgs) == msgs
@@ -275,6 +300,25 @@ class TestDuplicateResultsArePaidForOnce:
         out = budget.budget_history(self._msgs([same, same]), fresh=2, stale_limit=2000)
         assert "идентичен" in str(out[1]["content"])
         assert str(out[2]["content"]) == same
+
+    def test_no_do_not_reread_notice_when_the_kept_copy_is_clipped(self) -> None:
+        """2026-10-11: READ_FILE (6 650 знака), RUN_CMD, същият READ_FILE, още
+        два резултата → по-новото копие е старо и свито до 2 074 знака, пълното
+        тяло няма никъде, а бележката казваше „не го извиквай пак“."""
+        body = "def f():\n" + "    x = 1\n" * 665
+        out = budget.budget_history(self._msgs([body, "rc=0 " * 10, body, "a" * 8, "b" * 9]),
+                                    fresh=2, stale_limit=2000)
+        sent = [str(m["content"]) for m in out if m.get("role") == "tool"]
+        assert not any(body == s for s in sent)
+        assert not any("не го извиквай пак" in s for s in sent)
+        assert "извикай пак" in sent[0]
+
+    def test_the_do_not_reread_notice_stays_when_the_kept_copy_is_whole(self) -> None:
+        body = "def f():\n" + "    x = 1\n" * 665
+        out = budget.budget_history(self._msgs([body, "rc=0 " * 10, body]),
+                                    fresh=2, stale_limit=2000)
+        assert "не го извиквай пак" in str(out[1]["content"])
+        assert str(out[3]["content"]) == body
 
     def test_the_callers_history_is_still_not_mutated(self) -> None:
         same = "W" * 3000
@@ -375,3 +419,159 @@ class TestFormatReport:
                   "by_provider": {}}
         out = budget.format_report(totals, title="Днес")
         assert "900" in out and "90%" in out and "50" in out
+
+
+def _long_turn(rounds: int) -> list[dict]:
+    msgs = [{"role": "system", "content": "SYS"}, {"role": "user", "content": "ЗАДАЧАТА"}]
+    for i in range(rounds):
+        msgs += [{"role": "assistant", "content": "", "tool_calls": [{"id": f"c{i}"}]},
+                 {"role": "tool", "tool_call_id": f"c{i}", "content": f"резултат {i}"}]
+    return msgs
+
+
+def test_request_window_keeps_the_system_prompt_the_task_and_whole_rounds() -> None:
+    """2026-09-30: без user съобщение ollama отговаря празно (done_reason=load)."""
+    from genesis_agent.budget import request_window
+    out = request_window(_long_turn(20), limit=30)
+    assert len(out) <= 30
+    assert out[0]["content"] == "SYS" and out[1]["content"] == "ЗАДАЧАТА"
+    assert out[2]["role"] == "assistant"
+    assert out[-1]["content"] == "резултат 19"
+
+
+def test_request_window_leaves_a_short_history_alone() -> None:
+    from genesis_agent.budget import request_window
+    msgs = _long_turn(3)
+    assert request_window(msgs, limit=30) == msgs
+
+
+def test_budget_history_sends_the_task_in_a_long_turn() -> None:
+    from genesis_agent.budget import budget_history
+    out = budget_history(_long_turn(40))
+    assert out[1]["content"] == "ЗАДАЧАТА" and len(out) <= 30
+
+
+class TestElideOldWrites:
+    """B.12 (2026-10-11): старите WRITE_FILE/EDIT_FILE аргументи → маркер, само в
+    изпратеното копие и само с GENESIS_ELIDE_OLD_WRITES (по подразбиране OFF)."""
+
+    @staticmethod
+    def _call(cid: str, name: str, args: dict) -> list[dict]:
+        return [{"role": "assistant", "content": "", "tool_calls": [{
+                    "id": cid, "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}}]},
+                {"role": "tool", "tool_call_id": cid, "name": name, "content": "ok"}]
+
+    def _turn(self) -> list[dict]:
+        """Рундове (възраст в края): w1 4, e1 3, w2 2, w3 1, r1 0."""
+        msgs: list[dict] = [{"role": "system", "content": "SYS"}, {"role": "user", "content": "T"}]
+        msgs += self._call("w1", "WRITE_FILE", {"path": "app.py", "content": "A" * 1000})
+        msgs += self._call("e1", "EDIT_FILE", {"path": "app.py", "old": "B" * 400, "new": "C" * 400})
+        msgs += self._call("w2", "WRITE_FILE", {"path": "./app.py", "content": "D" * 1000})
+        msgs += self._call("w3", "WRITE_FILE", {"path": "lib.py", "content": "E" * 1000})
+        msgs += self._call("r1", "RUN_CMD", {"command": "pytest"})
+        return msgs
+
+    @staticmethod
+    def _args(out: list[dict], cid: str) -> dict:
+        for m in out:
+            for tc in m.get("tool_calls") or []:
+                if tc["id"] == cid:
+                    return json.loads(tc["function"]["arguments"])
+        raise AssertionError(cid)
+
+    def test_off_by_default_changes_nothing(self, monkeypatch) -> None:
+        # Подразбирането — в чист процес без GENESIS_ELIDE_*: conftest вече
+        # е нулирал модулите, тоест config.ELIDE_OLD_WRITES тук не доказва
+        # нищо, а изнесената променлива на оператора не бива да чупи теста
+        # (2026-10-11).
+        import os
+        import subprocess
+        import sys
+        from pathlib import Path
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GENESIS_ELIDE_")}
+        got = subprocess.run([sys.executable, "-c",
+                              "from genesis_agent import config; print(config.ELIDE_OLD_WRITES)"],
+                             cwd=str(Path(__file__).resolve().parent.parent), env=env,
+                             capture_output=True, text=True, check=True).stdout.split()
+        assert got[-1:] == ["0"]
+        monkeypatch.setattr(budget, "ELIDE_OLD_WRITES", 0)
+        msgs = self._turn()
+        assert budget.budget_history(msgs) == msgs
+
+    def test_a_superseded_write_is_elided_and_the_latest_kept(self, monkeypatch) -> None:
+        monkeypatch.setattr(budget, "ELIDE_OLD_WRITES", 1)
+        monkeypatch.setattr(budget, "ELIDE_WRITE_ROUNDS", 50)
+        out = budget.budget_history(self._turn())
+        w1, e1 = self._args(out, "w1"), self._args(out, "e1")
+        assert budget.ELIDED_MARK in w1["content"] and "READ_FILE app.py" in w1["content"]
+        assert budget.ELIDED_MARK in e1["old"] and budget.ELIDED_MARK in e1["new"]
+        assert self._args(out, "w2")["content"] == "D" * 1000, "последният запис остава"
+        assert self._args(out, "w3")["content"] == "E" * 1000, "друг файл, млад — остава"
+
+    def test_a_write_k_rounds_old_is_elided_even_without_a_rewrite(self) -> None:
+        out = budget._elide_old_writes(self._turn(), 2)
+        assert budget.ELIDED_MARK in self._args(out, "w2")["content"]      # възраст 2
+        assert self._args(out, "w3")["content"] == "E" * 1000              # възраст 1
+        out = budget._elide_old_writes(self._turn(), 3)
+        assert self._args(out, "w2")["content"] == "D" * 1000
+
+    def test_the_current_round_is_never_touched(self) -> None:
+        msgs = self._turn()
+        msgs += self._call("w9", "WRITE_FILE", {"path": "lib.py", "content": "F" * 1000})
+        msgs.append({"role": "assistant", "content": "", "tool_calls": [
+            {"id": "w10", "type": "function", "function": {
+                "name": "WRITE_FILE", "arguments": json.dumps({"path": "lib.py", "content": "G" * 1000})}},
+            {"id": "w11", "type": "function", "function": {
+                "name": "WRITE_FILE", "arguments": json.dumps({"path": "lib.py", "content": "H" * 1000})}}]})
+        out = budget._elide_old_writes(msgs, 0)                 # k се вдига до 2
+        assert self._args(out, "w10")["content"] == "G" * 1000
+        assert self._args(out, "w11")["content"] == "H" * 1000
+        assert budget.ELIDED_MARK in self._args(out, "w9")["content"]
+
+    def test_pairing_ids_and_json_survive_for_every_provider(self, monkeypatch) -> None:
+        from genesis_agent.brain import Brain
+        monkeypatch.setattr(budget, "ELIDE_OLD_WRITES", 1)
+        monkeypatch.setattr(budget, "ELIDE_WRITE_ROUNDS", 2)
+        msgs = self._turn()
+        out = budget.budget_history(msgs)
+        assert out != msgs
+        assert [m["role"] for m in out] == [m["role"] for m in msgs]
+        ids = [tc["id"] for m in out for tc in m.get("tool_calls") or []]
+        assert ids == [m["tool_call_id"] for m in out if m.get("role") == "tool"]
+        for m in out:
+            for tc in m.get("tool_calls") or []:
+                assert isinstance(json.loads(tc["function"]["arguments"]), dict)
+        _, anth = Brain._to_anthropic_messages(out)
+        uses = {b["id"] for m in anth if isinstance(m["content"], list)
+                for b in m["content"] if b.get("type") == "tool_use"}
+        results = {b["tool_use_id"] for m in anth if isinstance(m["content"], list)
+                   for b in m["content"] if b.get("type") == "tool_result"}
+        assert uses == results == set(ids)
+
+    def test_the_input_is_never_mutated(self) -> None:
+        msgs = self._turn()
+        before = json.dumps(msgs, ensure_ascii=False)
+        budget._elide_old_writes(msgs, 2)
+        assert json.dumps(msgs, ensure_ascii=False) == before
+
+    def test_short_values_and_cut_json_are_left_alone(self) -> None:
+        msgs = self._turn()
+        msgs += self._call("s1", "WRITE_FILE", {"path": "s.py", "content": "x = 1\n"})
+        cut_args = '{"path": "c.py", "content": "' + "z" * 500
+        msgs += [{"role": "assistant", "content": "", "tool_calls": [{
+                     "id": "cut", "type": "function",
+                     "function": {"name": "WRITE_FILE", "arguments": cut_args}}]},
+                 {"role": "tool", "tool_call_id": "cut", "content": "ok"}]
+        for i in range(4):
+            msgs += self._call(f"y{i}", "RUN_CMD", {"command": "ls"})
+        out = budget._elide_old_writes(msgs, 2)
+        assert self._args(out, "s1")["content"] == "x = 1\n"
+        cut = next(tc for m in out for tc in m.get("tool_calls") or [] if tc["id"] == "cut")
+        assert cut["function"]["arguments"] == cut_args
+
+    def test_it_runs_before_the_early_return_paths(self, monkeypatch) -> None:
+        monkeypatch.setattr(budget, "ELIDE_OLD_WRITES", 1)
+        monkeypatch.setattr(budget, "ELIDE_WRITE_ROUNDS", 2)
+        out = budget.budget_history(self._turn(), stale_limit=0)
+        assert budget.ELIDED_MARK in self._args(out, "w1")["content"]

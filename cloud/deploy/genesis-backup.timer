@@ -1,0 +1,9 @@
+[Unit]
+Description=Genesis онлайн: резервно копие на 6 часа
+
+[Timer]
+OnCalendar=*-*-* 00/6:17:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

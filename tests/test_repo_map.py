@@ -253,3 +253,22 @@ class TestRipgrepOutputIsTreatedAsUntrusted:
                                        "lines": {"text": "ok"}}}])
         got = repo_map._search_ripgrep(tmp_path, "x", None, 10)
         assert [m.path for m in got] == ["b.py"]
+
+
+def test_search_code_on_a_file_searches_only_that_file(tmp_path) -> None:
+    from genesis_agent.repo_map import search_code
+    (tmp_path / "src" / "sub").mkdir(parents=True)
+    (tmp_path / "src" / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "src" / "sub" / "__init__.py").write_text("VALUE = 2\n", encoding="utf-8")
+    hits = search_code("VALUE", tmp_path / "src" / "__init__.py")
+    assert [h.text.strip() for h in hits] == ["VALUE = 1"]
+
+
+def test_search_code_on_a_file_without_ripgrep(tmp_path, monkeypatch) -> None:
+    from genesis_agent import repo_map
+    monkeypatch.setattr(repo_map.shutil, "which", lambda name: None)
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "a.py").write_text("X = 1\n", encoding="utf-8")
+    (tmp_path / "sub" / "a.py").write_text("X = 2\n", encoding="utf-8")
+    hits = repo_map.search_code("X =", tmp_path / "a.py")
+    assert [h.text.strip() for h in hits] == ["X = 1"]

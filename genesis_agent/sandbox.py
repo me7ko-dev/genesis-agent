@@ -29,16 +29,20 @@ from __future__ import annotations
 
 import ast
 import os
+import posixpath
 import re
 import shlex
 import signal
 import subprocess
 import sys
+import threading
+import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import IntEnum
 from pathlib import Path
+from typing import Any
 
 try:  # POSIX-only; resource limits са best-effort на не-Linux платформи.
     import resource  # type: ignore
@@ -126,6 +130,56 @@ _BLOCK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
      "изключване/рестарт на машината"),
 ]
 
+# Файловете с ключове и тайни — ЕДИН образец за shell командите (двата вида
+# наклонени черти) и за инструментите (sensitive_path_reason). Измерено
+# 2026-09-28: `Get-Content ~/.genesis/private_key.pem`, `cat ~/.genesis/remote.json`
+# (ключът за сдвояване с телефона — с него някой управлява агента) и
+# `gh/hosts.yml` (GitHub токенът) минаваха като SAFE, а READ_FILE ги четеше
+# без въпрос. Папките (`.ssh`, `.aws`, `.gnupg`) — и без наклонена черта след
+# тях (2026-10-07): `grep -r SECRET ~/.ssh ~/.aws` и `tar cz ~/.ssh` минаваха
+# като SAFE и печатаха ключовете, макар `cat ~/.ssh/id_rsa` да беше спрян.
+# Папката на Genesis и 8.3 името ѝ на Windows (`GENESI~1`), 2026-10-11:
+# `echo {} > ~/GENESI~1/hooks.json` беше SAFE, а `~/.genesis/hooks.json` — CONFIRM.
+_GENESIS_DIR = r"(?:\.genesis|\bgenesi~\d)"
+
+# Краят на името на папката е `(?![\w-])`, не `\b` (ревю 2026-10-11): `\b` има и
+# преди „-“, и `.aws-sam/` (папката на AWS SAM) и `.azure-pipelines.yml` (CI на
+# Azure DevOps) искаха потвърждение, а в deny режим и `genesis fix` се отказваха.
+_SECRET_PATHS = (
+    r"\.ssh(?:[/\\]|(?![\w-]))|\.aws(?:[/\\]|(?![\w-]))|\.gnupg(?:[/\\]|(?![\w-]))"
+    r"|id_rsa|id_ed25519|id_ecdsa|id_dsa"
+    r"|\bid_[*?\[]|\.env\b|credentials\b"
+    r"|\.pem\b|\.p12\b|\.pfx\b|" + _GENESIS_DIR + r"[/\\]remote\.json|gh[/\\]hosts\.yml"
+    # gh на Windows: %APPDATA%\GitHub CLI\hosts.yml (2026-10-11).
+    r"|GitHub CLI[/\\]hosts\.yml"
+    # OAuth токените за MCP и копията на проекта за /undo (2026-10-09).
+    r"|mcp_tokens\.json\b|" + _GENESIS_DIR + r"[/\\]checkpoints\b"
+    r"|\.npmrc\b|\.pypirc\b|\.netrc\b|\.docker[/\\]config\.json|\.kube[/\\]config\b"
+    r"|Login Data\b"
+    # Ключът, с който се подписва доверието за hooks/MCP (2026-10-11).
+    r"|hooks_trust\.key\b"
+    # Средата и паметта на друг процес (2026-10-11): `tr '\0' '\n' <
+    # /proc/$PPID/environ` печаташе API ключа, махнат от средата на детето.
+    r"|/proc/[^/\s]+/(?:environ|mem|maps)\b"
+    # Добре известни файлове с токени (2026-10-11): gcloud, Azure CLI, Vault,
+    # PostgreSQL. `.git-credentials` хваща `credentials\b` по-горе.
+    r"|\.config[/\\]gcloud\b|[/\\]Roaming[/\\]gcloud\b|\.azure(?:[/\\]|(?![\w-]))"
+    r"|\.vault-token\b|\.pgpass\b|pgpass\.conf\b"
+)
+
+# Управляващите файлове на Genesis — пускат програми ИЗВЪН sandbox-а с целия
+# os.environ (hooks.json при всеки инструмент, mcp.json при всеки чат) или
+# решават кое е доверено. Измерено 2026-10-11: `printf … > ~/.genesis/hooks.json`
+# беше SAFE и в режим „deny“, а следващият инструмент пускаше подхвърлената
+# команда, която виждаше API ключа, скрит от самия RUN_CMD. Отделна причина, не
+# в _SECRET_PATHS: READ_FILE на тези файлове (за /hooks) остава без въпрос.
+_GENESIS_CONTROL = (
+    _GENESIS_DIR + r"\b[^\n]{0,40}?\b(?:hooks|mcp|settings|trusted_\w+)\.json\b"
+    r"|\btrusted_hooks\b|" + _GENESIS_DIR + r"[/\\](?:agents|commands)\b"
+)
+_GENESIS_CONTROL_REASON = ("промяна на управляващ файл на Genesis (hooks/MCP/доверие) — "
+                           "пуска програми извън sandbox-а")
+
 # Опасни — изискват потвърждение (interactive) или отказ (autonomous).
 _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # И дългите форми: без `--(recursive|force)` тук `rm --recursive нещо`
@@ -159,8 +213,15 @@ _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
      "глобална npm инсталация"),
     (_c(r"\bgit\s+push\b"),
      "git push (публикуване)"),
-    (_c(r"(\.ssh/|\.aws/|id_rsa|\.env\b|credentials\b)"),
+    (_c(_SECRET_PATHS),
      "достъп до чувствителни файлове (ключове/тайни)"),
+    (_c(_GENESIS_CONTROL), _GENESIS_CONTROL_REASON),
+    # Качване на локален файл навън — пътят, по който тайна напуска машината.
+    # localhost е изключен: така агентът тества собственото си API.
+    (_c(r"\bcurl\b(?![^\n]*\b(?:localhost|127\.0\.0\.1)\b)[^\n]*\s(?:-T\s*\S|--upload-file\b"
+        r"|(?:-d|--data|--data-binary|--data-raw)\s*['\"]?@|(?:-F|--form)\s*['\"]?[^\s'\"=]+=[@<])"
+        r"|\bwget\b[^\n]*--post-file\b|\bscp\b"),
+     "качване на локален файл към друга машина"),
     (_c(r"\b(eval|exec)\s"),
      "динамично изпълнение (eval/exec)"),
     (_c(r"/etc/(passwd|shadow|sudoers)"),
@@ -188,10 +249,33 @@ _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 # срещат случайно в POSIX команда, така че цената на безусловното включване е
 # нула, а ползата е, че една и съща команда се оценява еднакво навсякъде.
 
-# Корени, чието рекурсивно триене е катастрофа (не просто опасно).
+# Корени, чието рекурсивно триене е катастрофа (не просто опасно). Всеки
+# завършва с края на думата (2026-10-11): без него всичко ПОД C:\Users — тоест
+# всеки проект на оператора — беше BLOCKED и не можеше да се одобри, а
+# `rd /s /q C:\Users\<име>\Projects\app\build` е нормално чистене.
+# Последната част може да е глоб (2026-10-11, трета вълна): с `\*?` отзад
+# `del /s /q C:\Users\<име>\*.*` и `… C:\Windows\*.*` — идиомът на cmd.exe за
+# „всички файлове“ — бяха паднали от BLOCKED (main) на CONFIRM.
+_WIN_GLOB_TAIL = r"[^\\/\s\"';|&]*[*?][^\\/\s\"';|&]*"
+_WIN_ROOT_END = r"[\\/]*(?:" + _WIN_GLOB_TAIL + r")?(?=[\s\"';|&)]|$)"
 _WIN_ROOT = (r"(?:[A-Za-z]:\\*(?:\s|$|[\"';*])"          # C:\ / C: / C:\\ (ескейпнато)
-             r"|[A-Za-z]:\\(?:Windows|Users|Program\s)"   # C:\Windows, C:\Users
-             r"|\$env:USERPROFILE|%USERPROFILE%|\$HOME"
+             # Системните папки — с всичко под тях, както в main: там няма
+             # проекти на оператора, които котвата да пази (2026-10-11).
+             # `rd /s /q C:\Windows\System32\drivers` беше паднал на CONFIRM.
+             r"|[A-Za-z]:[\\/](?:Windows|Program(?:\s|Data))"
+             # C:\Users, C:\Users\<име> и AppData на дома (настройките и
+             # паролите на всички програми; не е проект, а в main беше BLOCKED).
+             r"|[A-Za-z]:[\\/]Users(?:[\\/][^\\/\s\"';|&]+"
+             r"(?:[\\/]AppData(?:[\\/](?:Local|LocalLow|Roaming))?)?)?"
+             + _WIN_ROOT_END +
+             r"|(?:\$env:USERPROFILE|%USERPROFILE%|\$HOME)" + _WIN_ROOT_END +
+             # Всичко под AppData — и по буква, и през променлива (ревю
+             # 2026-10-11, трета вълна): `…\AppData\Roaming\Microsoft\Protect`
+             # (ключовете на DPAPI) и `$env:APPDATA\…` бяха паднали от BLOCKED
+             # (main) на CONFIRM. Там няма проекти — само настройки и пароли.
+             r"|(?:[A-Za-z]:[\\/]Users[\\/][^\\/\s\"';|&]+|\$env:USERPROFILE|%USERPROFILE%"
+             r"|\$HOME|~)[\\/]AppData(?:[\\/][^\s\"';|&]*)?(?=[\s\"';|&)]|$)"
+             r"|(?:\$env:(?:LOCAL)?APPDATA|%(?:LOCAL)?APPDATA%)(?:[\\/][^\s\"';|&]*)?(?=[\s\"';|&)]|$)"
              r"|[A-Za-z]:\\\*)")
 
 _WIN_BLOCK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
@@ -199,9 +283,10 @@ _WIN_BLOCK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # (и двата символа са не-word), затова тук е `(?:^|\s)-`.
     (_c(r"\bRemove-Item\b[^\n]*(?:^|\s)-(?:Recurse|Force)\b[^\n]*" + _WIN_ROOT),
      "Remove-Item -Recurse/-Force върху диск/системна/домашна директория"),
-    (_c(r"\b(del|erase)\b[^\n]*\s/s\b[^\n]*" + _WIN_ROOT),
+    # `(?:/[a-z])*` — слепените ключове на cmd.exe (`/q/s`), 2026-10-11.
+    (_c(r"\b(del|erase)\b[^\n]*\s(?:/[a-z])*/s\b[^\n]*" + _WIN_ROOT),
      "del /s върху диск/системна/домашна директория"),
-    (_c(r"\brd\b[^\n]*\s/s\b[^\n]*" + _WIN_ROOT),
+    (_c(r"\brd\b[^\n]*\s(?:/[a-z])*/s\b[^\n]*" + _WIN_ROOT),
      "rd /s върху диск/системна/домашна директория"),
     (_c(r"\bformat\s+[A-Za-z]:"),
      "форматиране на дял (format)"),
@@ -220,14 +305,13 @@ _WIN_BLOCK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 _WIN_CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (_c(r"\bRemove-Item\b[^\n]*(?:^|\s)-(?:Recurse|Force)\b"),
      "рекурсивно/принудително триене (Remove-Item)"),
-    (_c(r"\b(del|erase)\b[^\n]*\s/(s|q|f)\b"),
+    (_c(r"\b(del|erase)\b[^\n]*\s(?:/[a-z])*/(s|q|f)\b"),
      "принудително/рекурсивно триене (del)"),
-    (_c(r"\brd\b[^\n]*\s/s\b|\brmdir\b[^\n]*\s/s\b"),
+    (_c(r"\b(rd|rmdir)\b[^\n]*\s(?:/[a-z])*/s\b"),
      "триене на директория (rd /s)"),
     (_c(r"\breg\s+(delete|add|import)\b|\bSet-ItemProperty\b[^\n]*\bHK(LM|CU|CR|U|CC):"),
      "промяна на регистъра"),
-    (_c(r"\bpowershell(\.exe)?\b[^\n]*\s-(enc|e|encodedcommand)\b"),
-     "PowerShell с кодирана команда (-EncodedCommand)"),
+    # `-EncodedCommand` се проверява структурно (_encoded_powershell_verdict).
     (_c(r"\b(Invoke-Expression|iex)\b|\|\s*(powershell|pwsh)\b"),
      "динамично изпълнение / изтеглено съдържание директно в PowerShell"),
     (_c(r"\bSet-ExecutionPolicy\b"),
@@ -254,8 +338,13 @@ _WIN_CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
      "принудително преместване/копиране (презаписва целта)"),
     (_c(r"System32\\drivers\\etc\\hosts|[A-Za-z]:\\Windows\\System32\\"),
      "запис в системни файлове (System32)"),
-    (_c(r"\.ssh\\|\.aws\\|\bcredentials\b"),
-     "достъп до чувствителни файлове (ключове/тайни)"),
+    (_c(r"\b(Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b[^\n]*\s-InFile\b"),
+     "качване на локален файл към друга машина"),
+    # Вградени в Windows програми, с които се сваля изпълним файл покрай
+    # браузъра и антивирусния филтър.
+    (_c(r"\bcertutil(\.exe)?\b[^\n]*\s[-/](urlcache|decode|decodehex)\b"
+        r"|\bbitsadmin(\.exe)?\b[^\n]*\s/(transfer|addfile)\b|\bStart-BitsTransfer\b"),
+     "изтегляне/декодиране на файл през certutil/BITS"),
 ]
 
 _BLOCK_PATTERNS += _WIN_BLOCK_PATTERNS
@@ -296,6 +385,12 @@ _PY_CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # shutil/os, които СА покрити по-горе.
     (_c(r"\bos\.system\b"), "os.system (shell изпълнение)"),
     (_c(r"\bsubprocess\.(run|call|Popen|check_output|check_call)\b"), "стартиране на подпроцес"),
+    # И другите изписвания: py_guard отказва всеки процес без одобрение, а без
+    # въпрос тук `from subprocess import run` просто падаше (преглед 2026-10-09).
+    (_c(r"\bfrom\s+subprocess\s+import\b|\bimport\s+subprocess\s+as\b"
+        r"|\bsubprocess\.(getoutput|getstatusoutput)\b|\bmultiprocessing\b"
+        r"|\bProcessPoolExecutor\b|\basyncio\.create_subprocess_|\bos\.(posix_spawn\w*|fork|"
+        r"forkpty|startfile)\b|\bpty\.spawn\b"), "стартиране на подпроцес"),
     (_c(r"\bos\.(popen|execv|execve|execvp|spawn\w*)\b"), "стартиране на процес"),
     (_c(r"\bsocket\.socket\b"), "суров мрежов сокет"),
     (_c(r"\b__import__\s*\(\s*['\"]os['\"]"), "динамичен импорт на os"),
@@ -309,39 +404,83 @@ _PY_CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 # не суров текст за regex над цяла команда. ПАРОЛИ/ПЛАЩАНИЯ са BLOCKED винаги
 # (независимо от mode="allow" в 24/7/маратон режим) — категорично не се
 # автоматизират, дори при изрично поискване (виж genesis_agent/browser.py коментар).
+# Без `\b`: в него `_` е буква и `user_password`, `cc_number` минаваха (одит
+# 2026-10-07). Граница тук е „не латинска буква“ отляво/отдясно.
+_L = r"(?<![a-z])"
+_R = r"(?![a-z])"
 _SENSITIVE_FIELD_PATTERNS: list[re.Pattern[str]] = [
-    _c(r"\bpass(wo?rd)?\b"), _c(r"\bpwd\b"), _c(r"\bpasскод\b"),
-    _c(r"\bcard[_\s-]?(number|num|no)?\b"), _c(r"\bcvv\b"), _c(r"\bcvc\b"),
-    _c(r"\bexp(iry|iration)?[_\s-]?(date|month|year)?\b"),
-    _c(r"\bssn\b"), _c(r"\bsocial[_\s-]?security\b"),
-    _c(r"\biban\b"), _c(r"\brouting[_\s-]?number\b"), _c(r"\baccount[_\s-]?number\b"),
-    _c(r"\bprivate[_\s-]?key\b"), _c(r"\bseed[_\s-]?phrase\b"), _c(r"\bmnemonic\b"),
-    _c(r"\bsecret[_\s-]?key\b"), _c(r"\bapi[_\s-]?key\b"),
+    _c(r"pass(wo?r?d|phrase|code)|passwd|" + _L + r"pass" + _R + "|" + _L + r"pwd" + _R),
+    _c(r"парол|пин\s*код|" + r"(?<![а-я])пин(?![а-я])"),
+    _c(r"card.?(number|num|no|holder|cvv|cvc|code|exp)|" + _L + r"card" + _R
+       + r"|" + _L + r"cc.?(num|number|csc|exp|cvv|cvc|name|type)|ccnum"),
+    _c(_L + r"(cvv\d?|cvc|csc)" + _R + r"|security.?code"),
+    _c(r"(номер|данни)\s+(на|от)\s+(банков\w*\s+)?карта|банкова\s+карта|срок\s+на\s+валидност"),
+    _c(_L + r"exp(iry|iration)?.?(date|month|year)" + _R + "|" + _L + r"expiry" + _R),
+    _c(_L + r"ssn" + _R + r"|social.?security|егн"),
+    _c(_L + r"iban" + _R + r"|routing.?number|account.?number"),
+    _c(r"private.?key|seed.?phrase|mnemonic|secret.?key|api.?key|one.?time.?code|" + _L + r"otp" + _R),
 ]
+# Стойности на autocomplete, които са категорични сами по себе си.
+_SENSITIVE_AUTOCOMPLETE = re.compile(r"(^|\s)(cc-[\w-]+|current-password|new-password|one-time-code)(\s|$)",
+                                     re.IGNORECASE)
+# Етикетите на елемента идват съединени с „ | “ (текст, aria-label, value,
+# title, name, id, <label>), затова „начало на етикет“ е `^` или `|`.
+_SEG = r"(^|\|)\W*"
+# Думи след „pay/buy/checkout“, които правят връзката информация, не плащане.
+_INFO_AFTER = (r"(?!\s*-?\s*(history|attention|as-you-go|docs?|documentation|guide|faq|status|details"
+               r"|tracking|methods?|options?|policy|terms|info|later\s+info)\b)"
+               r"(?!\s+(the|our|this|these|more|how)\b)")
 _SENSITIVE_CLICK_PATTERNS: list[re.Pattern[str]] = [
-    _c(r"\b(buy|purchase|checkout|pay)\s*now\b"), _c(r"\bplace\s+order\b"),
-    _c(r"\bconfirm\s+(order|purchase|payment)\b"), _c(r"\bcomplete\s+purchase\b"),
-    _c(r"\bsubscribe\b"), _c(r"\badd\s+to\s+cart\b.*\bcheckout\b"),
-    _c(r"\b(купи|плати|поръчай|потвърди\s+поръчка)\b"),
+    # Етикет, който ЗАПОЧВА с глагола за плащане: „Pay with card“, „Buy It Now“,
+    # „Check out“, „Checkout ($19.99)“, „Buy – $9“. Посред текст („How to buy“)
+    # или със съществително след него („Purchase history“, „Pay attention“) —
+    # навигация (прегледи 2026-10-07: BLOCKED не може да се одобри).
+    _c(_SEG + r"(buy|purchase|checkout|check\s+out|pay|pre-?order|donate)(?![a-z])" + _INFO_AFTER),
+    _c(r"(place|submit|complete|confirm|finish)\s+(your\s+|my\s+|the\s+)?(order|purchase|payment|booking)"
+       r"(?!\s*(feedback|history|status|details))"),
+    _c(r"confirm\s+and\s+pay|proceed\s+to\s+(checkout|payment)|(buy|order|pay|checkout)\s+now"
+       + r"|" + _L + r"(go\s+to|continue\s+to|secure|complete)\s+checkout" + _R
+       + r"|" + _L + r"subscribe" + _R),
+    # Имена/id на бутони: pay_now, buy-now, place_order, btn-checkout.
+    _c(_L + r"(pay[-_]?now|buy[-_]?now|place[-_]?order|(btn|button)[-_]?check[-_]?out"
+       r"|check[-_]?out[-_]?(btn|button))" + _R),
+    # Български — глаголите, не съществителните („Плащане и доставка“, „Моите
+    # поръчки“ са информация, не плащане).
+    _c(r"(?<![а-я])(купи|купете|купувам|поръчай|поръчайте|поръчвам|плати|платете|плащам|заплати|заплатете)"
+       r"(?![а-я])"),
+    _c(r"(завърши|завършете|потвърди|потвърдете|изпрати|изпратете|направи|направете|финализирай|"
+       r"финализирайте|приключи|приключете|оформи|оформете)\s+(поръчка|покупка|плащане)\w*"),
+    _c(r"към\s+(плащане|касата|поръчката)|(^|\|)\W*плащане(\s+с\s+(карта|paypal))?\W*($|\|)"),
+    # Немски, испански, френски, италиански.
+    _c(r"(?<![a-zà-ü])(kaufen|bestellen|bezahlen|zahlungspflichtig|comprar|pagar|acheter|payer|commander"
+       r"|acquista|paga)(?![a-zà-ü])"),
+    _c(r"zur\s+kasse|valider\s+(la\s+)?commande|confirmer\s+le\s+paiement|finalizar\s+(la\s+)?compra"),
 ]
 
 
-def assess_browser_field(field_type: str, field_name: str) -> RiskVerdict:
+def assess_browser_field(field_type: str, field_name: str, autocomplete: str = "") -> RiskVerdict:
     """Оценява риска на попълване на поле в браузър формуляр.
     field_type: HTML input type ('password', 'text', 'email', ...).
-    field_name: name/id/placeholder/aria-label на полето (каквото е налично)."""
+    field_name: ВСИЧКИ етикети на полето заедно — name, id, placeholder,
+    aria-label, <label>; безсмислено name („field_7“) не бива да скрие
+    „Номер на карта“ (одит 2026-10-07).
+    autocomplete: атрибутът — `cc-number`, `current-password` решават сами."""
     if field_type.lower() == "password":
         return RiskVerdict(RiskLevel.BLOCKED, ["парола (input type=password)"])
+    if autocomplete and _SENSITIVE_AUTOCOMPLETE.search(autocomplete):
+        return RiskVerdict(RiskLevel.BLOCKED, [f"чувствително поле (autocomplete={autocomplete})"])
     for rx in _SENSITIVE_FIELD_PATTERNS:
         if rx.search(field_name):
-            return RiskVerdict(RiskLevel.BLOCKED, [f"чувствително поле: {field_name}"])
+            return RiskVerdict(RiskLevel.BLOCKED, [f"чувствително поле: {field_name[:80]}"])
     return RiskVerdict(RiskLevel.CONFIRM, ["попълване на браузър поле"])
 
 
 def assess_browser_click(label: str, is_submit_near_password: bool = False) -> RiskVerdict:
-    """Оценява риска на клик върху браузър елемент по видимия му текст/label."""
+    """Оценява риска на клик върху браузър елемент по ВСИЧКИ негови етикети
+    (видим текст, aria-label, value, title, name) — бутон „🔒“ с aria-label
+    „Pay now“ е бутон за плащане."""
     if is_submit_near_password:
-        return RiskVerdict(RiskLevel.BLOCKED, ["submit бутон в/до форма с парола (логин/регистрация)"])
+        return RiskVerdict(RiskLevel.BLOCKED, ["submit бутон във форма с парола или карта"])
     for rx in _SENSITIVE_CLICK_PATTERNS:
         if rx.search(label):
             return RiskVerdict(RiskLevel.BLOCKED, [f"плащане/поръчка: \"{label.strip()[:60]}\""])
@@ -352,7 +491,84 @@ def _split_segments(command: str) -> list[str]:
     """Реже съставна команда на отделни сегменти (`&&`, `||`, `;`, `|`), за да
     се оцени всеки поотделно. Груб разрез — не пълен shell парсър; целта е да
     не пропуснем `ls && mv *.jpg /другаде`, чиято опасна част е втора."""
-    return [s for s in re.split(r"&&|\|\||[;|]", command) if s.strip()]
+    # Нов ред и единичен `&` също делят команди (2026-10-07): `cd photos\nmv
+    # *.jpg /другаде` минаваше като SAFE, защото вторият ред не беше сегмент.
+    # Само ИЗВЪН кавички и без `\`: `mv *.jpg "/mnt/Tom & Jerry"` иначе се
+    # режеше на две половини с незатворени кавички, shlex падаше, сегментът се
+    # пропускаше — и масовото местене минаваше като SAFE. `2>&1`, `&>`, `>&`
+    # са пренасочване, не разделител.
+    out: list[str] = []
+    buf: list[str] = []
+    quote = ""
+    heredocs: list[str] = []            # разделители, чиито тела следват след този ред
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote:
+            buf.append(ch)
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                buf.append(command[i + 1])
+                i += 1
+            elif ch == quote:
+                quote = ""
+        elif ch == "\\" and i + 1 < n:
+            buf += [ch, command[i + 1]]
+            i += 1
+        elif ch == "#" and (not buf or buf[-1] in " \t;&|("):
+            # Коментар до края на реда: `# don't` не отваря кавичка.
+            while i + 1 < n and command[i + 1] != "\n":
+                i += 1
+        elif ch == "$" and command.startswith("$'", i):
+            # ANSI-C низ: `\'` вътре е буквален апостроф, не край.
+            j = i + 2
+            while j < n and command[j] != "'":
+                j += 2 if command[j] == "\\" else 1
+            buf.append(command[i:j + 1])
+            i = j
+        elif ch in "'\"":
+            quote = ch
+            buf.append(ch)
+        elif command.startswith("<<", i) and not command.startswith("<<<", i):
+            m = re.match(r"<<-?\s*(['\"]?)([A-Za-z_][\w-]*)\1", command[i:])
+            if m:
+                heredocs.append(m.group(2))
+                buf.append(m.group(0))
+                i += len(m.group(0))
+                continue
+            buf.append(ch)
+        elif command.startswith(("&&", "||"), i):
+            out.append("".join(buf))
+            buf = []
+            i += 1
+        elif ch == "&" and ((i and command[i - 1] in "<>") or (i + 1 < n and command[i + 1] == ">")):
+            buf.append(ch)
+        elif ch == "\n" and heredocs:
+            # Телата на heredoc-овете са данни, не команди: апостроф в
+            # „Don't touch“ не бива да отваря кавичка до края на командата.
+            out.append("".join(buf))
+            buf = []
+            lines = command[i + 1:].split("\n")
+            consumed = 0
+            for delim in heredocs:
+                while consumed < len(lines) and lines[consumed].strip() != delim:
+                    consumed += 1
+                consumed += 1
+            heredocs = []
+            skip = sum(len(line) + 1 for line in lines[:consumed])
+            i += skip
+        elif ch in ";|&\n":
+            out.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    out.append("".join(buf))
+    segments = [s for s in out if s.strip()]
+    if quote:
+        # Незатворена кавичка: не знаем къде свършва — оценяваме И грубия
+        # разрез, за да не стане опасна команда SAFE (затваряне при съмнение).
+        segments += [s for s in re.split(r"&&|\|\||[;|&\n]", command) if s.strip()]
+    return segments
 
 
 def _expand_targets(tokens: list[str], cwd: Path | None) -> tuple[list[Path], bool]:
@@ -404,6 +620,26 @@ def _shlex_split_for_classification(seg: str) -> list[str]:
     return shlex.split(seg)
 
 
+def _argument_readings(seg: str) -> list[list[str]]:
+    """Думите на сегмента така, както ги вижда всеки шел, който може да го
+    изпълни. На Windows RUN_CMD върви през Git Bash, където `\\` е escape, а
+    без bash — през cmd.exe, където е разделител. Измерено 2026-10-11:
+    `cat ~/.s\\sh/id_ed2551\\9` беше SAFE на Windows (само `/`-четенето), а bash
+    печаташе ключа. Проверката за тайни гледа и двете четения."""
+    try:
+        readings = [_shlex_split_for_classification(seg)]
+    except ValueError:
+        readings = [seg.split()]
+    if os.name == "nt":
+        try:
+            posix = shlex.split(seg)
+        except ValueError:
+            posix = []
+        if posix and posix != readings[0]:
+            readings.append(posix)
+    return readings
+
+
 def _assess_file_ops(command: str, cwd: Path | None = None) -> RiskVerdict:
     """Структурна оценка на файлови операции + РАЗГЪНАТ преглед кои файлове
     реално ще бъдат засегнати. Виж коментара при _DESTRUCTIVE_MOVE_CMDS."""
@@ -420,6 +656,8 @@ def _assess_file_ops(command: str, cwd: Path | None = None) -> RiskVerdict:
             argv = _shlex_split_for_classification(seg)
         except ValueError:  # неуравновесени кавички — не гадаем
             continue
+        # `nohup mv *.jpg …`, `time mv …` — обвивката не прави местенето по-малко масово.
+        argv = _strip_wrappers(argv)
         if not argv:
             continue
         cmd = os.path.basename(argv[0])
@@ -496,6 +734,26 @@ _CATASTROPHIC_ROOTS = frozenset({
 # не е. Затова се мери дълбочината, а не се изброяват имена.
 _HOME_PARENTS = ("/home/", "/users/", "/root/")
 
+# Нормализираните Windows корени (виж _normalise_target): `c:`, `c:/*`,
+# `c:/windows`, `c:/users`, `c:/program files (x86)`, `c:/users/<име>` и домът
+# през PowerShell/cmd (2026-10-11).
+# Глобът отзад (`*`, `*.*`, `*.txt`) трие от същия корен (2026-10-11, трета
+# вълна: `ri -r -fo C:\Users\<име>\*.*` беше само CONFIRM), а под системните
+# папки всичко е критично, както в _WIN_ROOT (и AppData на дома).
+_WIN_GLOB = r"(?:/[^/]*[*?][^/]*)?"
+_WIN_CRITICAL = re.compile(
+    r"^(?:[a-z]:/?" + _WIN_GLOB +
+    r"|[a-z]:/(?:windows|program files[^/]*|programdata)(?:/.*)?"
+    r"|[a-z]:/users(?:/[^/]+(?:/appdata(?:/(?:local|locallow|roaming))?)?)?" + _WIN_GLOB +
+    # Всичко под AppData, както в _WIN_ROOT: `ri -r -fo $env:APPDATA\x` и
+    # `Remove-Item -r -fo C:\Users\<име>\AppData\Roaming\x` бяха само CONFIRM.
+    r"|(?:[a-z]:/users/[^/]+|\$env:userprofile|%userprofile%|\$\{?home\}?|~)[\\/]appdata(?:[\\/].*)?"
+    r"|(?:\$env:(?:local)?appdata|%(?:local)?appdata%)(?:/.*)?"
+    r"|\$env:(?:userprofile|homepath|homedrive|systemdrive|systemroot|windir)" + _WIN_GLOB +
+    r"|%(?:userprofile|homedrive|systemdrive|systemroot|windir)%" + _WIN_GLOB +
+    r"|%homedrive%%homepath%" + _WIN_GLOB +
+    r"|\$\{?home\}?" + _WIN_GLOB + r")$")
+
 _RECURSIVE_LONG = frozenset({"--recursive", "--force", "-R", "-r"})
 
 # Програми, които само подават командата нататък. Пропускат се, за да стигнем
@@ -558,11 +816,41 @@ def _normalise_target(token: str) -> str:
     """Токен от командния ред → сравним път. Маха кавичките и завършващия
     разделител; `~/` и `~` трябва да значат едно и също за проверката."""
     t = token.strip().strip("'\"")
+    # Дискът на Windows в четирите си изписвания — `C:\x`, `C:/x`, `/c/x` (Git
+    # Bash) и `/mnt/c/x` (WSL) — става едно: `c:/x`. Измерено 2026-10-11:
+    # `rm -rf /c/`, `rm -rf C:/` и `rm -rf /c/Users/ivan` бяха само CONFIRM, а
+    # RUN_CMD на Windows върви точно през Git Bash.
+    if re.match(r"^[A-Za-z]:(?:[\\/]|$)", t):
+        t = t.replace("\\", "/")
+    elif re.match(r"^(?:\$\{?env:|%|\$\{?home\b)", t, re.IGNORECASE):
+        # Домът като променлива на PowerShell/cmd (2026-10-11): `$env:USERPROFILE\*`,
+        # `${env:USERPROFILE}` и `%HOMEDRIVE%\` бяха само CONFIRM, а `$HOME/*` — BLOCKED.
+        # И `$HOME\*.*` на PowerShell (`ri -r -fo $HOME\*.*` беше CONFIRM).
+        t = re.sub(r"^\$\{env:([A-Za-z_]\w*)\}", r"$env:\1", t, flags=re.IGNORECASE)
+        t = t.replace("\\", "/")
+    else:
+        drive = re.match(r"^/(?:mnt/)?([A-Za-z])(?=/|$)", t)
+        if drive:
+            t = f"{drive.group(1)}:{t[drive.end():] or '/'}"
     # `/home/./user` и `/home/user/../user` сочат същото място като
     # `/home/user`, но без канонизация се четат като по-дълбоки пътища и
-    # проверката за дълбочина ги пропускаше.
-    if t.startswith("/") and (".." in t or "/." in t):
-        t = os.path.normpath(t)
+    # проверката за дълбочина ги пропускаше. Същото за `c:/…` и `~/…`
+    # (2026-10-11): канонизацията стоеше СЛЕД превръщането на `/c/x` в `c:/x`
+    # и изискваше `/` отпред, затова `rm -rf C:\Users\<име>\Projects\..` (целият
+    # дом) и `rm -rf ~/..` бяха само CONFIRM. posixpath, не os.path: на Windows
+    # ntpath.normpath връща `\home\user` и сравнението с `/home/` пропада.
+    if ".." in t or "/." in t:
+        if t.startswith("/"):
+            t = posixpath.normpath(t)
+        elif re.match(r"^[A-Za-z]:/", t):
+            t = t[:2] + posixpath.normpath(t[2:])
+        elif t == "~" or t.startswith("~/"):
+            # Домът като истински път, за да се види излизането над него:
+            # `~/..` е родителят на дома (`/home`), `~/../x` — чужд дом.
+            anchor = "/home/\0home"
+            t = posixpath.normpath(anchor + t[1:])
+            if t == anchor or t.startswith(anchor + "/"):
+                t = "~" + t[len(anchor):]
     if len(t) > 1 and t.endswith(("/", "\\")):
         t = t.rstrip("/\\") or "/"
     return t.lower()
@@ -689,9 +977,18 @@ def _critical_root_reason(target: str) -> str | None:
     norm = _normalise_target(target)
     if norm in _CATASTROPHIC_ROOTS:
         return f"критичен корен ({target})"
+    # `/etc/*` трие същото като `/etc`, `/home/ivan/*` — същото като
+    # `/home/ivan` (2026-10-07: двете бяха само CONFIRM, а в режим „allow“
+    # CONFIRM се изпълнява сам).
+    if norm.endswith("/*"):
+        norm = norm[:-2] or "/"
+        if norm in _CATASTROPHIC_ROOTS:
+            return f"критичен корен ({target})"
     for parent in _HOME_PARENTS:
         if norm.startswith(parent) and norm.count("/") == parent.count("/"):
             return f"цяла home директория ({target})"
+    if _WIN_CRITICAL.match(norm):
+        return f"критичен корен на Windows ({target})"
     return None
 
 
@@ -761,12 +1058,382 @@ def _catastrophic_rm_reason(command: str) -> str | None:
     return None
 
 
-def assess_command(command: str, cwd: Path | None = None) -> RiskVerdict:
+# ── Триене на Windows по смисъл, не по изписване (2026-10-11) ───────────────
+# Образците за Remove-Item искаха пълното име и пълните `-Recurse/-Force`
+# ПРЕДИ пътя, а del/rd — `/s` на cmd.exe. Измерено: `ri -r -fo C:\Users\ivan`,
+# `del -r -fo …`, `rd -r -fo C:\`, `erase -r -fo $env:USERPROFILE` и
+# `pwsh -c "ri -r -fo ~"` бяха SAFE — изпълняваха се и в режим „deny“.
+# PowerShell приема псевдонимите и всеки еднозначен префикс на параметъра,
+# затова глаголът тук е един, флаговете се четат по префикс където и да стоят,
+# а всяка цел минава през същата проверка за критичен корен като `rm`.
+_WIN_DELETE_VERBS = frozenset({"remove-item", "ri", "rm", "del", "erase", "rd", "rmdir"})
+_CMD_DELETE_VERBS = frozenset({"del", "erase", "rd", "rmdir"})
+_WIN_LAUNCHERS = frozenset({"powershell", "pwsh", "cmd"})
+# Ключовете на cmd.exe, и слепени: `/q/s`, `/Q/S/F`, `/a:h/s`. Измерено
+# 2026-10-11: проверката искаше по един ключ на дума и `rd /q/s C:\Users\<име>`
+# беше SAFE, а `rd /s/q …` — BLOCKED само заради реда на ключовете.
+_CMD_SWITCHES = re.compile(r"^(?:/[a-z](?::[^/\s]*)?)+$", re.IGNORECASE)
+
+
+def _cmd_switch_letters(token: str) -> set[str]:
+    """Буквите на ключовете в една дума (`/q/s` → {q, s}); празно, ако думата
+    не е само ключове — `/c/Users/x` е път на Git Bash, не ключове."""
+    if not _CMD_SWITCHES.match(token):
+        return set()
+    return {m.lower() for m in re.findall(r"/([a-z])", token, re.IGNORECASE)}
+
+
+def _win_dangerous_flag(verb: str, flag: str) -> bool:
+    f = flag.lower()
+    if len(f) >= 2 and "-recurse".startswith(f):     # -r, -re, … -recurse
+        return True
+    if len(f) >= 3 and "-force".startswith(f):       # -fo … -force (`-f` е и -Filter)
+        return True
+    if f in ("--recursive", "--force"):
+        return True
+    if verb == "rm" and re.fullmatch(r"-[a-z]*[rf][a-z]*", f) is not None and len(f) <= 5:
+        return True                                   # `rm -rf` в Git Bash/PowerShell
+    return verb in _CMD_DELETE_VERBS and bool(_cmd_switch_letters(f) & {"s", "q", "f"})
+
+
+def _launcher_word(word: str) -> bool:
+    name = os.path.basename(word.replace("\\", "/")).lower()
+    return name.removesuffix(".exe") in _WIN_LAUNCHERS or word.startswith(("-", "/"))
+
+
+def _windows_delete_verdict(command: str) -> RiskVerdict:
+    """BLOCKED за рекурсивно/принудително триене на диск, системна папка или
+    дом; CONFIRM за всяко друго рекурсивно/принудително триене с тези глаголи.
+
+    2026-10-11: `${env:X}` се чете като `$env:X` (иначе `{}` режеше израза);
+    триене без цели на командния ред взима целите си от тръбата — `gci C:\\ -r
+    | ri -r -fo` е BLOCKED като `find / | xargs rm -rf`, а не CONFIRM; и първото
+    намерено триене вече не скрива по-късен израз, който трие корен."""
+    command = re.sub(r"\$\{env:([A-Za-z_]\w*)\}", r"$env:\1", command, flags=re.IGNORECASE)
+    confirm: RiskVerdict | None = None
+    for statement in re.split(r"[;&\n(){}]", command):
+        stages = statement.split("|")
+        for index, stage in enumerate(stages):
+            words = _windows_words(stage)
+            for i, word in enumerate(words):
+                verb = word.lower()
+                if verb not in _WIN_DELETE_VERBS:
+                    continue
+                # Глаголът е командата, не дума в текст: в началото на израза
+                # или след `powershell -c`, `cmd /c` и техните флагове.
+                before = words[:i]
+                if not all(_launcher_word(w) for w in before):
+                    break
+                args = words[i + 1:]
+                if not any(a.startswith(("-", "/")) and _win_dangerous_flag(verb, a) for a in args):
+                    break
+                targets = [a for a in args if not a.startswith("-")
+                           and not (verb in _CMD_DELETE_VERBS and _cmd_switch_letters(a))]
+                for target in targets:
+                    reason = _critical_root_reason(target)
+                    if reason:
+                        return RiskVerdict(RiskLevel.BLOCKED,
+                                           [f"рекурсивно/принудително триене ({word}) на {reason}"])
+                upstream = None if targets else _upstream_windows_root(stages[:index])
+                if upstream:
+                    return RiskVerdict(RiskLevel.BLOCKED, [
+                        (f"рекурсивно/принудително триене ({word}) на целите от тръбата, "
+                         f"в която по-рано стои {upstream}")])
+                confirm = confirm or RiskVerdict(RiskLevel.CONFIRM,
+                                                 [f"рекурсивно/принудително триене ({word})"])
+                break
+    return confirm or RiskVerdict(RiskLevel.SAFE, [])
+
+
+def _windows_words(stage: str) -> list[str]:
+    return [w for w in (w.strip("'\"`") for w in stage.split()) if w]
+
+
+def _upstream_windows_root(stages: list[str]) -> str | None:
+    """Критичен път, изписан в по-ранен етап на тръбата (`gci C:\\Users\\x | ri …`).
+
+    Етап, който стеснява списъка (`-Filter *.tmp`, `-Include *.log`, път с глоб
+    `C:\\Users\\x\\*.tmp`), не подава целия корен: такова чистене пита, както
+    в main, а не е BLOCKED без право на одобрение (2026-10-11, трета вълна —
+    `gci $HOME -r -Filter *.tmp | ri -fo` беше станало неодобримо). `-Exclude`
+    и `-Filter *` не стесняват нищо и остават BLOCKED."""
+    for stage in stages:
+        words = _windows_words(stage)[1:]
+        if any(_is_narrowing_filter(w) and i + 1 < len(words) and _narrowing_glob(words[i + 1])
+               for i, w in enumerate(words)):
+            continue
+        for word in words:
+            if word.startswith("-") or _cmd_switch_letters(word):
+                continue
+            last = re.split(r"[\\/]", word)[-1]
+            if any(ch in last for ch in "*?") and _narrowing_glob(last):
+                continue
+            if _critical_root_reason(word):
+                return word
+    return None
+
+
+def _is_narrowing_filter(word: str) -> bool:
+    """`-Filter`/`-Include` на Get-ChildItem и еднозначните им префикси."""
+    w = word.lower()
+    return (len(w) >= 5 and "-filter".startswith(w)) or (len(w) >= 4 and "-include".startswith(w))
+
+
+def _narrowing_glob(value: str) -> bool:
+    """`*.tmp`, `*.log,*.tmp` стесняват; `*`, `*.*` и празното — не."""
+    items = [v for v in value.split(",") if v]
+    return bool(items) and all(re.search(r"[^*?.]", v) for v in items)
+
+
+# ── PowerShell -EncodedCommand (2026-10-11) ─────────────────────────────────
+# Образецът искаше `powershell` и точно `-e`/`-enc`/`-encodedcommand`.
+# Измерено в режим „deny“ с base64 на `Remove-Item -Recurse -Force
+# $env:USERPROFILE`: `powershell -ec …`, `pwsh -enc …` и `pwsh -e …` бяха SAFE
+# и се изпълняваха без въпрос. `-ec` е документиран псевдоним, а PowerShell
+# приема всеки префикс на параметъра (`-e`, `-en`, `-enc` …) и с `/` отпред.
+# Кодираната команда е скрита от оператора, затова винаги пита — а щом се
+# декодира, получава и собствената си оценка: изтриване на дома е BLOCKED, не
+# въпрос, на който някой може да отговори „да“, без да вижда какво одобрява.
+_PS_LAUNCHERS = frozenset({"powershell", "pwsh"})
+_PS_PARAM = re.compile(r"^(?:--?|/)([a-z]+)$", re.IGNORECASE)
+
+
+def _is_encoded_command_flag(word: str) -> bool:
+    m = _PS_PARAM.match(word)
+    if not m:
+        return False
+    name = m.group(1).lower()
+    return name == "ec" or "encodedcommand".startswith(name)
+
+
+def _ends_launcher_params(word: str) -> bool:
+    """`-Command`/`-File`: думите след тях са скрипт или негови аргументи —
+    `pwsh -c "Select-String -e x"` не е кодирана команда."""
+    m = _PS_PARAM.match(word)
+    if not m:
+        return False
+    name = m.group(1).lower()
+    return name in ("c", "f") or (len(name) >= 3 and ("command".startswith(name)
+                                                      or "file".startswith(name)))
+
+
+def _encoded_powershell_verdict(command: str, cwd: Path | None) -> RiskVerdict:
+    import base64
+    import binascii
+
+    # Скобите и `{}` също започват команда (2026-10-11, трета вълна): с делене
+    # само по `;|&` думата беше `(powershell`, `$(powershell`, `x=$(powershell`
+    # — непозната — и командата ставаше SAFE дори с base64 на триене на дома,
+    # а в main беше CONFIRM. `@` е префиксът на cmd.exe, който скрива ехото.
+    command = re.sub(r"\\\s*\n", " ", command)
+    unrecognised = False
+    for statement in re.split(r"[;|&\n(){}]", command):
+        words = [w.strip("'\"`") for w in statement.split()]
+        launched = seen = False
+        for i, word in enumerate(words):
+            name = os.path.basename(word.replace("\\", "/")).lower().lstrip("@").removesuffix(".exe")
+            if name in _PS_LAUNCHERS:
+                launched = seen = True
+                continue
+            if launched and _ends_launcher_params(word):
+                launched = False             # нататък е скриптът, не параметри
+                continue
+            if not (launched and _is_encoded_command_flag(word)):
+                continue
+            payload = words[i + 1] if i + 1 < len(words) else ""
+            try:
+                decoded = base64.b64decode(payload, validate=True).decode("utf-16-le")
+            except (binascii.Error, ValueError):
+                return RiskVerdict(RiskLevel.CONFIRM, [
+                    "PowerShell с кодирана команда (-EncodedCommand), която не се декодира"])
+            # Декодираното е по-късо от кодираното, затова рекурсията свършва.
+            inner = assess_command(decoded, cwd)
+            shown = " ".join(decoded.split())[:120]
+            reasons = [f"PowerShell с кодирана команда (-EncodedCommand): {shown}"]
+            if inner.level == RiskLevel.BLOCKED:
+                return RiskVerdict(RiskLevel.BLOCKED, reasons + inner.reasons)
+            return RiskVerdict(RiskLevel.CONFIRM, reasons + inner.reasons)
+        # Мрежа под структурната проверка: старият образец от main за израз,
+        # в който думите не са разпознали стартера — никоя форма не пада под main.
+        unrecognised = unrecognised or (not seen and bool(_PS_ENCODED_TEXT.search(statement)))
+    if unrecognised:
+        return RiskVerdict(RiskLevel.CONFIRM, ["PowerShell с кодирана команда (-EncodedCommand)"])
+    return RiskVerdict(RiskLevel.SAFE, [])
+
+
+_PS_ENCODED_TEXT = re.compile(
+    r"\b(?:powershell|pwsh)(?:\.exe)?\b[^\n]*\s[-/](?:enc|e|ec|encodedcommand)\b", re.IGNORECASE)
+
+
+_INTERPRETERS = re.compile(r"^(python[\d.]*|py|pypy[\d.]*|perl|ruby|node|deno|bun)(\.exe)?$",
+                           re.IGNORECASE)
+_INLINE_FLAGS = frozenset({"-c", "-e", "-E", "--eval", "-p", "--print"})
+# Кратки флагове на python без аргумент, слепени с `-c`: `-uc`, `-Bc`, `-c"…"`.
+_PY_SHORT_C = re.compile(r"^-[bBdEhiIOPqRsSuvx]*c(.*)$", re.DOTALL)
+# perl/ruby/node: `-e`, слепен с други флагове (`perl -le`, `perl -ne`).
+_OTHER_SHORT_E = re.compile(r"^-[a-zA-Z]*[eE]$")
+# perl/ruby/node: триене и пускане на процеси с техните имена.
+_OTHER_LANG_RISK = re.compile(
+    r"\b(unlink|rmtree|rm_rf|rm_r|rmSync|rmdirSync|unlinkSync|File\.delete|FileUtils\.rm\w*"
+    r"|system|exec|execSync|spawnSync|child_process|`)", re.IGNORECASE)
+_RF_FLAG = re.compile(r"^(-[a-zA-Z]*[rRfF][a-zA-Z]*|--recursive|--force)$")
+
+
+def _inline_code_reasons(command: str) -> list[str]:
+    """Кодът в `python -c "…"` (и perl/ruby/node -e) получава Python образците.
+
+    2026-10-07: `python3 -c "import shutil; shutil.rmtree(…)"` минаваше като
+    SAFE и триеше в режим „deny“, а същото като `rm -rf` се спираше —
+    _PY_CONFIRM_PATTERNS се прилагаха само в assess_code. Изчислена командна
+    дума с флагове за рекурсия/сила (`$(echo rm) -rf ~`, `$x -rf ~`) не може да
+    се оцени статично — тя също пита; `$PY -m pytest` не.
+    """
+    reasons: list[str] = []
+    for seg in _split_segments(command):
+        try:
+            argv = _strip_wrappers(_shlex_split_for_classification(seg))
+        except ValueError:
+            continue
+        if not argv:
+            continue
+        head = argv[0]
+        if head.startswith(("$", "`")) or "$(" in head:
+            if any(_RF_FLAG.match(a) for a in argv[1:]):
+                reasons.append(f"изчислена команда с -r/-f ({head[:40]}) — не може да се оцени")
+            continue
+    # Кодът след `-c` е в кавички и носи `;` — сегментите отгоре го режат по
+    # средата, затова тук цялата команда се чете с кавичките.
+    try:
+        tokens = _shlex_split_for_classification(command)
+    except ValueError:
+        tokens = command.split()
+    for i, tok in enumerate(tokens):
+        name = os.path.basename(tok)
+        if not _INTERPRETERS.match(name):
+            continue
+        is_python = name.lower().startswith("py")
+        code, j, script = "", i + 1, False
+        while j < len(tokens):              # флаговете на интерпретатора до кода
+            t = tokens[j]
+            m = _PY_SHORT_C.match(t) if is_python else None
+            inline = (t == "-c" or m) if is_python else (t in _INLINE_FLAGS or _OTHER_SHORT_E.match(t))
+            if t.startswith("<<") or t == "<":
+                break                       # кодът идва от heredoc/файл на stdin
+            if inline:
+                # `-c code`, `-uc code`, `-c"code"` (shlex го слепва в `-ccode`)
+                attached = m.group(1) if m else ""
+                code = attached or (tokens[j + 1] if j + 1 < len(tokens) else "")
+                break
+            if t in ("-X", "-W"):           # `python -X utf8 -c …`
+                j += 2
+            elif t == "-m":
+                script = True
+                break
+            elif t.startswith("-") and t != "-":
+                j += 1
+            else:
+                script = t != "-" and not t.startswith(("<", "|", ";", "&"))
+                break
+        if not code and not script and ("|" in command[:command.find(tok)] or "<<" in command
+                                        or (j < len(tokens) and tokens[j] == "-")):
+            # Кодът идва от stdin: `echo "…" | python3`, `python3 - <<EOF`.
+            code = command
+        if not code:
+            continue
+        if is_python:
+            reasons += [f"{why} — в код на командния ред"
+                        for rx, why in _PY_CONFIRM_PATTERNS if rx.search(code)]
+        elif _OTHER_LANG_RISK.search(code):
+            reasons.append("триене/пускане на процес — в код на командния ред")
+    return reasons
+
+
+_SECRET_ARG_RX = re.compile(_SECRET_PATHS, re.IGNORECASE)
+_MAX_SECRET_GLOB = 300
+
+
+_CONTROL_ARG_RX = re.compile(_GENESIS_CONTROL, re.IGNORECASE)
+_REDIRECT_PREFIX = re.compile(r"^\d*[<>]+&?")
+
+
+def _control_file_reached(token: str, expanded: str) -> bool:
+    """Стига ли аргументът до управляващ файл на Genesis — и без кавичките и
+    escape-ите (`~/.gene''sis/hooks.json`), и по истинския път: realpath
+    разгъва символните връзки, а на Windows и 8.3 имената (`GENESI~1`), и то
+    за файл, който още не съществува (2026-10-11)."""
+    if _CONTROL_ARG_RX.search(token.replace("\\", "/")):
+        return True
+    if not any(ch in token for ch in "/\\~"):
+        return False
+    try:
+        real = os.path.realpath(expanded)
+    except (OSError, ValueError):
+        return False
+    # ~/.genesis/workspace е папката за проекти, когато Genesis тръгне от дома
+    # (paths._frozen_workspace): `config/settings.json` там е файл на проекта,
+    # а не на Genesis, но истинският му път съдържа `.genesis/` и в режим
+    # „deny“ командата се отказваше (2026-10-11, трета вълна). Отрязва се само
+    # префиксът — `<проект>/.genesis/hooks.json` вътре остава управляващ файл,
+    # а връзка навън realpath вече е разгънал до истинската ѝ цел.
+    real = _WORKSPACE_PREFIX.sub("", real.replace("\\", "/"), count=1)
+    return bool(_CONTROL_ARG_RX.search(real))
+
+
+_WORKSPACE_PREFIX = re.compile(r"^.*?/(?:\.genesis|genesi~\d)/workspace(?=/|$)", re.IGNORECASE)
+
+
+def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:
+    """Тайна, до която стигат АРГУМЕНТИТЕ на командата, а не само текстът ѝ.
+
+    Одит 2026-10-11, възпроизведено в режим „deny“: `cat ~/.s?h/id_r?a`,
+    `cat ~/.genesis/.en?`, `cat ~/.s''sh/id_ed2551''9` и `cat notes.txt`
+    (символна връзка към id_rsa в workspace-а) печатаха ключа — образецът
+    гледаше само буквалния текст. Тук всеки аргумент се чете без кавичките и
+    се разгъва както би го разгънал шелът (~, $VAR, glob), а всеки реален път
+    минава през sensitive_path_reason, която проследява и символните връзки.
+    """
+    import glob as _glob
+
+    base = cwd if (cwd and cwd.is_dir()) else Path.cwd()
+    seen = 0
+    for seg in _split_segments(command):
+        tokens = [tok for reading in _argument_readings(seg) for tok in reading]
+        for tok in tokens:
+            tok = _REDIRECT_PREFIX.sub("", tok)     # `>~/x`, `2>>log` — целта е пътят
+            if not tok or tok.startswith("-"):
+                continue
+            match = _SECRET_ARG_RX.search(tok.replace("\\", "/"))
+            if match and not _SENSITIVE_PATH_EXEMPT_RE.search(tok):
+                return f"достъп до чувствителен файл ({match.group(0)})"
+            expanded = os.path.expanduser(os.path.expandvars(tok))
+            if not os.path.isabs(expanded):
+                expanded = str(base / expanded)
+            if _control_file_reached(tok, expanded):
+                return _GENESIS_CONTROL_REASON
+            if any(ch in tok for ch in "*?["):
+                try:
+                    paths = _glob.glob(expanded)[:_MAX_SECRET_GLOB - seen]
+                except (OSError, ValueError, re.error):
+                    paths = []
+            else:
+                paths = [expanded] if os.path.lexists(expanded) else []
+            for path in paths:
+                seen += 1
+                reason = sensitive_path_reason(path)
+                if reason:
+                    return reason
+            if seen >= _MAX_SECRET_GLOB:
+                return None
+    return None
+
+
+def assess_command(command: str, cwd: Path | None = None, *, arguments: bool = True) -> RiskVerdict:
     """Оценява риска на shell команда.
 
-    `cwd` е по избор и се ползва само за разгъването на относителни glob-ове в
-    прегледа на файловите операции — без него проверката пак работи, само
-    описанието на засегнатите файлове е по-бедно."""
+    `cwd` е по избор и се ползва за разгъването на относителни glob-ове — в
+    прегледа на файловите операции и в проверката за тайни в аргументите.
+    `arguments=False` — без тази проверка: за Python кода (assess_code) думите
+    не са аргументи на шел, а там тайните пази py_guard при изпълнение."""
     reasons: list[str] = []
     level = RiskLevel.SAFE
 
@@ -782,6 +1449,12 @@ def assess_command(command: str, cwd: Path | None = None) -> RiskVerdict:
     structural = _catastrophic_rm_reason(command)
     if structural:
         return RiskVerdict(RiskLevel.BLOCKED, [structural])
+    windows_delete = _windows_delete_verdict(command)
+    if windows_delete.level == RiskLevel.BLOCKED:
+        return windows_delete
+    encoded = _encoded_powershell_verdict(command, cwd)
+    if encoded.level == RiskLevel.BLOCKED:
+        return encoded
 
     for rx, why in _BLOCK_PATTERNS:
         if rx.search(command):
@@ -793,6 +1466,25 @@ def assess_command(command: str, cwd: Path | None = None) -> RiskVerdict:
         if rx.search(command):
             reasons.append(why)
             level = RiskLevel.CONFIRM
+    if windows_delete.level == RiskLevel.CONFIRM and level < RiskLevel.CONFIRM:
+        reasons.extend(windows_delete.reasons)
+        level = RiskLevel.CONFIRM
+    if encoded.level == RiskLevel.CONFIRM:
+        reasons.extend(encoded.reasons)
+        level = RiskLevel.CONFIRM
+    inline = _inline_code_reasons(command)
+    if inline:
+        reasons.extend(inline)
+        level = RiskLevel(max(level, RiskLevel.CONFIRM))
+    if arguments and _SECRET_REASON not in reasons:
+        try:
+            secret = _secret_in_arguments(command, cwd)
+        except Exception:
+            secret = None
+        if secret:
+            if secret not in reasons:
+                reasons.append(secret)
+            level = RiskLevel(max(level, RiskLevel.CONFIRM))
     verdict = RiskVerdict(level, reasons)
     try:
         return verdict.merge(_assess_file_ops(command, cwd))
@@ -817,7 +1509,7 @@ _PATH_LITERAL_FALSE_POSITIVE_REASONS = {
 }
 _FILE_READ_CALL_NAMES = {"open", "read_text", "read_bytes", "read"}
 _SENSITIVE_PATH_RE = re.compile(
-    r"(/etc/(passwd|shadow|sudoers)|\.ssh/|\.aws/|id_rsa|\.env\b|credentials\b)"
+    r"(/etc/(passwd|shadow|sudoers)|" + _SECRET_PATHS + ")", re.IGNORECASE
 )
 
 # Шаблоните, които се РАЗПРОСТРАНЯВАТ нарочно: `.env.example` е в репото, за да
@@ -843,40 +1535,84 @@ def sensitive_path_reason(path: str | os.PathLike[str]) -> str | None:
     # sandbox._split_segment вече прави точно тази нормализация, и то по
     # същата причина.
     text = str(path).replace("\\", "/")
-    if _SENSITIVE_PATH_EXEMPT_RE.search(text):
-        return None
-    match = _SENSITIVE_PATH_RE.search(text)
-    return f"достъп до чувствителен файл ({match.group(0)})" if match else None
+    if not _SENSITIVE_PATH_EXEMPT_RE.search(text):
+        match = _SENSITIVE_PATH_RE.search(text)
+        if match:
+            return f"достъп до чувствителен файл ({match.group(0)})"
+    # Символна връзка в workspace-а към ключ (2026-10-07): `notes.txt → ~/.ssh/id_rsa`
+    # се четеше без въпрос — образецът гледаше само името, което моделът написа.
+    # Само за абсолютни пътища: относителният се разрешава спрямо cwd на
+    # процеса, а не спрямо папката, за която пита извикващият.
+    raw = os.fspath(path)
+    if os.path.isabs(raw):
+        try:
+            real = os.path.realpath(raw)
+        except (OSError, ValueError):
+            return None
+        if os.path.normcase(real) != os.path.normcase(os.path.abspath(raw)):
+            real_text = real.replace("\\", "/")
+            if not _SENSITIVE_PATH_EXEMPT_RE.search(real_text):
+                match = _SENSITIVE_PATH_RE.search(real_text)
+                if match:
+                    return f"достъп до чувствителен файл ({match.group(0)}, през символна връзка)"
+    return None
+
+
+# Където споменаването на чувствителен път е само сравнение/филтър, не четене:
+# `if name.startswith(".env")`, `re.search(r"\.pem$", f)`, `print("пази .env")`.
+_BENIGN_STR_CALLS = {"startswith", "endswith", "match", "fullmatch", "search", "compile",
+                     "sub", "findall", "fnmatch", "print"}
 
 
 def _python_reads_sensitive_path(code: str) -> bool:
-    """True ако код реално ЧЕТЕ чувствителен път (не само го споменава/сравнява).
-    При SyntaxError или друга несигурност връща True (консервативно — не
-    сваляме предупреждение за код, който не можем уверено да разберем)."""
+    """True ако код може да ЧЕТЕ чувствителен път (не само го сравнява).
+
+    Всеки низ с такъв път брои, освен ако е в сравнение (`in`, `==`), в
+    шаблон/филтър (startswith, re.search, fnmatch), в print или е голо
+    изречение (docstring). Одит 2026-10-07: проверката гледаше само низ,
+    подаден ПРЯКО на open()/read_text(), и `Path.home().joinpath(".ssh",
+    "id_rsa").read_text()` минаваше без въпрос в USE_SKILL, докато RUN_CMD
+    отказваше същото. При SyntaxError → True (консервативно)."""
     try:
         tree = ast.parse(code)
     except SyntaxError:
         return True
+    parents: dict[int, ast.AST] = {}
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        name = func.attr if isinstance(func, ast.Attribute) else (
-            func.id if isinstance(func, ast.Name) else None)
-        if name not in _FILE_READ_CALL_NAMES and not (
-                isinstance(func, ast.Attribute) and func.attr == "open" and
-                isinstance(func.value, ast.Name) and func.value.id == "os"):
-            continue
-        for arg in list(node.args) + [kw.value for kw in node.keywords]:
-            if (isinstance(arg, ast.Constant) and isinstance(arg.value, str)
-                    and _SENSITIVE_PATH_RE.search(arg.value)):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+
+    def benign(node: ast.AST) -> bool:
+        cur: ast.AST | None = node
+        while cur is not None and not isinstance(cur, ast.stmt):
+            parent = parents.get(id(cur))
+            if isinstance(parent, ast.Compare):
                 return True
+            if isinstance(parent, ast.Call):
+                if cur is parent.func:
+                    return False  # `(home / ".env").read_text()` — метод върху пътя
+                func = parent.func
+                name = func.attr if isinstance(func, ast.Attribute) else (
+                    func.id if isinstance(func, ast.Name) else None)
+                # подаден на друго извикване — може да е четене
+                return name in _BENIGN_STR_CALLS
+            if isinstance(parent, ast.Expr):
+                return True       # docstring / голо изречение
+            cur = parent
+        return False
+
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and _SENSITIVE_PATH_RE.search(node.value)
+                and not _SENSITIVE_PATH_EXEMPT_RE.search(node.value)
+                and not benign(node)):
+            return True
     return False
 
 
 def assess_code(code: str) -> RiskVerdict:
     """Оценява риска на Python код (проверява и shell, и Python образците)."""
-    verdict = assess_command(code)  # кодът може да съдържа shell чрез os.system и т.н.
+    verdict = assess_command(code, arguments=False)  # кодът може да съдържа shell (os.system)
     if verdict.level == RiskLevel.BLOCKED:
         return verdict
     reasons = list(verdict.reasons)
@@ -896,12 +1632,27 @@ def assess_code(code: str) -> RiskVerdict:
 # Политика
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Потвърждава се само каквото се вижда ЦЯЛО. Операцията се режеше (300 знака в
+# терминала, 1000 на телефона) без знак за отрязване — `rm -r build && echo
+# "…" && rm -r src` се одобряваше, без краят да се вижда (одит 2026-10-09).
+# По-дълга от това не се показва за одобрение — отказва се.
+MAX_SHOWN_OPERATION = 20_000
+
+
+def too_long_to_confirm(operation: str) -> bool:
+    return len(operation) > MAX_SHOWN_OPERATION
+
+
 def _default_confirm(prompt: str, verdict: RiskVerdict) -> bool:
     """Терминален confirmation prompt (само в интерактивен режим)."""
+    if too_long_to_confirm(prompt):
+        print(f"\n⛔ Операция от {len(prompt)} знака — твърде дълга, за да се одобри "
+              "наведнъж; отказана.", file=sys.stderr)
+        return False
     print("\n⚠️  GENESIS SANDBOX — изисква потвърждение", file=sys.stderr)
     for r in verdict.reasons:
         print(f"    • {r}", file=sys.stderr)
-    print(f"    Операция: {prompt[:300]}", file=sys.stderr)
+    print(f"    Операция ({len(prompt)} знака):\n{prompt}", file=sys.stderr)
     try:
         ans = input("    Да се изпълни ли? [y/N] ").strip().lower()
     except (EOFError, KeyboardInterrupt):
@@ -924,6 +1675,15 @@ class SandboxPolicy:
     env_passthrough: tuple[str, ...] = (
         "PATH", "HOME", "USER", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR",
         "PYTHONPATH", "PYTHONIOENCODING",
+        # Windows: без тях одобрен подпроцес от умение падаше с „shell not
+        # found: neither %ComSpec% nor %SystemRoot%“, а Python в детето — без
+        # random/сокети (Windows CI 2026-10-09). Не са тайни.
+        "SYSTEMROOT", "COMSPEC", "PATHEXT", "WINDIR", "TEMP", "TMP",
+        # Домът на Windows (2026-10-11): HOME/USER обикновено ги няма там, а
+        # Python от 3.8 не чете HOME — без тези `Path.home()` в детето хвърляше
+        # RuntimeError, getpass.getuser() падаше, а git без bash нямаше дом.
+        # review._git_env ги добавяше само за git; не са тайни.
+        "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "USERNAME",
     )
     cpu_seconds: int = 120
     max_memory_mb: int = 2048
@@ -942,6 +1702,7 @@ class SandboxPolicy:
 
 # Глобална, заменяема политика. Терминалният агент подменя confirm_fn със своя UI.
 _POLICY = SandboxPolicy()
+_CONFIRM_LOCK = threading.Lock()
 
 
 def set_policy(policy: SandboxPolicy) -> None:
@@ -966,10 +1727,20 @@ def _decide(operation: str, verdict: RiskVerdict, policy: SandboxPolicy) -> tupl
     if mode == "deny":
         return False, ("[SANDBOX DENIED] Операцията изисква потвърждение, но режимът е "
                        "неинтерактивен (autonomous). Причини: " + "; ".join(verdict.reasons))
-    # interactive
-    if policy.confirm_fn(operation, verdict):
+    # interactive — по един въпрос: паралелните четения (виж _parallel_reads в
+    # чата) иначе питаха едновременно и отговорът отиваше към грешния въпрос.
+    with _CONFIRM_LOCK:
+        allowed = policy.confirm_fn(operation, verdict)
+    if allowed:
         return True, ""
     return False, "[SANDBOX DECLINED] Операторът отказа изпълнението."
+
+
+def confirm(operation: str, reasons: list[str]) -> tuple[bool, str]:
+    """Действие извън shell-а (MCP инструмент, външна система), което иска
+    съгласие: същото правило като за CONFIRM команда — пита в терминала,
+    отказва в автономен режим. (позволено, причина за отказ)."""
+    return _decide(operation, RiskVerdict(RiskLevel.CONFIRM, list(reasons)), _POLICY)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -999,6 +1770,31 @@ def _windowsapps_last(path: str) -> str:
     parts = [p for p in path.split(";") if p]
     apps = [p for p in parts if "\\windowsapps" in p.lower()]
     return ";".join([p for p in parts if p not in apps] + apps)
+
+
+_ENVIRON_HIDDEN = False
+
+
+def _hide_own_environ() -> None:
+    """PR_SET_DUMPABLE=0 за процеса на Genesis (Linux), веднъж — преди първото дете.
+
+    Минималната среда на детето не значеше нищо, щом то чете средата на
+    родителя: `tr '\\0' '\\n' < /proc/$PPID/environ` печаташе API ключа
+    (одит 2026-10-11, възпроизведено). Недъмпваем процес има /proc/<pid>/
+    environ, mem и maps на root — дете със същия uid не ги отваря. При exec
+    детето отново е dumpable, така че инструментите му (gdb, py-spy върху
+    собствения му код) работят както преди. Образецът в _SECRET_PATHS е
+    вторият слой: той пита и за буквално изписан път."""
+    global _ENVIRON_HIDDEN
+    if _ENVIRON_HIDDEN or not sys.platform.startswith("linux"):
+        return
+    _ENVIRON_HIDDEN = True
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl(4, 0, 0, 0, 0)          # PR_SET_DUMPABLE = 4
+    except (OSError, AttributeError):
+        pass
 
 
 def _count_user_processes() -> int:
@@ -1039,9 +1835,38 @@ def _preexec(policy: SandboxPolicy, nproc_cap: int):  # изпълнява се 
             pass
 
 
+# Вика се точно преди процесът да тръгне — СЛЕД одобрението на оператора.
+# edit_history прави тук снимката за /undo: снимка преди въпроса „Да се
+# изпълни ли?“ приписваше на командата и каквото операторът запише, докато
+# мисли (одит 2026-10-09).
+before_exec: Callable[[], None] | None = None
+
+# „Стоп“ на оператора (бутонът на телефона), докато командата върви. Задава го
+# genesis_skills._set_cancel. Одит 2026-10-11: проверката беше само преди
+# следващия инструмент — `sleep 8` довършваше 7.1 s след Стоп, а увиснал
+# `npm test` държеше телефона на „Genesis работи…“ до таймаута от 120 s.
+cancel_check: Callable[[], bool] | None = None
+_CANCEL_POLL_S = 0.5
+
+
+def _stop_requested() -> bool:
+    check = cancel_check
+    try:
+        return bool(check and check())
+    except Exception:
+        return False
+
+
 def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
          env_extra: dict[str, str] | None = None) -> SandboxResult:
+    hook = before_exec
+    if hook is not None:
+        try:
+            hook()
+        except Exception:
+            pass
     env = _build_env(policy, env_extra)
+    _hide_own_environ()
     # Ако NPROC е включен, капът е headroom над текущото натоварване.
     nproc_cap = (_count_user_processes() + policy.max_processes) if policy.max_processes > 0 else 0
     try:
@@ -1050,31 +1875,38 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
             cwd=str(cwd),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            # Изрично UTF-8, а не локалното кодиране (bug fix, 2026-09-20,
-            # хванат от Windows CI). `text=True` само по себе си декодира с
-            # locale.getpreferredencoding() — cp1252 на англоезичен Windows,
-            # cp1251 на български. Детето обаче пише UTF-8: _build_env му
-            # задава PYTHONIOENCODING=utf-8 няколко реда по-горе. Двете страни
-            # се разминаваха, и всяко умение или команда, отпечатала кирилица,
-            # чуплеше reader нишката с UnicodeDecodeError — изходът се губеше,
-            # а причината не личеше отникъде. Това е проектът, чийто оператор
-            # пише на български; изходите също.
-            # errors="replace", защото sandbox-ът изпълнява ПРОИЗВОЛЕН код:
-            # програма, която извади двоични байтове на stdout, трябва да
-            # даде повреден текст, не да срине четенето.
-            encoding="utf-8",
-            errors="replace",
+            # Байтове, декодирани от decode_output, а не text=True (bug fix,
+            # 2026-09-20, хванат от Windows CI): text=True декодира с
+            # locale.getpreferredencoding() — cp1252/cp1251 на Windows — а
+            # детето пише UTF-8 (PYTHONIOENCODING от _build_env); кирилицата
+            # чупеше reader нишката с UnicodeDecodeError. Строгото UTF-8 пък
+            # (2026-10-11) правеше на „���“ българския изход на cmd.exe, `dir`,
+            # `type` и `powershell -c`, които пишат в кодовата страница.
             env=env,
             preexec_fn=(lambda: _preexec(policy, nproc_cap)) if os.name == "posix" else None,  # noqa: PLW1509 — fork()+exec() is immediate; setrlimit-only preexec, no locks touched
         )
     except Exception as e:
         return SandboxResult(ok=False, stdout="", stderr=f"[sandbox] стартът се провали: {e}",
                              returncode=None)
+    job = _WinJob(proc.pid)
+    deadline = time.monotonic() + timeout
+    stopped = False
     try:
-        out, err = proc.communicate(timeout=timeout)
-        return SandboxResult(ok=proc.returncode == 0, stdout=out or "", stderr=err or "",
-                             returncode=proc.returncode)
+        # На парчета по 0.5 s, за да се види „Стоп“; повторният communicate()
+        # не губи изход (документирано за TimeoutExpired).
+        while True:
+            try:
+                out, err = proc.communicate(
+                    timeout=max(0.01, min(_CANCEL_POLL_S, deadline - time.monotonic())))
+                break
+            except subprocess.TimeoutExpired:
+                if _stop_requested():
+                    stopped = True
+                    raise
+                if time.monotonic() >= deadline:
+                    raise
+        return SandboxResult(ok=proc.returncode == 0, stdout=decode_output(out),
+                             stderr=decode_output(err), returncode=proc.returncode)
     except subprocess.TimeoutExpired:
         # Убиваме цялата process group — само на POSIX (os.killpg/getpgid не
         # съществуват на Windows и AttributeError не се хваща по-долу, значи
@@ -1084,6 +1916,7 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
             if sys.platform != "win32":
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             else:
+                job.terminate()
                 _kill_tree_win32(proc.pid)
                 proc.kill()
         except (ProcessLookupError, PermissionError, OSError):
@@ -1097,7 +1930,8 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
         # 11 246 секунди при таймаут от 120. Ако нещо ги държи и след убиването
         # на дървото, изоставяме изхода, не чакаме завинаги.
         try:
-            out, err = proc.communicate(timeout=10)
+            raw_out, raw_err = proc.communicate(timeout=10)
+            text_out, text_err = decode_output(raw_out), decode_output(raw_err)
         except subprocess.TimeoutExpired:
             for stream in (proc.stdout, proc.stderr):
                 try:
@@ -1105,10 +1939,140 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
                         stream.close()
                 except OSError:
                     pass
-            out, err = "", "[sandbox] процесът не пусна изхода си и след убиване"
-        return SandboxResult(ok=False, stdout=out or "",
-                             stderr=(err or "") + f"\n[sandbox] Timeout след {timeout}s",
+            text_out, text_err = "", "[sandbox] процесът не пусна изхода си и след убиване"
+        note = "⏹ Спряно от оператора" if stopped else f"Timeout след {timeout}s"
+        return SandboxResult(ok=False, stdout=text_out,
+                             stderr=text_err + f"\n[sandbox] {note}",
                              returncode=None)
+    finally:
+        job.close()
+
+
+# ── Изход на детето: UTF-8, а на Windows и кодовата страница (2026-10-11) ────
+# Python децата пишат UTF-8 (PYTHONIOENCODING), но вградените в Windows
+# програми — в OEM (cp866, конзолата) или ANSI (cp1251) кодовата страница на
+# българския Windows. Измерено: run_shell на дете, което пише „Системата не
+# може да намери указания път.“ в cp866, връщаше „���⥬�� …“, а `!команда`
+# (shell_mode) я четеше правилно. Решава се ред по ред: UTF-8, ако е валиден;
+# иначе онази кодова страница, която дава най-много четим текст — cp866 и
+# cp1251 декодират всеки байт, затова грешка при декодиране не ги различава.
+_READABLE = re.compile(r"[\x20-\x7e\sЀ-џ]")
+
+
+def _legacy_codepages() -> list[str]:
+    """Кодовите страници, с които пишат програмите извън Python; празно извън Windows."""
+    if sys.platform != "win32":
+        return []
+    global _CODEPAGES
+    if _CODEPAGES is None:
+        import codecs
+        import locale
+
+        names: list[str] = []
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            names += [f"cp{cp}" for cp in (kernel32.GetConsoleOutputCP(), kernel32.GetOEMCP(),
+                                           kernel32.GetACP()) if cp]
+        except Exception:
+            pass
+        names.append(locale.getpreferredencoding(False))
+        found: list[str] = []
+        for name in names:
+            try:
+                codec = codecs.lookup(name).name
+            except (LookupError, TypeError):
+                continue
+            if codec != "utf-8" and codec not in found:
+                found.append(codec)
+        _CODEPAGES = found
+    return _CODEPAGES
+
+
+_CODEPAGES: list[str] | None = None
+
+
+def _decode_line(raw: bytes, codepages: list[str]) -> str:
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    if not codepages:
+        return raw.decode("utf-8", errors="replace")
+    candidates = [raw.decode(cp, errors="replace") for cp in codepages]
+    return max(candidates, key=lambda text: len(_READABLE.findall(text)))
+
+
+def decode_output(raw: bytes | str | None) -> str:
+    """Изход на подпроцес → текст с `\\n` за край на ред (както text=True)."""
+    if not raw:
+        return ""
+    if isinstance(raw, str):
+        return raw
+    codepages = _legacy_codepages()
+    text = "".join(_decode_line(line, codepages) for line in raw.splitlines(keepends=True))
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+class _WinJob:
+    """Windows Job Object около командата — „Стоп“ и таймаутът убиват ВСИЧКИ
+    потомци, не само тези, които `taskkill /T` намира по родителя.
+
+    Windows CI, PR #59 (2026-10-12): `sleep 8` през Git Bash довърши 11 s след
+    „Стоп“ на телефона. MSYS пуска последната команда така, че междинният
+    процес изчезва и `sleep.exe` остава без жив родител: `taskkill /T` не го
+    стига, а той държи pipe-овете до края. TerminateJobObject убива всичко в
+    job-а, независимо от родителя. Без KILL_ON_JOB_CLOSE: само изричното
+    прекратяване убива; затварянето на дръжката не пипа нищо. На POSIX е
+    празен (там е killpg на групата)."""
+
+    def __init__(self, pid: int) -> None:
+        self.handle: int | None = None
+        self._k32: Any = None
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+            # getattr: в typeshed `windll` го има само при win32 — mypy на Linux CI.
+            k32 = getattr(ctypes, "windll").kernel32  # noqa: B009
+            k32.CreateJobObjectW.restype = wintypes.HANDLE
+            k32.OpenProcess.restype = wintypes.HANDLE
+            k32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+            k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+            job = k32.CreateJobObjectW(None, None)
+            if not job:
+                return
+            proc = k32.OpenProcess(0x0100 | 0x0001, False, pid)   # SET_QUOTA | TERMINATE
+            ok = bool(proc) and bool(k32.AssignProcessToJobObject(job, proc))
+            if proc:
+                k32.CloseHandle(proc)
+            if not ok:
+                k32.CloseHandle(job)
+                return
+            self.handle = job
+            self._k32 = k32
+        except Exception:
+            self.handle = None
+
+    def terminate(self) -> None:
+        if self.handle is None:
+            return
+        try:
+            from ctypes import wintypes
+            self._k32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+            self._k32.TerminateJobObject(self.handle, 1)
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        if self.handle is None:
+            return
+        try:
+            self._k32.CloseHandle(self.handle)
+        except Exception:
+            pass
+        self.handle = None
 
 
 def _kill_tree_win32(pid: int) -> None:
@@ -1218,25 +2182,62 @@ def _shell_argv(command: str) -> list[str]:
         return ["/bin/sh", "-c", command]
     prefix = _windows_shell_prefix()
     if prefix and prefix[0].lower().endswith("bash.exe"):
-        command = _unescape_leading_windows_path(command)
+        command = _unescape_windows_paths(command)
     return [*prefix, command]
 
 
-_LEADING_WIN_PATH = re.compile(r"^(\s*)([A-Za-z]:\\[^\s\"']*)")
+# Непосредствено преди некавичен Windows път: начало, празно място, `=` или
+# оператор на обвивката (`cd C:\x&&python`, `>C:\x.log`, `--out=C:\x`).
+_WIN_PATH_BOUNDARY = frozenset(" \t\n=;&|()<>")
+_WIN_PATH_END = frozenset(" \t\n;&|()<>\"'`")
 
 
-def _unescape_leading_windows_path(command: str) -> str:
-    r"""`C:\Users\x\python.exe -m pytest` без кавички → `C:/Users/x/python.exe ...`.
+def _unescape_windows_paths(command: str) -> str:
+    r"""Некавичените Windows пътища → с `/`: `mkdir C:\x\tests` → `mkdir C:/x/tests`.
 
-    Bash чете `\U`, `\x`… като escape и изяжда наклонените черти, така че
-    командата търси несъществуващ `C:Usersx...` — rc=127 (хванато от
-    bench_fix.py, 2026-09-24: моделите пишат точно така пътя от средата).
-    Пипа се само ПЪРВИЯТ, некавичен токен: той е изпълнимият файл; в
-    аргументите обратната черта може да е нарочна."""
-    m = _LEADING_WIN_PATH.match(command)
-    if not m:
-        return command
-    return m.group(1) + m.group(2).replace("\\", "/") + command[m.end():]
+    Bash чете `\U`, `\x`… като escape и изяжда наклонените черти: изпълнимият
+    файл става несъществуващ `C:Usersx...` — rc=127 (bench_fix.py,
+    2026-09-24), а аргументът — папка `C:UsersroikaProjects...tests` до
+    истинската `tests/` (2 от 8 проби с IBAN/ДДС, 2026-09-25). Команда,
+    писана с `C:\`, иска Windows път — `\` след `X:` в bash никога не е
+    нарочен escape. Кавичените пътища не се пипат: в '...' bash пази `\`, а в
+    "..." `\U` също остава."""
+    out: list[str] = []
+    quote = ""
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                out.append(command[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            out.append(command[i:i + 2])
+            i += 2
+            continue
+        if (ch.isascii() and ch.isalpha() and i + 2 < n
+                and command[i + 1] == ":" and command[i + 2] == "\\"
+                and (i == 0 or command[i - 1] in _WIN_PATH_BOUNDARY)):
+            j = i
+            while j < n and command[j] not in _WIN_PATH_END:
+                j += 1
+            out.append(command[i:j].replace("\\", "/"))
+            i = j
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def run_shell(command: str, *, cwd: Path | None = None,
@@ -1258,10 +2259,68 @@ def run_shell(command: str, *, cwd: Path | None = None,
     return res
 
 
+def start_shell(command: str, *, cwd: Path | None = None, log: Path,
+                policy: SandboxPolicy | None = None) -> tuple[subprocess.Popen | None, str]:
+    """Пуска shell команда във фона — през СЪЩАТА бариера като run_shell.
+
+    Изходът отива във файл (`log`), не в pipe: dev сървър, който пише часове,
+    би напълнил pipe буфера и би спрял. Процесът е в своя група (POSIX), за да
+    може да се спре цялото дърво. Таван на процесорното време — час, не
+    cpu_seconds: сървърът чака, не смята. (процес, отказ) — едното е празно."""
+    policy = policy or _POLICY
+    work = cwd if (cwd and cwd.is_dir()) else _sandbox_dir()
+    verdict = assess_command(command, cwd=work)
+    allowed, reason = _decide(command, verdict, policy)
+    if not allowed:
+        return None, reason
+    _hide_own_environ()
+    long_policy = replace(policy, cpu_seconds=max(policy.cpu_seconds, 3600))
+    nproc_cap = (_count_user_processes() + policy.max_processes) if policy.max_processes > 0 else 0
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with open(log, "wb") as fh:
+            proc = subprocess.Popen(
+                _shell_argv(command), cwd=str(work), stdout=fh, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL, env=_build_env(policy),
+                preexec_fn=(lambda: _preexec(long_policy, nproc_cap)) if os.name == "posix" else None,  # noqa: PLW1509
+                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+            )
+    except Exception as e:
+        return None, f"[sandbox] стартът се провали: {e}"
+    return proc, ""
+
+
+def stop_process(proc: subprocess.Popen) -> None:
+    """Спира процес, пуснат с start_shell, заедно с децата му."""
+    if proc.poll() is not None:
+        return
+    try:
+        if sys.platform != "win32":
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            try:
+                proc.wait(timeout=5)
+                return
+            except subprocess.TimeoutExpired:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        else:
+            _kill_tree_win32(proc.pid)
+            proc.kill()
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def run_python(code: str, *, cwd: Path | None = None,
                policy: SandboxPolicy | None = None,
                timeout: int | None = None,
-               env_extra: dict[str, str] | None = None) -> SandboxResult:
+               env_extra: dict[str, str] | None = None,
+               allow: list[Path] | None = None) -> SandboxResult:
     """Изпълнява Python код в отделен интерпретатор през защитната бариера."""
     policy = policy or _POLICY
     verdict = assess_code(code)
@@ -1270,19 +2329,72 @@ def run_python(code: str, *, cwd: Path | None = None,
         return SandboxResult(ok=False, stdout="", stderr=reason, returncode=None,
                              blocked=True, verdict=verdict)
     root = _sandbox_dir()
+    # Нова папка за всяко пускане: тя е sys.path[0] на скрипта и на пазача, а
+    # `runpy.py`, оставен там от предишен скрипт, тръгваше преди hook-а (одит).
+    # Работната папка остава постоянната папка на sandbox-а (`report.csv` от
+    # драйвер трябва да остане след края); новата папка е само sys.path[0].
+    # Името — не `main.py`: засенчваше `main` модула на проекта (преглед).
+    run_dir = root / f"run_{uuid.uuid4().hex[:12]}"
+    run_dir.mkdir(parents=True)
     work = cwd if (cwd and cwd.is_dir()) else root
-    script = root / f"run_{uuid.uuid4().hex[:12]}.py"
+    script = run_dir / f"{run_dir.name}.py"
     script.write_text(code, encoding="utf-8")
+    argv = [sys.executable, str(script)]
+    # Пазачът (py_guard): отказва тайните и по сглобен път, който assess_code
+    # не вижда. Без него — само ако операторът в интерактивен режим е видял и
+    # одобрил точно „достъп до чувствителни файлове“ (не коментар с „.env“ до
+    # друга одобрена операция, не режим allow — одит 2026-10-09).
+    mode = policy.resolve_mode()
+    approved = mode == "interactive" and _SECRET_REASON in verdict.reasons
+    if not approved:
+        guard = _guard_script(run_dir)
+        if guard is not None:
+            argv = [sys.executable, str(guard), str(script)]
+            procs = any(r in verdict.reasons for r in _PROC_REASONS)
+            env_extra = {**(env_extra or {}),
+                         **_guard_env([run_dir, root, work, *(allow or [])], procs)}
     try:
-        res = _run([sys.executable, str(script)], cwd=work, policy=policy,
+        res = _run(argv, cwd=work, policy=policy,
                    timeout=timeout or policy.cpu_seconds, env_extra=env_extra)
         res.verdict = verdict
         return res
     finally:
-        try:
-            script.unlink(missing_ok=True)
-        except OSError:
-            pass
+        import shutil
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+
+_SECRET_REASON = "достъп до чувствителни файлове (ключове/тайни)"
+_PROC_REASONS = ("стартиране на подпроцес", "стартиране на процес", "os.system (shell изпълнение)")
+# За пазача `credentials` е име на файл (`credentials`, `credentials.json`), не
+# всеки път с думата — `tests/test_credentials.py` е код (одит 2026-10-09).
+# Пред думата — и `.`/`-`/`_`, отзад — разширения за данни, не за код
+# (2026-10-11): `~/.git-credentials`, gcloud `application_default_credentials.json`
+# и terraform `credentials.tfrc.json` се четяха от USE_SKILL по сглобен път.
+_GUARD_RX = _SECRET_PATHS.replace(
+    r"|credentials\b",
+    r"|(?:^|[/._-])credentials(?:\.(?:json|tfrc|ya?ml|toml|ini|cfg|conf|xml|db|txt|enc))*$")
+
+
+def _guard_script(run_dir: Path) -> Path | None:
+    """py_guard.py до скрипта, в новата папка на пускането: пуснат от
+    genesis_agent/, папката му щеше да е първа в sys.path и config.py/memory.py
+    там засенчваха модули."""
+    try:
+        src = (Path(__file__).resolve().parent / "py_guard.py").read_text(encoding="utf-8")
+        target = run_dir / "_genesis_guard.py"
+        target.write_text(src, encoding="utf-8")
+        return target
+    except OSError:
+        return None
+
+
+def _guard_env(allow: list[Path], procs: bool) -> dict[str, str]:
+    from genesis_agent.paths import GENESIS_HOME
+    return {"GENESIS_GUARD_RX": _GUARD_RX,
+            "GENESIS_GUARD_EXEMPT": _SENSITIVE_PATH_EXEMPT_RE.pattern,
+            "GENESIS_GUARD_BLOCK": str(GENESIS_HOME),
+            "GENESIS_GUARD_ALLOW": os.pathsep.join(str(p) for p in allow),
+            "GENESIS_GUARD_PROCS": "1" if procs else "0"}
 
 
 def _sandbox_dir() -> Path:

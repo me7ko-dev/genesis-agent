@@ -50,11 +50,25 @@ class TestDelegateTaskShellAgent:
 
 class TestWaitAllTimeout:
     def test_still_running_task_is_marked_timeout(self, monkeypatch) -> None:
-        monkeypatch.setattr(dm, "_run_shell", lambda goal: time.sleep(0.3) or "done-late")
+        monkeypatch.setattr(dm, "_run_shell", lambda goal, timeout=None: time.sleep(0.3) or "done-late")
         task = dm.delegate_task("irrelevant", agent="shell")
         dm.wait_all([task], timeout=0.01)
         assert task.status == dm.TaskStatus.TIMEOUT
         time.sleep(0.4)  # let the background thread actually finish before the test exits
+        # Одит 2026-10-07: късното приключване обръщаше статуса на „done“, макар
+        # викащият вече да е получил „timeout“.
+        assert task.status == dm.TaskStatus.TIMEOUT
+
+    def test_an_autonomous_task_gets_a_deadline(self, monkeypatch) -> None:
+        seen = {}
+
+        def fake(goal, *, operator_id=None, deadline=None):
+            seen["deadline"] = deadline
+            raise RuntimeError("x")
+        monkeypatch.setattr("genesis_agent.autonomous_loop.run_autonomous_loop", fake)
+        task = dm.delegate_task("g", agent="autonomous", timeout=30)
+        dm.wait_all([task], timeout=5)
+        assert seen["deadline"] is not None and seen["deadline"] - time.time() <= 30
 
     def test_fast_task_within_timeout_is_not_marked_timeout(self) -> None:
         task = dm.delegate_task("echo quick", agent="shell")

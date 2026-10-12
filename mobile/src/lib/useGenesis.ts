@@ -1,13 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 
-import { mergeEvents, thinkingLabel, toChatItems } from './chat';
-import { GenesisClient, ProtocolError, type GenesisEvent, type Pairing, type StatusReply } from './protocol';
+import { mergeEvents, reuseItems, thinkingLabel, toChatItems, type ChatItem } from './chat';
+import { errorText, MAX_MESSAGE, messageLength, replyErrorText } from './messages';
+import { Outbox } from './outbox';
+import {
+  b64urlEncode, GenesisClient, ProtocolError, type GenesisEvent, type Pairing, type PhoneState, type StatusReply,
+} from './protocol';
 import { random } from './random';
 
 export type Connection = 'connecting' | 'online' | 'offline' | 'unauthorized' | 'clock';
 
 const LONG_POLL_S = 20;
+const NO_STATE: PhoneState = { plan: false, todos: [] };
 const BACKOFF_MS = [1000, 2000, 5000, 10000];
 
 /**
@@ -17,10 +22,14 @@ const BACKOFF_MS = [1000, 2000, 5000, 10000];
  */
 export function useGenesis(pairing: Pairing) {
   const client = useMemo(() => new GenesisClient(pairing, random), [pairing]);
+  // Едно изпращане наведнъж, `mid` за повторния опит (lib/outbox.ts).
+  const outbox = useMemo(() => new Outbox(() => b64urlEncode(random(12))), [client]);
   const [connection, setConnection] = useState<Connection>('connecting');
   const [status, setStatus] = useState<StatusReply | null>(null);
   const [events, setEvents] = useState<GenesisEvent[]>([]);
   const [busy, setBusy] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [phone, setPhone] = useState<PhoneState>(NO_STATE);
   const [error, setError] = useState('');
   const [active, setActive] = useState(AppState.currentState === 'active');
   const lastSeq = useRef(0);
@@ -60,14 +69,30 @@ export function useGenesis(pairing: Pairing) {
           }
           // Right after (re)connecting: what we missed, at once. Then wait.
           const reply = await client.events(lastSeq.current, first ? 0 : LONG_POLL_S);
-          first = false;
+          // Над тавана сървърът праща най-старите и "more": дотегляме веднага,
+          // без дълго чакане, докато дупката се запълни (одит 2026-10-11).
+          first = !!reply.more;
           if (stopped) return;
-          // A restarted server numbers its events from 1 again.
-          const reset = reply.reset || (epoch.current !== '' && reply.epoch !== epoch.current);
+          // A restarted server numbers its events from 1 again: what it just
+          // sent was counted from our old seq, so start over from 0 (audit
+          // 2026-10-07: the new run's first events were skipped).
+          if (epoch.current !== '' && reply.epoch !== epoch.current) {
+            epoch.current = reply.epoch;
+            lastSeq.current = 0;
+            setEvents([]);
+            setPhone(NO_STATE);
+            first = true;
+            continue;
+          }
+          const reset = reply.reset;
           epoch.current = reply.epoch;
           lastSeq.current = reply.last;
           setEvents((cur) => mergeEvents(cur, reply.events, reset));
+          // Своето балонче дойде → изпращането е прието, следващото със
+          // същия текст е нов ход, не повторен опит (преглед 2026-10-11).
+          outbox.seen(reply.events, reply.mids);
           setBusy(reply.busy);
+          if (reply.state) setPhone(reply.state);
           setConnection('online');
           attempt = 0;
         } catch (e) {
@@ -83,7 +108,7 @@ export function useGenesis(pairing: Pairing) {
     return () => {
       stopped = true;
     };
-  }, [client, active, fail]);
+  }, [client, outbox, active, fail]);
 
   const act = useCallback(async <T,>(fn: () => Promise<T>): Promise<T | null> => {
     setError('');
@@ -91,29 +116,61 @@ export function useGenesis(pairing: Pairing) {
       return await fn();
     } catch (e) {
       fail(e);
-      setError(e instanceof Error ? e.message : String(e));
+      // На екрана — на български; суровото съобщение е за дневника (одит
+      // 2026-10-11: „cannot reach http://…“ и „server error 413“ стигаха
+      // до оператора дословно).
+      console.warn('genesis:', e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
       return null;
     }
   }, [fail]);
 
   const send = useCallback(async (text: string) => {
-    const reply = await act(() => client.send(text));
-    if (reply && !reply.ok) {
-      setError(reply.error === 'busy' ? 'Genesis още работи по предишното.' : reply.error ?? 'грешка');
+    if (outbox.sending) return false;
+    if (messageLength(text) > MAX_MESSAGE) {
+      setError(replyErrorText('too_long'));
       return false;
     }
-    if (reply) setBusy(true);
-    return !!reply;
+    setSending(true);
+    try {
+      const reply = await act(() => outbox.send(text, (t, mid) => client.send(t, mid)));
+      if (reply && !reply.ok) {
+        setError(replyErrorText(reply.error));
+        return false;
+      }
+      if (reply) setBusy(true);
+      return !!reply;
+    } finally {
+      setSending(false);
+    }
+  }, [act, client, outbox]);
+
+  const confirm = useCallback(async (id: string, allow: boolean) => {
+    const reply = await act(() => client.confirm(id, allow));
+    // ok:false — already answered, timed out or stopped: confirm_done shows
+    // what happened, nothing to retry.
+    if (reply && !reply.ok) setError('Това потвърждение вече е отговорено или изтече.');
+    return reply !== null;
+  }, [act, client]);
+  const stop = useCallback(() => act(() => client.stop()), [act, client]);
+  // „busy“ се казва, не се гълта: „Нов разговор“ насред хода не правеше нищо
+  // и мълчеше (одит 2026-10-11).
+  const clear = useCallback(async () => {
+    const reply = await act(() => client.clear());
+    if (reply && !reply.ok) setError(replyErrorText(reply.error));
+    return !!reply?.ok;
   }, [act, client]);
 
-  const confirm = useCallback((id: string, allow: boolean) => act(() => client.confirm(id, allow)), [act, client]);
-  const stop = useCallback(() => act(() => client.stop()), [act, client]);
-  const clear = useCallback(() => act(() => client.clear()), [act, client]);
-
-  const items = useMemo(() => toChatItems(events), [events]);
+  // Непроменените елементи остават същите обекти (chat.reuseItems).
+  const shown = useRef<ChatItem[]>([]);
+  const items = useMemo(() => {
+    shown.current = reuseItems(shown.current, toChatItems(events));
+    return shown.current;
+  }, [events]);
   const label = useMemo(() => thinkingLabel(events), [events]);
 
-  return { connection, status, items, busy, label, error, send, confirm, stop, clear };
+  return { connection, status, items, busy, sending, label, error, send, confirm, stop, clear,
+           plan: phone.plan, todos: phone.todos };
 }
 
 function sleep(ms: number) {

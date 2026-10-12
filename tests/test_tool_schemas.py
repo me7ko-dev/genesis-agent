@@ -90,3 +90,127 @@ def test_mission_tools_excludes_side_effecting_tools() -> None:
     forbidden = {"RUN_CMD", "WRITE_FILE", "DELEGATE", "BROWSE",
                  "BROWSER_CLICK", "BROWSER_TYPE", "BROWSER_READ"}
     assert _names(tool_schemas.MISSION_TOOLS).isdisjoint(forbidden)
+
+
+# ── load_tool_arguments ─────────────────────────────────────────────────────
+
+def test_valid_arguments_are_parsed_as_they_are() -> None:
+    raw = r'{"path": "a.py", "content": "x = \"\\d\"\n"}'
+    assert tool_schemas.load_tool_arguments(raw) == {"path": "a.py", "content": 'x = "\\d"\n'}
+
+
+def test_invalid_regex_escapes_become_literal_backslashes() -> None:
+    r"""bench faktura-excel: `\d`, `\s`, `\.` в код с регекси — json.loads пада,
+    а callers-ите даваха `{}` и WRITE_FILE оставаше без път."""
+    got = tool_schemas.load_tool_arguments(r'{"path": "e.py", "content": "r\"\d+\s*\.\"\n"}')
+    assert got == {"path": "e.py", "content": 'r"\\d+\\s*\\."\n'}
+
+
+def test_unrepairable_arguments_still_raise() -> None:
+    import json
+
+    import pytest
+    with pytest.raises(json.JSONDecodeError):
+        tool_schemas.load_tool_arguments('{"path": "a.py", "content": ')
+
+
+def test_empty_arguments_are_an_empty_dict_but_a_non_object_is_an_error() -> None:
+    import json
+
+    import pytest
+    assert tool_schemas.load_tool_arguments(None) == {}
+    assert tool_schemas.load_tool_arguments({"path": "x"}) == {"path": "x"}
+    # Списък не е „без аргументи“: с {} TODO_WRITE триеше списъка (одит 2026-10-09).
+    with pytest.raises(json.JSONDecodeError):
+        tool_schemas.load_tool_arguments("[1, 2]")
+
+
+def test_the_schemas_stay_small_and_keep_their_rules() -> None:
+    """Схемите се плащат на всяко обръщение. 2026-10-09: 9 400 знака JSON след
+    петте нови инструмента (+21% на заявката) → 7 466 след съкращаване на
+    описанията. Таванът пази от тихо надуване; правилата, които движат
+    поведението, трябва да останат."""
+    import json
+    tools = [t for t in tool_schemas.FULL_TOOLS
+             if t["function"]["name"] not in tool_schemas._BROWSER_TOOLS]
+    assert len(json.dumps(tools, ensure_ascii=False)) <= 7600
+    desc = {t["function"]["name"]: t["function"]["description"] for t in tools}
+    assert "once" in desc["EDIT_FILE"] and "WRITE_FILE" in desc["EDIT_FILE"]
+    assert "read" in desc["WRITE_FILE"] and "EDIT_FILE" in desc["WRITE_FILE"]
+    assert "in_progress" in desc["TODO_WRITE"] and "3+" in desc["TODO_WRITE"]
+    assert "driver_code" in desc["USE_SKILL"]
+    assert "why" in desc["REMEMBER"] and "preference" in desc["REMEMBER"]
+    assert "BEFORE" in desc["ASK_USER"]
+    assert "BG_KILL" in json.dumps(next(t for t in tools if t["function"]["name"] == "RUN_CMD"))
+
+
+def test_replace_all_as_the_string_false_is_false(tmp_path, monkeypatch) -> None:
+    # Модел, който праща булевите като низове: „false“ заменяше ВСИЧКИ
+    # съвпадения вместо отказа „среща се 2 пъти“ (одит 2026-10-09).
+    import genesis_skills as gs
+    monkeypatch.setattr(gs, "_WORKSPACE", tmp_path)
+    gs._SEEN_PATHS.clear()
+    f = tmp_path / "a.py"
+    f.write_text("x = 1\nx = 1\n", encoding="utf-8")
+    gs.dispatch_tool_call("READ_FILE", {"path": "a.py"})
+    gs.dispatch_tool_call("EDIT_FILE", {"path": "a.py", "old": "x = 1", "new": "x = 2",
+                                        "replace_all": "false"})
+    assert f.read_text(encoding="utf-8") == "x = 1\nx = 1\n"
+    gs.dispatch_tool_call("EDIT_FILE", {"path": "a.py", "old": "x = 1", "new": "x = 2",
+                                        "replace_all": "true"})
+    assert f.read_text(encoding="utf-8") == "x = 2\nx = 2\n"
+
+
+def test_raw_windows_paths_keep_their_backslashes() -> None:
+    r"""Моделът праща пътя със сурови `\`: `\U` е невалиден escape и пуска
+    поправката, а тя оставяше `\r`, `\n`, `\t` като управляващи знаци —
+    `C:\Users\roika` ставаше `C:\Users<CR>oika` и записът падаше с WinError 123
+    (2026-10-11)."""
+    got = tool_schemas.load_tool_arguments(
+        r'{"path": "C:\Users\roika\Projects\genitest\egn.py", "content": "x = 1\n"}')
+    assert got == {"path": "C:\\Users\\roika\\Projects\\genitest\\egn.py", "content": "x = 1\n"}
+    got = tool_schemas.load_tool_arguments(r'{"path": "C:\Users\roika\new_app\tests\test_x.py"}')
+    assert got["path"] == "C:\\Users\\roika\\new_app\\tests\\test_x.py"
+
+
+def test_a_path_made_only_of_valid_escapes_is_still_read_literally() -> None:
+    r"""`C:\new\tests` е валиден JSON (`\n`, `\t`), но в път управляващ знак
+    никога не е нарочен."""
+    got = tool_schemas.load_tool_arguments(r'{"path": "C:\new\tests"}')
+    assert got == {"path": "C:\\new\\tests"}
+
+
+def test_raw_windows_paths_in_a_command_keep_their_backslashes() -> None:
+    got = tool_schemas.load_tool_arguments(
+        r'{"command": "type C:\Users\roika\new\tests\notes.txt"}')
+    assert got["command"] == "type C:\\Users\\roika\\new\\tests\\notes.txt"
+
+
+def test_newlines_outside_windows_paths_stay_newlines() -> None:
+    r"""Многоредова команда с регекс (`\d` пуска поправката) не бива да
+    загуби новите си редове; съдържанието на файл изобщо не се пипа."""
+    got = tool_schemas.load_tool_arguments(
+        r'{"command": "grep -E \"\d+\" a.txt\nls", "content": "C:\new\n"}')
+    assert got["command"] == 'grep -E "\\d+" a.txt\nls'
+    assert got["content"] == "C:\new\n"
+
+
+def test_a_properly_escaped_path_before_a_newline_keeps_the_newline() -> None:
+    got = tool_schemas.load_tool_arguments(r'{"command": "cd C:\\proj\nnpm test"}')
+    assert got["command"] == "cd C:\\proj\nnpm test"
+
+
+def test_a_newline_right_after_a_raw_windows_path_stays_a_newline() -> None:
+    r"""`cd C:\Users\roika\proj\nnpm test`: последното `\n` е новият ред на
+    командата. Четенето на суровите `\` го поглъщаше в пътя и двата реда
+    ставаха един (2026-10-11, трета вълна); преди него поправката даваше
+    точно двата реда."""
+    load = tool_schemas.load_tool_arguments
+    assert load(r'{"command": "cd C:\Users\roika\proj\nnpm test"}')["command"] == \
+        "cd C:\\Users\\roika\\proj\nnpm test"
+    assert load(r'{"command": "type C:\Users\x\a.txt\nnpm test"}')["command"] == \
+        "type C:\\Users\\x\\a.txt\nnpm test"
+    assert load(r'{"command": "cd C:\Users\roika\new\tests\ngit status"}')["command"] == \
+        "cd C:\\Users\\roika\\new\\tests\ngit status"
+    assert load(r'{"command": "cd C:\Users\roika\r\nnpm test"}')["command"] == \
+        "cd C:\\Users\\roika\r\nnpm test"

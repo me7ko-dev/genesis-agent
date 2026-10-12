@@ -187,3 +187,54 @@ class TestIndexMissing:
         bad.write_text("{not json", encoding="utf-8")
         monkeypatch.setattr(emb, "SKILLS_INDEX", bad)
         assert emb._skill_texts() == {}
+
+
+class TestTheIndexFollowsTheLibrary:
+    """Одит 2026-10-07: изтрити умения оставаха в индекса завинаги; смяна на
+    модела със същата размерност или сменено описание — без преизчисляване."""
+
+    def _setup(self, monkeypatch, tmp_path, skills: dict[str, str]):
+        import json
+        index = tmp_path / "skills.json"
+        index.write_text(json.dumps({"skills": [{"name": n, "description": d}
+                                                for n, d in skills.items()]}), encoding="utf-8")
+        monkeypatch.setattr(emb, "SKILLS_INDEX", index)
+        calls: list[str] = []
+
+        def fake_embed(text, timeout=60):
+            calls.append(text)
+            return _vec(8, seed=float(len(text)))
+        monkeypatch.setattr(emb, "embed", fake_embed)
+        return calls
+
+    def _names(self) -> set[str]:
+        return {n for n, _ in emb._all_vectors()}
+
+    def test_deleted_skills_leave_the_index(self, monkeypatch, tmp_path) -> None:
+        self._setup(monkeypatch, tmp_path, {"reverse_string": "reverse", "keep": "x"})
+        emb._index_missing(8)
+        self._setup(monkeypatch, tmp_path, {"keep": "x"})
+        emb._index_missing(8)
+        assert self._names() == {"keep"}
+
+    def test_a_changed_description_is_reembedded(self, monkeypatch, tmp_path) -> None:
+        self._setup(monkeypatch, tmp_path, {"mailer": "parse csv"})
+        emb._index_missing(8)
+        calls = self._setup(monkeypatch, tmp_path, {"mailer": "send email over smtp"})
+        assert emb._index_missing(8) == 1 and "send email" in calls[-1]
+        assert emb._index_missing(8) == 0
+
+    def test_another_model_of_the_same_size_is_reembedded(self, monkeypatch, tmp_path) -> None:
+        self._setup(monkeypatch, tmp_path, {"a": "x"})
+        emb._index_missing(8)
+        monkeypatch.setattr(emb, "MODEL", "mxbai-embed-large")
+        assert emb._all_vectors("mxbai-embed-large") == []
+        assert emb._index_missing(8) == 1
+        assert [n for n, _ in emb._all_vectors("mxbai-embed-large")] == ["a"]
+
+    def test_an_unreadable_library_deletes_nothing(self, monkeypatch, tmp_path) -> None:
+        self._setup(monkeypatch, tmp_path, {"a": "x"})
+        emb._index_missing(8)
+        monkeypatch.setattr(emb, "SKILLS_INDEX", tmp_path / "missing.json")
+        emb._index_missing(8)
+        assert self._names() == {"a"}

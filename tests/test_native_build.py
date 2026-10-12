@@ -103,8 +103,40 @@ def test_frozen_workspace_is_never_the_install_directory(tmp_path, monkeypatch) 
     assert paths._frozen_workspace(install / "_internal") == tmp_path / "gh" / "workspace"
 
 
+def test_pipx_genesis_works_where_it_was_started(tmp_path, monkeypatch) -> None:
+    """pipx: PROJECT_ROOT is site-packages. `genesis` started in a project
+    asked before every write there (2026-09-25) — the project is the workspace."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    monkeypatch.delenv("GENESIS_WORKSPACE", raising=False)
+    monkeypatch.setattr(paths, "FROZEN", False)
+    monkeypatch.setattr(paths, "INSTALLED", True)
+    monkeypatch.setattr(paths, "GENESIS_HOME", tmp_path / "gh")
+    monkeypatch.chdir(project)
+    assert paths.workspace_dir() == project.resolve()
+
+
+def test_pipx_genesis_never_works_inside_its_own_venv(tmp_path, monkeypatch) -> None:
+    venv = tmp_path / "pipx" / "venvs" / "genesis-agent"
+    (venv / "Lib").mkdir(parents=True)
+    monkeypatch.setattr(paths, "FROZEN", False)
+    monkeypatch.setattr(paths, "INSTALLED", True)
+    monkeypatch.setattr(paths.sys, "prefix", str(venv))
+    monkeypatch.setattr(paths, "GENESIS_HOME", tmp_path / "gh")
+    assert paths._frozen_workspace(venv / "Lib") == tmp_path / "gh" / "workspace"
+
+
+def test_a_checkout_keeps_the_repo_as_workspace(monkeypatch) -> None:
+    monkeypatch.delenv("GENESIS_WORKSPACE", raising=False)
+    monkeypatch.setattr(paths, "FROZEN", False)
+    monkeypatch.setattr(paths, "INSTALLED", False)
+    assert paths.workspace_dir() == paths.PROJECT_ROOT
+
+
 def test_project_python_outside_the_build_is_this_interpreter(monkeypatch) -> None:
     monkeypatch.setattr(paths, "FROZEN", False)
+    monkeypatch.setattr(paths, "_genesis_is_isolated", lambda: False)
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
     assert paths.project_python() == sys.executable
 
 
@@ -114,7 +146,50 @@ def test_project_python_in_the_build_asks_the_real_python(monkeypatch, tmp_path)
     monkeypatch.setattr(paths, "FROZEN", True)
     monkeypatch.setattr(paths, "_project_python_cache", None)
     monkeypatch.setattr(paths, "_find_system_python", lambda: str(real))
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
     assert paths.project_python() == str(real)
+
+
+def test_project_python_from_pipx_asks_the_real_python(monkeypatch, tmp_path) -> None:
+    """pipx: Genesis has a venv of its own, without the project's packages
+    (2026-09-25: every test died on `No module named 'reportlab'`)."""
+    real = tmp_path / "python.exe"
+    real.write_text("")
+    monkeypatch.setattr(paths, "FROZEN", False)
+    monkeypatch.setattr(paths, "_genesis_is_isolated", lambda: True)
+    monkeypatch.setattr(paths, "_project_python_cache", None)
+    monkeypatch.setattr(paths, "_find_system_python", lambda: str(real))
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    assert paths.project_python(tmp_path) == str(real)
+
+
+def test_project_python_from_pipx_without_a_system_python_keeps_its_own(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(paths, "FROZEN", False)
+    monkeypatch.setattr(paths, "_genesis_is_isolated", lambda: True)
+    monkeypatch.setattr(paths, "_project_python_cache", None)
+    monkeypatch.setattr(paths, "_find_system_python", lambda: None)
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    assert paths.project_python(tmp_path) == sys.executable
+
+
+@pytest.mark.parametrize("layout", [("Scripts", "python.exe"), ("bin", "python")])
+def test_the_projects_own_venv_comes_first(monkeypatch, tmp_path, layout) -> None:
+    own = tmp_path / ".venv" / layout[0] / layout[1]
+    own.parent.mkdir(parents=True)
+    own.write_text("")
+    monkeypatch.setattr(paths, "FROZEN", True)
+    monkeypatch.setattr(paths, "_find_system_python", lambda: "C:/other/python.exe")
+    assert paths.project_python(tmp_path) == str(own)
+
+
+def test_an_activated_venv_comes_before_the_system_python(monkeypatch, tmp_path) -> None:
+    active = tmp_path / "work-env"
+    (active / "Scripts").mkdir(parents=True)
+    (active / "Scripts" / "python.exe").write_text("")
+    monkeypatch.setenv("VIRTUAL_ENV", str(active))
+    monkeypatch.setattr(paths, "FROZEN", True)
+    monkeypatch.setattr(paths, "_find_system_python", lambda: "C:/other/python.exe")
+    assert paths.project_python(tmp_path / "project") == str(active / "Scripts" / "python.exe")
 
 
 def test_the_store_stub_is_never_probed(monkeypatch) -> None:
@@ -126,14 +201,30 @@ def test_the_store_stub_is_never_probed(monkeypatch) -> None:
                         lambda n: rf"C:\Users\x\AppData\Local\Microsoft\WindowsApps\{n}.exe")
     started: list[list[str]] = []
     monkeypatch.setattr(subprocess, "run", lambda argv, **_k: started.append(argv))
+    monkeypatch.setattr(paths, "_installed_windows_python", lambda: None)
     assert paths._find_system_python() is None
     assert started == []
+
+
+def test_with_only_aliases_the_installed_python_is_found(monkeypatch, tmp_path) -> None:
+    """Python install manager: every py/python/python3 is a WindowsApps alias
+    (the operator's laptop, 2026-09-25). The newest pythoncore wins, by version
+    number, not by string (3.14 > 3.9)."""
+    import shutil
+    monkeypatch.setattr(shutil, "which",
+                        lambda n: rf"C:\Users\x\AppData\Local\Microsoft\WindowsApps\{n}.exe")
+    monkeypatch.setattr(paths, "_IS_WINDOWS", True)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    for ver in ("pythoncore-3.9-64", "pythoncore-3.14-64"):
+        (tmp_path / "Python" / ver).mkdir(parents=True)
+        (tmp_path / "Python" / ver / "python.exe").write_text("")
+    assert paths._find_system_python() == str(tmp_path / "Python" / "pythoncore-3.14-64" / "python.exe")
 
 
 def test_repo_map_tests_a_project_with_the_project_python(tmp_path, monkeypatch) -> None:
     from genesis_agent import repo_map
     (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n")
-    monkeypatch.setattr("genesis_agent.paths.project_python", lambda: r"C:\Py312\python.exe")
+    monkeypatch.setattr("genesis_agent.paths.project_python", lambda root=None: r"C:\Py312\python.exe")
     assert repo_map.detect_project(tmp_path).test_command == "C:/Py312/python.exe -m pytest -q"
 
 

@@ -242,3 +242,15 @@ class TestTheChangelogNeverBreaksUpdate:
         self._answer(monkeypatch, {"commits": [{"commit": {"message": "стар"}},
                                                {"commit": {"message": "нов"}}]})
         assert vi.changelog("a/b", "x", "y") == ["нов", "стар"]
+
+
+def test_an_install_without_a_branch_asks_for_head(monkeypatch) -> None:
+    """`pipx install git+https://github.com/...` (README) не записва ref. Дотук
+    нямаше нито една заявка и `/update` никога не намираше нова версия."""
+    _installed(monkeypatch, {"url": _REAL["url"],
+                             "vcs_info": {"commit_id": "a" * 40, "vcs": "git"}})
+    asked: list[str] = []
+    monkeypatch.setattr(vi, "latest_commit", lambda repo, ref, **k: asked.append(ref) or "b" * 40)
+    check = vi.check_update()
+    assert asked == ["HEAD"]
+    assert check.latest == "b" * 40 and check.up_to_date is False

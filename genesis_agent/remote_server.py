@@ -30,6 +30,16 @@ Code на телефона управлява сесия, която тече д
                        AAD "genesis/1/req"; открит текст:
                        {"ts":ms,"rid":"…","op":"status|send|events|confirm|stop|clear", …}
                      → {"v":1,"n":…,"c":…}, AAD "genesis/1/res:" + rid
+
+`events` носи и "state": {"plan": bool, "todos": [{content, status}]}; събитието
+"progress" е напредъкът на под-агент. `send` с "/plan", "/undo" … — командите на
+чата (phone_command), не текст за модела.
+
+2026-10-11: `events` с "more": true — отговорът е стигнал тавана, телефонът пита
+веднага пак от "last". `send` може да носи "mid" (идентификатор от телефона):
+повторен опит със същия "mid" получава първия отговор, без втори ход. Грешка в
+отворена заявка е {"ok": false, "error": "unknown_op"|"empty"|"bad_args"|…},
+не 401.
 """
 from __future__ import annotations
 
@@ -37,6 +47,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import secrets
 import socket
 import threading
@@ -58,6 +69,35 @@ _MAX_WAIT_S = 25.0
 _CONFIRM_TIMEOUT_S = 300.0
 _EVENT_LOG = 1000
 _TOOL_PREVIEW = 4000
+# Таван на един отговор на `events` (одит 2026-10-11): студен старт след 1000
+# изхода на инструменти теглеше 7.3 MiB, а open() на телефона ги декодираше
+# 1.1 s (5 s без JIT, близо до Hermes) на JS нишката. Над тавана: при reset —
+# най-новите; иначе — НАЙ-СТАРИТЕ след `after` и "more", телефонът дотегля
+# (втори одит 2026-10-11: най-новите + reset губеха дупката и целия разговор
+# на телефон, събуден след ~130 инструмента).
+_REPLY_BYTES = 512 * 1024
+# Колко последни `mid` на `send` помним (2026-10-11): повторен опит след
+# изгубен отговор не пуска хода втори път.
+_SENT_MIDS = 256
+# Колко от тях идват с всеки отговор на `events` (`mids`): един телефон има
+# най-много един неизпратен `mid`, а 16 покриват и няколко телефона наведнъж.
+_ACK_MIDS = 16
+_MID = re.compile(r"[A-Za-z0-9_-]{8,64}")
+# Видът на плика {"v":1,"n":…,"c":…} в суровите байтове (преглед 2026-10-11):
+# адрес над спирачката получава 429 веднага, без json.loads и опит за
+# отваряне — освен ако тялото не е точно плик (сдвоеният телефон зад същия
+# NAT минава). Без тази проверка всяка спряна заявка от 240 KiB струваше на
+# сървъра 10 ms вместо 1.5 ms преди спирачката да се премести след плика.
+_ENVELOPE_SHAPE = re.compile(
+    rb'\s*\{\s*"v"\s*:\s*\d{1,3}\s*,\s*"n"\s*:\s*"[A-Za-z0-9_=+/-]{1,64}"\s*,'
+    rb'\s*"c"\s*:\s*"[A-Za-z0-9_=+/-]+"\s*\}\s*')
+# Началото на същия плик — първите _HEAD_BYTES байта на дълго тяло от спрян
+# адрес (вълна 5): `{"v":1,"n":"<до 64>","c":"` е под 100 байта и с интервали.
+_ENVELOPE_HEAD = re.compile(
+    rb'\s*\{\s*"v"\s*:\s*\d{1,3}\s*,\s*"n"\s*:\s*"[A-Za-z0-9_=+/-]{1,64}"\s*,'
+    rb'\s*"c"\s*:\s*"[A-Za-z0-9_=+/-]*')
+_HEAD_BYTES = 160
+_BRAKED_READ_S = 2.0
 
 
 class ProtocolError(Exception):
@@ -70,6 +110,22 @@ def _b64e(raw: bytes) -> str:
 
 def _b64d(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def utf8_bytes(text: str) -> bytes:
+    """UTF-8 байтове и за текст с lone surrogates (име на файл в cp1251/cp866).
+
+    Одит 2026-10-11: os.listdir връща непрочитаемите байтове като \\udcXX и
+    .encode("utf-8") гърмеше — всеки отговор на `events` с такъв LIST_DIR
+    затваряше връзката. Байтовете се връщат каквито са били и невалидното става
+    U+FFFD; останали surrogates (не от файловата система) — „?“."""
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError:
+        try:
+            return text.encode("utf-8", "surrogateescape").decode("utf-8", "replace").encode("utf-8")
+        except UnicodeEncodeError:
+            return text.encode("utf-8", "replace")
 
 
 def key_id(key: bytes) -> str:
@@ -129,11 +185,23 @@ def lan_addresses() -> list[str]:
     return [a for a in found if not a.startswith(("127.", "169.254.", "0."))]
 
 
-def pairing_url(host: str, port: int, key: bytes, name: str) -> str:
-    """Какво носи QR кодът. Ключът е във фрагмента (след `#`): браузърът
-    не го праща към сървъра, а приложението го чете само от кода."""
+def pairing_url(host: str, port: int, key: bytes, name: str, *, web: bool = False) -> str:
+    """Какво носи QR кодът: `genesisremote://pair#u=<адрес>&k=<ключ>&n=<име>`.
+
+    Схемата на приложението, не `http://` (2026-10-09): камерата на телефона
+    отваряше `http://…/#k=…` в браузъра — уеб версията по обикновен HTTP в
+    LAN, където който подмени страницата, вижда ключа. Сега кодът отваря само
+    приложението. Ключът пак е във фрагмента (след `#`).
+
+    `web=True` (`genesis serve --web`) — старият `http://…/#k=…` за уеб
+    версията на iPhone без приложение: само по изричен избор и с предупреждение."""
     from urllib.parse import quote
-    return f"http://{host}:{port}/#k={_b64e(key)}&n={quote(name)}"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"   # IPv6 — без скоби приложението не четеше кода (одит 2026-10-09)
+    if web:
+        return f"http://{host}:{port}/#k={_b64e(key)}&n={quote(name)}"
+    base = quote(f"http://{host}:{port}", safe="")
+    return f"genesisremote://pair#u={base}&k={_b64e(key)}&n={quote(name)}"
 
 
 # ── криптиране ─────────────────────────────────────────────────────────────
@@ -149,7 +217,7 @@ class Cipher:
 
     def seal(self, payload: dict, aad: bytes) -> dict:
         nonce = secrets.token_bytes(12)
-        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        raw = utf8_bytes(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
         return {"v": PROTOCOL, "n": _b64e(nonce), "c": _b64e(self._aead.encrypt(nonce, raw, aad))}
 
     def open(self, envelope: Any, aad: bytes) -> dict:
@@ -171,15 +239,29 @@ class Cipher:
 class ReplayGuard:
     """Отказва заявка извън ±5 минути или с вече виждан идентификатор."""
 
-    def __init__(self, max_skew_ms: int = _MAX_SKEW_MS) -> None:
+    def __init__(self, max_skew_ms: int = _MAX_SKEW_MS, *, path: Path | None = None) -> None:
         self._max_skew_ms = max_skew_ms
         self._seen: dict[str, float] = {}
         self._lock = threading.Lock()
+        # Видяното се пази и на диска (одит 2026-10-07): само в паметта
+        # рестарт на `genesis serve` го губеше и записано от мрежата съобщение
+        # („rm -rf build && deploy“) се изпълняваше пак в рамките на 5-те минути.
+        self._path = path
+        if path is not None:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                horizon = time.time() * 1000 - 2 * max_skew_ms
+                self._seen = {str(r): float(t) for r, t in data.items()
+                              if isinstance(t, (int, float)) and t >= horizon}
+            except (OSError, ValueError, AttributeError):
+                self._seen = {}
 
     def check(self, payload: dict, now_ms: float | None = None) -> str:
         now_ms = time.time() * 1000 if now_ms is None else now_ms
         rid, ts = payload.get("rid"), payload.get("ts")
-        if not isinstance(rid, str) or not (8 <= len(rid) <= 64):
+        # Само латиница/цифри: rid влиза в AAD на отговора като ASCII — кирилица
+        # гърмеше в seal() СЛЕД като операцията вече е изпълнена (одит 2026-10-09).
+        if not isinstance(rid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", rid):
             raise ProtocolError("bad rid")
         if not isinstance(ts, (int, float)) or abs(now_ms - ts) > self._max_skew_ms:
             raise ProtocolError("stale request (check the phone's clock)")
@@ -190,6 +272,13 @@ class ReplayGuard:
             if rid in self._seen:
                 raise ProtocolError("replayed request")
             self._seen[rid] = now_ms
+            if self._path is not None:
+                try:
+                    tmp = self._path.with_name(self._path.name + ".tmp")
+                    tmp.write_text(json.dumps(self._seen), encoding="utf-8")
+                    os.replace(tmp, self._path)
+                except OSError:
+                    pass  # без запис пазим поне в паметта — както преди
         return rid
 
 
@@ -204,6 +293,23 @@ class _Pending:
 TurnRunner = Callable[[str, Any], None]
 
 
+_CLIPPED_NOTE = "\n…[отрязано — целият текст е в терминала]"
+
+
+def _fit_event(event: dict) -> dict:
+    """Копие на събитие, орязано до _REPLY_BYTES: дългите текстове (над 1 KiB)
+    делят тавана по равно, по 6 байта на знак (най-лошото в JSON — `\\u0001`),
+    с място за кратките полета."""
+    long = [k for k, v in event.items() if isinstance(v, str) and len(v) > 1024]
+    share = (_REPLY_BYTES // 6 - 4096) // max(1, len(long)) - len(_CLIPPED_NOTE)
+    out = dict(event)
+    for k in long:
+        if len(out[k]) > share:
+            out[k] = out[k][:share] + _CLIPPED_NOTE
+            out["clipped"] = True
+    return out
+
+
 class RemoteSession:
     """Един разговор, споделен от всички сдвоени телефони.
 
@@ -212,9 +318,13 @@ class RemoteSession:
     N" (дълго чакане до 25 s) — ако е бил офлайн, получава пропуснатото.
     """
 
-    def __init__(self, runner: TurnRunner, *, on_event: Callable[[dict], None] | None = None) -> None:
+    def __init__(self, runner: TurnRunner, *, on_event: Callable[[dict], None] | None = None,
+                 state: Callable[[], dict] | None = None) -> None:
         self._runner = runner
         self._on_event = on_event
+        # Какво телефонът показва постоянно, не като събитие: режим план и
+        # списъкът със задачи. Идва с всеки отговор на `events` (2026-10-09).
+        self._state = state
         self._events: deque[dict] = deque(maxlen=_EVENT_LOG)
         self._seq = 0
         self._cond = threading.Condition()
@@ -248,10 +358,46 @@ class RemoteSession:
             first = self._events[0]["seq"] if self._events else self._seq + 1
             # Пропуснатото вече не е в дневника → телефонът получава целия
             # наличен дневник и знае, че трябва да го покаже наново.
-            reset = after + 1 < first or after > self._seq
+            # after <= 0 — телефон без история (студен старт): и той е reset,
+            # иначе над тавана щеше да тегли целия дневник от НАЙ-СТАРИТЕ
+            # страница по страница (преглед 2026-10-11: 450 инструмента без
+            # завъртян дневник — 7 страници, 3.3 MB вместо 1 страница 0.5 MB).
+            reset = after <= 0 or after + 1 < first or after > self._seq
             items = list(self._events) if reset else [e for e in self._events if e["seq"] > after]
-            return {"events": items, "last": self._seq, "reset": reset,
-                    "busy": self._busy, "epoch": self.epoch}
+            reply = {"events": items, "last": self._seq, "reset": reset,
+                     "busy": self._busy, "epoch": self.epoch, "more": False}
+        # Размерът се мери извън ключалката — emit() не чака сериализацията.
+        # reset: телефонът подменя всичко → най-новите. Иначе той вече показва
+        # всичко до `after` → най-старите след него, `last` = последното
+        # изпратено и "more": дупка няма, а всеки отговор е до тавана (одит
+        # 2026-10-11: 200 инструмента в заключен телефон — изчезваха 130
+        # събития и собствените му съобщения).
+        ordered = list(reversed(items)) if reset else items
+        kept, size, head = 0, 0, 0
+        for event in ordered:
+            size += len(utf8_bytes(json.dumps(event, ensure_ascii=False)))
+            if kept and size > _REPLY_BYTES:
+                break
+            kept += 1
+            head = head or size
+        if kept < len(items):
+            if reset:
+                reply["events"] = items[-kept:]
+            else:
+                reply["events"], reply["more"] = items[:kept], True
+                reply["last"] = items[kept - 1]["seq"]
+        if head > _REPLY_BYTES:
+            # Едно събитие над тавана влиза винаги (иначе телефонът не мърда)
+            # — значи таванът не важеше за него. Вълна 5, 2026-10-11:
+            # отговор от 600 000 знака при студен старт — 1.2 MB в един
+            # отговор. Сега дългите текстове се орязват до тавана.
+            reply["events"] = [_fit_event(ordered[0])]
+        if self._state is not None:
+            try:
+                reply["state"] = self._state()
+            except Exception:
+                pass   # състоянието е украса — без него разговорът върви
+        return reply
 
     # -- ход --
     @property
@@ -284,18 +430,31 @@ class RemoteSession:
 
     def request_stop(self) -> None:
         self._stop.set()
-        for pending in list(self._pending.values()):
-            pending.allow = False
-            pending.event.set()
+        with self._cond:
+            for pending in list(self._pending.values()):
+                if not pending.event.is_set():
+                    pending.allow = False
+                    pending.event.set()
 
     def stopped(self) -> bool:
         return self._stop.is_set()
 
     # -- потвърждения от sandbox-а --
     def confirm(self, operation: str, reasons: list[str], timeout: float = _CONFIRM_TIMEOUT_S) -> bool:
+        # След „Стоп“ нищо не чака отговор: иначе всеки следващ въпрос държеше
+        # хода до 5 минути и пак се отказваше (одит 2026-10-09).
+        if self._stop.is_set():
+            return False
+        from genesis_agent import sandbox
         cid = secrets.token_hex(6)
+        if sandbox.too_long_to_confirm(operation):
+            self.emit("confirm_done", id=cid, allow=False,
+                      note=f"операция от {len(operation)} знака — твърде дълга за одобрение")
+            return False
         pending = self._pending[cid] = _Pending()
-        self.emit("confirm", id=cid, operation=operation[:1000], reasons=list(reasons)[:10])
+        # Цялата операция: отрязана на 1000 знака без знак, краят ѝ (`&& rm -r src`)
+        # се одобряваше невидян (одит 2026-10-09).
+        self.emit("confirm", id=cid, operation=operation, reasons=list(reasons)[:10])
         answered = pending.event.wait(timeout)
         self._pending.pop(cid, None)
         allow = answered and pending.allow and not self._stop.is_set()
@@ -304,11 +463,14 @@ class RemoteSession:
         return allow
 
     def answer(self, cid: str, allow: bool) -> bool:
-        pending = self._pending.get(cid)
-        if pending is None:
-            return False
-        pending.allow = bool(allow)
-        pending.event.set()
+        # Първият отговор печели: второ докосване („Откажи“ и веднага
+        # „Изпълни“) не сменя вече даденото решение (одит 2026-10-07).
+        with self._cond:
+            pending = self._pending.get(cid)
+            if pending is None or pending.event.is_set():
+                return False
+            pending.allow = bool(allow)
+            pending.event.set()
         return True
 
 
@@ -351,6 +513,118 @@ class RemoteTurnUI:
         return self._s.stopped()
 
 
+# ── командите от телефона ──────────────────────────────────────────────────
+
+# Командите на терминала, които телефонът не може да изпълни (менюта и въпроси
+# в конзолата, смяна на модела). Без този отказ стигаха до модела като текст и
+# той отговаряше наслуки (2026-10-09).
+_TERMINAL_ONLY = frozenset({"/model", "/models", "/agent", "/backup", "/status", "/history",
+                            "/export", "/предай", "/update", "/ъпдейт", "/done", "/drop",
+                            "/готово", "/maxcoding", "/макскод", "/local_model_max",
+                            "/local_model_normal", "/локален_макс", "/локален_нормал"})
+
+PHONE_HELP = """Команди от телефона:
+/plan — режим план: само чете и планира; /plan пак — изпълнява плана
+/plan <задача> — план за задачата
+/undo — връща файловете от последния ход (пита първо)
+/todos — списъкът със задачи на агента
+/agents — под-агентите (.genesis/agents/*.md)
+/compact — компресира историята
+/context — с какво е пълен контекстът
+/review [клон] — преглед на промените за грешки
+/memory, /init, /bg, /hooks, /mcp, /commands, /skills, /tasks
+/clear — нов разговор
+@файл — прикача файл от работната папка
+Само в терминала: /model, /history, /backup, /export, /update и доверяването (/hooks trust, /mcp trust)."""
+
+
+def phone_command(text: str, ui: Any, session: RemoteSession, *, messages: Any,
+                  workspace: Path, compact: Callable[[Any], Any] | None = None,
+                  context: Callable[[], dict] | None = None) -> tuple[Any, str | None]:
+    """Съобщение от телефона, преди да стигне до модела.
+
+    Връща (историята, текст за модела); None за текста = ходът свършва тук.
+    Командите са същите като в терминала (chat_commands) — досега телефонът
+    пращаше `/plan` и `/undo` на модела като обикновен текст (2026-10-09).
+    """
+    from genesis_agent import chat_commands
+    stripped = text.strip()
+    # Същото делене като chat_commands: `/hooks\ntrust` е /hooks trust и тук.
+    head, rest = chat_commands._split(stripped)
+    cmd = head.lower()
+    if stripped.startswith("/"):
+        if cmd == "/help":
+            ui.info(PHONE_HELP)
+            return messages, None
+        if cmd in _TERMINAL_ONLY:
+            ui.warn(f"{head} е само в терминала на компютъра. /help — какво може оттук.")
+            return messages, None
+        # Доверяването пуска програми на компютъра при всеки следващ ход, без
+        # да пита. Решава се пред целия файл в терминала, не с едно докосване
+        # на телефон, който може да е в чужди ръце.
+        if cmd in ("/hooks", "/mcp") and rest.strip().lower() == "trust":
+            ui.warn(f"{cmd} trust е само в терминала на компютъра — там се вижда целият файл.")
+            return messages, None
+        # Входът в MCP сървър отваря браузър на компютъра и чака там (2026-10-09).
+        if cmd == "/mcp" and chat_commands._split(rest)[0].lower() in ("login", "logout"):
+            ui.warn("/mcp login и /mcp logout са само в терминала на компютъра — браузърът е там.")
+            return messages, None
+        if cmd in ("/skills", "/умения"):
+            from genesis_agent.skill_loader import format_skill_list
+            ui.info(format_skill_list())
+            return messages, None
+        if cmd in ("/tasks", "/задачи", "/state"):
+            from genesis_agent import workspace_memory as _wm
+            ui.info(_wm.briefing(max_threads=20, max_decisions=10) or "Още нищо не е записано.")
+            return messages, None
+
+        said: list[str] = []
+
+        def out(line: str) -> None:
+            said.append(line)
+            ui.info(line)
+
+        def ask(question: str) -> str:
+            # Въпросът на командата (/undo) става карта „Изпълни/Откажи“ на
+            # телефона; какво точно ще стане е последното, което командата каза.
+            reason = question.split("(", 1)[0].strip(" >") or question
+            return "да" if session.confirm(said[-1] if said else question, [reason]) else "не"
+
+        res = chat_commands.handle(stripped, messages=messages, workspace=workspace,
+                                   out=out, ask=ask, compact=compact, context=context)
+        if res is not None:
+            if res.messages is not None:
+                messages = res.messages
+            if not res.prompt:
+                return messages, None
+            stripped = res.prompt
+    from genesis_agent import mentions
+    try:
+        stripped, notes = mentions.expand(stripped, workspace)
+    except Exception as e:
+        notes = [f"@: {e}"]
+    for note in notes:
+        ui.info(f"📎 {note}")
+    return messages, stripped
+
+
+def show_agent_progress(session: RemoteSession) -> None:
+    """Под-агентите (AGENT) казват какво правят — на телефона като събития.
+    Без това там се виждаше само „мисли…“, докато под-агентът работи минути
+    наред (2026-10-09)."""
+    from genesis_agent import agents
+
+    def say(text: str) -> None:
+        session.emit("progress", text=text)
+    agents.progress = say
+
+
+def phone_state() -> dict:
+    """Режимът план и задачите — за постоянния ред на телефона."""
+    from genesis_agent import plan_mode, todos
+    return {"plan": plan_mode.active(), "todos": todos.items()}
+
+
 # ── HTTP ────────────────────────────────────────────────────────────────────
 
 class RemoteServer:
@@ -360,10 +634,10 @@ class RemoteServer:
                  status: Callable[[], dict] | None = None,
                  clear: Callable[[], None] | None = None,
                  commands: Callable[[str, dict], dict] | None = None,
-                 web_root: Path | None = None) -> None:
+                 web_root: Path | None = None, replay_path: Path | None = None) -> None:
         self.key = key
         self.cipher = Cipher(key)
-        self.replay = ReplayGuard()
+        self.replay = ReplayGuard(path=replay_path)
         self.session = session
         self.name = name
         self.status = status or (dict)
@@ -372,6 +646,11 @@ class RemoteServer:
         self.web_root = web_root
         self._failures: dict[str, list[float]] = {}
         self._lock = threading.Lock()
+        # Приетите `send` по идентификатора от телефона (`mid`), за повторен
+        # опит след изгубен отговор (одит 2026-10-11: LAN прекъсне, телефонът
+        # казва „няма връзка“, операторът натиска пак — ходът вървеше два пъти).
+        self._sent: dict[str, dict] = {}
+        self._send_lock = threading.Lock()
 
     # -- заявки --
     def hello(self) -> dict:
@@ -381,7 +660,13 @@ class RemoteServer:
                 "features": ["commands"] if self.commands else []}
 
     def handle(self, envelope: Any) -> tuple[dict, str]:
-        """(отговор, rid) за вече декодиран JSON плик. Хвърля ProtocolError."""
+        """(отговор, rid) за вече декодиран JSON плик. Хвърля ProtocolError
+        САМО за плик, който не се отваря с ключа или е стар/повторен.
+
+        Грешка в самата заявка (непозната операция, празно съобщение) идва в
+        запечатания отговор като {"ok": false, "error": …} — одит 2026-10-11:
+        беше 401, телефонът го показваше като „ключът вече не се приема,
+        сдвои отново“ и го броеше за спирачката срещу налучкване."""
         payload = self.cipher.open(envelope, _REQ_AAD)
         rid = self.replay.check(payload)
         return self._dispatch(payload), rid
@@ -392,19 +677,34 @@ class RemoteServer:
         if op == "status":
             return {"ok": True, **self.hello(), "busy": s.busy, **self.status()}
         if op == "send":
-            text = str(p.get("text") or "")
-            if len(text) > 20000:
-                return {"ok": False, "error": "too_long"}
-            if text.strip().lower() in ("/clear", "/нов"):
-                return self._dispatch({"op": "clear"})
-            return {"ok": True} if s.send(text) else {"ok": False, "error": "busy"}
+            mid = p.get("mid")
+            if not (isinstance(mid, str) and _MID.fullmatch(mid)):
+                return self._send(p)
+            with self._send_lock:
+                if mid in self._sent:
+                    return self._sent[mid]
+                reply = self._send(p)
+                # Само приетото: „busy“ не е изпълнено — повторният опит
+                # трябва да може да мине, щом ходът свърши.
+                if reply.get("ok"):
+                    self._sent[mid] = reply
+                    while len(self._sent) > _SENT_MIDS:
+                        del self._sent[next(iter(self._sent))]
+                return reply
         if op == "events":
             try:
                 after = int(p.get("after") or 0)
                 wait = float(p.get("wait") or 0)
-            except (TypeError, ValueError) as e:
-                raise ProtocolError("bad events args") from e
-            return {"ok": True, **s.events_after(after, wait)}
+            except (TypeError, ValueError, OverflowError):   # "after": Infinity
+                return {"ok": False, "error": "bad_args"}
+            reply = {"ok": True, **s.events_after(after, wait)}
+            # Последните приети `mid` (вълна 5, 2026-10-11): телефонът по тях
+            # забравя повторения опит, и когато своето балонче не е в
+            # страницата (reset от най-новите, „/clear“ без балонче) — иначе
+            # нарочното повторение със стария `mid` се поглъщаше тук.
+            with self._send_lock:
+                reply["mids"] = list(self._sent)[-_ACK_MIDS:]
+            return reply
         if op == "confirm":
             return {"ok": s.answer(str(p.get("id") or ""), bool(p.get("allow")))}
         if op == "stop":
@@ -420,7 +720,20 @@ class RemoteServer:
         if op == "command" and self.commands is not None:
             arg = p.get("arg")
             return self.commands(str(p.get("name") or ""), arg if isinstance(arg, dict) else {})
-        raise ProtocolError("unknown op")
+        # По-ново приложение с операция, която този `genesis serve` не знае.
+        return {"ok": False, "error": "unknown_op"}
+
+    def _send(self, p: dict) -> dict:
+        text = str(p.get("text") or "")
+        if len(text) > 20000:
+            return {"ok": False, "error": "too_long"}
+        # Python strip(), не JS trim(): "\x1c" или "\x85" минават trim() на
+        # телефона и тук са празно (одит 2026-10-11).
+        if not text.strip():
+            return {"ok": False, "error": "empty"}
+        if text.strip().lower() in ("/clear", "/нов"):
+            return self._dispatch({"op": "clear"})
+        return {"ok": True} if self.session.send(text) else {"ok": False, "error": "busy"}
 
     def seal(self, response: dict, rid: str) -> dict:
         return self.cipher.seal(response, _RES_AAD + rid.encode("ascii"))
@@ -443,6 +756,10 @@ class RemoteServer:
         class Handler(BaseHTTPRequestHandler):
             server_version = "genesis"
             sys_version = ""
+            # Без таймаут клиент, който не праща тялото, държеше нишка завинаги —
+            # 200 такива = 200 нишки, без нито един „провал“ за спирачката (одит
+            # 2026-10-09). Чакането на събития е след четенето — не го засяга.
+            timeout = 30
 
             def log_message(self, fmt: str, *args: Any) -> None:  # тихо: дисплеят е събитията
                 return
@@ -480,19 +797,67 @@ class RemoteServer:
                     self._send(200, _LANDING.encode("utf-8"), "text/html; charset=utf-8")
                     return
                 rel = path.lstrip("/") or "index.html"
-                target = (root / rel).resolve()
-                if root.resolve() not in target.parents or not target.is_file():
-                    target = root / "index.html"  # едностранично приложение
+                try:
+                    target = (root / rel).resolve()
+                    if root.resolve() not in target.parents or not target.is_file():
+                        target = root / "index.html"  # едностранично приложение
+                except (OSError, ValueError):
+                    # NUL в пътя, твърде дълго име — без отговор и с traceback в
+                    # терминала на оператора (одит 2026-10-09).
+                    target = root / "index.html"
                 ctype = _CONTENT_TYPES.get(target.suffix.lower(), "application/octet-stream")
                 self._send(200, target.read_bytes(), ctype)
+
+            def _read_by(self, size: int, deadline: float) -> bytes:
+                """До `size` байта до `deadline` (time.monotonic) общо, не на recv."""
+                parts: list[bytes] = []
+                got = 0
+                try:
+                    while got < size:
+                        left = deadline - time.monotonic()
+                        if left <= 0:
+                            raise TimeoutError
+                        self.connection.settimeout(left)
+                        chunk = self.rfile.read1(size - got)
+                        if not chunk:
+                            break
+                        parts.append(chunk)
+                        got += len(chunk)
+                finally:
+                    self.connection.settimeout(self.timeout)
+                return b"".join(parts)
+
+            def _braked_body(self, length: int) -> bytes | None:
+                """Тялото от спрян адрес, ако започва като плик и идва цяло до
+                _BRAKED_READ_S; иначе None — 429, без да се чете останалото.
+
+                Вълна 5, 2026-10-11: над спирачката сървърът пак четеше цялото
+                тяло — клиент, обявил 200 KiB и пратил 1 KiB, държеше нишка и
+                едно от 16-те места на адреса 30 s на заявка (преди вълна 4:
+                429 без четене). Сега първите _HEAD_BYTES трябва да са начало
+                на плик. Ревю на вълна 5: таймаутът беше на recv, не общ —
+                байт на 1.5 s не стигаше до 429 и след 12 s, а публичното
+                начало на плик (~30 байта) и спиране държеше мястото с 30 s на
+                recv; 16 такива връзки заключваха сдвоения телефон зад същия
+                адрес. Сега целият прочит е до един общ срок; пликовете на
+                телефона са няколко KiB."""
+                deadline = time.monotonic() + _BRAKED_READ_S
+                want = min(length, _HEAD_BYTES)
+                try:
+                    head = self._read_by(want, deadline)
+                    whole = len(head) == length
+                    shape = _ENVELOPE_SHAPE if whole else _ENVELOPE_HEAD
+                    if len(head) != want or not shape.fullmatch(head):
+                        return None
+                    body = head + self._read_by(length - len(head), deadline)
+                except OSError:   # TimeoutError е OSError
+                    return None
+                return body if len(body) == length else None
 
             def do_POST(self) -> None:
                 ip = self.client_address[0]
                 if self.path.split("?", 1)[0] != "/api/v1":
                     self._json(404, {"error": "not_found"})
-                    return
-                if server.too_many_failures(ip):
-                    self._json(429, {"error": "slow_down"})
                     return
                 try:
                     length = int(self.headers.get("Content-Length") or 0)
@@ -502,10 +867,44 @@ class RemoteServer:
                     self._json(413, {"error": "size"})
                     return
                 try:
-                    envelope = json.loads(self.rfile.read(length).decode("utf-8"))
-                    response, rid = server.handle(envelope)
-                except (ProtocolError, ValueError, UnicodeDecodeError) as e:
+                    if server.too_many_failures(ip):
+                        braked_body = self._braked_body(length)
+                        if braked_body is None:
+                            server.record_failure(ip)
+                            self.close_connection = True
+                            self._json(429, {"error": "slow_down"})
+                            return
+                        body = braked_body
+                    else:
+                        body = self.rfile.read(length)
+                except OSError:   # таймаут — броим го като провал за спирачката
                     server.record_failure(ip)
+                    self.close_connection = True
+                    return
+                # Спирачката е СЛЕД опита да отворим плика (одит 2026-10-11):
+                # преди беше първа и по адрес — страница в браузъра на самия
+                # телефон (30 POST-а text/plain) или съсед зад същия NAT
+                # заключваше сдвоения телефон. Заявка, която се отваря с ключа и
+                # минава ReplayGuard, не се спира; провалите се броят както
+                # преди и над 30/мин получават 429 без подробност. Над
+                # спирачката само тяло с вида на плик стига до json.loads и
+                # ключа (_ENVELOPE_SHAPE); всичко друго — 429 веднага.
+                if server.too_many_failures(ip) and not _ENVELOPE_SHAPE.fullmatch(body):
+                    server.record_failure(ip)
+                    self._json(429, {"error": "slow_down"})
+                    return
+                try:
+                    envelope = json.loads(body.decode("utf-8"))
+                    response, rid = server.handle(envelope)
+                # RecursionError: `[` × 200 000 без ключ — traceback в терминала
+                # на оператора на всяка заявка и без провал за спирачката (одит
+                # 2026-10-11).
+                except (ProtocolError, ValueError, UnicodeDecodeError, RecursionError) as e:
+                    braked = server.too_many_failures(ip)
+                    server.record_failure(ip)
+                    if braked:
+                        self._json(429, {"error": "slow_down"})
+                        return
                     # Подробността е само вида на отказа („cannot open",
                     # „stale request"): полезна на своя телефон, безполезна
                     # на непознат, който няма ключа.
@@ -520,7 +919,62 @@ class RemoteServer:
 
 class _QuietServer(ThreadingHTTPServer):
     """Телефон, който заспи или смени мрежата насред дългото чакане, затваря
-    връзката — това е нормално, не грешка за печатане в терминала."""
+    връзката — това е нормално, не грешка за печатане в терминала.
+
+    Най-много _MAX_CONNECTIONS връзки наведнъж: над тях новата се затваря
+    веднага, вместо да ражда още една нишка (одит 2026-10-09). И най-много
+    _MAX_PER_IP от един адрес (одит 2026-10-11): 64 празни връзки от един
+    съсед без ключ заемаха всички места за 30 s и сдвоеният телефон не
+    можеше да влезе, а спирачката не виждаше провал."""
+
+    _MAX_CONNECTIONS = 64
+    _MAX_PER_IP = 16
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._slots = threading.BoundedSemaphore(self._MAX_CONNECTIONS)
+        self._per_ip: dict[str, int] = {}
+        self._per_ip_lock = threading.Lock()
+
+    @staticmethod
+    def _ip(client_address: Any) -> str:
+        try:
+            return str(client_address[0])
+        except (TypeError, IndexError):
+            return ""
+
+    def _release(self, client_address: Any) -> None:
+        ip = self._ip(client_address)
+        with self._per_ip_lock:
+            left = self._per_ip.get(ip, 0) - 1
+            if left > 0:
+                self._per_ip[ip] = left
+            else:
+                self._per_ip.pop(ip, None)
+        self._slots.release()
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        ip = self._ip(client_address)
+        with self._per_ip_lock:
+            full = self._per_ip.get(ip, 0) >= self._MAX_PER_IP
+            if not full and self._slots.acquire(blocking=False):
+                self._per_ip[ip] = self._per_ip.get(ip, 0) + 1
+            else:
+                full = True
+        if full:
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._release(client_address)
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._release(client_address)
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         import sys
@@ -547,6 +1001,16 @@ _LANDING = """<!doctype html><html lang="bg"><meta charset="utf-8">
 
 
 # ── `genesis serve` ─────────────────────────────────────────────────────────
+
+# Какво приложението приема за адрес (BASE в mobile/src/lib/protocol.ts).
+_HOST = re.compile(r"^(?:[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*|\[?[0-9A-Fa-f:.]+\]?)$")
+
+
+def valid_host(host: str) -> bool:
+    """Адрес, който телефонът ще прочете от кода. `PC_1.local` или `user@pc`
+    правеха код, който приложението тихо отхвърляше (одит 2026-10-09)."""
+    return bool(_HOST.match(host))
+
 
 def _print_qr(console: Any, url: str) -> None:
     try:
@@ -587,6 +1051,7 @@ class ServeOptions:
     host: str = ""          # адресът в QR кода; празно — първият LAN адрес
     bind: str = "0.0.0.0"   # къде слуша сървърът
     reset: bool = False
+    web: bool = False       # QR код за уеб версията (iPhone без приложението)
 
 
 def parse_serve_args(args: list[str]) -> ServeOptions | int:
@@ -610,6 +1075,8 @@ def parse_serve_args(args: list[str]) -> ServeOptions | int:
             opts.bind = args[i]
         elif a == "--reset":
             opts.reset = True
+        elif a == "--web":
+            opts.web = True
         elif a in ("-h", "--help"):
             print(SERVE_USAGE)
             return 0
@@ -621,7 +1088,7 @@ def parse_serve_args(args: list[str]) -> ServeOptions | int:
 
 
 def serve(args: list[str]) -> int:
-    """`genesis serve [--port N] [--host IP] [--bind IP] [--reset]`."""
+    """`genesis serve [--port N] [--host IP] [--bind IP] [--reset] [--web]`."""
     try:
         import cryptography  # noqa: F401
     except ImportError:
@@ -631,10 +1098,20 @@ def serve(args: list[str]) -> int:
     opts = parse_serve_args(args)
     if isinstance(opts, int):
         return opts
-    port, host_override, bind, reset = opts.port, opts.host, opts.bind, opts.reset
+    port, host_override, bind, reset, web = opts.port, opts.host, opts.bind, opts.reset, opts.web
     # Слуша само на един адрес (127.0.0.1 за Genesis Desktop) → той е и в QR кода.
     if not host_override and bind not in ("", "0.0.0.0"):
         host_override = bind
+    if host_override and not valid_host(host_override):
+        print(f"--host {host_override!r}: телефонът не може да го прочете — IP адрес или име "
+              "от латиница, цифри, точки и тирета.")
+        return 2
+    if web and _web_root() is None:
+        # Уеб версията е само в Windows приложението; другаде кодът водеше до
+        # страница „не е включена“ (одит 2026-10-09).
+        print("--web: уеб версията не е в тази инсталация (идва с Windows приложението). "
+              "Пусни без --web и сдвои с приложението Genesis Remote.")
+        return 2
 
     key = load_or_create_key(reset=reset)
     from rich.panel import Panel
@@ -648,36 +1125,64 @@ def serve(args: list[str]) -> int:
                                                maxlen=gta._HISTORY_MAXLEN)}
 
     def runner(text: str, ui: Any) -> None:
-        state["messages"] = gta.run_turn(state["messages"], text, ui)
+        messages, prompt = phone_command(text, ui, session, messages=state["messages"],
+                                         workspace=Path(gta.WORKSPACE), compact=gta._force_compact,
+                                         context=gta.context_info)
+        state["messages"] = messages
+        if prompt is not None:
+            try:
+                state["messages"] = gta.run_turn(state["messages"], prompt, ui)
+            except Exception as e:
+                # Свършеното до грешката остава в разговора (одит 2026-10-11).
+                state["messages"] = gta.history_after_error(e, state["messages"])
+                raise
 
     def clear() -> None:
+        # Както /clear в терминала: нов файл за историята (иначе следващият
+        # разговор презаписваше файла на предишния — одит 2026-10-09) и
+        # системният промпт наново (GENESIS.md, агентите, MCP).
+        nonlocal system_prompt
+        try:
+            system_prompt, _ = gta.build_system_prompt()
+        except Exception:
+            pass
+        gta._new_session()
         state["messages"] = deque([{"role": "system", "content": system_prompt}],
                                   maxlen=gta._HISTORY_MAXLEN)
-        # Нов разговор → нов файл в историята и нулеви броячи, както `/clear`
-        # в терминала; иначе следващият ход презаписва току-що изчистената сесия.
-        gta.session_start_time = time.time()
-        gta.total_input_tokens = gta.total_output_tokens = 0
+        # Нов разговор от телефона/приложението = нова сесия и за брояча
+        # (NEXT_STEPS В.8): иначе статус редът носеше Σ на стария разговор.
+        gta.reset_usage()
+        from genesis_agent import todos
+        todos.clear()   # както /clear в терминала
 
     def status() -> dict:
         return {"model": f"{gta.current_provider}/{gta.current_model_id}",
                 "workspace": str(gta.WORKSPACE)}
 
+    # Текстът от телефона и от модела — като текст, не като Rich разметка: `[/]`
+    # изтриваше реда, а `rm -r [bold]build[/bold] src` се показваше като
+    # `rm -r build src` в записа на одобреното (одит 2026-10-09).
     def show(event: dict) -> None:
         kind = event["type"]
         if kind == "user":
-            console.print(f"\n[bold green]📱 ❯[/] {event['text']}")
+            console.print(Text.assemble("\n", ("📱 ❯ ", "bold green"), str(event["text"])))
         elif kind == "assistant":
             gta.RICH_UI.assistant(event["text"])
         elif kind == "tool":
             gta.RICH_UI.tool(event["name"], event["result"])
         elif kind in ("warn", "asked", "error"):
-            console.print(f"[yellow]⚠ {event['text']}[/]")
+            console.print(Text(f"⚠ {event['text']}", style="yellow"))
+        elif kind in ("info", "progress"):
+            console.print(Text(str(event["text"]), style="dim"))
         elif kind == "confirm":
-            console.print(f"[bold yellow]📱 Чака потвърждение от телефона:[/] {event['operation'][:200]}")
+            console.print(Text.assemble(("📱 Чака потвърждение от телефона: ", "bold yellow"),
+                                        str(event["operation"])))
         elif kind == "confirm_done":
-            console.print(f"[dim]   → {'разрешено' if event['allow'] else 'отказано'} {event.get('note', '')}[/]")
+            console.print(Text(f"   → {'разрешено' if event['allow'] else 'отказано'} "
+                               f"{event.get('note', '')}", style="dim"))
 
-    session = RemoteSession(runner, on_event=show)
+    session = RemoteSession(runner, on_event=show, state=phone_state)
+    show_agent_progress(session)
 
     from genesis_agent import sandbox as _sandbox
     _sandbox.set_policy(_sandbox.SandboxPolicy(
@@ -695,7 +1200,8 @@ def serve(args: list[str]) -> int:
         busy=lambda: session.busy, emit=session.emit)
     server = RemoteServer(key, session, name=name, status=status, clear=clear,
                           commands=lambda n, a: desktop_commands.run(n, a, ctx),
-                          web_root=_web_root())
+                          web_root=_web_root(),
+                          replay_path=_config_path().with_name("remote_seen.json"))
     try:
         httpd = server.make_http(bind, port)
     except OSError as e:
@@ -703,14 +1209,21 @@ def serve(args: list[str]) -> int:
         return 1
 
     hosts = [host_override] if host_override else (lan_addresses() or ["127.0.0.1"])
-    url = pairing_url(hosts[0], port, key, name)
+    url = pairing_url(hosts[0], port, key, name, web=web)
     console.print(Panel(Text.assemble(
-        ("Сканирай с телефона (приложението Genesis Remote или камерата):\n", "bold"),
+        (("Отвори кода с камерата на телефона — отваря уеб версията в браузъра:\n" if web else
+          "Сканирай с телефона (приложението Genesis Remote или камерата — отваря приложението):\n"),
+         "bold"),
         ("Работна папка: ", "dim"), (str(gta.WORKSPACE), ""),
         ("\nАдрес: ", "dim"), (f"http://{hosts[0]}:{port}", "cyan"),
         (("\nКлючът е само в QR кода. Нов ключ (отнема достъпа на всички телефони): "
           "genesis serve --reset"), "dim")),
         title="📱 Genesis за телефона", border_style="cyan"))
+    if web:
+        console.print(Text(
+            "⚠ --web: кодът отваря уеб версията по обикновен HTTP. Който е в същата мрежа, може "
+            "да подмени страницата и да види ключа — само вкъщи. С приложението: без --web.",
+            style="yellow"))
     _print_qr(console, url)
     # Същото като текст — за поставяне в приложението, ако камерата не
     # хване кода. Терминалът е на машината на оператора, не в мрежата.
@@ -741,7 +1254,7 @@ def serve(args: list[str]) -> int:
     return 0
 
 
-SERVE_USAGE = """Употреба: genesis serve [--port N] [--host IP] [--bind IP] [--reset]
+SERVE_USAGE = """Употреба: genesis serve [--port N] [--host IP] [--bind IP] [--reset] [--web]
 
 Пуска Genesis за телефона (приложението Genesis Remote за Android и iOS):
 показва QR код, който сдвоява телефона с тази машина.
@@ -750,4 +1263,5 @@ SERVE_USAGE = """Употреба: genesis serve [--port N] [--host IP] [--bind 
   --host IP   адрес в QR кода — напр. Tailscale адрес за достъп извън дома
   --bind IP   на кой адрес да слуша (по подразбиране 0.0.0.0; 127.0.0.1 —
               само тази машина, както го пуска Genesis Desktop)
-  --reset     нов ключ; всички сдвоени телефони губят достъп"""
+  --reset     нов ключ; всички сдвоени телефони губят достъп
+  --web       QR код за уеб версията (iPhone без приложението) — по HTTP, само вкъщи"""

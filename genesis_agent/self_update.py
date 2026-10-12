@@ -48,10 +48,13 @@ from genesis_agent.paths import GENESIS_HOME
 
 _STATE_FILE_NAME = "update_state.json"
 _WAIT_POLL_SECONDS = 1.0
-_WAIT_TIMEOUT_SECONDS = 120.0
 _PIPX_TIMEOUT_SECONDS = 600
 _PROBE_TIMEOUT_SECONDS = 10
 _NATIVE_WAIT_TIMEOUT_SECONDS = 12 * 3600
+# Колкото и родното: чатът казва „обновяването е след изхода“, а операторът
+# може да работи часове. С 2 минути pipx обновяването тихо се отказваше
+# (одит 2026-10-07).
+_WAIT_TIMEOUT_SECONDS = float(_NATIVE_WAIT_TIMEOUT_SECONDS)
 
 
 def _state_path() -> Path:

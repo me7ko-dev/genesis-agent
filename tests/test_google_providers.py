@@ -143,8 +143,11 @@ class TestProjectRotation:
 
         monkeypatch.setattr(Brain, "_http", _fake_http)
         Brain()._call("vertex", "google/gemini-2.5-pro", [{"role": "user", "content": "x"}])
-        assert br._is_exhausted("key::VERTEX#1") is True
-        assert br._is_exhausted("key::VERTEX#2") is False
+        # 429 спира двойката (проект, модел): друг модел в същия проект има
+        # своя квота (одит 2026-10-11).
+        assert br._is_exhausted("key::VERTEX#1::google/gemini-2.5-pro") is True
+        assert br._is_exhausted("key::VERTEX#1") is False
+        assert br._is_exhausted("key::VERTEX#2::google/gemini-2.5-pro") is False
 
     def test_all_projects_cooling_down_is_a_skip_not_a_crash(self, monkeypatch) -> None:
         self._two_projects(monkeypatch)

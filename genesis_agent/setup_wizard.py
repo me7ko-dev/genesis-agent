@@ -23,7 +23,7 @@ import requests
 from genesis_agent.paths import ENV_FILE, ensure_genesis_home, read_env_files
 
 
-def _write_private(path: Path, text: str) -> None:
+def _write_private(path: Path, text: str | bytes) -> None:
     """
     Write a file that only its owner can read — private from the first byte.
 
@@ -33,8 +33,8 @@ def _write_private(path: Path, text: str) -> None:
     as "closed", and getting it right costs one extra argument.
     """
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(text)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(text if isinstance(text, bytes) else text.encode("utf-8"))
     path.chmod(0o600)  # an existing file keeps its old mode through O_CREAT
 
 
@@ -109,6 +109,8 @@ PAID_PROVIDERS: list[tuple[str, str, str, str, str]] = [
 
 def _test_anthropic_key(key: str, model: str) -> tuple[bool, str]:
     """Anthropic не е OpenAI-съвместим — собствена проба през Messages API."""
+    if not key.isascii():
+        return False, _NOT_LATIN
     try:
         import anthropic
     except ImportError:
@@ -150,6 +152,9 @@ def _test_key(base_url: str, key: str, model: str) -> tuple[bool, str]:
     apart from "the model I probed with no longer exists" — so it is consulted
     only on a 404/410, and only for providers that actually authenticate it.
     """
+    if not key.isascii():
+        return False, _NOT_LATIN
+
     def _probe() -> requests.Response | None:
         try:
             return requests.post(
@@ -161,7 +166,7 @@ def _test_key(base_url: str, key: str, model: str) -> tuple[bool, str]:
                       "max_tokens": 5},
                 timeout=30,
             )
-        except requests.RequestException:
+        except (requests.RequestException, UnicodeError):
             return None
 
     r = _probe()
@@ -192,6 +197,30 @@ def _test_key(base_url: str, key: str, model: str) -> tuple[bool, str]:
     return False, f"HTTP {r.status_code}: {r.text[:90]}"
 
 
+_NOT_LATIN = "ключът съдържа знаци извън латиницата — пиши го на латинска подредба"
+# Кавички (и „умните“ от Word/чат), невидими знаци от копиране.
+_QUOTES = "\"'\u201c\u201d\u201e\u2018\u2019\u00ab\u00bb`"
+_INVISIBLE = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff\u00a0"))
+
+
+def _clean_key(raw: str) -> str:
+    """Ключът, както е поставен, без обвивката около него.
+
+    Одит 2026-10-11: ключ с кавички, нулева ширина или писан на кирилица
+    сриваше `genesis setup` с UnicodeEncodeError (заглавката на заявката е
+    latin-1) и всички вече въведени ключове се губеха. Тук се маха обвивката;
+    останалото извън ASCII `_test_key` отказва с човешко изречение."""
+    key = raw.translate(_INVISIBLE).strip().removeprefix("export ").strip()
+    name, sep, rest = key.partition("=")
+    if sep and name.strip().replace("_", "").isalnum() and name.strip().isupper():
+        key = rest.strip()      # поставено цяло `GROQ_API_KEY=gsk_…`
+    return key.strip(_QUOTES + " ")
+
+
+def _prompt_key(text: str) -> str:
+    return _clean_key(_prompt(text))
+
+
 def _prompt(text: str) -> str:
     try:
         return input(text).strip()
@@ -202,6 +231,44 @@ def _prompt(text: str) -> str:
 
 def _existing(var: str) -> str:
     return os.environ.get(var) or read_env_files(var) or ""
+
+
+def _source(var: str) -> str:
+    """Откъде идва действащата стойност: "" (няма), "env", или пътя на .env файла."""
+    if os.environ.get(var):
+        return "env"
+    from genesis_agent.paths import ENV_FILES, env_value
+    for envf in ENV_FILES:
+        p = Path(envf)
+        try:
+            for line in p.read_text(encoding="utf-8-sig", errors="ignore").splitlines():
+                k, sep, v = line.strip().removeprefix("export ").partition("=")
+                if sep and k.strip() == var and env_value(v):
+                    return str(p)
+        except OSError:
+            continue
+    return ""
+
+
+def _overridden_warning(var: str) -> str:
+    """Предупреждение, когато записът в ENV_FILE няма да се ползва: действащата
+    стойност идва от променлива на средата или от .env на проекта, които имат
+    предимство (одит 2026-10-07: „✅ Записано“, а Genesis продължаваше със
+    стария, отнет ключ)."""
+    src = _source(var)
+    if not src or Path(src) == ENV_FILE:
+        return ""
+    where = f"променливата на средата {var}" if src == "env" else src
+    return (f"    ⚠️  Действащият ключ идва от {where} — той има предимство пред {ENV_FILE}. "
+            "Смени го там (или го махни), иначе новият няма да се ползва.")
+
+
+def _keep(collected: dict[str, str], var: str, value: str) -> None:
+    """Запазен ключ, който живее другаде (среда, .env на проекта), не се копира
+    тихо в глобалния файл — остава, където е."""
+    src = _source(var)
+    if not src or Path(src) == ENV_FILE:
+        collected[var] = value
 
 
 def run() -> int:
@@ -226,9 +293,9 @@ def run() -> int:
             print("✅" if ok else "❌", why)
             if ok:
                 # Working key: keep it unless the user deliberately replaces it.
-                key = _prompt("    [Enter] запази · или въведи нов ключ: ")
+                key = _prompt_key("    [Enter] запази · или въведи нов ключ: ")
                 if not key:
-                    collected[var] = current
+                    _keep(collected, var, current)
                     working += 1
                     print("    запазен\n")
                     continue
@@ -236,14 +303,14 @@ def run() -> int:
                 # Broken key: replacing is the obvious move, so make that the
                 # default and require a deliberate choice to keep it.
                 print(f"    Вземи нов от: {url}")
-                key = _prompt("    Нов ключ (Enter = остави счупения): ")
+                key = _prompt_key("    Нов ключ (Enter = остави счупения): ")
                 if not key:
-                    collected[var] = current
+                    _keep(collected, var, current)
                     print("    оставен непроменен — този доставчик няма да работи\n")
                     continue
         else:
             print(f"  {name}  —  вземи ключ от: {url}")
-            key = _prompt(f"    {var} = ")
+            key = _prompt_key(f"    {var} = ")
             if not key:
                 print("    (пропуснат)\n")
                 continue
@@ -254,10 +321,14 @@ def run() -> int:
         if ok:
             collected[var] = key
             working += 1
-        else:
+        elif key.isascii():   # ключ на кирилица би сринал всяка заявка — не се пише
             keep = _prompt("    Да го запиша ли въпреки това? [y/N] ").lower()
             if keep.startswith("y"):
                 collected[var] = key
+        if var in collected and collected[var] != current:
+            warning = _overridden_warning(var)
+            if warning:
+                print(warning)
         print()
 
     # ── Платени доставчици (по избор) ─────────────────────────────────────
@@ -282,14 +353,16 @@ def run() -> int:
                            if base_url.startswith("native://")
                            else _test_key(base_url, current, model))
                 print("✅" if ok else "❌", why)
-                key = _prompt("    [Enter] запази · или въведи нов ключ: ")
+                key = _prompt_key("    [Enter] запази · или въведи нов ключ: ")
                 if not key:
-                    collected[var] = current
+                    # Ключ от средата на шела не се копира тихо във файла — както
+                    # при безплатните (одит 2026-10-09).
+                    _keep(collected, var, current)
                     print()
                     continue
             else:
                 print(f"  {name}  —  вземи ключ от: {url}")
-                key = _prompt(f"    {var} = ")
+                key = _prompt_key(f"    {var} = ")
                 if not key:
                     print("    (пропуснат)\n")
                     continue
@@ -297,13 +370,14 @@ def run() -> int:
             ok, why = (_test_anthropic_key(key, model) if base_url.startswith("native://")
                        else _test_key(base_url, key, model))
             print("✅" if ok else "❌", why)
-            if ok or _prompt("    Да го запиша ли въпреки това? [y/N] ").lower().startswith("y"):
+            if ok or (key.isascii()
+                      and _prompt("    Да го запиша ли въпреки това? [y/N] ").lower().startswith("y")):
                 collected[var] = key
             print()
     else:
         # Съществуващ платен ключ се пренася, а не се трие мълчаливо.
         for var in existing_paid:
-            collected[var] = _existing(var)
+            _keep(collected, var, _existing(var))
         print()
 
     if not collected:
@@ -332,7 +406,9 @@ def run() -> int:
 
         # A dated copy before every write, so a mistake here is recoverable.
         backup = ENV_FILE.with_name(f".env.backup-{datetime.datetime.now():%Y%m%d-%H%M%S}")
-        _write_private(backup, ENV_FILE.read_text(encoding="utf-8"))
+        # Байт по байт: .env с коментар в cp1251 сриваше setup СЛЕД всички
+        # въпроси и нищо не се записваше (одит 2026-10-09).
+        _write_private(backup, ENV_FILE.read_bytes())
         _prune_backups(ENV_FILE.parent)
         print(f"  предишният файл е запазен като {backup.name}")
 

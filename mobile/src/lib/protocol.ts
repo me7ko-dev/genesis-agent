@@ -96,17 +96,73 @@ export type Pairing = {
   name: string;
 };
 
+// Only scheme://host[:port] — no user@, no backslash, no path or query
+// (audit 2026-10-07: `http://pc@evil:1/#k=…` showed "pc" and talked to "evil").
+const BASE = /^https?:\/\/(?:[a-z0-9-]+(?:\.[a-z0-9-]+)*|\[[0-9a-f:.]+\])(?::\d{1,5})?$/i;
+
+/** The app's own link scheme (app.json "scheme"). */
+export const APP_LINK = 'genesisremote://pair';
+
 /**
- * What the QR code on the computer says:
- *   http://192.168.1.5:8765/#k=<key>&n=<name>
- * The key is in the fragment, which a browser never sends over the network.
+ * What the QR code on the computer says (2026-10-09):
+ *   genesisremote://pair#u=<http://192.168.1.5:8765>&k=<key>&n=<name>
+ * A phone camera hands it to this app, never to a browser: the old
+ * `http://…/#k=…` code opened the web build over plain HTTP in the LAN, where
+ * anyone on the same Wi-Fi who swapped the page could read the key. That code
+ * is now only `genesis serve --web` (the web build), and still accepted here.
  */
 export function parsePairingUrl(raw: string): Pairing | null {
   const text = raw.trim();
-  const match = /^(https?:\/\/[^/#?\s]+)[^#]*#(.+)$/i.exec(text);
-  if (!match) return null;
+  let base: string;
+  let fragment: string;
+  const app = /^genesisremote:\/\/pair\/?#(.+)$/i.exec(text);
+  if (app) {
+    fragment = app[1];
+    const u = readParams(fragment)?.u;
+    if (!u || !BASE.test(u)) return null;
+    base = u;
+  } else {
+    const match = /^(https?:\/\/[^/?#\\]*)\/?#(.+)$/i.exec(text);
+    if (!match || !BASE.test(match[1])) return null;
+    base = match[1];
+    fragment = match[2];
+  }
+  const params = readParams(fragment);
+  if (!params?.k) return null;
+  let key: Uint8Array;
+  try {
+    key = b64urlDecode(params.k);
+  } catch {
+    return null;
+  }
+  if (key.length !== 32) return null;
+  return { base, key: params.k, name: cleanName(params.n) || base };
+}
+
+/** Какво се записва след успешна проверка: името, което компютърът казва,
+ *  изчистено като това от връзката. То се показва в заглавката и в
+ *  предупреждението „Ще замени сдвояването с …“ (одит 2026-10-11: пазеше се
+ *  сурово — с U+202E, нови редове и 300 знака). */
+export function pairingFrom(pairing: Pairing, status: StatusReply): Pairing {
+  return { ...pairing, name: cleanName(status.name) || pairing.name };
+}
+
+/** The computer's name as shown: no control or bidi characters, one line, at
+ *  most 40 characters — a link could otherwise push the real address off the
+ *  "Сдвои?" card with newlines or reverse it with U+202E (audit 2026-10-09). */
+export function cleanName(raw: string | undefined): string {
+  // Explicit ranges, not \p{…}: control, soft hyphen, bidi marks/overrides/
+  // isolates, zero-width, line/paragraph separators, BOM.
+  const flat = (raw ?? '')
+    .replace(/[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return [...flat].slice(0, 40).join('');
+}
+
+function readParams(fragment: string): Record<string, string> | null {
   const params: Record<string, string> = {};
-  for (const part of match[2].split('&')) {
+  for (const part of fragment.split('&')) {
     const eq = part.indexOf('=');
     if (eq > 0) {
       try {
@@ -116,15 +172,50 @@ export function parsePairingUrl(raw: string): Pairing | null {
       }
     }
   }
-  if (!params.k) return null;
-  let key: Uint8Array;
+  return params;
+}
+
+// ── a pairing link that opened the app ──────────────────────────────────────
+// genesisremote://pair#… waits here for the pair screen — not in the route, so
+// the key never enters the router's path or history.
+
+type Listener = () => void;
+
+// 'invalid': a genesisremote://pair link that is not a valid code — the pair
+// screen says so instead of opening silently (audit 2026-10-09).
+let pending: Pairing | 'invalid' | null = null;
+const listeners = new Set<Listener>();
+
+/** A link from the system: a pairing link (valid or not) → kept for the pair
+ *  screen, true. Any other link → false. */
+export function offerLink(url: string): boolean {
+  if (!/^genesisremote:\/\/pair\b/i.test(url.trim())) return false;
+  pending = parsePairingUrl(url) ?? 'invalid';
+  for (const l of listeners) l();
+  return true;
+}
+
+export function takeLink(): Pairing | 'invalid' | null {
+  const p = pending;
+  pending = null;
+  return p;
+}
+
+export function onLink(listener: Listener): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+/** Where a system link goes: a pairing → '/pair' (the key stays out of the
+ *  path), anything else unchanged. Used by app/+native-intent.tsx. */
+export function redirectFor(path: string): string {
   try {
-    key = b64urlDecode(params.k);
+    return offerLink(path) ? '/pair' : path;
   } catch {
-    return null;
+    return path;
   }
-  if (key.length !== 32) return null;
-  return { base: match[1].replace(/\/+$/, ''), key: params.k, name: params.n || match[1] };
 }
 
 // ── the envelope ────────────────────────────────────────────────────────────
@@ -156,9 +247,12 @@ export type ErrorKind = 'network' | 'unauthorized' | 'clock' | 'protocol' | 'ser
 
 export class ProtocolError extends Error {
   kind: ErrorKind;
-  constructor(message: string, kind: ErrorKind) {
+  /** HTTP кодът, ако е имало такъв (429 спирачка, 413 твърде голямо…). */
+  status?: number;
+  constructor(message: string, kind: ErrorKind, status?: number) {
     super(message);
     this.kind = kind;
+    this.status = status;
   }
 }
 
@@ -179,6 +273,12 @@ export type GenesisEvent = {
   label?: string;
 };
 
+export type Todo = { content: string; status: 'pending' | 'in_progress' | 'completed' };
+
+/** What the phone shows all the time, not as an event: plan mode and the
+ *  agent's task list (remote_server.phone_state). Older servers omit it. */
+export type PhoneState = { plan: boolean; todos: Todo[] };
+
 export type EventsReply = {
   ok: boolean;
   events: GenesisEvent[];
@@ -186,6 +286,14 @@ export type EventsReply = {
   reset: boolean;
   busy: boolean;
   epoch: string;
+  state?: PhoneState;
+  /** Отговорът е стигнал тавана на сървъра: питай веднага пак от `last`
+   *  (2026-10-11). По-старите сървъри не го пращат. */
+  more?: boolean;
+  /** Последните приети `mid` на `send` (вълна 5, 2026-10-11): по тях
+   *  outbox.seen забравя повторения опит. По-старите сървъри не ги пращат. */
+  mids?: string[];
+  error?: string;
 };
 
 export type StatusReply = {
@@ -255,8 +363,10 @@ export class GenesisClient {
       if (detail.includes('stale')) throw new ProtocolError('clock', 'clock');
       throw new ProtocolError(detail || 'rejected', 'unauthorized');
     }
-    if (response.status === 429) throw new ProtocolError('too many failed attempts', 'unauthorized');
-    if (response.status !== 200) throw new ProtocolError(`server error ${response.status}`, 'server');
+    // The server's brake after failed attempts from this address — temporary,
+    // retry later; it says nothing about our key (unpairing over it lost the pairing).
+    if (response.status === 429) throw new ProtocolError('too many failed attempts — wait a minute', 'network', 429);
+    if (response.status !== 200) throw new ProtocolError(`server error ${response.status}`, 'server', response.status);
     return open(this.key, data as Envelope, RES_AAD + rid) as T;
   }
 
@@ -264,12 +374,21 @@ export class GenesisClient {
     return this.call<StatusReply>('status');
   }
 
-  events(after: number, waitSeconds: number): Promise<EventsReply> {
-    return this.call<EventsReply>('events', { after, wait: waitSeconds }, (waitSeconds + 10) * 1000);
+  async events(after: number, waitSeconds: number): Promise<EventsReply> {
+    const reply = await this.call<EventsReply>('events', { after, wait: waitSeconds }, (waitSeconds + 10) * 1000);
+    // Грешка в заявката вече идва запечатана, не като 401 (2026-10-11) —
+    // отговор без събития не бива да стига до mergeEvents.
+    if (!reply.ok || !Array.isArray(reply.events)) {
+      throw new ProtocolError(reply.error ?? 'bad events reply', 'server');
+    }
+    return reply;
   }
 
-  send(text: string): Promise<{ ok: boolean; error?: string }> {
-    return this.call('send', { text });
+  /** `mid` — идентификаторът на съобщението от телефона: повторен опит със
+   *  същия след изгубен отговор получава първия отговор, ходът не тръгва
+   *  втори път (2026-10-11). */
+  send(text: string, mid?: string): Promise<{ ok: boolean; error?: string }> {
+    return this.call('send', mid ? { text, mid } : { text });
   }
 
   confirm(id: string, allow: boolean): Promise<{ ok: boolean }> {

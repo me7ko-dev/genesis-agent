@@ -108,6 +108,19 @@ class TestHttp:
         assert tool_calls is None
         assert b._last_usage == {"prompt_tokens": 5, "completion_tokens": 3}
 
+    def test_cached_tokens_reach_budget(self, monkeypatch) -> None:
+        # Ollama Cloud: prompt_tokens_details.cached_tokens → cached_read_tokens.
+        b = self._brain()
+        resp = _FakeResponse(200, {
+            "choices": [{"message": {"content": "4"}}],
+            "usage": {"prompt_tokens": 4089, "completion_tokens": 64,
+                      "prompt_tokens_details": {"cached_tokens": 4064}},
+        })
+        monkeypatch.setattr("genesis_agent.brain.requests.post", lambda *a, **kw: resp)
+        b._http("https://x", "key", "m", [], 30)
+        assert b._last_usage["cached_read_tokens"] == 4064
+        assert b._last_usage["prompt_tokens"] == 4089
+
     def test_non_200_raises_runtime_error_with_status_code(self, monkeypatch) -> None:
         b = self._brain()
         resp = _FakeResponse(429, text="rate limited")
@@ -328,8 +341,9 @@ class TestOllamaCloudRotation:
         out = b._call_rotating("https://x", "OLLAMA_API_KEY", "m", [], None, ["k1", "k2"])
         assert out == ("from k2", None)
         assert calls == ["k1", "k2"]
-        assert brain_mod._is_exhausted("key::OLLAMA_API_KEY#1") is True
-        assert brain_mod._is_exhausted("key::OLLAMA_API_KEY#2") is False
+        # 429 спира двойката (ключ, модел), не целия ключ (одит 2026-10-11).
+        assert brain_mod._is_exhausted("key::OLLAMA_API_KEY#1::m") is True
+        assert brain_mod._is_exhausted("key::OLLAMA_API_KEY#2::m") is False
 
     def test_already_cooling_key_is_skipped_without_being_tried(self, monkeypatch) -> None:
         b = self._brain()
@@ -381,10 +395,10 @@ class TestOllamaCloudRotation:
         with pytest.raises(RuntimeError):
             b._call_rotating("https://x", "GROQ_API_KEY", "m", [], None, ["g1"])
 
-        assert brain_mod._is_exhausted("key::GROQ_API_KEY#1") is True
+        assert brain_mod._is_exhausted("key::GROQ_API_KEY#1::m") is True
         # A different provider's first key must be untouched.
-        assert brain_mod._is_exhausted("key::OPENROUTER_API_KEY#1") is False
-        assert brain_mod._is_exhausted("key::OLLAMA_API_KEY#1") is False
+        assert brain_mod._is_exhausted("key::OPENROUTER_API_KEY#1::m") is False
+        assert brain_mod._is_exhausted("key::OLLAMA_API_KEY#1::m") is False
 
 
 class TestNumberedKeys:
@@ -536,10 +550,12 @@ class TestContextBudgetIsAppliedOnTheWayOut:
         b.complete(history)
 
         assert len(sent) == 1, "заявката трябва наистина да е стигнала до _http"
-        wire = sent[0]
-        assert len(str(wire[1]["content"])) < 800, "старият резултат трябва да е свит"
-        assert str(wire[1]["content"]).startswith("S0"), "началото се пази"
-        assert wire[-1]["content"] == history[-1]["content"], "последният остава пълен"
+        # Без tools role='tool' тръгва като текст (одит 2026-10-11) — сравнява
+        # се съдържанието след префикса на _sanitize_for_textmode.
+        wire = [str(m["content"]).removeprefix("[Резултат от tool]: ") for m in sent[0]]
+        assert len(wire[1]) < 800, "старият резултат трябва да е свит"
+        assert wire[1].startswith("S0"), "началото се пази"
+        assert wire[-1] == history[-1]["content"], "последният остава пълен"
         assert history == snapshot, "историята на извикващия не бива да се пипа"
 
 
@@ -639,5 +655,205 @@ class TestOverloadIsPerModelNotPerKey:
         assert not brain_mod._is_exhausted("key::NVIDIA_API_KEY")
 
     def test_quota_errors_still_stop_the_whole_key(self) -> None:
-        assert {429, 402, 401, 403} <= brain_mod._KEY_DEAD_CODES
+        assert {402, 401, 403} <= brain_mod._KEY_DEAD_CODES
         assert 503 not in brain_mod._KEY_DEAD_CODES
+        assert 429 in brain_mod._ROTATE_CODES          # при въртене — следващият ключ
+
+    def test_one_models_429_does_not_stop_the_key_a_second_one_does(self, monkeypatch) -> None:
+        """Одит 2026-10-07: лимитът на Groq е по модел — един 429 спираше ключа
+        и здравите модели под него не бяха пробвани."""
+        monkeypatch.setattr(brain_mod, "_KEY_429_MODELS", {})
+        assert brain_mod._note_key_429("key::GROQ_API_KEY", "llama-A") is False
+        assert brain_mod._note_key_429("key::GROQ_API_KEY", "llama-A") is False
+        assert brain_mod._note_key_429("key::GROQ_API_KEY", "llama-B") is True
+
+class TestTotalDeadline:
+    """2026-09-25: OpenRouter държи връзката жива, докато безплатният модел
+    чака — `timeout` на requests (между пакети) не изтича и пробата висеше
+    40 мин. Общият краен срок я праща към следващия модел."""
+
+    def test_a_hanging_call_ends_with_a_timeout(self, monkeypatch) -> None:
+        import threading
+        import time
+
+        import requests
+
+        release = threading.Event()
+        monkeypatch.setattr("genesis_agent.brain.requests.post",
+                            lambda *a, **kw: release.wait(10))
+        monkeypatch.setattr(brain_mod, "_TOTAL_DEADLINE_FACTOR", 0.2)
+        t0 = time.time()
+        with pytest.raises(requests.exceptions.Timeout):
+            Brain.__new__(Brain)._http("https://x", "k", "m", [], 1)
+        release.set()
+        assert time.time() - t0 < 5
+
+    def test_errors_from_requests_pass_through(self, monkeypatch) -> None:
+        import requests
+
+        def _boom(*a, **kw):
+            raise requests.exceptions.ConnectionError("refused")
+
+        monkeypatch.setattr("genesis_agent.brain.requests.post", _boom)
+        with pytest.raises(requests.exceptions.ConnectionError):
+            Brain.__new__(Brain)._http("https://x", "k", "m", [], 30)
+
+
+class TestTransientServerErrorIsRetriedOnce:
+    """bench 26–30.09: 131 от 286 бавни отговора (NVIDIA ~29 s) дойдоха след
+    HTTP 500 на ollama (~3.5 s), а следващият му опит минаваше в 104 от 139."""
+
+    def _brain(self, monkeypatch, outcomes: dict[str, list]):
+        calls: list[str] = []
+        sleeps: list[float] = []
+
+        def _fake_call(self, provider, model, messages, tools=None, extra=None):
+            calls.append(model)
+            result = outcomes[model].pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result, None
+
+        monkeypatch.setattr(Brain, "_call", _fake_call)
+        monkeypatch.setattr(brain_mod.time, "sleep", sleeps.append)
+        b = Brain()
+        real = b.chain[0]
+        b.chain = [dict(real, model=m) for m in outcomes]
+        b.local = None
+        b._pinned = None
+        return b, calls, sleeps
+
+    def test_a_500_is_retried_on_the_same_model(self, monkeypatch) -> None:
+        b, calls, sleeps = self._brain(monkeypatch, {
+            "t500-a": [RuntimeError("HTTP_500: Internal Server Error"), "ok from a"],
+            "t500-b": ["ok from b"]})
+        assert b.complete([{"role": "user", "content": "hi"}]).raw_text == "ok from a"
+        assert calls == ["t500-a", "t500-a"] and sleeps == [brain_mod._TRANSIENT_PAUSE_S]
+
+    def test_a_second_500_moves_on(self, monkeypatch) -> None:
+        b, calls, _ = self._brain(monkeypatch, {
+            "t500x-a": [RuntimeError("HTTP_500: x"), RuntimeError("HTTP_502: y")],
+            "t500x-b": ["ok from b"]})
+        assert b.complete([{"role": "user", "content": "hi"}]).raw_text == "ok from b"
+        assert calls == ["t500x-a", "t500x-a", "t500x-b"]
+
+    @pytest.mark.parametrize("error", ["HTTP_429: rate", "празен отговор (finish_reason=stop)",
+                                       "HTTP_413: too large"])
+    def test_other_errors_are_not_retried(self, monkeypatch, error) -> None:
+        a = f"once-{error[:8]}"
+        b, calls, sleeps = self._brain(monkeypatch, {a: [RuntimeError(error)], "once-b": ["ok"]})
+        assert b.complete([{"role": "user", "content": "hi"}]).raw_text == "ok"
+        assert calls == [a, "once-b"] and sleeps == []
+
+
+def test_an_empty_reply_says_why(monkeypatch) -> None:
+    def _post(url, headers=None, json=None, timeout=None):
+        return _FakeResponse(200, {"choices": [{"message": {"content": ""}, "finish_reason": "stop"}],
+                                   "usage": {"prompt_tokens": 9801, "completion_tokens": 0}})
+
+    monkeypatch.setattr("genesis_agent.brain.requests.post", _post)
+    with pytest.raises(RuntimeError, match=r"празен отговор \(finish_reason=stop, prompt=9801, out=0"):
+        Brain.__new__(Brain)._http("https://x", "k", "gpt-oss:120b-cloud", [], 30)
+
+
+def test_a_retried_call_counts_once_in_the_provider_stats(monkeypatch) -> None:
+    """500 + провал на повторния опит = ЕДИН провал: два сваляха ollama в края
+    на веригата за 15 минути (bench 2026-09-30)."""
+    recorded: list[tuple[str, bool]] = []
+    outcomes = {"stat-a": [RuntimeError("HTTP_500: x"), RuntimeError("HTTP_500: y")],
+                "stat-b": ["ok"]}
+
+    def _fake_call(self, provider, model, messages, tools=None, extra=None):
+        result = outcomes[model].pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result, None
+
+    monkeypatch.setattr(Brain, "_call", _fake_call)
+    monkeypatch.setattr(brain_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(Brain, "_record_stat",
+                        lambda self, prov, lat, ok: recorded.append((self._last_model, ok)))
+    b = Brain()
+    real = b.chain[0]
+    b.chain = [dict(real, model="stat-a"), dict(real, model="stat-b")]
+    b.local = None
+    b._pinned = None
+    b._last_model = None
+    orig = b._call
+
+    def _track(prov, model, *a, **k):
+        b._last_model = model
+        return orig(prov, model, *a, **k)
+
+    monkeypatch.setattr(b, "_call", _track)
+    assert b.complete([{"role": "user", "content": "hi"}]).raw_text == "ok"
+    assert recorded == [("stat-a", False), ("stat-b", True)]
+
+
+def test_a_truncated_but_paid_answer_is_recorded(monkeypatch) -> None:
+    """Одит 2026-10-07: отрязан (finish_reason=length) отговор е платен, но
+    разходът му не стигаше до budget_log."""
+    brain = Brain(use_local=False)
+    brain.chain = [{"provider": "openai", "model": "m1"}, {"provider": "deepseek", "model": "m2"}]
+    brain.local = None
+
+    def fake_call(prov, model, msgs, tools=None):
+        brain._last_usage = {"prompt_tokens": 3000 if model == "m1" else 10, "completion_tokens": 4096}
+        if model == "m1":
+            brain._usage_attempt = brain._attempt_id
+            raise RuntimeError("HTTP_TRUNCATED: отрязан")
+        return "ok", None
+
+    monkeypatch.setattr(brain, "_call", fake_call)
+    monkeypatch.setattr(brain, "_record_stat", lambda *a: None)
+    seen: list = []
+    monkeypatch.setattr("genesis_agent.budget.record_usage", lambda **kw: seen.append((kw["provider"], kw["prompt_tokens"])))
+    assert brain.complete([{"role": "user", "content": "x"}]).raw_text == "ok"
+    assert seen == [("openai", 3000), ("deepseek", 10)]
+
+
+def test_models_found_dead_are_left_out_of_the_coding_and_light_chains(monkeypatch) -> None:
+    cfg = {"models": {"coding_models": [{"provider": "groq", "model": "dead"}, {"provider": "groq", "model": "ok"}],
+                      "light_models": [{"provider": "groq", "model": "dead"}, {"provider": "groq", "model": "ok"}]}}
+    import yaml
+    monkeypatch.setattr(brain_mod.CONFIG_PATH.__class__, "read_text", lambda self, **kw: yaml.safe_dump(cfg))
+    monkeypatch.setattr(brain_mod, "_dead_models", lambda: {("groq", "dead")})
+    assert [c["model"] for c in brain_mod._load_coding_chain()] == ["ok"]
+    assert [c["model"] for c in brain_mod._load_light_chain()] == ["ok"]
+
+
+def test_no_keys_at_all_fails_at_once_without_retry_rounds(monkeypatch) -> None:
+    """2026-10-09: на чиста инсталация (нито един ключ) всяко съобщение чакаше
+    16 s — три кръга по веригата с пауза от 8 s, а ключ от паузата не идва."""
+    brain = Brain(use_local=False)
+    brain.chain = [{"provider": "groq", "model": "m1"}, {"provider": "nvidia", "model": "m2"}]
+    brain.local = None
+    calls: list[str] = []
+
+    def fake_call(prov, model, msgs, tools=None):
+        calls.append(model)
+        raise RuntimeError(f"skip: no {prov.upper()}_API_KEY configured")
+    sleeps: list[float] = []
+    monkeypatch.setattr(brain, "_call", fake_call)
+    monkeypatch.setattr(brain_mod.time, "sleep", sleeps.append)
+    out = brain.complete([{"role": "user", "content": "x"}]).raw_text
+    assert calls == ["m1", "m2"] and sleeps == []
+    assert "genesis setup" in out
+
+
+def test_a_real_failure_still_gets_the_retry_rounds(monkeypatch) -> None:
+    brain = Brain(use_local=False)
+    brain.chain = [{"provider": "groq", "model": "m1"}, {"provider": "nvidia", "model": "m2"}]
+    brain.local = None
+    outcomes = iter([RuntimeError("skip: no GROQ_API_KEY configured"), RuntimeError("HTTP_400: bad"),
+                     RuntimeError("skip: no GROQ_API_KEY configured"), "ok"])
+
+    def fake_call(prov, model, msgs, tools=None):
+        r = next(outcomes)
+        if isinstance(r, Exception):
+            raise r
+        return r, None
+    monkeypatch.setattr(brain, "_call", fake_call)
+    monkeypatch.setattr(brain, "_record_stat", lambda *a: None)
+    monkeypatch.setattr(brain_mod.time, "sleep", lambda s: None)
+    assert brain.complete([{"role": "user", "content": "x"}]).raw_text == "ok"

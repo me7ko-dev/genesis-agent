@@ -150,3 +150,25 @@ class TestNonRsaKeyGuard:
             format=serialization.PublicFormat.SubjectPublicKeyInfo,
         ))
         assert cu.verify_signature("print(1)", "aa") is False
+
+
+class TestKeyLossAndRaces:
+    def test_deleted_public_key_does_not_switch_the_check_off(self) -> None:
+        """Одит 2026-10-07: умение трие public_key.pem и подменя файла си."""
+        sig = cu.sign_code("print(1)")
+        cu.PUBLIC_KEY_PATH.unlink()
+        assert cu.verify_signature("print(1)", sig) is True
+        assert cu.verify_signature("print('PWNED')", sig) is False
+
+    def test_no_keys_at_all_means_no_verdict(self) -> None:
+        assert cu.have_keys() is False
+        assert cu.verify_signature("print(1)", "00") is False
+
+    def test_first_use_keeps_a_key_another_process_already_made(self) -> None:
+        first = cu.generate_keys()
+        again = cu.generate_keys(exclusive=True)
+        pub = serialization.PublicFormat.SubjectPublicKeyInfo
+        enc = serialization.Encoding.PEM
+        assert (again.public_key().public_bytes(enc, pub)
+                == first.public_key().public_bytes(enc, pub))
+        assert not list(cu.KEY_DIR.glob("*.tmp"))

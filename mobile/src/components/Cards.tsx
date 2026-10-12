@@ -1,30 +1,35 @@
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import type { ChatItem } from '../lib/chat';
+import { todoSummary, type ChatItem } from '../lib/chat';
+import type { Todo } from '../lib/protocol';
 import { mono, useTheme } from '../lib/theme';
 import { RichText } from './RichText';
 
 type Item<K extends ChatItem['kind']> = Extract<ChatItem, { kind: K }>;
 
-export function UserBubble({ item }: { item: Item<'user'> }) {
+// Картите са memo: chat.reuseItems пази същия обект за непроменен елемент, и
+// така ново „thinking“ не рисува пак всяка карта и не разбира Markdown-а
+// наново (одит 2026-10-11).
+
+export const UserBubble = memo(function UserBubble({ item }: { item: Item<'user'> }) {
   const theme = useTheme();
   return (
     <View style={[styles.user, { backgroundColor: theme.userBubble }]}>
       <Text selectable style={[styles.userText, { color: theme.userText }]}>{item.text}</Text>
     </View>
   );
-}
+});
 
-export function AssistantMessage({ item }: { item: Item<'assistant'> }) {
+export const AssistantMessage = memo(function AssistantMessage({ item }: { item: Item<'assistant'> }) {
   return (
     <View style={styles.assistant}>
       <RichText text={item.text} />
     </View>
   );
-}
+});
 
-export function ToolCard({ item }: { item: Item<'tool'> }) {
+export const ToolCard = memo(function ToolCard({ item }: { item: Item<'tool'> }) {
   const theme = useTheme();
   const [open, setOpen] = useState(false);
   const first = item.result.split('\n').find((l) => l.trim()) ?? '';
@@ -45,11 +50,12 @@ export function ToolCard({ item }: { item: Item<'tool'> }) {
       ) : null}
     </Pressable>
   );
-}
+});
 
-export function Note({ item }: { item: Item<'note'> }) {
+export const Note = memo(function Note({ item }: { item: Item<'note'> }) {
   const theme = useTheme();
-  const color = item.tone === 'error' ? theme.danger : item.tone === 'info' ? theme.muted : theme.warn;
+  const color = item.tone === 'error' ? theme.danger
+    : item.tone === 'info' || item.tone === 'progress' ? theme.muted : theme.warn;
   const icon = item.tone === 'asked' ? '❓' : item.tone === 'error' ? '⛔' : item.tone === 'warn' ? '⚠️' : '';
   if (item.tone === 'asked') {
     return (
@@ -59,12 +65,57 @@ export function Note({ item }: { item: Item<'note'> }) {
       </View>
     );
   }
+  if (item.tone === 'progress') {
+    return <Text selectable style={[mono, styles.progress, { color }]}>{item.text.trim()}</Text>;
+  }
   return <Text selectable style={[styles.note, { color }]}>{icon ? `${icon} ` : ''}{item.text}</Text>;
+});
+
+const TODO_MARK: Record<Todo['status'], string> = { pending: '☐', in_progress: '▶', completed: '☑' };
+
+/** The agent's task list (TODO_WRITE), above the composer: one line folded,
+ *  the whole list open. */
+export function TodoPanel({ todos }: { todos: Todo[] }) {
+  const theme = useTheme();
+  const [open, setOpen] = useState(false);
+  if (!todos.length) return null;
+  return (
+    <Pressable
+      onPress={() => setOpen((o) => !o)}
+      accessibilityRole="button"
+      accessibilityLabel={`Задачи ${todoSummary(todos)}, ${open ? 'свий' : 'разгъни'}`}
+      style={[styles.todos, { backgroundColor: theme.surfaceAlt, borderColor: theme.border }]}>
+      <Text style={[styles.toolName, { color: theme.muted }]} numberOfLines={open ? undefined : 1}>
+        {open ? '▾' : '▸'} 📋 {todoSummary(todos)}
+      </Text>
+      {open ? todos.map((t, i) => (
+        <Text key={i} style={[styles.todo, {
+          color: t.status === 'completed' ? theme.muted : theme.text,
+          fontWeight: t.status === 'in_progress' ? '600' : '400',
+        }]}>
+          {TODO_MARK[t.status] ?? '☐'} {t.content}
+        </Text>
+      )) : null}
+    </Pressable>
+  );
 }
 
-export function ConfirmCard({ item, onAnswer }: { item: Item<'confirm'>; onAnswer: (allow: boolean) => void }) {
+export const ConfirmCard = memo(function ConfirmCard({ item, onAnswer }: {
+  item: Item<'confirm'>;
+  /** Стабилна функция (useGenesis.confirm), не нова стрелка на всеки рендер —
+   *  иначе memo не пази картата (2026-10-11). */
+  onAnswer: (id: string, allow: boolean) => Promise<boolean>;
+}) {
   const theme = useTheme();
-  const pending = item.state === 'pending';
+  // One tap answers: the buttons go away at once, not when the server's
+  // confirm_done arrives — a second tap could change the answer.
+  const [sent, setSent] = useState(false);
+  const pending = item.state === 'pending' && !sent;
+  const answer = async (allow: boolean) => {
+    setSent(true);
+    // Didn't reach the computer (offline) → the buttons come back to retry.
+    if (!(await onAnswer(item.id, allow))) setSent(false);
+  };
   return (
     <View style={[styles.confirm, { backgroundColor: theme.surface, borderColor: pending ? theme.warn : theme.border }]}>
       <Text style={[styles.confirmTitle, { color: theme.warn }]}>⚠️ Изисква потвърждение</Text>
@@ -76,25 +127,26 @@ export function ConfirmCard({ item, onAnswer }: { item: Item<'confirm'>; onAnswe
         <View style={styles.row}>
           <Pressable
             accessibilityRole="button"
-            onPress={() => onAnswer(false)}
+            onPress={() => answer(false)}
             style={[styles.btn, { borderColor: theme.border }]}>
             <Text style={[styles.btnText, { color: theme.text }]}>Откажи</Text>
           </Pressable>
           <Pressable
             accessibilityRole="button"
-            onPress={() => onAnswer(true)}
+            onPress={() => answer(true)}
             style={[styles.btn, { backgroundColor: theme.danger, borderColor: theme.danger }]}>
             <Text style={[styles.btnText, { color: '#fff' }]}>Изпълни</Text>
           </Pressable>
         </View>
       ) : (
         <Text style={[styles.small, { color: item.state === 'allowed' ? theme.ok : theme.muted }]}>
-          {item.state === 'allowed' ? '✓ Разрешено' : '✕ Отказано'}{item.note ? ` — ${item.note}` : ''}
+          {item.state === 'pending' ? '… изпратено'
+            : item.state === 'allowed' ? '✓ Разрешено' : '✕ Отказано'}{item.note ? ` — ${item.note}` : ''}
         </Text>
       )}
     </View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   user: { alignSelf: 'flex-end', maxWidth: '85%', borderRadius: 18, borderBottomRightRadius: 4, paddingHorizontal: 14, paddingVertical: 9 },
@@ -105,6 +157,9 @@ const styles = StyleSheet.create({
   toolBody: { fontSize: 12, lineHeight: 17 },
   small: { fontSize: 12 },
   note: { fontSize: 13, lineHeight: 18 },
+  progress: { fontSize: 12, lineHeight: 16 },
+  todos: { marginHorizontal: 10, marginBottom: 8, borderRadius: 10, borderWidth: StyleSheet.hairlineWidth, padding: 10, gap: 4 },
+  todo: { fontSize: 14, lineHeight: 20 },
   asked: { borderRadius: 12, borderWidth: 1, padding: 12, gap: 6 },
   askedTitle: { fontWeight: '700' },
   confirm: { borderRadius: 12, borderWidth: 1, padding: 12, gap: 8 },

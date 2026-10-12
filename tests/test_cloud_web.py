@@ -12,6 +12,7 @@ import time
 import zipfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 
@@ -223,8 +224,26 @@ def test_oversized_body_is_refused(env) -> None:
     _, _, client = env
     cl = client()
     cl.login()
-    code, _, _ = cl.req("POST", "/api/chats", {"title": "x" * (web.MAX_BODY + 10)})
+    try:
+        code, _, _ = cl.req("POST", "/api/chats", {"title": "x" * (web.MAX_BODY + 10)})
+    except ConnectionError:
+        # Windows (2026-09-28, 1 от ~5 пълни пуска): сървърът отговаря 413 и
+        # затваря, докато клиентът още праща тялото → WinError 10053. Заявката
+        # пак е отказана — само отговорът не стига до клиента.
+        return
     assert code == 413
+
+
+def test_deeply_nested_json_is_a_400(env) -> None:
+    """Одит 2026-10-11: json.loads("[" * 60000) е RecursionError, не ValueError —
+    без вход връзката падаше с traceback вместо 400."""
+    _, _, client = env
+    cl = client()
+    c = http.client.HTTPConnection("127.0.0.1", cl.port, timeout=10)
+    c.request("POST", "/api/login", body=b"[" * 60_000,
+              headers={"Host": f"127.0.0.1:{cl.port}", "Content-Type": "application/json"})
+    assert c.getresponse().status == 400
+    c.close()
 
 
 def test_security_headers_are_on_every_response(env) -> None:
@@ -342,7 +361,7 @@ def test_files_are_listed_without_the_hidden_history(env) -> None:
     chat_id, _ = _chat_with_turn(cl)
     code, data = cl.json("GET", f"/api/chats/{chat_id}/files")
     assert code == 200 and data["files"] == [{"path": "out/result.csv", "size": 13}]
-    assert data["busy"] is False
+    assert data["busy"] is False and data["truncated"] is False
 
 
 def test_a_file_downloads_as_an_attachment(env) -> None:
@@ -402,6 +421,88 @@ def test_symlinks_from_the_container_are_never_followed(env, tmp_path) -> None:
         assert z.namelist() == ["out/result.csv"]
 
 
+def test_a_non_utf8_file_name_does_not_hide_every_file(env) -> None:
+    """Одит 2026-10-11: едно име в cp1251 (от стар архив или от кода в
+    контейнера) правеше /files и files.zip „RemoteDisconnected“ — не се виждаше
+    и не се теглеше нищо, и добрият report.xlsx също."""
+    app, _, client = env
+    cl = client()
+    cl.login()
+    chat_id, _ = _chat_with_turn(cl)
+    ws = app.workspace(1, chat_id)
+    try:
+        fd = os.open(os.fsencode(str(ws)) + b"/\xee\xf2\xf7\xe5\xf2.txt",
+                     os.O_CREAT | os.O_WRONLY)
+    except (OSError, ValueError):
+        pytest.skip("файловата система тук не приема имена извън UTF-8")
+    os.write(fd, b"cp1251")
+    os.close(fd)
+    # Ревю 2026-10-11: файлът не се крие — показва се с U+FFFD на мястото на
+    # невалидните байтове и се тегли (поотделно и в zip-а) с истинското име.
+    shown = "�" * 5 + ".txt"
+    code, data = cl.json("GET", f"/api/chats/{chat_id}/files")
+    assert code == 200 and [f["path"] for f in data["files"]] == [shown, "out/result.csv"]
+    code, _, body = cl.req("GET", f"/api/chats/{chat_id}/files/{quote(shown)}")
+    assert code == 200 and body == b"cp1251"
+    code, _, body = cl.req("GET", f"/api/chats/{chat_id}/files.zip")
+    assert code == 200
+    with zipfile.ZipFile(io.BytesIO(body)) as z:
+        assert z.namelist() == [shown, "out/result.csv"] and z.read(shown) == b"cp1251"
+
+
+def test_names_that_differ_only_in_invalid_bytes_stay_apart(env) -> None:
+    """Ревю 2026-10-11: \\xee.txt, \\xef.txt и истинско „�.txt“ се показваха
+    еднакво — /files с три еднакви реда, сваляше се само първият, а zip-ът
+    имаше три записа с едно име (при разархивиране оставаше един файл)."""
+    app, _, client = env
+    cl = client()
+    cl.login()
+    chat_id, _ = _chat_with_turn(cl)
+    ws = app.workspace(1, chat_id)
+    for raw, body in ((b"\xee.txt", b"ee"), (b"\xef.txt", b"ef")):
+        try:
+            fd = os.open(os.fsencode(str(ws)) + b"/" + raw, os.O_CREAT | os.O_WRONLY)
+        except (OSError, ValueError):
+            pytest.skip("файловата система тук не приема имена извън UTF-8")
+        os.write(fd, body)
+        os.close(fd)
+    (ws / "�.txt").write_bytes(b"real")
+    want = {"� (2).txt": b"ee", "� (3).txt": b"ef", "�.txt": b"real"}
+    code, data = cl.json("GET", f"/api/chats/{chat_id}/files")
+    assert code == 200 and [f["path"] for f in data["files"]] == [*want, "out/result.csv"]
+    for shown, body in want.items():
+        assert cl.req("GET", f"/api/chats/{chat_id}/files/{quote(shown)}")[::2] == (200, body)
+    code, _, zipped = cl.req("GET", f"/api/chats/{chat_id}/files.zip")
+    assert code == 200
+    with zipfile.ZipFile(io.BytesIO(zipped)) as z:
+        assert z.namelist() == [*want, "out/result.csv"]
+        assert all(z.read(n) == b for n, b in want.items())
+
+
+def test_a_long_file_list_says_it_is_cut_and_the_zip_has_everything(env, monkeypatch) -> None:
+    """Одит 2026-10-11: списъкът и zip-ът спираха мълчаливо на 1000 файла —
+    при 1500 в out/ result/report.pdf липсваше и от двете, без знак."""
+    app, _, client = env
+    cl = client()
+    cl.login()
+    chat_id, _ = _chat_with_turn(cl)
+    ws = app.workspace(1, chat_id)
+    for i in range(5):
+        (ws / "out" / f"f{i}.txt").write_text(str(i), encoding="utf-8")
+    (ws / "result").mkdir()
+    (ws / "result" / "report.pdf").write_bytes(b"%PDF")
+    monkeypatch.setattr(web, "MAX_FILES", 3)
+    code, data = cl.json("GET", f"/api/chats/{chat_id}/files")
+    assert code == 200 and len(data["files"]) == 3 and data["truncated"] is True
+    code, _, body = cl.req("GET", f"/api/chats/{chat_id}/files.zip")
+    assert code == 200
+    with zipfile.ZipFile(io.BytesIO(body)) as z:
+        assert "result/report.pdf" in z.namelist() and len(z.namelist()) == 7
+    # Над тавана на архива — ясен отказ, не непълен архив.
+    monkeypatch.setattr(web, "MAX_ZIP_FILES", 5)
+    assert cl.req("GET", f"/api/chats/{chat_id}/files.zip")[0] == 413
+
+
 def test_no_downloads_while_a_turn_is_running(env) -> None:
     _, runner, client = env
     cl = client()
@@ -427,6 +528,18 @@ def test_add_user_command_prints_a_password(tmp_path, capsys) -> None:
 
 # ── историята на разговора (task.py) ──────────────────────────────────────────
 
+def test_both_proxy_flags_are_refused(tmp_path, monkeypatch, capsys) -> None:
+    """Одит 2026-10-11: --trust-proxy с --trust-cloudflare се приемаше и вярваше
+    на CF-Connecting-IP — зад Caddy клиентът си го пише сам и всяка заявка
+    получаваше нов брояч за входа (12 × 401, нито един 429)."""
+    started: list[bool] = []
+    monkeypatch.setattr(web, "make_server", lambda *a, **k: started.append(True))
+    code = web.main(["serve", "--data", str(tmp_path), "--jobs", str(tmp_path / "jobs"),
+                     "--trust-proxy", "--trust-cloudflare"])
+    assert code == 2 and started == []
+    assert "взаимно изключващи" in capsys.readouterr().err
+
+
 def test_history_round_trip_and_caps(tmp_path) -> None:
     msgs = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}"} for i in range(30)]
     task.save_history(tmp_path, msgs)
@@ -451,3 +564,160 @@ def test_tampered_history_is_ignored_not_trusted(tmp_path) -> None:
     assert task.load_history(tmp_path) == [{"role": "user", "content": "ok"}]
     (tmp_path / ".genesis" / "history.json").write_text("{broken", encoding="utf-8")
     assert task.load_history(tmp_path) == []
+    # Ревю 2026-10-11: `[` * 200000, записан от кода в контейнера, хвърляше
+    # RecursionError и този чат падаше на всеки следващ ход.
+    (tmp_path / ".genesis" / "history.json").write_text("[" * 200_000, encoding="utf-8")
+    assert task.load_history(tmp_path) == []
+
+
+def test_a_lone_surrogate_in_a_reply_does_not_wipe_the_history(tmp_path) -> None:
+    """Ревю 2026-10-11: write_text отрязваше history.json и чак после
+    гърмеше на кодирането — един отговор с lone surrogate изтриваше целия
+    разговор."""
+    task.save_history(tmp_path, [{"role": "user", "content": "първо"}])
+    task.save_history(tmp_path, [{"role": "user", "content": "първо"},
+                                 {"role": "assistant", "content": "име \udcee.txt"}])
+    got = task.load_history(tmp_path)
+    assert got[0] == {"role": "user", "content": "първо"} and len(got) == 2
+    assert "\udcee" not in got[1]["content"]
+
+
+# ── одит 2026-10-07 ──────────────────────────────────────────────────────────
+
+def test_whitespace_in_the_email_does_not_reset_the_lockout(env) -> None:
+    _, _, client = env
+    cl = client()
+    codes = [cl.login(email="ana@example.com" + " " * i, password="wrong-password")
+             for i in range(web.LOGIN_FAILURES + 2)]
+    assert 429 in codes
+    assert cl.login() == 429
+
+
+def test_a_file_over_the_cap_is_refused_not_loaded(env, monkeypatch) -> None:
+    _, _, client = env
+    cl = client()
+    cl.login()
+    chat_id, _ = _chat_with_turn(cl)
+    monkeypatch.setattr(web, "MAX_ZIP_BYTES", 4)
+    code, _, _ = cl.req("GET", f"/api/chats/{chat_id}/files/out/result.csv")
+    assert code == 413
+
+
+def test_no_turn_starts_while_a_download_is_in_progress(env) -> None:
+    app, _, client = env
+    cl = client()
+    cl.login()
+    chat_id, _ = _chat_with_turn(cl)
+    assert app.begin_download(chat_id)
+    try:
+        code, _ = cl.json("POST", f"/api/chats/{chat_id}/turns", {"text": "още"})
+        assert code != 202
+    finally:
+        app.end_download(chat_id)
+    code, _ = cl.json("POST", f"/api/chats/{chat_id}/turns", {"text": "още"})
+    assert code == 202
+
+
+# ── старт и спиране: без контейнери сираци (D4, деплой одит 2026-10-11) ───────
+
+def test_a_restart_kills_leftover_containers_before_failing_their_turns(tmp_path) -> None:
+    """Сираците се убиват ПРЕДИ ходовете им да станат „failed“: иначе човекът
+    пускаше нов ход в папката, в която старият контейнер още пишеше."""
+    store = Store(tmp_path / "db")
+    uid = store.add_user("a@b.c", PASSWORD)
+    turn = store.add_turn(store.new_chat(uid, "t"), "x")
+    seen: list[str] = []
+
+    def cleanup() -> int:
+        seen.append(store.turn(uid, turn)["status"])  # type: ignore[index]
+        return 1
+
+    web.App(store, tmp_path / "jobs", runner=FakeRunner(), cleanup=cleanup)
+    assert seen == ["queued"]
+    assert store.turn(uid, turn)["status"] == "failed"  # type: ignore[index]
+
+
+def test_the_default_cleanup_kills_task_containers(tmp_path, fake_docker) -> None:
+    web.App(Store(tmp_path / "db"), tmp_path / "jobs", runner=FakeRunner())
+    assert ["ps", "-aq", "--filter", "name=^genesis-task-"] in fake_docker.calls
+
+
+@pytest.mark.skipif(os.name == "nt", reason="SO_REUSEADDR на Windows позволява втори bind")
+def test_a_second_serve_on_a_busy_port_touches_nothing(tmp_path, fake_docker, capsys) -> None:
+    """Измерено 2026-10-11: втори `serve` на зает порт падаше с OSError 98, но
+    преди това правеше ходовете на живия сървър „failed“ — и той прие нов ход в
+    същия чат, докато старият контейнер още вървеше."""
+    import socket
+    store = Store(tmp_path / "web.db")
+    uid = store.add_user("a@b.c", PASSWORD)
+    turn = store.add_turn(store.new_chat(uid, "t"), "x")
+    store.set_status(turn, "running")
+    busy = socket.socket()
+    busy.bind(("127.0.0.1", 0))
+    busy.listen()
+    try:
+        code = web.main(["serve", "--data", str(tmp_path), "--jobs", str(tmp_path / "jobs"),
+                         "--port", str(busy.getsockname()[1]), "--insecure-cookie"])
+    finally:
+        busy.close()
+    assert code == 1 and "не може да се заеме" in capsys.readouterr().err
+    assert store.turn(uid, turn)["status"] == "running"  # type: ignore[index]
+    assert not any(c[:2] == ["rm", "-f"] or c[0] == "ps" for c in fake_docker.calls)
+
+
+def test_shutdown_stops_running_tasks_and_says_why(tmp_path) -> None:
+    store = Store(tmp_path / "db")
+    uid = store.add_user("a@b.c", PASSWORD)
+    chat = store.new_chat(uid, "t")
+    started = threading.Event()
+    killed = threading.Event()
+
+    def runner(text: str, workspace: Path, **kw: Any) -> launch.Result:
+        started.set()
+        killed.wait(5)                      # „контейнерът“ върви, докато не го убият
+        return launch.Result(False, False, 137, 1.0, error="Killed")
+
+    app = web.App(store, tmp_path / "jobs", runner=runner, recover=False,
+                  cleanup=lambda: (killed.set(), 0)[1])
+    turn = app.start_turn({"id": uid}, chat, "дълга задача")
+    assert turn is not None and started.wait(5)
+    app.shutdown()
+    t = store.turn(uid, turn)
+    assert t is not None and t["status"] == "failed" and "сървърът спря" in t["error"]
+
+
+def test_shutdown_kills_a_container_that_started_after_the_first_cleanup(tmp_path) -> None:
+    """Ревю 2026-10-11: ход минава проверката `_stopping` точно преди
+    shutdown() да я вдигне и пуска контейнера СЛЕД почистването. Измерено:
+    shutdown чакаше, докато задачата свърши сама (до limits.seconds, 600 s),
+    контейнерът оставаше жив, а ходът ставаше „ok“."""
+    store = Store(tmp_path / "db")
+    uid = store.add_user("a@b.c", PASSWORD)
+    chat = store.new_chat(uid, "t")
+    entered = threading.Event()
+    killed = threading.Event()
+    containers: set[str] = set()
+
+    def runner(text: str, workspace: Path, **kw: Any) -> launch.Result:
+        entered.set()
+        time.sleep(0.3)                     # docker run тръгва след почистването
+        containers.add("genesis-task-x")
+        if killed.wait(10):
+            return launch.Result(False, False, 137, 0.3, error="Killed")
+        return launch.Result(True, False, 0, 10.0)
+
+    def cleanup() -> int:
+        n = len(containers)
+        if n:
+            containers.clear()
+            killed.set()
+        return n
+
+    app = web.App(store, tmp_path / "jobs", runner=runner, recover=False, cleanup=cleanup)
+    turn = app.start_turn({"id": uid}, chat, "дълга задача")
+    assert turn is not None and entered.wait(5)
+    t0 = time.monotonic()
+    app.shutdown()
+    assert time.monotonic() - t0 < 5 and not containers
+    t = store.turn(uid, turn)
+    assert t is not None and t["status"] == "failed" and "сървърът спря" in t["error"]

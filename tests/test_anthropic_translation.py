@@ -89,9 +89,36 @@ def test_empty_assistant_turn_is_dropped() -> None:
 def test_empty_tool_result_gets_a_placeholder_not_an_empty_string() -> None:
     _, msgs = Brain._to_anthropic_messages([
         {"role": "user", "content": "x"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c", "type": "function", "function": {"name": "LIST_DIR", "arguments": "{}"}}]},
         {"role": "tool", "tool_call_id": "c", "content": ""},
     ])
     assert msgs[-1]["content"][0]["content"] == "(празен резултат)"
+
+
+def test_a_tool_result_whose_call_was_cut_away_is_dropped() -> None:
+    """Одит 2026-10-07: след компресия/рязане историята започваше с
+    `assistant(tool_calls)`, той отпадаше (трябва user първо), а резултатите
+    му оставаха — tool_result без tool_use → 400 на всеки ход."""
+    _, msgs = Brain._to_anthropic_messages([
+        {"role": "system", "content": "s"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c5", "type": "function", "function": {"name": "READ_FILE", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c5", "content": "x"},
+        {"role": "user", "content": "продължи"},
+    ])
+    assert msgs == [{"role": "user", "content": "продължи"}]
+
+
+def test_a_later_system_message_is_a_user_turn_not_part_of_the_system_prompt() -> None:
+    system, msgs = Brain._to_anthropic_messages([
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "Готово."},
+        {"role": "system", "content": "[Резултат]: rc=1"},
+    ])
+    assert system == "sys"
+    assert msgs[-1] == {"role": "user", "content": "[system] [Резултат]: rc=1"}
 
 
 def test_conversation_is_forced_to_start_with_user() -> None:

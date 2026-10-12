@@ -10,6 +10,7 @@ genesis_agent.provider_stats — data-driven ред на веригата (desig
 from __future__ import annotations
 
 import json
+import os
 import time
 from threading import Lock
 
@@ -19,6 +20,14 @@ _STATS_PATH = DATA_DIR / "provider_stats.json"
 _MAX_SAMPLES = 30          # rolling прозорец на извикване по доставчик
 _MIN_SAMPLES_TO_JUDGE = 5  # под това не съдим — недостатъчно данни
 _BAD_SUCCESS_RATE = 0.5    # под 50% успех (при ≥5 извадки) → деприоритизирай
+# Съдим само по пресните извадки. Без прозорец деприоритизацията беше за
+# постоянно (измерено 2026-09-25): 16 провала на ollama за 2 минути (09:50) го
+# пратиха зад nvidia; оттам нататък nvidia отговаряше винаги първа, ollama не
+# получи нито едно обръщение, статистиката му не се обнови — и всички следващи
+# пускания часове наред вървяха през 5–10× по-бавния модел, при напълно
+# здрав ollama. С прозореца старите провали изтичат, доставчикът се връща на
+# мястото си от config.yaml и получава нов шанс.
+_JUDGE_WINDOW_S = 15 * 60
 
 _lock = Lock()
 
@@ -31,15 +40,27 @@ def _load() -> dict:
 
 
 def _save(data: dict) -> None:
+    # През временен файл + os.replace: write_text първо изпразва файла и
+    # паралелен _load() виждаше {} — и записваше само своята извадка, триейки
+    # историята на всички доставчици (одит 2026-10-07: 4 процеса × 30 записа →
+    # остават 1–4).
     try:
-        _STATS_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp = _STATS_PATH.with_name(f"{_STATS_PATH.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(tmp, _STATS_PATH)
     except Exception:
         pass  # статистиката е "nice to have" — никога не бива да чупи мисия
 
 
+def _across_processes():
+    """Заключване между процеси (чат + bench + `genesis serve` едновременно)."""
+    from genesis_agent.file_lock import locked
+    return locked(_STATS_PATH)
+
+
 def record_call(provider: str, latency_s: float, success: bool) -> None:
     """Записва резултат от едно API извикване (успех/провал + латентност)."""
-    with _lock:
+    with _lock, _across_processes():
         data = _load()
         entry = data.setdefault(provider, {"samples": []})
         entry["samples"].append({"t": round(time.time()), "ok": success, "lat": round(latency_s, 2)})
@@ -47,9 +68,14 @@ def record_call(provider: str, latency_s: float, success: bool) -> None:
         _save(data)
 
 
+def _recent(samples: list[dict], now: float | None = None) -> list[dict]:
+    cutoff = (time.time() if now is None else now) - _JUDGE_WINDOW_S
+    return [s for s in samples if s.get("t", 0) >= cutoff]
+
+
 def success_rate(provider: str) -> float | None:
-    """None = недостатъчно данни (<5 извадки) — не съди все още."""
-    samples = _load().get(provider, {}).get("samples", [])
+    """None = недостатъчно пресни данни (<5 извадки в прозореца) — не съди."""
+    samples = _recent(_load().get(provider, {}).get("samples", []))
     if len(samples) < _MIN_SAMPLES_TO_JUDGE:
         return None
     return sum(1 for s in samples if s["ok"]) / len(samples)
@@ -77,9 +103,10 @@ def deprioritize_flaky(chain: list[dict]) -> list[dict]:
     обръщение към модел.
     """
     data = _load()
+    now = time.time()
 
     def _is_flaky(provider: str) -> bool:
-        samples = data.get(provider, {}).get("samples", [])
+        samples = _recent(data.get(provider, {}).get("samples", []), now)
         if len(samples) < _MIN_SAMPLES_TO_JUDGE:
             return False  # недостатъчно данни — не съдим
         return sum(1 for s in samples if s["ok"]) / len(samples) < _BAD_SUCCESS_RATE

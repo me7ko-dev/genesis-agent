@@ -3,9 +3,12 @@
 genesis_agent.cli — the `genesis` command.
 
     genesis                 start the terminal chat (default)
+    genesis -c              continue the last conversation in this workspace
+    genesis -p "..."        one turn without the chat, answer on stdout (--json, --plan)
     genesis setup           configure API keys
     genesis mission "..."   run one autonomous mission and print the result
     genesis fix PATH "..."  fix a bug in an existing project (tests + diff)
+    genesis export [PATH]   zip the project + a hand-over report (tests run now)
     genesis skills          library status
     genesis models          the model chain; `--refresh` re-scans, `--check` probes each
     genesis update          is there a newer commit on the installed branch
@@ -56,7 +59,10 @@ _FIX_USAGE = """Употреба:
   --no-diff          не печатай диффа накрая
   --checkpoint       снимка на проекта преди промените; `--revert` я връща
 
-Снимка се прави само с `--checkpoint`. Проект в git се връща с `git checkout .`.
+Опциите може да са преди или след пътя; описание, което съдържа `--`, сложи в
+кавички или след `--`.
+Снимка се прави само с `--checkpoint` (и сама, ако в git има некомитнати промени).
+Проект в git се връща с `git checkout -- <файловете>` — накрая се казва кои.
 """
 
 
@@ -141,16 +147,29 @@ def _fix(args: list[str]) -> int:
         if len(args) < 2:
             print("Кой проект да върна? `genesis fix --revert <път>`")
             return 2
-        print(restore_checkpoint(args[1]))
-        return 0
+        result = restore_checkpoint(args[1])
+        print(result)
+        return 1 if result.startswith("❌") else 0
 
-    project, rest = args[0], args[1:]
+    # Одит 2026-10-11: непозната опция (`--chekpoint`, `--max-coding`) или
+    # `--rounds` без стойност ставаха част от описанието на бъга — без грешка и
+    # без поисканата снимка; опция ПРЕДИ пътя ставаше „проектът“. Сега проектът е
+    # първият аргумент, който не е опция; непознатото е грешка, както в
+    # `genesis export`; след `--` всичко е текст на задачата.
+    project: str | None = None
+    rest = list(args)
     task_parts: list[str] = []
     test_command: str | None = None
     max_rounds, quality, show_diff, checkpoint = 8, None, True, False
     i = 0
     while i < len(rest):
         a = rest[i]
+        if a == "--":
+            task_parts += rest[i + 1:]
+            break
+        if a in ("--test", "--rounds") and i + 1 >= len(rest):
+            print(f"{a} иска стойност.\n\n{_FIX_USAGE}")
+            return 2
         if a == "--checkpoint":
             checkpoint = True
         elif a == "--max":
@@ -169,11 +188,23 @@ def _fix(args: list[str]) -> int:
             except ValueError:
                 print(f"--rounds иска число, не {rest[i]!r}")
                 return 2
+        # Аргумент с интервал е описание в кавички, не опция (преглед
+        # 2026-10-11: „--verbose не работи“ в кавички беше отказвано, а
+        # грешката съветваше да го сложиш в кавички).
+        elif a.startswith("--") and not any(c.isspace() for c in a):
+            print(f"Непозната опция: {a}  (текст с `--` в описанието: сложи го в кавички "
+                  f"или след `--`)\n\n{_FIX_USAGE}")
+            return 2
+        elif project is None:
+            project = a
         else:
             task_parts.append(a)
         i += 1
 
     task = " ".join(task_parts).strip()
+    if project is None:
+        print(f"Липсва пътят до проекта.\n\n{_FIX_USAGE}")
+        return 2
     if not task:
         print("Липсва описание на бъга.\n")
         print(_FIX_USAGE)
@@ -200,12 +231,22 @@ def main(argv: list[str] | None = None) -> int:
         print(describe(__version__))
         return 0
 
+    if cmd in ("-p", "--print"):
+        sys.path.insert(0, str(_project_root()))
+        from genesis_agent.headless import run as headless_run
+        return headless_run(argv[1:])
+
     if cmd == "setup":
         from genesis_agent.setup_wizard import run
         return run()
 
     if cmd == "mission":
         goal = " ".join(argv[1:]).strip()
+        # `--help` не е цел: пускаше истинска мисия с цел „--help“ (одит 2026-10-09).
+        if goal in ("-h", "--help", "help"):
+            print('Употреба: genesis mission "напиши функция, която ..." — една автономна '
+                  "мисия: пише код, пуска го, проверява го и го пази като умение.")
+            return 0
         if not goal:
             print('Употреба: genesis mission "напиши функция, която ..."')
             return 2
@@ -250,6 +291,10 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "fix":
         return _fix(argv[1:])
 
+    if cmd == "export":
+        from genesis_agent.deliver import main as export_main
+        return export_main(argv[1:])
+
     if cmd in ("gui", "voice"):
         # Махнати на 2026-09-23 — Genesis е само терминален. Изрично съобщение,
         # защото „Непозната команда" би звучало като счупена инсталация.
@@ -261,7 +306,8 @@ def main(argv: list[str] | None = None) -> int:
         from genesis_agent.remote_server import serve
         return serve(argv[1:])
 
-    if cmd == "chat":
+    if cmd in ("chat", "-c", "--continue"):
+        # -c стига до чата през sys.argv (runpy сменя само argv[0]).
         return _chat()
 
     print(f"Непозната команда: {cmd}\n")

@@ -222,3 +222,23 @@ class TestMaxRoundsExhausted:
         assert out.success is False
         assert out.rounds == 3
         assert isinstance(out, OrchestratedOutcome)
+
+
+def test_tdd_tests_must_actually_pass_against_the_code(monkeypatch, tmp_path) -> None:
+    """Одит 2026-10-07: тестовете на Tester-а бяха само в промпта; `fib(n) = n`
+    със собствен `assert fib(1) == 1` минаваше и се записваше."""
+    from genesis_agent.executor import run_python_subprocess as real_run
+    monkeypatch.setattr(orch_mod, "SKILLS_ROOT", tmp_path)
+    monkeypatch.setattr(orch_mod, "run_python_subprocess", real_run)
+    monkeypatch.setattr(orch_mod, "verify_skill",
+                        lambda code: SimpleNamespace(verified=True, method="self_test_passed", detail=""))
+    saved: list = []
+    monkeypatch.setattr(orch_mod, "save_skill", lambda **kw: saved.append(kw) or tmp_path / "x.md")
+    monkeypatch.setattr(orch_mod, "_write_tests_first", lambda brain, goal: "assert fib(10) == 55")
+    _install_fake_brain(monkeypatch, [
+        _reply(raw_text="plan"),
+        _reply(code="def fib(n):\n    return n\n\n\nassert fib(1) == 1\nprint('OK')"),
+        _reply(raw_text="reviewer: wrong"),
+    ])
+    out = run_orchestrated("fibonacci", tdd=True, max_rounds=1)
+    assert out.success is False and saved == []

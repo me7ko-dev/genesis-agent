@@ -72,47 +72,93 @@ def seed_user_skills(shipped: Path, user_dir: Path) -> int:
     следващото обновяване. Доставеният набор е част от версията; който иска да
     го няма, го празни, а не го трие.
     """
+    import hashlib
     import json
     import shutil
 
-    user_dir.mkdir(parents=True, exist_ok=True)
-    added: list[str] = []
-    for md in sorted(shipped.glob("*.md")):
-        target = user_dir / md.name
-        if not target.exists():
-            shutil.copy2(md, target)
-            added.append(md.stem)
-    if not added:
-        return 0
+    from genesis_agent.file_lock import locked
 
-    # Индексът се слива по име. Записът на оператора за същото име печели —
-    # той сочи неговия файл, който току-що НЕ презаписахме.
+    def sha(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    user_dir.mkdir(parents=True, exist_ok=True)
     index_path = user_dir / "skills.json"
-    try:
-        current = json.loads(index_path.read_text(encoding="utf-8"))
-        entries = list(current.get("skills") or [])
-    except (OSError, ValueError):
-        current, entries = {"version": "1.0"}, []
-    known = {e.get("name") for e in entries}
     try:
         shipped_index = json.loads((shipped / "skills.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         shipped_index = {"skills": []}
-    for entry in shipped_index.get("skills") or []:
-        if entry.get("name") in added and entry.get("name") not in known:
-            entries.append(entry)
-    current["skills"] = entries
-    # Пише се през временен файл: прекъснат запис на индекса прави ЦЯЛАТА
-    # библиотека незаредима, а това се случва при стартиране.
-    tmp = index_path.with_suffix(".json.tmp")
-    try:
-        tmp.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n",
-                       encoding="utf-8")
-        tmp.replace(index_path)
-    except OSError:
-        log.warning("не можах да обновя %s — новите умения са копирани, но не са в индекса",
-                    index_path)
-    return len(added)
+    shipped_entries = {e.get("name"): e for e in shipped_index.get("skills") or []
+                       if isinstance(e, dict)}
+
+    # Под заключване: две стартиращи копия (чат + `genesis serve`) пишат
+    # същия индекс (одит 2026-10-07).
+    with locked(index_path):
+        try:
+            current = json.loads(index_path.read_text(encoding="utf-8"))
+            if not isinstance(current, dict) or not isinstance(current.get("skills"), list):
+                raise TypeError("unexpected shape")
+        except FileNotFoundError:
+            current = {"version": "1.0", "skills": []}
+        except (ValueError, TypeError):
+            # Повреден индекс: настрани, не върху него — той е картата към
+            # уменията на оператора (одит 2026-10-07: изтриваше се без следа).
+            from genesis_agent.skills_manager import _free_corrupt_name
+            kept = _free_corrupt_name(index_path)
+            index_path.replace(kept)
+            log.warning("skills.json е нечетим — запазен като %s", kept.name)
+            current = {"version": "1.0", "skills": []}
+        entries: list[dict] = list(current["skills"])
+        by_name = {e.get("name"): e for e in entries if isinstance(e, dict)}
+
+        changed: list[str] = []
+        for md in sorted(shipped.glob("*.md")):
+            name, target = md.stem, user_dir / md.name
+            new_sha = sha(md)
+            entry = shipped_entries.get(name)
+            if not target.exists():
+                shutil.copy2(md, target)
+            else:
+                have = sha(target)
+                mine = by_name.get(name) or {}
+                # Непипано копие на по-стара доставка → новата версия. Само
+                # когато знаем какво сме доставили (shipped_sha): иначе не можем
+                # да различим редакция на оператора и тя печели.
+                untouched_old = mine.get("shipped_sha") == have and have != new_sha
+                if untouched_old:
+                    shutil.copy2(md, target)
+                elif have != new_sha:
+                    continue
+                # Същото съдържание без запис (копиран, но записът на индекса
+                # се провали) → долу влиза в индекса.
+                elif name in by_name:
+                    if mine.get("shipped_sha") != new_sha:
+                        mine["shipped_sha"] = new_sha    # същото съдържание: запомни го
+                        changed.append("")
+                    continue
+            if entry is None:
+                changed.append(name)
+                continue
+            fresh = dict(entry, shipped_sha=new_sha)
+            if name in by_name:
+                entries[entries.index(by_name[name])] = fresh
+            else:
+                entries.append(fresh)
+            by_name[name] = fresh
+            changed.append(name)
+        if not changed:
+            return 0
+        current["skills"] = entries
+        # Пише се през временен файл: прекъснат запис на индекса прави ЦЯЛАТА
+        # библиотека незаредима, а това се случва при стартиране.
+        tmp = index_path.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n",
+                           encoding="utf-8")
+            tmp.replace(index_path)
+        except OSError:
+            log.warning("не можах да обновя %s — новите умения са копирани, но не са в индекса; "
+                        "ще опитам пак при следващото стартиране", index_path)
+        return len([n for n in changed if n])
 
 
 def _default_skills_dir() -> Path:
@@ -149,9 +195,27 @@ LOGS_DIR: Path = (Path.home() / ".genesis" / "logs") if _INSTALLED else PROJECT_
 # nobody can write survives exactly until the next `pip install --upgrade`
 # deletes it anyway. Same path as always in checkout mode: zero behavior
 # change for anyone running from a git clone.
-DATA_DIR: Path = (Path.home() / ".genesis" / "data") if _INSTALLED else (PROJECT_ROOT / "genesis_agent")
-if _INSTALLED:
+#
+# GENESIS_DATA_DIR премества и състоянието на веригата (2026-10-11): e2e тестът
+# на bench-а пуска истинския чат срещу фалшив доставчик и той записа
+# budget_log.jsonl, provider_stats.json и model_check.json в genesis_agent/ на
+# checkout-а — тоест в истинското състояние на оператора, от което веригата
+# после решава кой модел е мъртъв. GENESIS_MEMORY_DIR покриваше само паметта.
+_DATA_OVERRIDE = os.environ.get("GENESIS_DATA_DIR", "").strip()
+DATA_DIR: Path = (Path(_DATA_OVERRIDE).expanduser() if _DATA_OVERRIDE else
+                  (Path.home() / ".genesis" / "data") if _INSTALLED else (PROJECT_ROOT / "genesis_agent"))
+if _INSTALLED or _DATA_OVERRIDE:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# What Genesis remembers — conversations, episodes, work threads, decisions,
+# preferences, the knowledge graph — apart from the state of the model chain
+# (provider_stats, model_check, budget_log). bench runs every trial with an
+# empty one: on 2026-09-28 a site task's "preferences" (SEO, dark theme,
+# index.html) were injected into every later trial, even a Python function.
+# Without the variable it is DATA_DIR, as before.
+MEMORY_DIR: Path = Path(os.environ.get("GENESIS_MEMORY_DIR") or DATA_DIR)
+if MEMORY_DIR != DATA_DIR:
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
 # Removed here: ENGINE_EXE / MODEL_PATH / ENGINE_PORT / LLM_BASE_URL /
 # LLM_API_KEY / LLM_MODEL / GENESIS_MODE. They described a llama-server and
@@ -188,6 +252,19 @@ EXEC_TIMEOUT_SEC: int = _int_env("GENESIS_EXEC_TIMEOUT", 120, minimum=1)
 TOOL_RESULT_MAX_CHARS: int = _int_env("GENESIS_TOOL_RESULT_MAX_CHARS", 40000)
 STALE_TOOL_RESULT_MAX_CHARS: int = _int_env("GENESIS_STALE_TOOL_RESULT_MAX_CHARS", 2000)
 FRESH_TOOL_RESULTS: int = _int_env("GENESIS_FRESH_TOOL_RESULTS", 2)
+
+# B.12 (2026-10-11): в ИЗПРАТЕНОТО копие съдържанието на стари WRITE_FILE/
+# EDIT_FILE аргументи се заменя с маркер (budget._elide_old_writes). Офлайн
+# scripts/bench_history.py (seed 7, K=6): 5/15 рунда −29.6%, 5/24 −25.8%,
+# 8/40 −23.4%, 10/60 −24.5% промпт токени — но делът файлове, видими в
+# текущия си вид, пада средно за хода 92% → 65% (5/15) и 61% → 41% (8/40):
+# старият READ_FILE вече е свит и изпуснатият запис е бил единственото пълно
+# копие. Само правилото „по-нов запис на същия файл“ (K=∞) дава −1..−7% без
+# загуба на видимост. Затова е
+# ИЗКЛЮЧЕНО, докато A/B на лаптопа не покаже, че верните решения не падат:
+#   GENESIS_ELIDE_OLD_WRITES=1 python scripts/bench_all.py --steps projects,fix
+ELIDE_OLD_WRITES: int = _int_env("GENESIS_ELIDE_OLD_WRITES", 0)
+ELIDE_WRITE_ROUNDS: int = _int_env("GENESIS_ELIDE_WRITE_ROUNDS", 6, minimum=2)
 
 # Колко tool рунда има правото да направи агентът за ЕДНО съобщение, преди
 # цикълът да спре и да върне контрола. Това е предпазителят срещу зацикляне,

@@ -58,7 +58,19 @@ def _conn() -> sqlite3.Connection:
     c = sqlite3.connect(DB_PATH)
     c.execute("PRAGMA journal_mode=WAL;")
     c.executescript(_SCHEMA)
+    # С кой модел и от какъв текст е векторът (одит 2026-10-07): bge-m3 →
+    # mxbai-embed-large са 1024 измерения и двата, верното умение падна от
+    # 0.94 на 0.01 без предупреждение; сменено описание не се преизчисляваше.
+    cols = {row[1] for row in c.execute("PRAGMA table_info(embeddings)")}
+    for col in ("model", "text_hash"):
+        if col not in cols:
+            c.execute(f"ALTER TABLE embeddings ADD COLUMN {col} TEXT")
     return c
+
+
+def _hash(text: str) -> str:
+    import hashlib
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
 def _pack(vec: list[float]) -> bytes:
@@ -128,9 +140,11 @@ def index_skill(name: str, text: str) -> bool:
     import datetime
     with _conn() as c:
         c.execute(
-            "INSERT INTO embeddings (name, vector, dim, updated_at) VALUES (?,?,?,?) "
-            "ON CONFLICT(name) DO UPDATE SET vector=excluded.vector, dim=excluded.dim, updated_at=excluded.updated_at",
-            (name, _pack(vec), len(vec), datetime.datetime.now(datetime.timezone.utc).isoformat()),
+            "INSERT INTO embeddings (name, vector, dim, updated_at, model, text_hash) VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(name) DO UPDATE SET vector=excluded.vector, dim=excluded.dim, "
+            "updated_at=excluded.updated_at, model=excluded.model, text_hash=excluded.text_hash",
+            (name, _pack(vec), len(vec), datetime.datetime.now(datetime.timezone.utc).isoformat(),
+             MODEL, _hash(text)),
         )
     return True
 
@@ -140,9 +154,15 @@ def _count_vectors() -> int:
         return int(c.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0])
 
 
-def _all_vectors() -> list[tuple[str, list[float]]]:
+def _all_vectors(model: str | None = None) -> list[tuple[str, list[float]]]:
+    """Векторите; с `model` — само от него (записите без модел са отпреди
+    колоната и не се знае от кой са — те се преизчисляват от _index_missing)."""
     with _conn() as c:
-        rows = c.execute("SELECT name, vector, dim FROM embeddings").fetchall()
+        if model is None:
+            rows = c.execute("SELECT name, vector, dim FROM embeddings").fetchall()
+        else:
+            rows = c.execute("SELECT name, vector, dim FROM embeddings WHERE model = ?",
+                             (model,)).fetchall()
     return [(name, _unpack(blob, dim)) for name, blob, dim in rows]
 
 
@@ -155,7 +175,7 @@ def semantic_search(query: str, top_k: int = 5) -> list[tuple[str, float]]:
     # Изключват се от класирането, вместо да висят с нула: така броят им е
     # видим и наличието на стар индекс не изглежда като "няма съвпадения".
     _index_missing(len(qvec))
-    usable = [(name, vec) for name, vec in _all_vectors() if len(vec) == len(qvec)]
+    usable = [(name, vec) for name, vec in _all_vectors(MODEL) if len(vec) == len(qvec)]
     skipped = _count_vectors() - len(usable)
     if skipped > 0:
         log.warning(
@@ -188,7 +208,9 @@ def _skill_texts() -> dict[str, str]:
 
 
 def _index_missing(dim: int) -> int:
-    """Индексира уменията без вектор с размерност `dim`. Връща броя им.
+    """Индексира уменията без верен вектор: липсващ, от друг модел или
+    размерност, или от стар текст (сменено описание). Маха редовете на
+    изтрити/преименувани умения. Връща броя преизчислени.
 
     Индексът се пълнеше само при запис на НОВО умение, а `reindex_all()` не се
     вика от никъде. Измерено на лаптопа (2026-09-24): embeddings.db липсваше
@@ -196,19 +218,36 @@ def _index_missing(dim: int) -> int:
     модела оставя същото: старите вектори са с друга размерност. Тук веднъж
     се наваксва: 21 умения × ~0.3 s при bge-m3. После вече няма липсващи.
     """
+    texts = _skill_texts()
+    _drop_ghosts(texts)
     with _conn() as c:
-        have = {name for (name,) in c.execute("SELECT name FROM embeddings WHERE dim = ?", (dim,))}
+        have = {name: (model, h, d) for name, model, h, d in
+                c.execute("SELECT name, model, text_hash, dim FROM embeddings")}
     count = 0
-    for name, text in _skill_texts().items():
-        if name not in have and index_skill(name, text):
+    for name, text in texts.items():
+        if have.get(name) != (MODEL, _hash(text), dim) and index_skill(name, text):
             count += 1
     return count
 
 
+def _drop_ghosts(texts: dict[str, str]) -> None:
+    """Редовете на умения, които вече ги няма в skills.json. Те заемаха
+    местата в top_n*3 на search_skills: с 15 призрака търсенето връщаше []
+    (одит 2026-10-07). Нечетим/празен индекс → нищо не се трие."""
+    if not texts:
+        return
+    with _conn() as c:
+        names = [n for (n,) in c.execute("SELECT name FROM embeddings")]
+        gone = [n for n in names if n not in texts]
+        c.executemany("DELETE FROM embeddings WHERE name = ?", [(n,) for n in gone])
+
+
 def reindex_all(progress_every: int = 100) -> int:
     """Преиндексира всички умения от skills.json. Връща брой индексирани."""
+    texts = _skill_texts()
+    _drop_ghosts(texts)
     count = 0
-    for i, (name, text) in enumerate(_skill_texts().items()):
+    for i, (name, text) in enumerate(texts.items()):
         if index_skill(name, text):
             count += 1
         if (i + 1) % progress_every == 0:

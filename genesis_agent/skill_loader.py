@@ -73,6 +73,28 @@ def format_skill_list(width: int = 70) -> str:
     return "\n".join(lines)
 
 
+_CODE_FENCE = re.compile(r"^(`{3,})python\n(.*?)\n\1[ \t]*$", re.DOTALL | re.MULTILINE)
+
+
+def extract_code(content: str) -> str | None:
+    """Кодът от първия ```python блок — същият низ, който се подписва.
+
+    Затварящата ограда е със СЪЩАТА дължина като отварящата и на свой ред:
+    код с ред, започващ с ``` (Markdown шаблон), се пише в ````python и не
+    се отрязва при първия такъв ред (одит 2026-10-07: подписано и проверено
+    умение се отказваше като „подправено“, а неподписано пускаше отрязан код).
+    """
+    text = content.replace("\r\n", "\n")
+    # След ПОСЛЕДНОТО заглавие „## Python Код“ (преглед 2026-10-07): целта на
+    # умението се записва дословно в „## Описание“ над него, и ```python блок в
+    # нея ставаше „кодът“ — подписан и пуснат вместо проверения.
+    head = text.rfind("\n## Python Код")
+    if head != -1:
+        text = text[head:]
+    m = _CODE_FENCE.search(text)
+    return m.group(2).strip() if m else None
+
+
 def skill_view(name: str, *, file_path: Path | None = None) -> dict[str, Any]:
     """
     Зарежда .md файл на умение и връща YAML метаданни + код.
@@ -114,10 +136,9 @@ def skill_view(name: str, *, file_path: Path | None = None) -> dict[str, Any]:
     metadata.setdefault("name", name)
 
     # Извличане на Python код
-    code_match = re.search(r"```python\n(.*?)\n```", content, re.DOTALL)
-    if not code_match:
+    code = extract_code(content)
+    if code is None:
         raise ValueError(f"Няма Python код блок в: {md_path}")
-    code = code_match.group(1).strip()
 
     # Signature check (design note, 2026-08-12): skills_manager.save_skill
     # signs NEW skills going forward — see its comment for why. Deliberately
@@ -136,10 +157,7 @@ def skill_view(name: str, *, file_path: Path | None = None) -> dict[str, Any]:
     signature = (skill_meta or {}).get("signature") or ""
     if signature:
         try:
-            from genesis_agent.cryptography_utils import (
-                PUBLIC_KEY_PATH,
-                verify_signature,
-            )
+            from genesis_agent.cryptography_utils import have_keys, verify_signature
             # Липсващ публичен ключ НЕ е провалена проверка (bug found
             # end-to-end, 2026-08-12): verify_signature() връща False и в двата
             # случая, а третирането им еднакво значи, че всяко клониране без
@@ -147,8 +165,11 @@ def skill_view(name: str, *, file_path: Path | None = None) -> dict[str, Any]:
             # библиотека незаредима, при това с обвинение в подправяне.
             # Липсата на ключ значи "не мога да преценя", не "открих намеса";
             # тогава се държим точно както при неподписаните умения.
-            # Несъвпадение ПРИ наличен ключ си остава твърд отказ.
-            if not PUBLIC_KEY_PATH.exists():
+            # Несъвпадение ПРИ наличен ключ си остава твърд отказ. Изтрит
+            # public_key.pem при наличен частен ключ не изключва проверката —
+            # публичният се извежда от частния (одит 2026-10-07: код, пуснат
+            # от умение, трие public_key.pem и подменя умението трайно).
+            if not have_keys():
                 sig_ok = True
             else:
                 sig_ok = verify_signature(code, signature)
@@ -201,16 +222,88 @@ _STOPWORDS = {
 }
 
 
+# Окончания на български, най-дългите първи. Не е граматика, а сгъване на
+# формите, които операторът реално пише за едно и също: „фактура/фактурите“,
+# „провери/проверка“, „уебсайт/уебсайта“, „работни/работните/работен“,
+# „умение/уменията“. Измерено 2026-10-07 (domain_context върху заявки като
+# „провери ЕГН-то на клиента“, „направи уебсайта на пекарната“, „провери
+# IBAN-ите“, „извлечи полетата от фактурите“): без него и четирите не получаваха
+# провереното знание, макар темата да е точно тя — само заради формата на думата.
+_BG_SUFFIXES = tuple(sorted({
+    "ение", "ения", "ие", "ия", "ове", "еве", "ища", "ане", "яне", "ания",
+    "ни", "на", "но", "ен", "ена", "ено", "ени",
+    "ам", "ям", "аме", "яме", "ате", "яте", "ат", "ах", "ях", "еше", "аше",
+    "ете", "ем", "еш", "иш", "им", "ал", "ала", "ало", "али", "ял", "яла", "яли",
+    "ка", "ки", "а", "я", "о", "е", "и", "у", "ю",
+}, key=len, reverse=True))
+_BG_VOWELS = set("аъоуеияю")
+# Остатъкът от „IBAN-ите“, „ЕГН-то“: `\w+` реже на тирето и членът остава
+# като отделна „дума“, която съвпада с нищо смислено.
+_BG_FRAGMENTS = {"ите", "ата", "ото", "ият", "ния"}
+_CYRILLIC_WORD = re.compile(r"^[а-яѝ]+$")
+
+
+def _stem(word: str) -> str:
+    """Основата на българска дума: първо членът, после едно окончание;
+    основата остава поне 3 букви.
+
+    Членът „-та/-то/-те“ се маха само след гласна („фактура|та“), иначе
+    „-а“ е окончанието („уебсайт|а“, не „уебсай|та“). Латиница и думи под
+    4 букви (`егн`, `ддс`, `iban`) не се пипат — там формата е една и
+    съкращаването само би слепило различни неща.
+    """
+    if len(word) < 4 or not _CYRILLIC_WORD.match(word):
+        return word
+    article = word.endswith(("ът", "ят")) or (
+        word.endswith(("та", "то", "те")) and word[-3] in _BG_VOWELS)
+    if article and len(word) >= 5:
+        word = word[:-2]
+    for suffix in _BG_SUFFIXES:
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            return word[: -len(suffix)]
+    return word
+
+
+def _light_stem(word: str) -> str:
+    """Само членът и окончанието на съществително — без глаголните окончания.
+
+    За проверката „цял тригер“ в domain_context. Пълната основа (_stem) слива
+    „работи“ (глагол) с „работни“ — и „скриптът не работи вече 3 дни“ получаваше
+    правилата за работни дни (одит 2026-10-07); „основните полета“ — правилата
+    за фактури („данъчна основа“). Тук „работи“ и „работни“ остават различни,
+    а „фактурите“/„фактура“, „уебсайта“/„уебсайт“, „номерата“/„номер“ се срещат.
+    """
+    if len(word) < 4 or not _CYRILLIC_WORD.match(word):
+        return word
+    if word.endswith(("ът", "ят")) and len(word) >= 5:
+        return word[:-2]
+    if word.endswith(("та", "то", "те")) and len(word) >= 5 and word[-3] in _BG_VOWELS:
+        word = word[:-2]
+    if word[-1] in "ая" and word[-2] not in _BG_VOWELS and len(word) >= 5:
+        word = word[:-1]
+    return word
+
+
+def _light_keywords(text: str) -> set[str]:
+    return {
+        _light_stem(w) for w in re.findall(r"\w+", text.lower())
+        if len(w) >= 3 and w not in _STOPWORDS and w not in _BG_FRAGMENTS
+    }
+
+
 def _keywords(text: str) -> set[str]:
     r"""Думите, по които се мери съвпадение. `\w` вместо `[a-z0-9_]` (2026-09-20):
     старият клас беше само ASCII, тоест всяка дума на кирилица беше невидима.
     Измерено преди поправката — заявка изцяло на български даваше ПРАЗНО
     множество, значи score 0 за всяко умение, значи нито едно не можеше да се
     преизползва никога. А преизползването е целият смисъл на библиотеката.
+
+    Българските думи се свеждат до основата си (_stem) — и в заявката, и в
+    тригерите, затова „фактурите“ съвпада с тригер „фактура“.
     """
     return {
-        w for w in re.findall(r"\w+", text.lower())
-        if len(w) >= 3 and w not in _STOPWORDS
+        _stem(w) for w in re.findall(r"\w+", text.lower())
+        if len(w) >= 3 and w not in _STOPWORDS and w not in _BG_FRAGMENTS
     }
 
 
@@ -259,6 +352,95 @@ def search_skills(query: str, top_n: int = 5, *, use_semantic: bool = True) -> l
             pass  # embeddings недостъпни — просто чист keyword резултат
 
     return results[:top_n]
+
+
+def domain_context(query: str) -> str:
+    """Провереното знание по темата на заявката — за чата, само категория `domain`.
+
+    Защо (измерено 2026-09-25, проект за ЕГН): и четирите безплатни модела
+    във веригата твърдяха 3/3 пъти, че четна девета цифра е жена (обратното е
+    вярно). Кодът и тестовете им бяха еднакво грешни, тоест зелени. Ред в
+    промпта „провери правилото“ не помогна (0/3 преди, 0/3 след) — моделът е
+    сигурен и не търси. Затова знанието идва от библиотеката: проверено
+    умение със самотест, подадено на модела наготово.
+
+    Само `category: domain` — общите умения (event bus, rate limiter…) не се
+    подават в чата: там съвпадение по две думи е случайно твърде често
+    (виж build_context). Празен низ = нищо не се добавя, нула токена.
+    """
+    try:
+        hits = search_skills(query, top_n=10, use_semantic=False)
+    except Exception:
+        return ""
+    # Мярката е само по ТРИГЕРИТЕ, не по описанието (2026-09-25): „България“ и
+    # „модул“ от описанието на IBAN умението стигнаха за 2 думи — и задача за
+    # работни дни получи правилата за IBAN; „знака“ + „число“ биха го подали и
+    # на CSV отчет. Тригерите са думите на темата, описанието е проза.
+    query_words = _keywords(query)
+    ranked: list[tuple[int, dict[str, Any]]] = []
+    for h in hits:
+        verified = h.get("verified") or h.get("verification", {}).get("verified")
+        # `min_score` (по подразбиране 2): уеб ръководството се подава и на „направи
+        # сайт за пекарна“ — една, но недвусмислена дума. Затова тригерите му са
+        # сайт/уебсайт/лендинг, не „html“ и „страница“ (скрейпърът в bench-а ги има).
+        need = int(h.get("min_score", 2))
+        if h.get("category") not in ("domain", "web") or not verified or h.get("_kw_score", 0) < need:
+            continue
+        triggers = h.get("triggers", [])
+        if isinstance(triggers, str):
+            triggers = [triggers]
+        # `not_with`: думи, които отменят знанието. bench car-ads (2026-10-06):
+        # „scraper.py … обяви от сайт за коли“ — „сайт“ подаваше уеб
+        # ръководството на скрейпър; да събираш от сайт не е да правиш сайт.
+        blockers = h.get("not_with", [])
+        if isinstance(blockers, str):
+            blockers = [blockers]
+        if query_words & {w for b in blockers for w in _keywords(b)}:
+            continue
+        score = len(query_words & {w for t in triggers for w in _keywords(t)})
+        # Поне един тригер — целият. bench library-pkg (2026-10-06): „проверка
+        # на контролната цифра“ + „номер на читателя“ за ISBN дадоха 3 думи от
+        # тригерите на ЕГН („проверка на егн контролна цифра“, „единен граждански
+        # номер“) без самото „егн“ — и правилата за ЕГН отиваха в задача за книги.
+        light_query = _light_keywords(query)
+        whole = any(kw and kw <= light_query for kw in (_light_keywords(t) for t in triggers))
+        if whole and score >= need:
+            ranked.append((score, h))
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    for _, h in ranked:
+        if h.get("category") == "web":
+            body = _guide_body(h)
+            if body:
+                return (f"## Проверено ръководство от библиотеката: {h['name']}\n"
+                        "Основата отдолу минава браузърната проверка без находки — започни от нея "
+                        "и я пригоди към заявката (съдържание, илюстрации, цвят на акцента), "
+                        "вместо да пишеш стиловете от нулата.\n\n" + body)
+            continue
+        try:
+            code = skill_view(h["name"])["code"]
+        except (OSError, ValueError, KeyError):
+            continue
+        # „Правилата оттук, имената от заявката“: първата версия само казваше
+        # „ползвай кода“ и моделът го копира дословно — с validate_egn/parse_egn
+        # вместо поисканите validate/parse; правилни правила, счупен интерфейс
+        # (скритите тестове не можаха да го импортират, 2026-09-25).
+        return (f"## Проверено знание от библиотеката: {h['name']}\n"
+                "ПРАВИЛАТА в този код са проверени със самотест — вземи ги оттук (и "
+                "очакваните стойности в тестовете), не по памет. ИМЕНАТА, файловете и "
+                "интерфейса вземи от заявката на оператора, не от този код.\n"
+                f"```python\n{code.strip()}\n```")
+    return ""
+
+
+def _guide_body(meta: dict[str, Any]) -> str:
+    """Тялото на умение-ръководство (category: web) без frontmatter и без
+    „Описание“ — то е за хората (защо, кога е мерено), не за модела."""
+    try:
+        text = (SKILLS_ROOT / meta.get("file_path", f"skills/{meta['name']}.md")).read_text(encoding="utf-8")
+    except (OSError, KeyError):
+        return ""
+    text = re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.DOTALL)
+    return re.sub(r"## Описание\n.*?(?=\n## )", "", text, flags=re.DOTALL).strip()
 
 
 def _extract_signatures(code: str) -> list[str]:
@@ -330,6 +512,143 @@ def resolve_skill(name_or_query: str) -> tuple[str | None, list[dict[str, Any]]]
     return None, candidates
 
 
+# Тестовете (conftest) я пренасочват; иначе — системната временна папка.
+SKILL_HOME_ROOT: Path | None = None
+_operator_env: dict[str, str] | None = None
+
+
+def _home_roots() -> list[Path]:
+    import os
+    import tempfile
+    if SKILL_HOME_ROOT is not None:
+        return [Path(SKILL_HOME_ROOT)]
+    roots = [Path(tempfile.gettempdir())]
+    if os.name != "nt":
+        roots += [Path("/tmp"), Path("/var/tmp")]
+    try:
+        real = Path.home().resolve()
+        # TMPDIR в домашната папка връщаше точно това, което се маха: истинския
+        # HOME сред родителите (втори одит 2026-10-09). На Windows няма друго.
+        outside = [r for r in roots if r.is_dir() and r.resolve() != real
+                   and real not in r.resolve().parents]
+        return outside or roots
+    except (OSError, RuntimeError):
+        return roots
+
+
+def _ours(path: Path) -> bool:
+    import os
+    import stat
+    try:
+        path.mkdir(mode=0o700, exist_ok=True)
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        return False
+    if hasattr(os, "getuid"):
+        if st.st_uid != os.getuid():
+            return False
+        os.chmod(path, 0o700)
+    return True
+
+
+def skill_home() -> Path:
+    """Домашната папка на кода на уменията: във временната папка на системата,
+    по една на потребител, 0700 и наша. Не в ~/.genesis: оттам
+    `Path.home().parent` беше точно .env, ключовете и mcp_tokens.json, а
+    `.parents[1]` — истинската домашна папка (одит 2026-10-09)."""
+    import os
+    import tempfile
+    root = _home_roots()[0]
+    uid = os.getuid() if hasattr(os, "getuid") else 0
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    # Чужда/подменена папка с това име (споделен /tmp): следващото стабилно
+    # име, не нова случайна папка при всяко извикване — кешът студен и папки
+    # изтичаха в /tmp (втори одит 2026-10-09).
+    for n in range(10):
+        home = root / (f"genesis-skill-home-{uid}" + (f"-{n}" if n else ""))
+        if _ours(home):
+            return home
+    return Path(tempfile.mkdtemp(prefix="genesis-skill-home-", dir=str(root)))
+
+
+def _operator_settings() -> dict[str, str]:
+    """Каквото уменията губят с нова домашна папка и наистина им трябва:
+    кой подписва git комитите и откъде pip тегли (корпоративен индекс).
+    Само тези стойности, не файловете (одит 2026-10-09)."""
+    global _operator_env
+    if _operator_env is not None:
+        return dict(_operator_env)
+    import os
+    import subprocess
+    out: dict[str, str] = {}
+    for key, names in (("user.name", ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME")),
+                       ("user.email", ("GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"))):
+        try:
+            value = subprocess.run(["git", "config", "--get", key], capture_output=True,
+                                   text=True, timeout=5, check=False).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            value = ""
+        if value:
+            out.update({n: value for n in names})
+    home = Path.home()
+    appdata = os.environ.get("APPDATA", "")
+    for conf in (os.environ.get("PIP_CONFIG_FILE", ""), str(home / ".config" / "pip" / "pip.conf"),
+                 str(home / ".pip" / "pip.conf"),
+                 str(Path(appdata) / "pip" / "pip.ini") if appdata else "",
+                 str(home / "Library" / "Application Support" / "pip" / "pip.conf")):
+        if conf and Path(conf).is_file():
+            out["PIP_CONFIG_FILE"] = conf
+            break
+    _operator_env = out
+    return dict(out)
+
+
+def _workspace() -> list[Path]:
+    """Работната папка на чата: пазачът я пуска и когато е в ~/.genesis
+    (`~/.genesis/workspace` при старт от домашната папка — одит 2026-10-09)."""
+    import sys
+    gs = sys.modules.get("genesis_skills")
+    ws = getattr(gs, "_WORKSPACE", None) if gs is not None else None
+    return [Path(ws)] if ws else []
+
+
+def skill_env() -> dict[str, str]:
+    """Средата на кода на умение: собствена домашна папка (skill_home).
+
+    Драйверът на USE_SKILL е код от модела. С HOME на оператора
+    `Path.home() / ".ssh"` или `expanduser("~/.aws")` стигаха до тайните без
+    нито един буквален път, който sandbox-ът да види (NEXT_STEPS, одит
+    2026-10-07). Папката е постоянна, затова кешовете на pip/matplotlib в нея
+    остават топли — заради тях досега HOME не беше сменян. PYTHONUSERBASE
+    сочи истинския user site: пакет от `pip install --user` пак се внася
+    (2026-10-09).
+
+    Не е стена: `pwd.getpwuid()`, а и RUN_CMD знаят истинската папка —
+    истинската граница е отделен потребител/контейнер."""
+    import os
+    import site
+    home = skill_home()
+    for sub in (".cache", ".config", ".local/share", "AppData/Roaming", "AppData/Local"):
+        (home / sub).mkdir(mode=0o700, parents=True, exist_ok=True)
+    env = {"HOME": str(home), "USERPROFILE": str(home),
+           "XDG_CACHE_HOME": str(home / ".cache"), "XDG_CONFIG_HOME": str(home / ".config"),
+           "XDG_DATA_HOME": str(home / ".local" / "share"),
+           "MPLCONFIGDIR": str(home / ".config" / "matplotlib"),
+           "APPDATA": str(home / "AppData" / "Roaming"),
+           "LOCALAPPDATA": str(home / "AppData" / "Local"),
+           **_operator_settings()}
+    try:
+        env["PYTHONUSERBASE"] = os.environ.get("PYTHONUSERBASE") or site.getuserbase()
+    except Exception:
+        pass
+    return env
+
+
 def use_skill(name_or_query: str, driver_code: str = "") -> str:
     """
     Намира умение (по точно име или свободна заявка) и го изпълнява РЕАЛНО —
@@ -378,7 +697,7 @@ def use_skill(name_or_query: str, driver_code: str = "") -> str:
     if driver_code.strip():
         script += "\n\n# --- USE_SKILL driver ---\n" + driver_code
 
-    res = sandbox.run_python(script, timeout=60)
+    res = sandbox.run_python(script, timeout=60, env_extra=skill_env(), allow=_workspace())
     if res.blocked:
         return "\n".join(header) + "\n" + res.stderr
 
@@ -411,7 +730,8 @@ def run_skill(name: str, **exec_kwargs) -> str:
     res = sandbox.run_python(
         code,
         timeout=120,
-        env_extra={"SKILL_ARGS": _json.dumps(exec_kwargs)},
+        env_extra={**skill_env(), "SKILL_ARGS": _json.dumps(exec_kwargs)},
+        allow=_workspace(),
     )
     if res.blocked:
         raise RuntimeError(res.stderr)

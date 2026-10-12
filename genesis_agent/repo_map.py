@@ -22,6 +22,7 @@ Both refuse to descend into the directories that make a naive walk useless:
 """
 from __future__ import annotations
 
+import base64
 import json
 import re
 import shutil
@@ -30,14 +31,16 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+from genesis_agent.code_edit import decode_text, displayable
+
 _SKIP_DIRS = {
     ".git", ".hg", ".svn", "node_modules", "__pycache__", ".mypy_cache",
     ".pytest_cache", ".ruff_cache", ".venv", "venv", "env", ".env",
     "dist", "build", "target", ".next", ".tox", ".gradle", "vendor",
     "site-packages", ".verify_libs", ".idea", ".vscode",
 }
-# Extensions worth searching. Anything else is assumed to be data or a binary;
-# grepping a 40MB model checkpoint helps nobody.
+# Разширенията, които detect_project/REPO_MAP броят за код. SEARCH_CODE вече
+# не филтрира по тях (пропуска двоичните по NUL байт, като rg — 2026-10-11).
 _TEXT_SUFFIXES = {
     ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".rb", ".java",
     ".kt", ".c", ".h", ".cc", ".cpp", ".hpp", ".cs", ".php", ".swift", ".sh",
@@ -57,13 +60,78 @@ class Match:
     text: str
 
 
-def _iter_files(root: Path, glob: str | None = None):
-    for p in root.rglob(glob or "*"):
-        if p.is_dir():
+def _skipped(p: Path, root: Path) -> bool:
+    """В папка за пропускане ВЪТРЕ в проекта. Само частите под корена:
+    проект в `~/build/app` или `~/env/proj` иначе губеше всеки свой файл
+    (2026-10-07: GLOB „няма файлове“, REPO_MAP „0 файла с код“)."""
+    try:
+        parts = p.relative_to(root).parts[:-1]
+    except ValueError:
+        parts = p.parts[:-1]
+    return any(part in _SKIP_DIRS for part in parts)
+
+
+def _walk(root: Path, match=None):
+    """Файловете под `root`, без да се слиза в _SKIP_DIRS. rglob влизаше в
+    node_modules и чак после ги отхвърляше: 2026-10-09, 100k файла там →
+    detect_project 3.3 s, REPO_MAP 3.1 s, търсенето 2.9 s на всяко извикване.
+    `match(части на пътя спрямо root)` избира файловете (виж _matcher)."""
+    import os
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
+        rel = Path(dirpath).relative_to(root).parts
+        for name in sorted(filenames):
+            if match is None or match((*rel, name)):
+                yield Path(dirpath) / name
+
+
+def _segments_match(parts: tuple[str, ...], segs: tuple[str, ...]) -> bool:
+    import fnmatch
+    if not segs:
+        return not parts
+    if segs[0] == "**":
+        return any(_segments_match(parts[i:], segs[1:]) for i in range(len(parts) + 1))
+    # Буквалното име печели преди fnmatch: `[slug].tsx` (Next.js, SvelteKit) е
+    # клас знаци за fnmatch и GLOB отговаряше „няма файлове“ (одит 2026-10-11).
+    return (bool(parts) and (parts[0] == segs[0] or fnmatch.fnmatch(parts[0], segs[0]))
+            and _segments_match(parts[1:], segs[1:]))
+
+
+def _matcher(pattern: str):
+    """Шаблонът като rglob (`**/` отпред), но върху вече подрязания обход.
+    Одит 2026-10-09: `**/components/*.tsx` минаваше по стария път и пак
+    обхождаше node_modules (1.1 s на 40k файла). Сравнява сегмент по сегмент
+    с fnmatch — `*` не минава през `/`, а `**` е нула или повече папки.
+    None = необичаен шаблон (абсолютен, `..`, `\\`, завършващ на `/`) → rglob."""
+    if (not pattern or pattern.startswith("/") or pattern.endswith("/") or "\\" in pattern
+            or ".." in pattern.split("/") or ":" in pattern):
+        return None
+    segs: list[str] = ["**"]
+    for seg in pattern.split("/"):
+        if seg in ("", "."):
             continue
-        if any(part in _SKIP_DIRS for part in p.parts):
+        if seg == "**" and segs[-1] == "**":
             continue
-        if glob is None and p.suffix.lower() not in _TEXT_SUFFIXES:
+        segs.append(seg)
+    if segs[-1] == "**":
+        return None
+    frozen = tuple(segs)
+    return lambda parts: _segments_match(tuple(parts), frozen)
+
+
+def _files(root: Path, pattern: str):
+    """Файловете по шаблон — подрязаният обход, или rglob за необичайния."""
+    match = _matcher(pattern)
+    if match is not None:
+        return _walk(root, match)
+    return (p for p in root.rglob(pattern) if not p.is_dir() and not _skipped(p, root))
+
+
+def _iter_files(root: Path, glob: str | None = None, *, any_suffix: bool = False):
+    # Файл като корен е самият той — не шаблон по името му (виж search_code).
+    files = [root] if root.is_file() else _walk(root) if glob is None else _files(root, glob)
+    for p in files:
+        if glob is None and not any_suffix and p.suffix.lower() not in _TEXT_SUFFIXES:
             continue
         try:
             if p.stat().st_size > _MAX_FILE_BYTES:
@@ -80,17 +148,48 @@ def _search_python(root: Path, pattern: str, glob: str | None,
     except re.error as e:
         raise ValueError(f"невалиден regex: {e}") from e
     out: list[Match] = []
-    for p in _iter_files(root, glob):
+    wants_cr = _wants_cr(pattern)
+    # Без филтър по разширение — текст или двоичен се решава като при rg (NUL в
+    # първите 8 KB). Одит 2026-10-11: без rg (обичайното на Windows лаптопа)
+    # Dockerfile, Makefile, .ps1, .bat, .env.example, .xml, .mts, .cjs бяха
+    # „няма съвпадения“, а rg ги намираше 8 от 8.
+    for p in _iter_files(root, glob, any_suffix=True):
         try:
-            with p.open("r", encoding="utf-8", errors="replace") as fh:
-                for i, line in enumerate(fh, 1):
-                    if rx.search(line):
-                        out.append(Match(str(p), i, line.rstrip()[:_LINE_CLIP]))
-                        if len(out) >= max_results:
-                            return out
+            raw = p.read_bytes()
         except OSError:
             continue
+        if b"\x00" in raw[:8192] and not raw.startswith((b"\xff\xfe", b"\xfe\xff", b"\x00\x00\xfe\xff")):
+            continue
+        # Кодирането по файла (одит 2026-10-11): „Грешка“ в cp1251 файл даваше
+        # „няма съвпадения … наистина го няма“. Редовете се делят само по `\n`,
+        # както при rg и EDIT_FILE, за да съвпадат номерата.
+        text = displayable(decode_text(raw)[0])
+        for i, line in enumerate(text.split("\n"), 1):
+            # `\r` от CRLF не е част от реда (ревю 2026-10-11): `return 1$`
+            # не съвпадаше в CRLF файл и инструментът казваше „наистина го
+            # няма“ — старият текстов режим го махаше. rg е с `--crlf`.
+            # Освен когато се търси самият `\r` (виж _wants_cr).
+            if not wants_cr:
+                line = line.removesuffix("\r")
+            if rx.search(line):
+                out.append(Match(str(p), i, line.rstrip()[:_LINE_CLIP]))
+                if len(out) >= max_results:
+                    return out
     return out
+
+
+def _wants_cr(pattern: str) -> bool:
+    r"""Търси ли шаблонът самия `\r` — напр. `\r$`, за да намери CRLF файловете.
+
+    Ревю 2026-10-11 (трета вълна), мерено с rg 14.1: с `--crlf` rg не
+    намира `\r` изобщо (и по средата на реда), а Python пътят го махаше от
+    края — `\r$` беше „няма съвпадения“ и в двата, а rg без флага го
+    намираше. За такъв шаблон `\r` остава част от реда и в двата пътя.
+    Широко нарочно: `\\r` (буквално `\` и `r`) също минава оттук — цената
+    е само, че в това търсене `$` пред CRLF е както преди вълна 2.
+    """
+    low = pattern.lower()
+    return "\r" in pattern or "\\r" in pattern or "\\x0d" in low or "\\015" in pattern
 
 
 def _search_ripgrep(root: Path, pattern: str, glob: str | None,
@@ -111,18 +210,51 @@ def _search_ripgrep(root: Path, pattern: str, glob: str | None,
                       generated trees are excluded by `_SKIP_DIRS` instead,
                       which BOTH paths honour
       --max-filesize  the Python path skips files over `_MAX_FILE_BYTES`
+      --crlf          `$` съвпада пред `\r\n`, както Python пътят го маха
+                      (ревю 2026-10-11)
 
     `.git/` stays excluded because it is in `_SKIP_DIRS`, which is turned into
     `--glob !.git/` below — so `--hidden --no-ignore` does not drag in object
     files.
     """
+    out = _run_ripgrep(root, pattern, glob, max_results, None)
+    # rg търси байтовете на шаблона в UTF-8, а cp1251 файл ги няма (одит
+    # 2026-10-11: „Грешка“ → „наистина го няма“). Шаблон с не-ASCII знаци се
+    # пуска втори път с windows-1251. От него се взимат само файловете, които
+    # decode_text (и Python пътят) смята за cp1251: ревю 2026-10-11 — UTF-8
+    # „мир“ там е „РјРёСЂ“ и търсене на „Р“ връщаше боклук, а Python — нищо.
+    if out is not None and not pattern.isascii() and len(out) < max_results:
+        extra = _run_ripgrep(root, pattern, glob, max_results, "windows-1251")
+        seen = {(m.path, m.line) for m in out}
+        legacy: dict[str, bool] = {}
+        for m in extra or []:
+            if len(out) >= max_results:
+                break
+            if m.path not in legacy:
+                legacy[m.path] = _is_cp1251(m.path)
+            if legacy[m.path] and (m.path, m.line) not in seen:
+                out.append(m)
+    return out
+
+
+def _is_cp1251(path: str) -> bool:
+    try:
+        return decode_text(Path(path).read_bytes())[1] == "cp1251"
+    except OSError:
+        return False
+
+
+def _run_ripgrep(root: Path, pattern: str, glob: str | None,
+                 max_results: int, encoding: str | None) -> list[Match] | None:
     cmd = ["rg", "--json", "--max-count", str(max_results),
            "--hidden", "--no-ignore", "--max-filesize", str(_MAX_FILE_BYTES),
-           "-e", pattern]
+           *([] if _wants_cr(pattern) else ["--crlf"]), "-e", pattern]
+    if encoding:
+        cmd += ["--encoding", encoding]
     for d in sorted(_SKIP_DIRS):
         cmd += ["--glob", f"!{d}/"]
-    if glob:
-        cmd += ["--glob", glob]
+    for g in _rg_globs(glob):
+        cmd += ["--glob", g]
     cmd.append(str(root))
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, check=False)
@@ -155,11 +287,48 @@ def _search_ripgrep(root: Path, pattern: str, glob: str | None,
         out.append(Match(
             (data.get("path") or {}).get("text", "?"),
             line_no,
-            ((data.get("lines") or {}).get("text") or "").rstrip()[:_LINE_CLIP],
+            _rg_text(data.get("lines") or {}).rstrip()[:_LINE_CLIP],
         ))
         if len(out) >= max_results:
             break
     return out
+
+
+def _rg_globs(glob: str | None) -> list[str]:
+    """`glob` за rg, така че да избира същите файлове като `_matcher`.
+
+    Ревю 2026-10-11, мерено с rg 14.1: `--glob pages/*.tsx` се мери спрямо
+    cwd, не спрямо търсената папка — когато workspace-ът не е cwd, rg
+    връщаше „няма съвпадения“, а Python пътят намираше файла. `_matcher`
+    слага `**/` отпред, тук също. `[slug].tsx` е клас знаци за rg, а
+    `_segments_match` приема и буквалното име — затова второ `--glob` с
+    `[[]` (буквално `[`); няколко `--glob` са „или“.
+    """
+    if not glob:
+        return []
+    neg, body = ("!", glob[1:]) if glob.startswith("!") else ("", glob)
+    # `./src/*.py` и `src/./*.py`: `_matcher` пропуска сегментите `.`, а rg ги
+    # мери буквално и не намираше нищо (ревю 2026-10-11, трета вълна).
+    # Абсолютен или завършващ на `/` шаблон `_matcher` не приема — него не пипаме.
+    if not body.startswith("/") and not body.endswith("/"):
+        body = "/".join(seg for seg in body.split("/") if seg not in ("", ".")) or body
+    if "/" in body and not body.startswith(("/", "**/")):
+        body = "**/" + body
+    variants = [body] + ([body.replace("[", "[[]")] if "[" in body else [])
+    return [neg + v for v in variants]
+
+
+def _rg_text(lines: dict) -> str:
+    """Редът от събитие на rg. Ред, който не е UTF-8, идва като `bytes`
+    (base64), не като `text` — попадението излизаше с празен текст
+    („msg.txt:1: “, одит 2026-10-11)."""
+    if isinstance(lines.get("text"), str):
+        return lines["text"]
+    try:
+        raw = base64.b64decode(lines.get("bytes") or "")
+    except (ValueError, TypeError):
+        return ""
+    return displayable(decode_text(raw)[0])
 
 
 def find_files(pattern: str, path: str | Path = ".",
@@ -171,11 +340,7 @@ def find_files(pattern: str, path: str | Path = ".",
     if not root.exists():
         raise FileNotFoundError(f"няма такъв път: {root}")
     out: list[str] = []
-    for p in root.rglob(pattern):
-        if p.is_dir():
-            continue
-        if any(part in _SKIP_DIRS for part in p.parts):
-            continue
+    for p in _files(root, pattern):
         try:
             out.append(str(p.relative_to(root)))
         except ValueError:
@@ -193,17 +358,19 @@ def search_code(pattern: str, path: str | Path = ".", glob: str | None = None,
     if not root.exists():
         raise FileNotFoundError(f"няма такъв път: {root}")
     if root.is_file():
-        root, glob = root.parent, root.name
-    if shutil.which("rg"):
-        hits = _search_ripgrep(root, pattern, glob, max_results)
-        if hits is not None:
-            return hits
-    return _search_python(root, pattern, glob, max_results)
+        # Само този файл — подаден направо на двата енджина. Преди името му
+        # ставаше glob, а `[slug].tsx` е клас знаци и за rg, и за fnmatch:
+        # „низът наистина го няма“ във файл, който го съдържа (одит 2026-10-11).
+        glob = None
+    hits = _search_ripgrep(root, pattern, glob, max_results) if shutil.which("rg") else None
+    if hits is None:
+        hits = _search_python(root, pattern, glob, max_results)
+    return hits
 
 
 # ── Project shape ────────────────────────────────────────────────────────────
 
-def _python_cmd() -> str:
+def _python_cmd(root: Path | None = None) -> str:
     """Как да извикаме СЪЩИЯ интерпретатор, на който върви Genesis.
 
     Не голото "python3" (bug found end-to-end, 2026-08-12). На Windows това име
@@ -219,11 +386,12 @@ def _python_cmd() -> str:
     (виж sandbox._shell_argv, който на Windows предпочита bash) — там
     обратната наклонена черта е escape знак. Windows приема и двата вида.
 
-    В родния Windows билд `sys.executable` е genesis.exe, не Python — затова
-    пътят идва от paths.project_python(), който там пита истинския Python.
+    В родния Windows билд `sys.executable` е genesis.exe, не Python, а в pipx е
+    venv без пакетите на проекта — затова пътят идва от paths.project_python(root),
+    който предпочита venv-а на проекта и иначе пита истинския Python.
     """
     from genesis_agent.paths import project_python
-    exe = project_python().replace("\\", "/")
+    exe = project_python(root).replace("\\", "/")
     return f'"{exe}"' if " " in exe else exe
 
 
@@ -263,7 +431,10 @@ def _package_json_has_test(root: Path) -> bool:
         data = json.loads((root / "package.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    return bool((data.get("scripts") or {}).get("test"))
+    test = str((data.get("scripts") or {}).get("test") or "")
+    # Заготовката на `npm init -y` („Error: no test specified“ && exit 1) не е
+    # тест — с нея всеки проект „падаше“ (одит 2026-10-09).
+    return bool(test) and "no test specified" not in test
 
 
 def _makefile_has_test(root: Path) -> bool:
@@ -333,12 +504,12 @@ def detect_project(path: str | Path) -> ProjectInfo:
             continue
         if marker == "Makefile" and not _makefile_has_test(root):
             continue
-        language, test_cmd = lang, cmd.replace("{python}", _python_cmd())
+        language, test_cmd = lang, cmd.replace("{python}", _python_cmd(root))
         break
     # Няма маркерен файл, но има тестове по pytest конвенцията — виж
     # _has_pytest_style_tests за защо липсата на маркер не е доказателство.
     if not test_cmd and _has_pytest_style_tests(root):
-        language, test_cmd = "python", f"{_python_cmd()} -m pytest -q"
+        language, test_cmd = "python", f"{_python_cmd(root)} -m pytest -q"
     if language == "unknown" and counts:
         by_lang = {".py": "python", ".js": "javascript", ".ts": "typescript",
                    ".go": "go", ".rs": "rust", ".rb": "ruby", ".java": "java"}
@@ -350,12 +521,10 @@ def detect_project(path: str | Path) -> ProjectInfo:
     is_git = (root / ".git").exists()
     dirty = False
     if is_git:
-        try:
-            proc = subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
-                                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15, check=False)
-            dirty = bool(proc.stdout.strip())
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+        # Чуждото хранилище не пуска програми (core.fsmonitor, филтри):
+        # REPO_MAP само чете — без въпрос и в plan mode (одит 2026-10-11).
+        from genesis_agent.review import safe_git
+        dirty = bool(safe_git(root, "status", "--porcelain", timeout=15)[1].strip())
 
     return ProjectInfo(root, language, test_cmd, counts, entries[:10], is_git, dirty)
 

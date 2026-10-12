@@ -5,6 +5,7 @@ every test (module-level constant bound at import time, same convention as
 gui_sessions.py)."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -15,6 +16,7 @@ from genesis_agent import workspace_memory as wm
 @pytest.fixture(autouse=True)
 def _isolated_db(monkeypatch, tmp_path):
     monkeypatch.setattr(wm, "DB_PATH", tmp_path / "workspace_memory.db")
+    monkeypatch.setattr(wm, "_workspace", wm._norm(tmp_path / "project-a"))
     yield
 
 
@@ -201,7 +203,7 @@ class TestAutoCapture:
 
         monkeypatch.setattr("genesis_agent.brain.Brain.complete", lambda self, messages: _Reply())
         messages = [
-            {"role": "user", "content": "let's use pytest, be direct with me, and I still need to write docs"},
+            {"role": "user", "content": "let's use pytest, always be direct with me, and I still need to write docs"},
             {"role": "assistant", "content": "got it"},
         ]
         result = wm.auto_capture(messages)
@@ -209,6 +211,42 @@ class TestAutoCapture:
         assert wm.list_decisions()[0]["what"] == "use pytest"
         assert wm.list_preferences() == {"tone": "direct"}
         assert wm.list_threads("open")[0]["title"] == "write docs"
+
+    def test_a_tasks_requirements_are_not_preferences(self, monkeypatch) -> None:
+        """2026-09-28: one site task → 11 "preferences" (index.html, SVG, SEO…),
+        injected into every later session, a Python task included."""
+        spec = [{"topic": t, "value": v} for t, v in [
+            ("file_structure", "index.html, styles.css, script.js"), ("SEO", "meta tags"),
+            ("design_style", "premium modern"), ("theme_toggle", "light/dark")]]
+
+        class _Reply:
+            raw_text = json.dumps({"decisions": [], "preferences": spec, "threads": []})
+
+        monkeypatch.setattr("genesis_agent.brain.Brain.complete", lambda self, messages: _Reply())
+        messages = [{"role": "user", "content": "Направи сайт: index.html, styles.css, script.js, "
+                                                "SEO, премиум дизайн, светла/тъмна тема. Винаги с alt."},
+                    {"role": "assistant", "content": "готово"}]
+        assert wm.auto_capture(messages)["preferences"] == 0
+        assert wm.list_preferences() == {}
+
+    def test_no_general_words_no_preference(self, monkeypatch) -> None:
+        class _Reply:
+            raw_text = '{"decisions": [], "preferences": [{"topic": "testing", "value": "run pytest"}], "threads": []}'
+
+        monkeypatch.setattr("genesis_agent.brain.Brain.complete", lambda self, messages: _Reply())
+        messages = [{"role": "user", "content": "Напиши модул и пусни pytest, докато минат."},
+                    {"role": "assistant", "content": "готово"}]
+        assert wm.auto_capture(messages)["preferences"] == 0
+
+    def test_a_general_wish_in_bulgarian_is_kept(self, monkeypatch) -> None:
+        class _Reply:
+            raw_text = '{"decisions": [], "preferences": [{"topic": "език", "value": "само български"}], "threads": []}'
+
+        monkeypatch.setattr("genesis_agent.brain.Brain.complete", lambda self, messages: _Reply())
+        messages = [{"role": "user", "content": "Отсега нататък ми отговаряй само на български."},
+                    {"role": "assistant", "content": "добре"}]
+        assert wm.auto_capture(messages)["preferences"] == 1
+        assert wm.list_preferences() == {"език": "само български"}
 
     def test_strips_markdown_code_fence_around_json(self, monkeypatch) -> None:
         class _Reply:
@@ -285,3 +323,59 @@ class TestStats:
         wm.set_preference("topic", "value")
         stats = wm.stats()
         assert stats == {"open": 1, "blocked": 1, "done": 0, "decisions": 1, "preferences": 1}
+
+
+class TestPerWorkspace:
+    """Нишките и решенията са на папката; предпочитанията са общи
+    (bench_projects 2026-09-26: решение „създаден money.py“ от друга папка
+    накара модела да търси несъществуващия файл вместо да го напише)."""
+
+    def test_another_folder_does_not_see_this_folders_work(self, tmp_path) -> None:
+        wm.add_thread("build money.py", next_step="write tests")
+        wm.add_decision("created money.py with to_eur()")
+        wm.set_preference("език", "български")
+        wm.set_workspace(tmp_path / "project-b")
+        out = wm.briefing()
+        assert "money.py" not in out
+        assert "език: български" in out
+        assert wm.list_threads() == [] and wm.list_decisions() == []
+        assert wm.stats()["open"] == 0 and wm.stats()["decisions"] == 0
+
+    def test_the_same_folder_sees_it_again(self, tmp_path) -> None:
+        wm.add_decision("use SQLite")
+        wm.set_workspace(tmp_path / "project-b")
+        wm.set_workspace(tmp_path / "project-a")
+        assert "use SQLite" in wm.briefing()
+
+    def test_same_title_in_two_folders_is_two_threads(self, tmp_path) -> None:
+        wm.add_thread("write the README")
+        wm.set_workspace(tmp_path / "project-b")
+        assert "✓" in wm.add_thread("write the README")
+
+    def test_the_folder_is_normalised(self, tmp_path) -> None:
+        wm.add_decision("keep it")
+        wm.set_workspace(str(tmp_path / "project-a") + "/")
+        assert [d["what"] for d in wm.list_decisions()] == ["keep it"]
+
+    def test_an_old_database_gains_the_column_and_hides_its_rows(self) -> None:
+        import sqlite3
+        with sqlite3.connect(wm.DB_PATH) as c:
+            c.executescript(
+                "CREATE TABLE threads (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,"
+                " status TEXT NOT NULL DEFAULT 'open', next_step TEXT NOT NULL DEFAULT '',"
+                " notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);"
+                "CREATE TABLE decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, what TEXT NOT NULL,"
+                " why TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);"
+                "INSERT INTO threads (title, created_at, updated_at) VALUES ('old', 'x', 'x');"
+                "INSERT INTO decisions (what, created_at) VALUES ('old decision', 'x');")
+        assert wm.briefing() == ""  # не се знае на кой проект са
+        wm.add_decision("new one")
+        assert [d["what"] for d in wm.list_decisions()] == ["new one"]
+
+    def test_genesis_skills_moves_the_memory_with_the_tools(self, monkeypatch, tmp_path) -> None:
+        import genesis_skills
+        monkeypatch.setattr(genesis_skills, "_WORKSPACE", genesis_skills._WORKSPACE)
+        wm.add_decision("only in a")
+        genesis_skills.set_workspace(tmp_path / "project-b")
+        assert wm.current_workspace() == wm._norm(tmp_path / "project-b")
+        assert wm.list_decisions() == []

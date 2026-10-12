@@ -152,3 +152,46 @@ def test_order_does_not_change_the_outcome(tmp_path, shipped_first) -> None:
         (user / "mine.md").write_text("x", encoding="utf-8")
         seed_user_skills(shipped, user)
     assert {p.stem for p in user.glob("*.md")} == {"alpha", "beta", "mine"}
+
+
+class TestUpdatesReachAnExistingInstall:
+    """Одит 2026-10-07: v2 на доставено умение (поправено правило) не стигаше
+    до инсталация с непипано v1 — и индексът оставаше със старите тригери."""
+
+    def _ship(self, tmp_path, body, triggers):
+        d = tmp_path / "shipped"
+        d.mkdir(exist_ok=True)
+        (d / "bg_egn.md").write_text(body, encoding="utf-8")
+        (d / "skills.json").write_text(json.dumps({"skills": [
+            {"name": "bg_egn", "file_path": "skills/bg_egn.md", "triggers": triggers}]}),
+            encoding="utf-8")
+        return d
+
+    def test_an_untouched_old_copy_is_updated(self, tmp_path) -> None:
+        user = tmp_path / "home" / "skills"
+        seed_user_skills(self._ship(tmp_path, "# v1 bug\n", ["егн"]), user)
+        assert seed_user_skills(self._ship(tmp_path, "# v2 fixed\n", ["егн", "egn"]), user) == 1
+        assert (user / "bg_egn.md").read_text(encoding="utf-8") == "# v2 fixed\n"
+        assert _index(user)["skills"][0]["triggers"] == ["егн", "egn"]
+
+    def test_an_edited_old_copy_is_kept(self, tmp_path) -> None:
+        user = tmp_path / "home" / "skills"
+        seed_user_skills(self._ship(tmp_path, "# v1 bug\n", ["егн"]), user)
+        (user / "bg_egn.md").write_text("# моята поправка\n", encoding="utf-8")
+        assert seed_user_skills(self._ship(tmp_path, "# v2 fixed\n", ["егн"]), user) == 0
+        assert (user / "bg_egn.md").read_text(encoding="utf-8") == "# моята поправка\n"
+
+    def test_a_copied_but_unindexed_skill_is_indexed_next_start(self, tmp_path) -> None:
+        user = tmp_path / "home" / "skills"
+        shipped = self._ship(tmp_path, "# v1\n", ["егн"])
+        seed_user_skills(shipped, user)
+        (user / "skills.json").unlink()          # записът на индекса се е провалил
+        assert seed_user_skills(shipped, user) == 1
+        assert _names(user) == ["bg_egn"]
+
+    def test_a_corrupt_index_is_kept_aside(self, tmp_path) -> None:
+        user = tmp_path / "home" / "skills"
+        user.mkdir(parents=True)
+        (user / "skills.json").write_text('{"skills": [{"name": "mine"', encoding="utf-8")
+        seed_user_skills(_shipped(tmp_path), user)
+        assert (user / "skills.json.corrupt").read_text(encoding="utf-8").startswith('{"skills"')

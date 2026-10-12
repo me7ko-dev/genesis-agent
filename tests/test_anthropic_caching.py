@@ -137,8 +137,10 @@ class TestCacheTokensAreReportedNotAssumed:
     def test_cache_reads_are_recorded_separately_from_fresh_input(self, sent) -> None:
         brain = Brain()
         _call(brain, sent)
+        # prompt_tokens включва кеша, както при OpenAI (одит 2026-10-07: иначе
+        # отчетът показваше „кеш 7500% от prompt“).
         assert brain._last_usage == {
-            "prompt_tokens": 1200,
+            "prompt_tokens": 1200 + 4300,
             "completion_tokens": 80,
             "cached_read_tokens": 4300,
             "cached_write_tokens": 0,

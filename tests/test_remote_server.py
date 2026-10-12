@@ -142,8 +142,18 @@ def test_pairing_url_keeps_the_key_in_the_fragment() -> None:
     url = rs.pairing_url("192.168.1.5", 8765, KEY, "my pc")
     before, _, fragment = url.partition("#")
     assert rs._b64e(KEY) not in before, "the key must never reach the server in a URL"
-    assert fragment.startswith("k=" + rs._b64e(KEY))
+    assert "k=" + rs._b64e(KEY) in fragment.split("&")
     assert "n=my%20pc" in fragment
+
+
+def test_the_qr_code_opens_the_app_not_a_browser() -> None:
+    # 2026-10-09: `http://…/#k=…` от камерата отваряше уеб версията по HTTP в LAN.
+    url = rs.pairing_url("192.168.1.5", 8765, KEY, "my pc")
+    assert url.startswith("genesisremote://pair#")
+    assert "u=http%3A%2F%2F192.168.1.5%3A8765" in url.split("#", 1)[1].split("&")
+    # Уеб версията (iPhone без приложението) — само при изрично --web.
+    web = rs.pairing_url("192.168.1.5", 8765, KEY, "my pc", web=True)
+    assert web.startswith("http://192.168.1.5:8765/#k=")
 
 
 # ── the session ────────────────────────────────────────────────────────────
@@ -186,6 +196,160 @@ def test_a_phone_that_missed_too_much_gets_the_whole_log() -> None:
     assert got["reset"] is True and len(got["events"]) == rs._EVENT_LOG
 
 
+def test_a_cold_start_after_a_long_session_gets_a_bounded_reply() -> None:
+    """Одит 2026-10-11: `events after=0` (всеки студен старт на приложението)
+    след 1000 изхода на инструменти беше 7.3 MiB, а open() на телефона го
+    декодираше 1.1–5 s на JS нишката. Сега най-новите в ~512 KiB и reset."""
+    session, _ = _session()
+    ui = rs.RemoteTurnUI(session)
+    for i in range(1000):
+        ui.tool("RUN_CMD", f"ред {i} " + "изход от теста " * 400)
+    ui.assistant("последно")
+    server = rs.RemoteServer(KEY, session, name="pc")
+    payload = _request("events", after=0, wait=0)
+    reply, rid = server.handle(_client_seal(KEY, payload))
+    sealed = json.dumps(server.seal(reply, rid))
+    assert len(sealed) <= 1 << 20
+    opened = _client_open(KEY, json.loads(sealed), rid)
+    assert opened["reset"] is True and opened["events"][-1]["text"] == "последно"
+    assert opened["last"] == opened["events"][-1]["seq"]
+    # Обикновеното допитване „какво има след N“ не се пипа.
+    small = session.events_after(opened["last"] - 3)
+    assert small["reset"] is False and len(small["events"]) == 3
+
+
+def test_a_cold_start_before_the_log_rotates_gets_one_bounded_page() -> None:
+    """Преглед 2026-10-11: докато дневникът не е завъртян (първото събитие е
+    1), `after=0` не беше reset — над тавана телефонът теглеше дневника от
+    НАЙ-СТАРИТЕ, 7 страници и 3.3 MB за 450 инструмента. Без история на
+    телефона — най-новите в една страница и reset."""
+    session, _ = _session()
+    ui = rs.RemoteTurnUI(session)
+    for i in range(450):
+        ui.tool("RUN_CMD", f"ред {i} " + "изход " * 1000)
+    ui.assistant("последно")
+    got = session.events_after(0)
+    assert got["events"][0]["seq"] > 1, "тестът иска страница под целия дневник"
+    assert got["reset"] is True and got["more"] is False
+    assert got["events"][-1]["text"] == "последно" and got["last"] == got["events"][-1]["seq"]
+    assert len(rs.utf8_bytes(json.dumps(got["events"], ensure_ascii=False))) <= \
+        rs._REPLY_BYTES + 8 * 1024
+    # Празен дневник: reset без събития, телефонът няма какво да подменя.
+    empty, _ = _session()
+    assert empty.events_after(0)["events"] == []
+
+
+def test_a_phone_that_slept_through_a_long_run_pages_from_where_it_was() -> None:
+    """Одит 2026-10-11: телефонът е настигнал (after=N), заключва се, агентът
+    прави 200 инструмента с кирилски изход. Над тавана сървърът пращаше
+    НАЙ-НОВИТЕ с reset — дупката от ~130 събития и собствените съобщения на
+    телефона изчезваха. Сега: най-старите след N, "more", без дупка."""
+    session, _ = _session()
+    ui = rs.RemoteTurnUI(session)
+    session.emit("user", text="здравей")
+    caught_up = session.events_after(0)["last"]
+    session.emit("user", text="много")
+    for i in range(200):
+        ui.tool("RUN_CMD", f"ред {i} " + "изход " * 700)
+    total = caught_up + 201
+    after, pages, seqs = caught_up, 0, []
+    while True:
+        got = session.events_after(after)
+        pages += 1
+        assert got["reset"] is False
+        assert len(utf8 := rs.utf8_bytes(json.dumps(got["events"], ensure_ascii=False))) <= \
+            rs._REPLY_BYTES + 8 * 1024, len(utf8)
+        seqs += [e["seq"] for e in got["events"]]
+        assert got["last"] == got["events"][-1]["seq"]
+        after = got["last"]
+        if not got["more"]:
+            break
+    assert pages > 1
+    assert seqs == list(range(caught_up + 1, total + 1)), "без дупка и без повторение"
+    assert session.events_after(caught_up)["events"][0]["text"] == "много"
+    # Под тавана — един отговор, "more" е false.
+    assert session.events_after(total - 2)["more"] is False
+
+
+def test_a_retried_send_with_the_same_mid_runs_once() -> None:
+    """Одит 2026-10-11: отговорът на `send` се губи (LAN, 15 s таймаут),
+    телефонът казва „няма връзка“, операторът натиска пак — ходът вървеше
+    два пъти. Със същия `mid` вторият опит получава първия отговор."""
+    session, runner = _session()
+    server = rs.RemoteServer(KEY, session, name="pc")
+
+    def send(text: str, mid: str | None) -> dict:
+        payload = _request("send", text=text, **({"mid": mid} if mid else {}))
+        reply, _ = server.handle(_client_seal(KEY, payload))
+        return reply
+
+    assert send("/plan", "m-0000000001") == {"ok": True}
+    _wait_idle(session)
+    assert send("/plan", "m-0000000001") == {"ok": True}
+    _wait_idle(session)
+    assert runner.texts == ["/plan"]
+    # Друг mid (или без mid, по-старо приложение) — нов ход.
+    assert send("/plan", "m-0000000002") == {"ok": True}
+    _wait_idle(session)
+    assert send("/plan", None) == {"ok": True}
+    _wait_idle(session)
+    assert runner.texts == ["/plan"] * 3
+
+
+def test_a_busy_send_is_not_remembered_and_can_be_retried() -> None:
+    gate = threading.Event()
+    session, runner = _session(Recorder(block=gate))
+    server = rs.RemoteServer(KEY, session, name="pc")
+
+    def send(text: str, mid: str) -> dict:
+        reply, _ = server.handle(_client_seal(KEY, _request("send", text=text, mid=mid)))
+        return reply
+
+    assert send("първо", "mid-first-01")["ok"]
+    assert send("второ", "mid-second-1") == {"ok": False, "error": "busy"}
+    gate.set()
+    _wait_idle(session)
+    assert send("второ", "mid-second-1") == {"ok": True}
+    _wait_idle(session)
+    assert runner.texts == ["първо", "второ"]
+
+
+def test_remembered_mids_are_bounded() -> None:
+    session, _ = _session()
+    server = rs.RemoteServer(KEY, session, name="pc")
+    for i in range(rs._SENT_MIDS + 5):
+        payload = _request("send", text=f"т{i}", mid=f"mid-{i:08d}")
+        assert server.handle(_client_seal(KEY, payload))[0] == {"ok": True}
+        _wait_idle(session)
+    assert len(server._sent) == rs._SENT_MIDS
+    assert "mid-00000000" not in server._sent and f"mid-{rs._SENT_MIDS + 4:08d}" in server._sent
+
+
+def test_events_name_the_accepted_mids() -> None:
+    """Вълна 5, 2026-10-11: телефонът забравяше `mid` само по своето балонче;
+    reset страница без него или „/clear“ (няма балонче) оставяха стария `mid`
+    и нарочното повторение се поглъщаше. Сега `events` носи приетите `mid`."""
+    gate = threading.Event()
+    session, _ = _session(Recorder(block=gate))
+    server = rs.RemoteServer(KEY, session, name="pc", clear=lambda: None)
+
+    def call(op: str, **args) -> dict:
+        return server.handle(_client_seal(KEY, _request(op, **args)))[0]
+
+    assert call("send", text="първо", mid="mid-first-01")["ok"]
+    assert call("send", text="второ", mid="mid-busy-001") == {"ok": False, "error": "busy"}
+    gate.set()
+    _wait_idle(session)
+    assert call("send", text="/clear", mid="mid-clear-01")["ok"]
+    mids = call("events", after=0)["mids"]
+    assert mids == ["mid-first-01", "mid-clear-01"], "„busy“ не е прието"
+    for i in range(rs._ACK_MIDS + 3):
+        call("send", text=f"т{i}", mid=f"mid-{i:08d}")
+        _wait_idle(session)
+    mids = call("events", after=0)["mids"]
+    assert len(mids) == rs._ACK_MIDS and mids[-1] == f"mid-{rs._ACK_MIDS + 2:08d}"
+
+
 def test_confirm_is_answered_from_the_phone() -> None:
     session, _ = _session(Recorder(confirm=True))
     session.send("clean")
@@ -200,6 +364,24 @@ def test_confirm_is_answered_from_the_phone() -> None:
     _wait_idle(session)
     texts = [e.get("text") for e in session.events_after(0)["events"]]
     assert "allowed=True" in texts
+
+
+def test_the_first_answer_to_a_confirm_wins() -> None:
+    """Две бързи докосвания („Откажи“, после „Изпълни“) не обръщат отказа."""
+    import threading
+    session, _ = _session()
+    result: list[bool] = []
+    t = threading.Thread(target=lambda: result.append(session.confirm("rm -rf build", ["риск"], timeout=5)))
+    t.start()
+    deadline = time.time() + 5
+    while not session._pending:
+        assert time.time() < deadline
+        time.sleep(0.01)
+    cid = next(iter(session._pending))
+    assert session.answer(cid, False) is True
+    assert session.answer(cid, True) is False
+    t.join(5)
+    assert result == [False]
 
 
 def test_unanswered_confirm_is_a_no() -> None:
@@ -318,6 +500,99 @@ def test_guessing_is_slowed_down(live) -> None:
     assert codes[0] == 401 and codes[-1] == 429
 
 
+def test_a_request_error_with_the_right_key_is_not_a_401(live) -> None:
+    """Одит 2026-10-11: непозната операция (по-ново приложение) или текст,
+    който JS trim() пази, а Python strip() изпразва ("\x1c"), бяха 401 —
+    телефонът казваше „ключът вече не се приема, сдвои отново“, а 30 такива
+    заключваха самия сдвоен телефон за минута."""
+    base, session, _ = live
+    assert _call(base, "newer_app_op") == {"ok": False, "error": "unknown_op"}
+    assert _call(base, "send", text="\x1c") == {"ok": False, "error": "empty"}
+    assert _call(base, "send", text=" \x85 ") == {"ok": False, "error": "empty"}
+    assert _call(base, "events", after="x") == {"ok": False, "error": "bad_args"}
+    for _ in range(35):
+        _call(base, "newer_app_op")      # 200 всеки път, не се брои за провал
+    assert _call(base, "status")["ok"]
+    assert session.events_after(0)["events"] == []
+
+
+def test_failures_from_the_phones_address_do_not_lock_out_the_paired_phone(live) -> None:
+    """Одит 2026-10-11: спирачката беше първа и по адрес — страница в браузъра
+    на самия телефон (30 POST-а text/plain, без preflight) или съсед зад
+    същия NAT заключваше сдвоения телефон. Сега заявка, която се отваря с
+    ключа, минава; провалите пак се броят и получават 429."""
+    base, _, _ = live
+    codes = [_post(base, b"x")[0] for _ in range(35)]
+    assert codes[0] == 401 and codes[-1] == 429
+    assert _call(base, "status")["ok"]
+    assert _post(base, b"x")[0] == 429
+    # Повторен (записан) плик с верния ключ не е „отворен“ — спира се.
+    payload = _request("status")
+    body = json.dumps(_client_seal(KEY, payload)).encode()
+    assert _post(base, body)[0] == 200
+    assert _post(base, body)[0] == 429
+
+
+def test_a_braked_address_gets_429_before_parsing_a_body_that_is_not_an_envelope(
+        live, monkeypatch) -> None:
+    """Преглед 2026-10-11: след преместването на спирачката след плика всяка
+    спряна заявка (240 KiB "[1,1,…]") минаваше през json.loads и handle() —
+    ~10 ms работа вместо 1.5 ms. Над спирачката само тяло с вида на плик
+    стига до ключа; сдвоеният телефон пак минава."""
+    base, _, _ = live
+    opened: list[int] = []
+    real = rs.RemoteServer.handle
+
+    def counting(self, envelope):
+        opened.append(1)
+        return real(self, envelope)
+
+    monkeypatch.setattr(rs.RemoteServer, "handle", counting)
+    codes = [_post(base, b"x")[0] for _ in range(31)]
+    assert codes[-1] == 429
+    before = len(opened)
+    junk = b"[" + b"1," * (120 * 1024) + b"1]"
+    assert [_post(base, junk)[0] for _ in range(5)] == [429] * 5
+    assert _post(base, json.dumps({"v": 1, "n": 1, "c": []}).encode())[0] == 429
+    assert len(opened) == before, "спряна заявка без вида на плик не се разчита"
+    assert _call(base, "status")["ok"]
+
+
+def test_deeply_nested_json_is_a_counted_failure_not_a_traceback(live, capsys) -> None:
+    """Одит 2026-10-11: `[` × 200 000 без ключ даваше RecursionError — traceback
+    в терминала на оператора на всяка заявка и нито един провал за спирачката."""
+    base, _, _ = live
+    codes = [_post(base, b"[" * 200_000)[0] for _ in range(35)]
+    assert codes[0] == 401 and codes[-1] == 429
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_one_address_cannot_take_every_connection_slot(live) -> None:
+    """Одит 2026-10-11: 64 празни връзки от един адрес без ключ заемаха всички
+    места за 30 s — сдвоеният телефон получаваше „RemoteDisconnected“, а
+    спирачката не виждаше нито един провал."""
+    import http.client
+    import socket
+    base, _, _ = live
+    port = int(base.rsplit(":", 1)[1])
+    try:
+        probe = socket.create_connection(("127.0.0.1", port), source_address=("127.0.0.2", 0))
+        probe.close()
+    except OSError:
+        pytest.skip("тук няма втори loopback адрес")
+    idle = [socket.create_connection(("127.0.0.1", port)) for _ in range(64)]
+    try:
+        time.sleep(0.3)
+        phone = http.client.HTTPConnection("127.0.0.1", port, timeout=5,
+                                           source_address=("127.0.0.2", 0))
+        phone.request("GET", "/api/hello")
+        assert phone.getresponse().status == 200
+        phone.close()
+    finally:
+        for sock in idle:
+            sock.close()
+
+
 def test_the_web_page_falls_back_to_a_landing_page(live) -> None:
     base, _, _ = live
     with urllib.request.urlopen(base + "/", timeout=5) as r:
@@ -412,5 +687,233 @@ def test_command_op_is_unknown_without_commands() -> None:
     session, _ = _session()
     server = rs.RemoteServer(KEY, session, name="x")
     assert server.hello()["features"] == []
-    with pytest.raises(rs.ProtocolError):
-        server._dispatch({"op": "command", "name": "status"})
+    assert server._dispatch({"op": "command", "name": "status"}) == {"ok": False, "error": "unknown_op"}
+
+
+def test_the_phone_stop_interrupts_a_running_command(monkeypatch, tmp_path) -> None:
+    """Одит 2026-10-11: ■ на телефона не стигаше до работеща команда — ходът
+    свърши 7.1 s след Стоп, `sleep 8` довърши с rc=0."""
+    from collections import deque
+
+    import genesis_terminal_agent as gta
+
+    monkeypatch.setattr(gta, "HISTORY_DIR", tmp_path)
+    monkeypatch.setattr(gta, "_remember", lambda *a: None)
+    gta.genesis_skills.set_workspace(tmp_path)
+    call = {"id": "c1", "type": "function",
+            "function": {"name": "RUN_CMD", "arguments": json.dumps({"command": "sleep 8"})}}
+    replies = iter([("running tests", [call]), ("done", [])])
+    monkeypatch.setattr(gta, "ask_genesis", lambda *a, **k: next(replies))
+    session = rs.RemoteSession(lambda text, ui: gta.run_turn(
+        deque([{"role": "system", "content": "s"}], maxlen=50), text, ui))
+    assert session.send("run the tests")
+    deadline = time.monotonic() + 10
+    while not any(e["type"] == "thinking" for e in session.events_after(0)["events"]):
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+    time.sleep(1.0)
+    stopped_at = time.monotonic()
+    session.request_stop()
+    while session.busy and time.monotonic() - stopped_at < 15:
+        time.sleep(0.05)
+    assert time.monotonic() - stopped_at < 3, "the command ran to the end after Stop"
+    tools = [e for e in session.events_after(0)["events"] if e["type"] == "tool"]
+    assert tools and "Спряно от оператора" in tools[-1]["result"]
+
+
+def test_a_replay_is_still_rejected_after_a_restart(tmp_path) -> None:
+    """Одит 2026-10-07: видяното беше само в паметта — след рестарт на
+    `genesis serve` записано съобщение се изпълняваше пак."""
+    path = tmp_path / "remote_seen.json"
+    payload = _request("send", text="rm -rf build && deploy")
+    rs.ReplayGuard(path=path).check(payload)
+    with pytest.raises(rs.ProtocolError, match="replayed"):
+        rs.ReplayGuard(path=path).check(payload)          # нов процес, същият файл
+
+
+def test_a_broken_seen_file_does_not_stop_the_server(tmp_path) -> None:
+    path = tmp_path / "remote_seen.json"
+    path.write_text("{not json", encoding="utf-8")
+    rs.ReplayGuard(path=path).check(_request("status"))
+
+
+# ── одит на QR сдвояването (2026-10-09) ──────────────────────────────────────
+
+def test_an_ipv6_host_gets_brackets_in_the_code() -> None:
+    url = rs.pairing_url("fd7a:115c:a1e0::1", 8765, KEY, "pc")
+    assert "u=http%3A%2F%2F%5Bfd7a%3A115c%3Aa1e0%3A%3A1%5D%3A8765" in url
+
+
+@pytest.fixture
+def no_listen(monkeypatch):
+    """serve() никога не слуша и не пипа глобалния sandbox — ако проверката
+    липсва, тестът пада (код 1), вместо да виси на serve_forever."""
+    from genesis_agent import sandbox
+
+    def refuse(self, host, port):
+        raise OSError("тест: без слушане")
+    monkeypatch.setattr(rs.RemoteServer, "make_http", refuse)
+    monkeypatch.setattr(sandbox, "set_policy", lambda policy: None)
+
+
+@pytest.mark.parametrize("host", ["PC_1.local", "user@pc", "pc/x", "pc local"])
+def test_serve_refuses_a_host_the_phone_cannot_read(host, capsys, no_listen) -> None:
+    assert rs.serve(["--host", host]) == 2
+    assert "--host" in capsys.readouterr().out
+
+
+def test_serve_web_without_the_web_build_says_so(monkeypatch, capsys, no_listen) -> None:
+    monkeypatch.setattr(rs, "_web_root", lambda: None)
+    assert rs.serve(["--web"]) == 2
+    assert "--web" in capsys.readouterr().out
+
+
+# ── a file name that is not UTF-8 ───────────────────────────────────────────
+
+def test_a_non_utf8_file_name_does_not_break_the_event_stream(live) -> None:
+    """Одит 2026-10-11: име на файл в cp1251 („отчет.txt“) стига до LIST_DIR като
+    lone surrogates; seal() гърмеше с UnicodeEncodeError и всяко `events after=0`
+    затваряше връзката — телефонът показваше „няма връзка“ до края на сесията."""
+    base, session, _ = live
+    rs.RemoteTurnUI(session).tool("LIST_DIR", "  main.py\n  \udcee\udcf2\udcf7\udce5\udcf2.txt")
+    rs.RemoteTurnUI(session).assistant("Готово.")
+    for _ in range(2):
+        got = _call(base, "events", after=0, wait=0)
+        tools = [e for e in got["events"] if e["type"] == "tool"]
+        assert tools and "main.py" in tools[0]["result"] and ".txt" in tools[0]["result"]
+        assert got["events"][-1]["text"] == "Готово."
+
+
+# ── Вълна 5 (2026-10-11): повторна проверка на вълна 4 ─────────────────────
+
+def test_a_single_huge_event_does_not_break_the_reply_cap() -> None:
+    """Едно събитие над тавана влизаше цяло: отговор от 600 000 знака даваше
+    1.2 MB при студен старт. Сега текстът се орязва и се белязва."""
+    for after in (0, 1):
+        session, _ = _session()
+        session.emit("user", text="кажи много")
+        session.emit("assistant", text="я" * 600_000)
+        got = session.events_after(after)
+        size = len(rs.utf8_bytes(json.dumps(got, ensure_ascii=False)))
+        assert size <= rs._REPLY_BYTES + 8 * 1024, (after, size)
+        last = got["events"][-1]
+        assert last["type"] == "assistant" and last["clipped"] is True
+        assert last["text"].startswith("яяя") and "терминала" in last["text"]
+        # Дневникът не се пипа: следващият отговор пак реже копие.
+        assert len(session._events[-1]["text"]) == 600_000
+    # Всяко поле от управляващи знаци (6 байта в JSON) също влиза.
+    session, _ = _session()
+    session.emit("assistant", text="\x01" * 300_000)
+    size = len(rs.utf8_bytes(json.dumps(session.events_after(0), ensure_ascii=False)))
+    assert size <= rs._REPLY_BYTES + 8 * 1024, size
+
+
+def _braked(base: str) -> None:
+    codes = [_post(base, b"x")[0] for _ in range(31)]
+    assert codes[-1] == 429
+
+
+def _raw_post(base: str, declared: int, sent: bytes, wait: float) -> tuple[bytes, float]:
+    """POST с обявена дължина `declared`, от която са пратени само `sent`."""
+    import socket
+    port = int(base.rsplit(":", 1)[1])
+    sock = socket.create_connection(("127.0.0.1", port), timeout=wait)
+    try:
+        sock.sendall(b"POST /api/v1 HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                     + f"Content-Length: {declared}\r\n\r\n".encode() + sent)
+        started = time.monotonic()
+        try:
+            got = sock.recv(4096)
+        except (TimeoutError, ConnectionError):
+            got = b""
+        return got, time.monotonic() - started
+    finally:
+        sock.close()
+
+
+def test_a_braked_address_is_refused_before_its_body_is_read(live) -> None:
+    """Преглед на вълна 4: над спирачката сървърът пак четеше цялото тяло
+    (до 256 KiB) — бавен клиент, който обяви 200 KiB и прати 1 KiB, държеше
+    нишка и място 30 s за всяка заявка. Преди вълна 4 спряният адрес получаваше
+    429 без четене. Сега стига началото на тялото: не е плик → 429 веднага."""
+    base, _, _ = live
+    _braked(base)
+    got, took = _raw_post(base, 200 * 1024, b"[" + b"1," * 512, wait=5)
+    assert got.startswith((b"HTTP/1.0 429", b"HTTP/1.1 429")), got[:40]
+    assert took < 2.0, took
+    # Сдвоеният телефон зад същия адрес пак минава.
+    assert _call(base, "status")["ok"]
+
+
+def test_a_braked_address_that_sends_no_body_is_dropped_fast(live) -> None:
+    base, _, _ = live
+    _braked(base)
+    _, took = _raw_post(base, 200 * 1024, b"", wait=10)
+    assert took < 5.0, took
+    assert _call(base, "status")["ok"]
+
+
+# Начало на плик: публично, ~30 байта, минава _ENVELOPE_HEAD.
+_ENVELOPE_PREFIX = b'{"v":1,"n":"abcdefgh","c":"' + b"A" * 200
+
+
+def _open_post(base: str, declared: int, sent: bytes):
+    import socket
+    port = int(base.rsplit(":", 1)[1])
+    sock = socket.create_connection(("127.0.0.1", port), timeout=10)
+    sock.sendall(b"POST /api/v1 HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                 + f"Content-Length: {declared}\r\n\r\n".encode() + sent)
+    return sock
+
+
+def _closed_within(sock, seconds: float, trickle: bytes = b"") -> float | None:
+    """След колко секунди сървърът отговаря или затваря (None — не го прави).
+    С `trickle` праща по един байт на 1.5 s, докато чака."""
+    started = time.monotonic()
+    try:
+        while time.monotonic() - started < seconds:
+            sock.settimeout(1.5)
+            try:
+                sock.recv(4096)
+                return time.monotonic() - started
+            except TimeoutError:
+                if trickle:
+                    sock.sendall(trickle)
+            except ConnectionError:
+                return time.monotonic() - started
+        return None
+    finally:
+        sock.close()
+
+
+def test_a_braked_envelope_prefix_that_stalls_is_dropped(live) -> None:
+    """Ревю на вълна 5 (2026-10-11): спрян адрес, пратил публичното начало на
+    плик и спрял, се четеше нататък с 30 s на всяко recv — държеше нишка и
+    място на адреса; 8 s по-късно връзката още беше отворена."""
+    base, _, _ = live
+    _braked(base)
+    took = _closed_within(_open_post(base, 200 * 1024, _ENVELOPE_PREFIX), 8)
+    assert took is not None and took < rs._BRAKED_READ_S + 1.5, took
+
+
+def test_a_braked_trickle_is_dropped_on_a_total_deadline(live) -> None:
+    """Таймаутът беше за едно recv: байт на 1.5 s не стигаше до 429 и след 12 s."""
+    base, _, _ = live
+    _braked(base)
+    took = _closed_within(_open_post(base, 200 * 1024, b"["), 9, trickle=b"1")
+    assert took is not None and took < rs._BRAKED_READ_S + 2, took
+
+
+def test_stalled_braked_envelopes_do_not_lock_out_the_phone(live) -> None:
+    """16 спрели начала на плик заемаха всички места на адреса: сдвоеният
+    телефон 3 s по-късно получаваше затворена връзка без отговор."""
+    base, _, _ = live
+    _braked(base)
+    socks = [_open_post(base, 200 * 1024, _ENVELOPE_PREFIX)
+             for _ in range(rs._QuietServer._MAX_PER_IP)]
+    try:
+        time.sleep(rs._BRAKED_READ_S + 1.5)
+        assert _call(base, "status")["ok"]
+    finally:
+        for sock in socks:
+            sock.close()

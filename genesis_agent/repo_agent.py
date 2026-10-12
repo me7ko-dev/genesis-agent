@@ -34,7 +34,7 @@ from __future__ import annotations
 import difflib
 import json
 import os
-import subprocess
+import re
 import tarfile
 import time
 from dataclasses import dataclass, field
@@ -42,7 +42,8 @@ from pathlib import Path
 
 from genesis_agent.brain import Brain
 from genesis_agent.repo_map import detect_project, repo_map
-from genesis_agent.tool_schemas import REPAIR_TOOLS
+from genesis_agent.review import safe_git
+from genesis_agent.tool_schemas import REPAIR_TOOLS, load_tool_arguments
 
 # Нарочно в HOME, а НЕ в DATA_DIR: при git checkout DATA_DIR сочи вътре в самото
 # repo, а тук се пазят tar архиви на ЧУЖДИ проекти — те нямат работа в дървото на
@@ -85,24 +86,107 @@ class RepairOutcome:
 
 # ── Checkpoints ──────────────────────────────────────────────────────────────
 
+# Имена, които са и обичайни папки с код (`mypkg/build/builder.py`,
+# `app/env/settings.py`): пропускат се само в КОРЕНА на проекта. Одит
+# 2026-10-07: пропускани на всяка дълбочина, те изчезваха от снимката, а
+# `--revert` пак казваше „✓ върнат“ — без да ги върне.
+_SKIP_ONLY_AT_TOP = {"build", "dist", "env", "target"}
+
+
+def _skip_in_snapshot(rel_parts: tuple[str, ...], root: Path | None = None) -> bool:
+    for depth, part in enumerate(rel_parts):
+        if part not in _SKIP_IN_SNAPSHOT:
+            continue
+        if depth == 0 or part not in _SKIP_ONLY_AT_TOP:
+            return True
+        # Вложено `backend/env/`, `rustlib/target/`: артефакт е, ако си личи —
+        # venv (pyvenv.cfg), кеш (CACHEDIR.TAG) или `target` до Cargo.toml.
+        if root is not None:
+            here = root.joinpath(*rel_parts[:depth + 1])
+            if ((here / "pyvenv.cfg").is_file() or (here / "CACHEDIR.TAG").is_file()
+                    or (part == "target" and (here.parent / "Cargo.toml").is_file())):
+                return True
+    return False
+
+
 def _tree_size_mb(root: Path) -> float:
+    # os.walk с подрязване, не rglob: rglob обхождаше целия node_modules и чак
+    # после го пропускаше — 2.4 s на 100k файла преди всеки `genesis fix`
+    # (2026-10-09). Пропуснатата папка значи пропуснато и всичко под нея.
     total = 0
-    for p in root.rglob("*"):
-        if any(part in _SKIP_IN_SNAPSHOT for part in p.parts):
-            continue
-        try:
-            if p.is_file():
-                total += p.stat().st_size
-        except OSError:
-            continue
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Спрямо корена: проект в `~/build/app` иначе мереше 0 MB и минаваше тавана.
+        rel = Path(dirpath).relative_to(root).parts
+        dirnames[:] = [d for d in dirnames if not _skip_in_snapshot((*rel, d), root)]
+        for name in filenames:
+            p = Path(dirpath) / name
+            if _skip_in_snapshot((*rel, name), root):
+                continue
+            try:
+                if p.is_file():
+                    total += p.stat().st_size
+            except OSError:
+                continue
     return total / (1024 * 1024)
 
 
+_SNAPSHOT_ROOT: Path | None = None
+
+
 def _snapshot_filter(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
-    parts = Path(info.name).parts
-    if any(part in _SKIP_IN_SNAPSHOT for part in parts):
+    parts = tuple(p for p in Path(info.name).parts if p != ".")
+    if _skip_in_snapshot(parts, _SNAPSHOT_ROOT):
         return None
     return info
+
+
+def _new_checkpoint_path(root: Path) -> tuple[Path, str]:
+    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with _suppress_oserror():
+        os.chmod(CHECKPOINT_DIR, 0o700)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dest = CHECKPOINT_DIR / f"{root.name}-{stamp}.tar.gz"
+    n = 2
+    while dest.exists():   # две снимки в една секунда (напр. преди --revert)
+        dest = CHECKPOINT_DIR / f"{root.name}-{stamp}-{n}.tar.gz"
+        n += 1
+    return dest, stamp
+
+
+def _backup_overwritten(root: Path, cp: Path) -> Path | None:
+    """Снимка САМО на файловете, които връщането към `cp` ще презапише.
+
+    Резерва, когато пълната снимка преди --revert не става (над тавана, OSError):
+    одит 2026-10-11 — тогава `--revert` презаписваше ръчната работа след
+    снимката без никакво копие и пак казваше „✓“. Тези файлове са малко и
+    таванът не важи за тях. None — нищо не би се презаписало."""
+    changed: list[str] = []
+    with tarfile.open(cp, "r:gz") as tar:
+        for member in tar.getmembers():
+            if not member.isfile():
+                continue
+            rel = Path(member.name).as_posix().removeprefix("./")
+            target = root / rel
+            if target.is_symlink() or not target.is_file():
+                continue
+            try:
+                if target.stat().st_size == member.size:
+                    old = tar.extractfile(member)
+                    if old is not None and old.read() == target.read_bytes():
+                        continue
+            except OSError:
+                pass
+            changed.append(rel)
+    if not changed:
+        return None
+    dest, stamp = _new_checkpoint_path(root)
+    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as raw, tarfile.open(fileobj=raw, mode="w:gz") as tar:
+        for rel in changed:
+            tar.add(root / rel, arcname=f"./{rel}", recursive=False)
+    meta = {"project": str(root), "created": stamp, "partial": True, "files": changed}
+    dest.with_suffix(".json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    return dest
 
 
 def create_checkpoint(root: Path) -> Path:
@@ -115,11 +199,22 @@ def create_checkpoint(root: Path) -> Path:
             f"(таван {_MAX_SNAPSHOT_MB}MB). Комитни в git преди поправката: "
             "тогава `git diff` и `git checkout .` вършат същата работа."
         )
-    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    dest = CHECKPOINT_DIR / f"{root.name}-{stamp}.tar.gz"
-    with tarfile.open(dest, "w:gz") as tar:
-        tar.add(root, arcname=".", filter=_snapshot_filter)
+    # Снимката носи и .env на проекта: само за собственика (одит 2026-10-09 —
+    # ~/.genesis ставаше 0755, а архивът 0644, четим от всеки на машината).
+    try:
+        from genesis_agent.paths import ensure_genesis_home
+        ensure_genesis_home()
+    except Exception:
+        pass
+    dest, stamp = _new_checkpoint_path(root)
+    global _SNAPSHOT_ROOT
+    _SNAPSHOT_ROOT = root
+    try:
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as raw, tarfile.open(fileobj=raw, mode="w:gz") as tar:
+            tar.add(root, arcname=".", filter=_snapshot_filter)
+    finally:
+        _SNAPSHOT_ROOT = None
     meta = {
         "project": str(root),
         "created": stamp,
@@ -130,14 +225,87 @@ def create_checkpoint(root: Path) -> Path:
     return dest
 
 
+class _suppress_oserror:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, kind, *_rest) -> bool:
+        return kind is not None and issubclass(kind, OSError)
+
+
+_FINGERPRINT_MAX = 50_000
+
+
+def _fingerprint(root: Path) -> dict[str, tuple[int, int]]:
+    """{път: (mtime_ns, размер)} на файловете в проекта — без пропусканите папки.
+
+    Така се виждат и промените, направени с команда (`sed -i`, patch): само
+    EDIT_FILE/WRITE_FILE се броеха и такава поправка излизаше „няма промяна“
+    и провал, без тестовете да се пуснат пак (одит 2026-10-09)."""
+    out: dict[str, tuple[int, int]] = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        base = Path(dirpath)
+        rel_dir = base.relative_to(root).parts
+        dirnames[:] = [d for d in dirnames
+                       if d != "__pycache__" and not _skip_in_snapshot(rel_dir + (d,), root)]
+        for name in filenames:
+            if name.endswith((".pyc", ".pyo")):
+                continue
+            try:
+                st = (base / name).stat()
+            except OSError:
+                continue
+            out[(base / name).relative_to(root).as_posix()] = (st.st_mtime_ns, st.st_size)
+            if len(out) >= _FINGERPRINT_MAX:
+                return out
+    return out
+
+
+def _changed_since(root: Path, before: dict[str, tuple[int, int]]) -> list[str]:
+    now = _fingerprint(root)
+    return sorted(rel for rel, stamp in now.items() if before.get(rel) != stamp)
+
+
+def _drop_stale_bytecode(root: Path, rels: list[str]) -> None:
+    """Махa .pyc на току-що променените модули: две редакции с еднаква дължина
+    в една секунда караха pytest да внесе стария код и присъдата беше грешна."""
+    for rel in set(rels):
+        if not rel.endswith(".py"):
+            continue
+        cache = (root / rel).parent / "__pycache__"
+        if cache.is_dir():
+            for pyc in cache.glob(f"{Path(rel).stem}.*.pyc"):
+                with _suppress_oserror():
+                    pyc.unlink()
+
+
+def _git_raw(root: Path, *args: str) -> str:
+    """Като _git, но без strip — за `-z` изход."""
+    return safe_git(root, *args)[1]
+
+
 def _git(root: Path, *args: str) -> str:
-    """git output, or "" when this is not a repo / git is unavailable."""
-    try:
-        proc = subprocess.run(["git", "-C", str(root), *args],
-                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, check=False)
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
-    return proc.stdout.strip() if proc.returncode == 0 else ""
+    """git output, or "" when this is not a repo / git is unavailable.
+
+    През review.safe_git: `genesis fix` върви и върху изтеглени проекти, а
+    подхвърлен `.git/config` (core.fsmonitor, филтър, diff.external) пускаше
+    програма при `git status`/`git diff` (одит 2026-10-11, възпроизведено)."""
+    return safe_git(root, *args)[1].strip()
+
+
+def _in_git(root: Path) -> bool:
+    """Дали проектът е под git — и когато е ПОДПАПКА на хранилище.
+
+    Одит 2026-10-11: проверката беше `(root / ".git").exists()`, а `genesis fix
+    mono/backend` (monorepo) излизаше „без git“ — без принудителна снимка върху
+    некомитнатата работа, с празен дифф и с „връщане няма“. Брои се само
+    хранилище, което следи файлове ТУК: неследена папка в dotfiles репо в
+    $HOME не е „под git“ — `git checkout` нищо не би върнал."""
+    if (root / ".git").exists():
+        return True
+    if not _git(root, "rev-parse", "--show-toplevel"):
+        return False
+    return bool(_git(root, "ls-files", "--", "."))
 
 
 def latest_checkpoint(root: Path) -> Path | None:
@@ -155,10 +323,16 @@ def latest_checkpoint(root: Path) -> Path | None:
             # `.with_suffix` on `foo.tar.json` yields `foo.tar.gz` — the sidecar
             # is written next to the archive, so this is the archive's path.
             if tar_path.exists():
-                mine.append((meta.get("created", ""), tar_path))
+                # По време на файла, не по име: две снимки в една секунда
+                # (резервната преди --revert) иначе се подреждаха по азбука.
+                try:
+                    stamp = tar_path.stat().st_mtime_ns
+                except OSError:
+                    continue
+                mine.append((meta.get("created", ""), stamp, tar_path))
     if not mine:
         return None
-    return max(mine)[1]
+    return max(mine)[2]
 
 
 def restore_checkpoint(root: str | Path, checkpoint: str | Path | None = None) -> str:
@@ -167,14 +341,100 @@ def restore_checkpoint(root: str | Path, checkpoint: str | Path | None = None) -
     cp = Path(checkpoint) if checkpoint else latest_checkpoint(root)
     if not cp or not cp.exists():
         return f"❌ Няма намерена снимка за {root}."
-    with tarfile.open(cp, "r:gz") as tar:
-        # Python 3.12+ validates member paths; on older versions the archive is
-        # one we wrote ourselves minutes ago, so there is nothing to filter.
+    # Каквото е направено след снимката (и от човека) се пази в нова снимка
+    # преди връщането: --revert презаписваше и по-късната ръчна работа, без
+    # връщане назад (одит 2026-10-09).
+    backup: Path | None
+    try:
+        backup = create_checkpoint(root)
+    except (RuntimeError, OSError, tarfile.TarError):
         try:
-            tar.extractall(root, filter="data")  # type: ignore[call-arg]
-        except TypeError:
-            tar.extractall(root)
-    return f"✓ {root} е върнат към снимката {cp.name}"
+            backup = _backup_overwritten(root, cp)
+        except (OSError, tarfile.TarError) as e:
+            return (f"❌ Не мога да запазя текущото състояние ({e}) — нищо не е върнато, "
+                    "за да не се загуби работата след снимката.")
+    skipped: list[str] = []
+    in_archive: set[str] = set()
+    with tarfile.open(cp, "r:gz") as tar:
+        # Член по член (одит 2026-10-07): с extractall символна връзка извън
+        # проекта (`shared -> ../common`) хвърляше OutsideDestinationError
+        # посред възстановяването — всичко след нея по азбучен ред оставаше
+        # променено. Връзките се пресъздават такива, каквито бяха; останалото
+        # минава през филтъра "data" (Python 3.12+), а грешка в един член не
+        # спира другите и се казва.
+        for member in tar.getmembers():
+            rel = Path(member.name).as_posix().removeprefix("./")
+            if rel in ("", "."):
+                continue
+            in_archive.add(rel)
+            target = root / rel
+            try:
+                if member.issym():
+                    # Нищо извън проекта (преглед 2026-10-07): родител, който сега
+                    # е връзка навън, или `..`/абсолютно име в архива биха
+                    # изтрили и заместили чужд файл.
+                    if (Path(rel).is_absolute() or ".." in Path(rel).parts
+                            or not target.parent.resolve().is_relative_to(root)):
+                        skipped.append(f"{rel} (извън проекта)")
+                        continue
+                    if target.is_symlink():
+                        if os.readlink(target) == member.linkname:
+                            continue
+                        target.unlink()
+                    elif target.is_dir():
+                        skipped.append(f"{rel} (сега е папка, в снимката — връзка)")
+                        continue
+                    elif target.exists():
+                        target.unlink()
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    os.symlink(member.linkname, target)
+                    continue
+                if member.isdir() and target.is_symlink():
+                    skipped.append(f"{rel} (сега е връзка, в снимката — папка)")
+                    continue
+                try:
+                    tar.extract(member, root, filter="data")  # type: ignore[call-arg]
+                except TypeError:
+                    tar.extract(member, root)
+            except (tarfile.TarError, OSError) as e:
+                skipped.append(f"{rel} ({type(e).__name__})")
+    # Частичната резервна снимка (_backup_overwritten) не съдържа целия проект —
+    # всичко извън нея не е „създадено след снимката“.
+    try:
+        partial = bool(json.loads(cp.with_suffix(".json").read_text(encoding="utf-8")).get("partial"))
+    except (OSError, ValueError, AttributeError):
+        partial = False
+    created = [] if partial else _created_since(root, in_archive)
+    age = ""
+    with _suppress_oserror():
+        hours = (time.time() - cp.stat().st_mtime) / 3600
+        age = f" (отпреди {hours:.0f} ч)" if hours >= 1 else " (отпреди по-малко от час)"
+    lines = [f"{'✓' if not skipped else '⚠️'} {root} е върнат към снимката {cp.name}{age}"]
+    if backup is not None:
+        lines.append(f"  Състоянието отпреди връщането е в {backup.name} — "
+                     f"`genesis fix --revert` пак го връща.")
+    if skipped:
+        lines.append("  НЕ върнати: " + ", ".join(skipped[:10]) + (" …" if len(skipped) > 10 else ""))
+    if created:
+        lines.append("  Файлове, създадени след снимката (оставени — изтрий ги, ако не трябват): "
+                     + ", ".join(created[:10]) + (" …" if len(created) > 10 else ""))
+    return "\n".join(lines)
+
+
+def _created_since(root: Path, in_archive: set[str]) -> list[str]:
+    """Файлове в проекта, които ги няма в снимката (без пропусканите папки)."""
+    out: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        base = Path(dirpath)
+        rel_dir = base.relative_to(root).parts
+        dirnames[:] = [d for d in dirnames if not _skip_in_snapshot(rel_dir + (d,), root)]
+        for name in filenames:
+            rel = (base / name).relative_to(root).as_posix()
+            if rel not in in_archive:
+                out.append(rel)
+            if len(out) > 50:
+                return sorted(out)
+    return sorted(out)
 
 
 # ── Tests ────────────────────────────────────────────────────────────────────
@@ -188,6 +448,9 @@ def run_tests(root: Path, command: str) -> TestRun:
     if res.blocked:
         return TestRun(False, False, f"sandbox отказа командата: {res.stderr}", command)
     out = ((res.stdout or "") + "\n" + (res.stderr or "")).strip()
+    if res.returncode == 5 and "pytest" in command:
+        # pytest: „не се събра нито един тест“ — няма тестове, не падащи тестове.
+        return TestRun(False, False, "pytest не намери нито един тест", command)
     if len(out) > _MAX_TEST_OUTPUT:
         # The tail carries the failure summary; the head carries collection
         # errors. Both matter, the middle rarely does.
@@ -201,18 +464,28 @@ def _diff_from_checkpoint(root: Path, checkpoint: Path, files: list[str]) -> str
     """Unified diff of `files` against the snapshot, for non-git projects."""
     if not files:
         return ""
+    from genesis_agent.code_edit import decode_text, displayable
+
+    # Двете страни — от байтове, със същото разпознаване на кодирането и без
+    # превод на краищата на редовете (e2e 2026-10-11). Измерено: `genesis fix`
+    # в мръсно дърво (тогава дифът е от снимката) на CRLF calc.py показваше
+    # ВСЕКИ ред за сменен — снимката пазеше `\r\n`, а read_text го правеше
+    # `\n`; cp1251 файл излизаше като „�����“ и от двете страни.
+    def text(raw: bytes) -> str:
+        return displayable(decode_text(raw)[0])
+
     out: list[str] = []
     with tarfile.open(checkpoint, "r:gz") as tar:
         for rel in sorted(set(files)):
             try:
                 member = tar.extractfile(f"./{rel}")
-                before = member.read().decode("utf-8", "replace") if member else ""
+                before = text(member.read()) if member else ""
             except KeyError:
                 before = ""  # file did not exist in the snapshot — newly created
             except (OSError, UnicodeDecodeError):
                 continue
             try:
-                after = (root / rel).read_text(encoding="utf-8", errors="replace")
+                after = text((root / rel).read_bytes())
             except OSError:
                 after = ""
             if before == after:
@@ -225,16 +498,37 @@ def _diff_from_checkpoint(root: Path, checkpoint: Path, files: list[str]) -> str
 
 def project_diff(root: Path, checkpoint: Path | None, files: list[str]) -> str:
     """
-    Git is authoritative when available: it also catches files changed by a
-    shell command, which tool-call tracking cannot see.
+    Със снимка дифът е спрямо снимката; без нея — от git (чисто хранилище,
+    тоест `git diff` == поправката).
     """
     root = Path(root)
-    if (root / ".git").exists():
-        d = _git(root, "diff")
-        if d:
-            return d
+    # Снимката е точна: в мръсно хранилище `git diff` на същия файл смесваше
+    # некомитнатата работа на човека с поправката (одит 2026-10-11 — снимката
+    # се прави точно тогава, а дифът пак идваше от git).
     if checkpoint:
         return _diff_from_checkpoint(root, checkpoint, files)
+    if _in_git(root):
+        # Само пипнатите файлове: целият `git diff` показваше и некомитнатата
+        # работа на човека като част от поправката (одит 2026-10-09).
+        # `--relative`: в подпапка на хранилище имената са спрямо проекта.
+        d = _git(root, "diff", "--relative", "--no-ext-diff", "--no-textconv", "--", *files) if files else ""
+        # `git diff` не вижда нови (неследени) файлове — помощен модул, нов
+        # тест. Одит 2026-10-07: поправка САМО с нов файл даваше празен дифф.
+        # Само новите файлове, които поправката е пипнала — не всеки неследен
+        # файл в проекта (200k-редов data.csv); `-z` пази кирилицата в имената.
+        untracked = set(filter(None, _git_raw(root, "ls-files", "--others", "--exclude-standard",
+                                              "-z").split("\0")))
+        touched = {Path(f).as_posix() for f in files}
+        for rel in sorted(untracked & touched)[:20]:
+            try:
+                if (root / rel).stat().st_size > 200_000:
+                    continue
+                after = (root / rel).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            d += ("\n" if d and not d.endswith("\n") else "") + "".join(difflib.unified_diff(
+                [], after.splitlines(keepends=True), fromfile="/dev/null", tofile=f"b/{rel}"))
+        return d
     return ""
 
 
@@ -343,11 +637,13 @@ def _edit_succeeded(result: str) -> bool:
         от него, защото още не е променил нищо.
     genesis_skills слага "✓" при успех и "❌" при отказ и в двата инструмента.
     """
-    return "✓" in (result or "")
+    # Само в заглавието: отказът цитира близки редове от файла и `return "✓ готово"`
+    # в тях се броеше за успех (одит 2026-10-07).
+    return bool(re.match(r"\[(?:EDIT|WRITE)_FILE: [^\n]*?\] ✓", (result or "").lstrip()))
 
 
 def _verify_after_edit(root: Path, cmd: str | None, before: TestRun,
-                       messages: list[dict], say) -> TestRun | None:
+                       messages: list[dict], say, runner=None) -> TestRun | None:
     """Пуска тестовете веднага след успешна редакция (design note, 2026-09-24).
 
     Досега тестовете вървяха едва когато моделът сам реши, че е готов — и
@@ -362,7 +658,7 @@ def _verify_after_edit(root: Path, cmd: str | None, before: TestRun,
     """
     if not cmd or (before.ran and before.passed):
         return None
-    run = run_tests(root, cmd)
+    run = (runner or run_tests)(root, cmd)
     if not run.ran:
         return None
     if run.passed:
@@ -378,9 +674,11 @@ def _verify_after_edit(root: Path, cmd: str | None, before: TestRun,
 def _relative(root: Path, path_str: str) -> str:
     p = Path(path_str)
     if not p.is_absolute():
-        return path_str
+        # `./stats.py` → `stats.py`: иначе търсенето в снимката е `././stats.py`
+        # и целият файл излизаше като нов в диффа.
+        p = root / p
     try:
-        return str(p.resolve().relative_to(root.resolve()))
+        return p.resolve().relative_to(root.resolve()).as_posix()
     except (ValueError, OSError):
         return path_str
 
@@ -410,19 +708,51 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
     say(f"🔎 {root.name}: {info.language}, тестове: {cmd or 'няма открити'}")
 
     snapshot: Path | None = None
+    # Некомитнати промени + поправка = смесени в един `git diff`, а съветът
+    # `git checkout .` триеше и работата на човека (одит 2026-10-09). Тогава
+    # снимка се прави винаги.
+    in_git = _in_git(root)
+    # `-- .`: в monorepo мръсотията на съседна папка не е на този проект.
+    dirty = in_git and bool(_git(root, "status", "--porcelain", "--", "."))
+    if dirty and not checkpoint:
+        say("⚠️  Има некомитнати промени — правя снимка, за да не се смесят с поправката.")
+        checkpoint = True
     if checkpoint:
         try:
             snapshot = create_checkpoint(root)
         except (RuntimeError, OSError) as e:
-            return RepairOutcome(False, f"Снимката не успя, нищо не е променено: {e}")
+            extra = (" Комитни или `git stash` промените си и пусни пак." if dirty else "")
+            return RepairOutcome(False, f"Снимката не успя, нищо не е променено: {e}{extra}")
         say(f"📦 Снимка преди промените: {snapshot.name}")
-    elif (root / ".git").exists():
-        say("↩️  Без снимка — връщане с `git checkout .` (или `--checkpoint` за снимка).")
+    elif in_git:
+        say("↩️  Без снимка — промените се връщат с git (или `--checkpoint` за снимка).")
     else:
         say("⚠️  Без снимка и без git — промените НЯМА как да се върнат. "
             "Пусни с `--checkpoint`, ако искаш снимка.")
 
+    # Отпечатъкът е СЛЕД първия тестов пас, а каквото самият пас пипа (лог,
+    # .coverage, test.db, junit.xml) не се брои за промяна никога: одит
+    # 2026-10-11 — тест, който пише last_run.log, правеше „само описа“ на
+    # модела в ✅ и код 0 с `last_run.log` като „променен файл“.
+    pre_tests = _fingerprint(root)
     before = run_tests(root, cmd)
+    files_before = _fingerprint(root)
+    test_noise = {rel for rel in set(pre_tests) | set(files_before)
+                  if pre_tests.get(rel) != files_before.get(rel)}
+
+    def _tests(root_: Path, cmd_: str) -> TestRun:
+        """run_tests, а каквото пипне самото пускане — шум (e2e 2026-10-11):
+        първото пускане падаше на import, преди да пише last_run.log, и логът
+        от зеленото пускане след поправката излизаше като „променен файл“
+        в диффа и в съвета за връщане."""
+        pre = _fingerprint(root_)
+        run = run_tests(root_, cmd_)
+        post = _fingerprint(root_)
+        test_noise.update(rel for rel in set(pre) | set(post) if pre.get(rel) != post.get(rel))
+        return run
+
+    def _changed_by_fix() -> list[str]:
+        return [rel for rel in _changed_since(root, files_before) if rel not in test_noise]
     if before.ran:
         say(f"🧪 Преди: {'минават ✅' if before.passed else 'падат ❌'}")
         if before.passed:
@@ -449,10 +779,19 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
     pushbacks = 0
     after = before
     edited_now = False
+    chain_error = ""
     try:
         for rounds in range(1, max_rounds + 1):
             reply = brain.complete(messages, tools=REPAIR_TOOLS)
             raw = (reply.raw_text or "").strip()
+
+            # Brain.complete не хвърля: изчерпаната верига идва като текст
+            # „Error: …“. Одит 2026-10-11: без ключове това се четеше като проза
+            # на модела — два пъти „описа, но не направи“, още две минавания
+            # през всичките 12 модела (36 реда „[Brain] ✗“) и вината на модела.
+            if not getattr(reply, "tool_calls", None) and raw.startswith("Error:"):
+                chain_error = raw.removeprefix("Error:").strip()
+                break
 
             # ── Native tool calls ───────────────────────────────────────────
             if getattr(reply, "tool_calls", None):
@@ -462,11 +801,11 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
                     fn = tc.get("function", {})
                     name = fn.get("name", "")
                     try:
-                        args = json.loads(fn.get("arguments") or "{}")
+                        args = load_tool_arguments(fn.get("arguments"))
                     except (ValueError, TypeError):
                         args = {}
                     say(f"  ⚙️  {name} {str(args.get('path') or args.get('pattern') or args.get('command') or '')[:70]}")
-                    result = genesis_skills.dispatch_tool_call(name, args)
+                    result = genesis_skills.dispatch_tool_call(name, args or fn.get("arguments") or {})
                     if _edit_succeeded(result):
                         touched += [_relative(root, p) for p in _tool_call_paths(name, args)]
                         edited_now = True
@@ -474,7 +813,8 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
                                      "content": result[:_MAX_TOOL_OUTPUT]})
                 if edited_now:
                     edited_now = False
-                    verdict = _verify_after_edit(root, cmd, before, messages, say)
+                    _drop_stale_bytecode(root, touched)
+                    verdict = _verify_after_edit(root, cmd, before, messages, say, _tests)
                     if verdict is not None:
                         after = verdict
                         break
@@ -495,7 +835,8 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
                                  "Резултати от инструментите:\n"
                                  + "\n".join(r[:_MAX_TOOL_OUTPUT] for r in tag_results)})
                 if edited:
-                    verdict = _verify_after_edit(root, cmd, before, messages, say)
+                    _drop_stale_bytecode(root, touched)
+                    verdict = _verify_after_edit(root, cmd, before, messages, say, _tests)
                     if verdict is not None:
                         after = verdict
                         break
@@ -505,6 +846,9 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
                 continue
 
             # ── No tools: the model considers itself done ───────────────────
+            if not touched:
+                # Промяна с команда (`sed -i`, patch) също е промяна.
+                touched += _changed_by_fix()
             if not touched:
                 # It answered in prose without changing anything. Usually that
                 # means it wrote the fixed code INTO the reply and asked the
@@ -528,7 +872,8 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
                     False, raw or "Моделът не направи нито една промяна.",
                     rounds, snapshot, [], "", before, before)
 
-            after = run_tests(root, cmd)
+            _drop_stale_bytecode(root, touched)
+            after = _tests(root, cmd)
             if not after.ran or after.passed:
                 break
             if rounds >= max_rounds:
@@ -554,18 +899,31 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
     # `--revert`, тоест да изхвърлиш работеща поправка. За подсистема, чийто
     # пръв принцип е „ТЕСТОВЕТЕ СА ПРИСЪДАТА", присъда по остарели данни е
     # по-лоша от липсваща.
+    # Промените с команди (RUN_CMD) не минават през touched — гледа се диска.
+    touched = sorted(set(touched) | set(_changed_by_fix()))
     if touched and after is before and cmd:
         say("🧪 Рундовете свършиха — пускам тестовете за финална присъда…")
-        after = run_tests(root, cmd)
+        _drop_stale_bytecode(root, touched)
+        after = _tests(root, cmd)
 
     diff = project_diff(root, snapshot, touched)
     files = sorted(set(touched))
 
-    if after.ran and after.passed and not before.passed:
+    if chain_error:
+        hint = "" if "genesis setup" in chain_error else " Провери ключовете с `genesis setup`."
+        summary = f"Нито един модел не отговори: {chain_error}.{hint}"
+        if files:
+            summary += f" Промените дотук са запазени; {_undo_hint(root, snapshot, files)}"
+        return RepairOutcome(False, summary, rounds, snapshot, files, diff, before, after)
+    if not files:
+        # Зелени тестове без нито една промяна не са поправка (одит 2026-10-09:
+        # „Промените са направени“ при празен дифф и код 0).
+        ok, summary = False, "Не е направена нито една промяна — нищо не е поправено."
+    elif after.ran and after.passed and not before.passed:
         ok, summary = True, f"Поправено: тестовете вече минават ({cmd})."
     elif after.ran and not after.passed:
         ok, summary = False, (f"НЕ е поправено — тестовете още падат след {rounds} рунда. "
-                              f"Промените са запазени за преглед; {_undo_hint(root, snapshot)}")
+                              f"Промените са запазени за преглед; {_undo_hint(root, snapshot, files)}")
     elif not after.ran:
         ok, summary = False, ("Промените са направени, но НЕ са проверени — този проект няма "
                               "открита тестова команда. Прегледай диффа преди да му вярваш.")
@@ -576,12 +934,15 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
     return RepairOutcome(ok, summary, rounds, snapshot, files, diff, before, after)
 
 
-def _undo_hint(root: Path, snapshot: Path | None) -> str:
-    """Как се връщат промените — зависи от това какво има, не от надежда."""
+def _undo_hint(root: Path, snapshot: Path | None, files: list[str] | None = None) -> str:
+    """Как се връщат промените — зависи от това какво има, не от надежда.
+    Никога `git checkout .`: то връща и чужди (на човека) промени."""
     if snapshot:
         return f"върни ги с `genesis fix --revert {root}`."
-    if (root / ".git").exists():
-        return "върни ги с `git checkout .` в проекта."
+    if _in_git(root):
+        names = " ".join(f'"{f}"' for f in (files or [])[:20])
+        return (f"върни ги с `git checkout -- {names}` в проекта (новите файлове изтрий)."
+                if names else "няма какво да се връща.")
     return "снимка не е правена и проектът не е в git — връщане няма."
 
 

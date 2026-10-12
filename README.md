@@ -143,6 +143,25 @@ Optional paid tier, off unless you ask for it — see [MAX mode](#max-mode):
 | OpenAI | `OPENAI_API_KEY` |
 | DeepSeek | `DEEPSEEK_API_KEY` |
 
+**Your Claude subscription (no API key).** If Claude Code is installed and you
+are logged in with your own Pro/Max plan (`claude` → `/login`), Genesis can use
+it as its model: pick **Claude (абонамент, claude CLI)** in `/model`, or start
+with it:
+
+```bash
+export GENESIS_START_PROVIDER=claude_cli   # PowerShell: $env:GENESIS_START_PROVIDER="claude_cli"
+export GENESIS_START_MODEL=sonnet          # or opus / haiku
+genesis
+```
+
+Genesis runs the unmodified `claude -p` as a plain text model (its own tools,
+MCP, CLAUDE.md and hooks off) and keeps its own tools and sandbox. It never
+reads your Claude credentials, and it removes `ANTHROPIC_API_KEY` from that
+process so the key cannot be billed instead of the plan. This is for your own
+personal use on your own machine. The online service (`cloud/`) never uses it,
+because a subscription may not serve other people. Usage counts toward your
+plan's limits; when the limit is hit, Genesis moves on to the next model.
+
 **One key per provider.** Genesis does not rotate multiple accounts of the same
 provider to multiply a quota — that violates most providers' terms of service.
 Resilience comes from breadth instead. See [SECURITY.md](SECURITY.md).
@@ -156,6 +175,40 @@ Genesis is terminal-only. Every command runs on the same engine
 genesis                       # terminal chat
 genesis mission "write a retry decorator with exponential backoff"
 genesis fix ~/code/theirs "median() is wrong for even-length input"
+```
+
+## Steering it like Claude Code
+
+The habits that make Claude Code pleasant to work with, in the Genesis chat:
+
+| | What it does |
+|---|---|
+| `GENESIS.md` | Standing instructions for a project, read at the start of every session: how to test, what not to touch, the house style. `AGENTS.md` or `CLAUDE.md` is read when there is no `GENESIS.md`; `~/.genesis/GENESIS.md` holds yours for every project; `GENESIS.local.md` is personal and stays out of git. `@docs/style.md` inside one pulls that file in (only from the project, never a key). |
+| `/init` | Genesis looks at the project and writes (or improves) its `GENESIS.md`. `/memory` shows which files are in force. |
+| `/plan [task]` | Plan mode: it reads, searches and asks, and every tool that would change something is refused in code. `/plan` again approves the plan and it is carried out. |
+| `/undo` | Puts back the files the last turn changed (created files are removed), including what commands, skills and MCP tools changed in the project folder (a hidden git snapshot around each, in `~/.genesis/checkpoints/`; not node_modules, .gitignore'd files or files over 20 MB). A file changed by someone else since is left alone. Again → the turn before. |
+| hooks | Your commands around its work: `~/.genesis/hooks.json` (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Stop`; exit code 2 blocks or sends stderr back to the model — Claude Code's format is read too). A project's `.genesis/hooks.json` runs only after `/hooks trust`, and only while the file is unchanged. |
+| `/name args` | Your own commands: `.genesis/commands/name.md` in the project or `~/.genesis/commands/`, `$ARGUMENTS` / `$1` replaced. `/commands` lists them. |
+| background | `RUN_CMD` with `background: true` (`[RUN_BG: …]`) keeps a dev server running while it works; `BG_OUTPUT` / `BG_KILL`, `/bg` in the chat. |
+| `/compact` | Summarise the history now instead of waiting for the threshold. |
+| MCP | Tools from any MCP server (GitHub, databases, Slack, …), local (`command`) or hosted (`"type": "http", "url": …, "headers": {"Authorization": "Bearer ${TOKEN}"}`): `~/.genesis/mcp.json` in Claude Code's `.mcp.json` format (a project's `.mcp.json` only after `/mcp trust`). Read-only tools run at once; any other asks first, like a risky command (or list it in `autoApprove`). A hosted server that wants a login (OAuth): `/mcp login <name>` opens the browser, the token is kept in `~/.genesis/mcp_tokens.json` and refreshed by itself; `/mcp logout <name>` forgets it. Over SSH (no browser here) it asks you to paste the address the browser ended on (`--paste` forces that). `/mcp` shows servers and tools. |
+| `genesis -p "…"` | One turn without the chat, for scripts and CI: the answer alone on stdout (`--json` for one JSON object), piped stdin added to the task (`git diff \| genesis -p "review"`), `--plan` to change nothing, `--cwd` for the folder. Nobody can say yes, so anything risky is refused unless `--dangerously-allow`. |
+| `WEB_FETCH` | Reads one page by its address as text (headings, lists, links, code) without a browser. Internal-network addresses are refused, also after a redirect; localhost is allowed for your dev server. |
+| parallel reads | Several independent reads in one round (READ_FILE, SEARCH_CODE, GLOB, WEB_FETCH…) run at once. |
+| `!command` | You run a command yourself, without the model (`!git status`, `!pytest -q`). The output shows at once and goes to the model with your next message, so "why does this fail?" needs no copying. |
+| `@path` | Attaches a file (or a folder's listing) to your message: `why does @tests/test_api.py fail against @src/api/`. Works in `genesis -p` too. `.env` and keys are never attached. |
+| `genesis -c` | Continues the last conversation in this folder (`/history` picks any older one). |
+| sub-agents | Your own specialists: `.genesis/agents/reviewer.md` (or `~/.genesis/agents/`, or Claude Code's `.claude/agents/` as is) with `description`, `tools` and a role. Genesis hands them a task with `AGENT`; each works in its own conversation with only its tools and returns the report. Their tools pass the same gate as the main agent's (plan mode, hooks, sandbox, `/undo`). `/agents` lists them. |
+| task list | For work with several steps Genesis writes its plan with `TODO_WRITE` and ticks it off as it goes, so you see where it is. `/todos` shows it. |
+| `/context` | What fills the context: the system prompt by section, the tool schemas (built-in, MCP, AGENT), the conversation and the biggest tool output, and how much is left. |
+| `/review [branch]` | Reviews your changes for bugs: the uncommitted ones (or the last commit), or everything against a branch from where you branched off. The diff goes in ready-made; a `review.md` of your own in `~/.genesis/commands/` still wins (a project's does not). |
+| `EXPLORE` | A read-only sub-agent: "where is the price computed and who calls it?" is searched and read in its own conversation, and only the answer (with `path:line`) comes back — the main conversation stays small. |
+
+```json
+{"hooks": {
+  "PostToolUse": [{"matcher": "WRITE_FILE|EDIT_FILE", "command": "ruff format \"$GENESIS_FILE\""}],
+  "Stop": [{"command": "python -m pytest -q || (echo 'tests fail' >&2; exit 2)"}]
+}}
 ```
 
 ## Fixing an existing project
@@ -218,6 +271,23 @@ genesis fix ~/code/theirs "..." --max    # or: export GENESIS_QUALITY=max
 ⚠️ These keys **cost money per request**. Nothing is enabled by the key alone:
 without `--max` / `GENESIS_QUALITY=max` the chain, the order and the spend are
 exactly as before.
+
+## Handing a project over
+
+```bash
+genesis export ~/code/invoices              # → invoices-20261007-1412.zip next to it
+genesis export . -o client.zip --no-tests
+```
+
+In the chat: `/export` (or just "предай проекта"). The zip carries
+`GENESIS_REPORT.md`, written from the project at that moment rather than from
+the conversation: the files, how to run it (the README's own section, or worked
+out from `requirements.txt` / `package.json` / `main.py`), its dependencies, the
+test suite **run right then** with its result, the assumptions (the README's
+"Assumptions" section plus the decisions remembered for that folder) and what is
+still open. `.env`, `*.pem` and other secrets stay out of the archive and the
+report names them, so the recipient knows to supply their own. Exit code 1 when
+the tests fail.
 
 ## What it can do
 

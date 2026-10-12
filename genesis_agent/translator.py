@@ -29,7 +29,36 @@ import urllib.request
 OLLAMA_URL = "http://localhost:11434/v1/chat/completions"
 TRANSLATOR_MODEL = "zongwei/gemma3-translator:1b"
 
-_CODE_FENCE = re.compile(r"(```.*?```)", re.DOTALL)
+_FENCE_OPEN = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
+
+
+def split_code(text: str) -> list[tuple[bool, str]]:
+    """(е код, парче) по редове, както Markdown: ограда от 3+ ` или ~ се
+    затваря само от същия знак и поне същата дължина; незатворена ограда
+    (отрязан изход) е код до края. Сдвоени ``` не стигаха (одит 2026-10-07):
+    незатворен блок, ~~~ и ```` около пример с ``` отиваха в преводача."""
+    parts: list[tuple[bool, str]] = []
+    buf: list[str] = []
+    fence = ""
+    for line in text.splitlines(keepends=True):
+        if not fence:
+            m = _FENCE_OPEN.match(line)
+            if m:
+                if buf:
+                    parts.append((False, "".join(buf)))
+                buf, fence = [line], m.group(1)
+            else:
+                buf.append(line)
+            continue
+        buf.append(line)
+        stripped = line.strip()
+        if stripped and set(stripped) == {fence[0]} and len(stripped) >= len(fence):
+            parts.append((True, "".join(buf)))
+            buf, fence = [], ""
+    if buf:
+        parts.append((bool(fence), "".join(buf)))
+    return parts
+
 
 # Каквото НЕ бива да се превежда, макар да е извън код блок (design note,
 # 2026-08-12, наблюдавано на живо). И двата промпта по-долу изрично казват
@@ -45,7 +74,8 @@ _CODE_FENCE = re.compile(r"(```.*?```)", re.DOTALL)
 # с плейсхолдъри преди превода и ги връщаме дословно след него.
 _PROTECTED = re.compile(
     r"`[^`\n]+`"                     # `inline code`
-    r"|\b\w+(?:[._/\\-]\w+)+\(?\)?"  # snake_case, module.attr, path/to/file, file.py
+    # Само ASCII: `\w` с тирето хващаше „по-бърза“ и тя оставаше непреведена.
+    r"|\b[A-Za-z0-9_]+(?:[._/\\-][A-Za-z0-9_]+)+\(?\)?"  # snake_case, module.attr, path, file.py
     r"|\b[A-Z][A-Z0-9_]{2,}\b"       # ALLCAPS_CONSTANT
     r"|\b\w+\(\)"                    # func()
     r"|(?:[A-Za-z]:)?[\\/][^\s\"']+" # абсолютни пътища
@@ -119,14 +149,10 @@ def translate_bg_to_en(text: str) -> str:
 def translate_en_to_bg(text: str) -> str:
     """Превежда английски отговор на български, като пази код блоковете
     (```...```) абсолютно недокоснати — превод на код чупи синтаксиса."""
-    parts = _CODE_FENCE.split(text)
     out = []
-    for part in parts:
-        if part.startswith("```"):
+    for is_code, part in split_code(text):
+        if is_code or not part.strip():
             out.append(part)  # код — недокоснат
-            continue
-        if not part.strip():
-            out.append(part)
             continue
         masked, kept = _mask(part)
         prompt = (

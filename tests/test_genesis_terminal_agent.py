@@ -126,18 +126,21 @@ class TestRestoreSession:
         assert restored[0] == {"role": "system", "content": "CURRENT PROMPT"}
         assert restored[1:] == loaded[1:]
 
-    def test_duplicate_system_messages_collapse_to_one(self) -> None:
-        """compact_chat_history injects a second system message (the summary),
-        so a restored file can legitimately contain more than one — the result
-        must still carry exactly one, at the head."""
+    def test_the_old_prompt_goes_but_the_compaction_summary_stays(self) -> None:
+        """compact_chat_history injects a second system message (the summary).
+        The stale prompt is replaced by the current one; the summary is the
+        conversation's memory and stays right after it (одит 2026-10-07: it was
+        dropped, and every restored long session lost its earlier context)."""
         loaded = [
             {"role": "system", "content": "original"},
-            {"role": "system", "content": "## Резюме на по-ранния разговор:\n..."},
+            {"role": "system", "content": "## Резюме на по-ранния разговор:\nPostgres 16, порт 5433"},
             {"role": "user", "content": "hi"},
         ]
         restored = gta._restore_session(loaded, "CURRENT PROMPT")
         assert restored[0]["content"] == "CURRENT PROMPT"
-        assert sum(1 for m in restored if m.get("role") == "system") == 1
+        assert [m["content"] for m in restored if m.get("role") == "system"][1:] == [
+            "## Резюме на по-ранния разговор:\nPostgres 16, порт 5433"]
+        assert all("original" != m["content"] for m in restored)
 
 
 class TestTerminalHasTheSameIntegrityCheckAsTheSharedCore:
@@ -418,6 +421,28 @@ def test_backup_uses_rsync_when_present(tmp_path, monkeypatch) -> None:
     assert calls[0][calls[0].index(".env") - 1] == "--exclude"
 
 
+def test_backup_never_deletes_in_a_foreign_folder_or_above_the_project(tmp_path, monkeypatch) -> None:
+    """Одит 2026-10-07: цел над проекта или чужда непразна папка + `--delete`
+    би изтрила съседни проекти."""
+    calls = []
+
+    class _R:
+        returncode, stderr = 0, ""
+
+    monkeypatch.setattr(gta, "_rsync", lambda: "/usr/bin/rsync")
+    monkeypatch.setattr(gta.subprocess, "run", lambda argv, **kw: calls.append(argv) or _R())
+    parent = tmp_path / "projects"
+    (parent / "ws").mkdir(parents=True)
+    (parent / "sibling").mkdir()
+    ok, err = gta._backup_workspace(parent / "ws", parent)
+    assert not ok and "съседните" in err and calls == []
+    foreign = tmp_path / "usb"
+    foreign.mkdir()
+    (foreign / "photos").mkdir()
+    assert gta._backup_workspace(parent / "ws", foreign)[0]
+    assert "--delete" not in calls[-1]
+
+
 @pytest.mark.parametrize("inside", ["", "backup", "a/b"])
 def test_backup_refuses_a_target_inside_the_workspace(tmp_path, inside) -> None:
     src = tmp_path / "ws"
@@ -425,3 +450,75 @@ def test_backup_refuses_a_target_inside_the_workspace(tmp_path, inside) -> None:
     ok, err = gta._backup_workspace(src, src / inside if inside else src)
     assert not ok and "GENESIS_BACKUP_DIR" in err
     assert list(src.iterdir()) == []
+
+
+class TestStatusBar:
+    """Статус редът: заетият контекст е последната заявка, не сборът за сесията."""
+
+    def test_it_renders(self) -> None:
+        """Регресия: помощна функция `_k` беше засенчена от модулна променлива
+        `_k` (цикъл по ключове) и всяко показване гърмеше с „'str' object is
+        not callable“."""
+        gta.reset_usage()
+        assert "ctx 0/" in gta.build_status_bar().plain
+
+    def test_context_is_the_last_request_and_the_session_total_is_separate(self) -> None:
+        gta.reset_usage()
+        gta.count_usage({"prompt_tokens": 12_000, "completion_tokens": 500}, [], "")
+        gta.count_usage({"prompt_tokens": 14_000, "completion_tokens": 700}, [], "")
+        used, _remaining, _pct = gta.get_context_stats()
+        assert used == 14_700
+        assert gta.total_input_tokens + gta.total_output_tokens == 27_200
+        bar = gta.build_status_bar().plain
+        assert "ctx 14K/" in bar and "Σ 27K" in bar
+        gta.reset_usage()
+
+    def test_without_usage_the_whole_prompt_is_estimated(self) -> None:
+        gta.reset_usage()
+        msgs = [{"role": "system", "content": "s" * 400}, {"role": "tool", "content": "t" * 400}]
+        gta.count_usage(None, msgs, "o" * 40)
+        assert gta.get_context_stats()[0] == 210
+        gta.reset_usage()
+
+
+class TestTheLegacyPathIsBudgetedToo:
+    """2026-10-11: ръчно избран ollama/github/llmstudio минаваше по стария път
+    без budget_history — на рунд 40 тръгваха 82 съобщения / 248 764 знака
+    вместо 30 / 15 193. Локалният ollama реже отпред при малък num_ctx и така
+    губеше системния промпт и задачата."""
+
+    @staticmethod
+    def _turn(rounds: int, native: bool) -> list[dict]:
+        msgs: list[dict] = [{"role": "system", "content": "SYSPROMPT " + "s" * 7600},
+                            {"role": "user", "content": "ЗАДАЧАТА"}]
+        for i in range(rounds):
+            if native:
+                msgs += [{"role": "assistant", "content": "", "tool_calls": [
+                             {"id": f"c{i}", "type": "function",
+                              "function": {"name": "RUN_CMD", "arguments": "{}"}}]},
+                         {"role": "tool", "tool_call_id": f"c{i}", "content": "x" * 6000}]
+            else:
+                msgs += [{"role": "assistant", "content": f"[RUN_CMD: pytest {i}]"},
+                         {"role": "system", "content": "[Резултат]:\n" + "x" * 6000}]
+        return msgs
+
+    @pytest.mark.parametrize("native", [False, True])
+    def test_a_long_turn_is_windowed_and_keeps_the_task(self, monkeypatch, native) -> None:
+        from genesis_agent import budget
+        sent: list = []
+
+        def fake(prov, model, msgs, tools=None):
+            sent.append(msgs)
+            return "ok", None
+
+        monkeypatch.setattr(gta, "_call_provider", fake)
+        if native:
+            monkeypatch.setitem(gta._SUPPORTS_TOOLS, ("ollama", "m"), True)
+        history = self._turn(40, native)
+        gta._ask_via_legacy(history, [{"type": "function"}] if native else None, "ollama", "m")
+        msgs = sent[0]
+        assert len(msgs) <= budget.MAX_SENT_MESSAGES
+        assert str(msgs[0]["content"]).startswith("SYSPROMPT")
+        assert any(m.get("content") == "ЗАДАЧАТА" for m in msgs)
+        assert sum(len(str(m.get("content", ""))) for m in msgs) < 60_000
+        assert len(history) == 82, "историята на извикващия не се пипа"

@@ -36,8 +36,9 @@ Cloud има СВОЯ квота и се таксува отделно — то�
 """
 from __future__ import annotations
 
-import os
 import time
+
+from genesis_agent.paths import get_secret
 
 # Токенът живее ~60 минути. Подновяваме 5 минути по-рано, за да не се случи
 # изтичане между проверката и самата заявка.
@@ -57,20 +58,24 @@ def projects() -> list[str]:
     names = ["GOOGLE_CLOUD_PROJECT"] + [f"GOOGLE_CLOUD_PROJECT_{i}" for i in range(2, 11)]
     out: list[str] = []
     for env_name in names:
-        value = (os.environ.get(env_name) or "").strip()
+        # get_secret, не os.environ (одит 2026-10-11): проект, записан само в
+        # ~/.genesis/.env, както казва docstring-ът горе, не се виждаше в
+        # терминалния чат — Brain броеше vertex за конфигуриран (MAX режимът
+        # го печаташе), а всяко обръщение даваше „skip: no GOOGLE_CLOUD_PROJECT“.
+        value = (get_secret(env_name) or "").strip()
         if value and value not in out:
             out.append(value)
     return out
 
 
 def location() -> str:
-    return (os.environ.get("GOOGLE_CLOUD_LOCATION") or "global").strip() or "global"
+    return (get_secret("GOOGLE_CLOUD_LOCATION") or "global").strip() or "global"
 
 
 def endpoint(project: str, loc: str | None = None) -> str:
     """Базовият адрес за този проект — без `/chat/completions`, защото
     `Brain._http` го добавя сам, както за всеки друг доставчик."""
-    override = (os.environ.get("GOOGLE_VERTEX_BASE_URL") or "").strip()
+    override = (get_secret("GOOGLE_VERTEX_BASE_URL") or "").strip()
     if override:
         return override.rstrip("/")
     loc = (loc or location()).strip() or "global"

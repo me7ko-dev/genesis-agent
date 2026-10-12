@@ -251,6 +251,10 @@ def test_command_for_request_leaves_the_rest_to_the_model(text):
     ("нов разговор", "/clear"),
     ("покажи задачите", "/tasks"),
     ("помощ", "/help"),
+    ("предай проекта", "/export"),
+    ("експортирай проекта за клиента", "/export"),
+    ("napravi zip na proekta", "/export"),
+    ("направи zip", "/export"),
 ])
 def test_a_message_that_is_just_a_command_maps_to_it(text, cmd) -> None:
     assert mr.command_for_request(text) == cmd
@@ -270,10 +274,12 @@ def test_a_message_that_is_just_a_command_maps_to_it(text, cmd) -> None:
     "да",
     "/backup",             # вече е команда
     "",
+    "направи zip на снимките в D:",
+    "export the project to pdf",
 ])
 def test_anything_more_than_the_intent_goes_to_the_model(text) -> None:
     assert mr.command_for_request(text) is None
 
 
 def test_only_commands_that_change_something_ask_first() -> None:
-    assert mr.CONFIRM_COMMANDS == {"/backup", "/clear"}
+    assert mr.CONFIRM_COMMANDS == {"/backup", "/clear", "/export"}

@@ -138,6 +138,23 @@ def test_write_file_outside_workspace_is_denied_non_interactively(_workspace, tm
     assert "SANDBOX DENIED" in out or "[WRITE_FILE]" in out
 
 
+def test_write_file_without_a_file_name_says_so(_workspace) -> None:
+    """bench faktura-excel 2026-09-29: празен path → write_text върху папката →
+    „Permission denied“, и моделът питаше дали папката е защитена."""
+    for arg in ("", str(_workspace)):
+        out = gs._tool_write_file(arg, "x = 1\n")
+        assert "Няма име на файл" in out and "Permission" not in out
+
+
+def test_dispatch_repairs_regex_escapes_in_raw_arguments(_workspace) -> None:
+    """Моделът праща `\\d` в JSON низ (невалиден escape): пътят и кодът
+    трябва да стигнат, а `\\n` да си остане нов ред."""
+    raw = r'{"path": "rx.txt", "content": "D = r\"\d{2}\s*\"\nE = 1\n"}'
+    out = gs.dispatch_tool_call("WRITE_FILE", raw)
+    assert "✓" in out, out
+    assert (_workspace / "rx.txt").read_text(encoding="utf-8") == 'D = r"\\d{2}\\s*"\nE = 1\n'
+
+
 def test_write_file_refuses_to_clobber_an_unread_existing_file(_workspace) -> None:
     f = _workspace / "important.py"
     f.write_text("original content that matters", encoding="utf-8")
@@ -245,6 +262,18 @@ def test_dispatch_accepts_raw_json_string_arguments(_workspace) -> None:
 def test_dispatch_invalid_json_string_does_not_raise(_workspace) -> None:
     out = gs.dispatch_tool_call("READ_FILE", "{not json")
     assert "Невалидни аргументи" in out
+
+
+def test_dispatch_names_arguments_cut_mid_write_as_cut(_workspace) -> None:
+    """Ревю 2026-10-11: WRITE_FILE, отрязан на тавана при всеки модел, стига
+    до цикъла — моделът трябва да разбере, че файлът е твърде голям за един
+    запис, а не че е сбъркал JSON-а."""
+    import json
+    cut = json.dumps({"path": "big.py", "content": "x = 1\n" * 50})[:120]
+    out = gs.dispatch_tool_call("WRITE_FILE", cut)
+    assert "Невалидни аргументи" in out and "отрязан" in out
+    assert not (_workspace / "big.py").exists()
+    assert "отрязан" not in gs.dispatch_tool_call("READ_FILE", "{not json}")
 
 
 def test_dispatch_unknown_tool_name_does_not_raise(_workspace) -> None:
@@ -637,6 +666,46 @@ class TestListDirIsTheThirdDoor:
         assert "id_rsa" in out
 
 
+class TestAnEmptyFolderSaysSo:
+    """bench_projects 2026-09-28: върху нова празна папка LIST_DIR връщаше само
+    заглавието; groq gpt-oss-120b питаше още два пъти, пазачът за повторения
+    спираше хода и не беше написан нито ред код — 3 от първите 6 пуска."""
+
+    @staticmethod
+    def _new_folder(workspace: Path) -> Path:
+        # Не самият workspace: conftest държи данните на Genesis в него.
+        d = workspace / "project"
+        d.mkdir()
+        return d
+
+    def test_list_dir_names_the_empty_folder(self, _workspace) -> None:
+        out = gs._tool_list_dir(str(self._new_folder(_workspace)))
+        assert "празна" in out
+        assert "WRITE_FILE" in out
+
+    def test_glob_names_the_empty_folder(self, _workspace) -> None:
+        assert "празна" in gs._tool_glob(f"**/* | {self._new_folder(_workspace)}")
+
+    def test_glob_without_a_match_in_a_full_folder_does_not(self, _workspace) -> None:
+        d = self._new_folder(_workspace)
+        (d / "main.py").write_text("x = 1\n", encoding="utf-8")
+        out = gs._tool_glob(f"*.txt | {d}")
+        assert "Няма файлове" in out
+        assert "празна" not in out
+
+
+def test_search_code_takes_a_pattern_given_as_the_path(_workspace) -> None:
+    """2026-09-28, задача за сайт: `SEARCH_CODE лв | site/**/*.html` връщаше
+    „няма такъв път“ два пъти подред."""
+    site = _workspace / "site" / "pages"
+    site.mkdir(parents=True)
+    (site / "index.html").write_text("<p>120 лв</p>\n", encoding="utf-8")
+    (site / "notes.txt").write_text("120 лв\n", encoding="utf-8")
+    out = gs._tool_search_code("лв", path=str(_workspace / "site" / "**" / "*.html"))
+    assert "index.html" in out
+    assert "notes.txt" not in out
+
+
 class TestTheGuardReadsWindowsPathsToo:
     """Образецът е писан за shell команди, в които пътят носи `/`. Подаден
     като Windows път, `.ssh\\config` не съвпадаше с `\\.ssh/` — същият файл
@@ -741,3 +810,260 @@ class TestRepoMapIsTheFifthDoor:
         (_workspace / "main.py").write_text("print(1)\n", encoding="utf-8")
         out = gs._tool_repo_map(str(_workspace))
         assert "SANDBOX" not in out
+
+
+# ── pytest не вижда модул от корена ─────────────────────────────────────────
+
+_MISSING = "E   ModuleNotFoundError: No module named 'egn'"
+
+
+def test_import_hint_when_the_module_sits_in_the_root(tmp_path) -> None:
+    (tmp_path / "egn.py").write_text("")
+    assert "conftest.py" in gs._import_path_hint(_MISSING, tmp_path)
+
+
+def test_import_hint_for_a_package_in_the_root(tmp_path) -> None:
+    (tmp_path / "faktura").mkdir()
+    (tmp_path / "faktura" / "__init__.py").write_text("")
+    out = "ModuleNotFoundError: No module named 'faktura.extract'"
+    assert "`faktura`" in gs._import_path_hint(out, tmp_path)
+
+
+def test_no_import_hint_for_a_missing_third_party_package(tmp_path) -> None:
+    assert gs._import_path_hint("No module named 'reportlab'", tmp_path) == ""
+
+
+def test_no_import_hint_once_conftest_exists(tmp_path) -> None:
+    (tmp_path / "egn.py").write_text("")
+    (tmp_path / "conftest.py").write_text("")
+    assert gs._import_path_hint(_MISSING, tmp_path) == ""
+
+# ── пътища с правописна грешка (NEXT_STEPS В.9) ───────────────────────────
+
+def _project(tmp_path_factory, name: str = "genitest") -> Path:
+    root = tmp_path_factory.mktemp("Projects")
+    ws = root / name
+    ws.mkdir()
+    gs.set_workspace(ws)
+    return ws
+
+
+def test_write_file_typo_in_workspace_name_asks_and_names_the_likely_path(tmp_path_factory) -> None:
+    """Запис по догадка не минава покрай потвърждението (одит 2026-10-07);
+    отказът казва кой е вероятният път, за да е верен следващият рунд."""
+    ws = _project(tmp_path_factory)
+    typo = ws.parent / "genittest" / "egn.py"
+    out = gs._tool_write_file(str(typo), "X = 1\n")
+    assert not (ws / "egn.py").exists() and not typo.exists()   # без tty → отказ
+    assert str(ws / "egn.py") in out and "правописна" in out
+
+
+def test_typo_redirect_for_reads_keeps_subfolders(tmp_path_factory) -> None:
+    ws = _project(tmp_path_factory)
+    (ws / "tests").mkdir()
+    (ws / "tests" / "test_a.py").write_text("OK = 1\n", encoding="utf-8")
+    out = gs._tool_read_file(str(ws.parent / "gentiest" / "tests" / "test_a.py"))   # размяна
+    assert "OK = 1" in out
+
+
+def test_a_versioned_sibling_is_never_the_workspace(tmp_path_factory) -> None:
+    """api-v1 → api-v2: преди одита записът презаписваше api-v1/app.py."""
+    root = tmp_path_factory.mktemp("projects")
+    ws = root / "api-v1"
+    ws.mkdir()
+    (ws / "app.py").write_text("OLD v1\n", encoding="utf-8")
+    gs.set_workspace(ws)
+    gs._tool_read_file("app.py")
+    gs._tool_write_file(str(root / "api-v2" / "app.py"), "NEW v2\n")
+    assert (ws / "app.py").read_text(encoding="utf-8") == "OLD v1\n"
+    assert gs._resolve(str(root / "api-v2" / "app.py")) == root / "api-v2" / "app.py"
+
+
+def test_a_sibling_project_with_a_suffix_is_not_a_typo(tmp_path_factory) -> None:
+    """`genitest2` може да е нарочна нова папка — не се пренасочва тихо."""
+    ws = _project(tmp_path_factory)
+    other = ws.parent / "genitest2" / "x.py"
+    assert gs._resolve(str(other)) == other
+    out = gs._tool_write_file(str(other), "x")
+    assert not (ws / "x.py").exists()
+    assert not other.exists()           # извън workspace → отказано без tty
+    assert "[WRITE_FILE]" in out
+
+
+def test_an_unrelated_absolute_path_passes_through(tmp_path_factory) -> None:
+    ws = _project(tmp_path_factory)
+    other = ws.parent / "completely-different" / "x.py"
+    assert gs._resolve(str(other)) == other
+
+
+def test_existing_folder_is_never_redirected(tmp_path_factory) -> None:
+    ws = _project(tmp_path_factory)
+    real = ws.parent / "genittest"
+    real.mkdir()
+    assert gs._resolve(str(real / "a.py")) == real / "a.py"
+
+
+def test_read_file_through_a_typo_reads_the_workspace_file(tmp_path_factory) -> None:
+    ws = _project(tmp_path_factory)
+    (ws / "data.txt").write_text("hello", encoding="utf-8")
+    out = gs._tool_read_file(str(ws.parent / "Genitest" / "data.txt"))
+    assert "hello" in out
+
+
+@pytest.mark.parametrize(("a", "b", "typo"), [
+    ("genittest", "genitest", True),
+    ("Projetcs", "Projects", True),
+    ("projects", "Projects", True),
+    ("genitest2", "genitest", False),
+    ("api-v2", "api-v1", False),
+    ("report2026", "report2025", False),
+    ("site-old", "site", False),
+    ("app", "apx", False),               # твърде кратко за да се гадае
+    ("invoices", "customers", False),
+])
+def test_is_typo(a, b, typo) -> None:
+    assert gs._is_typo(a, b) is typo
+
+
+# ── „може би имаше предвид“ ──────────────────────────────────────────────
+
+def test_read_file_missing_suggests_the_same_name_elsewhere(_workspace) -> None:
+    (_workspace / "src").mkdir()
+    (_workspace / "src" / "utils.py").write_text("", encoding="utf-8")
+    out = gs._tool_read_file("utils.py")
+    assert "не съществува" in out
+    assert "src/utils.py" in out.replace("\\", "/")
+
+
+def test_read_file_missing_suggests_a_close_name(_workspace) -> None:
+    (_workspace / "utils.py").write_text("", encoding="utf-8")
+    out = gs._tool_read_file("util.py")
+    assert "Може би: utils.py" in out
+
+
+def test_read_file_missing_without_candidates_has_no_hint(_workspace) -> None:
+    assert "Може би" not in gs._tool_read_file("nothing_like_it.py")
+
+
+def test_read_file_on_a_folder_says_use_list_dir(_workspace) -> None:
+    (_workspace / "pkg").mkdir()
+    out = gs._tool_read_file("pkg")
+    assert "LIST_DIR" in out
+
+
+def test_edit_file_missing_suggests_the_real_file(_workspace) -> None:
+    (_workspace / "app").mkdir()
+    (_workspace / "app" / "main.py").write_text("x = 1\n", encoding="utf-8")
+    out = gs._tool_edit_file("main.py", "x = 1", "x = 2")
+    assert "❌" in out
+    assert "app/main.py" in out.replace("\\", "/")
+
+
+def test_list_dir_on_a_file_says_use_read_file(_workspace) -> None:
+    (_workspace / "a.txt").write_text("", encoding="utf-8")
+    assert "READ_FILE" in gs._tool_list_dir("a.txt")
+
+
+# ── скеле за тестовете (NEXT_STEPS Г.10) ─────────────────────────────────
+
+def test_first_test_in_a_subfolder_gets_a_root_conftest(_workspace) -> None:
+    gs._tool_write_file("egn.py", "def ok():\n    return True\n")
+    out = gs._tool_write_file("tests/test_egn.py", "from egn import ok\n\n\ndef test_ok():\n    assert ok()\n")
+    assert (_workspace / "conftest.py").is_file()
+    assert "[скеле]" in out
+
+
+def test_the_scaffold_makes_root_modules_importable_from_tests(_workspace) -> None:
+    import subprocess
+    import sys
+    gs._tool_write_file("egn.py", "def ok():\n    return True\n")
+    gs._tool_write_file("tests/test_egn.py", "from egn import ok\n\n\ndef test_ok():\n    assert ok()\n")
+    r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"],
+                       cwd=_workspace, capture_output=True, text=True, timeout=120, check=False)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+@pytest.mark.parametrize(("name", "content"), [
+    ("conftest.py", ""),
+    ("pytest.ini", "[pytest]\n"),
+    ("pyproject.toml", "[tool.pytest.ini_options]\npythonpath = ['.']\n"),
+    ("setup.cfg", "[tool:pytest]\n"),
+])
+def test_an_existing_pytest_setup_is_left_alone(_workspace, name, content) -> None:
+    (_workspace / name).write_text(content, encoding="utf-8")
+    out = gs._tool_write_file("tests/test_a.py", "def test_a():\n    assert True\n")
+    assert "[скеле]" not in out
+    if name != "conftest.py":
+        assert not (_workspace / "conftest.py").exists()
+
+
+def test_a_test_in_the_root_or_a_non_test_file_gets_no_scaffold(_workspace) -> None:
+    gs._tool_write_file("test_root.py", "def test_a():\n    assert True\n")
+    gs._tool_write_file("pkg/helpers.py", "X = 1\n")
+    assert not (_workspace / "conftest.py").exists()
+
+
+def test_pyproject_without_pytest_section_still_gets_the_scaffold(_workspace) -> None:
+    (_workspace / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+    gs._tool_write_file("tests/test_a.py", "def test_a():\n    assert True\n")
+    assert (_workspace / "conftest.py").is_file()
+
+
+def test_read_file_through_a_symlink_to_a_key_is_refused(_workspace, tmp_path_factory) -> None:
+    home = tmp_path_factory.mktemp("home")
+    key = home / ".ssh" / "id_rsa"
+    key.parent.mkdir()
+    key.write_text("SECRETKEYBODY", encoding="utf-8")
+    try:
+        (_workspace / "notes.txt").symlink_to(key)
+    except (OSError, NotImplementedError):
+        pytest.skip("no symlinks here")
+    out = gs._tool_read_file("notes.txt")
+    assert "SECRETKEYBODY" not in out
+
+
+def test_tools_work_in_a_project_under_a_folder_named_build(tmp_path_factory) -> None:
+    ws = tmp_path_factory.mktemp("build") / "proj"
+    (ws / "src").mkdir(parents=True)
+    (ws / "src" / "app.py").write_text("def parse_config():\n    pass\n", encoding="utf-8")
+    (ws / "node_modules").mkdir()
+    (ws / "node_modules" / "x.py").write_text("parse_config = 1\n", encoding="utf-8")
+    gs.set_workspace(ws)
+    out = gs._tool_glob("**/*.py")
+    assert "app.py" in out and "x.py" not in out
+
+
+def test_text_tag_arguments_may_contain_brackets(_workspace) -> None:
+    page = _workspace / "app" / "[id]" / "page.tsx"
+    page.parent.mkdir(parents=True)
+    page.write_text("export default 1\n", encoding="utf-8")
+    out = gs.parse_and_execute_tools(
+        "[READ_FILE: app/[id]/page.tsx]\n[LIST_DIR: app] [GLOB: *.tsx]")
+    joined = "\n".join(out)
+    assert "export default 1" in joined
+    assert "[id]" in joined
+    assert len(out) == 3
+
+
+def test_run_cmd_with_indexing_reaches_the_shell_whole(_workspace) -> None:
+    import sys
+    out = gs.parse_and_execute_tools(
+        f'[RUN_CMD: "{sys.executable}" -c "import sys; print(sys.argv[1:])" a b]')
+    assert "['a', 'b']" in "\n".join(out)
+
+
+
+def test_list_dir_does_not_leak_names_from_a_key_folder(_workspace, tmp_path_factory) -> None:
+    home = tmp_path_factory.mktemp("home")
+    (home / ".ssh").mkdir()
+    (home / ".ssh" / "id_ed25519_work_github").write_text("k", encoding="utf-8")
+    out = gs._tool_list_dir(str(home / ".ssh" / "id_ed25519_work"))
+    assert "github" not in out
+
+
+def test_scaffold_for_a_project_in_a_subfolder_goes_next_to_its_tests(_workspace) -> None:
+    gs._tool_write_file("egn/egn.py", "def ok():\n    return True\n")
+    out = gs._tool_write_file("egn/tests/test_egn.py", "from egn import ok\n\n\ndef test_ok():\n    assert ok()\n")
+    assert (_workspace / "egn" / "conftest.py").is_file()
+    assert not (_workspace / "conftest.py").exists()
+    assert "egn/conftest.py" in out

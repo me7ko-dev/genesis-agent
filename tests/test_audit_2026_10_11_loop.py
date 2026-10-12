@@ -1,0 +1,587 @@
+"""Проверката на главния цикъл 2026-10-11 (A1–A12): ред на таговете, история
+при грешка, доказателства за твърдения, ASK_USER, режим план, компактиране,
+грешка на веригата, Stop в EXPLORE, ping-pong, code_check, TODO_WRITE.
+Всеки тест пада без поправката си (пуснато срещу стария код)."""
+from __future__ import annotations
+
+import contextlib
+import json
+from collections import deque
+
+import pytest
+
+import genesis_skills as gs
+import genesis_terminal_agent as gta
+from genesis_agent import hooks, sandbox
+
+
+@pytest.fixture
+def ws(tmp_path, monkeypatch):
+    root = tmp_path / "proj"
+    (root / ".git").mkdir(parents=True)
+    monkeypatch.setattr(gs, "_WORKSPACE", root)
+    monkeypatch.setattr(gta, "WORKSPACE", root)
+    monkeypatch.setattr(gta, "_remember", lambda *a: None)
+    gs._SEEN_PATHS.clear()
+    hooks.workspace = root
+    (root / "app.py").write_text("PRICE = 42\n", encoding="utf-8")
+    yield root
+    hooks.workspace = None
+    gs._set_agent_scope(None)
+    gs._set_cancel(None)
+
+
+def _call(name, args, cid="c1"):
+    return {"id": cid, "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args)}}
+
+
+def _script(monkeypatch, replies):
+    it = iter(replies)
+    seen: list[list[dict]] = []
+
+    def fake(messages, tools=None):
+        seen.append([dict(m) for m in messages])
+        r = next(it)
+        if isinstance(r, BaseException):
+            raise r
+        return r
+    monkeypatch.setattr(gta, "ask_genesis", fake)
+    return seen
+
+
+class _UI(gta.TurnUI):
+    def __init__(self):
+        self.log: list = []
+
+    def thinking(self, label, spinner="dots"):
+        return contextlib.nullcontext()
+
+    def assistant(self, text): self.log.append(("assistant", text))
+    def tool(self, name, result): self.log.append(("tool", name, result))
+    def asked(self, q): self.log.append(("asked", q))
+    def spinning(self, n): self.log.append(("spin", n))
+    def warn(self, t): self.log.append(("warn", t))
+    def info(self, t): self.log.append(("info", t))
+
+
+def _fresh():
+    return deque([{"role": "system", "content": "SYS"}], maxlen=gta._HISTORY_MAXLEN)
+
+
+# ── A1: текстовите тагове се изпълняват в реда, в който са написани ─────────
+
+def test_text_tags_run_in_written_order_backup_before_write(ws, monkeypatch):
+    monkeypatch.setattr(sandbox, "_POLICY", sandbox.SandboxPolicy(mode="allow"))
+    gs.parse_and_execute_tools("[READ_FILE: app.py]")
+    out = gs.parse_and_execute_tools(
+        "Първо пазя копие:\n[RUN_CMD: cp app.py app.bak]\nПосле пиша новата версия:\n"
+        "[WRITE_FILE: app.py]PRICE = 0\n[END_WRITE]")
+    assert len(out) == 2
+    assert (ws / "app.bak").read_text(encoding="utf-8") == "PRICE = 42\n"
+    assert (ws / "app.py").read_text(encoding="utf-8").strip() == "PRICE = 0"
+
+
+def test_text_read_before_edit_shows_old_content(ws):
+    out = gs.parse_and_execute_tools(
+        "[READ_FILE: app.py]\n[EDIT_FILE: app.py]PRICE = 42\n---GENESIS-REPLACE-WITH---\nPRICE = 7\n[END_EDIT]")
+    assert len(out) == 2
+    assert "PRICE = 42" in out[0] and "PRICE = 7" not in out[0]
+    assert (ws / "app.py").read_text(encoding="utf-8") == "PRICE = 7\n"
+
+
+# ── A5: нищо след ASK_USER в същия рунд не се изпълнява преди отговора ─────
+
+def test_native_tools_after_ask_user_wait_for_the_answer(ws, monkeypatch):
+    gs.parse_and_execute_tools("[READ_FILE: app.py]")
+    _script(monkeypatch, [("", [
+        _call("ASK_USER", {"question": "Да сменя ли цената на 0?"}, "a1"),
+        _call("EDIT_FILE", {"path": "app.py", "old": "PRICE = 42", "new": "PRICE = 0"}, "e1"),
+    ])])
+    ui = _UI()
+    out = gta.run_turn(_fresh(), "смени цената", ui)
+    assert [e for e in ui.log if e[0] == "asked"]
+    assert (ws / "app.py").read_text(encoding="utf-8") == "PRICE = 42\n"
+    # Двойката извикване/резултат остава цяла — иначе следващата заявка е невалидна.
+    tool_msgs = [m for m in out if m.get("role") == "tool"]
+    assert [m["tool_call_id"] for m in tool_msgs] == ["a1", "e1"]
+    assert "чака отговора" in tool_msgs[1]["content"]
+
+
+def test_text_tags_after_ask_user_wait_for_the_answer(ws, monkeypatch):
+    reply = "[ASK_USER: Да презапиша ли notes.txt?]\n[WRITE_FILE: notes.txt]ново\n[END_WRITE]"
+    _script(monkeypatch, [(reply, None)])
+    ui = _UI()
+    gta.run_turn(_fresh(), "x", ui)
+    assert [e for e in ui.log if e[0] == "asked"]
+    assert not (ws / "notes.txt").exists()
+
+
+# ── A2: грешка посред хода не изтрива свършеното от живата история ─────────
+
+def _write_then_crash(monkeypatch):
+    return _script(monkeypatch, [
+        ("", [_call("WRITE_FILE", {"path": "made.py", "content": "x = 1\n"}, "w1")]),
+        RuntimeError("ReadTimeout от доставчика"),
+        ("ок", None),
+    ])
+
+
+def test_an_error_mid_turn_hands_back_the_work_done(ws, monkeypatch):
+    _write_then_crash(monkeypatch)
+    messages = _fresh()
+    # Точно както main(): `messages = run_turn(...)` в try / except Exception.
+    try:
+        messages = gta.run_turn(messages, "направи made.py", _UI())
+    except Exception as e:
+        assert "ReadTimeout" in str(e)
+        messages = gta.history_after_error(e, messages)
+    assert (ws / "made.py").exists()
+    assert any(m["role"] == "tool" and "made.py" in str(m["content"]) for m in messages)
+    assert getattr(messages, "maxlen", None) == gta._HISTORY_MAXLEN
+
+
+def test_the_phone_keeps_the_work_of_a_crashed_turn(ws, monkeypatch):
+    import time
+
+    from genesis_agent import remote_server as rs
+    monkeypatch.setattr(gta, "build_system_prompt", lambda: ("SYS", ""))
+    seen = _write_then_crash(monkeypatch)
+    monkeypatch.setattr(rs, "_print_qr", lambda *a: None)
+    cap: dict = {}
+    real_init = rs.RemoteServer.__init__
+
+    def init(self, *a, **k):
+        real_init(self, *a, **k)
+        cap["server"] = self
+
+    def wait(session):
+        deadline = time.time() + 15
+        time.sleep(0.05)
+        while session.busy and time.time() < deadline:
+            time.sleep(0.02)
+
+    class FakeHTTP:
+        def serve_forever(self, poll_interval=0.5):
+            srv = cap["server"]
+            srv.session.send("направи made.py")
+            wait(srv.session)
+            srv.session.send("какво направи?")
+            wait(srv.session)
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            pass
+    monkeypatch.setattr(rs.RemoteServer, "__init__", init)
+    monkeypatch.setattr(rs.RemoteServer, "make_http", lambda self, h, p: FakeHTTP())
+    assert rs.serve(["--port", "0"]) == 0
+    assert len(seen) == 3
+    assert any(m.get("role") == "tool" and "made.py" in str(m.get("content")) for m in seen[2])
+
+
+# ── A3/A4: провалена команда не доказва свършена работа ───────────────────
+
+def test_a_failed_install_does_not_prove_the_install():
+    from genesis_agent import claim_check
+    res = ("[RUN_CMD: pip install fastapi-nonexist]  (rc=1)\nstderr:\n"
+           "ERROR: Could not find a version that satisfies the requirement fastapi-nonexist")
+    entry = claim_check.counts_as_executed("RUN_CMD", "pip install fastapi-nonexist", res)
+    claims = claim_check.unsupported_claims("Инсталирах пакета fastapi-nonexist.",
+                                            [entry] if entry else [])
+    assert [c.kind for c in claims] == ["инсталация"]
+
+
+def test_a_failed_move_is_challenged_in_the_loop(ws, monkeypatch):
+    seen = _script(monkeypatch, [("", [_call("RUN_CMD", {"command": "mv nosuch.jpg photos/"})]),
+                                 ("Преместих снимките в photos/.", None),
+                                 ("Не успях — nosuch.jpg го няма.", None)])
+    monkeypatch.setattr(gs, "dispatch_tool_call", lambda name, args: (
+        "[RUN_CMD: mv nosuch.jpg photos/]  (rc=1)\nstderr:\n"
+        "mv: cannot stat 'nosuch.jpg': No such file or directory"))
+    ui = _UI()
+    gta.run_turn(_fresh(), "премести снимките", ui)
+    assert any(e[0] == "warn" and "Твърди" in e[1] for e in ui.log)
+    assert len(seen) == 3
+
+
+def test_failing_tests_do_not_prove_that_the_tests_pass():
+    from genesis_agent import claim_check
+    res = "[RUN_CMD: pytest -q]  (rc=1)\nF.\nFAILED test_x.py::test_a - assert 1 == 2\n1 failed, 1 passed"
+    entry = claim_check.counts_as_executed("RUN_CMD", "pytest -q", res)
+    assert entry is not None
+    # „Пуснах тестовете“ е вярно и при паднал тест …
+    assert claim_check.unsupported_claims("Пуснах тестовете: test_a пада.", [entry]) == []
+    # … „всички минаха“ — не.
+    claims = claim_check.unsupported_claims("Готово — всички тестове минаха.", [entry])
+    assert claims and "rc=1" in claim_check.nudge_text(claims)
+    # Последното пускане решава: след поправка и зелено пускане твърдението е вярно.
+    ok = claim_check.counts_as_executed("RUN_CMD", "pytest -q", "[RUN_CMD: pytest -q]  (rc=0)\n2 passed")
+    assert ok is not None
+    assert claim_check.unsupported_claims("Всички тестове минаха.", [entry, ok]) == []
+    assert claim_check.unsupported_claims("All tests pass now.", [ok, entry])
+    # Текстовият път дава същото.
+    assert claim_check.unsupported_claims(
+        "Тестовете минаха.", claim_check.executed_from_text_results([res]))
+
+
+# ── A6: в режим план планът е отговорът, не „неизпълнено обещание“ ─────────
+
+_PLAN = ("План:\n1. Ще създам utils.py с функцията parse_price().\n"
+         "2. Ще напиша тестове в tests/test_utils.py.\n"
+         "Проверка: pytest -q. Рискове: няма.\nСлед одобрение ще създам файловете.")
+
+
+def _plan_replies():
+    return [("", [_call("READ_FILE", {"path": "app.py"}, "r1")]),
+            (_PLAN, None),
+            ("", [_call("WRITE_FILE", {"path": "utils.py", "content": "x=1\n"}, "w1")]),
+            ("Не мога да пиша в режим план.", None),
+            ("край", None)]
+
+
+def test_plan_mode_does_not_push_the_plan_into_execution(ws, monkeypatch):
+    from genesis_agent import plan_mode
+    plan_mode.set_active(True)
+    try:
+        seen = _script(monkeypatch, _plan_replies())
+        ui = _UI()
+        gta.run_turn(_fresh(), "добави parse_price", ui)
+    finally:
+        plan_mode.set_active(False)
+    assert len(seen) == 2
+    assert not [e for e in ui.log if e[0] == "warn"]
+
+
+def test_headless_plan_prints_the_plan(ws, monkeypatch, capsys):
+    from genesis_agent import headless
+    monkeypatch.setattr(gta, "build_system_prompt", lambda: ("SYS", ""))
+    monkeypatch.setattr(headless, "_read_stdin", lambda: "")
+    _script(monkeypatch, _plan_replies())
+    code = headless.run(["--plan", "--json", "--cwd", str(ws), "добави parse_price"])
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0 and "parse_price" in out["result"]
+    assert out["tools"] == ["READ_FILE"]
+
+
+# ── A8: грешка на веригата не е отговор на модела ──────────────────────────
+
+_CHAIN_ERR = "[Грешка: цялата верига е изчерпана | последна: groq 429]"
+
+
+def test_a_chain_error_ends_the_turn_without_nudges(ws, monkeypatch):
+    seen = _script(monkeypatch, [
+        ("", [_call("WRITE_FILE", {"path": "calc.py",
+                                   "content": "def add(a, b):\n    return a + b\n"}, "w1")]),
+        (_CHAIN_ERR, None), (_CHAIN_ERR, None), (_CHAIN_ERR, None)])
+    ui = _UI()
+    msgs = gta.run_turn(_fresh(), "напиши calc.py с add()", ui)
+    assert len(seen) == 2
+    assert ("warn", _CHAIN_ERR) in ui.log
+    assert not [m for m in msgs if m["role"] == "assistant"
+                and str(m.get("content") or "").startswith("[Грешка")]
+    # Свършеното преди грешката остава.
+    assert any(m["role"] == "tool" and "calc.py" in str(m["content"]) for m in msgs)
+
+
+def test_headless_reports_a_chain_error_as_the_error(ws, monkeypatch, capsys):
+    from genesis_agent import headless
+    monkeypatch.setattr(gta, "build_system_prompt", lambda: ("SYS", ""))
+    monkeypatch.setattr(headless, "_read_stdin", lambda: "")
+    _script(monkeypatch, [(_CHAIN_ERR, None)])
+    assert headless.run(["здравей", "--json", "--cwd", str(ws)]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["ok"] is False and "верига" in (out["error"] or "")
+
+
+# ── A7: повторното компактиране не реже предишното резюме ──────────────────
+
+@pytest.mark.parametrize("ordinary_len", [10, 2000])
+def test_recompaction_keeps_the_whole_previous_summary(monkeypatch, ordinary_len):
+    from types import SimpleNamespace
+
+    from genesis_agent import brain
+    compact = brain.Brain.compact_chat_history
+    seen: list[str] = []
+
+    class Fake:
+        def __init__(self, *a, **k):
+            pass
+
+        def complete(self, msgs, tools=None):
+            seen.append(msgs[-1]["content"])
+            return SimpleNamespace(raw_text="ново резюме")
+    monkeypatch.setattr(brain, "Brain", Fake)
+    old_summary = ("## Резюме на по-ранния разговор:\n" + "Работим по проекта faktura-excel. " * 15
+                   + "РЕШЕНИЕ: базата е PostgreSQL 16, не SQLite.")
+    msgs = [{"role": "system", "content": "SYS"}, {"role": "system", "content": old_summary}]
+    for i in range(10):
+        msgs += [{"role": "user", "content": f"въпрос {i} " + "x" * ordinary_len},
+                 {"role": "assistant", "content": f"отговор {i}"}]
+    out = compact(msgs, threshold=16, keep_recent=10)
+    assert "PostgreSQL 16" in seen[0]
+    assert len(seen[0]) <= 8000
+    assert out[1]["content"].endswith("ново резюме")
+
+
+# ── A9: „Стоп“ спира и EXPLORE ─────────────────────────────────────────────
+
+def test_stop_reaches_explore(ws):
+    from types import SimpleNamespace
+
+    from genesis_agent import explore
+    n = {"calls": 0}
+
+    def complete(messages, tools=None):
+        n["calls"] += 1
+        return SimpleNamespace(raw_text="търся", tool_calls=[{"id": f"c{n['calls']}", "function": {
+            "name": "SEARCH_CODE", "arguments": json.dumps({"pattern": "PRICE"})}}])
+    gs._set_cancel(lambda: n["calls"] >= 1)   # операторът натиска „Стоп“ след първия рунд
+    try:
+        out = explore.explore("къде е цената?", str(ws), complete=complete)
+    finally:
+        gs._set_cancel(None)
+    assert n["calls"] == 1
+    assert "⏹ Спрян от оператора след 1 рунда" in out and "търся" in out
+
+
+# ── A10: кръг READ_FILE ↔ провален EDIT_FILE без промяна се хваща ─────────
+
+def test_a_read_edit_ping_pong_stops_early(ws, monkeypatch):
+    import itertools
+    gs.parse_and_execute_tools("[READ_FILE: app.py]")
+    calls = {"n": 0}
+    cycle = itertools.cycle([
+        ("", [_call("READ_FILE", {"path": "app.py"}, "r")]),
+        ("", [_call("EDIT_FILE", {"path": "app.py", "old": "PRICE=42", "new": "PRICE = 0"}, "e")]),
+    ])
+
+    def fake(messages, tools=None):
+        calls["n"] += 1
+        return next(cycle)
+    monkeypatch.setattr(gta, "ask_genesis", fake)
+    ui = _UI()
+    gta.run_turn(_fresh(), "смени цената на 0", ui)
+    assert calls["n"] <= 8
+    spins = [e[1] for e in ui.log if e[0] == "spin"]
+    assert spins and "READ_FILE ↔ EDIT_FILE" in spins[0]
+
+
+def test_the_cycle_guard_warns_then_stops_and_spares_progress():
+    from genesis_agent.repeat_guard import RepeatGuard
+    g = RepeatGuard()
+    assert g.observe("READ_FILE", {"path": "a"}, "A").note == ""
+    assert g.observe("EDIT_FILE", {"path": "a"}, "❌ няма го").note == ""
+    third = g.observe("READ_FILE", {"path": "a"}, "A")
+    assert not third.stop and third.note        # предупреждение при първото връщане
+    assert not g.observe("EDIT_FILE", {"path": "a"}, "❌ няма го").stop
+    assert g.observe("READ_FILE", {"path": "a"}, "A").stop
+    # A, B, C с различни резултати — напредък, никога спиране.
+    g = RepeatGuard()
+    for i in range(12):
+        assert not g.observe("RUN_CMD", {"command": "pytest"}, "1 failed").stop
+        assert not g.observe("EDIT_FILE", {"path": "a", "new": str(i)}, "✓").stop
+        assert not g.observe("READ_FILE", {"path": "a"}, f"v{i}").stop
+
+
+def test_polling_a_silent_background_job_is_not_a_cycle():
+    """Ревю 2026-10-11: BG_OUTPUT (върви; нищо ново) ↔ `sleep 10` връщат всеки път
+    същото — кръгът спираше хода на петия извик, докато build-ът си вървеше."""
+    from genesis_agent.repeat_guard import RepeatGuard
+    for poll in (("RUN_CMD", {"command": "sleep 10"}, "[RUN_CMD: sleep 10]  (rc=0)"),
+                 ("RUN_CMD", {"command": "timeout /t 5"}, "[RUN_CMD: timeout /t 5]  (rc=0)")):
+        g = RepeatGuard()
+        for _ in range(6):
+            v = g.observe("BG_OUTPUT", {"id": "bg1"},
+                          "[BG_OUTPUT: bg1] (върви; npm run build)\n(нищо ново)")
+            assert not v.stop and v.note == ""
+            v = g.observe(*poll)
+            assert not v.stop and v.note == ""
+    g = RepeatGuard()    # таг-режим: командата е в заглавието на резултата
+    for _ in range(6):
+        assert not g.observe_text_result("[BG_OUTPUT: bg1] (върви; npm run build)\n(нищо ново)").note
+        assert not g.observe_text_result("[RUN_CMD: sleep 10]  (rc=0)").note
+    # Приключила задача ↔ същият sleep без промяна пак е кръг (sleep не спасява
+    # кръга на READ ↔ EDIT, а свършилата задача няма какво да чака).
+    g = RepeatGuard()
+    done = "[BG_OUTPUT: bg1] (приключи с код 1; npm run build)\n(нищо ново)"
+    seq = [("BG_OUTPUT", {"id": "bg1"}, done), ("READ_FILE", {"path": "a"}, "A")] * 3
+    assert any(g.observe(*c).stop for c in seq)
+    # Еднакво подред си остава въртене и при чакане (поведението от main).
+    g = RepeatGuard()
+    assert [g.observe("RUN_CMD", {"command": "sleep 1"}, "[RUN_CMD: sleep 1]  (rc=0)").stop
+            for _ in range(3)] == [False, False, True]
+
+
+# ── A11: pip и отказана команда не са „пуснат код“ ─────────────────────────
+
+@pytest.mark.parametrize("result", [
+    "[RUN_CMD: python -m pip install requests]  (rc=0)\nSuccessfully installed requests",
+    "[RUN_CMD: pip3 install -r requirements.txt]  (rc=0)\nok",
+    "[RUN_CMD: python --version]  (rc=0)\nPython 3.12.1",
+    "[RUN_CMD: python solution.py]\n[SANDBOX DECLINED] операторът отказа",
+    "[RUN_CMD: python solution.py]\n[SANDBOX BLOCKED] опасна команда",
+])
+def test_code_check_needs_the_code_actually_run(result):
+    from genesis_agent.code_check import RunCheck
+    c = RunCheck()
+    c.observe("[WRITE_FILE: /ws/solution.py] ✓ записани 120 символа")
+    c.observe(result)
+    assert "НЕ пуснат" in c.note()
+
+
+# ── A12: [TODO_WRITE: {"todos": [...]}] — формата на native схемата ────────
+
+def test_todo_write_accepts_the_object_form_in_text_mode():
+    from genesis_agent import todos
+    todos.clear()
+    try:
+        out = todos.write('{"todos": [{"content": "пиши тест", "status": "in_progress"}, '
+                          '{"content": "поправи", "status": "pending"}]}')
+        assert todos.items() == [{"content": "пиши тест", "status": "in_progress"},
+                                 {"content": "поправи", "status": "pending"}]
+        assert "0/2" in out
+        before = todos.items()
+        refused = todos.write('{"content": "нещо", "status": "pending"}')
+        assert refused.startswith("[TODO_WRITE] ❌") and todos.items() == before
+    finally:
+        todos.clear()
+
+
+# ── Втора вълна (преглед 2026-10-11) ───────────────────────────────────────
+
+def _ran(cmd, rc, out=""):
+    from genesis_agent import claim_check
+    return claim_check.counts_as_executed("RUN_CMD", cmd, f"[RUN_CMD: {cmd}]  (rc={rc})\n{out}")
+
+
+@pytest.mark.parametrize("cmd", ["make check", "python run_tests.py", "npm run check"])
+def test_a_failing_run_of_any_test_runner_is_still_a_run(cmd):
+    from genesis_agent import claim_check
+    entry = _ran(cmd, 1, "1 failed, 4 passed")
+    executed = [entry] if entry else []
+    assert claim_check.unsupported_claims("Пуснах тестовете: един пада.", executed) == []
+    # … но не доказва „всички минаха“.
+    assert claim_check.unsupported_claims("Всички тестове минаха.", executed)
+
+
+def test_a_failed_command_still_proves_nothing_else():
+    from genesis_agent import claim_check
+    entry = _ran("pip install fastapi-nonexist", 1, "ERROR: Could not find a version")
+    executed = [entry] if entry else []
+    assert [c.kind for c in claim_check.unsupported_claims("Инсталирах пакета.", executed)] \
+        == ["инсталация"]
+    moved = _ran("mv a.jpg photos/", 1, "mv: cannot stat 'a.jpg'")
+    executed = [moved] if moved else []
+    assert claim_check.unsupported_claims("Преместих снимките.", executed)
+    written = _ran("cp a.txt b.txt", 1, "cp: cannot stat 'a.txt'")
+    executed = [written] if written else []
+    assert claim_check.unsupported_claims("Записах b.txt.", executed)
+
+
+@pytest.mark.parametrize("later", ["git add tests/ && git commit -m wip", "ls tests"])
+def test_a_later_command_that_names_tests_does_not_hide_a_red_run(later):
+    from genesis_agent import claim_check
+    executed = [e for e in (_ran("pytest -q", 1, "1 failed"), _ran(later, 0)) if e]
+    assert claim_check.unsupported_claims("Всички тестове минаха.", executed)
+
+
+def test_a_failing_read_of_a_tests_file_is_not_a_red_test_run():
+    from genesis_agent import claim_check
+    executed = [e for e in (_ran("pytest -q", 0, "3 passed"),
+                            _ran("cat tests/fixtures/data.json", 1, "No such file")) if e]
+    assert claim_check.unsupported_claims("Всички тестове минаха.", executed) == []
+
+
+@pytest.mark.parametrize("cmd,expected", [
+    ("cd proj && python -m pytest -q 2>&1 | tail -20", True),
+    (r".venv\Scripts\python.exe -m pytest", True),
+    ("FOO=1 timeout 60 uv run pytest tests", True),
+    ("npm run test:unit", True), ("go test ./...", True), ("make -C sub check", True),
+    ("python manage.py test", True), ("./run_tests.sh", True),
+    ("python app.py", False), ("make", False), ("cargo build", False),
+    ("pip install pytest", False), ("test -f x && echo ok", False), ("./fetch_latest.sh", False),
+    ("mkdir tests", False),
+])
+def test_a_test_run_is_known_by_the_head_of_the_command(cmd, expected):
+    from genesis_agent.claim_check import is_test_run
+    assert is_test_run(cmd) is expected
+
+
+@pytest.mark.parametrize("command", [
+    "pip install -r requirements.txt && python solution.py",
+    "python solution.py --version",
+    "python -m pip install -q requests; python3 solution.py",
+])
+def test_code_check_sees_the_run_next_to_pip_or_a_flag(command):
+    from genesis_agent.code_check import RunCheck
+    c = RunCheck()
+    c.observe("[WRITE_FILE: /ws/solution.py] ✓ записани 120 символа")
+    c.observe(f"[RUN_CMD: {command}]  (rc=0)\nok")
+    assert "НЕ пуснат" not in c.note()
+
+
+def test_a_file_that_quotes_the_ask_marker_does_not_stop_the_round(ws, monkeypatch):
+    # Genesis върху собственото си repo чете код, в който стои маркерът.
+    (ws / "notes.md").write_text(f"marker = {gs.ASK_USER_MARKER!r}\nстаро\n", encoding="utf-8")
+    _script(monkeypatch, [
+        ("", [_call("READ_FILE", {"path": "notes.md"}, "r1"),
+              _call("EDIT_FILE", {"path": "notes.md", "old": "старо", "new": "ново"}, "e1")]),
+        ("Сменено.", None), ("Сменено.", None), ("Сменено.", None)])
+    ui = _UI()
+    gta.run_turn(_fresh(), "смени старо на ново в notes.md", ui)
+    assert not [e for e in ui.log if e[0] == "asked"]
+    assert "ново" in (ws / "notes.md").read_text(encoding="utf-8")
+
+
+class _CoreW2:
+    def __init__(self, replies, results):
+        self._replies = list(replies)
+        self.calls: list[str] = []
+        self.wm = None
+        core = self
+
+        class _Skills:
+            def _resolve(self, path):
+                raise RuntimeError("не се ползва")
+
+            def dispatch_tool_call(self, name, args):
+                core.calls.append(name)
+                return results[name]
+
+            def parse_and_execute_tools(self, text):
+                return []
+        self.skills = _Skills()
+
+    def complete(self, messages):
+        return self._replies.pop(0)
+
+    def remember(self, role, content):
+        pass
+
+
+def test_shared_loop_holds_the_calls_after_ask_user(monkeypatch):
+    from genesis_agent import agent_core as ac
+    monkeypatch.setattr(ac, "_translate_last_user_message_to_en", lambda m: None)
+    core = _CoreW2([("", [_call("ASK_USER", {"question": "Да трия ли?"}, "a1"),
+                          _call("RUN_CMD", {"command": "rm -rf build"}, "r1")], "p", "m")],
+                   {"ASK_USER": f"{gs.ASK_USER_MARKER}❓ Да трия ли?", "RUN_CMD": "изтрито"})
+    out = ac.run_tool_loop(core, [{"role": "user", "content": "почисти"}],
+                           on_assistant=lambda *a: None, on_tool_result=lambda *a: None)
+    assert core.calls == ["ASK_USER"]
+    tool_msgs = [m for m in out if m.get("role") == "tool"]
+    assert [m["tool_call_id"] for m in tool_msgs] == ["a1", "r1"]
+    assert "чака отговора" in tool_msgs[1]["content"]
+
+
+def test_shared_loop_ignores_the_marker_in_a_read_result(monkeypatch):
+    from genesis_agent import agent_core as ac
+    monkeypatch.setattr(ac, "_translate_last_user_message_to_en", lambda m: None)
+    core = _CoreW2([("", [_call("READ_FILE", {"path": "genesis_skills.py"}, "r1"),
+                          _call("LIST_DIR", {"path": "."}, "l1")], "p", "m"),
+                    ("Прочетох го.", None, "p", "m")],
+                   {"READ_FILE": f"[READ_FILE: genesis_skills.py]\nASK = '{gs.ASK_USER_MARKER}'",
+                    "LIST_DIR": "[LIST_DIR: .] a.py"})
+    ac.run_tool_loop(core, [{"role": "user", "content": "прочети"}],
+                     on_assistant=lambda *a: None, on_tool_result=lambda *a: None)
+    assert core.calls == ["READ_FILE", "LIST_DIR"]
+    assert core._replies == []
