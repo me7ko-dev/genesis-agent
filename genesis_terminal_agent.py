@@ -344,6 +344,9 @@ PROVIDERS: dict[str, dict[str, str | None]] = {
     # не и в това меню, тоест операторът можеше да го настрои и да не може
     # да го избере.
     "vertex":       {"name": "🔷 Vertex AI (Google)",  "key_env": None,                "base_url": None,                                                    "type": "vertex"},
+    # Claude с абонамента на оператора, през официалния `claude` CLI (2026-10-12,
+    # genesis_agent/claude_cli.py). Без ключ: входът е на `claude` (/login).
+    "claude_cli":   {"name": "🟠 Claude (абонамент, claude CLI)", "key_env": None, "base_url": None,                                       "type": "claude_cli"},
 }
 FALLBACKS = {
     "groq":         ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
@@ -366,11 +369,21 @@ FALLBACKS = {
     "sambanova":    ["DeepSeek-V3-0324", "Meta-Llama-3.3-70B-Instruct", "gpt-oss-120b"],
     "together":     ["meta-llama/Llama-3.3-70B-Instruct-Turbo"],
     "llmstudio":    ["local-model"],
+    "claude_cli":   ["sonnet", "opus", "haiku"],
 }
 
 MODELS_CACHE: dict[str, list[str]] = {}
 current_provider = config.get("models", {}).get("default_provider", "groq")
 current_model_id = config.get("models", {}).get("default_model_id", "openai/gpt-oss-120b")
+# Изричен избор на стартовия модел (2026-10-12): последният модел нарочно не се
+# помни между сесиите, но операторът с Claude абонамент иска да започва с него —
+# `GENESIS_START_PROVIDER=claude_cli` (+ по желание `GENESIS_START_MODEL=opus`).
+# Работи и за bench-а: чатът там се пуска като подпроцес с тази среда.
+_start_provider = os.environ.get("GENESIS_START_PROVIDER", "").strip()
+if _start_provider in PROVIDERS:
+    current_provider = _start_provider
+    current_model_id = (os.environ.get("GENESIS_START_MODEL", "").strip()
+                        or (FALLBACKS.get(_start_provider) or [current_model_id])[0])
 
 # Fallback chain from config (in order, tried on quota/rate-limit errors).
 # min 32B (design note, 2026-07-25): терминалният чат е основният coding assistant —
@@ -451,6 +464,11 @@ def provider_ready(provider_key: str) -> tuple[bool, str]:
     if p["type"] == "vertex":
         from genesis_agent import vertex_auth
         return vertex_auth.ready(), vertex_auth.status()
+    if p["type"] == "claude_cli":
+        from genesis_agent import claude_cli
+        if not claude_cli.available():
+            return False, "няма `claude` CLI (инсталирай Claude Code и влез с /login)"
+        return True, ""
     key_env = p["key_env"]
     if key_env is None:
         return True, ""
@@ -461,6 +479,8 @@ def fetch_models(provider_key):
     if provider_key in MODELS_CACHE:
         return MODELS_CACHE[provider_key]
     p = PROVIDERS[provider_key]
+    if p["type"] == "claude_cli":   # псевдонимите на `claude --model`, без заявка
+        return list(FALLBACKS["claude_cli"])
     key = KEYS.get(p["key_env"] or "", "")
     if p["type"] == "openai":
         try:
@@ -746,8 +766,10 @@ def ask_genesis(messages, tools=None):
     from genesis_agent.brain import Brain
 
     # Лек въпрос → малък модел (виж model_router.is_light_turn). Не и в
-    # /maxcoding — операторът изрично е поискал най-силните.
-    if not _CODING_MODE:
+    # /maxcoding — операторът изрично е поискал най-силните. Не и с избран
+    # Claude абонамент (2026-10-12): операторът е избрал Claude за всичко, а без
+    # безплатни ключове леката верига само минава празно през „skip: no KEY“.
+    if not _CODING_MODE and current_provider != "claude_cli":
         try:
             from genesis_agent.model_router import (
                 is_light_turn,
@@ -1946,6 +1968,11 @@ def _no_model_guard() -> bool:
     # като в ask_genesis.
     if not _brain_handles(current_provider) and not os.environ.get("GENESIS_LOCAL_ONLY"):
         return False
+    # Claude абонаментът отговаря без ключ — стига CLI-то да е тук (2026-10-12).
+    if current_provider == "claude_cli":
+        from genesis_agent import claude_cli
+        if claude_cli.available():
+            return False
     try:
         from genesis_agent.brain import any_model_reachable
         if any_model_reachable():

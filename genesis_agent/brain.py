@@ -207,6 +207,11 @@ _PROVIDERS = {
     # в `_call` и свой модул (genesis_agent.vertex_auth), вместо ред тук с
     # фиксиран base_url. key_env сочи проекта — „конфигуриран" значи „има проект".
     "vertex": ("dynamic://vertex", "GOOGLE_CLOUD_PROJECT"),
+    # Claude през официалния `claude` CLI с абонамента на оператора (2026-10-12,
+    # genesis_agent/claude_cli.py). Без ключ: входът е на `claude` (/login).
+    # Не е в нито една верига от config.yaml — само ръчен избор (`/model` или
+    # GENESIS_START_PROVIDER), и никога в облака (виж _call_claude_cli).
+    "claude_cli": ("native://claude_cli", None),
 }
 
 # Кои доставчици се викат през native SDK вместо през OpenAI-съвместим HTTP.
@@ -686,6 +691,12 @@ def any_model_reachable() -> bool:
     """
     keys = _load_keys()
     local_models = {LOCAL_MODEL}
+    # Избран Claude абонамент (GENESIS_START_PROVIDER=claude_cli) не е в нито
+    # една верига от config.yaml, а отговаря без ключ — стига CLI-то да е тук.
+    if os.environ.get("GENESIS_START_PROVIDER", "").strip() == "claude_cli":
+        from genesis_agent import claude_cli
+        if claude_cli.available():
+            return True
     for c in _load_chain() + _load_light_chain() + _load_coding_chain() + _load_premium_chain():
         key_env = _PROVIDERS.get(c["provider"], ("", None))[1]
         if key_env is None:          # ollama_local във веригата — решава пробата долу
@@ -1555,6 +1566,8 @@ class Brain:
                 kids = [f"key::VERTEX#{i}" for i in range(1, len(vertex_auth.projects()) + 1)]
             except Exception:
                 kids = []
+        elif provider == "claude_cli":
+            kids = ["key::claude_cli"]   # лимитът на абонамента (_call_claude_cli)
         elif not key_env:
             kids = []
         elif provider not in _NATIVE_PROVIDERS and len(self._numbered_keys(key_env)) > 1:
@@ -1569,6 +1582,8 @@ class Brain:
              extra: dict[str, Any] | None = None) -> tuple[str, list | None]:
         key_env = _PROVIDERS[provider][1]
         base_url = provider_base_url(provider)
+        if provider == "claude_cli":
+            return self._call_claude_cli(model, messages)
         if provider == "vertex":
             # Адресът и токенът се смятат при извикване (проект + локация +
             # OAuth), затова Vertex не минава през общия път с фиксиран
@@ -1662,6 +1677,35 @@ class Brain:
         if not tried_any:
             raise RuntimeError(f"HTTP_429: all configured {key_env}* are cooling down")
         raise last_err or RuntimeError(f"HTTP_502: {key_env} key rotation exhausted")
+
+    def _call_claude_cli(self, model: str, messages: list[dict]) -> tuple[str, list | None]:
+        """Claude през `claude -p` с абонамента на оператора — текстов модел:
+        инструментите са таговете на Genesis, не native tool_calls.
+
+        В облака (GENESIS_MODEL_GATEWAY) се отказва: абонаментът е за личната
+        употреба на оператора, не за задачи на други хора (правилата на
+        Anthropic, проверено 2026-10-12)."""
+        if os.environ.get("GENESIS_MODEL_GATEWAY", "").strip():
+            raise RuntimeError("skip: claude абонаментът не се ползва в онлайн услугата")
+        from genesis_agent import claude_cli
+        if any(m.get("role") == "tool" or m.get("tool_calls") for m in messages):
+            messages = self._sanitize_for_textmode(messages)
+        kid = f"key::{claude_cli.PROVIDER}"
+        if _is_exhausted(kid):
+            raise RuntimeError("HTTP_429: claude абонаментът е на пауза (лимит), cooling down")
+        try:
+            text, usage = claude_cli.complete(messages, model)
+        except RuntimeError as e:
+            last = str(e)
+            # Лимитът на абонамента е за целия акаунт, не за модел: друг модел
+            # през същия вход пак ще удари стената. 401 — входът липсва.
+            if "HTTP_429" in last or any(f"HTTP_{c}" in last for c in _KEY_DEAD_CODES):
+                _mark_exhausted(kid, _cooldown_for(last))
+                print(f"  [Brain] 🔑 claude абонамент недостъпен ({last[:80]}) → следващ")
+            raise
+        self._last_usage = usage
+        self._usage_attempt = getattr(self, "_attempt_id", None) if usage else None
+        return text, None
 
     def _call_vertex(self, model: str, messages: list[dict],
                       tools: list[dict] | None,
