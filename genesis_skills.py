@@ -523,6 +523,77 @@ def _read_range(fh, path: Path, encoding: str, offset_i: int | None,
 _STYLE_PROBE = 2_000_000
 
 
+# Буквални `\n` вместо нови редове (bench_all 2026-10-12, код f8f08d7): gpt-oss
+# и nemotron понякога пишат кода с текста „\n“ там, където е новият ред — 8 .py
+# файла в 4 проекта (предния ден 0). Записът минаваше с „✓“: ruff го няма в PATH
+# на лаптопа и проверката по-долу тихо се пропуска; pytest падаше при събирането
+# и faktura-excel свърши 0/1, а моделът четеше теста, не счупения файл. Поправя
+# се само когато без поправката файлът не е Python, а с нея е; иначе моделът
+# поне научава веднага кой ред не е наред.
+_LITERAL_NEWLINES_MIN = 3
+
+
+def _literal_newlines_outside_strings(code: str) -> str:
+    """`\\n` извън низовете → нов ред. Извън низ `\\` е само продължение на реда,
+    затова там буквалното „\\n“ е изгубен нов ред; в низа (`r"[^\\n]+"`) е код —
+    заместване навсякъде чупеше точно него (faktura-excel-1/extract.py)."""
+    out: list[str] = []
+    i, n = 0, len(code)
+    quote = ""        # отвореният низ: ', ", ''' или """
+    while i < n:
+        ch = code[i]
+        if quote:
+            if ch == "\\":
+                out.append(code[i:i + 2])
+                i += 2
+                continue
+            if code.startswith(quote, i):
+                out.append(quote)
+                i += len(quote)
+                quote = ""
+                continue
+            if ch == "\n" and len(quote) == 1:   # незатворен низ свършва с реда
+                quote = ""
+            out.append(ch)
+            i += 1
+            continue
+        for lost in ("\\r\\n", "\\n"):
+            if code.startswith(lost, i):
+                out.append("\n")
+                i += len(lost)
+                break
+        else:
+            if ch == "#":                       # коментарът — до истинския или изгубения ред
+                end = min((j for j in (code.find("\n", i), code.find("\\n", i)) if j >= 0), default=n)
+                out.append(code[i:end])
+                i = end
+                continue
+            if ch in "'\"":
+                quote = ch * 3 if code.startswith(ch * 3, i) else ch
+                out.append(quote)
+                i += len(quote)
+                continue
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def _python_write_check(path: Path, content: str) -> tuple[str, str]:
+    """(съдържанието за запис, бележка към резултата) за .py файл."""
+    from genesis_agent.code_edit import _syntax_error
+    err = _syntax_error(path, content)
+    if not err:
+        return content, ""
+    if content.count("\\n") >= _LITERAL_NEWLINES_MIN:
+        for fixed in (_literal_newlines_outside_strings(content),
+                      content.replace("\\r\\n", "\n").replace("\\n", "\n")):
+            if not _syntax_error(path, fixed):
+                return fixed, ("\n⚠ Новите редове бяха написани буквално като \\n — поправени "
+                               f"преди записа (без поправката: {err}). Пиши истински нови редове.")
+    return content, (f"\n⚠ Записаният файл не е валиден Python: {err}. Поправи го в "
+                     "този файл, преди да пускаш тестовете.")
+
+
 def _tool_write_file(arg: str, content: str, exact: bool = False) -> str:
     path, redirect = _resolve_noted(arg, redirect=False)
     if not arg.strip() or path.is_dir():
@@ -559,12 +630,14 @@ def _tool_write_file(arg: str, content: str, exact: bool = False) -> str:
     # моделът в следващия рунд вместо да чака sandbox изпълнение да ги хване.
     lint_note = ""
     if path.suffix == ".py":
+        content, syntax_note = _python_write_check(path, content)
         from genesis_agent.code_validate import validate_code_with_ruff
         ok, detail = validate_code_with_ruff(content)
         if ok and detail:
             content = detail
         elif not ok:
             lint_note = f"\n{detail}"
+        lint_note = syntax_note + lint_note
     # Съществуващ файл се записва в СВОЕТО кодиране (одит 2026-10-11): cp1251
     # файл, минал през READ→WRITE, излизаше с U+FFFD на мястото на всяка буква.
     encoding = "utf-8"

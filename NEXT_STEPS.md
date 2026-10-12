@@ -70,6 +70,13 @@ bg_phone_numbers: booking-form 20/20 ×2, customers-sqlite ×2); `bench_fix` **1
 записи) 15/16 при −0.4% токени (кратки задачи), офлайн −23…−30% в дългите → **включено
 по подразбиране** (`GENESIS_ELIDE_OLD_WRITES=0` го спира).
 
+**Claude с API ключа (2026-10-12):** `/model` → „Anthropic (API ключ, платен)“ или
+`GENESIS_START_PROVIDER=anthropic` (+ `GENESIS_START_MODEL=claude-sonnet-5`). Преди
+ключът стигаше само до `--max`. Моделите идват живо от ключа; избраният модел носи
+effort-а и native tools от `premium_models`, другите платени не влизат във веригата.
+Пробвано с истинския ключ само с кратък отговор (sonnet-5, 31 токена); bench с ключа
+още не е пускан — първото пускане да е кратко (ЕГН задача).
+
 **Чеклист на лаптопа (по ред):**
 1. `py -m pipx install --force "git+https://github.com/me7ko-dev/genesis-agent@claude/mega-upgrade-oct11"`
    (или `git pull` в checkout-а) → `genesis --version` показва новия комит.
@@ -81,6 +88,14 @@ bg_phone_numbers: booking-form 20/20 ×2, customers-sqlite ×2); `bench_fix` **1
    доверените проекти (доверието вече е подписано, старите записи не важат).
 5. PowerShell: `Remove-Item -r -fo $env:USERPROFILE\x`, `ri`, `rd /s /q` — трябва да питат/блокират;
    `rd /s /q C:\Users\<ти>\Projects\x\build` само пита; всичко под AppData — BLOCKED.
+
+**bench_all 2026-10-12 (f8f08d7, безплатната верига):** projects 23/32, faktura-excel
+1/2. Причината: 8 .py файла в 4 проекта с буквални `\n` вместо нови редове (gpt-oss,
+nemotron; предния ден 0), записани с „✓“, защото ruff го няма в PATH на лаптопа
+(ruff до pipx е в PR #58). WRITE_FILE на .py вече поправя изгубените редове извън
+низовете, когато само така файлът става Python; иначе казва реда. Петте файла на
+faktura-excel-1 → скритите тестове 2/2. Друго в същото пускане: `b"…"` с кирилица в
+test_app.py на booking-form (само бележка). Да се мери с `--steps projects`.
 
 **Отворено след ъпгрейда (клоновете `mega/w3-*` са качени, но не слети — прегледът ги отхвърли):**
 - ~~`claim_check`: Traceback в зелен изход, неуспешен build като „пуснах тестовете“,
