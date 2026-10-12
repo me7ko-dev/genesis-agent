@@ -1533,8 +1533,17 @@ def _tool_call_as_invoke(m: re.Match) -> str:
     return f'<invoke name="{m.group("tool")}">{params}</invoke>'
 
 
+# Измислен затварящ таг (2026-10-12, 2 на 371 отговора на Claude): дълга
+# RUN_CMD с heredoc, затворена с `EOF[END_CMD]` вместо `]` — тагът не се
+# разпознаваше, идваше подкана и ходът губеше рунд („heredoc-ът не се затвори“).
+# `[END_CMD]` не е наш синтаксис никъде, затова при отворен RUN_CMD/RUN_BG е `]`.
+_END_CMD = "[END_CMD]"
+
+
 def _normalize_xml_tool_calls(text: str) -> str:
     """XML формата на Claude за нашите инструменти → нашите тагове."""
+    if _END_CMD in text and ("[RUN_CMD:" in text or "[RUN_BG:" in text):
+        text = text.replace(_END_CMD, "]")
     if not any(mark in text for mark in ("<invoke", "</parameter>", "</invoke>", "<tool_call>")):
         return text
     text = _XML_WRAPPER_RE.sub("", text)

@@ -106,3 +106,10 @@ def test_an_invented_tool_stays_text_and_gets_the_nudge():
     text = '<invoke name="RUN_TESTS"><parameter name="command">pytest</parameter></invoke>'
     assert gs._normalize_xml_tool_calls(text) == text
     assert gs.looks_like_attempted_tool_tag(text)
+
+
+def test_a_heredoc_command_closed_with_end_cmd_runs():
+    """Claude, 2026-10-12: `[RUN_CMD: python - <<'EOF' … EOF[END_CMD]` губеше рунд."""
+    reply = "[RUN_CMD: python - <<'EOF'\nprint(sum([1, 2]))\nEOF[END_CMD]"
+    assert gs._SIMPLE_RE.search(gs._normalize_xml_tool_calls(reply)).group("arg").endswith("EOF")
+    assert gs._normalize_xml_tool_calls("[END_CMD] сам по себе си") == "[END_CMD] сам по себе си"
