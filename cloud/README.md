@@ -251,6 +251,76 @@ Webhook-ът проверява подписа (HMAC-SHA256 върху суро�
 два платени абонамента на един човек зареждат и двата, спирането на единия
 не спира другия. Адресите за връщане са от `--public-url`, не от `Host`.
 
+### Проверка на Stripe в тестов режим (5 минути, `cloud/stripe_check.py`)
+
+Тестовете минават с фалшив Stripe; това е проверката с **твоите тестови
+ключове** преди първия истински клиент. Live ключ (`sk_live_`/`rk_live_`) в
+средата → отказ (код 2), преди каквото и да е обръщение. Пускай на лаптопа или
+на машината, но с **отделна папка и порт** — не с базата на клиентите.
+
+1. Таблото на Stripe с включен **Test mode**: Product → Price за всеки пакет
+   (еднократна, напр. 5.00 EUR за `p5`) и план (месечна, 15.00 EUR за `basic`).
+   Сумата и валутата **точно** като `amount_cents`/`currency` — иначе webhook-ът
+   не зарежда. Developers → API keys → `sk_test_…`.
+2. Тестова папка, цени и човек (GROQ ключът е фалшив — ход не се пуска):
+   ```bash
+   D=/tmp/genesis-stripe; mkdir -p $D
+   cp cloud/web/prices.json $D/prices.json     # впиши price_… в stripe_price
+   printf 'GATEWAY_SECRET=%s\nGROQ_API_KEY=x\nGATEWAY_MODELS=groq/*\n' "$(openssl rand -hex 24)" > $D/keys.env
+   python -m cloud.web.server add-user test@example.com --data $D
+   ```
+3. Stripe CLI (`stripe login` веднъж), терминал 1 — тайната за webhook-а:
+   ```bash
+   stripe listen --print-secret                 # → whsec_… (не се сменя между пусканията)
+   stripe listen --forward-to localhost:8080/api/stripe/webhook
+   ```
+4. Терминал 2 — сървърът с тестовите ключове (`read -rs` — ключът не влиза в историята):
+   ```bash
+   read -rs STRIPE_SECRET_KEY; export STRIPE_SECRET_KEY         # sk_test_…
+   export STRIPE_WEBHOOK_SECRET=whsec_…                         # от стъпка 3
+   python -m cloud.web.server serve --data $D --jobs $D/jobs --billing \
+     --prices $D/prices.json --gateway-usage $D/usage.jsonl --env-file $D/keys.env \
+     --insecure-cookie --public-url http://localhost:8080
+   ```
+5. Терминал 3 (същите две променливи) — проверката:
+   ```bash
+   C="python -m cloud.stripe_check"
+   $C simulate test@example.com --data $D       # без Stripe: подписан webhook към сървъра
+   $C prices --prices $D/prices.json            # price_… срещу тестовия режим
+   $C checkout test@example.com --data $D --prices $D/prices.json   # плащане с 4242
+   $C checkout test@example.com --data $D --prices $D/prices.json --plan basic
+   ```
+
+Успех изглежда така (`simulate` и `checkout`, код 0):
+```
+  чужд подпис: 400 — отказан, нищо не е заредено
+  доставка: 200 заредено
+  повторна доставка: 200 — редът вече е, не е заредено втори път
+  баланс: 0.00 → 500.00 кредита (+500.00, очаквано +500.00)
+УСПЕХ: подписаният webhook зарежда точно веднъж
+```
+`checkout` първо проверява всички цени (`пакет p5: price_… = 5.00 EUR — наред`),
+после прави сесия по пътя на сървъра (`billing.create_checkout`) и печата
+`https://checkout.stripe.com/…`: плати с **4242 4242 4242 4242**, бъдеща дата
+(12/34), CVC 123. Скриптът чете `web.db` на 2 s до `--timeout` (300 s), докато
+дойде редът `stripe:cs_…` (планът — `stripe:in_…` от `invoice.paid`), и
+печата `баланс: 0.00 → 500.00 кредита` и `УСПЕХ: Stripe → webhook → сметка
+работи в тестовия режим`. В терминал 1 се виждат събитията с `[200]`.
+
+Неуспех (код 1) казва какво да провериш: 404 за цена — live цена или друг
+акаунт; „сумата е 499 eur, а в prices.json 500 eur“ — поправи цената; 400 при
+`simulate` — `STRIPE_WEBHOOK_SECRET` на сървъра е от друг `stripe listen`;
+„сървърът върви с live ключ“ — тестово събитие не зарежда; без ред до таймаута —
+не върви `stripe listen --forward-to` или `--data` е на друг сървър; при плана
+`invoice.paid` може да дойде преди `checkout.session.completed` → `[503]` в
+терминал 1 — тогава `stripe events resend evt_…` за фактурата. Редовете в
+сметката са истински (само с добавяне) — затова отделна папка; на машината на
+клиентите корекция е `grant … -5`. Проверено (2026-10-12, тук без ключове):
+`tests/test_cloud_stripe_check.py` — подписът минава `verify_stripe_signature`,
+live ключ → отказ без мрежа, `simulate` срещу сървър в процеса зарежда точно
+веднъж (и с чужда тайна или live сървър — нищо), `checkout` с фалшив Stripe.
+С истински тестов Stripe **още не е пускано** — това е първата стъпка на оператора.
+
 ### Командите на оператора (само локално — няма админ адрес в уеба)
 
 ```bash
