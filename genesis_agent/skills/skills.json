@@ -612,6 +612,30 @@
         "method": "self_test_passed",
         "detail": "OK"
       }
+    },
+    {
+      "name": "bg_phone_numbers",
+      "category": "domain",
+      "file_path": "skills/bg_phone_numbers.md",
+      "description": "Български телефонни номера — мобилен или стационарен по номерационния план, нормализиране до +359…, всички обичайни изписвания (0888/123-456, +359 888 123 456, 00359…).",
+      "triggers": [
+        "български мобилен",
+        "мобилен номер",
+        "мобилен телефон",
+        "телефонен номер",
+        "телефонни номера",
+        "телефоните",
+        "bulgarian phone number",
+        "bulgarian mobile number"
+      ],
+      "version": "1.0",
+      "last_updated": "2026-10-12T13:00:00+00:00",
+      "verified": true,
+      "verification": {
+        "verified": true,
+        "method": "self_test_passed",
+        "detail": "OK"
+      }
     }
   ]
 }

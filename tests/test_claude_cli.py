@@ -223,3 +223,19 @@ def test_the_raw_reply_log_is_written_only_when_asked(fake, monkeypatch, tmp_pat
     monkeypatch.setenv("GENESIS_CLAUDE_CLI_LOG", str(log))
     claude_cli.complete([{"role": "user", "content": "x"}])
     assert [json.loads(line)["text"] for line in log.read_text(encoding="utf-8").splitlines()] == ["готово"]
+
+
+def test_light_work_falls_back_to_haiku_only_when_the_subscription_is_chosen(fake, monkeypatch):
+    monkeypatch.delenv("GENESIS_START_PROVIDER", raising=False)
+    monkeypatch.delenv("GENESIS_CLAUDE_CLI_ACTIVE", raising=False)
+    assert not any(c["provider"] == "claude_cli" for c in brain.Brain(light=True, use_local=False).chain)
+    monkeypatch.setenv("GENESIS_CLAUDE_CLI_ACTIVE", "1")
+    chain = brain.Brain(light=True, use_local=False).chain
+    assert chain[-1] == {"provider": "claude_cli", "model": "haiku", "size_b": 0, "supports_tools": False}
+
+
+def test_a_missing_key_is_not_printed_as_a_dropped_model(capsys):
+    brain._print_skip("groq", "m", "skip: no GROQ_API_KEY configured", 0.0)
+    brain._print_skip("groq", "m", "HTTP_429: slow down", 0.1)
+    out = capsys.readouterr().out
+    assert "GROQ_API_KEY" not in out and "HTTP_429" in out

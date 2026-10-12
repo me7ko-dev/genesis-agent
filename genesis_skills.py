@@ -1480,11 +1480,75 @@ _XML_TAIL_RE = re.compile(r"\s*</parameter>\s*</invoke>\s*\]")
 _XML_WRAPPER_RE = re.compile(r"</?function_calls>\s*")
 
 
+# Пълното XML извикване с именувани параметри (2026-10-12, bench_fix с
+# claude_cli: 0/13 — в `genesis fix` Claude пише ВСЯКА редакция така:
+# `<invoke name="EDIT_FILE"><parameter name="path">…</parameter>
+# <parameter name="old_string">…</parameter><parameter name="new_string">…`;
+# формата с един аргумент горе не го хваща и редакцията не се изпълняваше).
+_XML_FULL_INVOKE_RE = re.compile(
+    r'<invoke name="(?P<tool>' + _XML_TOOLS + r')">'
+    r'(?P<params>(?:\s*<parameter name="[\w-]+">.*?</parameter>)+)\s*</invoke>', re.DOTALL)
+_XML_PARAM_RE = re.compile(r'<parameter name="(?P<key>[\w-]+)">(?P<value>.*?)</parameter>', re.DOTALL)
+_XML_ARG_ALIASES = {"file_path": "path", "filepath": "path", "filename": "path",
+                    "old_string": "old", "old_str": "old", "new_string": "new", "new_str": "new",
+                    "cmd": "command", "text": "content", "body": "content", "query": "pattern"}
+# Главният аргумент на едноредовия таг на всеки инструмент.
+_XML_MAIN_ARG = {"READ_FILE": "path", "LIST_DIR": "path", "REPO_MAP": "path", "GLOB": "pattern",
+                 "SEARCH_CODE": "pattern", "RUN_CMD": "command", "RUN_BG": "command",
+                 "WEB_SEARCH": "query", "WEB_FETCH": "url", "ASK_USER": "question",
+                 "EXPLORE": "question", "TODO_WRITE": "todos", "BG_OUTPUT": "id", "BG_KILL": "id"}
+
+
+def _xml_full_invoke(m: re.Match) -> str:
+    tool = m.group("tool")
+    args: dict[str, str] = {}
+    for p in _XML_PARAM_RE.finditer(m.group("params")):
+        key = p.group("key")
+        args[_XML_ARG_ALIASES.get(key, key) if not (tool == "WEB_SEARCH" and key == "query")
+             else key] = p.group("value")
+    path = args.get("path", "").strip()
+    if tool == "EDIT_FILE" and path and "old" in args and "new" in args:
+        return f"[EDIT_FILE: {path}]\n{args['old']}\n{_EDIT_SEPARATOR}\n{args['new']}\n[END_EDIT]"
+    if tool == "WRITE_FILE" and path and "content" in args:
+        return f"[WRITE_FILE: {path}]\n{args['content']}[END_WRITE]"
+    main = args.get(_XML_MAIN_ARG.get(tool, ""), "") or (next(iter(args.values()), "") if len(args) == 1 else "")
+    if not main:
+        return m.group(0)        # непознат вид — остава текст и получава подканата за синтаксис
+    if tool == "RUN_CMD" and str(args.get("background", "")).lower() in ("true", "1", "yes"):
+        tool = "RUN_BG"
+    return f"[{tool}: {main.strip()}]"
+
+
+# Трета форма от същия bench_fix (3 от 50 отговора): `<tool_call>READ_FILE
+# </tool_call><arg name="path">…</arg>` — свежда се до <invoke>, един път.
+_XML_TOOL_CALL_RE = re.compile(
+    r'<tool_call>\s*(?P<tool>' + _XML_TOOLS + r')\s*</tool_call>'
+    r'(?P<args>(?:\s*<arg name="[\w-]+">.*?</arg>)+)', re.DOTALL)
+_XML_ARG_RE = re.compile(r'<arg name="(?P<key>[\w-]+)">(?P<value>.*?)</arg>', re.DOTALL)
+
+
+def _tool_call_as_invoke(m: re.Match) -> str:
+    params = "".join(f'<parameter name="{a.group("key")}">{a.group("value")}</parameter>'
+                     for a in _XML_ARG_RE.finditer(m.group("args")))
+    return f'<invoke name="{m.group("tool")}">{params}</invoke>'
+
+
+# Измислен затварящ таг (2026-10-12, 2 на 371 отговора на Claude): дълга
+# RUN_CMD с heredoc, затворена с `EOF[END_CMD]` вместо `]` — тагът не се
+# разпознаваше, идваше подкана и ходът губеше рунд („heredoc-ът не се затвори“).
+# `[END_CMD]` не е наш синтаксис никъде, затова при отворен RUN_CMD/RUN_BG е `]`.
+_END_CMD = "[END_CMD]"
+
+
 def _normalize_xml_tool_calls(text: str) -> str:
     """XML формата на Claude за нашите инструменти → нашите тагове."""
-    if "<invoke" not in text and "</parameter>" not in text and "</invoke>" not in text:
+    if _END_CMD in text and ("[RUN_CMD:" in text or "[RUN_BG:" in text):
+        text = text.replace(_END_CMD, "]")
+    if not any(mark in text for mark in ("<invoke", "</parameter>", "</invoke>", "<tool_call>")):
         return text
     text = _XML_WRAPPER_RE.sub("", text)
+    text = _XML_TOOL_CALL_RE.sub(_tool_call_as_invoke, text)
+    text = _XML_FULL_INVOKE_RE.sub(_xml_full_invoke, text)
     text = _XML_BLOCK_OPEN_RE.sub(lambda m: f"[{m.group('tool')}: {m.group('path')}]\n", text)
     text = _XML_BLOCK_CLOSE_RE.sub("\n", text)
     text = _XML_TAIL_RE.sub("]", text)
@@ -1657,7 +1721,8 @@ def looks_like_attempted_tool_tag(response_text: str) -> bool:
         return False
     # `<invoke name="…">`, останал след _normalize_xml_tool_calls, също е опит
     # за инструмент — иначе ходът свършваше тихо (2026-10-12, виж горе).
-    return bool(_ATTEMPTED_TAG_RE.search(response_text) or "<invoke name=" in response_text)
+    return bool(_ATTEMPTED_TAG_RE.search(response_text) or "<invoke name=" in response_text
+                or "<tool_call>" in response_text)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
