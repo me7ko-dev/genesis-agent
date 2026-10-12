@@ -10,7 +10,8 @@
 ## Къде се намира
 - Worktree: `C:\Users\roika\Projects\genesis-desktop`, клон **`feat/desktop-oct12`**
   (= старият `feat/desktop-app` + merge на `origin/main` 0365470 след PR #59; качен в origin)
-- **PR #60** към main: https://github.com/me7ko-dev/genesis-agent/pull/60 — чака „да“ от потребителя
+- **PR #60** към main: https://github.com/me7ko-dev/genesis-agent/pull/60 — **СЛЯТ на 12.10** с „да“ от
+  потребителя (преди това в клона влезе и main с #65); нататък работи от main
 - Основното репо: `C:\Users\roika\Projects\genesis-agent` (GitHub: me7ko-dev/genesis-agent)
 - Кодът на приложението: `desktop/`
 
@@ -54,7 +55,7 @@
     ruff, mypy за bench-а не се губят; `pipx install --force` би ги изтрил).
     pipx_metadata вече сочи този клон. Чакано е bench-ът (свърши 20:36) и чужд pytest
     с pipx Python-а да свършат. Връщане: същото с `@f8f08d7`.
-    **След сливане на PR #60 → същата команда с `@main`.**
+    След сливането на PR #60 pipx е превключен на `@main` (същата команда).
   - Прекият път „Genesis Agent“ (Start менюто) → `~\.local\bin\genesis.exe`
     (беше `Programs\Genesis\genesis.exe`; иконата още е от там).
   - Резервата `Programs\Genesis` = CI сборка на 5a0b5ed (Native apps 38287850817,
@@ -162,8 +163,9 @@
 
 ## Следващи стъпки
 1. Потребителят да пробва приложението и да каже какво да се промени
-2. PR към main (само ако потребителят поиска)
-3. Инсталаторът да влезе в release до `genesis-windows-x64.zip`
+2. ~~PR към main~~ — PR #60 слят на 12.10
+3. Инсталаторът да влезе в release до `genesis-windows-x64.zip` (`publish` в
+   native.yml тегли само `genesis-windows-x64` и APK-то)
 4. Автоматично обновяване, подписване на инсталатора
 
 ## Полезни команди (от `desktop/`)

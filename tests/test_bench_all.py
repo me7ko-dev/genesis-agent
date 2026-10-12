@@ -72,7 +72,8 @@ def _ns(**kw):
 def test_acceptance_is_compared_with_this_runs_projects(tmp_path) -> None:
     steps = ba.plan(_ns(), tmp_path / "out", tmp_path)
     acc = next(s for s in steps if s.name == "acceptance")
-    assert acc.env == {"GENESIS_ACCEPTANCE": "1"}
+    # Включени по подразбиране за безплатните (2026-10-12) → стъпката мери БЕЗ тях.
+    assert acc.env == {"GENESIS_ACCEPTANCE": "0"}
     assert acc.baseline == tmp_path / "out" / "projects" / "results.json"
     assert [s.name for s in ba.plan(_ns(quick=True), tmp_path / "out", tmp_path)
             if not s.skip] == ["projects", "fix"]
@@ -98,7 +99,7 @@ def test_verdict() -> None:
     assert ba.verdict_of([ok]).startswith("✅")
     assert "РЕГРЕСИЯ" in ba.verdict_of([ok, bad])
     assert "не се пуснаха: fcc" in ba.verdict_of([ok, {"step": "fcc", "status": "timeout"}])
-    assert "поправиха a" in ba.verdict_of([ok, acc])
+    assert "Без приемните тестове минават: a" in ba.verdict_of([ok, acc])
 
 
 def test_a_whole_run_with_fake_steps(tmp_path, monkeypatch) -> None:
@@ -127,7 +128,7 @@ def test_dry_run_runs_nothing(tmp_path, monkeypatch, capsys) -> None:
     monkeypatch.setattr(ba, "bench_home", lambda: tmp_path)
     assert ba.main(["--dry-run", "--out", str(tmp_path / "out")]) == 0
     assert not (tmp_path / "out").exists()
-    assert "GENESIS_ACCEPTANCE=1" in capsys.readouterr().out
+    assert "GENESIS_ACCEPTANCE=0" in capsys.readouterr().out
 
 
 # ── одит 2026-10-11: присъдата ───────────────────────────────────────────────
@@ -246,11 +247,21 @@ def test_a_first_run_is_no_baseline_even_with_the_acceptance_pass() -> None:
     assert ba.verdict_of([acc]).startswith("✅")
 
 
-def test_acceptance_noise_is_not_a_code_regression() -> None:
+def test_a_project_that_falls_without_acceptance_tests_keeps_them() -> None:
+    """Стъпката е без приемните тестове: пада ли нещо без тях — помагат."""
     ok = {"step": "projects", "status": "ok", "compare": ba.compare({"a": _s(2)}, {"a": _s(2)})}
     acc = {"step": "acceptance", "status": "ok", "compare": ba.compare({"a": _s(1)}, {"a": _s(2)})}
     v = ba.verdict_of([ok, acc])
-    assert "РЕГРЕСИЯ" not in v and "Приемните тестове влошиха: a" in v
+    assert "РЕГРЕСИЯ" not in v and "Без приемните тестове падат a — остават" in v
+    assert ba.exit_code([ok, acc]) == 0
+
+
+def test_acceptance_noise_is_not_a_code_regression() -> None:
+    """Без приемните тестове минава нещо, което с тях падна веднъж — шум."""
+    ok = {"step": "projects", "status": "ok", "compare": ba.compare({"a": _s(1)}, {"a": _s(1)})}
+    acc = {"step": "acceptance", "status": "ok", "compare": ba.compare({"a": _s(2)}, {"a": _s(1)})}
+    v = ba.verdict_of([ok, acc])
+    assert "РЕГРЕСИЯ" not in v and "Без приемните тестове минават: a" in v
     assert ba.exit_code([ok, acc]) == 0
 
 

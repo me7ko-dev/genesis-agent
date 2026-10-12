@@ -15,9 +15,7 @@ PR #59, нагоден към новия протокол (`more`, `epoch`, `mid
 Състоянието е в `desktop/SESSION_NOTES.md`. Сглобява се само в CI
 (`native.yml` dispatch — задачи `windows` + `desktop`), не на лаптопа (SAC).
 Прозорецът пуска `genesis` от PATH (pipx), не стария `Programs\Genesis`.
-На лаптопа (12.10): pipx е от **този клон** (main + прозорецът) — не го връщай
-на main, преди PR #60 да е слят, иначе прозорецът губи /usage, /model, /status.
-Остава: PR #60 → main само с „да“; после pipx `@main`; инсталаторът в release.
+PR #60 е слят на 12.10; pipx на лаптопа е `@main`. Остава: инсталаторът в release.
 
 ## Мега-ъпгрейд 2026-10-11 (клон `claude/mega-upgrade-oct11`) — първо това на лаптопа
 
@@ -66,8 +64,10 @@ bench харнесът минава до край срещу фалшив дос
 bg_phone_numbers: booking-form 20/20 ×2, customers-sqlite ×2); `bench_fix` **13/13**, 10.9 s,
 5 834 токена, 0 фалшиви (беше 0/13: в `genesis fix` Claude пише всяка редакция като
 `<invoke name="EDIT_FILE">` с `old_string/new_string` — вече се превежда). Б.4
-(`GENESIS_ACCEPTANCE=1`) 15/16 при +20% токени и +11% време — не хваща нищо повече →
-остава изключено, да се махне, ако и безплатната верига не спечели. Б.12 (свиване на старите
+(`GENESIS_ACCEPTANCE=1`) 15/16 при +20% токени и +11% време — не хваща нищо повече.
+**Б.4 решено (2026-10-12):** с безплатната верига bench_all 25/32 с тях срещу 23/32 без
+(+19% токени) → включени по подразбиране за безплатен модел, изключени за Claude/платен;
+`GENESIS_ACCEPTANCE=1/0` решава изрично; стъпката `acceptance` на bench_all вече мери БЕЗ тях. Б.12 (свиване на старите
 записи) 15/16 при −0.4% токени (кратки задачи), офлайн −23…−30% в дългите → **включено
 по подразбиране** (`GENESIS_ELIDE_OLD_WRITES=0` го спира).
 
@@ -79,7 +79,8 @@ effort-а и native tools от `premium_models`, другите платени �
 още не е пускан — първото пускане да е кратко (ЕГН задача).
 
 **Чеклист на лаптопа (по ред):**
-1. `py -m pipx install --force "git+https://github.com/me7ko-dev/genesis-agent@claude/mega-upgrade-oct11"`
+1. `pipx runpip genesis-agent install --force-reinstall --no-deps "git+https://github.com/me7ko-dev/genesis-agent@main"`
+   (само пакетът — венвът пази добавките и pytest/ruff за bench-а)
    (или `git pull` в checkout-а) → `genesis --version` показва новия комит.
 2. `python scripts/bench_all.py` — регресия спрямо 2026-09-30 ли? Регресия → поправка преди сливане.
 3. ~~Б.12 A/B~~ — включено по подразбиране (2026-10-12, мерено с Claude, виж горе). С

@@ -103,6 +103,7 @@ except Exception:
 # installed package and the user's own home — nothing machine-specific here.
 from genesis_agent import claim_check
 from genesis_agent.acceptance import AcceptanceCheck as _AcceptanceCheck
+from genesis_agent.acceptance import enabled as _acceptance_enabled
 from genesis_agent.budget import TEXT_RESULT_FOLLOWUP, clip_for_context
 from genesis_agent.code_check import RunCheck as _RunCheck
 from genesis_agent.config import TOOL_ROUND_CAP as _TOOL_ROUND_CAP
@@ -454,6 +455,14 @@ def is_free_model(provider_key: str, model_id: str) -> bool:
 
 def model_badge(provider_key: str, model_id: str) -> str:
     return "[green bold]FREE[/]" if is_free_model(provider_key, model_id) else "[yellow dim]PAID[/]"
+
+
+def _free_turn() -> bool:
+    """Безплатен ли е моделът, с който върви ходът — пинът от `/model`, без
+    GENESIS_QUALITY=max (тогава платените са отпред)."""
+    if (os.environ.get("GENESIS_QUALITY") or "").strip().lower() == "max":
+        return False
+    return is_free_model(current_provider, current_model_id)
 
 # ── API Calls ────────────────────────────────────────────────────────────────
 def provider_ready(provider_key: str) -> tuple[bool, str]:
@@ -1584,8 +1593,10 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
     _page_check = _PageCheck()
     # .py, записан и непуснат след последната промяна (genesis_agent.code_check).
     _run_check = _RunCheck()
-    # Приемни тестове само от заявката (GENESIS_ACCEPTANCE=1, genesis_agent.acceptance).
-    _accept = _AcceptanceCheck(user_input, Path(genesis_skills._WORKSPACE), rules=knowledge)
+    # Приемни тестове само от заявката (genesis_agent.acceptance): с безплатен
+    # модел — включени, с Claude/платен — не; GENESIS_ACCEPTANCE=1/0 решава изрично.
+    _accept = _AcceptanceCheck(user_input, Path(genesis_skills._WORKSPACE), rules=knowledge,
+                               on=_acceptance_enabled(_free_turn()))
     # Въртене на място: същият извик, същият резултат, пореден път.
     # Таванът го ограничава по цена, но не го разпознава — виж
     # genesis_agent.repeat_guard.
