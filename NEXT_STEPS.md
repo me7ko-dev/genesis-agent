@@ -50,6 +50,12 @@ bench харнесът минава до край срещу фалшив дос
 празен ред; скритият тест на faktura-excel искаше шрифт само от Windows. На лаптопа: `claude auth status`
 трябва да казва `claude.ai`, после същите стъпки отдолу с тази променлива.
 
+**Claude с API ключа (2026-10-12):** `/model` → „Anthropic (API ключ, платен)“ или
+`GENESIS_START_PROVIDER=anthropic` (+ `GENESIS_START_MODEL=claude-sonnet-5`). Преди
+ключът стигаше само до `--max`. Моделите идват живо от ключа; избраният модел носи
+effort-а и native tools от `premium_models`, другите платени не влизат във веригата.
+Не е мерено с истинския ключ — първото пускане да е кратко (ЕГН задача).
+
 **Чеклист на лаптопа (по ред):**
 1. `py -m pipx install --force "git+https://github.com/me7ko-dev/genesis-agent@claude/mega-upgrade-oct11"`
    (или `git pull` в checkout-а) → `genesis --version` показва новия комит.

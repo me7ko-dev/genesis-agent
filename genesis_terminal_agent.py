@@ -253,6 +253,7 @@ KEYS = {
     "GROQ_API_KEY": "", "GEMINI_API_KEY": "", "OPENROUTER_API_KEY": "",
     "NVIDIA_API_KEY": "", "GITHUB_TOKEN": "", "OPENAI_API_KEY": "",
     "HF_TOKEN": "", "COHERE_API_KEY": "", "OLLAMA_API_KEY": "",
+    "ANTHROPIC_API_KEY": "",
     "OLLAMA_MODEL": config.get("models", {}).get("ollama_model", "llama3.2")
 }
 
@@ -347,6 +348,10 @@ PROVIDERS: dict[str, dict[str, str | None]] = {
     # Claude с абонамента на оператора, през официалния `claude` CLI (2026-10-12,
     # genesis_agent/claude_cli.py). Без ключ: входът е на `claude` (/login).
     "claude_cli":   {"name": "🟠 Claude (абонамент, claude CLI)", "key_env": None, "base_url": None,                                       "type": "claude_cli"},
+    # Claude с API ключа (2026-10-12): ключът в ~/.genesis/.env и пакетът
+    # `anthropic` стигаха само до --max — менюто нямаше ред за него, тоест
+    # операторът с ключ не можеше да го избере. Плаща се от ключа (PAID).
+    "anthropic":    {"name": "🟤 Anthropic (API ключ, платен)", "key_env": "ANTHROPIC_API_KEY", "base_url": "https://api.anthropic.com/v1",          "type": "anthropic"},
 }
 FALLBACKS = {
     "groq":         ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
@@ -370,6 +375,8 @@ FALLBACKS = {
     "together":     ["meta-llama/Llama-3.3-70B-Instruct-Turbo"],
     "llmstudio":    ["local-model"],
     "claude_cli":   ["sonnet", "opus", "haiku"],
+    # Редът е като premium_models в config.yaml; живият списък идва от ключа.
+    "anthropic":    ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
 }
 
 MODELS_CACHE: dict[str, list[str]] = {}
@@ -469,6 +476,13 @@ def provider_ready(provider_key: str) -> tuple[bool, str]:
         if not claude_cli.available():
             return False, "няма `claude` CLI (инсталирай Claude Code и влез с /login)"
         return True, ""
+    if p["type"] == "anthropic":
+        if not KEYS.get("ANTHROPIC_API_KEY"):
+            return False, "липсва ANTHROPIC_API_KEY (в ~/.genesis/.env)"
+        import importlib.util
+        if importlib.util.find_spec("anthropic") is None:
+            return False, "липсва пакетът anthropic (pipx inject genesis-agent anthropic)"
+        return True, ""
     key_env = p["key_env"]
     if key_env is None:
         return True, ""
@@ -482,6 +496,18 @@ def fetch_models(provider_key):
     if p["type"] == "claude_cli":   # псевдонимите на `claude --model`, без заявка
         return list(FALLBACKS["claude_cli"])
     key = KEYS.get(p["key_env"] or "", "")
+    if p["type"] == "anthropic":
+        # Живият списък на ключа (Models API); без мрежа — резервата отгоре.
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=key, max_retries=0, timeout=10)
+            models = [m.id for m in client.models.list()]
+            if models:
+                MODELS_CACHE[provider_key] = models
+                return models
+        except Exception:
+            pass   # без мрежа / лош ключ: менюто пак показва резервата
+        return list(FALLBACKS["anthropic"])
     if p["type"] == "openai":
         try:
             r = requests.get(f"{p['base_url']}/models",
