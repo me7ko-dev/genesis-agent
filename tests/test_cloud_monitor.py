@@ -420,3 +420,55 @@ def test_a_hung_docker_still_leaves_time_to_send_the_alert(env, monkeypatch, ids
     # /healthz до 10 с; имейл: свързване, STARTTLS, вход, пращане; webhook.
     worst = sum(spent) + 10 + 5 * monitor.SEND_TIMEOUT
     assert worst + 30 <= _unit_timeout(), (spent, worst)
+
+
+def test_one_dead_channel_does_not_repeat_the_alert_on_the_working_one(env, capsys) -> None:
+    """Ревю 2026-10-12: при работещ имейл и паднал webhook (404) състоянието
+    не се записваше — същото ПРОБЛЕМ отиваше по имейла на всеки 5 минути, а
+    при оправяне имейлът не получаваше „наред“. Състоянието е на канал."""
+    s = _mail(min_free_gb=0, name="test", webhook_url="https://hooks.example.com/t")
+    env.run(s)
+    env.web_down = True
+    hook: list[str] = []
+    hook_up = False
+
+    def urlopen(req: Any, timeout: float = 0) -> FakeResponse:
+        hook.append(json.loads(req.data)["text"])
+        if not hook_up:
+            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)  # type: ignore[arg-type]
+        return FakeResponse(200)
+
+    def sender(st: monitor.Settings, subject: str, body: str) -> list[str]:
+        return monitor.send(st, subject, body, smtp=FakeSMTP, smtp_ssl=None, urlopen=urlopen)
+
+    FakeSMTP.made.clear()
+    codes = [env.run(s, after=300 * i, sender=sender) for i in range(1, 5)]
+    mails = [m["Subject"] for c in FakeSMTP.made for m in c.messages]
+    assert codes == [1, 1, 1, 1] and len(hook) == 4      # webhook-ът се опитва всеки път
+    assert mails == ["[Genesis test] ПРОБЛЕМ: уеб сървърът"]   # имейлът — веднъж
+    assert "HTTP Error 404" in capsys.readouterr().err
+    # Оправено, докато webhook-ът е още паднал: имейлът получава „наред“.
+    env.web_down = False
+    assert env.run(s, after=1500, sender=sender) == 0     # за webhook-а няма промяна
+    mails = [m["Subject"] for c in FakeSMTP.made for m in c.messages]
+    assert mails[-1] == "[Genesis test] наред: уеб сървърът" and len(mails) == 2
+    assert len(hook) == 4
+    # Проблем, webhook-ът се връща: получава го веднъж, имейлът — също веднъж.
+    env.web_down = True
+    assert env.run(s, after=1800, sender=sender) == 1
+    hook_up = True
+    assert env.run(s, after=2100, sender=sender) == 0
+    assert env.run(s, after=2400, sender=sender) == 0
+    mails = [m["Subject"] for c in FakeSMTP.made for m in c.messages]
+    assert len(mails) == 3 and len(hook) == 6 and "ПРОБЛЕМ: уеб сървърът" in hook[-1]
+
+
+def test_a_state_file_from_before_channels_does_not_resend(env) -> None:
+    """Файл само с "checks" (отпреди 2026-10-12): каналите тръгват от него —
+    деплоят не праща наново проблем, за който вече е пратено."""
+    env.web_down = True
+    env.run()
+    state = json.loads(env.state.read_text(encoding="utf-8"))
+    env.state.write_text(json.dumps({"checks": state["checks"]}), encoding="utf-8")
+    assert env.run(after=300) == 0 and len(env.sent) == 1
+    assert json.loads(env.state.read_text(encoding="utf-8"))["channels"]["webhook"]["web"]["ok"] is False

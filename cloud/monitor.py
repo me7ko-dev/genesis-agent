@@ -17,8 +17,9 @@
 състояние е в monitor-state.json до web.db (без него всичко е „наред“). Каналът
 — имейл по SMTP и/или webhook (JSON за Slack, Discord или Telegram бот) — и
 праговете са в /srv/genesis/monitor.env (виж cloud/deploy/monitor.env.example).
-Ако пращането не успее, състоянието не се записва — следващото пускане опитва
-пак — и кодът е 1, за да се вижда в `systemctl --failed`. Паролата за SMTP и
+Всеки канал помни какво е стигнало до него: ако пращането по един не успее,
+неговото състояние не се сменя — следващото пускане опитва пак само по него —
+и кодът е 1, за да се вижда в `systemctl --failed`. Паролата за SMTP и
 адресът на webhook-а (в него е жетонът на Telegram бота) не се печатат: в
 грешките се заменят с ***.
 
@@ -41,7 +42,7 @@ import sys
 import time
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
@@ -104,12 +105,19 @@ class Settings:
 
     def channels(self) -> list[str]:
         """Каналите без тайни — за журнала и --dry-run."""
+        return [desc for _, desc, _ in self.split()]
+
+    def split(self) -> list[tuple[str, str, Settings]]:
+        """(ключ, описание без тайни, настройки само с този канал) за всеки
+        настроен канал — всеки се праща и помни отделно (виж run_once)."""
         out = []
         if self.smtp_host:
-            out.append(f"имейл до {', '.join(self.smtp_to)} през {self.smtp_host}:{self.smtp_port}"
-                       f" ({self.smtp_tls})")
+            mail = (f"имейл до {', '.join(self.smtp_to)} през {self.smtp_host}:{self.smtp_port}"
+                    f" ({self.smtp_tls})")
+            out.append(("email", mail, replace(self, webhook_url="")))
         if self.webhook_url:
-            out.append(f"webhook {self.webhook_format} към {urlsplit(self.webhook_url).hostname}")
+            hook = f"webhook {self.webhook_format} към {urlsplit(self.webhook_url).hostname}"
+            out.append(("webhook", hook, replace(self, smtp_host="")))
         return out
 
 
@@ -311,13 +319,22 @@ def run_checks(s: Settings, *, data: Path, jobs: Path, backup_dir: Path, web: st
 
 # ── състояние и съобщение ───────────────────────────────────────────────────
 
-def load_state(path: Path) -> dict[str, dict[str, Any]]:
-    """{име: {"ok", "since", "detail"}} от предишното пускане; счупен файл = няма."""
+def load_state(path: Path, channel: str | None = None) -> dict[str, dict[str, Any]]:
+    """{име: {"ok", "since", "detail"}} от предишното пускане; счупен файл = няма.
+
+    Без `channel` — каквото е видяно; с него — каквото е стигнало до този
+    канал. Канал без запис (файл отпреди 2026-10-12 или току-що добавен) тръгва
+    от видяното."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    checks = data.get("checks") if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return {}
+    checks = data.get("checks")
+    per_channel = data.get("channels")
+    if channel and isinstance(per_channel, dict) and isinstance(per_channel.get(channel), dict):
+        checks = per_channel[channel]
     if not isinstance(checks, dict):
         return {}
     return {k: v for k, v in checks.items() if isinstance(v, dict)}
@@ -454,30 +471,41 @@ def run_once(s: Settings, *, data: Path, jobs: Path, backup_dir: Path, web: str 
     findings = run_checks(s, data=data, jobs=jobs, backup_dir=backup_dir, web=web, now=now)
     for f in findings:
         out(f"{'✓' if f.ok else '✗'} {LABELS[f.name]}: {f.detail}")
-    prev = load_state(state_path)
-    changed = changes(prev, findings)
-    channels = s.channels()
-    if not changed:
+    # Всеки канал помни какво е стигнало до него (2026-10-12, ревю): с общо
+    # състояние паднал webhook (404) връщаше същото ПРОБЛЕМ по работещия имейл
+    # на всеки 5 минути, а при оправяне имейлът не получаваше „наред“.
+    targets = s.split() or [("journal", "", s)]
+    delivered: dict[str, Any] = {}
+    failed = sent = False
+    for key, desc, only in targets:
+        before = load_state(state_path, key)
+        changed = changes(before, findings)
+        delivered[key] = new_state(before, findings, now)["checks"]
+        if not changed:
+            continue
+        sent = True
+        subject, body = message(s, changed, findings, before, now)
+        if dry_run:
+            out(f"\nби пратил по: {desc or 'няма канал — само в журнала'}\n{subject}\n{body}")
+        elif key == "journal":
+            out(f"\nняма канал за аларми (monitor.env) — само в журнала:\n{subject}\n{body}")
+        else:
+            errors = sender(only, subject, body)
+            if errors:
+                # Състоянието на този канал остава старото: следващото пускане
+                # праща по него пак; другите канали не повтарят.
+                for e in errors:
+                    print(f"ГРЕШКА: алармата не стигна: {e}", file=sys.stderr)
+                delivered[key] = before
+                failed = True
+                continue
+            out(f"пратено по: {desc} — {subject}")
+    if not sent:
         out("няма промяна — нищо за пращане")
-    elif dry_run:
-        subject, body = message(s, changed, findings, prev, now)
-        out(f"\nби пратил по: {'; '.join(channels) or 'няма канал — само в журнала'}\n"
-            f"{subject}\n{body}")
-    elif not channels:
-        subject, body = message(s, changed, findings, prev, now)
-        out(f"\nняма канал за аларми (monitor.env) — само в журнала:\n{subject}\n{body}")
-    else:
-        subject, body = message(s, changed, findings, prev, now)
-        errors = sender(s, subject, body)
-        if errors:
-            # Състоянието остава старото: следващото пускане праща пак.
-            for e in errors:
-                print(f"ГРЕШКА: алармата не стигна: {e}", file=sys.stderr)
-            return 1
-        out(f"пратено по: {'; '.join(channels)} — {subject}")
     if not dry_run:
-        save_state(state_path, new_state(prev, findings, now))
-    return 0
+        state = new_state(load_state(state_path), findings, now)
+        save_state(state_path, {**state, "channels": delivered})
+    return 1 if failed else 0
 
 
 def main(argv: list[str] | None = None) -> int:
