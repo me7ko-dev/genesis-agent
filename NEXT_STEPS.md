@@ -71,6 +71,14 @@ bg_phone_numbers: booking-form 20/20 ×2, customers-sqlite ×2); `bench_fix` **1
 5. PowerShell: `Remove-Item -r -fo $env:USERPROFILE\x`, `ri`, `rd /s /q` — трябва да питат/блокират;
    `rd /s /q C:\Users\<ти>\Projects\x\build` само пита; всичко под AppData — BLOCKED.
 
+**bench_all 2026-10-12 (f8f08d7, безплатната верига):** projects 23/32, faktura-excel
+1/2. Причината: 8 .py файла в 4 проекта с буквални `\n` вместо нови редове (gpt-oss,
+nemotron; предния ден 0), записани с „✓“, защото ruff го няма в PATH на лаптопа
+(ruff до pipx е в PR #58). WRITE_FILE на .py вече поправя изгубените редове извън
+низовете, когато само така файлът става Python; иначе казва реда. Петте файла на
+faktura-excel-1 → скритите тестове 2/2. Друго в същото пускане: `b"…"` с кирилица в
+test_app.py на booking-form (само бележка). Да се мери с `--steps projects`.
+
 **Отворено след ъпгрейда (клоновете `mega/w3-*` са качени, но не слети — прегледът ги отхвърли):**
 - ~~`claim_check`: Traceback в зелен изход, неуспешен build като „пуснах тестовете“,
   `| tail`~~ — вълни 4–5 (rc на runner-а, иначе маркерите в изхода). Остава
