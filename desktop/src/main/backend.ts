@@ -14,7 +14,9 @@ import { createServer } from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { BackendState, CommandResult, EventsBatch, GenesisEvent, SendResult } from '../shared/types';
+import { guardedFolder } from '../shared/workspace';
 import { exeCandidates } from './exe';
+import { logLine } from './logline';
 import { b64d, GenesisClient, keyId, ProtocolError } from './protocol';
 
 const START_TIMEOUT_MS = 90_000;
@@ -90,7 +92,6 @@ function readKey(): Buffer | undefined {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // eslint-disable-next-line no-control-regex
 const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g;
-const QR_LINE = /^[\s█▀▄]+$/;
 const PROTOCOL_FAILURES = 3;
 
 function commandLineOf(pid: number): Promise<string> {
@@ -293,6 +294,7 @@ export class Backend extends EventEmitter {
       const s = await this.client.call<{ model?: string; workspace?: string; version?: string; busy: boolean;
                                           features?: string[] }>('status');
       this.set({ ...this.state, model: s.model, agentWorkspace: s.workspace, version: s.version, busy: s.busy,
+                 workspaceGuard: guardedFolder(this.state.workspace, homedir()),
                  commands: !!s.features?.includes('commands') });
     } catch {
       /* the next poll will tell */
@@ -337,7 +339,8 @@ export class Backend extends EventEmitter {
       return { ok: false, error: 'old_agent' };
     }
     try {
-      const r = await this.client.call<CommandResult>('command', { name, arg }, 60_000);
+      // /export runs the project's tests before it zips: give it minutes, not one.
+      const r = await this.client.call<CommandResult>('command', { name, arg }, name === 'export' ? 600_000 : 60_000);
       if (name === 'set_model' || name === 'maxcoding' || name.startsWith('local_')) void this.refreshStatus();
       return r;
     } catch (e) {
@@ -361,10 +364,8 @@ export class Backend extends EventEmitter {
   }
 
   private line(raw: string): void {
-    // `genesis serve` prints a QR code and the pairing link for phones: the
-    // window has no use for them, and the key has no business in a log.
-    if (QR_LINE.test(raw)) return;
-    const text = raw.replace(/#k=[A-Za-z0-9_-]+/g, '#k=•••');
+    const text = logLine(raw);
+    if (text === null) return;
     this.log.push(text);
     if (this.log.length > LOG_LINES) this.log.splice(0, this.log.length - LOG_LINES);
     this.emit('log', text);

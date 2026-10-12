@@ -20,7 +20,7 @@ export type SheetView =
   | { view: 'history' }
   | { view: 'update' }
   | { view: 'help' }
-  | { view: 'text'; title: string; command: string; arg?: Record<string, unknown> };
+  | { view: 'text'; title: string; command: string; arg?: Record<string, unknown>; loading?: string };
 
 // ── numbers ──────────────────────────────────────────────────────────────────
 
@@ -55,8 +55,8 @@ export function explain(error?: string): string {
   return error || 'Нещо се обърка.';
 }
 
-function Loading() {
-  return <div className="sheet-loading"><Loader2 size={18} className="spin" /> Зареждам…</div>;
+function Loading({ text = 'Зареждам…' }: { text?: string }) {
+  return <div className="sheet-loading"><Loader2 size={18} className="spin" /> {text}</div>;
 }
 
 function Failure({ text, onRetry }: { text: string; onRetry?: () => void }) {
@@ -114,7 +114,7 @@ export function Sheet({ sheet, onClose, onFlash, onOpen, onTerminal }: SheetProp
           {sheet.view === 'history' && <HistoryView onFlash={onFlash} onClose={onClose} />}
           {sheet.view === 'update' && <UpdateView onTerminal={onTerminal} onFlash={onFlash} />}
           {sheet.view === 'help' && <HelpView />}
-          {sheet.view === 'text' && <TextView command={sheet.command} arg={sheet.arg} />}
+          {sheet.view === 'text' && <TextView command={sheet.command} arg={sheet.arg} loading={sheet.loading} />}
         </div>
       </div>
     </div>
@@ -601,10 +601,10 @@ function HelpView() {
 
 // ── /skills, /tasks, /done, /drop ────────────────────────────────────────────
 
-function TextView({ command, arg }: { command: string; arg?: Record<string, unknown> }) {
+function TextView({ command, arg, loading }: { command: string; arg?: Record<string, unknown>; loading?: string }) {
   const { data, error, reload } = useCommand<CommandResult & { text?: string; stats?: Record<string, number> }>(command, arg);
   if (error) return <Failure text={error} onRetry={reload} />;
-  if (!data) return <Loading />;
+  if (!data) return <Loading text={loading} />;
   const s = data.stats;
   return (
     <div className="textview">

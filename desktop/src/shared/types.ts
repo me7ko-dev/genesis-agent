@@ -49,6 +49,8 @@ export type BackendState = {
   workspace: string;
   /** What the agent reports it actually works in (it may refuse ~ or C:\). */
   agentWorkspace?: string;
+  /** The opened folder is home or a drive root — why the agent works elsewhere. */
+  workspaceGuard?: boolean;
   model?: string;
   version?: string;
   exe?: string;

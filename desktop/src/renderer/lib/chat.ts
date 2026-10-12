@@ -118,14 +118,32 @@ export function toolLook(name: string): ToolLook {
  * Split it into what the tool was given, the rest of the header line, and
  * whether it failed (a non-zero exit code or an error mark).
  */
-export function toolHeader(name: string, result: string): { target: string; extra: string; failed: boolean } {
+export function toolHeader(name: string, result: string, workspace?: string): { target: string; extra: string; failed: boolean } {
   const first = result.split(/\r?\n/, 1)[0] ?? '';
   const m = /^\[([A-Z_]+):\s*([\s\S]*?)\]\s*(.*)$/.exec(first.trim());
   const rc = /\(rc=(-?\d+)\)/.exec(first);
   const failed = (rc !== null && rc[1] !== '0') || /^(✗|❌|error|грешка|traceback)/i.test(result.trim());
-  if (!m || m[1] !== name.toUpperCase()) return { target: summarize(result), extra: '', failed };
-  const extra = m[3].replace(/\(rc=0\)/, '').replace(/^✓\s*/, '').trim();
-  return { target: m[2], extra: extra.length > 80 ? `${extra.slice(0, 79)}…` : extra, failed };
+  if (!m || m[1] !== name.toUpperCase()) {
+    // `[TASK_UPDATE] ✓ Нишка #20 обновена.` — the tool's own tag is already the card's name.
+    const own = `[${name.toUpperCase()}]`;
+    const text = result.trimStart().startsWith(own) ? result.trimStart().slice(own.length) : result;
+    return { target: summarize(text), extra: '', failed };
+  }
+  const extra = relativeTo(m[3].replace(/\(rc=0\)/, '').replace(/^✓\s*/, '').trim(), workspace);
+  return { target: relativeTo(m[2], workspace), extra: extra.length > 80 ? `${extra.slice(0, 79)}…` : extra, failed };
+}
+
+/**
+ * Paths inside the open folder, relative to it: `calc.py`, not
+ * `C:\Users\…\project\calc.py`. 2026-10-12: an EDIT_FILE card showed the full
+ * path twice (target and result) and both were cut off.
+ */
+export function relativeTo(text: string, workspace?: string): string {
+  const root = workspace?.replace(/[\\/]+$/, '');
+  if (!root) return text;
+  if (text.toLowerCase() === root.toLowerCase()) return baseName(root);
+  const escaped = root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\\\\/g, '[\\\\/]');
+  return text.replace(new RegExp(`${escaped}[\\\\/]`, 'gi'), '');
 }
 
 /** First meaningful line of a tool result, for the collapsed card. */

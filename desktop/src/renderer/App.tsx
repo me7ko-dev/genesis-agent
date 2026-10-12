@@ -116,6 +116,7 @@ export function App() {
       case '/update': setSheet({ view: 'update' }); return true;
       case '/skills': setSheet({ view: 'text', title: 'Умения', command: 'skills' }); return true;
       case '/tasks': setSheet({ view: 'text', title: 'Работа', command: 'tasks' }); return true;
+      case '/export': setSheet({ view: 'text', title: 'Предаване', command: 'export', loading: 'Опаковам проекта и пускам тестовете…' }); return true;
       case '/maxcoding': void quick('maxcoding'); return true;
       case '/local_model_max': void quick('local_max'); return true;
       case '/local_model_normal': void quick('local_normal'); return true;
@@ -194,7 +195,7 @@ export function App() {
               switch (it.kind) {
                 case 'user': return <UserMessage key={it.key} text={it.text} />;
                 case 'assistant': return <AssistantMessage key={it.key} text={it.text} />;
-                case 'tool': return <ToolCard key={it.key} item={it} />;
+                case 'tool': return <ToolCard key={it.key} item={it} workspace={state.agentWorkspace || state.workspace} />;
                 case 'note': return <Note key={it.key} item={it} />;
                 case 'confirm': return <ConfirmCard key={it.key} item={it} onAnswer={answer} />;
               }
@@ -277,12 +278,17 @@ export function App() {
       )}
 
       <main className="main">
-        {differs && (
+        {differs && (state.workspaceGuard ? (
           <div className="banner">
             Genesis не работи направо в <b>{state.workspace}</b> (домашната папка и корена на диска са забранени) —
             работи в <b>{state.agentWorkspace}</b>.
           </div>
-        )}
+        ) : (
+          <div className="banner">
+            Genesis работи в <b>{state.agentWorkspace}</b>, не в <b>{state.workspace}</b>: насочен е там
+            (GENESIS_WORKSPACE или config.yaml) или е пуснат от изходния си код. Инсталираният Genesis работи в отворената папка.
+          </div>
+        ))}
         {main}
       </main>
 

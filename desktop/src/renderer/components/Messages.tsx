@@ -70,11 +70,11 @@ export function AssistantMessage({ text }: { text: string }) {
   );
 }
 
-export function ToolCard({ item }: { item: Extract<ChatItem, { kind: 'tool' }> }) {
+export function ToolCard({ item, workspace }: { item: Extract<ChatItem, { kind: 'tool' }>; workspace?: string }) {
   const [open, setOpen] = useState(false);
   const look = toolLook(item.name);
   const Icon = TOOL_ICONS[look.icon as keyof typeof TOOL_ICONS] ?? Wrench;
-  const head = toolHeader(item.name, item.result);
+  const head = toolHeader(item.name, item.result, workspace);
   return (
     <div className={`tool ${open ? 'open' : ''} ${head.failed ? 'failed' : ''}`}>
       <button className="tool-head" onClick={() => setOpen(!open)}>
