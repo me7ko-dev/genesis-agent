@@ -74,6 +74,21 @@ def parse_text(arg: str) -> list[dict[str, str]] | None:
     return out
 
 
+# Как моделите наричат текста и „готово“ — не само схемата. Проба на
+# приложението 2026-10-12: gpt-oss-120b пишеше {"description", "done": false}.
+_TEXT_KEYS = ("content", "task", "title", "text", "description", "name", "step")
+_DONE_KEYS = ("done", "completed", "checked")
+
+
+def _item(raw: dict) -> tuple[str, Any]:
+    text = next((raw[k] for k in _TEXT_KEYS if raw.get(k)), "")
+    status = raw.get("status")
+    if status is None:
+        done = next((raw[k] for k in _DONE_KEYS if isinstance(raw.get(k), bool)), None)
+        status = None if done is None else ("completed" if done else "pending")
+    return " ".join(str(text).split())[:_MAX_TEXT], status
+
+
 def write(todos: Any) -> str:
     """Подменя целия списък. Връща го нарисуван (или защо е отказан)."""
     if isinstance(todos, str):
@@ -84,14 +99,19 @@ def write(todos: Any) -> str:
     for raw in todos[:_MAX_ITEMS]:
         if not isinstance(raw, dict):
             continue
-        text = " ".join(str(raw.get("content") or raw.get("task") or "").split())[:_MAX_TEXT]
-        status = _status(raw.get("status"))
+        text, raw_status = _item(raw)
+        status = _status(raw_status)
         if not text:
             continue
         if status not in STATUSES:
-            return (f"[TODO_WRITE] ❌ Непознат статус „{raw.get('status')}“ — "
+            return (f"[TODO_WRITE] ❌ Непознат статус „{raw_status}“ — "
                     f"само {', '.join(STATUSES)}.")
         new.append({"content": text, "status": status})
+    if todos and not new:
+        # Задачи имаше, но нито една не се прочете: не трием списъка мълчаливо
+        # („празен“ караше модела да опитва пак и пак, 12 пъти в един ход).
+        return ("[TODO_WRITE] ❌ Не разпознах нито една задача — всяка е "
+                '{"content": "…", "status": "pending|in_progress|completed"}. Списъкът е непроменен.')
     _items[:] = new
     note = ""
     if sum(i["status"] == "in_progress" for i in new) > 1:

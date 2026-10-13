@@ -47,6 +47,34 @@ def test_off_unless_enabled(ws, monkeypatch) -> None:
     assert acceptance.enabled()
 
 
+def test_on_by_default_only_for_a_free_model(monkeypatch) -> None:
+    """bench_all 2026-10-12: безплатната верига 25/32 с тях срещу 23/32 без;
+    Claude 15/16 срещу 16/16. Изричната променлива печели и в двете посоки."""
+    monkeypatch.delenv("GENESIS_ACCEPTANCE", raising=False)
+    assert acceptance.enabled(free_model=True)
+    assert not acceptance.enabled(free_model=False)
+    monkeypatch.setenv("GENESIS_ACCEPTANCE", "0")
+    assert not acceptance.enabled(free_model=True)
+    monkeypatch.setenv("GENESIS_ACCEPTANCE", "1")
+    assert acceptance.enabled(free_model=False)
+
+
+@pytest.mark.parametrize(("provider", "model", "quality", "free"), [
+    ("groq", "openai/gpt-oss-120b", "", True),
+    ("ollama_cloud", "gpt-oss:120b-cloud", "", True),
+    ("claude_cli", "sonnet", "", False),
+    ("anthropic", "claude-sonnet-5", "", False),
+    ("groq", "openai/gpt-oss-120b", "max", False),     # --max: платените са отпред
+])
+def test_the_chat_turn_knows_whether_its_model_is_free(monkeypatch, provider, model,
+                                                       quality, free) -> None:
+    import genesis_terminal_agent as gta
+    monkeypatch.setattr(gta, "current_provider", provider)
+    monkeypatch.setattr(gta, "current_model_id", model)
+    monkeypatch.setenv("GENESIS_QUALITY", quality)
+    assert gta._free_turn() is free
+
+
 def test_due_only_after_a_non_test_python_file(ws) -> None:
     c = acceptance.AcceptanceCheck("x", ws, complete=_fake(_GOOD), on=True)
     c.observe(f"[WRITE_FILE: {ws / 'tests' / 'test_calc.py'}] ✓ записани 3 символа")

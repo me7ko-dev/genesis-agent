@@ -497,6 +497,10 @@ class RemoteTurnUI:
         clipped = len(result) > _TOOL_PREVIEW
         self._s.emit("tool", name=name, result=result[:_TOOL_PREVIEW], clipped=clipped)
 
+    def tool_start(self, name: str, detail: str) -> None:
+        # Етикетът на хода, докато инструментът върви („RUN_CMD: pytest -q“).
+        self._s.emit("thinking", label=f"{name}: {detail}" if detail else name)
+
     def asked(self, question: str) -> None:
         self._s.emit("asked", text=question)
 
@@ -633,6 +637,7 @@ class RemoteServer:
     def __init__(self, key: bytes, session: RemoteSession, *, name: str,
                  status: Callable[[], dict] | None = None,
                  clear: Callable[[], None] | None = None,
+                 commands: Callable[[str, dict], dict] | None = None,
                  web_root: Path | None = None, replay_path: Path | None = None) -> None:
         self.key = key
         self.cipher = Cipher(key)
@@ -641,6 +646,7 @@ class RemoteServer:
         self.name = name
         self.status = status or (dict)
         self.clear = clear
+        self.commands = commands
         self.web_root = web_root
         self._failures: dict[str, list[float]] = {}
         self._lock = threading.Lock()
@@ -654,7 +660,8 @@ class RemoteServer:
     def hello(self) -> dict:
         from genesis_agent import __version__
         return {"app": "genesis", "v": PROTOCOL, "key_id": key_id(self.key),
-                "name": self.name, "version": __version__}
+                "name": self.name, "version": __version__,
+                "features": ["commands"] if self.commands else []}
 
     def handle(self, envelope: Any) -> tuple[dict, str]:
         """(отговор, rid) за вече декодиран JSON плик. Хвърля ProtocolError
@@ -714,6 +721,9 @@ class RemoteServer:
                 self.clear()
             s.emit("cleared")
             return {"ok": True}
+        if op == "command" and self.commands is not None:
+            arg = p.get("arg")
+            return self.commands(str(p.get("name") or ""), arg if isinstance(arg, dict) else {})
         # По-ново приложение с операция, която този `genesis serve` не знае.
         return {"ok": False, "error": "unknown_op"}
 
@@ -1039,32 +1049,38 @@ def _web_root() -> Path | None:
     return root if (root / "index.html").is_file() else None
 
 
-def serve(args: list[str]) -> int:
-    """`genesis serve [--port N] [--host IP] [--reset] [--web]`."""
-    try:
-        import cryptography  # noqa: F401
-    except ImportError:
-        print("`genesis serve` иска cryptography:  pip install \"genesis-agent[mobile]\"")
-        return 2
+@dataclass
+class ServeOptions:
+    port: int = DEFAULT_PORT
+    host: str = ""          # адресът в QR кода; празно — първият LAN адрес
+    bind: str = "0.0.0.0"   # къде слуша сървърът
+    reset: bool = False
+    web: bool = False       # QR код за уеб версията (iPhone без приложението)
 
-    port, host_override, reset, web = DEFAULT_PORT, "", False, False
+
+def parse_serve_args(args: list[str]) -> ServeOptions | int:
+    """Опциите на `genesis serve` — или код за изход (--help, грешна опция)."""
+    opts = ServeOptions()
     i = 0
     while i < len(args):
         a = args[i]
         if a == "--port" and i + 1 < len(args):
             i += 1
             try:
-                port = int(args[i])
+                opts.port = int(args[i])
             except ValueError:
                 print(f"--port иска число, не {args[i]!r}")
                 return 2
         elif a == "--host" and i + 1 < len(args):
             i += 1
-            host_override = args[i]
+            opts.host = args[i]
+        elif a == "--bind" and i + 1 < len(args):
+            i += 1
+            opts.bind = args[i]
         elif a == "--reset":
-            reset = True
+            opts.reset = True
         elif a == "--web":
-            web = True
+            opts.web = True
         elif a in ("-h", "--help"):
             print(SERVE_USAGE)
             return 0
@@ -1072,6 +1088,24 @@ def serve(args: list[str]) -> int:
             print(f"Непозната опция: {a}\n\n{SERVE_USAGE}")
             return 2
         i += 1
+    return opts
+
+
+def serve(args: list[str]) -> int:
+    """`genesis serve [--port N] [--host IP] [--bind IP] [--reset] [--web]`."""
+    try:
+        import cryptography  # noqa: F401
+    except ImportError:
+        print("`genesis serve` иска cryptography:  pip install \"genesis-agent[mobile]\"")
+        return 2
+
+    opts = parse_serve_args(args)
+    if isinstance(opts, int):
+        return opts
+    port, host_override, bind, reset, web = opts.port, opts.host, opts.bind, opts.reset, opts.web
+    # Слуша само на един адрес (127.0.0.1 за Genesis Desktop) → той е и в QR кода.
+    if not host_override and bind not in ("", "0.0.0.0"):
+        host_override = bind
     if host_override and not valid_host(host_override):
         print(f"--host {host_override!r}: телефонът не може да го прочете — IP адрес или име "
               "от латиница, цифри, точки и тирета.")
@@ -1119,8 +1153,8 @@ def serve(args: list[str]) -> int:
         gta._new_session()
         state["messages"] = deque([{"role": "system", "content": system_prompt}],
                                   maxlen=gta._HISTORY_MAXLEN)
-        # Нов разговор от телефона = нова сесия и за брояча (NEXT_STEPS В.8):
-        # иначе статус редът на компютъра носеше Σ на стария разговор.
+        # Нов разговор от телефона/приложението = нова сесия и за брояча
+        # (NEXT_STEPS В.8): иначе статус редът носеше Σ на стария разговор.
         gta.reset_usage()
         from genesis_agent import todos
         todos.clear()   # както /clear в терминала
@@ -1160,10 +1194,20 @@ def serve(args: list[str]) -> int:
         confirm_fn=lambda op, verdict: session.confirm(op, list(verdict.reasons))))
 
     name = socket.gethostname()
-    server = RemoteServer(key, session, name=name, status=status, clear=clear, web_root=_web_root(),
+    from genesis_agent import desktop_commands
+
+    def set_messages(messages: Any) -> None:
+        state["messages"] = messages
+
+    ctx = desktop_commands.CommandContext(
+        get_messages=lambda: state["messages"], set_messages=set_messages,
+        busy=lambda: session.busy, emit=session.emit)
+    server = RemoteServer(key, session, name=name, status=status, clear=clear,
+                          commands=lambda n, a: desktop_commands.run(n, a, ctx),
+                          web_root=_web_root(),
                           replay_path=_config_path().with_name("remote_seen.json"))
     try:
-        httpd = server.make_http("0.0.0.0", port)
+        httpd = server.make_http(bind, port)
     except OSError as e:
         print(f"Не мога да слушам на порт {port}: {e}. Друг порт: genesis serve --port 8766")
         return 1
@@ -1214,12 +1258,14 @@ def serve(args: list[str]) -> int:
     return 0
 
 
-SERVE_USAGE = """Употреба: genesis serve [--port N] [--host IP] [--reset] [--web]
+SERVE_USAGE = """Употреба: genesis serve [--port N] [--host IP] [--bind IP] [--reset] [--web]
 
 Пуска Genesis за телефона (приложението Genesis Remote за Android и iOS):
 показва QR код, който сдвоява телефона с тази машина.
 
   --port N    порт (по подразбиране 8765)
   --host IP   адрес в QR кода — напр. Tailscale адрес за достъп извън дома
+  --bind IP   на кой адрес да слуша (по подразбиране 0.0.0.0; 127.0.0.1 —
+              само тази машина, както го пуска Genesis Desktop)
   --reset     нов ключ; всички сдвоени телефони губят достъп
   --web       QR код за уеб версията (iPhone без приложението) — по HTTP, само вкъщи"""

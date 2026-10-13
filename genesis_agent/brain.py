@@ -861,6 +861,17 @@ class Brain:
                         if not (c["provider"] == p_prov and c["model"] == p_model)]
                 existing = next((c for c in self.chain
                                  if c["provider"] == p_prov and c["model"] == p_model), None)
+                # Anthropic, избран в `/model` (2026-10-12): записът от
+                # premium_models носи effort-а от config.yaml и native tools —
+                # същото, което --max праща за този модел. Иначе ръчният избор
+                # минаваше на текстови тагове. Пинът е изричен избор на
+                # оператора, затова не чака quality="max".
+                if not existing and p_prov in _NATIVE_PROVIDERS:
+                    existing = next((dict(c) for c in _load_premium_chain()
+                                     if c["provider"] == p_prov and c["model"] == p_model),
+                                    {"provider": p_prov, "model": p_model, "size_b": 0,
+                                     "supports_tools": True})
+                    self._premium_meta.setdefault((p_prov, p_model), existing)
                 self._pinned = existing or {"provider": p_prov, "model": p_model,
                                             "size_b": 0, "supports_tools": False}
                 self.chain = [self._pinned] + rest

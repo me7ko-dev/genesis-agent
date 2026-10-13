@@ -386,6 +386,27 @@ def test_todo_both_call_paths_and_plan_mode(ws) -> None:
     assert "(1/2 готови)" in out[0]
 
 
+def test_todo_other_field_names_are_read_and_nothing_known_keeps_the_list(ws) -> None:
+    """Проба на приложението 2026-10-12 (gpt-oss-120b): моделът пишеше
+    {"description": …, "done": false} — нито една задача не се четеше, списъкът
+    се изтриваше мълчаливо („празен“) и ходът изгоря 12 пъти TODO_WRITE."""
+    gs.dispatch_tool_call("TODO_WRITE", {"todos": [
+        {"description": "прочети calc.py", "done": True},
+        {"title": "прочети test_calc.py", "done": False},
+        {"text": "пусни pytest -q", "completed": False}]})
+    assert todos.items() == [{"content": "прочети calc.py", "status": "completed"},
+                             {"content": "прочети test_calc.py", "status": "pending"},
+                             {"content": "пусни pytest -q", "status": "pending"}]
+    # Задачи, от които не се чете нито една, и липсващ "todos" — отказ, старият остава.
+    for args in ({"todos": [{"foo": "bar"}]}, {"tasks": "x"}, {}):
+        out = gs.dispatch_tool_call("TODO_WRITE", args)
+        assert "❌" in out, args
+        assert len(todos.items()) == 3
+    # Изричен празен списък все още чисти.
+    assert "празен" in gs.dispatch_tool_call("TODO_WRITE", {"todos": []})
+    assert todos.items() == []
+
+
 def test_todo_limits() -> None:
     todos.write([{"content": f"t{i}", "status": "pending"} for i in range(80)]
                 + [{"content": "", "status": "pending"}])

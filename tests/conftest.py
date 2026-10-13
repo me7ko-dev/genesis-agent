@@ -204,6 +204,15 @@ def _elide_off_like_the_default(monkeypatch):
         monkeypatch.setattr(module, "ELIDE_WRITE_ROUNDS", 6)
 
 
+@pytest.fixture(autouse=True)
+def _acceptance_off_like_before(monkeypatch):
+    """Б.4 (2026-10-12): приемните тестове са включени по подразбиране за
+    безплатен модел, а терминалът в тестовете стои на groq — всеки ход с .py
+    би направил още една заявка към фалшивия модел и старите тестове щяха да
+    видят чужд отговор. Започват изключени; тестовете за тях задават сами."""
+    monkeypatch.setenv("GENESIS_ACCEPTANCE", "0")
+
+
 class FakeDocker:
     """Записва `docker` командите вместо да ги пуска. `answers` — отговор по
     префикс на аргументите: {("network", "create"): (1, "", "pool exhausted")}."""
