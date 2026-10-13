@@ -1896,6 +1896,21 @@ class Brain:
         # Няма system съобщение (рядко) → добавяме таговете като собствено.
         return [{"role": "system", "content": tags}] + out
 
+    def _cache_stable_textmode(self, history: list[dict], tools: list[dict] | None,
+                               fallback: list[dict]) -> list[dict]:
+        """Текстовата история за доставчик с кеш по префикс (claude_cli) — без
+        свиването на budget_history, което сменя вече пратени байтове (виж
+        budget.cache_stable_history). Над тавана — `fallback`, свитата."""
+        from genesis_agent.budget import cache_stable_history
+        msgs = cache_stable_history(history)
+        if msgs is None:
+            return fallback
+        if tools:
+            return self._with_tool_tag_docs(self._sanitize_for_textmode(msgs))
+        if any(m.get("role") == "tool" or m.get("tool_calls") for m in msgs):
+            return self._sanitize_for_textmode(msgs)
+        return msgs
+
     @staticmethod
     def _sanitize_for_textmode(messages: list[dict]) -> list[dict]:
         """Превръща native tool_calls/tool-role съобщения в обикновен текст.
@@ -1953,7 +1968,9 @@ class Brain:
         # остава пълна (budget_history не мутира входа); свива се само копието,
         # което тръгва по мрежата.
         from genesis_agent.budget import budget_history
+        full_history = messages
         messages = budget_history(messages)
+        stable_notools: list[dict] | None = None   # за claude_cli (кеш по префикс)
 
         last_error = "неизвестна грешка"
         # Последната ИСТИНСКА грешка (тръгнала заявка). `last_error` се
@@ -2096,6 +2113,11 @@ class Brain:
                         continue  # временно изчерпан → пропускаме
                     use_tools = tools if (tools and attempt.get("supports_tools")) else None
                     msgs = messages if use_tools else messages_notools
+                    if prov == "claude_cli":
+                        if stable_notools is None:
+                            stable_notools = self._cache_stable_textmode(
+                                full_history, tools, messages_notools)
+                        msgs = stable_notools
                     t0 = time.time()
                     self._attempt_id = (prov, model)
                     self._usage_attempt = None
