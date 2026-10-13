@@ -36,6 +36,7 @@ import os
 import re
 import secrets
 import signal
+import sqlite3
 import stat
 import sys
 import threading
@@ -136,6 +137,7 @@ class App:
         self.stripe_opener = stripe_opener
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="turn")
         self._failures: dict[str, list[float]] = {}
+        self._noted: dict[str, float] = {}     # ключ → кога заключването е записано
         self._lock = threading.Lock()
         self._downloading: set[str] = set()
         self._cleanup = cleanup or launch.cleanup_leftovers
@@ -193,6 +195,24 @@ class App:
         # 12 грешни опита с 0..11 интервала — нито един 429).
         return f"e:{email.strip().lower()}"
 
+    def _fresh_lockouts(self, keys: list[str], now: float) -> list[str]:
+        """Под self._lock: от заключените `keys` — тези, чието заключване още не
+        е записано в този прозорец. По един ред на ключ на 15 мин, не на всеки
+        отказан опит: при налучкване с 1000 заявки/s базата не расте с тях."""
+        self._noted = {k: t for k, t in self._noted.items() if now - t < LOGIN_WINDOW}
+        fresh = [k for k in keys if k not in self._noted]
+        for k in fresh:
+            self._noted[k] = now
+        return fresh
+
+    def _note_lockouts(self, keys: list[str]) -> None:
+        """Записва заключванията за cloud/monitor.py (2026-10-12) — само вида."""
+        for k in keys:
+            kind = "email" if k.startswith("e:") else "signup" if k.startswith("signup:") else "ip"
+            # 429 на човека е по-важен от реда за наблюдението.
+            with contextlib.suppress(sqlite3.Error):
+                self.store.add_lockout(kind)
+
     def login_blocked(self, email: str, ip: str) -> bool:
         return any(len(self._recent_failures(k)) >= LOGIN_FAILURES
                    for k in (self._email_key(email), f"ip:{ip}"))
@@ -208,10 +228,14 @@ class App:
             now = time.time()
             for k in keys:
                 self._failures[k] = [t for t in self._failures.get(k, []) if now - t < LOGIN_WINDOW]
-            if any(len(self._failures[k]) >= LOGIN_FAILURES for k in keys):
-                raise LoginBlocked
-            for k in keys:
-                self._failures[k].append(stamp)
+            blocked = [k for k in keys if len(self._failures[k]) >= LOGIN_FAILURES]
+            fresh = self._fresh_lockouts(blocked, now)
+            if not blocked:
+                for k in keys:
+                    self._failures[k].append(stamp)
+        if blocked:
+            self._note_lockouts(fresh)
+            raise LoginBlocked
         user_id = self.store.check_password(email, password)
         if user_id is None:
             return None
@@ -233,9 +257,13 @@ class App:
         with self._lock:
             now = time.time()
             self._failures[key] = [t for t in self._failures.get(key, []) if now - t < LOGIN_WINDOW]
-            if len(self._failures[key]) >= LOGIN_FAILURES:
-                raise LoginBlocked
-            self._failures[key].append(stamp)
+            blocked = len(self._failures[key]) >= LOGIN_FAILURES
+            fresh = self._fresh_lockouts([f"signup:{key}"] if blocked else [], now)
+            if not blocked:
+                self._failures[key].append(stamp)
+        if blocked:
+            self._note_lockouts(fresh)
+            raise LoginBlocked
         user_id = self.store.signup(code, email, password)
         with self._lock:
             ip_list = self._failures.get(key, [])

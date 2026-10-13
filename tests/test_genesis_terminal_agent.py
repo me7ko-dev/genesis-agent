@@ -327,6 +327,28 @@ class TestTheVertexModelListDegradesInsteadOfFailing:
         assert all(m.startswith("google/") for m in t.FALLBACKS["vertex"])
 
 
+def test_the_model_menu_offers_only_chat_models(monkeypatch) -> None:
+    """Проба на приложението 2026-10-12: /model на Groq предлагаше whisper
+    (реч→текст), orpheus (текст→реч) и prompt-guard — изборът им чупеше чата."""
+    import genesis_terminal_agent as t
+
+    ids = ["allam-2-7b", "canopylabs/orpheus-v1-english", "meta-llama/llama-prompt-guard-2-86m",
+           "meta-llama/llama-guard-4-12b", "openai/gpt-oss-120b", "openai/gpt-oss-safeguard-20b",
+           "qwen/qwen3.8-27b", "whisper-large-v3", "whisper-large-v3-turbo", "text-embedding-3-small",
+           "gpt-4o-mini-tts", "gpt-4o-transcribe", "dall-e-3", "omni-moderation-latest"]
+
+    class _Reply:
+        status_code = 200
+
+        def json(self) -> dict:
+            return {"data": [{"id": i} for i in ids]}
+
+    monkeypatch.setattr(t, "MODELS_CACHE", {})
+    monkeypatch.setattr(t.requests, "get", lambda *a, **k: _Reply())
+    assert t.fetch_models("groq") == ["allam-2-7b", "openai/gpt-oss-120b",
+                                      "openai/gpt-oss-safeguard-20b", "qwen/qwen3.8-27b"]
+
+
 class _FakeBrain:
     """Brain с предварително зададени отговори: лек и силен поотделно."""
     calls: ClassVar[list] = []

@@ -453,7 +453,7 @@ def test_budget_history_sends_the_task_in_a_long_turn() -> None:
 
 class TestElideOldWrites:
     """B.12 (2026-10-11): старите WRITE_FILE/EDIT_FILE аргументи → маркер, само в
-    изпратеното копие и само с GENESIS_ELIDE_OLD_WRITES (по подразбиране OFF)."""
+    изпратеното копие и само с GENESIS_ELIDE_OLD_WRITES (по подразбиране ON от 2026-10-12)."""
 
     @staticmethod
     def _call(cid: str, name: str, args: dict) -> list[dict]:
@@ -480,7 +480,7 @@ class TestElideOldWrites:
                     return json.loads(tc["function"]["arguments"])
         raise AssertionError(cid)
 
-    def test_off_by_default_changes_nothing(self, monkeypatch) -> None:
+    def test_on_by_default_and_off_changes_nothing(self, monkeypatch) -> None:
         # Подразбирането — в чист процес без GENESIS_ELIDE_*: conftest вече
         # е нулирал модулите, тоест config.ELIDE_OLD_WRITES тук не доказва
         # нищо, а изнесената променлива на оператора не бива да чупи теста
@@ -494,7 +494,8 @@ class TestElideOldWrites:
                               "from genesis_agent import config; print(config.ELIDE_OLD_WRITES)"],
                              cwd=str(Path(__file__).resolve().parent.parent), env=env,
                              capture_output=True, text=True, check=True).stdout.split()
-        assert got[-1:] == ["0"]
+        # Включено по подразбиране от 2026-10-12 (A/B с claude_cli, виж config.py).
+        assert got[-1:] == ["1"]
         monkeypatch.setattr(budget, "ELIDE_OLD_WRITES", 0)
         msgs = self._turn()
         assert budget.budget_history(msgs) == msgs

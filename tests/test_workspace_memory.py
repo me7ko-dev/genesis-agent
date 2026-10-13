@@ -78,6 +78,16 @@ class TestUpdateThread:
         tid = wm.list_threads("open")[0]["id"]
         assert "обновена" in wm.update_thread(f"#{tid}", status="done")
 
+    def test_the_todo_words_models_use_are_understood(self) -> None:
+        """Проба на приложението 2026-10-12: gpt-oss-120b пишеше status="completed"
+        (думата на TODO_WRITE) и губеше едно извикване за отказа."""
+        wm.add_thread("a task")
+        tid = wm.list_threads("open")[0]["id"]
+        for word, status in (("completed", "done"), ("in_progress", "open"), ("Pending", "open"),
+                             ("finished", "done"), ("stuck", "blocked")):
+            assert "обновена" in wm.update_thread(tid, status=word), word
+            assert wm.list_threads(status)[0]["id"] == tid, word
+
 
 class TestListThreads:
     def test_filters_by_status(self) -> None:
@@ -379,3 +389,12 @@ class TestPerWorkspace:
         genesis_skills.set_workspace(tmp_path / "project-b")
         assert wm.current_workspace() == wm._norm(tmp_path / "project-b")
         assert wm.list_decisions() == []
+
+
+def test_what_was_remembered_reads_in_words() -> None:
+    """Проба на приложението 2026-10-12: бележката беше „🧠 … 0т/1р/0п“."""
+    gta = pytest.importorskip("genesis_terminal_agent")
+    assert gta._memory_note({"threads": 0, "decisions": 1, "preferences": 0}) == "1 решение"
+    assert gta._memory_note({"threads": 2, "decisions": 0, "preferences": 1}) == "2 нишки, 1 предпочитание"
+    assert gta._memory_note({"threads": 1, "decisions": 3, "preferences": 5}) == (
+        "1 нишка, 3 решения, 5 предпочитания")

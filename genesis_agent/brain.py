@@ -213,6 +213,11 @@ _PROVIDERS = {
     # в `_call` и свой модул (genesis_agent.vertex_auth), вместо ред тук с
     # фиксиран base_url. key_env сочи проекта — „конфигуриран" значи „има проект".
     "vertex": ("dynamic://vertex", "GOOGLE_CLOUD_PROJECT"),
+    # Claude през официалния `claude` CLI с абонамента на оператора (2026-10-12,
+    # genesis_agent/claude_cli.py). Без ключ: входът е на `claude` (/login).
+    # Не е в нито една верига от config.yaml — само ръчен избор (`/model` или
+    # GENESIS_START_PROVIDER), и никога в облака (виж _call_claude_cli).
+    "claude_cli": ("native://claude_cli", None),
 }
 
 # Кои доставчици се викат през native SDK вместо през OpenAI-съвместим HTTP.
@@ -228,6 +233,11 @@ def _print_skip(provider: str, model: str, error: str, seconds: float) -> None:
     нито една причина за ollama. Грешките на ниво ключ (429 на ключ) си имат
     свой ред в _call и не минават оттук.
     """
+    # Липсващ ключ е настройка, не отпадане (2026-10-12): с Claude абонамента
+    # и без безплатни ключове всяка лека задача при изход печаташе 13 реда
+    # „skip: no GROQ_API_KEY configured“, а истинските причини се губеха в тях.
+    if error.startswith("skip: no ") and error.rstrip().endswith("configured"):
+        return
     reason = " ".join(error.split())[:80]
     print(f"  [Brain] ✗ {provider}/{model} след {seconds:.1f}s: {reason} → следващ")
 
@@ -713,6 +723,12 @@ def any_model_reachable() -> bool:
     """
     keys = _load_keys()
     local_models = {LOCAL_MODEL}
+    # Избран Claude абонамент (GENESIS_START_PROVIDER=claude_cli) не е в нито
+    # една верига от config.yaml, а отговаря без ключ — стига CLI-то да е тук.
+    if os.environ.get("GENESIS_START_PROVIDER", "").strip() == "claude_cli":
+        from genesis_agent import claude_cli
+        if claude_cli.available():
+            return True
     for c in _load_chain() + _load_light_chain() + _load_coding_chain() + _load_premium_chain():
         key_env = _PROVIDERS.get(c["provider"], ("", None))[1]
         if key_env is None:          # ollama_local във веригата — решава пробата долу
@@ -779,6 +795,14 @@ class Brain:
             already = {(c["provider"], c["model"]) for c in fast}
             self.chain = fast + [c for c in self.chain
                                  if (c["provider"], c["model"]) not in already]
+            # Операторът е избрал Claude абонамента (2026-10-12): леката работа
+            # (памет, резюмета, граф) има последна резерва в haiku. Без безплатни
+            # ключове паметта иначе тихо не се записваше — цялата лека верига
+            # беше „skip: no KEY“. Отзад: безплатните пак са първи.
+            from genesis_agent import claude_cli
+            if claude_cli.chosen() and claude_cli.available():
+                self.chain.append({"provider": "claude_cli", "model": "haiku",
+                                   "size_b": 0, "supports_tools": False})
         # Леката работа не наследява GENESIS_QUALITY (2026-10-11): с `max` от
         # средата резюмето между ходовете, паметта и графът на знанието тръгваха
         # към claude-opus-5 при xhigh — платен размисъл за второстепенна работа.
@@ -869,6 +893,17 @@ class Brain:
                         if not (c["provider"] == p_prov and c["model"] == p_model)]
                 existing = next((c for c in self.chain
                                  if c["provider"] == p_prov and c["model"] == p_model), None)
+                # Anthropic, избран в `/model` (2026-10-12): записът от
+                # premium_models носи effort-а от config.yaml и native tools —
+                # същото, което --max праща за този модел. Иначе ръчният избор
+                # минаваше на текстови тагове. Пинът е изричен избор на
+                # оператора, затова не чака quality="max".
+                if not existing and p_prov in _NATIVE_PROVIDERS:
+                    existing = next((dict(c) for c in _load_premium_chain()
+                                     if c["provider"] == p_prov and c["model"] == p_model),
+                                    {"provider": p_prov, "model": p_model, "size_b": 0,
+                                     "supports_tools": True})
+                    self._premium_meta.setdefault((p_prov, p_model), existing)
                 self._pinned = existing or {"provider": p_prov, "model": p_model,
                                             "size_b": 0, "supports_tools": False}
                 self.chain = [self._pinned] + rest
@@ -1606,6 +1641,8 @@ class Brain:
                 kids = [f"key::VERTEX#{i}" for i in range(1, len(vertex_auth.projects()) + 1)]
             except Exception:
                 kids = []
+        elif provider == "claude_cli":
+            kids = ["key::claude_cli"]   # лимитът на абонамента (_call_claude_cli)
         elif not key_env:
             kids = []
         elif provider not in _NATIVE_PROVIDERS and len(self._numbered_keys(key_env)) > 1:
@@ -1620,6 +1657,8 @@ class Brain:
              extra: dict[str, Any] | None = None) -> tuple[str, list | None]:
         key_env = _PROVIDERS[provider][1]
         base_url = provider_base_url(provider)
+        if provider == "claude_cli":
+            return self._call_claude_cli(model, messages)
         if provider == "vertex":
             # Адресът и токенът се смятат при извикване (проект + локация +
             # OAuth), затова Vertex не минава през общия път с фиксиран
@@ -1713,6 +1752,35 @@ class Brain:
         if not tried_any:
             raise RuntimeError(f"HTTP_429: all configured {key_env}* are cooling down")
         raise last_err or RuntimeError(f"HTTP_502: {key_env} key rotation exhausted")
+
+    def _call_claude_cli(self, model: str, messages: list[dict]) -> tuple[str, list | None]:
+        """Claude през `claude -p` с абонамента на оператора — текстов модел:
+        инструментите са таговете на Genesis, не native tool_calls.
+
+        В облака (GENESIS_MODEL_GATEWAY) се отказва: абонаментът е за личната
+        употреба на оператора, не за задачи на други хора (правилата на
+        Anthropic, проверено 2026-10-12)."""
+        if os.environ.get("GENESIS_MODEL_GATEWAY", "").strip():
+            raise RuntimeError("skip: claude абонаментът не се ползва в онлайн услугата")
+        from genesis_agent import claude_cli
+        if any(m.get("role") == "tool" or m.get("tool_calls") for m in messages):
+            messages = self._sanitize_for_textmode(messages)
+        kid = f"key::{claude_cli.PROVIDER}"
+        if _is_exhausted(kid):
+            raise RuntimeError("HTTP_429: claude абонаментът е на пауза (лимит), cooling down")
+        try:
+            text, usage = claude_cli.complete(messages, model)
+        except RuntimeError as e:
+            last = str(e)
+            # Лимитът на абонамента е за целия акаунт, не за модел: друг модел
+            # през същия вход пак ще удари стената. 401 — входът липсва.
+            if "HTTP_429" in last or any(f"HTTP_{c}" in last for c in _KEY_DEAD_CODES):
+                _mark_exhausted(kid, _cooldown_for(last))
+                print(f"  [Brain] 🔑 claude абонамент недостъпен ({last[:80]}) → следващ")
+            raise
+        self._last_usage = usage
+        self._usage_attempt = getattr(self, "_attempt_id", None) if usage else None
+        return text, None
 
     def _call_vertex(self, model: str, messages: list[dict],
                       tools: list[dict] | None,
@@ -1879,6 +1947,21 @@ class Brain:
         # Няма system съобщение (рядко) → добавяме таговете като собствено.
         return [{"role": "system", "content": tags}] + out
 
+    def _cache_stable_textmode(self, history: list[dict], tools: list[dict] | None,
+                               fallback: list[dict]) -> list[dict]:
+        """Текстовата история за доставчик с кеш по префикс (claude_cli) — без
+        свиването на budget_history, което сменя вече пратени байтове (виж
+        budget.cache_stable_history). Над тавана — `fallback`, свитата."""
+        from genesis_agent.budget import cache_stable_history
+        msgs = cache_stable_history(history)
+        if msgs is None:
+            return fallback
+        if tools:
+            return self._with_tool_tag_docs(self._sanitize_for_textmode(msgs))
+        if any(m.get("role") == "tool" or m.get("tool_calls") for m in msgs):
+            return self._sanitize_for_textmode(msgs)
+        return msgs
+
     @staticmethod
     def _sanitize_for_textmode(messages: list[dict]) -> list[dict]:
         """Превръща native tool_calls/tool-role съобщения в обикновен текст.
@@ -1955,7 +2038,9 @@ class Brain:
                 cache_views[limit] = cache_history(raw_history, max_chars=limit)
             return cache_views[limit]
 
+        full_history = messages
         messages = budget_history(messages)
+        stable_notools: list[dict] | None = None   # за claude_cli (кеш по префикс)
 
         last_error = "неизвестна грешка"
         # Последната ИСТИНСКА грешка (тръгнала заявка). `last_error` се
@@ -2101,6 +2186,11 @@ class Brain:
                     if use_tools and (prov in _NATIVE_PROVIDERS or prov in CACHE_PROVIDERS
                                       or key in CACHE_PROVIDERS):
                         msgs = cache_view(prov)
+                    if prov == "claude_cli":
+                        if stable_notools is None:
+                            stable_notools = self._cache_stable_textmode(
+                                full_history, tools, messages_notools)
+                        msgs = stable_notools
                     size = _request_size(msgs, use_tools)
                     if size >= _TOO_LARGE.get(key, size + 1):
                         only_unconfigured = False

@@ -50,17 +50,29 @@ def backup_db(src: Path, dst: Path) -> int:
         source.close()
 
 
-def prune(dest: Path, keep_days: float, now: float | None = None) -> list[str]:
-    """Трие копията по-стари от `keep_days` — само папки с името на копие."""
-    limit = (now if now is not None else time.time()) - keep_days * 86400
-    removed = []
+def _copies(dest: Path) -> list[tuple[float, Path]]:
+    """(кога е направено, папка) за всяко копие в `dest` — само папки с името на копие."""
+    out = []
     for d in sorted(dest.iterdir()) if dest.is_dir() else []:
         if not (d.is_dir() and not d.is_symlink() and _STAMP.match(d.name)):
             continue
         try:
-            made = time.mktime(time.strptime(d.name, "%Y%m%d-%H%M%S"))
+            out.append((time.mktime(time.strptime(d.name, "%Y%m%d-%H%M%S")), d))
         except ValueError:
             continue
+    return out
+
+
+def latest(dest: Path) -> float | None:
+    """Кога е направено последното копие (за cloud/monitor.py); None — няма копие."""
+    return max((made for made, _ in _copies(dest)), default=None)
+
+
+def prune(dest: Path, keep_days: float, now: float | None = None) -> list[str]:
+    """Трие копията по-стари от `keep_days` — само папки с името на копие."""
+    limit = (now if now is not None else time.time()) - keep_days * 86400
+    removed = []
+    for made, d in _copies(dest):
         if made < limit:
             shutil.rmtree(d)
             removed.append(d.name)

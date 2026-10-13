@@ -1,6 +1,6 @@
 """
 genesis_agent.acceptance — tests written from the request alone, never from
-the code (NEXT_STEPS Б.4). Opt-in: GENESIS_ACCEPTANCE=1.
+the code (NEXT_STEPS Б.4). On for the free models; GENESIS_ACCEPTANCE=1/0 decides.
 
 Why: the model writes its own tests from its own code, so they agree with it —
 green with a wrong EGN rule, a wrong EIK weight, a wrong euro date (bench,
@@ -12,9 +12,11 @@ project is not touched. A failure goes back to the model once, with the rule
 for settling it: the REQUEST decides — fix the code if the request says what
 the test says, otherwise leave the code and say the test assumed too much.
 
-Off by default because it is unmeasured: the plan is to run bench_projects
-with and without it and keep it only if it catches more than it costs
-(`GENESIS_ACCEPTANCE=1 scripts/bench_projects.py --runs 2 --compare ...`).
+Measured with bench_all (both runs ×2 per project): on the free chain
+(2026-10-12, f8f08d7) 25/32 with it against 23/32 without, at +19% tokens and
++10% time — it fixed customers-sqlite and faktura-excel, lost car-ads; on the
+Claude subscription 15/16 against 16/16 at +20% tokens, i.e. nothing caught.
+So on by default only when the turn's model is free (operator's decision).
 """
 from __future__ import annotations
 
@@ -69,8 +71,15 @@ REQUEST:
 {rules}"""
 
 
-def enabled() -> bool:
-    return os.environ.get("GENESIS_ACCEPTANCE", "").strip().lower() in ("1", "true", "yes", "on")
+def enabled(free_model: bool = False) -> bool:
+    """GENESIS_ACCEPTANCE=1/0 печели; без него — включено за безплатен модел
+    (виж модула: с безплатната верига печелят, с Claude не хващат нищо)."""
+    raw = os.environ.get("GENESIS_ACCEPTANCE", "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return free_model
 
 
 def _is_test(path: Path) -> bool:

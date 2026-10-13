@@ -42,6 +42,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from enum import IntEnum
 from pathlib import Path
+from typing import Any
 
 try:  # POSIX-only; resource limits са best-effort на не-Linux платформи.
     import resource  # type: ignore
@@ -1887,6 +1888,7 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
     except Exception as e:
         return SandboxResult(ok=False, stdout="", stderr=f"[sandbox] стартът се провали: {e}",
                              returncode=None)
+    job = _WinJob(proc.pid)
     deadline = time.monotonic() + timeout
     stopped = False
     try:
@@ -1914,6 +1916,7 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
             if sys.platform != "win32":
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             else:
+                job.terminate()
                 _kill_tree_win32(proc.pid)
                 proc.kill()
         except (ProcessLookupError, PermissionError, OSError):
@@ -1941,6 +1944,8 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
         return SandboxResult(ok=False, stdout=text_out,
                              stderr=text_err + f"\n[sandbox] {note}",
                              returncode=None)
+    finally:
+        job.close()
 
 
 # ── Изход на детето: UTF-8, а на Windows и кодовата страница (2026-10-11) ────
@@ -2007,6 +2012,67 @@ def decode_output(raw: bytes | str | None) -> str:
     codepages = _legacy_codepages()
     text = "".join(_decode_line(line, codepages) for line in raw.splitlines(keepends=True))
     return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+class _WinJob:
+    """Windows Job Object около командата — „Стоп“ и таймаутът убиват ВСИЧКИ
+    потомци, не само тези, които `taskkill /T` намира по родителя.
+
+    Windows CI, PR #59 (2026-10-12): `sleep 8` през Git Bash довърши 11 s след
+    „Стоп“ на телефона. MSYS пуска последната команда така, че междинният
+    процес изчезва и `sleep.exe` остава без жив родител: `taskkill /T` не го
+    стига, а той държи pipe-овете до края. TerminateJobObject убива всичко в
+    job-а, независимо от родителя. Без KILL_ON_JOB_CLOSE: само изричното
+    прекратяване убива; затварянето на дръжката не пипа нищо. На POSIX е
+    празен (там е killpg на групата)."""
+
+    def __init__(self, pid: int) -> None:
+        self.handle: int | None = None
+        self._k32: Any = None
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+            # getattr: в typeshed `windll` го има само при win32 — mypy на Linux CI.
+            k32 = getattr(ctypes, "windll").kernel32  # noqa: B009
+            k32.CreateJobObjectW.restype = wintypes.HANDLE
+            k32.OpenProcess.restype = wintypes.HANDLE
+            k32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+            k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+            job = k32.CreateJobObjectW(None, None)
+            if not job:
+                return
+            proc = k32.OpenProcess(0x0100 | 0x0001, False, pid)   # SET_QUOTA | TERMINATE
+            ok = bool(proc) and bool(k32.AssignProcessToJobObject(job, proc))
+            if proc:
+                k32.CloseHandle(proc)
+            if not ok:
+                k32.CloseHandle(job)
+                return
+            self.handle = job
+            self._k32 = k32
+        except Exception:
+            self.handle = None
+
+    def terminate(self) -> None:
+        if self.handle is None:
+            return
+        try:
+            from ctypes import wintypes
+            self._k32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+            self._k32.TerminateJobObject(self.handle, 1)
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        if self.handle is None:
+            return
+        try:
+            self._k32.CloseHandle(self.handle)
+        except Exception:
+            pass
+        self.handle = None
 
 
 def _kill_tree_win32(pid: int) -> None:

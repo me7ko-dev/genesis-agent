@@ -1072,13 +1072,15 @@ def test_scaffold_for_a_project_in_a_subfolder_goes_next_to_its_tests(_workspace
 
 def test_write_file_reports_a_syntax_error_without_ruff(_workspace, monkeypatch) -> None:
     """bench booking-form 2026-10-01: b'кирилица' в теста се записа с „✓“ и
-    грешката излезе чак при pytest. Записът остава — моделът поиска точно това."""
+    грешката излезе чак при pytest. Записът остава — моделът поиска точно това.
+    Проверката е _python_write_check (тя върви и без ruff); подсказката с реда
+    идва от code_edit.syntax_error."""
     monkeypatch.setattr("genesis_agent.code_validate._ruff_available", lambda: False)
     out = gs._tool_write_file("test_app.py", "def test_x(r):\n    assert b'Мария' in r\n")
-    assert "✓" in out and "не се компилира" in out and "L2" in out, out
+    assert "✓" in out and "не е валиден Python" in out and "L2" in out, out
     assert (_workspace / "test_app.py").exists()
     out = gs._tool_write_file("ok.py", "x = 1\n")
-    assert "не се компилира" not in out
+    assert "не е валиден Python" not in out
 
 
 def test_pip_install_of_what_is_already_installed_does_not_run_pip(_workspace) -> None:

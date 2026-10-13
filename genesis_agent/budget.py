@@ -375,6 +375,38 @@ def budget_history(messages, *, fresh: int | None = None,
     return request_window(out)
 
 
+# Над това историята за доставчик с кеш по префикс пак се свива както за
+# всички: ~100K токена кирилица, под прозореца на Claude (200K) с място за отговор.
+CACHE_STABLE_MAX_CHARS = 300_000
+# Прозорецът се мести на скокове: с отрязване по едно съобщение началото на
+# историята се сменяше на всеки ход и кешът не съвпадаше никога.
+CACHE_STABLE_WINDOW_STEP = 10
+
+
+def cache_stable_history(messages, *, limit: int = MAX_SENT_MESSAGES,
+                         step: int = CACHE_STABLE_WINDOW_STEP,
+                         max_chars: int = CACHE_STABLE_MAX_CHARS) -> list[dict] | None:
+    """Историята за `claude -p`: каквото е пратено веднъж, не се пипа.
+
+    budget_history свива всеки стар резултат с напредването на хода — байтове
+    в средата на историята се сменят между заявките. Кешът на Anthropic е
+    съвпадение по префикс, тоест след първата промяна всичко се записва
+    наново (1.25× цената на входа) вместо да се прочете (0.1×). Мерено
+    2026-10-12, orders-api с абонамента: 5-и и 6-и ход записват по 25–30K и
+    четат само системния промпт. Тук: без свиване на старите резултати и
+    прозорец, който се мести на стъпки от `step` съобщения.
+
+    None, когато историята е над `max_chars` — тогава важи budget_history."""
+    msgs = list(messages)
+    excess = len(msgs) - limit
+    if limit > 0 and excess > 0:
+        drop = -(-excess // max(step, 1)) * max(step, 1)
+        msgs = request_window(msgs, max(len(msgs) - drop, 1))
+    if sum(len(str(m.get("content") or "")) for m in msgs) > max_chars:
+        return None
+    return msgs
+
+
 def record_usage(*, provider: str, model: str, prompt_tokens: int,
                   completion_tokens: int, context: str = "",
                   cached_read_tokens: int = 0,

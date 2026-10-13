@@ -66,15 +66,17 @@ class TestSecretsDoNotReachGeneratedCode:
         assert res.ok, f"кодът трябва РЕАЛНО да се е изпълнил: {res.stderr[:300]}"
         assert "GENESIS_TEST_CANARY" not in res.stdout
         assert "canary-value-98765" not in res.stdout
-        # Средата е само белият списък, не наследеният списък на родителя —
-        # това е разликата между whitelist и "махнахме познатите имена".
-        # Имената, не броят: на Windows списъкът сам е 16 (SYSTEMROOT, APPDATA…)
-        # и `< 15` падаше на лаптопа, без нищо да е изтекло (2026-10-11).
-        from genesis_agent.sandbox import SandboxPolicy
-        assert "N= " in res.stdout
-        names = set(res.stdout.split("\n", 1)[0].strip().split("|")) - {""}
-        extra = names - set(SandboxPolicy().env_passthrough)
-        assert not extra, f"детето вижда променливи извън белия списък: {sorted(extra)}"
+        # Средата е whitelist-ът, не наследеният списък на родителя — всяко
+        # име в детето трябва да е в env_passthrough. Беше праг „< 15“: на
+        # Windows домът (USERPROFILE, APPDATA, …, 2026-10-11) го вдигна на 16
+        # и CI падна, без да изтича нищо (2026-10-12). Проверката по имена е
+        # по-строга от прага и вярна на всяка платформа.
+        from genesis_agent import sandbox
+        assert "N= " in res.stdout  # иначе празен списък минава, без да е проверен
+        allowed = {name.upper() for name in sandbox.get_policy().env_passthrough}
+        seen = res.stdout.split("\n")[0].split("|")
+        leaked = sorted(name for name in seen if name and name.upper() not in allowed)
+        assert not leaked, f"детето вижда имена извън whitelist-а: {leaked}"
 
 
 class TestExecutionNeverRaises:

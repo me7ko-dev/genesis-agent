@@ -7,13 +7,16 @@
 # cloud/check.py → https://<домейн>/healthz. Спира на първата грешка.
 # Променливи: GENESIS_DOMAIN (без него — без Caddy), GENESIS_KEYS
 # (/srv/genesis/keys.env), GENESIS_RUNTIME (напр. runsc за gVisor),
-# GENESIS_NO_PULL=1, DEPLOY_DRY_DIR (къде сухото пускане пише файловете).
+# GENESIS_NO_PULL=1, DEPLOY_DRY_DIR (къде сухото пускане пише файловете),
+# GENESIS_MONITOR_ENV (само за тестовете: genesis-monitor.service чете
+# /srv/genesis/monitor.env).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO="$(pwd)"
 DRY="${DEPLOY_DRY_RUN:-0}"
 DOMAIN="${GENESIS_DOMAIN:-}"
 KEYS="${GENESIS_KEYS:-/srv/genesis/keys.env}"
+MONITOR_ENV="${GENESIS_MONITOR_ENV:-/srv/genesis/monitor.env}"
 USAGE="${GENESIS_GATEWAY_DATA:-/srv/genesis/gateway}/usage.jsonl"
 DOCKER="${DOCKER:-docker}"
 PYTHON="${PYTHON:-python3}"
@@ -75,6 +78,18 @@ else
   echo "  внимание: няма $KEYS — задачите няма да имат модел"
 fi
 echo "  режим: $MODE"
+# Аларми (cloud/monitor.py, 2026-10-12): в monitor.env е паролата за SMTP или
+# адресът на webhook-а с жетона на бота — само за root; грешен файл спира
+# деплоя тук, а не след месец мълчание на алармите.
+if [ -f "$MONITOR_ENV" ]; then
+  [ "$(stat -c %a "$MONITOR_ENV")" = 600 ] \
+    || fail "$MONITOR_ENV трябва да е 600 (тайни за SMTP/webhook), а е $(stat -c %a "$MONITOR_ENV")"
+  need "$PYTHON" -c 'import sys; from pathlib import Path; from cloud.gateway.gateway import read_keys; from cloud.monitor import load_settings; load_settings(read_keys(Path(sys.argv[1])))' "$MONITOR_ENV" \
+    || fail "$MONITOR_ENV не е верен — sudo python3 -m cloud.monitor --once --dry-run казва защо"
+  echo "  аларми: $MONITOR_ENV"
+else
+  echo "  внимание: няма $MONITOR_ENV — алармите ще са само в журнала (виж cloud/deploy/monitor.env.example)"
+fi
 AVAIL_KB="$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4}')"
 FREE_GB=$(( ${AVAIL_KB:-0} / 1048576 ))
 [ "$FREE_GB" -ge 10 ] || echo "  внимание: само ${FREE_GB} GB свободни (образите са ~1 GB, задачите пишат в /srv/jobs)"
@@ -111,17 +126,19 @@ DEFAULTS="$(mktemp)"
 printf '# cloud/deploy.sh — режим %s\nGENESIS_WEB_ARGS=%s\n' "$MODE" "$ARGS" > "$DEFAULTS"
 install_file "$DEFAULTS" /etc/default/genesis-web
 rm -f "$DEFAULTS"
-for unit in genesis-net.service genesis-web.service genesis-backup.service genesis-backup.timer; do
+for unit in genesis-net.service genesis-web.service genesis-backup.service genesis-backup.timer \
+            genesis-monitor.service genesis-monitor.timer; do
   install_file "$REPO/cloud/deploy/$unit" "/etc/systemd/system/$unit"
 done
 run mkdir -p /srv/genesis/web /srv/jobs /srv/backup/genesis
 run chmod 700 /srv/genesis/web /srv/backup/genesis
 run "$SYSTEMCTL" daemon-reload
-run "$SYSTEMCTL" enable genesis-net.service genesis-web.service genesis-backup.timer
+run "$SYSTEMCTL" enable genesis-net.service genesis-web.service genesis-backup.timer \
+  genesis-monitor.timer
 run "$SYSTEMCTL" restart genesis-net.service
 # Рестартът спира текущите задачи (сървърът ги убива при SIGTERM).
 run "$SYSTEMCTL" restart genesis-web.service
-run "$SYSTEMCTL" start genesis-backup.timer
+run "$SYSTEMCTL" start genesis-backup.timer genesis-monitor.timer
 
 if [ -n "$DOMAIN" ]; then
   step "Caddy (HTTPS за $DOMAIN)"

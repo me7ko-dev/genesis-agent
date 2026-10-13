@@ -103,6 +103,7 @@ except Exception:
 # installed package and the user's own home — nothing machine-specific here.
 from genesis_agent import claim_check
 from genesis_agent.acceptance import AcceptanceCheck as _AcceptanceCheck
+from genesis_agent.acceptance import enabled as _acceptance_enabled
 from genesis_agent.budget import TEXT_RESULT_FOLLOWUP, clip_for_context
 from genesis_agent.code_check import RunCheck as _RunCheck
 from genesis_agent.config import TOOL_ROUND_CAP as _TOOL_ROUND_CAP
@@ -253,6 +254,7 @@ KEYS = {
     "GROQ_API_KEY": "", "GEMINI_API_KEY": "", "OPENROUTER_API_KEY": "",
     "NVIDIA_API_KEY": "", "GITHUB_TOKEN": "", "OPENAI_API_KEY": "",
     "HF_TOKEN": "", "COHERE_API_KEY": "", "OLLAMA_API_KEY": "",
+    "ANTHROPIC_API_KEY": "",
     "OLLAMA_MODEL": config.get("models", {}).get("ollama_model", "llama3.2")
 }
 
@@ -344,6 +346,13 @@ PROVIDERS: dict[str, dict[str, str | None]] = {
     # не и в това меню, тоест операторът можеше да го настрои и да не може
     # да го избере.
     "vertex":       {"name": "🔷 Vertex AI (Google)",  "key_env": None,                "base_url": None,                                                    "type": "vertex"},
+    # Claude с абонамента на оператора, през официалния `claude` CLI (2026-10-12,
+    # genesis_agent/claude_cli.py). Без ключ: входът е на `claude` (/login).
+    "claude_cli":   {"name": "🟠 Claude (абонамент, claude CLI)", "key_env": None, "base_url": None,                                       "type": "claude_cli"},
+    # Claude с API ключа (2026-10-12): ключът в ~/.genesis/.env и пакетът
+    # `anthropic` стигаха само до --max — менюто нямаше ред за него, тоест
+    # операторът с ключ не можеше да го избере. Плаща се от ключа (PAID).
+    "anthropic":    {"name": "🟤 Anthropic (API ключ, платен)", "key_env": "ANTHROPIC_API_KEY", "base_url": "https://api.anthropic.com/v1",          "type": "anthropic"},
 }
 FALLBACKS = {
     "groq":         ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
@@ -366,11 +375,23 @@ FALLBACKS = {
     "sambanova":    ["DeepSeek-V3-0324", "Meta-Llama-3.3-70B-Instruct", "gpt-oss-120b"],
     "together":     ["meta-llama/Llama-3.3-70B-Instruct-Turbo"],
     "llmstudio":    ["local-model"],
+    "claude_cli":   ["sonnet", "opus", "haiku"],
+    # Редът е като premium_models в config.yaml; живият списък идва от ключа.
+    "anthropic":    ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
 }
 
 MODELS_CACHE: dict[str, list[str]] = {}
 current_provider = config.get("models", {}).get("default_provider", "groq")
 current_model_id = config.get("models", {}).get("default_model_id", "openai/gpt-oss-120b")
+# Изричен избор на стартовия модел (2026-10-12): последният модел нарочно не се
+# помни между сесиите, но операторът с Claude абонамент иска да започва с него —
+# `GENESIS_START_PROVIDER=claude_cli` (+ по желание `GENESIS_START_MODEL=opus`).
+# Работи и за bench-а: чатът там се пуска като подпроцес с тази среда.
+_start_provider = os.environ.get("GENESIS_START_PROVIDER", "").strip()
+if _start_provider in PROVIDERS:
+    current_provider = _start_provider
+    current_model_id = (os.environ.get("GENESIS_START_MODEL", "").strip()
+                        or (FALLBACKS.get(_start_provider) or [current_model_id])[0])
 
 # Fallback chain from config (in order, tried on quota/rate-limit errors).
 # min 32B (design note, 2026-07-25): терминалният чат е основният coding assistant —
@@ -435,6 +456,14 @@ def is_free_model(provider_key: str, model_id: str) -> bool:
 def model_badge(provider_key: str, model_id: str) -> str:
     return "[green bold]FREE[/]" if is_free_model(provider_key, model_id) else "[yellow dim]PAID[/]"
 
+
+def _free_turn() -> bool:
+    """Безплатен ли е моделът, с който върви ходът — пинът от `/model`, без
+    GENESIS_QUALITY=max (тогава платените са отпред)."""
+    if (os.environ.get("GENESIS_QUALITY") or "").strip().lower() == "max":
+        return False
+    return is_free_model(current_provider, current_model_id)
+
 # ── API Calls ────────────────────────────────────────────────────────────────
 def provider_ready(provider_key: str) -> tuple[bool, str]:
     """(готов ли е, какво липсва) — ЕДИН източник за менюто и за избора.
@@ -451,23 +480,57 @@ def provider_ready(provider_key: str) -> tuple[bool, str]:
     if p["type"] == "vertex":
         from genesis_agent import vertex_auth
         return vertex_auth.ready(), vertex_auth.status()
+    if p["type"] == "claude_cli":
+        from genesis_agent import claude_cli
+        if not claude_cli.available():
+            return False, "няма `claude` CLI (инсталирай Claude Code и влез с /login)"
+        return True, ""
+    if p["type"] == "anthropic":
+        if not KEYS.get("ANTHROPIC_API_KEY"):
+            return False, "липсва ANTHROPIC_API_KEY (в ~/.genesis/.env)"
+        import importlib.util
+        if importlib.util.find_spec("anthropic") is None:
+            return False, "липсва пакетът anthropic (pipx inject genesis-agent anthropic)"
+        return True, ""
     key_env = p["key_env"]
     if key_env is None:
         return True, ""
     return bool(KEYS.get(key_env)), f"липсва {key_env}"
 
 
+# Не са модели за разговор: глас, транскрипция, класификатори, ембединги,
+# картинки. Проба на приложението 2026-10-12: /model на Groq предлагаше
+# whisper, orpheus и prompt-guard — изборът им чупеше чата.
+_NOT_CHAT = re.compile(r"whisper|orpheus|tts|transcribe|prompt-guard|llama-guard|embed|"
+                       r"rerank|moderation|dall-e|playai", re.IGNORECASE)
+
+
 def fetch_models(provider_key):
     if provider_key in MODELS_CACHE:
         return MODELS_CACHE[provider_key]
     p = PROVIDERS[provider_key]
+    if p["type"] == "claude_cli":   # псевдонимите на `claude --model`, без заявка
+        return list(FALLBACKS["claude_cli"])
     key = KEYS.get(p["key_env"] or "", "")
+    if p["type"] == "anthropic":
+        # Живият списък на ключа (Models API); без мрежа — резервата отгоре.
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=key, max_retries=0, timeout=10)
+            models = [m.id for m in client.models.list()]
+            if models:
+                MODELS_CACHE[provider_key] = models
+                return models
+        except Exception:
+            pass   # без мрежа / лош ключ: менюто пак показва резервата
+        return list(FALLBACKS["anthropic"])
     if p["type"] == "openai":
         try:
             r = requests.get(f"{p['base_url']}/models",
                              headers={"Authorization": f"Bearer {key}"}, timeout=10)
             if r.status_code == 200:
-                models = sorted([m.get("id","") for m in r.json().get("data",[])])
+                models = sorted(m.get("id", "") for m in r.json().get("data", [])
+                                if not _NOT_CHAT.search(m.get("id", "")))
                 if models:
                     MODELS_CACHE[provider_key] = models
                     return models
@@ -746,8 +809,10 @@ def ask_genesis(messages, tools=None):
     from genesis_agent.brain import Brain
 
     # Лек въпрос → малък модел (виж model_router.is_light_turn). Не и в
-    # /maxcoding — операторът изрично е поискал най-силните.
-    if not _CODING_MODE:
+    # /maxcoding — операторът изрично е поискал най-силните. Не и с избран
+    # Claude абонамент (2026-10-12): операторът е избрал Claude за всичко, а без
+    # безплатни ключове леката верига само минава празно през „skip: no KEY“.
+    if not _CODING_MODE and current_provider != "claude_cli":
         try:
             from genesis_agent.model_router import (
                 is_light_turn,
@@ -880,6 +945,27 @@ def _restore_session(loaded: list, system_prompt: str) -> "deque":
     """
     from genesis_agent.agent_core import restored_history
     return restored_history(loaded, system_prompt, maxlen=_HISTORY_MAXLEN)
+
+
+def _tool_detail(args: object) -> str:
+    """Какво прави инструментът, на един ред: командата, файлът, заявката."""
+    if not isinstance(args, dict):
+        return ""
+    for key in ("command", "path", "file", "query", "url", "question", "pattern", "task"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            text = " ".join(value.split())
+            return text if len(text) <= 80 else f"{text[:79]}…"
+    return ""
+
+
+def _memory_note(saved: dict) -> str:
+    """„1 решение, 2 нишки“ — какво auto_capture запомни. Беше „0т/1р/0п“
+    (неразбираемо в прозореца, проба 2026-10-12) и „1 нишки“ на изход."""
+    words = (("threads", "нишка", "нишки"), ("decisions", "решение", "решения"),
+             ("preferences", "предпочитание", "предпочитания"))
+    return ", ".join(f"{saved[k]} {one if saved[k] == 1 else many}"
+                     for k, one, many in words if saved.get(k))
 
 
 def _compact_messages(messages: "deque") -> "deque":
@@ -1161,6 +1247,11 @@ def show_agent_menu():
     if 1 <= msel <= len(models):
         current_provider = pk
         current_model_id = models[msel-1]
+        # Леката работа в Brain също да знае за абонамента (claude_cli.chosen).
+        if pk == "claude_cli":
+            os.environ["GENESIS_CLAUDE_CLI_ACTIVE"] = "1"
+        else:
+            os.environ.pop("GENESIS_CLAUDE_CLI_ACTIVE", None)
         console.print(f"[green]✓ {current_model_id}[/]")
 
 # ── Main Loop ─────────────────────────────────────────────────────────────────
@@ -1175,6 +1266,10 @@ class TurnUI:
     def assistant(self, text: str) -> None: ...
 
     def tool(self, name: str, result: str) -> None: ...
+
+    def tool_start(self, name: str, detail: str) -> None:
+        """Инструментът тръгва (телефонът и прозорецът го показват, докато
+        върви). Терминалът — нищо: спинер би закрил въпросите на sandbox-а."""
 
     def asked(self, question: str) -> None: ...
 
@@ -1208,6 +1303,11 @@ class _WatchedUI(TurnUI):
 
     def tool(self, name: str, result: str) -> None:
         self.inner.tool(name, result)
+
+    def tool_start(self, name: str, detail: str) -> None:
+        start = getattr(self.inner, "tool_start", None)   # UI-ите не наследяват всички TurnUI
+        if start is not None:
+            start(name, detail)
 
     def asked(self, question: str) -> None:
         self.stopped_for = "ask"
@@ -1501,7 +1601,9 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
             knowledge = ""
     if knowledge:
         content = f"{user_input}\n\n{knowledge}"
-        ui.info(f"📚 проверено знание: {head.split(': ', 1)[-1]}")
+        names = [line.split(": ", 1)[-1] for line in knowledge.splitlines()
+                 if line.startswith("## Проверено ")]   # знание + ръководство (2026-10-12)
+        ui.info(f"📚 проверено знание: {', '.join(names) or head.split(': ', 1)[-1]}")
     content += extra
     # Без таван до края на хода: deque(maxlen) изхвърляше посред задачата
     # системния промпт и самата заявка (виж agent_core.bounded_history).
@@ -1533,8 +1635,10 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
     # .py, записан и непуснат след последната промяна (genesis_agent.code_check).
     # Със заявката: буквалните думи от нея („ред ОБЩО“) се сверяват с кода.
     _run_check = _RunCheck(user_input)
-    # Приемни тестове само от заявката (GENESIS_ACCEPTANCE=1, genesis_agent.acceptance).
-    _accept = _AcceptanceCheck(user_input, Path(genesis_skills._WORKSPACE), rules=knowledge)
+    # Приемни тестове само от заявката (genesis_agent.acceptance): с безплатен
+    # модел — включени, с Claude/платен — не; GENESIS_ACCEPTANCE=1/0 решава изрично.
+    _accept = _AcceptanceCheck(user_input, Path(genesis_skills._WORKSPACE), rules=knowledge,
+                               on=_acceptance_enabled(_free_turn()))
     # Въртене на място: същият извик, същият резултат, пореден път.
     # Таванът го ограничава по цена, но не го разпознава — виж
     # genesis_agent.repeat_guard.
@@ -1606,6 +1710,10 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                         messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                                          "name": name, "content": _held})
                         continue
+                    if _tc_i not in _prefetched:
+                        # Телефонът/прозорецът виждат какво върви (проба 2026-10-12:
+                        # `sleep 60` минаваше като „Genesis мисли...“).
+                        ui.tool_start(name, _tool_detail(args))
                     result = (_prefetched[_tc_i] if _tc_i in _prefetched
                               else genesis_skills.dispatch_tool_call(name, call_args))
                     _page_check.observe(result)
@@ -1656,6 +1764,10 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
 
             # Стар text-tag режим — моделът не поддържа native tool-calling
             # (или просто избра да не вика нищо тази реплика).
+            # Таговете тръгват наведнъж: телефонът/прозорецът виждат поне първия.
+            _first = re.search(r"\[([A-Z_]{3,}):\s*([^\]\n]{0,200})", response or "")
+            if _first:
+                ui.tool_start(_first.group(1), _tool_detail({"command": _first.group(2)}))
             tool_results = parse_and_execute_tools(response)
             _executed.extend(claim_check.executed_from_text_results(tool_results))
             for _r in tool_results:
@@ -1811,8 +1923,7 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
             from genesis_agent import workspace_memory as _wm
             saved = _wm.auto_capture(pre_compact)
             if any(saved.values()):
-                ui.info(f"🧠 Запомнено преди компресията: "
-                        f"{saved['threads']}т/{saved['decisions']}р/{saved['preferences']}п")
+                ui.info(f"🧠 Запомнено преди компресията: {_memory_note(saved)}")
         except Exception:
             pass
 
@@ -1950,6 +2061,11 @@ def _no_model_guard() -> bool:
     # като в ask_genesis.
     if not _brain_handles(current_provider) and not os.environ.get("GENESIS_LOCAL_ONLY"):
         return False
+    # Claude абонаментът отговаря без ключ — стига CLI-то да е тук (2026-10-12).
+    if current_provider == "claude_cli":
+        from genesis_agent import claude_cli
+        if claude_cli.available():
+            return False
     try:
         from genesis_agent.brain import any_model_reachable
         if any_model_reachable():
@@ -2445,10 +2561,7 @@ def main():
             with console.status("[dim]Запомням какво свършихме...[/]", spinner="dots"):
                 saved = _wm.auto_capture(list(convo))
             if any(saved.values()):
-                console.print(
-                    f"[dim]🧠 Запомнено: {saved['threads']} нишки, "
-                    f"{saved['decisions']} решения, {saved['preferences']} предпочитания[/]"
-                )
+                console.print(f"[dim]🧠 Запомнено: {_memory_note(saved)}[/]")
     except Exception:
         pass
 

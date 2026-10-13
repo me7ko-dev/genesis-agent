@@ -523,6 +523,77 @@ def _read_range(fh, path: Path, encoding: str, offset_i: int | None,
 _STYLE_PROBE = 2_000_000
 
 
+# Буквални `\n` вместо нови редове (bench_all 2026-10-12, код f8f08d7): gpt-oss
+# и nemotron понякога пишат кода с текста „\n“ там, където е новият ред — 8 .py
+# файла в 4 проекта (предния ден 0). Записът минаваше с „✓“: ruff го няма в PATH
+# на лаптопа и проверката по-долу тихо се пропуска; pytest падаше при събирането
+# и faktura-excel свърши 0/1, а моделът четеше теста, не счупения файл. Поправя
+# се само когато без поправката файлът не е Python, а с нея е; иначе моделът
+# поне научава веднага кой ред не е наред.
+_LITERAL_NEWLINES_MIN = 3
+
+
+def _literal_newlines_outside_strings(code: str) -> str:
+    """`\\n` извън низовете → нов ред. Извън низ `\\` е само продължение на реда,
+    затова там буквалното „\\n“ е изгубен нов ред; в низа (`r"[^\\n]+"`) е код —
+    заместване навсякъде чупеше точно него (faktura-excel-1/extract.py)."""
+    out: list[str] = []
+    i, n = 0, len(code)
+    quote = ""        # отвореният низ: ', ", ''' или """
+    while i < n:
+        ch = code[i]
+        if quote:
+            if ch == "\\":
+                out.append(code[i:i + 2])
+                i += 2
+                continue
+            if code.startswith(quote, i):
+                out.append(quote)
+                i += len(quote)
+                quote = ""
+                continue
+            if ch == "\n" and len(quote) == 1:   # незатворен низ свършва с реда
+                quote = ""
+            out.append(ch)
+            i += 1
+            continue
+        for lost in ("\\r\\n", "\\n"):
+            if code.startswith(lost, i):
+                out.append("\n")
+                i += len(lost)
+                break
+        else:
+            if ch == "#":                       # коментарът — до истинския или изгубения ред
+                end = min((j for j in (code.find("\n", i), code.find("\\n", i)) if j >= 0), default=n)
+                out.append(code[i:end])
+                i = end
+                continue
+            if ch in "'\"":
+                quote = ch * 3 if code.startswith(ch * 3, i) else ch
+                out.append(quote)
+                i += len(quote)
+                continue
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def _python_write_check(path: Path, content: str) -> tuple[str, str]:
+    """(съдържанието за запис, бележка към резултата) за .py файл."""
+    from genesis_agent.code_edit import syntax_error
+    err = syntax_error(path, content)
+    if not err:
+        return content, ""
+    if content.count("\\n") >= _LITERAL_NEWLINES_MIN:
+        for fixed in (_literal_newlines_outside_strings(content),
+                      content.replace("\\r\\n", "\n").replace("\\n", "\n")):
+            if not syntax_error(path, fixed):
+                return fixed, ("\n⚠ Новите редове бяха написани буквално като \\n — поправени "
+                               f"преди записа (без поправката: {err}). Пиши истински нови редове.")
+    return content, (f"\n⚠ Записаният файл не е валиден Python: {err}. Поправи го в "
+                     "този файл, преди да пускаш тестовете.")
+
+
 def _tool_write_file(arg: str, content: str, exact: bool = False) -> str:
     path, redirect = _resolve_noted(arg, redirect=False)
     if not arg.strip() or path.is_dir():
@@ -559,20 +630,14 @@ def _tool_write_file(arg: str, content: str, exact: bool = False) -> str:
     # моделът в следващия рунд вместо да чака sandbox изпълнение да ги хване.
     lint_note = ""
     if path.suffix == ".py":
+        content, syntax_note = _python_write_check(path, content)
         from genesis_agent.code_validate import validate_code_with_ruff
         ok, detail = validate_code_with_ruff(content)
         if ok and detail:
             content = detail
         elif not ok:
             lint_note = f"\n{detail}"
-        if not lint_note:
-            # Без ruff (не е задължителен) счупеният файл се записваше с „✓“ и
-            # грешката излизаше чак при pytest като срив при събирането
-            # (bench booking-form, 2026-10-01).
-            from genesis_agent.code_edit import syntax_error
-            err = syntax_error(path, content)
-            if err:
-                lint_note = f"\n⚠ Файлът е записан, но не се компилира: {err}"
+        lint_note = syntax_note + lint_note
     # Съществуващ файл се записва в СВОЕТО кодиране (одит 2026-10-11): cp1251
     # файл, минал през READ→WRITE, излизаше с U+FFFD на мястото на всяка буква.
     encoding = "utf-8"
@@ -1516,6 +1581,112 @@ def parse_and_execute_readonly_tools(response_text: str) -> list[str]:
     return [r for _, r in results]
 
 
+# Claude (през `claude -p`, 2026-10-12) понякога пише ПЪРВИЯ инструмент в
+# своя собствен XML формат, а останалите — с нашите тагове. Измерено на 30
+# сурови отговора от bench (vat/eik/iban ×2): 6 започваха с
+# `<invoke name="WRITE_FILE">път</parameter>` / `<invoke name="RUN_CMD">pwd</invoke>`;
+# всеки струваше рунд („първият ми WRITE_FILE беше с грешен синтаксис“), а
+# отговор САМО с XML не съдържаше `[TAG:` — нямаше подкана и ходът свършваше
+# без нито един инструмент (vat-check 0/1). Превръщат се само имената на
+# нашите инструменти; всичко друго остава текст.
+_XML_TOOLS = ("WRITE_FILE|EDIT_FILE|READ_FILE|RUN_CMD|RUN_BG|LIST_DIR|SEARCH_CODE|GLOB|"
+              "REPO_MAP|WEB_SEARCH|WEB_FETCH|ASK_USER|EXPLORE|TODO_WRITE|BG_OUTPUT|BG_KILL")
+_XML_BLOCK_OPEN_RE = re.compile(
+    r'<invoke name="(?P<tool>WRITE_FILE|EDIT_FILE)">\s*'
+    r'(?:<parameter name="(?:path|file_path)">)?\s*(?P<path>[^\n<\]]+?)\s*'
+    r'(?:</parameter>|</invoke>)?[ \t]*\n'
+    r'(?:\s*<parameter name="(?:content|body)">)?')
+_XML_BLOCK_CLOSE_RE = re.compile(r"\n?[ \t]*</(?:parameter|invoke)>\s*(?=\[END_(?:WRITE|EDIT)\])")
+_XML_SIMPLE_RE = re.compile(
+    r'<invoke name="(?P<tool>' + _XML_TOOLS + r')">\s*'
+    r'(?:<parameter name="\w+">)?(?P<arg>.*?)\s*(?:</parameter>\s*)?</invoke>', re.DOTALL)
+_XML_TAIL_RE = re.compile(r"\s*</parameter>\s*</invoke>\s*\]")
+_XML_WRAPPER_RE = re.compile(r"</?function_calls>\s*")
+
+
+# Пълното XML извикване с именувани параметри (2026-10-12, bench_fix с
+# claude_cli: 0/13 — в `genesis fix` Claude пише ВСЯКА редакция така:
+# `<invoke name="EDIT_FILE"><parameter name="path">…</parameter>
+# <parameter name="old_string">…</parameter><parameter name="new_string">…`;
+# формата с един аргумент горе не го хваща и редакцията не се изпълняваше).
+_XML_FULL_INVOKE_RE = re.compile(
+    r'<invoke name="(?P<tool>' + _XML_TOOLS + r')">'
+    r'(?P<params>(?:\s*<parameter name="[\w-]+">.*?</parameter>)+)\s*</invoke>', re.DOTALL)
+_XML_PARAM_RE = re.compile(r'<parameter name="(?P<key>[\w-]+)">(?P<value>.*?)</parameter>', re.DOTALL)
+_XML_ARG_ALIASES = {"file_path": "path", "filepath": "path", "filename": "path",
+                    "old_string": "old", "old_str": "old", "new_string": "new", "new_str": "new",
+                    "cmd": "command", "text": "content", "body": "content", "query": "pattern"}
+# Главният аргумент на едноредовия таг на всеки инструмент.
+_XML_MAIN_ARG = {"READ_FILE": "path", "LIST_DIR": "path", "REPO_MAP": "path", "GLOB": "pattern",
+                 "SEARCH_CODE": "pattern", "RUN_CMD": "command", "RUN_BG": "command",
+                 "WEB_SEARCH": "query", "WEB_FETCH": "url", "ASK_USER": "question",
+                 "EXPLORE": "question", "TODO_WRITE": "todos", "BG_OUTPUT": "id", "BG_KILL": "id"}
+
+
+def _xml_full_invoke(m: re.Match) -> str:
+    tool = m.group("tool")
+    args: dict[str, str] = {}
+    for p in _XML_PARAM_RE.finditer(m.group("params")):
+        key = p.group("key")
+        args[_XML_ARG_ALIASES.get(key, key) if not (tool == "WEB_SEARCH" and key == "query")
+             else key] = p.group("value")
+    path = args.get("path", "").strip()
+    if tool == "EDIT_FILE" and path and "old" in args and "new" in args:
+        return f"[EDIT_FILE: {path}]\n{args['old']}\n{_EDIT_SEPARATOR}\n{args['new']}\n[END_EDIT]"
+    if tool == "WRITE_FILE" and path and "content" in args:
+        return f"[WRITE_FILE: {path}]\n{args['content']}[END_WRITE]"
+    main = args.get(_XML_MAIN_ARG.get(tool, ""), "") or (next(iter(args.values()), "") if len(args) == 1 else "")
+    if not main:
+        return m.group(0)        # непознат вид — остава текст и получава подканата за синтаксис
+    if tool == "RUN_CMD" and str(args.get("background", "")).lower() in ("true", "1", "yes"):
+        tool = "RUN_BG"
+    return f"[{tool}: {main.strip()}]"
+
+
+# Трета форма от същия bench_fix (3 от 50 отговора): `<tool_call>READ_FILE
+# </tool_call><arg name="path">…</arg>` — свежда се до <invoke>, един път.
+_XML_TOOL_CALL_RE = re.compile(
+    r'<tool_call>\s*(?P<tool>' + _XML_TOOLS + r')\s*</tool_call>'
+    r'(?P<args>(?:\s*<arg name="[\w-]+">.*?</arg>)+)', re.DOTALL)
+_XML_ARG_RE = re.compile(r'<arg name="(?P<key>[\w-]+)">(?P<value>.*?)</arg>', re.DOTALL)
+
+
+def _tool_call_as_invoke(m: re.Match) -> str:
+    params = "".join(f'<parameter name="{a.group("key")}">{a.group("value")}</parameter>'
+                     for a in _XML_ARG_RE.finditer(m.group("args")))
+    return f'<invoke name="{m.group("tool")}">{params}</invoke>'
+
+
+# Измислен затварящ таг (2026-10-12, 2 на 371 отговора на Claude): дълга
+# RUN_CMD с heredoc, затворена с `EOF[END_CMD]` вместо `]` — тагът не се
+# разпознаваше, идваше подкана и ходът губеше рунд („heredoc-ът не се затвори“).
+# `[END_CMD]` не е наш синтаксис никъде, затова при отворен RUN_CMD/RUN_BG е `]`.
+_END_CMD = "[END_CMD]"
+
+
+def _normalize_xml_tool_calls(text: str) -> str:
+    """XML формата на Claude за нашите инструменти → нашите тагове."""
+    if _END_CMD in text and ("[RUN_CMD:" in text or "[RUN_BG:" in text):
+        text = text.replace(_END_CMD, "]")
+    if not any(mark in text for mark in ("<invoke", "</parameter>", "</invoke>", "<tool_call>")):
+        return text
+    text = _XML_WRAPPER_RE.sub("", text)
+    text = _XML_TOOL_CALL_RE.sub(_tool_call_as_invoke, text)
+    text = _XML_FULL_INVOKE_RE.sub(_xml_full_invoke, text)
+    text = _XML_BLOCK_OPEN_RE.sub(lambda m: f"[{m.group('tool')}: {m.group('path')}]\n", text)
+    text = _XML_BLOCK_CLOSE_RE.sub("\n", text)
+    text = _XML_TAIL_RE.sub("]", text)
+    original = text
+
+    def simple(m: re.Match) -> str:
+        tag = f"[{m.group('tool')}: {m.group('arg')}]"
+        # Същата команда и като XML, и като таг („<invoke name="RUN_CMD">pwd</invoke>
+        # [RUN_CMD: pwd]“) — веднъж, не два пъти (команда със страничен ефект).
+        return "" if tag in original else tag
+
+    return _XML_SIMPLE_RE.sub(simple, text)
+
+
 def parse_and_execute_tools(response_text: str) -> list[str]:
     """
     Извлича и изпълнява всички тул-тагове в реда, в който се появяват.
@@ -1533,6 +1704,7 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
     """
     if not response_text:
         return []
+    response_text = _normalize_xml_tool_calls(response_text)
 
     # (позиция_в_текста, име, действие) — НИЩО не се изпълнява, докато не са
     # събрани всички тагове и не е решено влагането. После се изпълняват в
@@ -1573,8 +1745,13 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
             continue  # вложен в вече приет блок → това е текст, не тул
         consumed_spans.append((start, end))
         if kind == "WRITE_FILE":
+            # Новият ред веднага след тага е синтаксис, не съдържание
+            # (2026-10-12): моделите почти винаги го пишат, и всеки файл
+            # започваше с празен ред — а `#!/bin/sh` на втори ред не е shebang.
+            # Само един и само отпред; краят на файла остава какъвто е написан.
             actions.append((start, kind, partial(
-                _safe_tool, "WRITE_FILE", _tool_write_file, m.group("path"), m.group("body"))))
+                _safe_tool, "WRITE_FILE", _tool_write_file, m.group("path"),
+                m.group("body").removeprefix("\r\n").removeprefix("\n"))))
         elif kind == "EDIT_FILE":
             actions.append((start, kind, partial(_edit_action, m)))
         else:  # USE_SKILL
@@ -1666,7 +1843,10 @@ def looks_like_attempted_tool_tag(response_text: str) -> bool:
     истински таг не е разпознат от parse_and_execute_tools за него."""
     if not response_text:
         return False
-    return bool(_ATTEMPTED_TAG_RE.search(response_text))
+    # `<invoke name="…">`, останал след _normalize_xml_tool_calls, също е опит
+    # за инструмент — иначе ходът свършваше тихо (2026-10-12, виж горе).
+    return bool(_ATTEMPTED_TAG_RE.search(response_text) or "<invoke name=" in response_text
+                or "<tool_call>" in response_text)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1745,7 +1925,13 @@ def _dispatch(name: str, arguments: dict) -> str:
             return _tool_agent(str(arguments.get("agent", "") or ""),
                                str(arguments.get("task", "") or ""))
         if name == "TODO_WRITE":
-            return _todos().write(arguments.get("todos", []))
+            # Без "todos" — отказ, не празен списък (проба 2026-10-12: липсващ
+            # ключ мълчаливо изтриваше задачите). Друго име — само ако е списък.
+            todo_list = arguments.get("todos")
+            for alias in ("tasks", "items"):
+                if todo_list is None and isinstance(arguments.get(alias), list):
+                    todo_list = arguments[alias]
+            return _todos().write(todo_list)
         if name == "WEB_FETCH":
             return _tool_web_fetch(str(arguments.get("url", "") or ""))
         if name.startswith("mcp__"):

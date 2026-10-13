@@ -443,6 +443,25 @@ def _post(base: str, body: bytes) -> tuple[int, dict]:
         return e.code, json.loads(e.read())
 
 
+def _post_unread(base: str, body: bytes) -> int:
+    """Статусът на заявка, чието тяло сървърът нарочно не дочита (спрян адрес,
+    тяло без вида на плик → 429 и затваряне, вълна 5).
+
+    Затваряне с непрочетени байтове на Windows е RST и той може да изпревари
+    429-а при клиента: на лаптопа (Python 3.14) urllib падаше с WinError 10053
+    в getresponse — тестът за спряно тяло без вида на плик 3 от 3 пъти, този за
+    дълбокия JSON понякога; в CI на Windows (3.12) минаваха (2026-10-12).
+    И в двата случая сървърът е отказал, без да чете, затова RST се брои за 429."""
+    try:
+        return _post(base, body)[0]
+    except ConnectionError:                       # RST при четене на отговора
+        return 429
+    except urllib.error.URLError as e:            # RST, докато тялото се праща
+        if isinstance(e.reason, ConnectionError):
+            return 429
+        raise
+
+
 def _call(base: str, op: str, key: bytes = KEY, **args) -> dict:
     payload = _request(op, **args)
     status, env = _post(base, json.dumps(_client_seal(key, payload)).encode())
@@ -534,7 +553,7 @@ def test_failures_from_the_phones_address_do_not_lock_out_the_paired_phone(live)
 
 
 def test_a_braked_address_gets_429_before_parsing_a_body_that_is_not_an_envelope(
-        live, monkeypatch) -> None:
+        live, monkeypatch, capsys) -> None:
     """Преглед 2026-10-11: след преместването на спирачката след плика всяка
     спряна заявка (240 KiB "[1,1,…]") минаваше през json.loads и handle() —
     ~10 ms работа вместо 1.5 ms. Над спирачката само тяло с вида на плик
@@ -552,17 +571,20 @@ def test_a_braked_address_gets_429_before_parsing_a_body_that_is_not_an_envelope
     assert codes[-1] == 429
     before = len(opened)
     junk = b"[" + b"1," * (120 * 1024) + b"1]"
-    assert [_post(base, junk)[0] for _ in range(5)] == [429] * 5
+    assert [_post_unread(base, junk) for _ in range(5)] == [429] * 5
     assert _post(base, json.dumps({"v": 1, "n": 1, "c": []}).encode())[0] == 429
     assert len(opened) == before, "спряна заявка без вида на плик не се разчита"
     assert _call(base, "status")["ok"]
+    # Срив на нишката също затваря връзката, а _post_unread брои RST за 429.
+    assert "Traceback" not in capsys.readouterr().err
 
 
 def test_deeply_nested_json_is_a_counted_failure_not_a_traceback(live, capsys) -> None:
     """Одит 2026-10-11: `[` × 200 000 без ключ даваше RecursionError — traceback
     в терминала на оператора на всяка заявка и нито един провал за спирачката."""
     base, _, _ = live
-    codes = [_post(base, b"[" * 200_000)[0] for _ in range(35)]
+    # След спирачката тялото не се дочита — на Windows понякога RST (виж _post_unread).
+    codes = [_post_unread(base, b"[" * 200_000) for _ in range(35)]
     assert codes[0] == 401 and codes[-1] == 429
     assert "Traceback" not in capsys.readouterr().err
 
@@ -618,6 +640,27 @@ def test_static_files_never_leave_the_web_root(tmp_path) -> None:
         httpd.server_close()
 
 
+# ── `genesis serve` options ────────────────────────────────────────────────
+
+def test_serve_listens_on_every_interface_by_default() -> None:
+    opts = rs.parse_serve_args([])
+    assert isinstance(opts, rs.ServeOptions)
+    assert (opts.bind, opts.port, opts.host, opts.reset) == ("0.0.0.0", rs.DEFAULT_PORT, "", False)
+
+
+def test_serve_bind_keeps_it_on_this_machine() -> None:
+    # Genesis Desktop: loopback only, a port of its own, no firewall prompt.
+    opts = rs.parse_serve_args(["--bind", "127.0.0.1", "--port", "0"])
+    assert isinstance(opts, rs.ServeOptions)
+    assert (opts.bind, opts.port) == ("127.0.0.1", 0)
+
+
+@pytest.mark.parametrize("args, code", [(["--help"], 0), (["--port", "x"], 2), (["--nope"], 2)])
+def test_serve_bad_or_help_options_exit(args, code, capsys) -> None:
+    assert rs.parse_serve_args(args) == code
+    assert "genesis serve" in capsys.readouterr().out or code == 2
+
+
 # ── the terminal loop honours the phone's stop ─────────────────────────────
 
 def test_run_turn_stops_before_the_next_tool(monkeypatch, tmp_path) -> None:
@@ -651,6 +694,24 @@ def test_run_turn_stops_before_the_next_tool(monkeypatch, tmp_path) -> None:
     assert "tool_calls" not in list(messages)[-1], "history left with unanswered tool_calls"
 
 
+def test_command_op_reaches_the_commands_and_hello_says_so() -> None:
+    session, _ = _session()
+    calls: list[tuple] = []
+    server = rs.RemoteServer(KEY, session, name="x",
+                             commands=lambda n, a: calls.append((n, a)) or {"ok": True, "n": n})
+    assert server.hello()["features"] == ["commands"]
+    assert server._dispatch({"op": "command", "name": "usage", "arg": {"days": 7}}) == {"ok": True, "n": "usage"}
+    assert server._dispatch({"op": "command", "name": "status", "arg": "junk"})["ok"]
+    assert calls == [("usage", {"days": 7}), ("status", {})]
+
+
+def test_command_op_is_unknown_without_commands() -> None:
+    session, _ = _session()
+    server = rs.RemoteServer(KEY, session, name="x")
+    assert server.hello()["features"] == []
+    assert server._dispatch({"op": "command", "name": "status"}) == {"ok": False, "error": "unknown_op"}
+
+
 def test_the_phone_stop_interrupts_a_running_command(monkeypatch, tmp_path) -> None:
     """Одит 2026-10-11: ■ на телефона не стигаше до работеща команда — ходът
     свърши 7.1 s след Стоп, `sleep 8` довърши с rc=0."""
@@ -680,6 +741,32 @@ def test_the_phone_stop_interrupts_a_running_command(monkeypatch, tmp_path) -> N
     assert time.monotonic() - stopped_at < 3, "the command ran to the end after Stop"
     tools = [e for e in session.events_after(0)["events"] if e["type"] == "tool"]
     assert tools and "Спряно от оператора" in tools[-1]["result"]
+
+
+def test_the_window_sees_which_tool_is_running(monkeypatch, tmp_path) -> None:
+    """Проба на приложението 2026-10-12: докато `sleep 60` вървеше, прозорецът
+    показваше само „Genesis мисли...“ — събитие идваше чак след инструмента."""
+    from collections import deque
+
+    import genesis_terminal_agent as gta
+
+    monkeypatch.setattr(gta, "HISTORY_DIR", tmp_path)
+    monkeypatch.setattr(gta, "_remember", lambda *a: None)
+    gta.genesis_skills.set_workspace(tmp_path)
+    call = {"id": "c1", "type": "function",
+            "function": {"name": "RUN_CMD", "arguments": json.dumps({"command": "echo hi"})}}
+    replies = iter([("", [call]), ("готово", [])])
+    monkeypatch.setattr(gta, "ask_genesis", lambda *a, **k: next(replies))
+    session = rs.RemoteSession(lambda text, ui: gta.run_turn(
+        deque([{"role": "system", "content": "s"}], maxlen=50), text, ui))
+    assert session.send("пусни го")
+    deadline = time.monotonic() + 20
+    while session.busy and time.monotonic() < deadline:
+        time.sleep(0.05)
+    events = session.events_after(0)["events"]
+    kinds = [(e["type"], e.get("label") or e.get("name")) for e in events]
+    assert ("thinking", "RUN_CMD: echo hi") in kinds, kinds
+    assert kinds.index(("thinking", "RUN_CMD: echo hi")) < kinds.index(("tool", "RUN_CMD"))
 
 
 def test_a_replay_is_still_rejected_after_a_restart(tmp_path) -> None:

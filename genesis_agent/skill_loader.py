@@ -407,19 +407,27 @@ def domain_context(query: str) -> str:
         if whole and score >= need:
             ranked.append((score, h))
     ranked.sort(key=lambda x: x[0], reverse=True)
-    parts: list[str] = []
+    # Едно уеб ръководство и до две правила. Уеб ръководството и правилата не
+    # се изключват (2026-10-12): сайт за записване на час има нужда и от двете —
+    # с bg_phone_numbers първото съвпадение изместваше уеб основата на
+    # booking-form. Второ правило — само строго (min_score ≥ 3): bench
+    # clients-migrate 2026-10-01, CSV от Excel + телефон, стигаше само CSV-то →
+    # +3590359…; а ЕИК (min 2) не идва с всяко CSV. Двете са мерени поотделно;
+    # и трите наведнъж (2026-10-13, при сливането на клоновете) — не.
+    rules: list[str] = []
+    guide = ""
     for _, h in ranked:
-        # Второ знание — само строго (min_score ≥ 3). bench clients-migrate 2026-10-01: CSV от
-        # Excel + телефон, стигаше само CSV-то → +3590359…; а ЕИК (min 2) не идва с всяко CSV.
-        if parts and (h.get("category") == "web" or int(h.get("min_score", 2)) < 3):
-            continue
         if h.get("category") == "web":
+            if guide:
+                continue
             body = _guide_body(h)
             if body:
-                return (f"## Проверено ръководство от библиотеката: {h['name']}\n"
-                        "Основата отдолу минава браузърната проверка без находки — започни от нея "
-                        "и я пригоди към заявката (съдържание, илюстрации, цвят на акцента), "
-                        "вместо да пишеш стиловете от нулата.\n\n" + body)
+                guide = (f"## Проверено ръководство от библиотеката: {h['name']}\n"
+                         "Основата отдолу минава браузърната проверка без находки — започни от нея "
+                         "и я пригоди към заявката (съдържание, илюстрации, цвят на акцента), "
+                         "вместо да пишеш стиловете от нулата.\n\n" + body)
+            continue
+        if len(rules) == 2 or (rules and int(h.get("min_score", 2)) < 3):
             continue
         try:
             code = skill_view(h["name"])["code"]
@@ -429,14 +437,12 @@ def domain_context(query: str) -> str:
         # „ползвай кода“ и моделът го копира дословно — с validate_egn/parse_egn
         # вместо поисканите validate/parse; правилни правила, счупен интерфейс
         # (скритите тестове не можаха да го импортират, 2026-09-25).
-        parts.append(f"## Проверено знание от библиотеката: {h['name']}\n"
+        rules.append(f"## Проверено знание от библиотеката: {h['name']}\n"
                      "ПРАВИЛАТА в този код са проверени със самотест — вземи ги оттук (и "
                      "очакваните стойности в тестовете), не по памет. ИМЕНАТА, файловете и "
                      "интерфейса вземи от заявката на оператора, не от този код.\n"
                      f"```python\n{code.strip()}\n```")
-        if len(parts) == 2:
-            break
-    return "\n\n".join(parts)
+    return "\n\n".join(rules + ([guide] if guide else []))
 
 
 def _guide_body(meta: dict[str, Any]) -> str:
