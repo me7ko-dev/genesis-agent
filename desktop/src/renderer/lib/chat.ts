@@ -1,7 +1,7 @@
-import type { GenesisEvent, Todo } from '../../shared/types';
+import type { GenesisEvent, ImageRef, Todo } from '../../shared/types';
 
 export type ChatItem =
-  | { kind: 'user'; key: string; text: string; ts: number }
+  | { kind: 'user'; key: string; text: string; ts: number; images?: ImageRef[] }
   | { kind: 'assistant'; key: string; text: string; ts: number }
   | { kind: 'tool'; key: string; name: string; result: string; clipped: boolean; ts: number }
   | { kind: 'note'; key: string; tone: 'info' | 'warn' | 'error' | 'asked' | 'progress'; text: string; ts: number }
@@ -32,7 +32,9 @@ export function toChatItems(events: GenesisEvent[]): ChatItem[] {
         confirms.clear();
         break;
       case 'user':
-        items.push({ kind: 'user', key, text: e.text ?? '', ts });
+        // Картинките — само име и размер (server 2026-10-15); байтовете не идват.
+        items.push({ kind: 'user', key, text: e.text ?? '', ts,
+                     ...(Array.isArray(e.images) && e.images.length ? { images: e.images } : {}) });
         break;
       case 'assistant':
         items.push({ kind: 'assistant', key, text: e.text ?? '', ts });

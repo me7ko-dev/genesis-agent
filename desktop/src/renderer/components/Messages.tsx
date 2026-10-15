@@ -1,9 +1,11 @@
 import {
   Activity,
-  Brain, Check, ChevronRight, CircleHelp, File, FilePen, Folder, GitBranch, Globe, Info,
-  Save, Search, ShieldAlert, Sparkles, Terminal, TriangleAlert, Wrench, X,
+  Brain, Check, ChevronRight, CircleHelp, File, FilePen, Folder, GitBranch, Globe, Image, Info,
+  LoaderCircle, Save, Search, ShieldAlert, Sparkles, Square, Terminal, TriangleAlert, Volume2, Wrench, X,
 } from 'lucide-react';
 import { memo, useEffect, useState, type MouseEvent } from 'react';
+import { fmtBytes } from '../../shared/media';
+import type { ImageRef } from '../../shared/types';
 import { confirmChoices, elapsed, toolHeader, toolLook, type ChatItem } from '../lib/chat';
 import { renderMarkdown } from '../lib/markdown';
 
@@ -50,21 +52,54 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-export function UserMessage({ text }: { text: string }) {
+/** Изпратена картинка: името и размерът (байтовете не се връщат от агента). */
+function ImageChip({ image }: { image: ImageRef }) {
+  const size = image.width && image.height ? `${image.width}×${image.height}` : '';
+  const title = [image.name, size, image.bytes ? fmtBytes(image.bytes) : '', image.mime].filter(Boolean).join(' · ');
+  return (
+    <span className="image-chip" title={title}>
+      <Image size={13} /> <span className="image-chip-name">{image.name || 'картинка'}</span>
+      {size && <span className="image-chip-size">{size}</span>}
+    </span>
+  );
+}
+
+export function UserMessage({ text, images }: { text: string; images?: ImageRef[] }) {
   return (
     <div className="msg user">
-      <div className="bubble">{text}</div>
+      <div className="bubble">
+        {images && images.length > 0 && (
+          <div className="bubble-images">{images.map((im, i) => <ImageChip key={i} image={im} />)}</div>
+        )}
+        {text}
+      </div>
     </div>
   );
 }
 
-export function AssistantMessage({ text }: { text: string }) {
+/** Бутонът „Прочети на глас“ на отговор: чете / зарежда / спира. */
+export type Speech = { phase: 'idle' | 'loading' | 'playing'; onToggle: () => void };
+
+function SpeakButton({ speech }: { speech: Speech }) {
+  const title = speech.phase === 'idle' ? 'Прочети на глас' : speech.phase === 'loading' ? 'Озвучавам… (спри)' : 'Спри четенето';
+  return (
+    <button className={`icon-btn subtle ${speech.phase !== 'idle' ? 'on' : ''}`} title={title} onClick={speech.onToggle}>
+      {speech.phase === 'idle' ? <Volume2 size={14} />
+        : speech.phase === 'loading' ? <LoaderCircle size={14} className="spin" /> : <Square size={11} fill="currentColor" />}
+    </button>
+  );
+}
+
+export function AssistantMessage({ text, speech }: { text: string; speech?: Speech }) {
   return (
     <div className="msg assistant">
       <div className="avatar"><span className="logo-dot" /></div>
       <div className="body">
         <Markdown text={text} />
-        <div className="msg-actions"><CopyButton text={text} /></div>
+        <div className={`msg-actions ${speech && speech.phase !== 'idle' ? 'shown' : ''}`}>
+          <CopyButton text={text} />
+          {speech && <SpeakButton speech={speech} />}
+        </div>
       </div>
     </div>
   );
