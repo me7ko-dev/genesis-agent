@@ -294,6 +294,97 @@ def test_stop_interrupts_a_running_command(tmp_path) -> None:
     assert res.ok is False and "Спряно от оператора" in res.stderr
 
 
+@pytest.mark.skipif(os.name != "posix", reason="killpg/setsid — POSIX път; Windows е job object-ът")
+def test_a_survivor_that_holds_the_output_does_not_delay_the_stop(tmp_path) -> None:
+    """Windows CI 2026-10-15 (main 68b217f): ходът свърши 4.9–5.4 s след Стоп.
+    Тук — същият механизъм на Linux: внук в своя сесия наследява stdout,
+    killpg не го стига и след убиването изходът се чакаше още 10 s."""
+    import signal
+    import sys
+    import time
+
+    import genesis_skills
+    pid_file = tmp_path / "survivor.pid"
+    code = ("import subprocess, sys, time\n"
+            "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],"
+            " start_new_session=True)\n"
+            f"open({str(pid_file)!r}, 'w').write(str(p.pid))\n"
+            "time.sleep(30)\n")
+    t0 = time.monotonic()
+    genesis_skills._set_cancel(lambda: pid_file.exists() and time.monotonic() - t0 > 0.5)
+    try:
+        res = sandbox._run([sys.executable, "-c", code], cwd=tmp_path,
+                           policy=SandboxPolicy(mode="allow"), timeout=60)
+        took = time.monotonic() - t0
+    finally:
+        genesis_skills._set_cancel(None)
+        if pid_file.exists():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
+    assert "Спряно от оператора" in res.stderr
+    assert took < 4, f"Стоп отне {took:.1f} s"
+
+
+def test_a_stop_before_the_start_starts_nothing(tmp_path, monkeypatch) -> None:
+    """Стоп, дошъл докато се прави снимката за /undo (или се избира обвивката),
+    не пуска командата, за да я убие веднага (2026-10-15)."""
+    import genesis_skills
+    calls: list[str] = []
+    monkeypatch.setattr(sandbox, "before_exec", lambda: calls.append("snapshot"))
+    monkeypatch.setattr(sandbox.subprocess, "Popen",
+                        lambda *a, **k: calls.append("popen") or (_ for _ in ()).throw(OSError))
+    genesis_skills._set_cancel(lambda: True)
+    try:
+        res = sandbox.run_shell("echo hi", cwd=tmp_path, policy=SandboxPolicy(mode="allow"))
+    finally:
+        genesis_skills._set_cancel(None)
+    assert calls == []
+    assert res.ok is False and "Спряно от оператора" in res.stderr
+
+
+def test_after_the_job_ends_everything_taskkill_is_not_waited_for(tmp_path, monkeypatch) -> None:
+    """Windows CI 2026-10-15: след TerminateJobObject идваше и `taskkill /T /F`
+    — отделен процес, последователно, точно на пътя на Стоп. Нужен е само
+    ако job-ът не е станал."""
+    import sys
+    import time
+
+    import genesis_skills
+    killed: list[int] = []
+    outcome = {"job": True}
+
+    class FakeJob:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+
+        def terminate(self) -> bool:
+            if outcome["job"]:
+                os.kill(self.pid, 9)
+            return outcome["job"]
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(sandbox, "_WinJob", FakeJob)
+    monkeypatch.setattr(sandbox, "_kill_tree_win32", killed.append)
+    monkeypatch.setattr(sandbox, "_CODEPAGES", [])     # иначе кешира win32 кодови страници
+    monkeypatch.setattr(sandbox.sys, "platform", "win32")
+    t0 = time.monotonic()
+    genesis_skills._set_cancel(lambda: time.monotonic() - t0 > 0.3)
+    try:
+        for job_works in (True, False):
+            outcome["job"] = job_works
+            t0 = time.monotonic()
+            res = sandbox._run([sys.executable, "-c", "import time; time.sleep(20)"],
+                               cwd=tmp_path, policy=SandboxPolicy(mode="allow"), timeout=60)
+            assert "Спряно от оператора" in res.stderr
+    finally:
+        genesis_skills._set_cancel(None)
+    assert len(killed) == 1     # само когато job-ът не е убил дървото
+
+
 def test_run_python_executes_and_returns_stdout(tmp_path) -> None:
     res = sandbox.run_python("print(2 + 2)", cwd=tmp_path)
     assert res.ok is True

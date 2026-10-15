@@ -743,6 +743,43 @@ def test_the_phone_stop_interrupts_a_running_command(monkeypatch, tmp_path) -> N
     assert tools and "Спряно от оператора" in tools[-1]["result"]
 
 
+def test_after_a_stop_during_a_tool_the_model_is_not_asked_again(monkeypatch, tmp_path) -> None:
+    """2026-10-15: след Стоп по време на инструмент моделът се питаше още веднъж
+    („Анализирам…“) и чак отговорът му спираше хода — с истински модел това са
+    секунди на „Genesis работи…“ и платено обръщение след Стоп."""
+    from collections import deque
+
+    import genesis_terminal_agent as gta
+
+    monkeypatch.setattr(gta, "HISTORY_DIR", tmp_path)
+    monkeypatch.setattr(gta, "_remember", lambda *a: None)
+    gta.genesis_skills.set_workspace(tmp_path)
+    call = {"id": "c1", "type": "function",
+            "function": {"name": "RUN_CMD", "arguments": json.dumps({"command": "make"})}}
+    asked: list[int] = []
+    replies = iter([("running", [call]), ("done", [])])
+
+    def ask(*a, **k):
+        asked.append(1)
+        return next(replies)
+    monkeypatch.setattr(gta, "ask_genesis", ask)
+    holder: dict = {}
+    session = rs.RemoteSession(lambda text, ui: holder.__setitem__("msgs", gta.run_turn(
+        deque([{"role": "system", "content": "s"}], maxlen=50), text, ui)))
+
+    def dispatch(name, args):
+        session.request_stop()          # Стоп идва, докато командата върви
+        return "[RUN_CMD: make]  (rc=None)\n[sandbox] ⏹ Спряно от оператора"
+    monkeypatch.setattr(gta.genesis_skills, "dispatch_tool_call", dispatch)
+    assert session.send("build")
+    deadline = time.monotonic() + 10
+    while session.busy and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert len(asked) == 1
+    tool_msgs = [m for m in holder["msgs"] if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1 and "Спряно" in tool_msgs[0]["content"]
+
+
 def test_the_window_sees_which_tool_is_running(monkeypatch, tmp_path) -> None:
     """Проба на приложението 2026-10-12: докато `sleep 60` вървеше, прозорецът
     показваше само „Genesis мисли...“ — събитие идваше чак след инструмента."""

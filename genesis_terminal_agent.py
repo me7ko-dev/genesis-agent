@@ -1751,6 +1751,13 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                     # СЕГА и казваме защо, вместо да догорим до тавана.
                     ui.spinning(_spinning)
                     break
+                if ui.cancelled():
+                    # Стоп по време на инструмент (2026-10-15): моделът се питаше
+                    # още веднъж и чак отговорът му спираше хода — с истински
+                    # модел секунди и платено обръщение след Стоп. Резултатите
+                    # вече са в историята, двойките извикване/резултат са цели.
+                    ui.warn("Спряно от оператора.")
+                    break
                 if _repeat_note:
                     messages.append({"role": "system", "content": _repeat_note})
                 round_i += 1
@@ -1884,6 +1891,10 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
             if _spinning:
                 messages.append(_last_results)
                 ui.spinning(_spinning)
+                break
+            if ui.cancelled():      # същото като при native пътя (2026-10-15)
+                messages.append(_last_results)
+                ui.warn("Спряно от оператора.")
                 break
             if _text_note:
                 messages.append({"role": "system", "content": _text_note})
