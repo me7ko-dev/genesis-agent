@@ -223,25 +223,40 @@ def _search_ripgrep(root: Path, pattern: str, glob: str | None,
     # пуска втори път с windows-1251. От него се взимат само файловете, които
     # decode_text (и Python пътят) смята за cp1251: ревю 2026-10-11 — UTF-8
     # „мир“ там е „РјРёСЂ“ и търсене на „Р“ връщаше боклук, а Python — нищо.
-    if out is not None and not pattern.isascii() and len(out) < max_results:
-        extra = _run_ripgrep(root, pattern, glob, max_results, "windows-1251")
+    # Същото за cp1252 (2026-10-15): „crème“ в latin-1 файл.
+    for rg_enc, enc in (("windows-1251", "cp1251"), ("windows-1252", "cp1252")):
+        if out is None or pattern.isascii() or len(out) >= max_results:
+            break
+        if enc == "cp1252" and not any(not c.isascii() and _fits(c, enc) for c in pattern):
+            continue   # само кирилица в шаблона: в cp1252 файл тя няма как да е
+        extra = _run_ripgrep(root, pattern, glob, max_results, rg_enc)
         seen = {(m.path, m.line) for m in out}
-        legacy: dict[str, bool] = {}
+        known: dict[str, str] = {}
         for m in extra or []:
             if len(out) >= max_results:
                 break
-            if m.path not in legacy:
-                legacy[m.path] = _is_cp1251(m.path)
-            if legacy[m.path] and (m.path, m.line) not in seen:
+            if _file_encoding(m.path, known) == enc and (m.path, m.line) not in seen:
                 out.append(m)
     return out
 
 
-def _is_cp1251(path: str) -> bool:
+def _fits(text: str, encoding: str) -> bool:
     try:
-        return decode_text(Path(path).read_bytes())[1] == "cp1251"
-    except OSError:
+        text.encode(encoding)
+    except UnicodeEncodeError:
         return False
+    return True
+
+
+def _file_encoding(path: str, known: dict[str, str]) -> str:
+    """Кодирането на файла — както Python пътят го чете (decode_text);
+    `known` пази вече прочетените в едно търсене."""
+    if path not in known:
+        try:
+            known[path] = decode_text(Path(path).read_bytes())[1]
+        except OSError:
+            known[path] = "utf-8"
+    return known[path]
 
 
 def _run_ripgrep(root: Path, pattern: str, glob: str | None,
@@ -266,6 +281,7 @@ def _run_ripgrep(root: Path, pattern: str, glob: str | None,
     if proc.returncode not in (0, 1):
         return None
     out: list[Match] = []
+    known: dict[str, str] = {}
     for raw in proc.stdout.splitlines():
         try:
             ev = json.loads(raw)
@@ -284,11 +300,8 @@ def _run_ripgrep(root: Path, pattern: str, glob: str | None,
         line_no = data.get("line_number")
         if not isinstance(line_no, int):
             continue
-        out.append(Match(
-            (data.get("path") or {}).get("text", "?"),
-            line_no,
-            _rg_text(data.get("lines") or {}).rstrip()[:_LINE_CLIP],
-        ))
+        path = (data.get("path") or {}).get("text", "?")
+        out.append(Match(path, line_no, _rg_text(data.get("lines") or {}, path, known).rstrip()[:_LINE_CLIP]))
         if len(out) >= max_results:
             break
     return out
@@ -318,16 +331,23 @@ def _rg_globs(glob: str | None) -> list[str]:
     return [neg + v for v in variants]
 
 
-def _rg_text(lines: dict) -> str:
+def _rg_text(lines: dict, path: str, known: dict[str, str]) -> str:
     """Редът от събитие на rg. Ред, който не е UTF-8, идва като `bytes`
     (base64), не като `text` — попадението излизаше с празен текст
-    („msg.txt:1: “, одит 2026-10-11)."""
+    („msg.txt:1: “, одит 2026-10-11).
+
+    Байтовете се четат с кодирането на ЦЕЛИЯ файл, както в Python пътя
+    (2026-10-15): ред „Да ok“ сам не е „ясно cp1251“ и излизаше „�� ok“, а
+    „NAME = 'Café'“ в cp1252 файл — според догадката по един ред."""
     if isinstance(lines.get("text"), str):
         return lines["text"]
     try:
         raw = base64.b64decode(lines.get("bytes") or "")
     except (ValueError, TypeError):
         return ""
+    enc = _file_encoding(path, known)
+    if enc in ("utf-8", "cp1251", "cp1252"):
+        return displayable(raw.decode(enc, "surrogateescape"))
     return displayable(decode_text(raw)[0])
 
 

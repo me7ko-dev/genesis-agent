@@ -5,9 +5,10 @@
 нова буква влизаше като UTF-8 в иначе cp1252 файл (два кодирания в един файл),
 а READ→WRITE се отказваше. Разпознаването не бива да взима cp1251 (български)
 или UTF-8 с един чужд байт за cp1252: тогава се показва mojibake, а запис с
-UTF-8 резерва го закова на диска. Пуснато срещу стария код: 25 падаха, а
+UTF-8 резерва го закова на диска. Пуснато срещу стария код: 28 падаха, а
 минаваха само пазачите — `test_cp1251_*`, `test_*_stays_utf8_*`,
-`test_cp1252_write_preview_*` и
+`test_cp1252_write_preview_*`, `test_cp1252_pass_does_not_hit_cp1251_files`,
+[python] варианта на `test_cp1251_line_from_rg_*` и
 `test_read_file_names_the_encoding_that_write_will_use` (той пада с новото
 разпознаване без поправката в READ_FILE).
 """
@@ -16,7 +17,7 @@ from __future__ import annotations
 import pytest
 
 import genesis_skills as gs
-from genesis_agent import code_edit, mentions
+from genesis_agent import code_edit, mentions, repo_map
 
 
 @pytest.fixture(autouse=True)
@@ -26,6 +27,15 @@ def ws(tmp_path, monkeypatch):
     monkeypatch.setattr("genesis_agent.sandbox._POLICY", gs.sandbox.SandboxPolicy())
     yield tmp_path
     gs.set_workspace(gs._PROJECT_ROOT)
+
+
+@pytest.fixture(params=["rg", "python"])
+def engine(request, monkeypatch):
+    if request.param == "python":
+        monkeypatch.setattr(repo_map.shutil, "which", lambda _name: None)
+    elif not repo_map.shutil.which("rg"):
+        pytest.skip("няма rg")
+    return request.param
 
 
 def _body(out: str) -> str:
@@ -201,7 +211,27 @@ def test_read_file_names_the_encoding_that_write_will_use(ws):
     assert "cp1252" not in out.splitlines()[0], out.splitlines()[0]
 
 
-# ── @файл ─────────────────────────────────────────────────────────────────
+# ── SEARCH_CODE и @файл ──────────────────────────────────────────────────────
+
+def test_search_finds_accented_text_in_cp1252_file_on_both_engines(ws, engine):
+    (ws / "m.py").write_bytes(_FR.encode("cp1252"))
+    assert [h.text for h in repo_map.search_code("crème", ws)] == ["# Café crème, naïve Müller — 5 €"]
+    # ASCII шаблон: rg дава реда като байтове — показва се в кодирането на файла.
+    assert [h.text for h in repo_map.search_code("NAME", ws)] == ["NAME = 'Café'"]
+
+
+def test_cp1252_pass_does_not_hit_cp1251_files(ws, engine):
+    # cp1251 „Мой“ (CC EE E9) в cp1252 е „Ìîé“.
+    (ws / "bg.txt").write_bytes("Мой файл е тук\n".encode("cp1251"))
+    assert code_edit.decode_text((ws / "bg.txt").read_bytes())[1] == "cp1251"
+    assert repo_map.search_code("é", ws) == []
+
+
+def test_cp1251_line_from_rg_uses_the_file_encoding(ws, engine):
+    # Ред „Да ok“ сам по себе си не е „ясно cp1251“, но файлът е.
+    (ws / "bg.txt").write_bytes("Здравей, свят\nДа ok\n".encode("cp1251"))
+    assert [h.text for h in repo_map.search_code("ok", ws)] == ["Да ok"]
+
 
 def test_a_mention_reads_cp1252_like_read_file(ws):
     (ws / "m.py").write_bytes(_FR.encode("cp1252"))
