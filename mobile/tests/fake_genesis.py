@@ -43,6 +43,13 @@ def main() -> None:
             allowed = session.confirm("rm -rf build", ["изтрива папка"], timeout=10)
             ui.info(f"allowed={allowed}")
             return
+        if text == "сесия":
+            # Командата може да се запомни — картата носи третия бутон
+            # (sandbox._decide го решава; тук — направо, 2026-10-15).
+            allowed = session.confirm("pip install requests", ["инсталиране на пакети"],
+                                      timeout=10, session_rule="pip install requests")
+            ui.info(f"allowed={allowed}")
+            return
         with ui.thinking("Genesis мисли..."):
             pass
         ui.tool("RUN_CMD", "$ echo " + text + "\n" + text)

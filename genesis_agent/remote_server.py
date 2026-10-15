@@ -40,6 +40,11 @@ Code на телефона управлява сесия, която тече д
 повторен опит със същия "mid" получава първия отговор, без втори ход. Грешка в
 отворена заявка е {"ok": false, "error": "unknown_op"|"empty"|"bad_args"|…},
 не 401.
+
+2026-10-15: събитието "confirm" може да носи "session_rule" (командата, която
+„За тази сесия“ би запомнила) — само тогава приложението показва третия бутон и
+праща `confirm` с "session": true. "confirm_done" носи "session": true, ако е
+запомнено. Старо приложение не праща "session" — Изпълни/Откажи както досега.
 """
 from __future__ import annotations
 
@@ -291,6 +296,7 @@ class ReplayGuard:
 class _Pending:
     event: threading.Event = field(default_factory=threading.Event)
     allow: bool = False
+    session: bool = False     # „За тази сесия“ — само ако картата го е предложила
 
 
 TurnRunner = Callable[[str, Any], None]
@@ -443,7 +449,12 @@ class RemoteSession:
         return self._stop.is_set()
 
     # -- потвърждения от sandbox-а --
-    def confirm(self, operation: str, reasons: list[str], timeout: float = _CONFIRM_TIMEOUT_S) -> bool:
+    def confirm(self, operation: str, reasons: list[str], timeout: float = _CONFIRM_TIMEOUT_S,
+                session_rule: str | None = None) -> bool | str:
+        """True/False, или sandbox.ALLOW_SESSION, когато телефонът е избрал
+        „За тази сесия“. `session_rule` идва от sandbox._decide (проста shell
+        команда, без тайни/управляващи файлове, никога BLOCKED) — само тогава
+        картата носи третия бутон (2026-10-15)."""
         # След „Стоп“ нищо не чака отговор: иначе всеки следващ въпрос държеше
         # хода до 5 минути и пак се отказваше (одит 2026-10-09).
         if self._stop.is_set():
@@ -457,22 +468,30 @@ class RemoteSession:
         pending = self._pending[cid] = _Pending()
         # Цялата операция: отрязана на 1000 знака без знак, краят ѝ (`&& rm -r src`)
         # се одобряваше невидян (одит 2026-10-09).
-        self.emit("confirm", id=cid, operation=operation, reasons=list(reasons)[:10])
+        # Старо приложение не знае `session_rule` и показва само Изпълни/Откажи.
+        offer = {"session_rule": session_rule} if session_rule else {}
+        self.emit("confirm", id=cid, operation=operation, reasons=list(reasons)[:10], **offer)
         answered = pending.event.wait(timeout)
         self._pending.pop(cid, None)
         allow = answered and pending.allow and not self._stop.is_set()
+        remembered = allow and bool(session_rule) and pending.session
         self.emit("confirm_done", id=cid, allow=allow,
-                  note="" if answered else "няма отговор — отказано")
+                  note="" if answered else "няма отговор — отказано",
+                  **({"session": True} if remembered else {}))
+        if remembered:
+            return sandbox.ALLOW_SESSION
         return allow
 
-    def answer(self, cid: str, allow: bool) -> bool:
+    def answer(self, cid: str, allow: bool, session: bool = False) -> bool:
         # Първият отговор печели: второ докосване („Откажи“ и веднага
-        # „Изпълни“) не сменя вече даденото решение (одит 2026-10-07).
+        # „Изпълни“ / „За тази сесия“) не сменя вече даденото решение (одит
+        # 2026-10-07; третият бутон — 2026-10-15).
         with self._cond:
             pending = self._pending.get(cid)
             if pending is None or pending.event.is_set():
                 return False
             pending.allow = bool(allow)
+            pending.session = bool(allow) and bool(session)
             pending.event.set()
         return True
 
@@ -633,6 +652,16 @@ def show_agent_progress(session: RemoteSession) -> None:
     agents.progress = say
 
 
+def phone_policy(session: RemoteSession) -> Any:
+    """Политиката на sandbox-а, когато пита телефонът/приложението: картата
+    носи `session_rule` от _decide — третият бутон е само за допустима команда."""
+    from genesis_agent import sandbox
+    return sandbox.SandboxPolicy(
+        mode="interactive",
+        confirm_fn=lambda op, verdict: session.confirm(op, list(verdict.reasons),
+                                                       session_rule=verdict.session_rule))
+
+
 def phone_state() -> dict:
     """Режимът план и задачите — за постоянния ред на телефона."""
     from genesis_agent import plan_mode, todos
@@ -720,7 +749,10 @@ class RemoteServer:
                 reply["mids"] = list(self._sent)[-_ACK_MIDS:]
             return reply
         if op == "confirm":
-            return {"ok": s.answer(str(p.get("id") or ""), bool(p.get("allow")))}
+            # "session": true — „За тази сесия“; само истинско true, и само
+            # заедно с "allow": true (2026-10-15).
+            return {"ok": s.answer(str(p.get("id") or ""), bool(p.get("allow")),
+                                   session=p.get("session") is True)}
         if op == "stop":
             s.request_stop()
             return {"ok": True}
@@ -1207,16 +1239,15 @@ def serve(args: list[str]) -> int:
             console.print(Text.assemble(("📱 Чака потвърждение от телефона: ", "bold yellow"),
                                         str(event["operation"])))
         elif kind == "confirm_done":
-            console.print(Text(f"   → {'разрешено' if event['allow'] else 'отказано'} "
-                               f"{event.get('note', '')}", style="dim"))
+            verdict = ("разрешено за тази сесия" if event.get("session") else
+                       "разрешено" if event["allow"] else "отказано")
+            console.print(Text(f"   → {verdict} {event.get('note', '')}", style="dim"))
 
     session = RemoteSession(runner, on_event=show, state=phone_state)
     show_agent_progress(session)
 
     from genesis_agent import sandbox as _sandbox
-    _sandbox.set_policy(_sandbox.SandboxPolicy(
-        mode="interactive",
-        confirm_fn=lambda op, verdict: session.confirm(op, list(verdict.reasons))))
+    _sandbox.set_policy(phone_policy(session))
 
     name = socket.gethostname()
     from genesis_agent import desktop_commands

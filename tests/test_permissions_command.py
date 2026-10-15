@@ -130,9 +130,9 @@ def test_the_phone_can_list_and_remove(repo) -> None:
 
 
 def _phone_policy(session) -> SandboxPolicy:
-    # Същото като rs.serve.
-    return SandboxPolicy(mode="interactive",
-                         confirm_fn=lambda op, verdict: session.confirm(op, list(verdict.reasons)))
+    pytest.importorskip("cryptography")
+    from genesis_agent import remote_server as rs
+    return rs.phone_policy(session)       # същото, което ползва rs.serve
 
 
 def test_blocked_from_the_phone_is_refused_without_a_card(repo, monkeypatch) -> None:
@@ -154,12 +154,26 @@ def test_a_rule_also_covers_commands_asked_from_the_phone(repo, monkeypatch) -> 
     assert not [e for e in session.events_after(0)["events"] if e["type"] == "confirm"]
 
 
-def test_the_phone_still_answers_yes_no(repo) -> None:
-    _rs, session = _remote()
+# ── „За тази сесия“ от телефона/приложението (протоколът) ───────────────────
+
+KEY = bytes(range(32))
+
+
+def _call(server, op: str, **args) -> dict:
+    import secrets as _secrets
+
+    from genesis_agent import remote_server as rs
+    payload = {"ts": int(time.time() * 1000), "rid": _secrets.token_hex(8), "op": op, **args}
+    return server.handle(rs.Cipher(KEY).seal(payload, rs._REQ_AAD))[0]
+
+
+def _ask(session, cmd: str) -> tuple[threading.Thread, dict, dict]:
+    """Пуска _decide във фона, както ход на агента; връща картата."""
     result: dict = {}
+    before = {e["id"] for e in session.events_after(0)["events"] if e["type"] == "confirm"}
 
     def go() -> None:
-        result["d"] = sandbox._decide("pip install requests", _confirm(), _phone_policy(session),
+        result["d"] = sandbox._decide(cmd, sandbox.assess_command(cmd), _phone_policy(session),
                                       shell=True)
 
     t = threading.Thread(target=go)
@@ -167,11 +181,109 @@ def test_the_phone_still_answers_yes_no(repo) -> None:
     deadline = time.time() + 5
     card = None
     while card is None and time.time() < deadline:
-        card = next((e for e in session.events_after(0)["events"] if e["type"] == "confirm"), None)
+        card = next((e for e in session.events_after(0)["events"]
+                     if e["type"] == "confirm" and e["id"] not in before), None)
         time.sleep(0.01)
-    assert card is not None
-    assert session.answer(card["id"], True)
+    assert card is not None, cmd
+    return t, result, card
+
+
+def _done(session, cid: str) -> dict:
+    return next(e for e in session.events_after(0)["events"]
+                if e["type"] == "confirm_done" and e["id"] == cid)
+
+
+def _server(session):
+    from genesis_agent import remote_server as rs
+    return rs.RemoteServer(KEY, session, name="pc")
+
+
+def test_the_session_button_is_offered_and_remembered(repo) -> None:
+    _rs, session = _remote()
+    server = _server(session)
+    t, result, card = _ask(session, "pip install requests")
+    assert card["session_rule"] == "pip install requests"
+    assert _call(server, "confirm", id=card["id"], allow=True, session=True) == {"ok": True}
     t.join(5)
     assert result["d"] == (True, "")
-    # „Изпълни“ от телефона е еднократно — не се помни за сесията.
+    assert _done(session, card["id"])["session"] is True
+    assert permissions.session_rules(repo) == ["pip install requests"]
+    # Следващият път — без карта.
+    assert sandbox._decide("pip install requests", _confirm(), _phone_policy(session), shell=True)[0]
+    assert len([e for e in session.events_after(0)["events"] if e["type"] == "confirm"]) == 1
+    assert not permissions.store_file().exists()       # само в паметта
+
+
+@pytest.mark.parametrize("cmd", [
+    "pip install requests && rm -r build",     # верига
+    "pip install requests > log.txt",          # пренасочване
+    "FOO=1 pip install requests",              # променлива отпред
+    "cat .env",                                # тайна
+    "cp x .genesis/permissions.json",          # управляващ файл
+])
+def test_no_session_button_for_what_cannot_be_remembered(repo, cmd) -> None:
+    _rs, session = _remote()
+    server = _server(session)
+    t, result, card = _ask(session, cmd)
+    assert "session_rule" not in card
+    # Ръчно пратено "session": true — само еднократно „да“.
+    assert _call(server, "confirm", id=card["id"], allow=True, session=True) == {"ok": True}
+    t.join(5)
+    assert result["d"] == (True, "")
+    assert "session" not in _done(session, card["id"])
+    assert permissions.session_rules(repo) == []
+
+
+def test_an_old_client_without_the_button_still_answers(repo) -> None:
+    _rs, session = _remote()
+    server = _server(session)
+    t, result, card = _ask(session, "pip install requests")
+    assert _call(server, "confirm", id=card["id"], allow=True) == {"ok": True}
+    t.join(5)
+    assert result["d"] == (True, "")
+    assert permissions.session_rules(repo) == []
+    t, result, card = _ask(session, "pip install requests")
+    assert _call(server, "confirm", id=card["id"], allow=False) == {"ok": True}
+    t.join(5)
+    assert result["d"][0] is False
+
+
+@pytest.mark.parametrize("first, second, allowed, remembered", [
+    ({"allow": True, "session": True}, {"allow": False}, True, True),
+    ({"allow": False}, {"allow": True, "session": True}, False, False),
+    ({"allow": True}, {"allow": True, "session": True}, True, False),
+])
+def test_a_second_tap_does_not_change_the_answer(repo, first, second, allowed, remembered) -> None:
+    _rs, session = _remote()
+    server = _server(session)
+    t, result, card = _ask(session, "pip install requests")
+    assert _call(server, "confirm", id=card["id"], **first) == {"ok": True}
+    assert _call(server, "confirm", id=card["id"], **second) == {"ok": False}
+    t.join(5)
+    assert result["d"][0] is allowed
+    assert (permissions.session_rules(repo) == ["pip install requests"]) is remembered
+
+
+@pytest.mark.parametrize("args", [
+    {"allow": False, "session": True},          # „сесия“ без „да“ е отказ
+    {"allow": False, "session": "true"},
+    {"session": True},
+])
+def test_session_without_allow_is_a_refusal(repo, args) -> None:
+    _rs, session = _remote()
+    server = _server(session)
+    t, result, card = _ask(session, "pip install requests")
+    assert _call(server, "confirm", id=card["id"], **args) == {"ok": True}
+    t.join(5)
+    assert result["d"][0] is False
+    assert permissions.session_rules(repo) == []
+
+
+def test_only_a_real_true_means_session(repo) -> None:
+    _rs, session = _remote()
+    server = _server(session)
+    t, result, card = _ask(session, "pip install requests")
+    assert _call(server, "confirm", id=card["id"], allow=True, session="true") == {"ok": True}
+    t.join(5)
+    assert result["d"] == (True, "")
     assert permissions.session_rules(repo) == []
