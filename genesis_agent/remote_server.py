@@ -61,7 +61,7 @@ Code на телефона управлява сесия, която тече д
 Грешки: "too_large", "too_long", "bad_mime", "bad_args", "empty", "busy" (друг
 запис се обработва), "rate_limited", "stt_failed"/"tts_failed" (+ "detail" на
 български). Плик над 256 KiB се приема само за тези две операции — до
-_MAX_VOICE_BODY, по един наведнъж; за всяка друга — "too_large".
+_MAX_VOICE_BODY, по един наведнъж; за всяка друга — HTTP 413, както преди.
 
 2026-10-15 — картинки, "features" съдържа "images". `send` може да носи
     "images": [{"mime": "image/png", "data": "<base64>", "name": "shot.png"}, …]
@@ -115,6 +115,9 @@ _REPLY_BYTES = 512 * 1024
 # се чете с общ срок (_VOICE_READ_S), само от незаспрян адрес и по едно наведнъж —
 # иначе 16 връзки × 19 MiB от непознат биха държали 300 MB памет.
 _VOICE_OPS = frozenset({"transcribe", "speak"})
+# Голям плик с операция, за която не е (текст, status…): handle го връща, а
+# HTTP слоят отговаря 413 — по обекта, не по съдържанието.
+_LARGE_REFUSED: dict = {"ok": False, "error": "too_large"}
 _MAX_VOICE_BODY = 19 * 1024 * 1024
 # Картинките в `send` (2026-10-15): същият голям плик, затова общо колкото
 # аудиото — 10 MiB × (4/3)² ≈ 17.8 MiB < _MAX_VOICE_BODY с място за текста.
@@ -876,7 +879,7 @@ class RemoteServer:
         # (2026-10-15) — с ключа е, тоест грешка в заявката, не налучкване.
         voice_op = payload.get("op") in _VOICE_OPS and self.stt is not None
         if large and not voice_op and not (payload.get("op") == "send" and payload.get("images")):
-            return {"ok": False, "error": "too_large"}, rid
+            return _LARGE_REFUSED, rid
         return self._dispatch(payload), rid
 
     def _dispatch(self, p: dict) -> dict:
@@ -1267,6 +1270,13 @@ class RemoteServer:
                     # „stale request"): полезна на своя телефон, безполезна
                     # на непознат, който няма ключа.
                     self._json(401, {"error": "rejected", "detail": str(e)[:80]})
+                    return
+                if response is _LARGE_REFUSED:
+                    # HTTP 413 както преди големия плик (2026-10-15): вече
+                    # инсталираните приложения показват по него „твърде голямо“;
+                    # запечатано "too_large" им беше „Компютърът отказа заявката.“
+                    # С ключа е — не е провал за спирачката.
+                    self._json(413, {"error": "size"})
                     return
                 self._json(200, server.seal(response, rid))
 

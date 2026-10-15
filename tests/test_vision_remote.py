@@ -178,8 +178,7 @@ def test_a_large_envelope_is_still_refused_for_text_and_other_ops(live_images) -
                     _request("send", text="x" * 300_000),
                     _request("send", text="x", images=[], pad="x" * 300_000)):
         status, env = _post(base, json.dumps(_client_seal(KEY, payload)).encode())
-        assert status == 200
-        assert _client_open(KEY, env, payload["rid"]) == {"ok": False, "error": "too_large"}
+        assert status == 413 and env == {"error": "size"}
     assert runner.calls == []
 
 
