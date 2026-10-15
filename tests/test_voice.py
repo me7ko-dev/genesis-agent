@@ -686,3 +686,19 @@ def test_doctor_names_the_input_device(monkeypatch) -> None:
     monkeypatch.setattr(voice.sys, "platform", "win32")
     status, detail = voice.mic_status()
     assert status == "fail" and "няма входно устройство" in detail
+
+
+def test_stopping_with_nothing_playing_never_touches_windows_audio(monkeypatch) -> None:
+    """/listen и всеки нов отговор викат stop_speaking: без наш звук то не
+    пипа winsound (2026-10-15 — Windows CI без звукова карта висеше там)."""
+    calls: list = []
+    fake = types.ModuleType("winsound")
+    fake.SND_PURGE = 64  # type: ignore[attr-defined]
+    fake.PlaySound = lambda *a: calls.append(a)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "winsound", fake)
+    monkeypatch.setattr(voice.sys, "platform", "win32")
+    voice.stop_speaking()
+    assert calls == []
+    monkeypatch.setitem(voice._CURRENT, "winsound", True)
+    voice.stop_speaking()
+    assert calls == [(None, 64)]
