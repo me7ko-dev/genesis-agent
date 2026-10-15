@@ -518,7 +518,7 @@ def test_local_only_never_takes_the_legacy_cloud_path(monkeypatch) -> None:
     monkeypatch.setattr("genesis_agent.brain.Brain", _B)
     try:
         gta.ask_genesis([{"role": "user", "content": "x"}])
-    except Exception as e:  # пътят през Brain може да иска още неща — важното е легаси пътят
+    except Exception as e:  # noqa: BLE001 — пътят през Brain може да иска още неща; важното е легаси пътят
         assert "облакът" not in str(e)
 
 

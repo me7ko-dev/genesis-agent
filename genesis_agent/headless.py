@@ -25,12 +25,15 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import sys
 import threading
 import time
 from collections import deque
 from pathlib import Path
 from typing import Any, cast
+
+log = logging.getLogger("genesis.headless")
 
 USAGE = """Употреба: genesis -p "задача" [--output-format text|json|stream-json] [--plan]
                   [--cwd ПАПКА] [--dangerously-allow]
@@ -297,6 +300,7 @@ def run(argv: list[str]) -> int:
     except KeyboardInterrupt:
         error = "прекъснато (Ctrl-C)"
     except Exception as e:  # отговорът е JSON и при грешка — скриптът трябва да я види
+        log.debug("ходът без чат завърши с грешка", exc_info=True)
         error = f"{type(e).__name__}: {e}"
     finally:
         gta.ask_genesis = real_ask

@@ -80,6 +80,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -92,6 +93,8 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger("genesis.remote_server")
 
 PROTOCOL = 1
 DEFAULT_PORT = 8765
@@ -414,7 +417,7 @@ class RemoteSession:
             try:
                 self._on_event(event)
             except Exception:
-                pass
+                log.debug("on_event се провали за %s", kind, exc_info=True)
         return event
 
     def events_after(self, after: int, wait: float = 0.0) -> dict:
@@ -466,7 +469,8 @@ class RemoteSession:
             try:
                 reply["state"] = self._state()
             except Exception:
-                pass   # състоянието е украса — без него разговорът върви
+                # състоянието е украса — без него разговорът върви
+                log.debug("състоянието за телефона не се прочете", exc_info=True)
         return reply
 
     # -- ход --
@@ -504,6 +508,7 @@ class RemoteSession:
             else:
                 self._runner(text, RemoteTurnUI(self))
         except Exception as e:
+            log.debug("ходът от телефона завърши с грешка", exc_info=True)
             self.emit("error", text=f"{type(e).__name__}: {e}")
         finally:
             with self._cond:
@@ -728,6 +733,7 @@ def phone_command(text: str, ui: Any, session: RemoteSession, *, messages: Any,
     try:
         stripped, notes = mentions.expand(stripped, workspace, images)
     except Exception as e:
+        log.debug("@-споменаванията не се разгънаха", exc_info=True)
         notes = [f"@: {e}"]
     for note in notes:
         ui.info(f"📎 {note}")
@@ -1545,7 +1551,7 @@ def serve(args: list[str]) -> int:
         try:
             system_prompt, _ = gta.build_system_prompt()
         except Exception:
-            pass
+            log.debug("системният промпт не се обнови за новия разговор", exc_info=True)
         gta._new_session()
         state["messages"] = deque([{"role": "system", "content": system_prompt}],
                                   maxlen=gta._HISTORY_MAXLEN)
@@ -1651,7 +1657,7 @@ def serve(args: list[str]) -> int:
             if len(convo) >= 2:
                 _wm.auto_capture(list(convo))
         except Exception:
-            pass
+            log.debug("запомнянето при спиране на сървъра не стана", exc_info=True)
     console.print("\n[dim]Сървърът за телефона е спрян.[/]")
     return 0
 

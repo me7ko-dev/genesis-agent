@@ -32,6 +32,7 @@ import contextlib
 import dataclasses
 import io
 import json
+import logging
 import os
 import re
 import secrets
@@ -55,6 +56,8 @@ from cloud.gateway import gateway as gw
 from cloud.runner import launch
 from cloud.web import billing
 from cloud.web.store import MICRO, SESSION_SECONDS, Store
+
+log = logging.getLogger("genesis.cloud.web")
 
 STATIC = Path(__file__).with_name("static")
 COOKIE = "genesis_session"
@@ -449,6 +452,7 @@ class App:
             if not ok and self._stopping.is_set():
                 error = "сървърът спря по време на задачата — пусни я пак"
         except Exception as e:
+            log.debug("ходът %s завърши с грешка", turn_id, exc_info=True)
             error = f"{type(e).__name__}: {e}"
         if prices is not None and gateway is not None:
             # Таксата ПРЕДИ края на хода (ревю 2026-10-11): докато е 'running',
@@ -460,7 +464,7 @@ class App:
             try:
                 billing.charge_turn(self.store, prices, user_id, turn_id,
                                     gw.usage_lines(gateway.usage, job, usage_start))
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — вече се печата в stderr; reconcile при следващия старт го таксува
                 print(f"сметка: ход {turn_id} не е таксуван: {type(e).__name__}: {e}",
                       file=sys.stderr)
         self.store.finish_turn(turn_id, ok=ok, error=error, tokens=tokens, seconds=seconds)
@@ -469,7 +473,7 @@ class App:
             # (и на хора, които не са пускали нищо оттогава).
             try:
                 billing.settle(self.store, prices, gateway.usage)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — вече се печата в stderr
                 print(f"сметка: окончателната сметка не мина: {type(e).__name__}: {e}",
                       file=sys.stderr)
 
@@ -657,6 +661,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             cookie.load(self.headers.get("Cookie", ""))
         except Exception:
+            log.debug("бисквитката не се разчете", exc_info=True)
             return ""
         morsel = cookie.get(COOKIE)
         return morsel.value if morsel else ""
@@ -918,7 +923,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             status, note = billing.handle_event(app.store, app.prices, event, live=app.stripe.live)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — вече се печата в stderr
             # Всеки запис е един ред (или нищо) — Stripe ще опита пак.
             print(f"stripe: {event.get('id')}: {type(e).__name__}: {e}", file=sys.stderr)
             self._error(500, "грешка — ще се опита пак")

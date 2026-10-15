@@ -14,6 +14,7 @@ rich rendering, and the interactive sandbox confirmation prompt.
 
 import glob
 import json
+import logging
 import os
 import re
 import shutil
@@ -34,6 +35,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+log = logging.getLogger("genesis.terminal")
+
 try:
     import genesis_skills
 except ImportError:
@@ -50,6 +53,7 @@ try:
     from genesis_agent import conversation_memory as _conv_mem
     from genesis_agent.memory import memory_context as _memory_context
 except Exception:
+    log.debug("паметта на разговора не се зареди — чатът е без нея", exc_info=True)
     _conv_mem: Any = None  # type: ignore[no-redef]
     _memory_context: Any = None  # type: ignore[no-redef]
 
@@ -66,7 +70,7 @@ def _remember(role: str, content: str) -> None:
     try:
         _conv_mem.add_message(role, content)
     except Exception:
-        pass
+        log.debug("репликата не се записа в conversation_memory", exc_info=True)
 
 
 console = Console()
@@ -102,7 +106,7 @@ try:
 
     _sandbox.set_policy(_sandbox.SandboxPolicy(mode="interactive", confirm_fn=_terminal_confirm))
 except Exception:
-    pass
+    log.debug("sandbox политиката на терминала не се сложи", exc_info=True)
 
 # --- Load Config ---
 # All paths come from genesis_agent.paths, which derives them from the
@@ -127,7 +131,7 @@ from genesis_agent.tool_schemas import load_tool_arguments
 try:
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
-except Exception as e:
+except Exception as e:  # noqa: BLE001 — грешката се печата и чатът спира с код 1
     console.print(f"[red]Грешка при зареждане на config.yaml: {e}[/]")
     sys.exit(1)
 
@@ -182,7 +186,7 @@ def _new_session() -> None:
         from genesis_agent import permissions as _permissions
         _permissions.clear_session()
     except Exception:
-        pass
+        log.debug("разрешенията „за тази сесия“ не се изчистиха", exc_info=True)
 
 
 def _save_session(messages) -> None:
@@ -203,7 +207,7 @@ def _save_session(messages) -> None:
         from genesis_agent import session_index
         session_index.record(HISTORY_DIR, Path(WORKSPACE), session_file)
     except Exception:
-        pass
+        log.debug("сесията не влезе в индекса", exc_info=True)
 
 
 def _conversations():
@@ -567,7 +571,8 @@ def fetch_models(provider_key):
                 MODELS_CACHE[provider_key] = models
                 return models
         except Exception:
-            pass   # без мрежа / лош ключ: менюто пак показва резервата
+            # без мрежа / лош ключ: менюто пак показва резервата
+            log.debug("списъкът с модели не се взе (%s)", provider_key, exc_info=True)
         return list(FALLBACKS["anthropic"])
     if p["type"] == "openai":
         try:
@@ -579,7 +584,8 @@ def fetch_models(provider_key):
                 if models:
                     MODELS_CACHE[provider_key] = models
                     return models
-        except Exception: pass
+        except Exception:
+            log.debug("списъкът с модели не се взе (%s)", provider_key, exc_info=True)
     elif p["type"] == "gemini":
         try:
             r = requests.get(f"{p['base_url']}?key={key}", timeout=10)
@@ -588,7 +594,8 @@ def fetch_models(provider_key):
                           if "generateContent" in m.get("supportedGenerationMethods",[])]
                 MODELS_CACHE[provider_key] = models
                 return models
-        except Exception: pass
+        except Exception:
+            log.debug("списъкът с модели не се взе (%s)", provider_key, exc_info=True)
     elif p["type"] == "vertex":
         # Адресът и токенът се вадят при извикване — и двата зависят от
         # проекта, а токенът живее около час.
@@ -605,7 +612,7 @@ def fetch_models(provider_key):
                         MODELS_CACHE[provider_key] = models
                         return models
         except Exception:
-            pass
+            log.debug("списъкът с модели не се взе (%s)", provider_key, exc_info=True)
     elif p["type"] == "ollama":
         # Local Ollama — use /api/tags
         try:
@@ -619,7 +626,7 @@ def fetch_models(provider_key):
                     MODELS_CACHE[provider_key] = ["__no_models__"]
                     return MODELS_CACHE[provider_key]
         except Exception:
-            pass
+            log.debug("списъкът с модели не се взе (%s)", provider_key, exc_info=True)
     MODELS_CACHE[provider_key] = FALLBACKS.get(provider_key, [])
     return MODELS_CACHE[provider_key]
 
@@ -670,13 +677,13 @@ def call_openai_compatible(messages, provider_key, model_id, tools=None):
         try:
             err_body = r.json()
             err_msg = err_body.get("error", {}).get("message", r.text[:120])
-        except Exception:
+        except (ValueError, AttributeError):
             err_msg = r.text[:120]
         raise RuntimeError(f"HTTP_{r.status_code}: {err_msg}")
     except RuntimeError:
         raise
     except Exception as e:
-        raise RuntimeError(f"CONN: {e}")
+        raise RuntimeError(f"CONN: {e}") from e
 
 def call_gemini(messages, model_id):
     global _last_usage
@@ -699,7 +706,7 @@ def call_gemini(messages, model_id):
                 "completion_tokens": usage.get("candidatesTokenCount", 0),
             }
         try: return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-        except Exception: return "[Грешка: Празен отговор]"
+        except (LookupError, TypeError, AttributeError): return "[Грешка: Празен отговор]"
     return f"[Грешка {r.status_code}]"
 
 def call_ollama(messages, model_id):
@@ -721,6 +728,7 @@ def call_ollama(messages, model_id):
             return data.get("message", {}).get("content", "").strip()
         return f"[Ollama грешка {r.status_code}: {r.text[:200]}]"
     except Exception as e:
+        log.debug("ollama не отговори", exc_info=True)
         return f"[Ollama не отговаря: {e}]"
 
 # (FALLBACK_TRIGGER_CODES живееше тук — кои HTTP кодове пускат fallback към
@@ -789,6 +797,7 @@ def _brain_handles(provider: str) -> bool:
     try:
         from genesis_agent.brain import _PROVIDERS
     except Exception:
+        log.debug("genesis_agent.brain не се зареди", exc_info=True)
         return False
     return provider in _PROVIDERS
 
@@ -814,6 +823,7 @@ def _ask_via_legacy(messages, tools, prov, model):
     try:
         response, tool_calls = _call_provider(prov, model, msgs, tools=use_tools)
     except Exception as e:
+        log.debug("доставчикът %s/%s се провали", prov, model, exc_info=True)
         return f"[Грешка: {e}]", None
     count_usage(_last_usage, msgs, response)
     if _last_usage:
@@ -823,7 +833,7 @@ def _ask_via_legacy(messages, tools, prov, model):
                          prompt_tokens=_last_usage.get("prompt_tokens", 0),
                          completion_tokens=_last_usage.get("completion_tokens", 0))
         except Exception:
-            pass
+            log.debug("разходът не се записа в бюджета", exc_info=True)
     return response, tool_calls
 
 
@@ -888,7 +898,8 @@ def ask_genesis(messages, tools=None):
                                       f"{lb.current.get('model')}[/]")
                     return l_text, None
         except Exception:
-            pass  # маршрутизацията е оптимизация — при каквато и да е грешка, силният модел
+            # маршрутизацията е оптимизация — при каквато и да е грешка, силният модел
+            log.debug("лекият маршрут се провали — отговаря силният модел", exc_info=True)
 
     # Кодинг режимът (/maxcoding) нарочно бие ръчния пин: ако избраният в
     # `/model` модел остане пръв, режимът не прави нищо, а изглежда включен.
@@ -1069,6 +1080,7 @@ def get_system_info() -> dict:
             load = f.read().split()[:3]
         info["cpu_load"] = f"{load[0]} {load[1]} {load[2]}"
     except Exception:
+        log.debug("натоварването на процесора не се прочете", exc_info=True)
         info["cpu_load"] = "N/A"
     # RAM
     try:
@@ -1081,6 +1093,7 @@ def get_system_info() -> dict:
         info["ram"] = f"{used_mb}MB / {total_mb}MB"
         info["ram_pct"] = int(used_mb / total_mb * 100) if total_mb else 0
     except Exception:
+        log.debug("паметта (RAM) не се прочете", exc_info=True)
         info["ram"] = "N/A"
         info["ram_pct"] = 0
     # Ollama
@@ -1095,6 +1108,7 @@ def get_system_info() -> dict:
             info["ollama"] = "❌ Не работи"
             info["ollama_ok"] = False
     except Exception:
+        log.debug("ollama не се провери", exc_info=True)
         info["ollama"] = "❌ Не работи"
         info["ollama_ok"] = False
     # GPU
@@ -1109,6 +1123,7 @@ def get_system_info() -> dict:
             else:
                 info["gpu"] = out
         except Exception:
+            log.debug("nvidia-smi не се прочете", exc_info=True)
             info["gpu"] = "N/A"
     else:
         info["gpu"] = "Няма NVIDIA GPU"
@@ -1401,6 +1416,7 @@ class RichTurnUI(TurnUI):
             try:
                 content = Markdown(text)
             except Exception:
+                log.debug("отговорът не се показа като Markdown", exc_info=True)
                 content = Text(text)
             console.print(Panel(content, border_style="cyan", padding=(1, 2)))
 
@@ -1483,7 +1499,7 @@ def build_system_prompt() -> tuple[str, str]:
         from genesis_agent.tool_schemas import fit_system_prompt
         SYSTEM_PROMPT = fit_system_prompt(SYSTEM_PROMPT)
     except Exception:
-        pass
+        log.debug("системният промпт не се съкрати", exc_info=True)
 
     # Реалните пътища на машината — иначе моделът ги отгатва (жив тест: писа в
     # несъществуваща измислена sandbox директория). Виж agent_core.env_facts.
@@ -1491,7 +1507,7 @@ def build_system_prompt() -> tuple[str, str]:
         from genesis_agent.agent_core import env_facts
         SYSTEM_PROMPT += "\n\n" + env_facts(str(WORKSPACE))
     except Exception:
-        pass
+        log.debug("фактите за средата не влязоха в промпта", exc_info=True)
 
     # MCP сървърите на оператора (и на проекта, ако е доверен) — пускат се
     # веднъж; инструментите им стигат до модела (виж mcp_client).
@@ -1502,7 +1518,7 @@ def build_system_prompt() -> tuple[str, str]:
         if mcp_text:
             SYSTEM_PROMPT += "\n\n" + mcp_text
     except Exception:
-        pass
+        log.debug("MCP сървърите не влязоха в промпта", exc_info=True)
 
     # Собствените под-агенти (.genesis/agents/*.md) — кога да им се възлага.
     try:
@@ -1511,7 +1527,7 @@ def build_system_prompt() -> tuple[str, str]:
         if agents_text:
             SYSTEM_PROMPT += "\n\n" + agents_text
     except Exception:
-        pass
+        log.debug("под-агентите не влязоха в промпта", exc_info=True)
 
     # GENESIS.md / AGENTS.md / CLAUDE.md на проекта — постоянните инструкции на
     # оператора, всяка сесия, преди първата дума (виж project_instructions).
@@ -1521,7 +1537,7 @@ def build_system_prompt() -> tuple[str, str]:
         if instructions:
             SYSTEM_PROMPT += "\n\n" + instructions
     except Exception:
-        pass
+        log.debug("инструкциите на проекта не влязоха в промпта", exc_info=True)
 
     # ── Брифинг за състоянието на РАБОТАТА (design note, 2026-07-25) ──────────────
     # Досега тук се инжектираха последните 8 епизода — на практика лог от
@@ -1536,7 +1552,7 @@ def build_system_prompt() -> tuple[str, str]:
         if briefing_text:
             SYSTEM_PROMPT += "\n\n## СЪСТОЯНИЕ НА РАБОТАТА (от предишни сесии)\n" + briefing_text
     except Exception:
-        pass
+        log.debug("брифингът за работата не влезе в промпта", exc_info=True)
 
     # Епизодичната памет остава като допълнение — полезна е за "какво се обърка
     # последно", но вече НЕ е основният контекст.
@@ -1546,7 +1562,7 @@ def build_system_prompt() -> tuple[str, str]:
             if ctx and ctx.strip() and "Няма записани" not in ctx:
                 SYSTEM_PROMPT += "\n\n## Скорошна активност (второстепенно)\n" + ctx
         except Exception:
-            pass
+            log.debug("епизодичната памет не влезе в промпта", exc_info=True)
     return SYSTEM_PROMPT, briefing_text
 
 
@@ -1559,6 +1575,7 @@ def _turn_tools():
     try:
         agent_schema = agents.schema(Path(WORKSPACE))
     except Exception:
+        log.debug("схемата на под-агентите не се построи", exc_info=True)
         agent_schema = None
     if agent_schema is not None:
         extra = [*extra, agent_schema]
@@ -1576,6 +1593,7 @@ def _vision_on() -> bool:
         from genesis_agent import vision
         return vision.chain_sees((current_provider, current_model_id))
     except Exception:
+        log.debug("проверката за зрение се провали", exc_info=True)
         return False
 
 
@@ -1677,6 +1695,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI",
     try:
         before = hooks.fire("UserPromptSubmit", {"prompt": user_input})
     except Exception:
+        log.debug("куката UserPromptSubmit се провали", exc_info=True)
         before = hooks.Outcome()
     global LAST_TURN_BLOCKED
     LAST_TURN_BLOCKED = before.blocked
@@ -1700,6 +1719,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI",
             try:
                 stop = hooks.fire("Stop", {"last_assistant_message": last[:4000]})
             except Exception:
+                log.debug("куката Stop се провали", exc_info=True)
                 break
             if not stop.blocked:
                 break
@@ -1721,6 +1741,7 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
         from genesis_agent.skill_loader import domain_context
         knowledge = domain_context(user_input)
     except Exception:
+        log.debug("знанието за домейна не се зареди", exc_info=True)
         knowledge = ""
     if knowledge:
         head = knowledge.splitlines()[0]
@@ -2056,7 +2077,7 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                 response, tool_calls = ask_genesis(messages, tools=_turn_tools())
     except KeyboardInterrupt:
         ui.warn("⏹ Прекъснато (Ctrl-C) — ходът спря; свършеното дотук е в историята.")
-    except Exception as e:  # пази историята, после грешката продължава нагоре
+    except Exception as e:  # noqa: BLE001 — пази историята, после се хвърля наново (raise _failure)
         _failure = e
     _close_open_tool_calls(messages)
 
@@ -2078,7 +2099,7 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
             if any(saved.values()):
                 ui.info(f"🧠 Запомнено преди компресията: {_memory_note(saved)}")
         except Exception:
-            pass
+            log.debug("запомнянето преди компресията не стана", exc_info=True)
 
     _save_session(messages)
     from genesis_agent.agent_core import bounded_history
@@ -2091,7 +2112,7 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
         try:
             _failure.genesis_messages = bounded_history(messages, limit)  # type: ignore[attr-defined]
         except Exception:
-            pass
+            log.debug("историята не се закачи към грешката", exc_info=True)
         raise _failure
     return bounded_history(messages, limit)
 
@@ -2153,6 +2174,7 @@ def _with_attachments(user_input: str, pending_shell: list[str],
     try:
         user_input, notes = mentions.expand(user_input, Path(WORKSPACE), images)
     except Exception as e:
+        log.debug("@-споменаванията не се разгънаха", exc_info=True)
         notes = [f"@: {e}"]
     for note in notes:
         console.print(Text(f"📎 {note}", style="dim"))
@@ -2226,6 +2248,7 @@ def _no_model_guard() -> bool:
         if any_model_reachable():
             return False
     except Exception:
+        log.debug("проверката за достъпен модел се провали", exc_info=True)
         return False   # проверката не бива да спира чата
     console.print(f"[bold yellow]{_NO_MODEL_HINT}[/]", highlight=False)
     try:
@@ -2246,6 +2269,7 @@ def _no_model_guard() -> bool:
         from genesis_agent.brain import any_model_reachable
         return not any_model_reachable()
     except Exception:
+        log.debug("проверката за достъпен модел се провали", exc_info=True)
         return False
 
 
@@ -2276,7 +2300,7 @@ def main():
             console.print(pending)
             console.print()
     except Exception:
-        pass
+        log.debug("отложеното обновяване не се показа", exc_info=True)
 
     # Седмична проверка на моделите, на заден план — не бави старта. Мъртвите
     # (404/410) Brain прескача сам от следващото обръщение (виж model_check).
@@ -2287,14 +2311,14 @@ def main():
             threading.Thread(target=model_check.run_check, daemon=True,
                              name="model-check").start()
     except Exception:
-        pass
+        log.debug("седмичната проверка на моделите не тръгна", exc_info=True)
     SYSTEM_PROMPT, briefing_text = build_system_prompt()
     try:
         from genesis_agent import mcp_client as _mcp_client
         for _line in _mcp_client.last_start:
             console.print(f"[dim]{_line}[/]", highlight=False)
     except Exception:
-        pass
+        log.debug("редовете от старта на MCP не се показаха", exc_info=True)
 
     # Проактивно отваряне: потребителят вижда веднага какво е отворено и кое е
     # следващото, вместо да се сеща сам или да пита.
@@ -2320,6 +2344,7 @@ def main():
         from genesis_agent import voice as _voice
         VOICE_ON = _voice.settings().speak_answers
     except Exception:
+        log.debug("настройките за глас не се прочетоха", exc_info=True)
         VOICE_ON = False
     from genesis_agent.chat_input import read_message
     from genesis_agent.model_router import CONFIRM_COMMANDS, command_for_request
@@ -2333,6 +2358,7 @@ def main():
             try:
                 show_status_bar()
             except Exception as e:
+                log.debug("статус лентата не се показа", exc_info=True)
                 console.print(f"[dim]⚠ статус: {e}[/]")
 
             if queued_input:
@@ -2387,6 +2413,7 @@ def main():
                 try:
                     SYSTEM_PROMPT, _ = build_system_prompt()
                 except Exception as e:
+                    log.debug("системният промпт не се обнови при /clear", exc_info=True)
                     console.print(Text(f"⚠ системният промпт не се обнови: {e}", style="yellow"))
                 messages = deque([{"role": "system", "content": SYSTEM_PROMPT}], maxlen=_HISTORY_MAXLEN)
                 pending_shell.clear()
@@ -2600,6 +2627,7 @@ def main():
                     from genesis_agent.skill_loader import format_skill_list
                     console.print(format_skill_list(), markup=False, highlight=False)
                 except Exception as e:
+                    log.debug("/skills се провали", exc_info=True)
                     console.print(f"[red]⚠ {e}[/]")
                 continue
 
@@ -2617,6 +2645,7 @@ def main():
                     for ident in parts_cmd[1:]:
                         console.print(f"[dim]{_wm.close_thread(ident, drop=drop)}[/]")
                 except Exception as e:
+                    log.debug("/done или /drop се провали", exc_info=True)
                     console.print(f"[red]⚠ {e}[/]")
                 continue
 
@@ -2632,6 +2661,7 @@ def main():
                               f"{st['blocked']} блокирани, {st['done']} готови[/]",
                         border_style="cyan", padding=(1, 2)))
                 except Exception as e:
+                    log.debug("/tasks се провали", exc_info=True)
                     console.print(f"[red]⚠ {e}[/]")
                 continue
 
@@ -2734,6 +2764,7 @@ def main():
             # forever, since the next read hit EOF again immediately.
             break
         except Exception as e:
+            log.debug("ходът в чата завърши с грешка", exc_info=True)
             messages = history_after_error(e, messages)
             console.print(f"[red]⚠ {e}[/]")
 
@@ -2741,7 +2772,7 @@ def main():
         from genesis_agent import browser as _browser_mod
         _browser_mod.close()  # затваря headless Chromium, ако е бил отворен
     except Exception:
-        pass
+        log.debug("браузърът не се затвори", exc_info=True)
 
     # ── Автоматично запомняне на трайното от сесията ────────────────────────
     # Не разчитаме моделът да е викал REMEMBER/TASK_ADD по време на чата —
@@ -2757,7 +2788,7 @@ def main():
             if any(saved.values()):
                 console.print(f"[dim]🧠 Запомнено: {_memory_note(saved)}[/]")
     except Exception:
-        pass
+        log.debug("запомнянето в края на сесията не стана", exc_info=True)
 
     console.print("\n[dim]Довиждане![/]")
 
