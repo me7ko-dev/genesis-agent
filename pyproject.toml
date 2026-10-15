@@ -104,6 +104,9 @@ addopts = "--ignore=scripts --ignore=bench"
 # Тест, заседнал над 5 мин, печата стека на всички нишки (2026-10-15: на
 # Windows CI един висеше 45+ мин без нито ред — с -q не личи кой).
 faulthandler_timeout = 300
+# …и спира процеса: стъпката пада с лог, който се чете. Прекъсната от
+# timeout-minutes задача няма достъпен лог (404 през API, 2026-10-15).
+faulthandler_exit_on_timeout = true
 
 [tool.ruff]
 target-version = "py310"
