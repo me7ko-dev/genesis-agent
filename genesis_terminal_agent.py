@@ -76,7 +76,7 @@ console = Console()
 try:
     from genesis_agent import sandbox as _sandbox
 
-    def _terminal_confirm(operation: str, verdict) -> bool:
+    def _terminal_confirm(operation: str, verdict) -> bool | str:
         # Цялата операция, като текст (без Rich разметка: `[bold]` в командата
         # иначе изчезваше от показаното) — одит 2026-10-09.
         if _sandbox.too_long_to_confirm(operation):
@@ -88,11 +88,17 @@ try:
             console.print(Text(f"    • {r}", style="yellow"))
         console.print(Text(f"    Операция ({len(operation)} знака):", style="dim"))
         console.print(Text(operation), soft_wrap=True)
+        # „s“ = да, за тази сесия: само за проста команда (permissions.py);
+        # после същата команда не се пита до /clear (2026-10-15).
         try:
-            ans = console.input("    [bold]Да се изпълни ли? [y/N] [/]").strip().lower()
+            ans = console.input(Text(_sandbox.confirm_question(verdict), style="bold"))
         except (EOFError, KeyboardInterrupt):
             return False
-        return ans in ("y", "yes", "да", "d")
+        answer = _sandbox.parse_answer(ans, verdict)
+        if answer == _sandbox.ALLOW_SESSION:
+            console.print(Text(f"    ✓ „{verdict.session_rule}“ — без въпрос до края на сесията "
+                               "(/permissions — списъкът).", style="dim"))
+        return answer
 
     _sandbox.set_policy(_sandbox.SandboxPolicy(mode="interactive", confirm_fn=_terminal_confirm))
 except Exception:
@@ -170,6 +176,13 @@ def _new_session() -> None:
     global session_start_time, _SESSION_FILE
     session_start_time = time.time()
     _SESSION_FILE = None
+    # „да, за тази сесия“ не преминава в новия разговор (/clear, /history,
+    # „Нов разговор“ от телефона) — 2026-10-15.
+    try:
+        from genesis_agent import permissions as _permissions
+        _permissions.clear_session()
+    except Exception:
+        pass
 total_input_tokens = 0
 total_output_tokens = 0
 # Размерът на ПОСЛЕДНАТА заявка (prompt + отговор) — това е заетият контекст.
