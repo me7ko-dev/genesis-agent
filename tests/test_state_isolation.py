@@ -85,3 +85,18 @@ def test_signing_keys_are_never_the_operators(tmp_path) -> None:
         assert tmp_path in Path(path).parents, path
     cu.sign_code("x = 1")
     assert Path(cu.PRIVATE_KEY_PATH).exists()
+
+
+def test_the_history_guard_also_watches_a_config_yaml_override(tmp_path) -> None:
+    """`storage.history_dir` в config.yaml е над GENESIS_HISTORY_DIR за
+    genesis_terminal_agent — пазачът в conftest гледаше само paths.history_dir
+    (ревю 2026-10-15)."""
+    from conftest import _real_histories
+    elsewhere = tmp_path / "моята история"
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f'storage:\n  history_dir: "{elsewhere.as_posix()}"\n', encoding="utf-8")
+    assert elsewhere in _real_histories(cfg)
+    cfg.write_text('storage:\n  history_dir: ""\n', encoding="utf-8")
+    assert len(_real_histories(cfg)) == 1
+    cfg.write_text("storage: [счупен", encoding="utf-8")
+    assert len(_real_histories(cfg)) == 1

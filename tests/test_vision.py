@@ -622,6 +622,30 @@ def test_a_hand_edited_session_with_odd_image_parts_still_loads(tmp_path) -> Non
     vision.for_disk(loaded, tmp_path / "images")
 
 
+def test_text_tag_models_learn_view_image_only_when_it_is_offered(monkeypatch) -> None:
+    """Моделите без native инструменти четат таговете от tool_tag_prompt —
+    там VIEW_IMAGE липсваше, т.е. виждащ модел в текстов режим не знаеше, че
+    го има. Ред само когато инструментът е предложен: иначе е разход."""
+    monkeypatch.setattr(Brain, "_TAG_PROMPT_CACHE", "TOOLS:\n- [READ_FILE: path]\n\nMEMORY TAGS:\n- x")
+    history = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
+    read_file = {"type": "function", "function": {"name": "READ_FILE", "parameters": {}}}
+    offered = Brain._with_tool_tag_docs(history, [read_file, vision.TOOL_SCHEMA])[0]["content"]
+    assert "[VIEW_IMAGE: " in offered
+    assert offered.index("[VIEW_IMAGE: ") < offered.index("MEMORY TAGS:")
+    for tools in ([read_file], None):
+        assert "VIEW_IMAGE" not in Brain._with_tool_tag_docs(history, tools)[0]["content"]
+
+
+def test_a_text_tag_model_in_the_chain_gets_the_view_image_line(wire, monkeypatch) -> None:
+    """През Brain.complete: инструментите от хода стигат до документацията."""
+    monkeypatch.setattr(Brain, "_TAG_PROMPT_CACHE", "TOOLS:\n- [READ_FILE: path]")
+    make, sent, _ = wire
+    b = make([("groq", "openai/gpt-oss-120b", 120)])
+    b.complete([{"role": "system", "content": "s"}, {"role": "user", "content": "u"}],
+               tools=[vision.TOOL_SCHEMA])
+    assert "[VIEW_IMAGE: " in sent[0]["messages"][0]["content"]
+
+
 def test_a_page_screenshot_over_pillows_bomb_limit_is_skipped_not_a_crash(tmp_path) -> None:
     """Снимка на цялата страница над 2× Image.MAX_IMAGE_PIXELS: Image.open
     хвърля DecompressionBombError (не е OSError) — _top_of я пускаше нагоре и
