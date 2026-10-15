@@ -1847,6 +1847,11 @@ before_exec: Callable[[], None] | None = None
 # `npm test` държеше телефона на „Genesis работи…“ до таймаута от 120 s.
 cancel_check: Callable[[], bool] | None = None
 _CANCEL_POLL_S = 0.5
+# Колко се чака изходът след убиване при Стоп. Дървото е мъртво след
+# милисекунди; ако pipe-ът е още отворен, го държи оцелял извън групата/job-а
+# и чакането не дава нищо. Измерено 2026-10-15 (тест с внук в своя сесия):
+# с 10 s, както при таймаута, Стоп свършваше за 10.5 s; с 1 s — за 1.5 s.
+_STOP_DRAIN_S = 1.0
 
 
 def _stop_requested() -> bool:
@@ -1857,14 +1862,26 @@ def _stop_requested() -> bool:
         return False
 
 
+def _stopped_before_start() -> SandboxResult:
+    return SandboxResult(ok=False, stdout="", stderr="[sandbox] ⏹ Спряно от оператора — не е пусната",
+                         returncode=None)
+
+
 def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
          env_extra: dict[str, str] | None = None) -> SandboxResult:
+    # Стоп, дошъл преди процеса (докато се питаше, избираше обвивка или
+    # снимаше за /undo), не го пуска, за да го убие веднага (2026-10-15):
+    # на Windows това беше старт на bash + убиване на пътя на Стоп.
+    if _stop_requested():
+        return _stopped_before_start()
     hook = before_exec
     if hook is not None:
         try:
             hook()
         except Exception:
             pass
+        if _stop_requested():
+            return _stopped_before_start()
     env = _build_env(policy, env_extra)
     _hide_own_environ()
     # Ако NPROC е включен, капът е headroom над текущото натоварване.
@@ -1916,8 +1933,13 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
             if sys.platform != "win32":
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             else:
-                job.terminate()
-                _kill_tree_win32(proc.pid)
+                # taskkill — само ако job-ът не е станал (2026-10-15, Windows CI
+                # на main 68b217f: ходът свърши 4.9–5.4 s след Стоп). След
+                # TerminateJobObject в дървото няма жив процес, а `taskkill /T /F`
+                # е отделен процес, пускан и чакан последователно точно на пътя
+                # на Стоп — единствената стъпка там, която Linux няма.
+                if not job.terminate():
+                    _kill_tree_win32(proc.pid)
                 proc.kill()
         except (ProcessLookupError, PermissionError, OSError):
             try:
@@ -1930,15 +1952,10 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
         # 11 246 секунди при таймаут от 120. Ако нещо ги държи и след убиването
         # на дървото, изоставяме изхода, не чакаме завинаги.
         try:
-            raw_out, raw_err = proc.communicate(timeout=10)
+            raw_out, raw_err = proc.communicate(timeout=_STOP_DRAIN_S if stopped else 10)
             text_out, text_err = decode_output(raw_out), decode_output(raw_err)
         except subprocess.TimeoutExpired:
-            for stream in (proc.stdout, proc.stderr):
-                try:
-                    if stream:
-                        stream.close()
-                except OSError:
-                    pass
+            _abandon_pipes(proc)
             text_out, text_err = "", "[sandbox] процесът не пусна изхода си и след убиване"
         note = "⏹ Спряно от оператора" if stopped else f"Timeout след {timeout}s"
         return SandboxResult(ok=False, stdout=text_out,
@@ -2055,15 +2072,16 @@ class _WinJob:
         except Exception:
             self.handle = None
 
-    def terminate(self) -> None:
+    def terminate(self) -> bool:
+        """True, ако job-ът е прекратен — тогава в дървото няма жив процес."""
         if self.handle is None:
-            return
+            return False
         try:
             from ctypes import wintypes
             self._k32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
-            self._k32.TerminateJobObject(self.handle, 1)
+            return bool(self._k32.TerminateJobObject(self.handle, 1))
         except Exception:
-            pass
+            return False
 
     def close(self) -> None:
         if self.handle is None:
@@ -2073,6 +2091,23 @@ class _WinJob:
         except Exception:
             pass
         self.handle = None
+
+
+def _abandon_pipes(proc: subprocess.Popen) -> None:
+    """Изоставя pipe-овете, които оцелял процес още държи.
+
+    На Windows communicate() чете в нишки, а close() на поток, който нишка
+    чете, чака самото четене — т.е. оцелелия (измерено 2026-10-15: close()
+    при четяща нишка върху `sleep 3` отне 2.8 s). Тогава не се затваря: нишките
+    са daemon и пускат потока, щом оцелелият излезе."""
+    for stream, reader in ((proc.stdout, "stdout_thread"), (proc.stderr, "stderr_thread")):
+        thread = getattr(proc, reader, None)
+        if stream is None or (thread is not None and thread.is_alive()):
+            continue
+        try:
+            stream.close()
+        except OSError:
+            pass
 
 
 def _kill_tree_win32(pid: int) -> None:
