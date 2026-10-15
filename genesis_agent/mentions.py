@@ -100,10 +100,30 @@ _DROPPED = re.compile(
     r"""(?:'(?P<sq>[^'\n]+)'|"(?P<dq>[^"\n]+)"|(?P<bare>(?:\\\ |[^\s'"`])+))""")
 
 
+# Кодов участък в ред: `…`, ``…`` (еднакъв брой кавички отвори и затвори).
+_INLINE_CODE = re.compile(r"(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)")
+
+
+def _outside_code(text: str) -> str:
+    """Текстът без ``` блоковете и `кода` в ред (2026-10-15, ревю на зрението):
+    лог или скрипт, поставен в кодов блок, с `/home/me/shot.png` вътре
+    прикачваше картинката, без операторът да я праща — пътят там е текст за
+    модела, не пусната с мишката картинка. Редовете остават (празни)."""
+    out: list[str] = []
+    fenced = False
+    for line in text.splitlines():
+        if _FENCE.match(line):
+            fenced = not fenced
+            out.append("")
+            continue
+        out.append("" if fenced else _INLINE_CODE.sub(" ", line))
+    return "\n".join(out)
+
+
 def _dropped_paths(text: str) -> list[str]:
     from genesis_agent.vision import IMAGE_SUFFIXES
     found: list[str] = []
-    for m in _DROPPED.finditer(text):
+    for m in _DROPPED.finditer(_outside_code(text)):
         raw = m.group("sq") or m.group("dq") or (m.group("bare") or "").replace("\\ ", " ")
         if raw.startswith("@"):
             continue           # @път е работа на _mentions
