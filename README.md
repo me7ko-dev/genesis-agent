@@ -177,6 +177,12 @@ genesis mission "write a retry decorator with exponential backoff"
 genesis fix ~/code/theirs "median() is wrong for even-length input"
 ```
 
+**For your own apps and games**: `genesis api` serves a local, text-only
+OpenAI-compatible endpoint on `http://127.0.0.1:8770` (`POST /v1/chat/completions`,
+`GET /v1/health`) backed by the same free model chain. It never runs tools,
+commands or the browser, listens on 127.0.0.1 only and accepts browser calls
+only from `http://127.0.0.1` / `http://localhost` pages.
+
 ## Steering it like Claude Code
 
 The habits that make Claude Code pleasant to work with, in the Genesis chat:
