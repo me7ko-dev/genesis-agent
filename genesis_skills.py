@@ -1329,7 +1329,7 @@ _SIMPLE_RE = re.compile(
     r"\[(?P<tool>READ_FILE|RUN_CMD|WEB_SEARCH|LIST_DIR|DELEGATE|RESEARCH|BROWSE|ASK_USER|"
     r"SEARCH_CODE|REPO_MAP|GLOB|"
     r"BROWSER_CLICK|BROWSER_TYPE|REMEMBER|TASK_ADD|TASK_UPDATE|TASK_LIST|"
-    r"RUN_BG|BG_OUTPUT|BG_KILL|MCP|EXPLORE|WEB_FETCH|AGENT|TODO_WRITE):"
+    r"RUN_BG|BG_OUTPUT|BG_KILL|MCP|EXPLORE|WEB_FETCH|AGENT|TODO_WRITE|VIEW_IMAGE):"
     r"\s*(?P<arg>(?:[^\[\]]|" + _BRACKETS + r")+)\]"
 )
 # REPO_MAP без аргумент = текущият workspace (както BROWSER_READ/TASK_LIST).
@@ -1365,7 +1365,16 @@ _SIMPLE_DISPATCH: dict[str, Callable[..., str]] = {
     "WEB_FETCH": lambda arg: _tool_web_fetch(arg),
     "AGENT": lambda arg: _tool_agent(*(part.strip() for part in arg.partition("|")[::2])),
     "TODO_WRITE": lambda arg: _todos().write(arg),
+    "VIEW_IMAGE": lambda arg: _tool_view_image(arg),
 }
+
+
+def _tool_view_image(path: str) -> str:
+    """Картинка от работната папка към модела в следващата заявка (2026-10-15).
+    Пътищата — като READ_FILE (genesis_agent.vision.load_image)."""
+    from genesis_agent import vision
+    resolved, redirect = _resolve_noted(str(path).strip())
+    return vision.view_image(str(resolved), Path(_WORKSPACE)) + redirect
 
 
 def _tool_agent(name: str, task: str) -> str:
@@ -1447,7 +1456,7 @@ def _text_args(name: str, args: tuple) -> dict:
     """The text-tag arguments in the shape the native path has (for hooks)."""
     if name == "EDIT_FILE" and len(args) >= 3:
         return {"path": str(args[0]).strip(), "old": args[1], "new": args[2]}
-    if name in ("WRITE_FILE", "EDIT_FILE", "READ_FILE", "LIST_DIR") and args:
+    if name in ("WRITE_FILE", "EDIT_FILE", "READ_FILE", "LIST_DIR", "VIEW_IMAGE") and args:
         return {"path": str(args[0]).strip(), **({"content": args[1]} if name == "WRITE_FILE"
                                                   and len(args) > 1 else {})}
     if name in ("RUN_CMD", "RUN_BG") and args:
@@ -1994,6 +2003,8 @@ def _dispatch(name: str, arguments: dict) -> str:
             return _tool_research(arguments.get("question", ""))
         if name == "LIST_DIR":
             return _tool_list_dir(arguments.get("path", ""))
+        if name == "VIEW_IMAGE":
+            return _tool_view_image(str(arguments.get("path", "") or ""))
         if name == "USE_SKILL":
             return _tool_use_skill(arguments.get("name_or_query", ""), arguments.get("driver_code", "") or "")
         if name == "DELEGATE":

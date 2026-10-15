@@ -382,8 +382,10 @@ _INJECTED = re.compile(r"\n\n## Проверено (ръководство|зн�
 
 
 def operator_text(content: Any) -> str:
-    """Само каквото операторът е написал — без приложеното знание."""
-    return _INJECTED.sub("", str(content or ""))
+    """Само каквото операторът е написал — без приложеното знание. Картинката е
+    „[картинка: име]“, не base64 в промпта за паметта (2026-10-15)."""
+    from genesis_agent.vision import text_of
+    return _INJECTED.sub("", text_of(content))
 
 
 def _operator_spoke_generally(convo: list[dict]) -> bool:

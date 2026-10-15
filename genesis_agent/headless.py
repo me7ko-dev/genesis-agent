@@ -238,9 +238,11 @@ def run(argv: list[str]) -> int:
         print(f"Няма такава папка: {cwd}", file=sys.stderr)
         return 2
     # `@файл` — само в задачата; подаденото на stdin е данни, не молба за прикачване.
+    # `@shot.png` и абсолютен път до картинка — като картинка за модела (2026-10-15).
+    images: list[dict] = []
     if prompt:
         from genesis_agent import mentions
-        prompt, notes = mentions.expand(prompt, cwd)
+        prompt, notes = mentions.expand(prompt, cwd, images)
         for note in notes:
             print(f"📎 {note}", file=sys.stderr)
     piped = _read_stdin()
@@ -293,7 +295,8 @@ def run(argv: list[str]) -> int:
             gta.ask_genesis = counted
             system_prompt, _ = gta.build_system_prompt()
             messages = gta.run_turn(deque([{"role": "system", "content": system_prompt}]),
-                                    prompt, cast("gta.TurnUI", ui))
+                                    prompt, cast("gta.TurnUI", ui),
+                                    **({"images": images} if images else {}))
     except KeyboardInterrupt:
         error = "прекъснато (Ctrl-C)"
     except Exception as e:  # отговорът е JSON и при грешка — скриптът трябва да я види

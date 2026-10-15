@@ -223,11 +223,14 @@ def test_a_minute_of_audio_goes_over_http_in_one_envelope(live_voice) -> None:
 
 
 def test_a_big_envelope_is_only_for_voice(live_voice) -> None:
-    base, _, _ = live_voice
+    base, server, _ = live_voice
+    # 413 като преди големия плик: старите приложения показват по него
+    # „твърде голямо“ (mobile/tests/interop.test.ts, 2026-10-15).
     status, reply = _call(base, "status", pad="x" * (rs._MAX_BODY + 10))
-    assert status == 200 and reply == {"ok": False, "error": "too_large"}
+    assert status == 413 and reply == {"error": "size"}
     status, reply = _call(base, "send", text="x" * (rs._MAX_BODY + 10))
-    assert status == 200 and reply == {"ok": False, "error": "too_large"}
+    assert status == 413 and reply == {"error": "size"}
+    assert not server._failures.get("127.0.0.1")       # с ключа е — не е налучкване
 
 
 def test_a_big_envelope_with_the_wrong_key_is_401_and_counted(live_voice) -> None:
@@ -259,13 +262,12 @@ def test_a_body_over_the_voice_cap_or_without_voice_is_413(live_voice) -> None:
     httpd = plain.make_http("127.0.0.1", 0)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     try:
+        # Без глас големият плик пак се чете — за `send` с картинки (2026-10-15),
+        # но гласова операция в него е 413, не транскрипция.
         payload = _request("transcribe", data="A" * (rs._MAX_BODY + 10))
-        try:
-            status, _ = _post(f"http://127.0.0.1:{httpd.server_address[1]}",
-                              json.dumps(_client_seal(KEY, payload)).encode())
-        except (ConnectionError, urllib.error.URLError):
-            status = 413
-        assert status == 413
+        status, env = _post(f"http://127.0.0.1:{httpd.server_address[1]}",
+                            json.dumps(_client_seal(KEY, payload)).encode())
+        assert status == 413 and env == {"error": "size"}
     finally:
         httpd.shutdown()
         httpd.server_close()

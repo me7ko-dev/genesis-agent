@@ -111,14 +111,25 @@ def render_blocks(messages: list[dict]) -> tuple[str, list[str]]:
     ход записваше целия разговор в кеша наново и не четеше нищо от него
     (orders-api: 20–30K записани на ход, прочетен само системният промпт); с
     блокове вторият ход чете 17 646 и записва 6 548 вместо 24 203."""
+    system, blocks = render_content(messages)
+    return system, [b for b in blocks if isinstance(b, str)]
+
+
+def render_content(messages: list[dict]) -> tuple[str, list[str | dict]]:
+    """Като render_blocks, но картинките на всеки ход остават след текста му
+    като image блокове (формата на stream-json входа на Claude Code SDK) —
+    стигат дотук само при изричен избор (vision.can_see, 2026-10-15)."""
+    from genesis_agent.vision import anthropic_block, images_in
     system: list[str] = []
-    turns: list[tuple[str, str]] = []
+    turns: list[tuple[str, str, list[dict]]] = []
     leading = True
     for m in messages:
         role = str(m.get("role") or "user")
         content = m.get("content")
-        if isinstance(content, list):   # блокове (OpenAI/Anthropic) → само текстът
-            content = "\n".join(str(b.get("text", "")) for b in content if isinstance(b, dict))
+        pictures = [anthropic_block(p) for p in images_in(content)]
+        if isinstance(content, list):   # блокове (OpenAI/Anthropic) → текстът + картинките
+            content = "\n".join(str(b.get("text", "")) for b in content
+                                if isinstance(b, dict) and b.get("type") != "image_url")
         text = str(content or "")
         if role == "system" and leading:
             if text:
@@ -130,15 +141,19 @@ def render_blocks(messages: list[dict]) -> tuple[str, list[str]]:
                               f"({(tc.get('function') or {}).get('arguments', '')})"
                               for tc in m["tool_calls"])
             text = (text + f"\n[извикани инструменти: {calls}]").strip()
-        if text:
-            turns.append((role, text))
+        if text or pictures:
+            turns.append((role, text, pictures))
     if len(turns) == 1 and turns[0][0] == "user":
-        return "\n\n".join(system), [turns[0][1]]
+        only: list[str | dict] = [turns[0][1], *turns[0][2]]
+        return "\n\n".join(system), [b for b in only if b]
     head = ("Това е разговорът досега. Ти си Genesis. Напиши САМО следващия си "
             "отговор — на последното съобщение — в същия формат (инструментите "
             "с техните тагове), без да повтаряш разговора.")
-    return "\n\n".join(system), [head] + [f"=== {_ROLE_LABEL.get(r, r)} ===\n{t}"
-                                           for r, t in turns]
+    blocks: list[str | dict] = [head]
+    for r, t, pictures in turns:
+        blocks.append(f"=== {_ROLE_LABEL.get(r, r)} ===\n{t}")
+        blocks.extend(pictures)
+    return "\n\n".join(system), blocks
 
 
 def render(messages: list[dict]) -> tuple[str, str]:
@@ -147,10 +162,12 @@ def render(messages: list[dict]) -> tuple[str, str]:
     return system, "\n\n".join(blocks)
 
 
-def stdin_message(blocks: list[str]) -> bytes:
+def stdin_message(blocks: list[str] | list[str | dict]) -> bytes:
     """Едно потребителско съобщение във формата stream-json, по блок на ход.
-    ensure_ascii: под Windows stdin минава и през .cmd обвивката."""
-    content = [{"type": "text", "text": b} for b in blocks if b] or [{"type": "text", "text": "."}]
+    ensure_ascii: под Windows stdin минава и през .cmd обвивката. Блок-речник
+    (картинка от render_content) минава както е."""
+    content = [b if isinstance(b, dict) else {"type": "text", "text": b}
+               for b in blocks if b] or [{"type": "text", "text": "."}]
     return (json.dumps({"type": "user", "message": {"role": "user", "content": content}})
             + "\n").encode("ascii")
 
@@ -207,7 +224,7 @@ def complete(messages: list[dict], model: str = DEFAULT_MODEL,
     path = cli_path()
     if not path:
         raise RuntimeError("skip: няма `claude` CLI в PATH (инсталирай Claude Code и влез с /login)")
-    system, blocks = render_blocks(messages)
+    system, blocks = render_content(messages)
     workdir = tempfile.mkdtemp(prefix="genesis-claude-")
     try:
         sp = Path(workdir) / "system.txt"

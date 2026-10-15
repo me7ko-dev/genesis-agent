@@ -140,9 +140,11 @@ def describe(path: Path, *, limit: int = 70) -> Entry:
     """Датата, първото съобщение и броят реплики. ValueError/OSError — повреден."""
     data = read(path)
     convo = [m for m in data if m.get("role") in ("user", "assistant")]
-    first = next((str(m.get("content")) for m in convo
-                  if m.get("role") == "user" and isinstance(m.get("content"), str)
-                  and m.get("content", "").strip()), "")
+    # С картинка съдържанието е списък от части — текстът му (2026-10-15).
+    from genesis_agent.vision import text_of
+    first = next((text_of(m.get("content")) for m in convo
+                  if m.get("role") == "user" and isinstance(m.get("content"), (str, list))
+                  and text_of(m.get("content")).strip()), "")
     return Entry(path, path.stat().st_mtime, _short(first, limit) if first else "(без съобщение)",
                  len(convo))
 
