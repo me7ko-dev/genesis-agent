@@ -3,8 +3,10 @@ without building it. packaging/build.py smoke-tests the built binary itself,
 and .github/workflows/native.yml runs the installer against it on Windows."""
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
+import re
 import struct
 import sys
 from pathlib import Path
@@ -318,3 +320,83 @@ def test_installer_and_app_agree_on_the_asset_name() -> None:
 def test_installer_is_ascii() -> None:
     """PowerShell 5.1 reads a BOM-less .ps1 in the system codepage."""
     (ROOT / "scripts" / "install.ps1").read_bytes().decode("ascii")
+
+
+# ── глас и картинки в genesis.exe (2026-10-15) ─────────────────────────────
+# Операторът ползва genesis.exe на Windows, а native.yml инсталираше само
+# [google,premium,signing,mobile]: /listen, /voice on и смаляването на
+# картинки не работеха там. CI на Linux не може да билдне exe-то — тези
+# проверки пазят конфигурацията; build.py проверява самото exe на Windows.
+
+def _spec_literal(name: str):
+    tree = ast.parse((ROOT / "packaging" / "genesis.spec").read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"{name} липсва в genesis.spec")
+
+
+def _extra(name: str) -> list[str]:
+    """Пакетите в [project.optional-dependencies] — без tomllib (няма го на 3.10)."""
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    m = re.search(rf"^{re.escape(name)} = \[(.*?)\]", text, re.MULTILINE | re.DOTALL)
+    assert m, name
+    return [re.split(r"[<>=!~\[ ]", p.strip().strip('"'))[0].lower()
+            for p in m.group(1).split(",") if p.strip()]
+
+
+_MODULE_OF = {"sounddevice": "sounddevice", "edge-tts": "edge_tts", "pillow": "PIL"}
+
+
+def test_the_windows_build_installs_voice_and_vision() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "native.yml").read_text(encoding="utf-8")
+    line = next(ln for ln in workflow.splitlines() if 'pip install ".[' in ln)
+    extras = line.split('".[', 1)[1].split("]", 1)[0].split(",")
+    assert {"voice", "vision"} <= set(extras), line
+    # faster-whisper тегли ctranslate2 и модел от гигабайти — не в exe-то.
+    assert "voice-local" not in extras and "all" not in extras
+
+
+def test_the_spec_carries_every_package_of_voice_and_vision() -> None:
+    media = _spec_literal("MEDIA_IMPORTS")
+    for dist in _extra("voice") + _extra("vision"):
+        assert _MODULE_OF[dist] in media, dist
+    # Мързеливите импорти и данните, които анализът не вижда сам.
+    assert {"_sounddevice", "_sounddevice_data", "_cffi_backend"} <= set(media["sounddevice"])
+    assert {"aiohttp", "certifi"} <= set(media["edge_tts"])
+    assert {"PIL.Image", "PIL.ImageOps"} <= set(media["PIL"])
+    spec = (ROOT / "packaging" / "genesis.spec").read_text(encoding="utf-8")
+    assert 'collect_data_files("certifi")' in spec
+    assert "libportaudio" in spec and "raise SystemExit" in spec
+
+
+def test_the_spec_keeps_faster_whisper_out() -> None:
+    tree = ast.parse((ROOT / "packaging" / "genesis.spec").read_text(encoding="utf-8"))
+    call = next(n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                and getattr(n.func, "id", "") == "Analysis")
+    excludes = ast.literal_eval(next(k.value for k in call.keywords if k.arg == "excludes"))
+    assert {"faster_whisper", "ctranslate2"} <= set(excludes)
+    assert not any("whisper" in m for names in _spec_literal("MEDIA_IMPORTS").values() for m in names)
+
+
+def test_the_smoke_test_checks_media_in_the_built_exe(monkeypatch) -> None:
+    assert set(build.MEDIA_PACKAGES) == set(_spec_literal("MEDIA_IMPORTS"))
+    source = (ROOT / "packaging" / "build.py").read_text(encoding="utf-8")
+    assert 'run("-c", MEDIA_CHECK' in source
+    # Минава като аргумент на командния ред на Windows.
+    build.MEDIA_CHECK.encode("ascii")
+    monkeypatch.setattr(sys, "platform", "win32")
+    # На Windows не се гадае по средата на билда: и трите са задължителни.
+    assert build.media_packages() == list(build.MEDIA_PACKAGES)
+
+
+def test_the_media_check_passes_with_what_is_installed(monkeypatch, capsys) -> None:
+    """Същият скрипт, който build.py пуска в exe-то — тук срещу изходния код.
+    sounddevice не се внася в тестовете (истинско аудио устройство)."""
+    need = [m for m in ("edge_tts", "PIL") if importlib.util.find_spec(m) is not None]
+    if not need:
+        pytest.skip("нито edge-tts, нито Pillow е инсталиран")
+    monkeypatch.setattr(sys, "argv", ["-c", ",".join(need)])
+    exec(compile(build.MEDIA_CHECK, "<media-check>", "exec"), {"__name__": "__main__"})  # noqa: S102
+    assert "media-ok" in capsys.readouterr().out

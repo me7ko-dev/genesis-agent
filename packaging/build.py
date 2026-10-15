@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the native app: genesis.exe on Windows (a `genesis` binary elsewhere).
 
-    pip install ".[google,premium,signing,mobile]" pyinstaller
+    pip install ".[google,premium,signing,mobile,voice,vision]" pyinstaller
     (cd mobile && npm ci && npm run export:web)   # optional: the phone web app
     python packaging/build.py            # build + smoke test + zip
     python packaging/build.py --no-zip   # leave dist/genesis/ only
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import platform
@@ -175,6 +176,69 @@ print("sandbox-ok")
 """
 
 
+# Глас и картинки в самия genesis.exe (2026-10-15): find_spec е това, което
+# voice.py/vision.py питат, преди да внесат пакета; PortAudio DLL-ът трябва да
+# се зареди (без микрофон в CI — PortAudioError при инициализация значи, че
+# DLL-ът е зареден); TLS контекстът на edge-tts трябва да има CA сертификати
+# от certifi, иначе всеки глас гърми на TLS; Pillow трябва реално да
+# смали картинка. Мрежа, микрофон и говорители не се пипат. Скриптът е
+# ASCII: минава като аргумент на командния ред на Windows.
+MEDIA_CHECK = """
+import io, os, sys
+from importlib.util import find_spec
+need = sys.argv[1].split(",")
+for name in need:
+    assert find_spec(name) is not None, "find_spec misses " + name
+if "sounddevice" in need:
+    try:
+        import sounddevice as sd
+        print("portaudio", sd.get_portaudio_version()[1])
+    except OSError as e:
+        raise SystemExit("no PortAudio DLL: " + str(e))
+    except Exception as e:
+        if type(e).__name__ != "PortAudioError":
+            raise
+        print("portaudio loaded, no device:", e)
+    from genesis_agent import voice
+    print("mic", voice.mic_status()[0])
+if "edge_tts" in need:
+    import certifi, edge_tts.communicate as c
+    assert os.path.isfile(certifi.where()), certifi.where()
+    assert c._SSL_CTX.cert_store_stats()["x509_ca"] > 100, c._SSL_CTX.cert_store_stats()
+    print("edge-tts", "ca", c._SSL_CTX.cert_store_stats()["x509_ca"])
+if "PIL" in need:
+    from PIL import Image
+    from genesis_agent import vision
+    buf = io.BytesIO()
+    Image.new("RGB", (3000, 1500), (40, 90, 200)).save(buf, "PNG")
+    meta = vision.image_part(buf.getvalue(), name="big.png")["genesis"]
+    assert max(meta["width"], meta["height"]) == vision.MAX_SIDE, meta
+    print("pillow", meta["width"], meta["height"])
+print("media-ok")
+"""
+
+# На Windows (единственото място, където CI билдва genesis.exe) трите пакета
+# са задължителни; другаде — каквото се внася в средата на билда (sounddevice
+# на Linux без libportaudio2 се инсталира, но не се внася).
+MEDIA_PACKAGES = ("sounddevice", "edge_tts", "PIL")
+
+
+def _importable(name: str) -> bool:
+    if importlib.util.find_spec(name) is None:
+        return False
+    try:
+        importlib.import_module(name)
+    except (ImportError, OSError):
+        return False
+    return True
+
+
+def media_packages() -> list[str]:
+    if sys.platform == "win32":
+        return list(MEDIA_PACKAGES)
+    return [m for m in MEDIA_PACKAGES if _importable(m)]
+
+
 def smoke(exe: Path) -> None:
     with tempfile.TemporaryDirectory() as home:
         env = {**os.environ, "GENESIS_HOME": home, "PYTHONIOENCODING": "utf-8"}
@@ -202,6 +266,9 @@ def smoke(exe: Path) -> None:
         run("-c", "import genesis_terminal_agent", expect="")
         run("-c", SERVE_CHECK, expect="serve-ok web" if WEB.joinpath("index.html").is_file() else "serve-ok")
         run("serve", "--help", expect="genesis serve")
+        media = media_packages()
+        if media:
+            run("-c", MEDIA_CHECK, ",".join(media), expect="media-ok")
 
 
 def package(version: str) -> Path:

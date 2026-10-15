@@ -249,10 +249,14 @@ export class ProtocolError extends Error {
   kind: ErrorKind;
   /** HTTP кодът, ако е имало такъв (429 спирачка, 413 твърде голямо…). */
   status?: number;
-  constructor(message: string, kind: ErrorKind, status?: number) {
+  /** "error" от явния (незапечатан) отговор — 429 "busy": друг голям плик се
+   *  чете в момента (2026-10-15), не спирачката срещу налучкване. */
+  code?: string;
+  constructor(message: string, kind: ErrorKind, status?: number, code?: string) {
     super(message);
     this.kind = kind;
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -276,7 +280,13 @@ export type GenesisEvent = {
   session_rule?: string;
   /** "confirm_done": allowed for the rest of the session. */
   session?: boolean;
+  /** "user": the pictures sent with it — name and size only, never the bytes
+   *  (server 2026-10-15). */
+  images?: ImageRef[];
 };
+
+/** What an event says about a sent picture (vision.image_ref). */
+export type ImageRef = { name?: string; mime?: string; bytes?: number; width?: number; height?: number };
 
 export type Todo = { content: string; status: 'pending' | 'in_progress' | 'completed' };
 
@@ -310,7 +320,47 @@ export type StatusReply = {
   busy: boolean;
   model?: string;
   workspace?: string;
+  /** "voice", "images", "commands" … — an older server omits it or the new
+   *  ones (2026-10-15): every media button is gated on it (lib/media.ts). */
+  features?: string[];
+  /** The server's caps for images and envelopes (2026-10-15). */
+  limits?: Partial<ServerLimits>;
 };
+
+export type ServerLimits = { images: number; images_bytes: number; body: number; large_body: number };
+
+/** One picture for `send`: standard base64 (no data: prefix), JPEG from the
+ *  phone. `id` stays on the phone — it tells the outbox which pictures a retry
+ *  carries (2026-10-15). */
+export type OutgoingImage = { id: string; mime: string; data: string; name: string };
+
+export type SendReply = { ok: boolean; error?: string; name?: string; max?: number; detail?: string };
+export type TranscribeReply = { ok: boolean; text?: string; error?: string; detail?: string };
+export type SpeakReply = { ok: boolean; mime?: string; data?: string; text?: string; error?: string; detail?: string };
+
+/** Снимка, глас и изговаряне чакат повече от 15 s (2026-10-15): Whisper и
+ *  edge-tts са секунди, а голям плик (до 19 MiB) по Wi-Fi — още толкова. */
+export const MEDIA_TIMEOUT_MS = 60000;
+
+/** Езикът на диктовката — операторът говори български (2026-10-15). */
+export const SPEECH_LANGUAGE = 'bg';
+
+/** Аргументите на `send`: "images" само когато ги има — по-стар сървър вижда
+ *  същата заявка като преди, а `id` не напуска телефона (2026-10-15). */
+export function sendArgs(text: string, mid?: string, images: readonly OutgoingImage[] = []): Record<string, unknown> {
+  const args: Record<string, unknown> = { text };
+  if (mid) args.mid = mid;
+  if (images.length) args.images = images.map(({ mime, data, name }) => ({ mime, data, name }));
+  return args;
+}
+
+export function transcribeArgs(mime: string, data: string, language = SPEECH_LANGUAGE): Record<string, unknown> {
+  return { mime, data, language };
+}
+
+export function speakArgs(text: string): Record<string, unknown> {
+  return { text };
+}
 
 export type FetchLike = (url: string, init: {
   method: string;
@@ -370,6 +420,11 @@ export class GenesisClient {
     }
     // The server's brake after failed attempts from this address — temporary,
     // retry later; it says nothing about our key (unpairing over it lost the pairing).
+    // 429 "busy" е друго (2026-10-15): сървърът чете по един голям плик
+    // наведнъж (снимки, глас) — това не е „няма връзка“, опитай след малко.
+    if (response.status === 429 && (data as { error?: unknown })?.error === 'busy') {
+      throw new ProtocolError('another large request is being read', 'server', 429, 'busy');
+    }
     if (response.status === 429) throw new ProtocolError('too many failed attempts — wait a minute', 'network', 429);
     if (response.status !== 200) throw new ProtocolError(`server error ${response.status}`, 'server', response.status);
     return open(this.key, data as Envelope, RES_AAD + rid) as T;
@@ -392,8 +447,19 @@ export class GenesisClient {
   /** `mid` — идентификаторът на съобщението от телефона: повторен опит със
    *  същия след изгубен отговор получава първия отговор, ходът не тръгва
    *  втори път (2026-10-11). */
-  send(text: string, mid?: string): Promise<{ ok: boolean; error?: string }> {
-    return this.call('send', mid ? { text, mid } : { text });
+  send(text: string, mid?: string, images: readonly OutgoingImage[] = []): Promise<SendReply> {
+    return this.call('send', sendArgs(text, mid, images), images.length ? MEDIA_TIMEOUT_MS : undefined);
+  }
+
+  /** Говор → текст на компютъра (2026-10-15). Текстът НЕ се праща сам —
+   *  отива в полето за писане. */
+  transcribe(mime: string, data: string, language = SPEECH_LANGUAGE): Promise<TranscribeReply> {
+    return this.call('transcribe', transcribeArgs(mime, data, language), MEDIA_TIMEOUT_MS);
+  }
+
+  /** Текст → mp3 на компютъра (2026-10-15). */
+  speak(text: string): Promise<SpeakReply> {
+    return this.call('speak', speakArgs(text), MEDIA_TIMEOUT_MS);
   }
 
   /** `session` — „За тази сесия“; only sent when true, so an older server

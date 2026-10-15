@@ -38,3 +38,37 @@ export async function clearPairing(): Promise<void> {
     // nothing stored — nothing to remove
   }
 }
+
+// ── настройки на приложението (2026-10-15) ──────────────────────────────────
+// Не са тайна, но SecureStore е единственото хранилище, което приложението
+// вече има на телефона — заради един флаг не добавяме още модул.
+
+const PREFS = 'genesis.prefs.v1';
+
+export type Prefs = {
+  /** „Чети отговорите на глас“ — всеки нов отговор се изговаря, щом ходът свърши. */
+  speakReplies: boolean;
+};
+
+export const DEFAULT_PREFS: Prefs = { speakReplies: false };
+
+export async function loadPrefs(): Promise<Prefs> {
+  try {
+    const raw = Platform.OS === 'web' ? globalThis.localStorage?.getItem(PREFS) : await SecureStore.getItemAsync(PREFS);
+    if (!raw) return DEFAULT_PREFS;
+    const parsed = JSON.parse(raw) as Partial<Prefs>;
+    return { speakReplies: parsed.speakReplies === true };
+  } catch {
+    return DEFAULT_PREFS;
+  }
+}
+
+export async function savePrefs(prefs: Prefs): Promise<void> {
+  try {
+    const raw = JSON.stringify(prefs);
+    if (Platform.OS === 'web') globalThis.localStorage?.setItem(PREFS, raw);
+    else await SecureStore.setItemAsync(PREFS, raw);
+  } catch {
+    // не се записа — настройката важи до затварянето
+  }
+}

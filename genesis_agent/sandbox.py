@@ -52,6 +52,8 @@ try:  # POSIX-only; resource limits са best-effort на не-Linux платф�
 except ImportError:  # pragma: no cover
     resource = None  # type: ignore
 
+log = logging.getLogger("genesis.sandbox")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Резултат и нива на риск
@@ -1991,7 +1993,7 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
     # Ако NPROC е включен, капът е headroom над текущото натоварване.
     nproc_cap = (_count_user_processes() + policy.max_processes) if policy.max_processes > 0 else 0
     try:
-        proc = subprocess.Popen(
+        proc, job = _popen_in_job(
             argv,
             cwd=str(cwd),
             stdout=subprocess.PIPE,
@@ -2004,13 +2006,14 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
             # (2026-10-11) правеше на „���“ българския изход на cmd.exe, `dir`,
             # `type` и `powershell -c`, които пишат в кодовата страница.
             env=env,
-            preexec_fn=(lambda: _preexec(policy, nproc_cap)) if os.name == "posix" else None,  # noqa: PLW1509 — fork()+exec() is immediate; setrlimit-only preexec, no locks touched
+            # PLW1509 не е приложимо: fork()+exec() веднага, preexec само със
+            # setrlimit, без заключвания.
+            preexec_fn=(lambda: _preexec(policy, nproc_cap)) if os.name == "posix" else None,
         )
     except Exception as e:
         log.debug("процесът не тръгна", exc_info=True)
         return SandboxResult(ok=False, stdout="", stderr=f"[sandbox] стартът се провали: {e}",
                              returncode=None)
-    job = _WinJob(proc.pid)
     deadline = time.monotonic() + timeout
     stopped = False
     try:
@@ -2146,7 +2149,8 @@ class _WinJob:
     стига, а той държи pipe-овете до края. TerminateJobObject убива всичко в
     job-а, независимо от родителя. Без KILL_ON_JOB_CLOSE: само изричното
     прекратяване убива; затварянето на дръжката не пипа нищо. На POSIX е
-    празен (там е killpg на групата)."""
+    празен (там е killpg на групата). Процесът влиза в job-а още спрян —
+    виж _popen_in_job."""
 
     def __init__(self, pid: int) -> None:
         self.handle: int | None = None
@@ -2198,6 +2202,78 @@ class _WinJob:
         except Exception:
             log.debug("Job обектът на Windows не се затвори", exc_info=True)
         self.handle = None
+
+
+# CREATE_SUSPENDED от WinBase.h; subprocess не го изнася.
+_CREATE_SUSPENDED = 0x00000004
+
+
+def _popen_in_job(argv: list[str], **kwargs: Any) -> tuple[subprocess.Popen, _WinJob]:
+    """Popen + job object; на Windows процесът влиза в job-а, ПРЕДИ да тръгне.
+
+    2026-10-15 (NEXT_STEPS, остатък от #79): процесът тръгваше нормално и чак
+    после се слагаше в job-а. Дете, което пусне внук в този прозорец, оставя
+    внука извън job-а — TerminateJobObject при Стоп не го стига и той върви
+    (тестът със забавено присвояване: маркерът на внука се появяваше). Затова:
+    CREATE_SUSPENDED → AssignProcessToJobObject → NtResumeProcess. Ако нещо в
+    този път се провали, спряният процес се убива (не е изпълнил нито ред) и
+    командата тръгва по стария начин: никога спрян сирак, никога провалена
+    команда заради job-а."""
+    if sys.platform == "win32":
+        try:
+            flags = int(kwargs.get("creationflags") or 0) | _CREATE_SUSPENDED
+            proc: subprocess.Popen | None = subprocess.Popen(
+                argv, **{**kwargs, "creationflags": flags})
+        except Exception:
+            log.debug("Popen с CREATE_SUSPENDED се провали — обичайният старт", exc_info=True)
+            proc = None
+        if proc is not None:
+            job = _WinJob(proc.pid)
+            if getattr(job, "handle", None) is not None and _resume_process(proc):
+                return proc, job
+            _discard_suspended(proc)
+            job.close()
+    proc = subprocess.Popen(argv, **kwargs)
+    return proc, _WinJob(proc.pid)
+
+
+def _resume_process(proc: subprocess.Popen) -> bool:
+    """Пуска главната нишка на процес, създаден с CREATE_SUSPENDED.
+
+    Popen не дава дръжката на нишката (затваря я веднага), затова е
+    NtResumeProcess върху дръжката на процеса — пуска всичките му нишки,
+    а при току-що създаден процес това е само главната."""
+    if sys.platform != "win32":
+        return False
+    handle = getattr(proc, "_handle", None)
+    if not handle:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        # getattr: в typeshed `windll` го има само при win32 — mypy на Linux CI.
+        ntdll = getattr(ctypes, "windll").ntdll  # noqa: B009
+        ntdll.NtResumeProcess.argtypes = (wintypes.HANDLE,)
+        ntdll.NtResumeProcess.restype = ctypes.c_long
+        return int(ntdll.NtResumeProcess(int(handle))) == 0   # STATUS_SUCCESS
+    except Exception:
+        log.debug("NtResumeProcess се провали", exc_info=True)
+        return False
+
+
+def _discard_suspended(proc: subprocess.Popen) -> None:
+    """Убива спрян процес, който няма да бъде пуснат, и затваря pipe-овете му."""
+    try:
+        proc.kill()
+        proc.wait(timeout=5)
+    except Exception:
+        log.debug("спряният процес не се уби", exc_info=True)
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
 
 
 def _abandon_pipes(proc: subprocess.Popen) -> None:

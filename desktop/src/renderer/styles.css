@@ -538,3 +538,42 @@ table.data tr:hover td { background: rgba(255, 255, 255, .02); }
   .money { flex-direction: column; align-items: flex-start; }
   .money-side { text-align: left; }
 }
+
+/* ── картинки и глас (2026-10-15) ──────────────────────────────────────── */
+.composer-foot { gap: 14px; flex-wrap: wrap; align-items: center; }
+.foot-toggle { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 7px; color: var(--muted); font-size: 11.5px; }
+.foot-toggle:hover { background: var(--panel); color: var(--text-2); }
+.foot-toggle.on { color: var(--accent); }
+.composer-tool {
+  flex: none; width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; color: var(--muted);
+}
+.composer-tool:hover:not(:disabled) { background: var(--panel-2); color: var(--text); }
+.composer-tool:disabled { opacity: .45; }
+.composer-tool.mic.recording { background: rgba(248, 113, 113, .15); color: var(--error); }
+.composer.recording { border-color: rgba(248, 113, 113, .5); }
+.recording-bar { flex: 1; display: flex; align-items: center; gap: 8px; min-height: 34px; color: var(--text-2); font-size: 13.5px; }
+.rec-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--error); animation: pulse 1s ease-in-out infinite; }
+.attachments { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.attachment {
+  position: relative; width: 64px; height: 64px; border-radius: 10px; overflow: hidden;
+  border: 1px solid var(--line-2); background: var(--panel); display: grid; place-items: center; color: var(--muted);
+}
+.attachment img { width: 100%; height: 100%; object-fit: cover; }
+.attachment-x {
+  position: absolute; top: 3px; right: 3px; width: 18px; height: 18px; border-radius: 50%;
+  display: grid; place-items: center; background: rgba(13, 15, 20, .85); color: var(--text);
+}
+.attachment-x:hover { background: var(--error); color: var(--bg); }
+.drop-hint {
+  display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 8px; padding: 18px;
+  border: 1.5px dashed var(--accent); border-radius: 14px; color: var(--accent); background: rgba(94, 234, 212, .06);
+}
+.bubble-images { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+.image-chip {
+  display: inline-flex; align-items: center; gap: 5px; max-width: 260px; padding: 2px 8px; border-radius: 7px;
+  background: var(--panel); border: 1px solid var(--line); color: var(--text-2); font-size: 12px;
+}
+.image-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.image-chip-size { color: var(--muted); font-family: var(--mono); font-feature-settings: "locl" 0; font-size: 11px; }
+.msg-actions.shown { opacity: 1; }
+.icon-btn.on { color: var(--accent); }

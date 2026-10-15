@@ -32,7 +32,6 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "blockedPermissions": ["android.permission.RECORD_AUDIO"],
       "predictiveBackGestureEnabled": false
     },
     "web": {
@@ -46,18 +45,39 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "The camera scans the pairing QR code shown by `genesis serve` on your computer.",
+          "cameraPermission": "Камерата сканира QR кода за сдвояване с компютъра и снима кадрите, които пращаш на Genesis.",
           "recordAudioAndroid": false,
-          "barcodeScannerEnabled": true
+          "barcodeScannerEnabled": true,
+          "microphonePermission": "Микрофонът записва това, което диктуваш; компютърът го прави на текст в полето за писане."
         }
       ],
       "expo-secure-store",
       [
         "expo-build-properties",
         {
-          "android": { "usesCleartextTraffic": true }
+          "android": {
+            "usesCleartextTraffic": true
+          }
         }
-      ]
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Снимките, които избереш, отиват при Genesis на твоя компютър.",
+          "cameraPermission": "Камерата сканира QR кода за сдвояване с компютъра и снима кадрите, които пращаш на Genesis.",
+          "microphonePermission": "Микрофонът записва това, което диктуваш; компютърът го прави на текст в полето за писане."
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Микрофонът записва това, което диктуваш; компютърът го прави на текст в полето за писане.",
+          "recordAudioAndroid": true,
+          "enableBackgroundPlayback": false,
+          "enableBackgroundRecording": false
+        }
+      ],
+      "expo-asset"
     ],
     "experiments": {
       "typedRoutes": false

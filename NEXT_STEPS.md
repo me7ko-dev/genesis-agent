@@ -28,8 +28,9 @@
   1 s, без нов рунд на модела (#73 — не беше причината: пак 6.9 s). Истинската (#79):
   снимката за /undo преди командата — 7 git процеса без проверка за Стоп + 4 за
   „след“ на непусната команда; на Linux с git по 0.7 s: 6.79 → 0.4 s. Тестът печата
-  хронология; да се потвърди на следващия windows-latest. Отделно: job без
-  CREATE_SUSPENDED може да изпусне внук (не е причината тук).
+  хронология; да се потвърди на следващия windows-latest. ~~Job без
+  CREATE_SUSPENDED изпуска внук~~ — процесът влиза в job-а спрян, после NtResumeProcess
+  (`_popen_in_job`; тестът с внук върви само на windows-latest). `!` (shell_mode) е без job.
 - `GENESIS_DEBUG=1` → `~/.genesis/debug.log` (маскиран); 88 погълнати грешки в 37
   модула оставят следа; ruff BLE001/S110 включени (#74). Останалите 25 файла —
   прегледани, `per-file-ignores` е празен: 132 места с log.debug(exc_info=True), 2
@@ -585,6 +586,10 @@ c365 пада всеки път (грешно разбрано условие) �
    на лаптопа остава: `irm …/install.ps1 | iex` (първият release се появява
    след merge в `main`), `genesis fix` на реален проект (тестовете през
    системния Python) и едно `/update` след следващия release.
+   ~~Глас и картинки в exe-то~~ (2026-10-15): `[voice,vision]` влизат в билда
+   (без faster-whisper); `build.py` проверява в exe-то PortAudio DLL, CA на
+   edge-tts и смаляване с Pillow. Остава на лаптопа: `/listen` с истински
+   микрофон и `/voice on` през говорителите от `genesis.exe`.
    **Блокер (2026-09-25):** на лаптопа е включен Smart App Control (enforce) —
    блокира всеки неподписан `.exe`: и pipx `genesis.exe`, и PyInstaller билда.
    Нужен е подпис (Authenticode, напр. Azure Trusted Signing) или SAC изключен

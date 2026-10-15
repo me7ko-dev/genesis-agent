@@ -13,7 +13,8 @@ import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:
 import { createServer } from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { BackendState, CommandResult, EventsBatch, GenesisEvent, SendResult } from '../shared/types';
+import { checkImages, limitsFrom, VOICE_TIMEOUT_MS, type ImageAttachment } from '../shared/media';
+import type { BackendState, CommandResult, EventsBatch, GenesisEvent, SendResult, SpeakResult, TranscribeResult } from '../shared/types';
 import { guardedFolder } from '../shared/workspace';
 import { exeCandidates } from './exe';
 import { logLine } from './logline';
@@ -292,10 +293,12 @@ export class Backend extends EventEmitter {
     if (!this.client) return;
     try {
       const s = await this.client.call<{ model?: string; workspace?: string; version?: string; busy: boolean;
-                                          features?: string[] }>('status');
+                                          features?: string[]; limits?: unknown }>('status');
       this.set({ ...this.state, model: s.model, agentWorkspace: s.workspace, version: s.version, busy: s.busy,
                  workspaceGuard: guardedFolder(this.state.workspace, homedir()),
-                 commands: !!s.features?.includes('commands') });
+                 commands: !!s.features?.includes('commands'),
+                 images: !!s.features?.includes('images'), voice: !!s.features?.includes('voice'),
+                 limits: limitsFrom(s.limits) });
     } catch {
       /* the next poll will tell */
     }
@@ -311,13 +314,22 @@ export class Backend extends EventEmitter {
   }
 
   /** `mid` names the message: a retry after a lost reply gets the first
-   *  answer back instead of starting the turn twice (server 2026-10-11). */
-  async send(text: string): Promise<SendResult> {
+   *  answer back instead of starting the turn twice (server 2026-10-11).
+   *  `images` (2026-10-15): up to 4, ≤ 10 MiB — checked here too, so a
+   *  refusal costs no network; a big envelope gets a minute, not 15 s. */
+  async send(text: string, images: ImageAttachment[] = []): Promise<SendResult> {
     const mid = randomBytes(12).toString('base64url');
+    if (images.length) {
+      if (!this.state.images) return { ok: false, error: 'old_agent' };
+      const check = checkImages(images, this.state.limits);
+      if (!check.ok) return { ok: false, error: check.error, name: check.name };
+    }
+    const args = images.length ? { text, mid, images } : { text, mid };
+    const timeout = images.length ? VOICE_TIMEOUT_MS : undefined;
     for (let attempt = 0; ; attempt++) {
       if (!this.client) return { ok: false, error: 'not_ready' };
       try {
-        return await this.client.call<SendResult>('send', { text, mid });
+        return await this.client.call<SendResult>('send', args, timeout);
       } catch (e) {
         if (e instanceof ProtocolError && e.kind === 'network' && attempt < 2) {
           await sleep(500 * (attempt + 1));
@@ -327,6 +339,28 @@ export class Backend extends EventEmitter {
       }
     }
   }
+  /** Говор → текст (2026-10-15). Без "language": решава настройката на
+   *  оператора (GENESIS_VOICE_LANGUAGE, по подразбиране bg). */
+  async transcribe(mime: string, data: string): Promise<TranscribeResult> {
+    if (!this.state.voice) return { ok: false, error: 'unknown_op' };
+    return this.voiceOp<TranscribeResult>('transcribe', { mime, data });
+  }
+
+  /** Текст → mp3 (2026-10-15). */
+  async speak(text: string): Promise<SpeakResult> {
+    if (!this.state.voice) return { ok: false, error: 'unknown_op' };
+    return this.voiceOp<SpeakResult>('speak', { text });
+  }
+
+  private async voiceOp<T extends SendResult>(op: string, args: Record<string, unknown>): Promise<T> {
+    if (!this.client) return { ok: false, error: 'not_ready' } as T;
+    try {
+      return await this.client.call<T>(op, args, VOICE_TIMEOUT_MS);
+    } catch (e) {
+      return { ok: false, error: (e as Error).message } as T;
+    }
+  }
+
   stop() { return this.op('stop'); }
   clear() { return this.op('clear'); }
   /** `session` — „За тази сесия“; sent only with allow, so an older agent sees the old request. */
