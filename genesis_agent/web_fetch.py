@@ -15,6 +15,7 @@ service (169.254.169.254) and hand what it finds to the model. Loopback
 from __future__ import annotations
 
 import ipaddress
+import logging
 import re
 import socket
 import threading
@@ -22,6 +23,8 @@ import time
 from html.parser import HTMLParser
 from typing import Any, ClassVar
 from urllib.parse import urljoin, urlparse
+
+log = logging.getLogger("genesis.web_fetch")
 
 _TIMEOUT = 20          # за ЦЯЛОТО четене, не за всяко парче (одит 2026-10-09: бавен
 _MAX_BYTES = 3_000_000  # сървър с байт на 0.4 s държеше инструмента с часове)
@@ -281,6 +284,7 @@ def html_to_text(html: str, base: str = "") -> tuple[str, str]:
         parser.feed(html)
         parser.close()
     except Exception:
+        log.debug("HTML парсерът се провали — махаме таговете с regex", exc_info=True)
         return "", re.sub(r"<[^>]+>", " ", html)
     return " ".join(parser.title.split()), parser.text()
 

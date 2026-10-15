@@ -64,7 +64,7 @@ def run_python_inprocess(code: str) -> ExecResult:
         with redirect_stdout(buf_out), redirect_stderr(buf_err):
             ns: dict[str, object] = {"__name__": "__genesis_exec__"}
             exec(compile(code, "<genesis_exec>", "exec"), ns, ns)  # noqa: S102 — trusted-snippet escape hatch, see docstring
-    except Exception:
+    except Exception:  # noqa: BLE001 — следата отива цяла в stderr на резултата
         rc = 1
         print(traceback.format_exc(), file=buf_err)
     return ExecResult(ok=rc == 0, stdout=buf_out.getvalue(), stderr=buf_err.getvalue(), returncode=rc)

@@ -20,6 +20,7 @@ from __future__ import annotations
 import contextlib
 import fnmatch
 import functools
+import logging
 import os
 import re
 import subprocess
@@ -29,6 +30,8 @@ from datetime import datetime
 from pathlib import Path
 
 from genesis_agent.code_edit import read_text_any
+
+log = logging.getLogger("genesis.deliver")
 
 REPORT_NAME = "GENESIS_REPORT.md"
 # A project above this is not a deliverable; it is a disk image with code in it.
@@ -647,6 +650,7 @@ def _memory(root: Path) -> tuple[list[dict], list[dict]]:
     try:
         from genesis_agent import workspace_memory as wm
     except Exception:
+        log.debug("workspace_memory не се внася — без памет в описанието", exc_info=True)
         return [], []
     previous = wm._workspace
     try:
@@ -654,6 +658,7 @@ def _memory(root: Path) -> tuple[list[dict], list[dict]]:
         decisions = wm.list_decisions(15)
         threads = wm.list_threads("open", 15) + wm.list_threads("blocked", 15)
     except Exception:
+        log.debug("паметта за папката не се прочете", exc_info=True)
         return [], []
     finally:
         wm._workspace = previous
@@ -725,6 +730,7 @@ def build_report(root: Path, files: list[Path], withheld: list[str], *,
         from genesis_agent.py_deps import undeclared
         missing = undeclared(root)
     except Exception:
+        log.debug("проверката за незаписани зависимости се провали", exc_info=True)
         missing = []
     if missing:
         lines += [("⚠️ Кодът внася пакети, които не са записани в requirements.txt / "

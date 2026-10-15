@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import threading
@@ -19,6 +20,8 @@ from genesis_agent.skill_loader import SKILLS_ROOT
 from genesis_agent.skills_manager import save_skill, slugify
 from genesis_agent.storage_monitor import check_storage, human_gb
 from genesis_agent.tool_schemas import MISSION_TOOLS, load_tool_arguments
+
+log = logging.getLogger("genesis.autonomous_loop")
 
 # Колко ДОПЪЛНИТЕЛНИ кандидата (отвъд първия опит) да генерираме от локалния
 # tier, когато той не излезе перфектен от първия път (design note, 2026-08-11).
@@ -50,6 +53,7 @@ def _score_local_candidate(code: str) -> tuple[int, str]:
         score = 2 if vres.method == "self_test_passed" else (1 if vres.verified else 0)
         return (score, code)
     except Exception:
+        log.debug("verify_skill хвърли — оценка 0", exc_info=True)
         return (0, code)
 
 
@@ -68,7 +72,7 @@ def _note_quality_failure(brain: Brain, count: int, threshold: int) -> int:
         try:
             provider_stats.record_call(prov, 0.0, False)
         except Exception:
-            pass
+            log.debug("provider_stats.record_call се провали", exc_info=True)
     if count >= threshold:
         try:
             brain.escalate_to_coding_chain()
@@ -90,6 +94,7 @@ def _research_for_weak_model(goal: str) -> str:
         from genesis_agent.research import grounded_research
         note = (grounded_research(goal) or "").strip()
     except Exception:
+        log.debug("проучването преди мисията се провали", exc_info=True)
         return ""
     if not note or "Няма намерени резултати" in note or "Грешка при търсене" in note:
         return ""
@@ -108,6 +113,7 @@ def _few_shot_example_for_weak_model(goal: str) -> str:
         from genesis_agent.skill_loader import search_skills, skill_view
         hits = search_skills(goal, top_n=1)
     except Exception:
+        log.debug("търсенето в уменията се провали", exc_info=True)
         return ""
     if not hits or not hits[0].get("verification", {}).get("verified"):
         return ""
@@ -115,6 +121,7 @@ def _few_shot_example_for_weak_model(goal: str) -> str:
     try:
         code = skill_view(hit["name"])["code"]
     except Exception:
+        log.debug("кодът на умението не се прочете", exc_info=True)
         return ""
     if not code.strip():
         return ""
@@ -142,6 +149,7 @@ def _plan_for_weak_model(brain: Brain, goal: str) -> str:
     try:
         hit = brain._call_local(plan_messages, attempts=1)
     except Exception:
+        log.debug("локалният план се провали", exc_info=True)
         return ""
     if not hit:
         return ""
@@ -224,7 +232,7 @@ def _run_and_report(goal: str, *, max_rounds: int | None, skill_slug: str | None
         record_mission(goal, outcome.success, outcome.last_stderr or "",
                         reused_existing=outcome.reused_existing)
     except Exception:
-        pass
+        log.debug("record_mission се провали", exc_info=True)
     try:
         from genesis_agent.notifier import notify
         if outcome.success:
@@ -234,7 +242,7 @@ def _run_and_report(goal: str, *, max_rounds: int | None, skill_slug: str | None
             notify(f"❌ **Genesis** не успя с мисия след {outcome.rounds} рунда\n"
                    f"🎯 {goal[:200]}")
     except Exception:
-        pass
+        log.debug("известието за мисията не замина", exc_info=True)
     return outcome
 
 
@@ -339,7 +347,7 @@ def _run_autonomous_loop_impl(
         if lessons:
             system_content += "\n\n" + lessons
     except Exception:
-        pass
+        log.debug("уроците за промпта не се прочетоха", exc_info=True)
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_content},
@@ -442,6 +450,7 @@ def _run_autonomous_loop_impl(
                     if _spin_guard.observe(name, args, tool_out).stop:
                         _spin_now = True
             except Exception as _e:
+                log.debug("инструментът хвърли", exc_info=True)
                 messages.append({"role": "tool", "tool_call_id": "error",
                                   "name": "error", "content": f"[tool грешка: {_e}]"})
 
@@ -479,6 +488,7 @@ def _run_autonomous_loop_impl(
                 import genesis_skills
                 tool_results = genesis_skills.parse_and_execute_readonly_tools(reply.raw_text)
             except Exception as _e:
+                log.debug("readonly инструментите хвърлиха", exc_info=True)
                 tool_results = [f"[tool грешка: {_e}]"]
             if tool_results:
                 report_thought("🔎 Brain ползва инструмент за информация...")
@@ -676,6 +686,7 @@ def _run_autonomous_loop_impl(
                 from genesis_agent.reflection import detect_reuse
                 reused = detect_reuse(rag_context, reply.code)
             except Exception:
+                log.debug("detect_reuse се провали", exc_info=True)
                 reused = False
             return LoopOutcome(
                 success=True,
@@ -781,6 +792,7 @@ def _run_autonomous_loop_impl(
                     dna_audit=audit,
                 )
             except Exception as save_err:
+                log.debug("ремонтираният код не се запази", exc_info=True)
                 print(f"  [\u0420\u0415\u041c\u041e\u041d\u0422] \u0413\u0440\u0435\u0448\u043a\u0430 \u043f\u0440\u0438 \u0437\u0430\u043f\u0430\u0437\u0432\u0430\u043d\u0435: {save_err}")
         else:
             print("  [\u0420\u0415\u041c\u041e\u041d\u0422 \u041d\u0415\u0423\u0421\u041f\u0415\u0428\u0415\u041d] \u041d\u0438\u0442\u043e pattern fixes, \u043d\u0438\u0442\u043e LLM \u043d\u0435 \u043f\u043e\u043c\u043e\u0433\u043d\u0430\u0445а.")

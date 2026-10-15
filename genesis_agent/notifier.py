@@ -15,12 +15,15 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import os
 import re
 import urllib.error
 import urllib.request
 
 from genesis_agent.paths import CONFIG_PATH as _CONFIG_YAML
+
+log = logging.getLogger("genesis.notifier")
 
 # ─── Разрешаване на конфигурация (env → .env файлове → config.yaml) ────────────
 # Ядрото (autonomous loop и т.н.) не зарежда .env в os.environ, затова notifier-ът
@@ -55,6 +58,7 @@ def _from_config_yaml(section: str, field: str) -> str:
         data = yaml.safe_load(_CONFIG_YAML.read_text(encoding="utf-8")) or {}
         return (data.get(section, {}) or {}).get(field, "") or ""
     except Exception:
+        log.debug("config.yaml не се прочете", exc_info=True)
         return ""
 
 
@@ -163,6 +167,7 @@ def notify(text: str) -> bool:
         results = send_message(text)
         return any(results.values())
     except Exception:
+        log.debug("известието не замина", exc_info=True)
         return False
 
 

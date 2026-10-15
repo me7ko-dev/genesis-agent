@@ -428,7 +428,7 @@ def auto_capture(messages: list[dict], max_chars: int = 6000) -> dict:
         if opens:
             known += "\nВече отворени нишки (НЕ ги дублирай):\n" + "\n".join(f"  - {t}" for t in opens)
     except Exception:
-        pass
+        log.debug("известните решения/нишки за промпта не се прочетоха", exc_info=True)
 
     try:
         import json as _json
@@ -490,6 +490,7 @@ def _days_since(iso: str) -> int:
             then = then.replace(tzinfo=timezone.utc)
         return max(0, (datetime.now(timezone.utc) - then).days)
     except Exception:
+        log.debug("невалидна дата на нишка — 0 дни", exc_info=True)
         return 0
 
 

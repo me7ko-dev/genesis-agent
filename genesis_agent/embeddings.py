@@ -90,6 +90,7 @@ def available() -> bool:
         names = [m.get("name", "") for m in r.json().get("models", [])]
         return any(MODEL in n for n in names)
     except Exception:
+        log.debug("Ollama не е достъпна за embeddings модела", exc_info=True)
         return False
 
 
@@ -105,6 +106,7 @@ def embed(text: str, timeout: int = 60) -> list[float] | None:
             return None
         return r.json().get("embedding")
     except Exception:
+        log.debug("embedding заявката към Ollama се провали", exc_info=True)
         return None
 
 
