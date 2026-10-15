@@ -712,9 +712,73 @@ def test_command_op_is_unknown_without_commands() -> None:
     assert server._dispatch({"op": "command", "name": "status"}) == {"ok": False, "error": "unknown_op"}
 
 
-def test_the_phone_stop_interrupts_a_running_command(monkeypatch, tmp_path) -> None:
-    """Одит 2026-10-11: ■ на телефона не стигаше до работеща команда — ходът
-    свърши 7.1 s след Стоп, `sleep 8` довърши с rc=0."""
+class _Timeline:
+    """Къде отиде времето между Стоп и края на хода — за съобщението на теста.
+
+    Windows CI 2026-10-15 (job 116436795903): ходът свърши 6.9 s след Стоп,
+    а тестът каза само „the command ran to the end“. Само наблюдава: всяка
+    обвивка вика истинската функция."""
+
+    def __init__(self) -> None:
+        self.t0 = time.monotonic()
+        self.rows: list[tuple[float, str]] = []
+        self._lock = threading.Lock()
+
+    def mark(self, what: str) -> None:
+        with self._lock:
+            self.rows.append((time.monotonic() - self.t0, what))
+
+    def __str__(self) -> str:
+        return "\n".join(f"{t:7.3f} s  {what}" for t, what in self.rows)
+
+    def watch(self, monkeypatch) -> None:
+        import os
+
+        from genesis_agent import checkpoints, edit_history, sandbox
+        mark = self.mark
+
+        def timed(owner, name: str, label) -> None:
+            real = getattr(owner, name)
+
+            def wrapper(*a, **k):
+                start = time.monotonic()
+                try:
+                    return real(*a, **k)
+                finally:
+                    mark(f"{label(*a)} — {time.monotonic() - start:.2f} s")
+            monkeypatch.setattr(owner, name, wrapper)
+
+        timed(checkpoints, "_git", lambda ws, *args: f"git {args[0] if args else ''}")
+        timed(checkpoints, "why_not", lambda *a: "git --version (why_not)")
+        timed(edit_history, "_open_window", lambda *a: "снимка за /undo преди командата")
+        timed(edit_history, "after_command", lambda *a: "снимка за /undo след командата")
+        timed(sandbox, "_kill_tree_win32", lambda *a: "taskkill /T /F")
+        if hasattr(os, "killpg"):
+            timed(sandbox.os, "killpg", lambda *a: "killpg")
+        real_run = sandbox._run
+
+        def run(argv, **k):
+            mark(f"sandbox._run({argv[-1]!r})")
+            res = real_run(argv, **k)
+            mark(f"sandbox._run върна rc={res.returncode}: {res.stderr.strip()[-60:]!r}")
+            return res
+        monkeypatch.setattr(sandbox, "_run", run)
+
+        class Job(sandbox._WinJob):
+            def __init__(self, pid: int) -> None:
+                super().__init__(pid)
+                mark(f"командата тръгна (pid {pid}, job={'да' if self.handle else 'не'})")
+
+            def terminate(self) -> bool:
+                ok = super().terminate()
+                mark(f"TerminateJobObject → {ok}")
+                return ok
+        monkeypatch.setattr(sandbox, "_WinJob", Job)
+
+
+def _stop_a_running_sleep(monkeypatch, tmp_path, timeline: _Timeline) -> tuple[float, rs.RemoteSession]:
+    """Моделът иска `sleep 8`; Стоп 1 s след „thinking“. Връща колко след Стоп
+    свърши ходът."""
     from collections import deque
 
     import genesis_terminal_agent as gta
@@ -726,8 +790,11 @@ def test_the_phone_stop_interrupts_a_running_command(monkeypatch, tmp_path) -> N
             "function": {"name": "RUN_CMD", "arguments": json.dumps({"command": "sleep 8"})}}
     replies = iter([("running tests", [call]), ("done", [])])
     monkeypatch.setattr(gta, "ask_genesis", lambda *a, **k: next(replies))
-    session = rs.RemoteSession(lambda text, ui: gta.run_turn(
-        deque([{"role": "system", "content": "s"}], maxlen=50), text, ui))
+    timeline.watch(monkeypatch)
+    session = rs.RemoteSession(
+        lambda text, ui: gta.run_turn(deque([{"role": "system", "content": "s"}], maxlen=50), text, ui),
+        on_event=lambda e: timeline.mark(
+            f"събитие {e['type']} {e.get('label') or e.get('name') or e.get('busy', '')}"))
     assert session.send("run the tests")
     deadline = time.monotonic() + 10
     while not any(e["type"] == "thinking" for e in session.events_after(0)["events"]):
@@ -735,12 +802,51 @@ def test_the_phone_stop_interrupts_a_running_command(monkeypatch, tmp_path) -> N
         time.sleep(0.05)
     time.sleep(1.0)
     stopped_at = time.monotonic()
+    timeline.mark("Стоп")
     session.request_stop()
     while session.busy and time.monotonic() - stopped_at < 15:
         time.sleep(0.05)
-    assert time.monotonic() - stopped_at < 3, "the command ran to the end after Stop"
+    took = time.monotonic() - stopped_at
+    timeline.mark("тестът видя края на хода")
+    return took, session
+
+
+def test_the_phone_stop_interrupts_a_running_command(monkeypatch, tmp_path) -> None:
+    """Одит 2026-10-11: ■ на телефона не стигаше до работеща команда — ходът
+    свърши 7.1 s след Стоп, `sleep 8` довърши с rc=0."""
+    timeline = _Timeline()
+    took, session = _stop_a_running_sleep(monkeypatch, tmp_path, timeline)
+    assert took < 3, f"ходът свърши {took:.2f} s след Стоп:\n{timeline}"
     tools = [e for e in session.events_after(0)["events"] if e["type"] == "tool"]
-    assert tools and "Спряно от оператора" in tools[-1]["result"]
+    assert tools and "Спряно от оператора" in tools[-1]["result"], timeline
+
+
+def test_a_stop_during_a_slow_undo_snapshot_ends_the_turn_in_time(monkeypatch, tmp_path) -> None:
+    """Windows CI 2026-10-15 (job 116436795903): ходът свърши 6.9 s след Стоп,
+    а целият тест трая 7.95 s — по-малко от самия `sleep 8`, значи командата
+    не е довършила. Преди нея и след нея се снима за /undo: в свежа папка това
+    са 7 + 4 последователни git процеса, нищо от тях не гледаше Стоп, а
+    снимката „след“ се правеше и когато командата изобщо не беше тръгнала.
+    С git по 0.7 s (11 процеса ≈ 7.9 s, колкото трая тестът на CI) същото се
+    вижда на Linux: преди поправката — 6.7 s след Стоп."""
+    from genesis_agent import checkpoints
+    real_git, real_why_not = checkpoints._git, checkpoints.why_not
+
+    def slow_git(*a, **k):
+        time.sleep(0.7)
+        return real_git(*a, **k)
+
+    def slow_why_not(*a, **k):
+        time.sleep(0.7)
+        return real_why_not(*a, **k)
+    monkeypatch.setattr(checkpoints, "_git", slow_git)
+    monkeypatch.setattr(checkpoints, "why_not", slow_why_not)
+    timeline = _Timeline()
+    took, session = _stop_a_running_sleep(monkeypatch, tmp_path, timeline)
+    assert took < 3, f"ходът свърши {took:.2f} s след Стоп:\n{timeline}"
+    tools = [e for e in session.events_after(0)["events"] if e["type"] == "tool"]
+    # Стоп дойде, докато се снимаше — командата не е пусната изобщо.
+    assert tools and "не е пусната" in tools[-1]["result"], timeline
 
 
 def test_after_a_stop_during_a_tool_the_model_is_not_asked_again(monkeypatch, tmp_path) -> None:
