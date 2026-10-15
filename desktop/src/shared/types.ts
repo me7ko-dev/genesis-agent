@@ -1,4 +1,8 @@
 /** What travels between the main process and the window (see preload.ts). */
+import type { ImageAttachment, MediaLimits } from './media';
+
+/** Картинка в събитие "user": само име, вид и размер, без байтовете (server 2026-10-15). */
+export type ImageRef = { name?: string; mime?: string; bytes?: number; width?: number; height?: number };
 
 /** One entry of the server's event log (genesis_agent/remote_server.py). */
 export type GenesisEvent = {
@@ -20,6 +24,8 @@ export type GenesisEvent = {
   session_rule?: string;
   /** "confirm_done": allowed for the rest of the session. */
   session?: boolean;
+  /** "user": the pictures sent with the message (server 2026-10-15). */
+  images?: ImageRef[];
 };
 
 /** The agent's task list (the TODO tool), sent with every `events` reply. */
@@ -66,6 +72,10 @@ export type BackendState = {
   plan?: boolean;
   /** The agent's task list for the running turn. */
   todos?: Todo[];
+  /** "features" of `status` (2026-10-15): `send` takes "images"; `transcribe`/`speak` work. */
+  images?: boolean;
+  voice?: boolean;
+  limits?: MediaLimits;
 };
 
 export type Settings = {
@@ -73,9 +83,16 @@ export type Settings = {
   lastWorkspace?: string;
   sidebar: boolean;
   exe?: string;
+  /** „Чети отговорите на глас“ (2026-10-15). */
+  speak?: boolean;
 };
 
-export type SendResult = { ok: boolean; error?: string };
+/** `name`/`max`/`detail` — какво точно е отказано (картинките, гласът). */
+export type SendResult = { ok: boolean; error?: string; name?: string; max?: number; detail?: string };
+
+/** `transcribe` → текстът; `speak` → mp3 като base64. */
+export type TranscribeResult = SendResult & { text?: string };
+export type SpeakResult = SendResult & { mime?: string; data?: string };
 
 // ── `/` commands (genesis_agent/desktop_commands.py) ─────────────────────────
 
@@ -143,7 +160,11 @@ export interface GenesisApi {
   state(): Promise<BackendState>;
   settings(): Promise<Settings>;
   events(): Promise<GenesisEvent[]>;
-  send(text: string): Promise<SendResult>;
+  send(text: string, images?: ImageAttachment[]): Promise<SendResult>;
+  /** `mime` — `audio/webm`; `data` — base64. Текстът идва за редакция, не се праща сам. */
+  transcribe(mime: string, data: string): Promise<TranscribeResult>;
+  speak(text: string): Promise<SpeakResult>;
+  setSpeak(on: boolean): Promise<void>;
   stop(): Promise<SendResult>;
   clear(): Promise<SendResult>;
   confirm(id: string, allow: boolean, session?: boolean): Promise<SendResult>;

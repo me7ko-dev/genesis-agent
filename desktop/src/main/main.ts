@@ -2,7 +2,9 @@ import { app, BrowserWindow, dialog, ipcMain, nativeTheme, shell } from 'electro
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { sanitizeImages } from '../shared/media';
 import { Backend, findExe, genesisHome, reapOrphan } from './backend';
+import { allowPermission } from './permissions';
 import { loadSettings, pushRecent, saveSettings } from './settings';
 
 const DEV_URL = process.env.GENESIS_DESKTOP_DEV_URL;
@@ -42,9 +44,21 @@ function createWindow(): void {
       sandbox: true,
       nodeIntegration: false,
       spellcheck: false,
+      // „Чети отговорите на глас“ пуска звука без щракване (2026-10-15).
+      autoplayPolicy: 'no-user-gesture-required',
     },
   });
   win.once('ready-to-show', () => win?.show());
+
+  // Само микрофонът (без камера) и записът в клипборда — виж permissions.ts
+  // (2026-10-15: без handler Electron разрешаваше всяко искане).
+  const ses = win.webContents.session;
+  ses.setPermissionRequestHandler((wc, permission, callback, details) => {
+    const mediaTypes = 'mediaTypes' in details ? (details.mediaTypes ?? []) : undefined;
+    callback(wc === win?.webContents && allowPermission(permission, { mediaTypes }));
+  });
+  ses.setPermissionCheckHandler((wc, permission, _origin, details) =>
+    (wc === null || wc === win?.webContents) && allowPermission(permission, { mediaType: details.mediaType }));
 
   // Links in answers open in the browser, never inside the app.
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -118,7 +132,19 @@ function registerIpc(): void {
   ipcMain.handle('state', () => backend.state);
   ipcMain.handle('settings', () => settings);
   ipcMain.handle('events', () => backend.events());
-  ipcMain.handle('send', (_e, text: string) => backend.send(String(text)));
+  ipcMain.handle('send', (_e, text: string, images?: unknown) => {
+    const pictures = sanitizeImages(images, backend.state.limits);
+    return pictures ? backend.send(String(text ?? ''), pictures) : { ok: false, error: 'bad_args' };
+  });
+  ipcMain.handle('transcribe', (_e, mime: unknown, data: unknown) =>
+    (typeof mime === 'string' && typeof data === 'string'
+      ? backend.transcribe(mime, data) : { ok: false, error: 'bad_args' }));
+  ipcMain.handle('speak', (_e, text: unknown) =>
+    (typeof text === 'string' ? backend.speak(text) : { ok: false, error: 'bad_args' }));
+  ipcMain.handle('set-speak', (_e, on: boolean) => {
+    settings = { ...settings, speak: !!on };
+    saveSettings(settings);
+  });
   ipcMain.handle('stop', () => backend.stop());
   ipcMain.handle('clear', () => backend.clear());
   ipcMain.handle('confirm', (_e, id: string, allow: boolean, session?: boolean) =>
