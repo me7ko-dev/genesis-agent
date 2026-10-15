@@ -534,6 +534,8 @@ PHONE_HELP = """Команди от телефона:
 /plan — режим план: само чете и планира; /plan пак — изпълнява плана
 /plan <задача> — план за задачата
 /undo — връща файловете от последния ход (пита първо)
+/rewind — твоите съобщения с номера; /rewind <номер> — назад до него: реже разговора и връща файловете (пита първо)
+/resume — по-ранните разговори в тази папка; /resume <номер> — зарежда го
 /todos — списъкът със задачи на агента
 /agents — под-агентите (.genesis/agents/*.md)
 /compact — компресира историята
@@ -547,7 +549,8 @@ PHONE_HELP = """Команди от телефона:
 
 def phone_command(text: str, ui: Any, session: RemoteSession, *, messages: Any,
                   workspace: Path, compact: Callable[[Any], Any] | None = None,
-                  context: Callable[[], dict] | None = None) -> tuple[Any, str | None]:
+                  context: Callable[[], dict] | None = None,
+                  conversations: Any = None) -> tuple[Any, str | None]:
     """Съобщение от телефона, преди да стигне до модела.
 
     Връща (историята, текст за модела); None за текста = ходът свършва тук.
@@ -597,8 +600,11 @@ def phone_command(text: str, ui: Any, session: RemoteSession, *, messages: Any,
             reason = question.split("(", 1)[0].strip(" >") or question
             return "да" if session.confirm(said[-1] if said else question, [reason]) else "не"
 
+        # Без `choose`: картата на телефона е да/не, не поле за номер — /resume и
+        # /rewind показват списъка, а номерът идва като `/rewind 3` (2026-10-15).
         res = chat_commands.handle(stripped, messages=messages, workspace=workspace,
-                                   out=out, ask=ask, compact=compact, context=context)
+                                   out=out, ask=ask, compact=compact, context=context,
+                                   conversations=conversations)
         if res is not None:
             if res.messages is not None:
                 messages = res.messages
@@ -1149,7 +1155,7 @@ def serve(args: list[str]) -> int:
     def runner(text: str, ui: Any) -> None:
         messages, prompt = phone_command(text, ui, session, messages=state["messages"],
                                          workspace=Path(gta.WORKSPACE), compact=gta._force_compact,
-                                         context=gta.context_info)
+                                         context=gta.context_info, conversations=gta._conversations())
         state["messages"] = messages
         if prompt is not None:
             try:
