@@ -90,6 +90,13 @@ export class GenesisClient {
     } catch {
       throw new ProtocolError(`unexpected reply (${response.status})`, 'server');
     }
+    // Голям плик (2026-10-15): 413 — над тавана или операция, на която голям
+    // плик не се полага; 429 "busy" — друг голям плик (картинки, глас) се чете
+    // в момента. И двете са отказ на тази заявка, не на ключа.
+    if (response.status === 413) throw new ProtocolError('too_large', 'server');
+    if (response.status === 429 && (data as { error?: string })?.error === 'busy') {
+      throw new ProtocolError('busy', 'server');
+    }
     if (response.status === 401 || response.status === 429) {
       throw new ProtocolError(String((data as { detail?: string })?.detail ?? 'rejected'), 'unauthorized');
     }

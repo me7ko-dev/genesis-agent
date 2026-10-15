@@ -1,11 +1,13 @@
 import { ArrowDown, ClipboardList, Cpu, Folder, ListChecks, PanelLeftClose, PanelLeftOpen, RotateCw, X, Zap } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { DEFAULT_LIMITS, imageErrorText, replyToSpeak, speechText, voiceErrorText, type ImageAttachment } from '../shared/media';
 import type { BackendState, CommandResult, GenesisEvent, Settings, UsageReport } from '../shared/types';
 import { Composer } from './components/Composer';
 import { AssistantMessage, ConfirmCard, Note, Thinking, ToolCard, UserMessage } from './components/Messages';
 import { explain, fmtTokens, Sheet, toggleMessage, type SheetView } from './components/Panels';
 import { EmptyChat, Failed, Logo, Missing, Starting, Welcome } from './components/Screens';
 import { Sidebar } from './components/Sidebar';
+import { playSpeech, stopAudio, usePlayer } from './lib/capture';
 import { mergeEvents, pendingConfirm, shortPath, toChatItems, todoSummary, turnInfo } from './lib/chat';
 
 const api = window.genesis;
@@ -22,16 +24,23 @@ export function App() {
   const [focusKey, setFocusKey] = useState(0);
   const [atBottom, setAtBottom] = useState(true);
   const scroller = useRef<HTMLDivElement>(null);
+  const player = usePlayer();
+  // Докъде са видени събитията за „Чети отговорите на глас“: историята при
+  // отваряне и след reset не се чете (2026-10-15).
+  const spokenSeq = useRef<number | null>(null);
 
   // ── wiring to the main process ──────────────────────────────────────────
   useEffect(() => {
     void api.state().then(setState);
     void api.settings().then(setSettings);
-    void api.events().then((e) => setEvents(e));
+    void api.events().then((e) => { spokenSeq.current = null; setEvents(e); });
     void api.logs().then(setLog);
     const offs = [
       api.onState((s) => { setState(s); void api.settings().then(setSettings); }),
-      api.onEvents((b) => setEvents((cur) => mergeEvents(cur, b.events, b.reset))),
+      api.onEvents((b) => {
+        if (b.reset) spokenSeq.current = null;
+        setEvents((cur) => mergeEvents(cur, b.events, b.reset));
+      }),
       api.onLog((line) => setLog((cur) => {
         const next = cur ? `${cur}\n${line}` : line;
         return next.length > 200_000 ? next.slice(-150_000) : next;
@@ -74,11 +83,47 @@ export function App() {
     setSettings((s) => { void api.setSidebar(!s.sidebar); return { ...s, sidebar: !s.sidebar }; });
   }, []);
 
-  const send = useCallback(async (text: string) => {
-    const r = await api.send(text);
-    if (!r.ok) flash(r.error === 'busy' ? 'Genesis още работи.' : `Не се изпрати: ${r.error}`);
+  const send = useCallback(async (text: string, images: ImageAttachment[] = []) => {
+    const r = await api.send(text, images);
+    if (!r.ok) {
+      flash(r.error === 'busy' ? 'Genesis още работи.'
+        : r.error === 'old_agent' ? 'Този genesis не приема картинки — обнови го (/update).'
+        : imageErrorText(r, state.limits) ?? `Не се изпрати: ${r.error}`);
+    }
     return r.ok;
+  }, [flash, state.limits]);
+
+  // ── гласът (2026-10-15) ─────────────────────────────────────────────────
+  const speakReply = useCallback((key: string, text: string) => {
+    void playSpeech(key, async () => {
+      const r = await api.speak(speechText(text));
+      return r.ok && r.data ? { mime: r.mime || 'audio/mpeg', data: r.data } : { error: voiceErrorText('speak', r) };
+    }).then((err) => { if (err) flash(err); });
   }, [flash]);
+
+  const toggleReply = useCallback((key: string, text: string) => {
+    if (player?.key === key) stopAudio();
+    else speakReply(key, text);
+  }, [player, speakReply]);
+
+  const setSpeak = useCallback((on: boolean) => {
+    setSettings((s) => ({ ...s, speak: on }));
+    void api.setSpeak(on);
+    if (!on) stopAudio();
+  }, []);
+
+  // Завършен ход → последният му отговор на глас, ако е включено.
+  useEffect(() => {
+    if (spokenSeq.current === null) {
+      spokenSeq.current = events.length ? events[events.length - 1].seq : 0;
+      return;
+    }
+    const r = replyToSpeak(events, spokenSeq.current);
+    spokenSeq.current = r.seq;
+    if (r.text && r.key !== undefined && settings.speak && state.voice) speakReply(String(r.key), r.text);
+  }, [events, settings.speak, state.voice, speakReply]);
+
+  useEffect(() => { if (!ready) stopAudio(); }, [ready]);
 
   // A command the agent answers and the app shows as a message, not a window.
   const quick = useCallback(async (name: string, arg: Record<string, unknown> = {}) => {
@@ -194,8 +239,12 @@ export function App() {
             )}
             {items.map((it) => {
               switch (it.kind) {
-                case 'user': return <UserMessage key={it.key} text={it.text} />;
-                case 'assistant': return <AssistantMessage key={it.key} text={it.text} />;
+                case 'user': return <UserMessage key={it.key} text={it.text} images={it.images} />;
+                case 'assistant': return (
+                  <AssistantMessage key={it.key} text={it.text}
+                    speech={state.voice ? { phase: player?.key === it.key ? player.phase : 'idle',
+                                            onToggle: () => toggleReply(it.key, it.text) } : undefined} />
+                );
                 case 'tool': return <ToolCard key={it.key} item={it} workspace={state.agentWorkspace || state.workspace} />;
                 case 'note': return <Note key={it.key} item={it} />;
                 case 'confirm': return <ConfirmCard key={it.key} item={it} onAnswer={answer} />;
@@ -218,6 +267,12 @@ export function App() {
           onStop={stop}
           onCommand={command}
           focusKey={focusKey}
+          images={!!state.images}
+          voice={!!state.voice}
+          limits={state.limits ?? DEFAULT_LIMITS}
+          speak={!!settings.speak}
+          onSpeak={setSpeak}
+          onFlash={flash}
         />
       </>
     );

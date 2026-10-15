@@ -704,3 +704,12 @@ def test_stopping_with_nothing_playing_never_touches_windows_audio(monkeypatch) 
     monkeypatch.setitem(voice._CURRENT, "winsound", True)
     voice.stop_speaking()
     assert calls == [(None, 64)]
+
+
+def test_the_native_exe_never_suggests_pip_for_what_it_already_carries() -> None:
+    # 2026-10-15: genesis.exe носи гласа — `pip install` там е грешен съвет.
+    install, local = voice._hints(frozen=True)
+    assert "pip" not in install and "/update" in install
+    assert "voice-local" in local and "genesis.exe" in local
+    assert voice._hints(frozen=False) == ('pip install "genesis-agent[voice]"',
+                                          'pip install "genesis-agent[voice-local]"')

@@ -62,8 +62,22 @@ from typing import Any
 
 log = logging.getLogger("genesis.voice")
 
-INSTALL_HINT = 'pip install "genesis-agent[voice]"'
-LOCAL_HINT = 'pip install "genesis-agent[voice-local]"'
+
+def _hints(frozen: bool) -> tuple[str, str]:
+    """Съвет „какво да инсталираш“ — в genesis.exe pip няма смисъл.
+
+    2026-10-15: genesis.exe вече носи sounddevice, edge-tts и Pillow
+    (packaging/genesis.spec); ако някой от тях липсва там, поправката е по-нов
+    exe, а `pip install` в чужд Python не помага. faster-whisper нарочно не е
+    в exe-то (стотици MB) — офлайн разпознаването иска pip инсталацията."""
+    if frozen:
+        return ("/update — по-нов genesis.exe носи гласа",
+                ("офлайн разпознаването го няма в genesis.exe — инсталирай "
+                 'с pip: pip install "genesis-agent[voice-local]"'))
+    return 'pip install "genesis-agent[voice]"', 'pip install "genesis-agent[voice-local]"'
+
+
+INSTALL_HINT, LOCAL_HINT = _hints(bool(getattr(sys, "frozen", False)))
 
 SAMPLE_RATE = 16_000
 # Таваните за един запис (и за `transcribe` от телефона): 2 минути и 10 MB.

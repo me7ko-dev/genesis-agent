@@ -385,6 +385,161 @@ def test_after_the_job_ends_everything_taskkill_is_not_waited_for(tmp_path, monk
     assert len(killed) == 1     # само когато job-ът не е убил дървото
 
 
+# ── Job object: процесът влиза в job-а спрян (2026-10-15) ────────────────────
+# Процесът тръгваше и чак после влизаше в job-а; внук, пуснат в този прозорец,
+# оставаше извън него и Стоп не го убиваше. Сега: CREATE_SUSPENDED → job →
+# NtResumeProcess, а при провал в този път — убит спрян процес и стария старт.
+
+class _FakeStart:
+    """Записва реда на стъпките на _popen_in_job: Popen, job, resume, kill."""
+
+    def __init__(self, monkeypatch, *, suspended_popen_ok=True, assign_ok=True,
+                 resume_ok=True) -> None:
+        import itertools
+        self.calls: list[tuple[str, int]] = []
+        pids = itertools.count(1)
+        calls = self.calls
+
+        class Proc:
+            def __init__(self, argv, **kw) -> None:
+                flags = kw.get("creationflags", 0)
+                calls.append(("popen", flags))
+                if flags & sandbox._CREATE_SUSPENDED and not suspended_popen_ok:
+                    raise OSError("няма CREATE_SUSPENDED")
+                self.pid = next(pids)
+                self.stdin = self.stdout = self.stderr = None
+
+            def kill(self) -> None:
+                calls.append(("kill", self.pid))
+
+            def wait(self, timeout=None) -> int:
+                calls.append(("wait", self.pid))
+                return 1
+
+        class Job:
+            def __init__(self, pid: int) -> None:
+                calls.append(("assign", pid))
+                self.handle = 7 if assign_ok else None
+
+            def close(self) -> None:
+                calls.append(("close", self.handle or 0))
+
+        def resume(proc) -> bool:
+            calls.append(("resume", proc.pid))
+            return resume_ok
+
+        monkeypatch.setattr(sandbox.sys, "platform", "win32")
+        monkeypatch.setattr(sandbox.subprocess, "Popen", Proc)
+        monkeypatch.setattr(sandbox, "_WinJob", Job)
+        monkeypatch.setattr(sandbox, "_resume_process", resume)
+
+
+SUSPENDED = sandbox._CREATE_SUSPENDED
+
+
+def test_the_process_enters_the_job_before_it_runs(monkeypatch) -> None:
+    fake = _FakeStart(monkeypatch)
+    proc, job = sandbox._popen_in_job(["x"], creationflags=0x200)
+    assert fake.calls == [("popen", 0x200 | SUSPENDED), ("assign", 1), ("resume", 1)]
+    assert proc.pid == 1 and job.handle == 7
+
+
+@pytest.mark.parametrize("broken", ["assign", "resume"])
+def test_a_failed_suspended_start_kills_it_and_starts_the_old_way(monkeypatch, broken) -> None:
+    """Никога спрян сирак, никога провалена команда: спряният процес не е
+    изпълнил нито ред — убива се и командата тръгва както преди."""
+    fake = _FakeStart(monkeypatch, assign_ok=broken != "assign", resume_ok=broken != "resume")
+    proc, _ = sandbox._popen_in_job(["x"])
+    resumed = [("resume", 1)] if broken == "resume" else []
+    closed = ("close", 0 if broken == "assign" else 7)
+    assert fake.calls == [("popen", SUSPENDED), ("assign", 1), *resumed,
+                          ("kill", 1), ("wait", 1), closed,
+                          ("popen", 0), ("assign", 2)]
+    assert proc.pid == 2
+
+
+def test_a_suspended_popen_that_raises_falls_back(monkeypatch) -> None:
+    fake = _FakeStart(monkeypatch, suspended_popen_ok=False)
+    proc, _ = sandbox._popen_in_job(["x"])
+    assert fake.calls == [("popen", SUSPENDED), ("popen", 0), ("assign", 1)]
+    assert proc.pid == 1
+
+
+def test_off_windows_there_is_no_suspended_start(monkeypatch) -> None:
+    real_resume = sandbox._resume_process
+    fake = _FakeStart(monkeypatch)
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    sandbox._popen_in_job(["x"])
+    assert fake.calls == [("popen", 0), ("assign", 1)]
+    assert real_resume(object()) is False   # type: ignore[arg-type]
+
+
+def test_the_command_still_runs_when_the_suspended_start_cannot(tmp_path, monkeypatch) -> None:
+    """Истински Popen: извън Windows creationflags дава ValueError — точно
+    провал в спрения път; командата пак трябва да мине."""
+    import sys
+
+    class NoJob:
+        handle = None
+
+        def __init__(self, pid: int) -> None:
+            pass
+
+        def terminate(self) -> bool:
+            return False
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(sandbox, "_WinJob", NoJob)
+    monkeypatch.setattr(sandbox, "_CODEPAGES", [])
+    monkeypatch.setattr(sandbox.sys, "platform", "win32")
+    res = sandbox._run([sys.executable, "-c", "print('hi')"], cwd=tmp_path,
+                       policy=SandboxPolicy(mode="allow"), timeout=30)
+    assert res.ok and res.stdout.strip() == "hi"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="истински job object — само на Windows (CI)")
+def test_a_grandchild_started_right_away_dies_with_the_stop(tmp_path, monkeypatch) -> None:
+    """Прозорецът между старта и job-а е разширен до 2 s (присвояването чака).
+    Без CREATE_SUSPENDED детето пуска внука в този прозорец, внукът остава
+    извън job-а, преживява Стоп и след 2 s пише маркера."""
+    import sys
+    import time
+
+    import genesis_skills
+    marker, started = tmp_path / "grandchild.txt", tmp_path / "started.txt"
+    grandchild = tmp_path / "grandchild.py"
+    grandchild.write_text(f"import time\ntime.sleep(2)\nopen({str(marker)!r}, 'w').write('x')\n",
+                          encoding="utf-8")
+    child = tmp_path / "child.py"
+    child.write_text("import subprocess, sys, time\n"
+                     f"subprocess.Popen([sys.executable, {str(grandchild)!r}])\n"
+                     f"open({str(started)!r}, 'w').write('1')\n"
+                     "time.sleep(30)\n", encoding="utf-8")
+    jobs: list[object] = []
+
+    class SlowJob(sandbox._WinJob):
+        def __init__(self, pid: int) -> None:
+            time.sleep(2)
+            super().__init__(pid)
+            jobs.append(self.handle)
+
+    monkeypatch.setattr(sandbox, "_WinJob", SlowJob)
+    genesis_skills._set_cancel(started.exists)
+    try:
+        res = sandbox._run([sys.executable, str(child)], cwd=tmp_path,
+                           policy=SandboxPolicy(mode="allow"), timeout=60)
+    finally:
+        genesis_skills._set_cancel(None)
+    assert "Спряно от оператора" in res.stderr
+    assert len(jobs) == 1 and jobs[0], "спреният старт не мина — командата тръгна по стария начин"
+    deadline = time.monotonic() + 4
+    while time.monotonic() < deadline and not marker.exists():
+        time.sleep(0.1)
+    assert not marker.exists(), "внукът е избягал от job-а и преживя Стоп"
+
+
 def test_run_python_executes_and_returns_stdout(tmp_path) -> None:
     res = sandbox.run_python("print(2 + 2)", cwd=tmp_path)
     assert res.ok is True

@@ -47,10 +47,16 @@ jobs:
           # skills work without `pipx inject`, which genesis.exe has no
           # equivalent of. Pinned so a PyInstaller release cannot change the
           # app on its own schedule.
-          pip install ".[google,premium,signing,mobile]" pyinstaller==6.22.3
+          # voice + vision (2026-10-15): /listen, /voice on and image
+          # downscaling in the exe the operator runs. sounddevice's PortAudio
+          # DLL comes from hook-sounddevice in pyinstaller-hooks-contrib;
+          # build.py checks it, edge-tts' CA bundle and Pillow in the built
+          # exe. Not [voice-local]: faster-whisper is far too big.
+          pip install ".[google,premium,signing,mobile,voice,vision]" pyinstaller==6.22.3
 
       # build.py runs the BUILT genesis.exe: CLI, Python mode, the sandbox
-      # running code through it, stdlib and bundled packages.
+      # running code through it, stdlib and bundled packages, and the media
+      # stack (PortAudio DLL loads, edge-tts has CA certs, Pillow downscales).
       - name: Build and smoke-test genesis.exe
         run: python packaging/build.py
 

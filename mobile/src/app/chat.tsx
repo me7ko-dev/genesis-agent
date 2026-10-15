@@ -1,15 +1,20 @@
 import { Redirect, router } from 'expo-router';
-import { useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator, FlatList, KeyboardAvoidingView, type NativeScrollEvent, type NativeSyntheticEvent, Platform, Pressable, StyleSheet, Text, TextInput, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { AssistantMessage, ConfirmCard, Note, TodoPanel, ToolCard, UserBubble } from '../components/Cards';
+import { AssistantMessage, ConfirmCard, Note, TodoPanel, ToolCard, UserBubble, type SpeakState } from '../components/Cards';
+import { AttachMenu, AttachmentStrip, RecordingBar } from '../components/Media';
+import { micAvailable, playAudio, stopPlayback, usePlayingKey, useRecorder } from '../lib/audio';
 import type { ChatItem } from '../lib/chat';
+import { appendDictation, imagesLeft, lastSeqOf, replyToRead } from '../lib/media';
 import { MAX_MESSAGE, trimDraft } from '../lib/messages';
 import { usePairing } from '../lib/pairing';
+import { pickFromLibrary, takePhoto, type Attachment, type PickResult } from '../lib/photos';
 import type { Pairing } from '../lib/protocol';
+import { DEFAULT_PREFS, loadPrefs, savePrefs, type Prefs } from '../lib/storage';
 import { useTheme } from '../lib/theme';
 import { useGenesis, type Connection } from '../lib/useGenesis';
 
@@ -35,6 +40,114 @@ function Chat({ pairing }: { pairing: Pairing }) {
   const [draft, setDraft] = useState('');
   const list = useRef<FlatList<ChatItem>>(null);
 
+  // ── снимки (2026-10-15) ──
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [attachOpen, setAttachOpen] = useState(false);
+  const [preparing, setPreparing] = useState(false);
+  const left = imagesLeft(attachments.length, g.limits);
+  const addImages = async (pick: () => Promise<PickResult>) => {
+    setAttachOpen(false);
+    setPreparing(true);
+    try {
+      const result = await pick();
+      setAttachments((cur) => [...cur, ...result.images].slice(0, g.limits.images));
+      if (result.error) g.setError(result.error);
+    } catch (e) {
+      console.warn('genesis: pick', e instanceof Error ? e.message : String(e));
+      g.setError('Снимката не можа да се отвори.');
+    } finally {
+      setPreparing(false);
+    }
+  };
+
+  // ── гласът (2026-10-15) ──
+  // Диктовката става текст в полето — операторът го чете, поправя и праща сам.
+  const [transcribing, setTranscribing] = useState(false);
+  const onFull = useRef<() => void>(() => undefined);
+  const recorder = useRecorder(() => onFull.current());
+  const canRecord = g.features.voice && micAvailable();
+  const stopAndTranscribe = async () => {
+    setTranscribing(true);
+    try {
+      const recording = await recorder.stop();
+      if (!recording) return;
+      const heard = await g.transcribe(recording.mime, recording.data);
+      if (heard) setDraft((d) => appendDictation(d, heard));
+    } catch (e) {
+      console.warn('genesis: stop', e instanceof Error ? e.message : String(e));
+      g.setError('Записът не можа да се прочете.');
+    } finally {
+      setTranscribing(false);
+    }
+  };
+  onFull.current = stopAndTranscribe;
+  const toggleMic = async () => {
+    if (transcribing) return;
+    if (recorder.recording) {
+      await stopAndTranscribe();
+      return;
+    }
+    g.setError('');
+    const problem = await recorder.start();
+    if (problem) g.setError(problem);
+  };
+
+  // Четене на глас: един отговор наведнъж; ▶ на звучащия го спира.
+  const playing = usePlayingKey();
+  // През ref: onSpeak остава същата функция и memo пази другите карти.
+  const playingRef = useRef(playing);
+  playingRef.current = playing;
+  const [loadingKey, setLoadingKey] = useState<string | null>(null);
+  const { speak, setError } = g;
+  const speakItem = useCallback(async (key: string, text: string, toggle: boolean) => {
+    if (toggle && playingRef.current === key) {
+      stopPlayback();
+      return;
+    }
+    setLoadingKey(key);
+    try {
+      const audio = await speak(text);
+      if (audio) await playAudio(key, audio.mime, audio.data);
+    } catch (e) {
+      console.warn('genesis: play', e instanceof Error ? e.message : String(e));
+      setError('Отговорът не можа да се пусне.');
+    } finally {
+      setLoadingKey((k) => (k === key ? null : k));
+    }
+  }, [speak, setError]);
+  const onSpeak = useCallback((key: string, text: string) => {
+    void speakItem(key, text, true);
+  }, [speakItem]);
+  useEffect(() => stopPlayback, []);
+
+  // „Чети отговорите на глас“ — запомнено на телефона. Чете се само отговорът
+  // на ход, който телефонът е видял да тече: при отваряне историята мълчи.
+  const [prefs, setPrefs] = useState<Prefs>(DEFAULT_PREFS);
+  useEffect(() => {
+    loadPrefs().then(setPrefs);
+  }, []);
+  const toggleSpeakReplies = () => {
+    const next = { ...prefs, speakReplies: !prefs.speakReplies };
+    setPrefs(next);
+    savePrefs(next);
+    if (!next.speakReplies) stopPlayback();
+  };
+  const readFrom = useRef(0);
+  const sawBusy = useRef(false);
+  const speakRef = useRef(speakItem);
+  speakRef.current = speakItem;
+  useEffect(() => {
+    if (g.busy) {
+      sawBusy.current = true;
+      return;
+    }
+    const pick = sawBusy.current && prefs.speakReplies && g.features.voice ? replyToRead(g.items, readFrom.current) : null;
+    sawBusy.current = false;
+    readFrom.current = lastSeqOf(g.items);
+    // През ref: смяна на ▶ (нов speakItem) не бива да чете пак.
+    if (pick) void speakRef.current(String(pick.seq), pick.text, false);
+  }, [g.busy, g.items, prefs.speakReplies, g.features.voice]);
+
   // Follow new output only while the reader is at the bottom: scrolling up to
   // read something must not be yanked back by the next tool result.
   const atBottom = useRef(true);
@@ -48,12 +161,18 @@ function Chat({ pairing }: { pairing: Pairing }) {
 
   // g.sending: второ докосване, докато първото е на път, не прави нищо (одит
   // 2026-10-11: две докосвания през 150 ms пускаха хода два пъти).
+  // Снимки без текст също се пращат — компютърът пита „Какво виждаш?“.
   const submit = async () => {
     const text = trimDraft(draft);
-    if (!text || g.busy || g.sending) return;
+    if ((!text && !attachments.length) || g.busy || g.sending || preparing || recorder.recording || transcribing) return;
     atBottom.current = true;
-    if (await g.send(text)) setDraft('');
+    if (await g.send(text, attachments)) {
+      setDraft('');
+      setAttachments([]);
+    }
   };
+  const canSend = (!!trimDraft(draft) || attachments.length > 0) && !g.sending && g.connection === 'online'
+    && !preparing && !recorder.recording && !transcribing;
 
   const [menuOpen, setMenuOpen] = useState(false);
   // The chat's own commands (remote_server.phone_command), one tap away.
@@ -101,6 +220,10 @@ function Chat({ pairing }: { pairing: Pairing }) {
           {/* Насред хода компютърът отказва всичко тук ("busy") — „Нов
               разговор“ се предлагаше и мълчаливо не правеше нищо (одит
               2026-10-11). */}
+          {g.features.voice ? (
+            <MenuItem label={`Чети отговорите на глас: ${prefs.speakReplies ? 'вкл.' : 'изкл.'}`}
+              onPress={() => { setMenuOpen(false); toggleSpeakReplies(); }} />
+          ) : null}
           {g.busy ? null : (
             <>
               <MenuItem label="Нов разговор" onPress={() => { setMenuOpen(false); g.clear(); }} />
@@ -147,7 +270,10 @@ function Chat({ pairing }: { pairing: Pairing }) {
           renderItem={({ item }) => {
             switch (item.kind) {
               case 'user': return <UserBubble item={item} />;
-              case 'assistant': return <AssistantMessage item={item} />;
+              case 'assistant': return (
+                <AssistantMessage item={item} onSpeak={g.features.voice ? onSpeak : undefined}
+                  speech={speechState(item.key, playing, loadingKey)} />
+              );
               case 'tool': return <ToolCard item={item} />;
               case 'note': return <Note item={item} />;
               case 'confirm': return <ConfirmCard item={item} onAnswer={g.confirm} />;
@@ -177,7 +303,23 @@ function Chat({ pairing }: { pairing: Pairing }) {
           </Text>
         ) : null}
 
+        {attachOpen && left > 0 ? (
+          <AttachMenu left={left} onCamera={() => addImages(takePhoto)} onLibrary={() => addImages(() => pickFromLibrary(left))} />
+        ) : null}
+        <AttachmentStrip images={attachments} preparing={preparing}
+          onRemove={(id) => setAttachments((cur) => cur.filter((a) => a.id !== id))} />
+
         <View style={[styles.composer, { borderColor: theme.border, backgroundColor: theme.surface }]}>
+          {g.features.images ? (
+            <Pressable accessibilityRole="button" accessibilityLabel="Прикачи снимка"
+              onPress={() => setAttachOpen((o) => !o)} disabled={left <= 0 || preparing || recorder.recording}
+              style={[styles.tool, { opacity: left > 0 && !preparing && !recorder.recording ? 1 : 0.4 }]}>
+              <Text style={[styles.toolText, { color: theme.text }]}>{attachOpen ? '×' : '+'}</Text>
+            </Pressable>
+          ) : null}
+          {recorder.recording ? (
+            <RecordingBar durationMs={recorder.durationMs} onCancel={() => recorder.cancel()} />
+          ) : (
           <TextInput
             value={draft}
             onChangeText={setDraft}
@@ -190,6 +332,16 @@ function Chat({ pairing }: { pairing: Pairing }) {
             blurOnSubmit={false}
             accessibilityLabel="Съобщение"
           />
+          )}
+          {canRecord ? (
+            <Pressable accessibilityRole="button"
+              accessibilityLabel={recorder.recording ? 'Спри записа и го направи на текст' : 'Диктувай'}
+              onPress={toggleMic} disabled={transcribing}
+              style={[styles.send, { backgroundColor: recorder.recording ? theme.danger : theme.surfaceAlt }]}>
+              {transcribing ? <ActivityIndicator size="small" color={theme.accent} />
+                : <Text style={[styles.micText, { color: recorder.recording ? '#fff' : theme.text }]}>{recorder.recording ? '■' : '🎤'}</Text>}
+            </Pressable>
+          ) : null}
           {g.busy ? (
             <Pressable accessibilityRole="button" accessibilityLabel="Спри" onPress={() => g.stop()}
               style={[styles.send, { backgroundColor: theme.danger }]}>
@@ -197,9 +349,8 @@ function Chat({ pairing }: { pairing: Pairing }) {
             </Pressable>
           ) : (
             <Pressable accessibilityRole="button" accessibilityLabel="Изпрати" onPress={submit}
-              disabled={!trimDraft(draft) || g.sending || g.connection !== 'online'}
-              style={[styles.send, { backgroundColor: theme.accent,
-                opacity: trimDraft(draft) && !g.sending && g.connection === 'online' ? 1 : 0.4 }]}>
+              disabled={!canSend}
+              style={[styles.send, { backgroundColor: theme.accent, opacity: canSend ? 1 : 0.4 }]}>
               <Text style={[styles.sendText, { color: theme.accentText }]}>↑</Text>
             </Pressable>
           )}
@@ -207,6 +358,10 @@ function Chat({ pairing }: { pairing: Pairing }) {
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
+}
+
+function speechState(key: string, playing: string | null, loading: string | null): SpeakState {
+  return loading === key ? 'loading' : playing === key ? 'playing' : 'idle';
 }
 
 function MenuItem({ label, onPress, danger }: { label: string; onPress: () => void; danger?: boolean }) {
@@ -257,6 +412,9 @@ const styles = StyleSheet.create({
   input: { flex: 1, fontSize: 16, maxHeight: 140, paddingTop: 8, paddingBottom: 8 },
   send: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
   sendText: { color: '#fff', fontSize: 18, fontWeight: '800' },
+  micText: { fontSize: 17 },
+  tool: { width: 32, height: 36, alignItems: 'center', justifyContent: 'center', marginLeft: -6 },
+  toolText: { fontSize: 24, fontWeight: '500' },
   menu: { marginHorizontal: 12, marginTop: 8, borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, paddingVertical: 4 },
   menuInfo: { fontSize: 12, paddingHorizontal: 14, paddingVertical: 8 },
   menuItem: { paddingHorizontal: 14, paddingVertical: 12 },
