@@ -9,7 +9,7 @@ import os
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 ROOT = Path(SPECPATH).parent  # noqa: F821 — SPECPATH is injected by PyInstaller
 PKG = ROOT / "genesis_agent"
@@ -74,14 +74,59 @@ for optional in ("google.auth", "anthropic", "cryptography", "qrcode"):
         continue
     hiddenimports += collect_submodules(optional)
 
+# Глас и картинки (2026-10-15): [voice] = sounddevice + edge-tts, [vision] =
+# Pillow. voice.py/vision.py ги внасят мързеливо (find_spec + import във
+# функция), затова тук се изброяват изрично — анализът на PyInstaller не
+# трябва да е единственото, което ги „вижда“. Без тях genesis.exe нямаше
+# /listen, /voice on и смаляване на картинки, а операторът на Windows
+# ползва точно него.
+#   sounddevice — DLL-ът на PortAudio е в _sounddevice_data/portaudio-binaries;
+#     прибира го hook-sounddevice от pyinstaller-hooks-contrib (идва с
+#     pyinstaller==6.22.3), а проверката под Analysis спира билда без него.
+#   edge_tts — чист Python върху aiohttp; TLS контекстът му е
+#     certifi.where(), затова cacert.pem трябва да е вътре (hook-certifi,
+#     а certifi е и изрично тук), иначе всеки глас гърми на TLS.
+#   PIL — hook-PIL.Image прибира плъгините; тук са тези, които vision.py
+#     приема (PNG/JPEG/WebP/GIF), за да не зависят от hook-а.
+# faster-whisper ([voice-local]) НЕ влиза: ctranslate2 + модел от 0.5–3 GB.
+MEDIA_IMPORTS = {
+    "sounddevice": ["sounddevice", "_sounddevice", "_sounddevice_data", "_cffi_backend"],
+    "edge_tts": ["edge_tts", "aiohttp", "certifi"],
+    "PIL": ["PIL.Image", "PIL.ImageOps", "PIL.PngImagePlugin", "PIL.JpegImagePlugin",
+            "PIL.WebPImagePlugin", "PIL.GifImagePlugin"],
+}
+media: list[str] = []
+for top, names in MEDIA_IMPORTS.items():
+    try:
+        __import__(top)
+    except ImportError:
+        continue
+    except OSError:
+        # sounddevice на Linux без libportaudio2: пакетът е тук, DLL-ът не.
+        pass
+    media.append(top)
+    hiddenimports += names
+if "edge_tts" in media:
+    # aiohttp.worker е за gunicorn — edge-tts ползва само клиента.
+    hiddenimports += collect_submodules("edge_tts")
+    hiddenimports += collect_submodules("aiohttp", filter=lambda m: m != "aiohttp.worker")
+    datas += collect_data_files("certifi")
+
 a = Analysis(  # noqa: F821
     [str(ROOT / "packaging" / "genesis_entry.py")],
     pathex=[str(ROOT)],
     datas=datas,
     hiddenimports=hiddenimports,
-    excludes=["tkinter", "_tkinter", "test", "idlelib", "turtledemo", "lib2to3", "playwright"],
+    excludes=["tkinter", "_tkinter", "test", "idlelib", "turtledemo", "lib2to3", "playwright",
+              # [voice-local] — дори ако е инсталиран там, където се билдва.
+              "faster_whisper", "ctranslate2"],
     noarchive=False,
 )
+# Без DLL-а `import sounddevice` в genesis.exe гърми с „PortAudio library not
+# found“ — по-добре билдът да спре тук, отколкото микрофонът при оператора.
+if sys.platform == "win32" and "sounddevice" in media and not any(
+        "libportaudio" in Path(dest).name.lower() for dest, *_ in a.binaries):
+    raise SystemExit("genesis.spec: sounddevice е тук, но libportaudio*.dll не е събран")
 pyz = PYZ(a.pure)  # noqa: F821
 
 icon = os.environ.get("GENESIS_ICON")
