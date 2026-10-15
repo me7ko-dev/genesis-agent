@@ -1278,6 +1278,13 @@ class RemoteServer:
 
             def _answer(self, ip: str, body: bytes, *, large: bool = False) -> None:
                 try:
+                    # И малкото тяло — точно плик преди json.loads (2026-10-15,
+                    # след ревюто на големия път): 256 KiB `[{},{},…]` без ключ
+                    # ставаха ~25× речници на заявка, по 64 връзки. Отговорът е
+                    # същият 401 „rejected“; спрян адрес вече минаваше през
+                    # същата проверка, а телефонът и Desktop пращат точно {v, n, c}.
+                    if not _ENVELOPE_SHAPE.fullmatch(body):
+                        raise ProtocolError("not an envelope")
                     envelope = json.loads(body.decode("utf-8"))
                     response, rid = (server.handle(envelope, large=True) if large
                                      else server.handle(envelope))

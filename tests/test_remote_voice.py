@@ -311,6 +311,24 @@ def test_a_big_body_with_an_envelope_head_and_json_after_it_is_not_parsed(live_v
     assert len(server._failures["127.0.0.1"]) == 1 and fakes.stt_calls == []
 
 
+def test_a_small_body_that_is_not_an_envelope_is_not_parsed(live_voice) -> None:
+    """И под 256 KiB (2026-10-15): `[{},{},…]` без ключ ставаше ~25× речници
+    в json.loads на заявка. Сега — същият 401 „rejected“, без разбор."""
+    import tracemalloc
+    base, server, fakes = live_voice
+    body = b"[" + b"{}," * ((rs._MAX_BODY - 8) // 3) + b"{}]"
+    assert len(body) <= rs._MAX_BODY
+    tracemalloc.start()
+    try:
+        status, reply = _post(base, body)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert status == 401 and reply.get("error") == "rejected"
+    assert peak < 4 * 1024 * 1024, f"{peak / 1048576:.1f} MiB"
+    assert len(server._failures["127.0.0.1"]) == 1 and fakes.stt_calls == []
+
+
 class _Conn:
     def settimeout(self, _t) -> None:
         pass
