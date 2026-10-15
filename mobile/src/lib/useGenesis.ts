@@ -145,8 +145,8 @@ export function useGenesis(pairing: Pairing) {
     }
   }, [act, client, outbox]);
 
-  const confirm = useCallback(async (id: string, allow: boolean) => {
-    const reply = await act(() => client.confirm(id, allow));
+  const confirm = useCallback(async (id: string, allow: boolean, session = false) => {
+    const reply = await act(() => client.confirm(id, allow, session));
     // ok:false — already answered, timed out or stopped: confirm_done shows
     // what happened, nothing to retry.
     if (reply && !reply.ok) setError('Това потвърждение вече е отговорено или изтече.');

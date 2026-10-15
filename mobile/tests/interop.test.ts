@@ -170,8 +170,22 @@ test('a whole conversation with the real server', async () => {
     const { hit: confirm, after } = await waitFor(client, (e) => e.type === 'confirm', before);
     assert.equal(confirm.operation, 'rm -rf build');
     assert.deepEqual(await client.confirm(confirm.id!, true), { ok: true });
-    const { hit: result } = await waitFor(client, (e) => e.type === 'info', after);
+    const { hit: result, after: done } = await waitFor(client, (e) => e.type === 'info', after);
     assert.equal(result.text, 'allowed=True');
+    assert.equal(confirm.session_rule, undefined, 'no third button unless the server offers it');
+
+    // „За тази сесия“ (2026-10-15): the server offers it, the phone answers it,
+    // and a second tap (Откажи) does not change the answer.
+    await waitFor(client, (e) => e.type === 'busy' && e.busy === false, done - 1);
+    assert.equal((await client.send('сесия')).ok, true);
+    const { hit: offer, after: asked } = await waitFor(client, (e) => e.type === 'confirm', done);
+    assert.equal(offer.session_rule, 'pip install requests');
+    assert.deepEqual(await client.confirm(offer.id!, true, true), { ok: true });
+    assert.deepEqual(await client.confirm(offer.id!, false), { ok: false });
+    const { hit: closed } = await waitFor(client, (e) => e.type === 'confirm_done', asked);
+    assert.equal(closed.session, true);
+    const { hit: remembered } = await waitFor(client, (e) => e.type === 'info', asked);
+    assert.equal(remembered.text, 'allowed=session');
   } finally {
     stop();
   }
