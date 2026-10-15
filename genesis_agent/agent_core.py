@@ -13,6 +13,7 @@ Jarvis да го internal-но ползва без да тегли GTK, и об�
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import traceback
@@ -23,6 +24,8 @@ from pathlib import Path
 
 from genesis_agent.config import TOOL_ROUND_CAP
 from genesis_agent.tool_schemas import load_tool_arguments
+
+log = logging.getLogger("genesis.agent_core")
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -195,7 +198,7 @@ class Core:
                 if instructions:
                     self.system_prompt += "\n\n" + instructions
             except Exception:
-                pass
+                log.debug("инструкциите на проекта не се добавиха към промпта", exc_info=True)
             self.provider = cfg.get("models", {}).get("default_provider", "")
             self.model = ""
 
@@ -209,6 +212,7 @@ class Core:
                         "\n\n## СЪСТОЯНИЕ НА РАБОТАТА (от предишни сесии)\n" + self.briefing
                     )
             except Exception:
+                log.debug("workspace_memory не се зареди", exc_info=True)
                 self.wm = None  # type: ignore[assignment]
 
             # Знаниев граф (GraphRAG-style, design note 2026-07-29) — допълва
@@ -225,17 +229,18 @@ class Core:
                         "\n\n## ЗНАНИЕВ ГРАФ (entities/relations/states)\n" + graph_text
                     )
             except Exception:
-                pass
+                log.debug("знаниевият граф не се добави към промпта", exc_info=True)
 
             try:
                 from genesis_agent import conversation_memory as cm
 
                 self.conv_mem = cm
             except Exception:
+                log.debug("conversation_memory не се внася", exc_info=True)
                 self.conv_mem = None  # type: ignore[assignment]
 
             self.ok = True
-        except Exception:
+        except Exception:  # noqa: BLE001 — следата се пази цяла в self.error
             self.error = traceback.format_exc()
 
     @staticmethod
@@ -261,7 +266,7 @@ class Core:
         try:
             self.conv_mem.add_message(role, content)
         except Exception:
-            pass
+            log.debug("съобщението не се записа в паметта на разговора", exc_info=True)
 
     def complete(self, messages: list) -> tuple:
         """Едно обръщение към мозъка. Връща (text, tool_calls, provider, model)."""
@@ -321,6 +326,7 @@ def _diff_for_write(skills, args: dict) -> str | None:
         )
         return "".join(diff) or None
     except Exception:
+        log.debug("diff-ът не се изчисли", exc_info=True)
         return None
 
 
@@ -330,6 +336,7 @@ def _is_question(result: str) -> bool:
     try:
         from genesis_skills import ASK_USER_MARKER
     except Exception:
+        log.debug("genesis_skills не се внася — маркерът по подразбиране", exc_info=True)
         ASK_USER_MARKER = "__GENESIS_ASK_USER__"
     return bool(result) and ASK_USER_MARKER in result
 
@@ -339,6 +346,7 @@ def _clean_question(result: str) -> str:
     try:
         from genesis_skills import ASK_USER_MARKER
     except Exception:
+        log.debug("genesis_skills не се внася — маркерът по подразбиране", exc_info=True)
         ASK_USER_MARKER = "__GENESIS_ASK_USER__"
     return result.replace(ASK_USER_MARKER, "").strip()
 
@@ -378,6 +386,7 @@ def _to_user_text(text: str) -> str:
         from genesis_agent.translator import translate_en_to_bg
         return translate_en_to_bg(text)
     except Exception:
+        log.debug("преводът към български се провали — оригиналът", exc_info=True)
         return text
 
 
@@ -402,7 +411,7 @@ def _translate_last_user_message_to_en(messages: list) -> None:
         from genesis_agent.translator import translate_bg_to_en
         last["content"] = translate_bg_to_en(content)
     except Exception:
-        pass
+        log.debug("преводът към английски се провали — оригиналът", exc_info=True)
 
 
 def run_tool_loop(
@@ -679,7 +688,7 @@ def run_tool_loop(
         try:
             core.wm.auto_capture(pre_compact)
         except Exception:
-            pass
+            log.debug("auto_capture след компресията се провали", exc_info=True)
         try:
             from genesis_agent import knowledge_graph as kgraph
 
@@ -690,7 +699,7 @@ def run_tool_loop(
             kgraph.compact_and_graph_memory(
                 transcript, workspace=str(getattr(core, "workspace", "") or "") or None)
         except Exception:
-            pass
+            log.debug("знаниевият граф след компресията се провали", exc_info=True)
         _status(f"история компресирана ({before_len} → {len(messages)})")
 
     return bounded_history(messages, limit) if limit else messages

@@ -36,12 +36,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+
+log = logging.getLogger("genesis.hooks")
 
 EVENTS = ("PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop")
 _TIMEOUT = 60
@@ -89,6 +92,7 @@ def _ws() -> Path:
         import genesis_skills
         return Path(genesis_skills._WORKSPACE)
     except Exception:
+        log.debug("работната папка на genesis_skills не е достъпна — cwd", exc_info=True)
         return Path.cwd()
 
 
@@ -186,7 +190,7 @@ def _say(text: str) -> None:
     try:
         notify(text)
     except Exception:
-        pass
+        log.debug("известието от куката не замина", exc_info=True)
 
 
 def _parse(path: Path) -> list[Hook]:

@@ -12,9 +12,12 @@ itself — the tools are not offered, and anything else is refused.
 """
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable
 from typing import Any
+
+log = logging.getLogger("genesis.explore")
 
 TOOLS = ("READ_FILE", "GLOB", "SEARCH_CODE", "REPO_MAP", "LIST_DIR")
 MAX_ROUNDS = 10
@@ -51,6 +54,7 @@ def _clip(text: str) -> str:
         from genesis_agent.budget import clip_for_context
         return clip_for_context(text)
     except Exception:
+        log.debug("clip_for_context се провали — режем до 8000 знака", exc_info=True)
         return text[:8000]
 
 
@@ -70,7 +74,7 @@ def explore(question: str, workspace: str = "", *,
         from genesis_agent.agent_core import env_facts
         system += "\n\n" + env_facts(workspace or str(gs._WORKSPACE))
     except Exception:
-        pass
+        log.debug("env_facts не се добави към промпта", exc_info=True)
     messages: list[dict] = [{"role": "system", "content": system},
                             {"role": "user", "content": question}]
     # Какво е „видял“ главният агент не се мени от прочетеното тук: иначе след

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import logging
 import os
 import re
 import tarfile
@@ -44,6 +45,8 @@ from genesis_agent.brain import Brain
 from genesis_agent.repo_map import detect_project, repo_map
 from genesis_agent.review import safe_git
 from genesis_agent.tool_schemas import REPAIR_TOOLS, load_tool_arguments
+
+log = logging.getLogger("genesis.repo_agent")
 
 # Нарочно в HOME, а НЕ в DATA_DIR: при git checkout DATA_DIR сочи вътре в самото
 # repo, а тук се пазят tar архиви на ЧУЖДИ проекти — те нямат работа в дървото на
@@ -205,7 +208,7 @@ def create_checkpoint(root: Path) -> Path:
         from genesis_agent.paths import ensure_genesis_home
         ensure_genesis_home()
     except Exception:
-        pass
+        log.debug("ensure_genesis_home се провали", exc_info=True)
     dest, stamp = _new_checkpoint_path(root)
     global _SNAPSHOT_ROOT
     _SNAPSHOT_ROOT = root

@@ -22,9 +22,12 @@ Playwright, headless Chromium, ИЗОЛИРАН ефемерен профил (�
 """
 from __future__ import annotations
 
+import logging
 import os
 
 from genesis_agent import sandbox
+
+log = logging.getLogger("genesis.browser")
 
 _ALLOWED_SCHEMES = ("http://", "https://")
 _MAX_TEXT_CHARS = 4000
@@ -98,7 +101,7 @@ def close() -> None:
         if _pw:
             _pw.stop()
     except Exception:
-        pass
+        log.debug("браузърът не се затвори чисто", exc_info=True)
     _pw = _browser = _page = None
 
 
@@ -108,6 +111,7 @@ def _scan() -> list[dict]:
     try:
         _last_elements = page.evaluate(_SCAN_JS)
     except Exception:
+        log.debug("сканирането на елементите се провали", exc_info=True)
         _last_elements = []
     return _last_elements
 
@@ -129,11 +133,13 @@ def _page_state_summary() -> str:
     try:
         title = page.title()
     except Exception:
+        log.debug("заглавието на страницата не се прочете", exc_info=True)
         title = "(?)"
     url = page.url
     try:
         text = page.inner_text("body")[:_MAX_TEXT_CHARS]
     except Exception:
+        log.debug("текстът на страницата не се прочете", exc_info=True)
         text = "(няма достъпен текст)"
     elements = _scan()
     return (
@@ -204,6 +210,7 @@ def navigate(url: str) -> str:
     try:
         page.goto(url, wait_until="domcontentloaded")
     except Exception as e:
+        log.debug("страницата не се зареди", exc_info=True)
         return f"[BROWSE] Грешка при зареждане на {url}: {e}"
     return f"[BROWSE: {url}]\n{_page_state_summary()}"
 
@@ -234,7 +241,7 @@ def click(target: str) -> str:
             el["i"],
         ))
     except Exception:
-        pass
+        log.debug("проверката за форма с парола се провали", exc_info=True)
 
     verdict = sandbox.assess_browser_click(" | ".join(filter(None, [label, el.get("labels", "")])),
                                            is_submit_near_password)
@@ -246,6 +253,7 @@ def click(target: str) -> str:
         _page.locator(f'[data-genesis-idx="{el["i"]}"]').click(timeout=5000)
         _page.wait_for_timeout(500)  # кратка пауза за евентуална навигация/render
     except Exception as e:
+        log.debug("кликът се провали", exc_info=True)
         return f"[BROWSER_CLICK: {label}] Грешка при клик: {e}"
     return f"[BROWSER_CLICK: {label}] ✓ кликнато\n\n{_page_state_summary()}"
 
@@ -274,5 +282,6 @@ def type_text(arg: str) -> str:
     try:
         _page.locator(f'[data-genesis-idx="{el["i"]}"]').fill(text, timeout=5000)
     except Exception as e:
+        log.debug("въвеждането се провали", exc_info=True)
         return f"[BROWSER_TYPE: {field_label}] Грешка при въвеждане: {e}"
     return f"[BROWSER_TYPE: {field_label}] ✓ въведено"

@@ -70,7 +70,10 @@ def _install() -> None:
     try:
         libs.update(real(p) for p in site.getsitepackages())
         libs.add(real(site.getusersitepackages()))
-    except Exception:
+    # Без log.debug (2026-10-15): py_guard е стартовият скрипт ВЪВ процеса на
+    # кода от модела — там няма debug.log handler, а logging, внесен преди
+    # runpy, би променил състоянието, което скриптът вижда.
+    except Exception:  # noqa: BLE001, S110
         pass
 
     def under(path: str, roots: list[str] | set[str]) -> bool:
@@ -251,7 +254,7 @@ def main() -> None:
         runpy.run_path(script, run_name="__main__")
     except SystemExit:
         raise
-    except BaseException as e:
+    except BaseException as e:  # noqa: BLE001 — следата се печата по-долу, кодът е 1
         # Следата — от кадъра на скрипта нататък, както без пазача: викащите
         # режат stderr отначало и „boom“ се губеше зад кадрите на runpy.
         import traceback

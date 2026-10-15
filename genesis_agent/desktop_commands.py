@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import glob
 import json
+import logging
 import os
 import re
 import time
@@ -23,6 +24,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger("genesis.desktop_commands")
 
 # Безплатните квоти, които кодът на Genesis вече документира (коментарите в
 # genesis_terminal_agent.PROVIDERS / FREE_PROVIDERS). Доставчиците не връщат
@@ -345,6 +348,19 @@ def cmd_history(_arg: dict, _ctx: CommandContext) -> dict:
     return {"ok": True, "sessions": items}
 
 
+def replay(emit: Callable[..., Any], messages: Any) -> None:
+    """Разговорът наново в приложението: "cleared", после репликите — с тях
+    телефонът и Desktop рисуват историята от нулата. Общо за /history и за
+    /resume и /rewind от чата (2026-10-15: там се виждаха само бележките, а
+    заредената или отрязаната история — не)."""
+    emit("cleared")
+    for m in messages:
+        if m.get("role") == "user":
+            emit("user", text=str(m.get("content") or ""))
+        elif m.get("role") == "assistant" and m.get("content"):
+            emit("assistant", text=str(m.get("content")))
+
+
 def cmd_load_history(arg: dict, ctx: CommandContext) -> dict:
     gta = _gta()
     if ctx.busy():
@@ -360,12 +376,7 @@ def cmd_load_history(arg: dict, ctx: CommandContext) -> dict:
     ctx.set_messages(messages)
     # Следващите ходове се пишат в нов файл: старата сесия остава непокътната.
     gta.session_start_time = time.time()
-    ctx.emit("cleared")
-    for m in messages:
-        if m.get("role") == "user":
-            ctx.emit("user", text=str(m.get("content") or ""))
-        elif m.get("role") == "assistant" and m.get("content"):
-            ctx.emit("assistant", text=str(m.get("content")))
+    replay(ctx.emit, messages)
     return {"ok": True, "messages": sum(1 for m in messages if m.get("role") in ("user", "assistant"))}
 
 
@@ -436,4 +447,5 @@ def run(name: str, arg: dict, ctx: CommandContext) -> dict:
     try:
         return fn(arg if isinstance(arg, dict) else {}, ctx)
     except Exception as e:  # командите никога не събарят сървъра
+        log.debug("командата хвърли", exc_info=True)
         return {"ok": False, "error": f"{type(e).__name__}: {e}"[:400]}
