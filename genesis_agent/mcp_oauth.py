@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -33,6 +34,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
+
+log = logging.getLogger("genesis.mcp_oauth")
 
 LOGIN_TIMEOUT = 300.0
 _HTTP_TIMEOUT = 15
@@ -469,7 +472,7 @@ def _open(url: str) -> None:
         import webbrowser
         webbrowser.open(url)
     except Exception:
-        pass
+        log.debug("браузърът не се отвори", exc_info=True)
 
 
 def _expired(entry: dict) -> bool:

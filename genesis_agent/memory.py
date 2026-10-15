@@ -149,6 +149,7 @@ def memory_dump() -> dict[str, Any]:
         try:
             result[key] = json.loads(val_str)
         except Exception:
+            log.debug("стойността не е JSON — връща се низът", exc_info=True)
             result[key] = val_str
     return result
 
@@ -182,7 +183,7 @@ def memory_search(query: str, top_k: int = 5) -> list[dict]:
     """
     try:
         return episodic.search_episodes(query, top_k=top_k)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — вече се записва с log.warning
         log.warning(f"[memory] Търсенето неуспешно (scikit-learn наличен ли е?): {e}")
         # Fallback: прост текстов search
         episodes = episodic._fetch_all_episodes()

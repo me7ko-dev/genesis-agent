@@ -136,7 +136,7 @@ def _worker(task: DelegatedTask, timeout: int, on_done: Callable | None):
             task.status = TaskStatus.DONE
         log.info(f"[delegate] ✅ Task {task.id[:8]} завършен ({task.elapsed}s)")
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — вече се записва с log.error по-долу
         task.error = str(e)
         if task.status != TaskStatus.TIMEOUT:
             task.status = TaskStatus.FAILED
@@ -146,7 +146,7 @@ def _worker(task: DelegatedTask, timeout: int, on_done: Callable | None):
         if on_done:
             try:
                 on_done(task)
-            except Exception as cb_err:
+            except Exception as cb_err:  # noqa: BLE001 — вече се записва с log.error
                 log.error(f"[delegate] Callback грешка: {cb_err}")
 
 

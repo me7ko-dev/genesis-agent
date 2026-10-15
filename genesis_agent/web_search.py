@@ -54,7 +54,7 @@ def _cache_get(key: str) -> str | None:
         if time.time() - data["ts"] < CACHE_TTL_SECONDS:
             return data["content"]
     except Exception:
-        pass
+        log.debug("кешът на търсенето не се прочете", exc_info=True)
     return None
 
 
@@ -102,6 +102,7 @@ def _extract_text(html: str) -> str:
         parser.feed(html)
         return parser.get_text()
     except Exception:
+        log.debug("HTMLParser се провали — махаме таговете с regex", exc_info=True)
         # Fallback — махаме HTML тагове с regex
         return re.sub(r"<[^>]+>", " ", html)
 
@@ -213,7 +214,7 @@ def search(
                 try:
                     result_url = urllib.parse.unquote(m_uddg.group(1))
                 except Exception:
-                    pass
+                    log.debug("uddg адресът не се декодира", exc_info=True)
         results.append({"title": title, "url": result_url, "snippet": snippet[:300]})
 
     # Fallback: показваме извлечен текст ако не е парснат нищо

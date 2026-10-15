@@ -14,6 +14,7 @@ genesis_agent.benchmark — самооценка на агента (L2-4).
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import time
 from datetime import datetime, timezone
@@ -22,6 +23,8 @@ from typing import Any
 from genesis_agent.brain import Brain
 from genesis_agent.config import DATA_DIR
 from genesis_agent.executor import run_python_subprocess
+
+log = logging.getLogger("genesis.benchmark")
 
 HISTORY = DATA_DIR / "benchmark_history.json"
 
@@ -164,7 +167,7 @@ def run_benchmark(quick: bool = False, orchestrated: bool = False) -> dict:
         try:
             hist = json.loads(HISTORY.read_text(encoding="utf-8"))
         except Exception:
-            pass
+            log.debug("историята на бенчмарка не се прочете — започва наново", exc_info=True)
     hist["runs"].append(summary)
     HISTORY.write_text(json.dumps(hist, indent=2, ensure_ascii=False), encoding="utf-8")
 

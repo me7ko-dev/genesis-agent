@@ -11,10 +11,13 @@ genesis_agent.reflection — мета-обучение: агентът се уч
 """
 from __future__ import annotations
 
+import logging
 import re
 from collections import Counter
 
 from genesis_agent import episodic_memory as _em
+
+log = logging.getLogger("genesis.reflection")
 
 # Образец на грешка → кратък урок. Проверяват се в реда на списъка.
 _ERROR_LESSONS: list[tuple[re.Pattern[str], str]] = [
@@ -84,7 +87,7 @@ def record_mission(goal: str, success: bool, detail: str = "", *, reused_existin
             tags=tags,
         )
     except Exception:
-        pass
+        log.debug("мисията не се записа в епизодичната памет", exc_info=True)
 
 
 _EXC_LINE = re.compile(r"^\s*(?:[\w.]+(?:Error|Exception|Exit|Interrupt)|SANDBOX \w+)\b.*$", re.MULTILINE)
@@ -117,6 +120,7 @@ def _recent_missions(last_n: int) -> list[dict]:
     try:
         return _em.recent_with_tag("mission", last_n)
     except Exception:
+        log.debug("скорошните мисии не се прочетоха", exc_info=True)
         return []
 
 
