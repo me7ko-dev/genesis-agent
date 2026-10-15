@@ -192,6 +192,11 @@ class ApiServer(ThreadingHTTPServer):
     daemon_threads = True
     # На Windows SO_REUSEADDR пуска втори процес на същия порт без грешка.
     allow_reuse_address = os.name != "nt"
+    # Опашката по подразбиране на socketserver е 5: измерено 2026-10-15 — от 20
+    # връзки, отворени наведнъж, минаваха 6, а другите висяха до таймаута си
+    # (на cloud/web същото даде ConnectionResetError в CI на 3.13, 2026-10-11).
+    # Играта пита за няколко жители едновременно — затова същата поправка.
+    request_queue_size = 128
 
     def __init__(self, port: int, *, request_timeout: float = REQUEST_TIMEOUT_S,
                  parallel: int = MAX_PARALLEL) -> None:

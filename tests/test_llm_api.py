@@ -254,3 +254,38 @@ def test_cli_routes_api_subcommand(capsys) -> None:
     assert cli.main(["api", "--help"]) == 0
     out = capsys.readouterr().out
     assert "Употреба: genesis api" in out and "Непозната команда" not in out
+
+
+def test_a_burst_of_connections_is_queued_not_dropped(monkeypatch) -> None:
+    """Връзки, отворени преди сървърът да ги приеме, чакат в опашката.
+
+    Измерено 2026-10-15: с опашката по подразбиране на socketserver (5) от 20
+    връзки, отворени наведнъж, минаха 6, а 14 висяха до таймаута на connect —
+    същото, което в CI на 3.13 даде ConnectionResetError на cloud/web."""
+    import socket
+    monkeypatch.setattr(llm_api, "health", lambda: {"ok": True})
+    httpd = llm_api.ApiServer(0)
+    port = httpd.server_address[1]
+    socks: list[socket.socket] = []
+    request = f"GET /v1/health HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode()
+    try:
+        for _ in range(16):  # над 5+1, далеч под 128
+            s = socket.create_connection(("127.0.0.1", port), timeout=0.5)
+            socks.append(s)
+            s.sendall(request)
+    except OSError:
+        for s in socks:
+            s.close()
+        httpd.server_close()
+        pytest.fail(f"опашката прие само {len(socks)} от 16 връзки")
+    thread = threading.Thread(target=httpd.serve_forever, args=(0.05,), daemon=True)
+    thread.start()
+    try:
+        for s in socks:
+            s.settimeout(5)
+            assert s.recv(64).startswith(b"HTTP/1.0 200")
+    finally:
+        for s in socks:
+            s.close()
+        httpd.shutdown()
+        httpd.server_close()
