@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import glob
 import json
+import logging
 import os
 import re
 import time
@@ -23,6 +24,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger("genesis.desktop_commands")
 
 # Безплатните квоти, които кодът на Genesis вече документира (коментарите в
 # genesis_terminal_agent.PROVIDERS / FREE_PROVIDERS). Доставчиците не връщат
@@ -436,4 +439,5 @@ def run(name: str, arg: dict, ctx: CommandContext) -> dict:
     try:
         return fn(arg if isinstance(arg, dict) else {}, ctx)
     except Exception as e:  # командите никога не събарят сървъра
+        log.debug("командата хвърли", exc_info=True)
         return {"ok": False, "error": f"{type(e).__name__}: {e}"[:400]}

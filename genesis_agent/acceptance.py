@@ -21,12 +21,15 @@ So on by default only when the turn's model is free (operator's decision).
 from __future__ import annotations
 
 import atexit
+import logging
 import os
 import re
 import shutil
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
+
+log = logging.getLogger("genesis.acceptance")
 
 _WRITTEN = re.compile(r"^\[(?:WRITE_FILE|EDIT_FILE): ([^\]\n]+)\] ✓", re.MULTILINE)
 _TIMEOUT = 120
@@ -148,6 +151,7 @@ class AcceptanceCheck:
         try:
             code = self._ask()
         except Exception as e:  # a failed side check never stops the turn
+            log.debug("приемните тестове не се генерираха", exc_info=True)
             return "", f"приемни тестове: пропуснати ({e})"
         if not code:
             return "", "приемни тестове: заявката не дава интерфейс за тест — пропуснати"
