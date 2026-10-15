@@ -61,14 +61,14 @@ def _real_histories(config_path: Path) -> list[Path]:
     2026-10-15): genesis_terminal_agent предпочита второто пред
     GENESIS_HISTORY_DIR, тоест тест, който го внася в тялото си, пише там —
     а пазачът гледаше само първото."""
+    import yaml
     found = [_history_dir()]
     try:
-        import yaml
         cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        storage = cfg.get("storage") if isinstance(cfg, dict) else None
-        override = (storage or {}).get("history_dir") if isinstance(storage, dict) else ""
-    except Exception:   # счупен config.yaml — пазачът пак гледа подразбиращата се
-        override = ""
+    except (OSError, ValueError, yaml.YAMLError):   # няма го или е счупен — само подразбиращата се
+        cfg = {}
+    storage = cfg.get("storage") if isinstance(cfg, dict) else None
+    override = storage.get("history_dir") if isinstance(storage, dict) else ""
     if override:
         found.append(Path(str(override)).expanduser())
     return found
