@@ -93,16 +93,18 @@ def test_usage(ws, capsys) -> None:
 # ── паралелни четения в един рунд ───────────────────────────────────────────
 
 def test_independent_reads_run_at_once_and_keep_their_order(monkeypatch) -> None:
-    import time
+    import threading
     calls = [_call("READ_FILE", {"path": f"f{i}.py"}, f"c{i}") for i in range(4)]
+    # Бариера вместо хронометър (2026-10-15): на Windows CI 4 × 0.4 s
+    # паралелно излязоха 1.3 s срещу таван 1.2. Четирите стигат бариерата само
+    # ако вървят едновременно — последователно първото чака и гърми.
+    together = threading.Barrier(4, timeout=10)
 
     def slow(name, args):
-        time.sleep(0.4)
+        together.wait()
         return f"{name}:{args['path']}"
     monkeypatch.setattr(gs, "dispatch_tool_call", slow)
-    started = time.monotonic()
     out = gta._parallel_reads(calls)
-    assert time.monotonic() - started < 1.2
     assert [out[i] for i in range(4)] == [f"READ_FILE:f{i}.py" for i in range(4)]
 
 

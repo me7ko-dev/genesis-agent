@@ -205,7 +205,9 @@ def test_local_faster_whisper_reads_from_memory_and_loads_the_model_once(monkeyp
     (b"x" * (voice.MAX_AUDIO_BYTES + 1), "audio/m4a", "MB"),
     (None, "audio/wav", "таванът е 120 s"),
     (b"abc", "video/mp4", "Непознат аудио формат"),
-])
+# Имената на случаите изрично (2026-10-15): иначе pytest слага 10 MB "x" в
+# името на теста — и в PYTEST_CURRENT_TEST, и в отчета (--durations: 30 MB лог).
+], ids=["empty", "over-10mb", "over-2min", "video-mime"])
 def test_limits_are_checked_before_anything_is_sent(calls, audio, mime, word) -> None:
     sent, _ = calls
     audio = _wav(125) if audio is None else audio
@@ -686,3 +688,19 @@ def test_doctor_names_the_input_device(monkeypatch) -> None:
     monkeypatch.setattr(voice.sys, "platform", "win32")
     status, detail = voice.mic_status()
     assert status == "fail" and "няма входно устройство" in detail
+
+
+def test_stopping_with_nothing_playing_never_touches_windows_audio(monkeypatch) -> None:
+    """/listen и всеки нов отговор викат stop_speaking: без наш звук то не
+    пипа winsound (2026-10-15 — Windows CI без звукова карта висеше там)."""
+    calls: list = []
+    fake = types.ModuleType("winsound")
+    fake.SND_PURGE = 64  # type: ignore[attr-defined]
+    fake.PlaySound = lambda *a: calls.append(a)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "winsound", fake)
+    monkeypatch.setattr(voice.sys, "platform", "win32")
+    voice.stop_speaking()
+    assert calls == []
+    monkeypatch.setitem(voice._CURRENT, "winsound", True)
+    voice.stop_speaking()
+    assert calls == [(None, 64)]

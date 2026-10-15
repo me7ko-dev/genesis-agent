@@ -55,7 +55,9 @@ class Client:
 
     def req(self, method: str, path: str, body: Any = None, headers: dict[str, str] | None = None
             ) -> tuple[int, dict[str, str], bytes]:
-        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        # 30 s (2026-10-15): на Windows CI един GET чака над 10 s (setup-ът на
+        # съседни тестове — 13–17 s); таванът хваща увисване, не бавна машина.
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
         h = {"Host": f"127.0.0.1:{self.port}", **(headers or {})}
         if self.cookie:
             h["Cookie"] = self.cookie
