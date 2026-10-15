@@ -133,6 +133,14 @@ def _normalize(data: bytes, mime: str, label: str) -> tuple[bytes, str, int, int
     except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as e:
         raise ImageError(f"{label}: не се отваря като картинка ({e})") from e
     # Снимка от телефон: ориентацията е в EXIF, иначе моделът я вижда легнала.
+    # Завъртяна или с GPS → прекодира се и при малък размер (ревю 2026-10-15:
+    # байтовете тръгваха както са — легнала снимка и координатите ѝ към
+    # доставчика). Новият файл е без EXIF.
+    try:
+        exif = img.getexif()
+        tagged = exif.get(0x0112, 1) != 1 or 0x8825 in exif
+    except (OSError, ValueError, SyntaxError, TypeError):
+        tagged = False
     try:
         img = ImageOps.exif_transpose(img)
     except (OSError, ValueError, SyntaxError):
@@ -145,7 +153,7 @@ def _normalize(data: bytes, mime: str, label: str) -> tuple[bytes, str, int, int
         scale = MAX_SIDE / max(w, h)
         img = img.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
         w, h = img.size
-    if not resized and mime != "image/gif" and len(data) <= MAX_SEND_BYTES:
+    if not resized and not tagged and mime != "image/gif" and len(data) <= MAX_SEND_BYTES:
         return data, mime, w, h            # като е: байтовете са същите → кешът също
     out = io.BytesIO()
     if img.mode in ("RGBA", "LA", "P") and mime in ("image/png", "image/gif", "image/webp"):
@@ -442,9 +450,16 @@ def for_provider(messages: list[dict], sees: bool, why: str = NO_VISION_NOTE) ->
     return out
 
 
+def _url_of(part: dict) -> str:
+    """Адресът на частта; "" при `image_url`, който не е речник (ръчно писан
+    или чужд разговор — ревю 2026-10-15: AttributeError сваляше /resume)."""
+    box = part.get("image_url")
+    return str(box.get("url") or "") if isinstance(box, dict) else ""
+
+
 def split_data_url(part: dict) -> tuple[str, str]:
     """(mime, base64) от `data:` адреса на частта."""
-    url = str((part.get("image_url") or {}).get("url") or "")
+    url = _url_of(part)
     head, _, data = url.partition(",")
     mime = head[5:].split(";", 1)[0] if head.startswith("data:") else ""
     return mime or "image/png", data
@@ -500,6 +515,7 @@ def elide_old_images(messages: list[dict], keep_turns: int = KEEP_IMAGE_TURNS,
 # ход. Байтовете са веднъж, по хеш, в <history>/images/ (2026-10-15).
 REF_SCHEME = "genesis-image:"
 _STORE_MAX_FILES = 500
+_REF_NAME = re.compile(r"[0-9a-f]{64}\.(?:png|jpg|webp|gif)")
 
 
 def _ref_name(meta: dict) -> str | None:
@@ -530,10 +546,12 @@ def for_disk(messages: Any, store: Path) -> list:
 
 
 def _stored(part: dict, store: Path) -> dict:
-    meta = dict(part.get("genesis") or {})
-    url = str((part.get("image_url") or {}).get("url") or "")
+    meta = dict(meta_of(part))
+    url = _url_of(part)
     if url.startswith(REF_SCHEME):
         return part
+    if not url.startswith("data:"):
+        return _note(part, "не е записана")
     mime, data = split_data_url(part)
     try:
         raw = base64.b64decode(data)
@@ -582,10 +600,20 @@ def from_disk(messages: list[dict], store: Path | None) -> list[dict]:
         if isinstance(content, list) and images_in(content):
             parts = []
             for p in content:
-                url = str((p.get("image_url") or {}).get("url") or "") if is_image_part(p) else ""
-                if url.startswith(REF_SCHEME):
-                    p = (_loaded(p, store / Path(url[len(REF_SCHEME):]).name) if store is not None
-                         else _note(p, "не е заредена от историята"))
+                if not is_image_part(p):
+                    parts.append(p)
+                    continue
+                url = _url_of(p)
+                # Само `<sha256>.<ext>` от images/ (ревю 2026-10-15): друго име
+                # не се отваря — `CON`/`COM1` на Windows е устройство, FIFO виси.
+                ref = url[len(REF_SCHEME):] if url.startswith(REF_SCHEME) else None
+                if ref is not None and store is not None and _REF_NAME.fullmatch(ref):
+                    p = _loaded(p, store / ref)
+                elif ref is not None:
+                    p = _note(p, "файлът ѝ вече го няма в историята" if store is not None
+                              else "не е заредена от историята")
+                elif not url.startswith("data:"):
+                    p = _note(p, "не е заредена от историята")
                 parts.append(p)
             m = {**m, "content": _collapse(parts)}
         out.append(m)
@@ -593,7 +621,7 @@ def from_disk(messages: list[dict], store: Path | None) -> list[dict]:
 
 
 def _loaded(part: dict, path: Path) -> dict:
-    meta = dict(part.get("genesis") or {})
+    meta = dict(meta_of(part))
     try:
         raw = path.read_bytes()
     except OSError:
