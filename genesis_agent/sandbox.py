@@ -177,6 +177,14 @@ _GENESIS_CONTROL = (
     _GENESIS_DIR + r"\b[^\n]{0,40}?\b(?:hooks|mcp|settings|trusted_\w+)\.json\b"
     r"|\btrusted_hooks\b|" + _GENESIS_DIR + r"[/\\](?:agents|commands)\b"
 )
+# Проектният `.mcp.json` на Claude Code е в КОРЕНА, не под `.genesis/` — горният
+# образец иска `.genesis` отпред, затова `printf {} > .mcp.json` и `cp x .mcp.json`
+# минаваха SAFE и в „deny" режим (одит 2026-10-15). Добавя се само за проверката
+# по АРГУМЕНТИ (_CONTROL_ARG_RX) и за пътищата на инструментите, не за суровия
+# текст на _CONFIRM_PATTERNS: иначе `git commit -m "… .mcp.json"` щеше да пита.
+# `(?:^|[/\\])` вързва името към началото на аргумента или към разделител, за да
+# не хване `.mcp.json`, споменат в прозата на команда.
+_GENESIS_CONTROL_ARG = _GENESIS_CONTROL + r"|(?:^|[/\\])\.mcp\.json\b"
 _GENESIS_CONTROL_REASON = ("промяна на управляващ файл на Genesis (hooks/MCP/доверие) — "
                            "пуска програми извън sandbox-а")
 
@@ -1352,7 +1360,7 @@ _SECRET_ARG_RX = re.compile(_SECRET_PATHS, re.IGNORECASE)
 _MAX_SECRET_GLOB = 300
 
 
-_CONTROL_ARG_RX = re.compile(_GENESIS_CONTROL, re.IGNORECASE)
+_CONTROL_ARG_RX = re.compile(_GENESIS_CONTROL_ARG, re.IGNORECASE)
 _REDIRECT_PREFIX = re.compile(r"^\d*[<>]+&?")
 
 
@@ -1363,7 +1371,11 @@ def _control_file_reached(token: str, expanded: str) -> bool:
     за файл, който още не съществува (2026-10-11)."""
     if _CONTROL_ARG_RX.search(token.replace("\\", "/")):
         return True
-    if not any(ch in token for ch in "/\\~"):
+    # Голо име без разделител обикновено не е път към управляващ файл — но
+    # символна връзка `link.json -> ~/.genesis/hooks.json` се пишеше през
+    # точно такова име и realpath я разгъваше до него (одит 2026-10-15).
+    # Затова голото име се проверява само когато вече съществува на диска.
+    if not any(ch in token for ch in "/\\~") and not os.path.lexists(expanded):
         return False
     try:
         real = os.path.realpath(expanded)
@@ -1380,6 +1392,27 @@ def _control_file_reached(token: str, expanded: str) -> bool:
 
 
 _WORKSPACE_PREFIX = re.compile(r"^.*?/(?:\.genesis|genesi~\d)/workspace(?=/|$)", re.IGNORECASE)
+
+
+def control_path_reason(path: str | os.PathLike[str]) -> str | None:
+    """Причина, ако този път стига до управляващ файл на Genesis
+    (hooks.json/mcp.json/.mcp.json/settings.json/доверие/commands/agents),
+    инак None. Същото правило като shell гейта — изнесено, за да го ползват и
+    WRITE_FILE/EDIT_FILE: инструментите пишеха проектните управляващи файлове
+    (те са ВЪТРЕ в workspace-а, затова „извън workspace" не ги пазеше) без
+    въпрос, докато `printf > .genesis/hooks.json` вече питаше — по-слабият път
+    решаваше (одит 2026-10-15). Разгъва символните връзки и `..`, за да не се
+    стигне до файла през невинно име.
+    """
+    raw = os.fspath(path)
+    if _CONTROL_ARG_RX.search(raw.replace("\\", "/")):
+        return _GENESIS_CONTROL_REASON
+    try:
+        real = os.path.realpath(raw)
+    except (OSError, ValueError):
+        return None
+    real = _WORKSPACE_PREFIX.sub("", real.replace("\\", "/"), count=1)
+    return _GENESIS_CONTROL_REASON if _CONTROL_ARG_RX.search(real) else None
 
 
 def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:

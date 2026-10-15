@@ -612,6 +612,17 @@ def _tool_write_file(arg: str, content: str, exact: bool = False) -> str:
         return (f"[WRITE_FILE: {path}] ❌ Файлът вече съществува и не си го чел в тази сесия — "
                 "WRITE_FILE презаписва ЦЯЛОТО му съдържание. Прочети го първо с READ_FILE (за да "
                 "видиш какво ще загубиш), или по-добре ползвай EDIT_FILE за частична промяна.")
+    # Управляващ файл на Genesis (hooks/MCP/доверие/commands/agents)? Тези
+    # файлове пускат програми извън sandbox-а или решават кое е доверено;
+    # проектните са ВЪТРЕ в workspace-а, затова проверката „извън workspace"
+    # не ги пазеше, а shell гейтът вече питаше за `printf > .genesis/hooks.json`
+    # — по-слабият път решаваше (одит 2026-10-15). Същата бариера като shell.
+    control = sandbox.control_path_reason(path)
+    if control:
+        verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM, [control])
+        allowed, reason = sandbox._decide(f"WRITE_FILE {path}", verdict, sandbox.get_policy())
+        if not allowed:
+            return f"[WRITE_FILE] {reason}"
     # Пишем ли извън workspace-а? Това е операция за потвърждение.
     try:
         inside = path.resolve().is_relative_to(_WORKSPACE.resolve())
@@ -772,6 +783,15 @@ def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False
     sensitive = sandbox.sensitive_path_reason(path)
     if sensitive:
         verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM, [sensitive])
+        allowed, reason = sandbox._decide(f"EDIT_FILE {path}", verdict, sandbox.get_policy())
+        if not allowed:
+            return f"[EDIT_FILE] {reason}"
+    # Управляващ файл на Genesis — същата бариера като при WRITE_FILE и shell
+    # (одит 2026-10-15): редакция на доверен hooks.json пак би развалила
+    # подписа, но записът не бива да минава без потвърждение.
+    control = sandbox.control_path_reason(path)
+    if control:
+        verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM, [control])
         allowed, reason = sandbox._decide(f"EDIT_FILE {path}", verdict, sandbox.get_policy())
         if not allowed:
             return f"[EDIT_FILE] {reason}"
