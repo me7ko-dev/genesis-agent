@@ -277,6 +277,7 @@ def _isolated_operator_settings(monkeypatch, tmp_path):
     # Картинките от VIEW_IMAGE и кешът „вижда ли веригата“ са на модула
     # (2026-10-15); байтовете на картинките в историята са под HISTORY_DIR горе.
     vision.take_pending()
+    vision.begin_turn()
     monkeypatch.setattr(vision, "_sees_cache", None)
     monkeypatch.setattr(vision, "_cfg_cache", None)
     plan_mode.set_active(False)

@@ -638,6 +638,32 @@ def _loaded(part: dict, path: Path) -> dict:
 _pending: list[dict] = []
 _pending_lock = threading.Lock()
 
+# Таван на VIEW_IMAGE за един ход на оператора (2026-10-15, ревю на зрението):
+# моделът в цикъл викаше VIEW_IMAGE без край и всяка картинка (до 5 MB base64)
+# оставаше в паметта и в историята. 8 = MAX_IMAGES_PER_REQUEST — повече от
+# толкова не влизат в една заявка (по-новите изтласкват по-старите), т.е. девета
+# картинка не дава на модела нищо ново; и е двойно над 4-те на съобщение от
+# телефона (`send`). Броят се само прикачените — отказ/грешен път не харчи.
+MAX_VIEWS_PER_TURN = MAX_IMAGES_PER_REQUEST
+_turn_views = 0
+
+
+def begin_turn() -> None:
+    """Нов ход на оператора: таванът на VIEW_IMAGE започва отначало."""
+    global _turn_views
+    with _pending_lock:
+        _turn_views = 0
+
+
+def _views_full() -> bool:
+    return _turn_views >= MAX_VIEWS_PER_TURN
+
+
+def _views_refusal(path: str) -> str:
+    return (f"[VIEW_IMAGE: {path}] ✗ не е прикачена — най-много {MAX_VIEWS_PER_TURN} "
+            "картинки за един ход. Работи с вече видените или поискай следващата "
+            "в нов ход.")
+
 
 def queue_image(part: dict) -> None:
     with _pending_lock:
@@ -666,11 +692,21 @@ def describe(part: dict) -> str:
 
 def view_image(path: str, workspace: Path) -> str:
     """Инструментът VIEW_IMAGE: картинката отива в следващата заявка."""
+    global _turn_views
+    with _pending_lock:
+        if _views_full():
+            return _views_refusal(path)
     try:
         part = load_image(path, workspace=workspace)
     except ImageError as e:
         return f"[VIEW_IMAGE] {e}"
-    queue_image(part)
+    # Пак под ключалката: между проверката горе и бавното зареждане друга нишка
+    # (под-агент, сървърът за телефона) може да е прикачила картинка.
+    with _pending_lock:
+        if _views_full():
+            return _views_refusal(path)
+        _turn_views += 1
+        _pending.append(part)
     return (f"[VIEW_IMAGE: {path}] ✓ {image_name(part)} ({describe(part)}) е прикачена към "
             "следващото съобщение като картинка — погледни я там.")
 
