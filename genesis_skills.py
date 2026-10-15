@@ -389,15 +389,19 @@ def _tool_read_file(arg: str, offset=None, limit=None) -> str:
             # (одит 2026-10-11); @mentions вече го отказваше по същия признак.
             # UTF-16/32 с BOM носят NUL, но са текст — decode_text ги чете.
             text, encoding = decode_text(head, partial=not whole)
-            if not whole and encoding == "utf-8" and st.st_size <= _STYLE_PROBE:
+            if not whole and encoding in ("utf-8", "cp1251", "cp1252") and st.st_size <= _STYLE_PROBE:
                 # Кодирането — по целия файл, както SEARCH_CODE и WRITE_FILE
                 # (ревю 2026-10-11): ASCII в първите 32 KB и cp1251 след тях
                 # даваше „�“ в READ_FILE с offset, а SEARCH_CODE — текста.
-                encoding = decode_text(head + fh.read())[1]
+                # И обратно (2026-10-15): latin-1 начало и UTF-8 след него е
+                # UTF-8 файл — „cp1252“ тук значеше, че READ→WRITE пише „é“
+                # от началото като C3 A9.
+                whole_enc = decode_text(head + fh.read())[1]
                 fh.seek(len(head))
-                if encoding != "utf-8":
+                if whole_enc != encoding:
+                    encoding = whole_enc
                     text = head.decode(encoding, "surrogateescape")
-            if encoding in ("utf-8", "cp1251") and b"\x00" in head[:8192]:
+            if encoding in ("utf-8", "cp1251", "cp1252") and b"\x00" in head[:8192]:
                 return (f"[READ_FILE] {path} е двоичен файл ({st.st_size} байта, "
                         f"{path.suffix or 'без разширение'}) — не се показва. За "
                         "съдържанието ползвай RUN_CMD с подходящ инструмент "
