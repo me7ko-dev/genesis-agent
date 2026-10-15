@@ -31,6 +31,7 @@ export const COMMANDS: SlashCommand[] = [
   { group: 'Работа', name: '/commands', hint: 'Твоите команди (.genesis/commands)' },
   { group: 'Работа', name: '/hooks', hint: 'Куките (.genesis/hooks); доверяването е само в терминала' },
   { group: 'Работа', name: '/mcp', hint: 'MCP сървърите; login/trust са само в терминала' },
+  { group: 'Работа', name: '/permissions', aliases: ['/разрешения'], hint: 'Командите без въпрос; add е само в терминала' },
   { group: 'Система', name: '/backup', hint: 'Архивирай работната папка в GENESIS_BACKUP_DIR' },
   { group: 'Система', name: '/export', aliases: ['/предай'], hint: 'Проектът за предаване: zip + отчет (тестове, как се пуска)' },
   { group: 'Система', name: '/update', aliases: ['/ъпдейт'], hint: 'Има ли нова версия на Genesis' },

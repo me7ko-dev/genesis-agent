@@ -93,7 +93,8 @@ export function App() {
     // The chat's own commands (genesis_agent/chat_commands.py) travel as text:
     // the agent runs them in the turn and answers in the conversation.
     const chat = ['/plan', '/undo', '/compact', '/context', '/todos', '/review', '/bg',
-                  '/agents', '/memory', '/init', '/commands', '/hooks', '/mcp'];
+                  '/agents', '/memory', '/init', '/commands', '/hooks', '/mcp',
+                  '/permissions'];
     if (chat.includes(name)) return false;
     // Everything but the window's own commands needs a genesis.exe that knows them.
     const local = ['/clear', '/stop', '/folder', '/terminal', '/logs', '/help'];
