@@ -116,11 +116,33 @@ def check_git(_ws: Path) -> list[Check]:
                         "следи командите")]
 
 
+def _npm_version_on_disk(npm: str) -> str | None:
+    """Версията на npm от package.json до него — без процес.
+
+    2026-10-15 (Windows CI, PR #87): `npm --version` не отговори за 15 s —
+    npm.cmd е cmd.exe → node → целият npm, докато другите проби вървят
+    едновременно (#67: същото при 8 s). Вдигането на срока само отлага;
+    файлът е на диска. Windows: `nodejs/npm.cmd` до `nodejs/node_modules/npm`;
+    POSIX: `bin/npm` → `lib/node_modules/npm/bin/npm-cli.js`."""
+    real = Path(npm).resolve()
+    for pkg in (real.parent / "node_modules" / "npm" / "package.json",
+                real.parent.parent / "package.json"):
+        try:
+            data = json.loads(pkg.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and data.get("name") == "npm" and isinstance(data.get("version"), str):
+            return data["version"][:40]
+    return None
+
+
 def check_node(_ws: Path) -> list[Check]:
     fix = "инсталирай Node.js LTS (https://nodejs.org) — за MCP сървърите през npx и JS проектите"
     node = _version_of("Node.js", shutil.which("node"), fix)
     # npm под Windows е npm.cmd — shutil.which го намира по PATHEXT.
-    npm = _version_of("npm", shutil.which("npm"), fix)
+    exe = shutil.which("npm")
+    version = _npm_version_on_disk(exe) if exe else None
+    npm = Check("npm", "ok", version) if version else _version_of("npm", exe, fix)
     return [node, npm]
 
 
