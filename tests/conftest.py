@@ -5,7 +5,11 @@ genesis_agent.config, so patching config.DATA_DIR afterwards has no effect on
 an already-imported module; patch the module's own attribute instead."""
 from __future__ import annotations
 
+import atexit
+import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -13,6 +17,38 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+# Папката на пакета (2026-10-15). В checkout DATA_DIR е genesis_agent/ —
+# там е истинската памет на оператора (episodes.db, persistent_memory.db).
+# memory и episodic_memory създават базите си при ВНАСЯНЕ, преди която и да е
+# фикстура да е пренасочила пътя: пълният пакет оставяше двете бази (и -wal/
+# -shm) в genesis_agent/ на чист checkout. Снимката е преди всякакво внасяне;
+# _package_dir_untouched по-долу проверява след всеки тест.
+_PACKAGE_DIR = ROOT / "genesis_agent"
+
+
+def _package_entries() -> set[str]:
+    found: set[str] = set()
+    for base in (_PACKAGE_DIR, _PACKAGE_DIR / "skills"):
+        try:
+            names = os.listdir(base)
+        except OSError:
+            continue
+        rel = base.relative_to(_PACKAGE_DIR)
+        found.update(str(rel / n) for n in names if n != "__pycache__")
+    return found
+
+
+_PACKAGE_BEFORE = _package_entries()
+
+# Затова DATA_DIR на целия пакет — и на подпроцесите, които наследяват средата —
+# е временна папка, зададена ПРЕДИ genesis_agent.config да се внесе. Операторски
+# GENESIS_DATA_DIR/GENESIS_MEMORY_DIR също не стига до тестовете: и той е
+# истинско състояние. Фикстурите по-долу пак пренасочват всеки път поотделно.
+_SESSION_DATA = Path(tempfile.mkdtemp(prefix="genesis-tests-"))
+atexit.register(shutil.rmtree, _SESSION_DATA, ignore_errors=True)
+os.environ["GENESIS_DATA_DIR"] = str(_SESSION_DATA / "data")
+os.environ.pop("GENESIS_MEMORY_DIR", None)
 
 
 _OLLAMA_PORT = 11434
@@ -242,3 +278,13 @@ def fake_docker(monkeypatch):
     fake = FakeDocker()
     monkeypatch.setattr(launch, "_docker", fake)
     return fake
+
+
+@pytest.fixture(autouse=True)
+def _package_dir_untouched():
+    """Нито един тест не оставя файл в genesis_agent/ (виж _PACKAGE_DIR)."""
+    yield
+    new = _package_entries() - _PACKAGE_BEFORE
+    # Пада само тестът, който ги е оставил — следващите не наследяват грешката.
+    _PACKAGE_BEFORE.update(new)
+    assert not new, f"тестът остави файлове в genesis_agent/: {sorted(new)}"
