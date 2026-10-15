@@ -1,5 +1,5 @@
 import { memo, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { confirmChoices, todoSummary, type ChatItem } from '../lib/chat';
 import type { Todo } from '../lib/protocol';
@@ -16,15 +16,46 @@ export const UserBubble = memo(function UserBubble({ item }: { item: Item<'user'
   const theme = useTheme();
   return (
     <View style={[styles.user, { backgroundColor: theme.userBubble }]}>
+      {/* Снимките идват само като име (2026-10-15) — байтовете остават на компютъра. */}
+      {item.images.length ? (
+        <View style={styles.chips}>
+          {item.images.map((name, i) => (
+            <Text key={i} numberOfLines={1} style={[styles.chip, { color: theme.userText, borderColor: theme.userText }]}>
+              📷 {name}
+            </Text>
+          ))}
+        </View>
+      ) : null}
       <Text selectable style={[styles.userText, { color: theme.userText }]}>{item.text}</Text>
     </View>
   );
 });
 
-export const AssistantMessage = memo(function AssistantMessage({ item }: { item: Item<'assistant'> }) {
+export type SpeakState = 'idle' | 'loading' | 'playing';
+
+export const AssistantMessage = memo(function AssistantMessage({ item, speech, onSpeak }: {
+  item: Item<'assistant'>;
+  /** Само за този отговор — останалите карти не се рисуват пак (memo). */
+  speech?: SpeakState;
+  /** Няма го, ако компютърът не може да говори ("voice" в features). */
+  onSpeak?: (key: string, text: string) => void;
+}) {
+  const theme = useTheme();
   return (
     <View style={styles.assistant}>
       <RichText text={item.text} />
+      {onSpeak ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={speech === 'playing' ? 'Спри четенето' : 'Прочети на глас'}
+          onPress={() => onSpeak(item.key, item.text)}
+          disabled={speech === 'loading'}
+          hitSlop={8}
+          style={[styles.speak, { borderColor: theme.border }]}>
+          {speech === 'loading' ? <ActivityIndicator size="small" color={theme.muted} />
+            : <Text style={[styles.small, { color: theme.muted }]}>{speech === 'playing' ? '■ спри' : '▶ на глас'}</Text>}
+        </Pressable>
+      ) : null}
     </View>
   );
 });
@@ -165,6 +196,9 @@ const styles = StyleSheet.create({
   user: { alignSelf: 'flex-end', maxWidth: '85%', borderRadius: 18, borderBottomRightRadius: 4, paddingHorizontal: 14, paddingVertical: 9 },
   userText: { fontSize: 16, lineHeight: 22 },
   assistant: { paddingVertical: 2 },
+  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 4 },
+  chip: { fontSize: 12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8, paddingHorizontal: 6, paddingVertical: 2, maxWidth: 200 },
+  speak: { alignSelf: 'flex-start', marginTop: 4, borderWidth: StyleSheet.hairlineWidth, borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4, minWidth: 70, alignItems: 'center' },
   tool: { borderRadius: 10, borderWidth: StyleSheet.hairlineWidth, padding: 10, gap: 4 },
   toolName: { fontSize: 13, fontWeight: '600' },
   toolBody: { fontSize: 12, lineHeight: 17 },

@@ -34,7 +34,14 @@ def main() -> None:
     conversations = chat_commands.Conversations(history_dir=history, new_file=lambda: None)
     state = {"messages": deque([{"role": "system", "content": "s"}], maxlen=200)}
 
-    def runner(text: str, ui) -> None:
+    def runner(text: str, ui, images=None) -> None:
+        # Pictures from the phone (2026-10-15): say what arrived, as the model would see it.
+        if images:
+            from genesis_agent import vision
+            ui.assistant("Видях: " + ", ".join(
+                f"{vision.image_ref(p).get('name')} {vision.image_ref(p).get('mime')}" for p in images)
+                + f" — {text}")
+            return
         # The chat's own commands (/plan …) the way `genesis serve` runs them.
         state["messages"], prompt = rs.phone_command(
             text, ui, session, messages=state["messages"], workspace=workspace,
@@ -71,9 +78,23 @@ def main() -> None:
     session = rs.RemoteSession(runner, state=rs.phone_state)
     rs.show_agent_progress(session)
     web = Path(sys.argv[sys.argv.index("--web") + 1]) if "--web" in sys.argv else None
+    # The voice ops with stand-ins for Whisper and edge-tts (2026-10-15);
+    # `--no-voice` is a server without them, like one without the voice extras.
+    voice = "--no-voice" not in sys.argv
+
+    def stt(audio: bytes, mime: str, language: str) -> str:
+        if audio.startswith(b"FAIL"):
+            from genesis_agent.voice import VoiceError
+            raise VoiceError("няма ключ за Groq")
+        return f"чух {len(audio)} байта {mime} {language}"
+
+    def tts(text: str, name: str | None) -> tuple[bytes, str]:
+        return b"ID3" + text.encode("utf-8"), "audio/mpeg"
+
     server = rs.RemoteServer(KEY, session, name="тест-компютър",
                              status=lambda: {"model": "fake/model", "workspace": "/w"},
-                             web_root=web)
+                             web_root=web, voice=voice,
+                             stt=stt if voice else None, tts=tts if voice else None)
     host = sys.argv[sys.argv.index("--host") + 1] if "--host" in sys.argv else "127.0.0.1"
     httpd = server.make_http(host, 0)
     port = httpd.server_address[1]

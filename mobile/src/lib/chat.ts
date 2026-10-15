@@ -1,7 +1,9 @@
 import type { GenesisEvent, Todo } from './protocol';
 
 export type ChatItem =
-  | { kind: 'user'; key: string; text: string }
+  /** `images` — имената на изпратените снимки (събитието носи само име и
+   *  размер, никога байтовете; 2026-10-15). Винаги масив, за sameItem. */
+  | { kind: 'user'; key: string; text: string; images: string[] }
   | { kind: 'assistant'; key: string; text: string }
   | { kind: 'tool'; key: string; name: string; result: string; clipped: boolean }
   | { kind: 'note'; key: string; tone: 'info' | 'warn' | 'error' | 'asked' | 'progress'; text: string }
@@ -32,7 +34,7 @@ export function toChatItems(events: GenesisEvent[]): ChatItem[] {
         confirms.clear();
         break;
       case 'user':
-        items.push({ kind: 'user', key, text: e.text ?? '' });
+        items.push({ kind: 'user', key, text: e.text ?? '', images: imageNames(e) });
         break;
       case 'assistant':
         items.push({ kind: 'assistant', key, text: e.text ?? '' });
@@ -68,6 +70,17 @@ export function toChatItems(events: GenesisEvent[]): ChatItem[] {
     }
   }
   return items;
+}
+
+/** Имената от "images" на събитието "user"; без име — „снимка“. Името е
+ *  от който и да е сдвоен клиент: без контролни и bidi знаци, до 60. */
+function imageNames(e: GenesisEvent): string[] {
+  if (!Array.isArray(e.images)) return [];
+  return e.images.map((image) => {
+    const raw = typeof image?.name === 'string' ? image.name : '';
+    const name = raw.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, '').trim();
+    return [...name].slice(0, 60).join('') || 'снимка';
+  });
 }
 
 /** Колкото пази и сървърът (remote_server._EVENT_LOG). */

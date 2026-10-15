@@ -17,7 +17,7 @@
  */
 export const RETRY_WINDOW_MS = 2 * 60 * 1000;
 
-type Unsent = { text: string; mid: string; at: number };
+type Unsent = { text: string; attachments: string; mid: string; at: number };
 
 export class Outbox {
   private inFlight = false;
@@ -36,18 +36,25 @@ export class Outbox {
   }
 
   /** null — друго изпращане още е на път; това докосване не направи нищо.
-   *  Хвърлената грешка минава нататък, а `mid` се пази за повторния опит. */
-  async send<T>(text: string, deliver: (text: string, mid: string) => Promise<T>): Promise<T | null> {
+   *  Хвърлената грешка минава нататък, а `mid` се пази за повторния опит.
+   *
+   *  `attachments` — кои снимки носи съобщението (идентификаторите им,
+   *  2026-10-15): повторният опит е „същият“ само със същия текст И същите
+   *  снимки. Иначе празен текст със снимка А, изгубен отговор, после празен
+   *  текст със снимка Б получаваше стария `mid` и сървърът отговаряше с хода
+   *  на А, без да види Б. */
+  async send<T>(text: string, deliver: (text: string, mid: string) => Promise<T>, attachments = ''): Promise<T | null> {
     if (this.inFlight) return null;
     this.inFlight = true;
     const last = this.unsent;
     // Часовник, върнат назад, не е „в прозореца“ (вълна 5, 2026-10-11).
     const age = last === null ? -1 : this.now() - last.at;
-    const retry = last !== null && last.text === text && age >= 0 && age < RETRY_WINDOW_MS;
+    const retry = last !== null && last.text === text && last.attachments === attachments
+      && age >= 0 && age < RETRY_WINDOW_MS;
     const mid = retry ? last.mid : this.newMid();
     // Прозорецът тече от последния опит: оператор, който натиска пак и пак
     // без връзка, не получава нов `mid` насред повторенията.
-    this.unsent = { text, mid, at: this.now() };
+    this.unsent = { text, attachments, mid, at: this.now() };
     try {
       const reply = await deliver(text, mid);
       // Отговор има — сървърът е решил (прието, „busy“, „too_long“…).
@@ -73,6 +80,9 @@ export class Outbox {
       return;
     }
     const text = pending.text.trim();
+    // Само снимки, без текст: балончето носи въпроса на сървъра
+    // (IMAGE_QUESTION), не празното — решават `mids` (2026-10-15).
+    if (!text) return;
     if (events.some((e) => e.type === 'user' && (e.text ?? '').trim() === text)) this.unsent = null;
   }
 }

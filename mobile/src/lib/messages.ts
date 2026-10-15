@@ -20,12 +20,57 @@ const REPLY_ERRORS: Record<string, string> = {
   empty: 'Съобщението е празно.',
   unknown_op: 'Genesis на компютъра е по-стар от приложението — обнови го.',
   bad_args: 'Компютърът не разбра заявката — обнови приложението или Genesis.',
+  // Снимките (2026-10-15): сървърът ги проверява преди хода.
+  too_many_images: 'Най-много 4 снимки в едно съобщение.',
+  images_too_large: 'Снимките са твърде големи — най-много 10 MB общо.',
+  bad_image: 'Компютърът не прочете снимката.',
+  // Плик над 256 KiB за операция, която не го приема (2026-10-15).
+  too_large: 'Съобщението е твърде голямо за компютъра.',
 };
 
 /** {ok:false, error} от сървъра → текст за екрана. */
 export function replyErrorText(code: string | undefined): string {
   const known = code !== undefined && Object.prototype.hasOwnProperty.call(REPLY_ERRORS, code);
   return known ? REPLY_ERRORS[code as string] : 'Компютърът отказа заявката.';
+}
+
+/** Отказ на `send` с подробности: "bad_image" казва коя снимка и защо (на
+ *  български от сървъра), "too_many_images" — колко са позволени. */
+export function sendErrorText(reply: { error?: string; name?: string; max?: number; detail?: string }): string {
+  if (reply.error === 'bad_image') {
+    const what = reply.name ? `Компютърът не прочете „${reply.name}“` : 'Компютърът не прочете снимката';
+    return reply.detail ? `${what}: ${reply.detail}` : `${what}.`;
+  }
+  if (reply.error === 'too_many_images' && typeof reply.max === 'number') {
+    return `Най-много ${reply.max} снимки в едно съобщение.`;
+  }
+  return replyErrorText(reply.error);
+}
+
+const VOICE_ERRORS: Record<string, string> = {
+  too_large: 'Записът е твърде голям — най-много 10 MB.',
+  too_long: 'Записът е над 2 минути — раздели го на по-кратки.',
+  bad_mime: 'Компютърът не познава формата на записа.',
+  empty: 'Записът е празен — не се чу нищо.',
+  busy: 'Компютърът още обработва предишния запис — опитай след малко.',
+  rate_limited: 'Твърде много записи за минута — изчакай малко.',
+  stt_failed: 'Говорът не стана текст.',
+  tts_failed: 'Отговорът не можа да се изговори.',
+  unknown_op: 'Genesis на компютъра не поддържа глас — обнови го.',
+  bad_args: 'Компютърът не разбра заявката — обнови приложението или Genesis.',
+};
+
+/** Отказ на `transcribe`/`speak` → текст за екрана (2026-10-15). "too_long" и
+ *  "empty" значат друго, отколкото при `send`; "detail" на
+ *  "stt_failed"/"tts_failed" е на български от компютъра — показва се. */
+export function voiceErrorText(op: 'transcribe' | 'speak', reply: { error?: string; detail?: string }): string {
+  const code = reply.error;
+  if (op === 'speak' && code === 'too_long') return 'Отговорът е твърде дълъг за четене на глас.';
+  if (op === 'speak' && code === 'empty') return 'В отговора няма какво да се прочете.';
+  if (op === 'speak' && code === 'busy') return 'Компютърът още изговаря предишния отговор — опитай след малко.';
+  const known = code !== undefined && Object.prototype.hasOwnProperty.call(VOICE_ERRORS, code);
+  const text = known ? VOICE_ERRORS[code as string] : 'Компютърът отказа заявката.';
+  return (code === 'stt_failed' || code === 'tts_failed') && reply.detail ? `${text} ${reply.detail}` : text;
 }
 
 /** Хвърлена грешка (мрежа, ключ, часовник…) → текст за екрана. */
@@ -43,6 +88,8 @@ export function errorText(e: unknown): string {
     case 'protocol':
       return 'Отговорът на компютъра не можа да бъде проверен.';
     case 'server':
+      // 429 "busy": сървърът чете друг голям плик (2026-10-15).
+      if (e.status === 429 && e.code === 'busy') return 'Компютърът приема друг голям файл в момента — опитай след малко.';
       return e.status === 413 ? 'Съобщението е твърде голямо за компютъра.'
         : e.status ? `Грешка на компютъра (${e.status}).` : 'Компютърът върна неочакван отговор.';
     default:
