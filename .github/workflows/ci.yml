@@ -8,6 +8,9 @@ on:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
+    # 2026-10-15: a hung test on Windows held the job for 45+ min with no
+    # output (the default limit is 6 h). Normal Windows run is ~20 min.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
