@@ -205,7 +205,9 @@ def test_local_faster_whisper_reads_from_memory_and_loads_the_model_once(monkeyp
     (b"x" * (voice.MAX_AUDIO_BYTES + 1), "audio/m4a", "MB"),
     (None, "audio/wav", "таванът е 120 s"),
     (b"abc", "video/mp4", "Непознат аудио формат"),
-])
+# Имената на случаите изрично (2026-10-15): иначе pytest слага 10 MB "x" в
+# името на теста — и в PYTEST_CURRENT_TEST, и в отчета (--durations: 30 MB лог).
+], ids=["empty", "over-10mb", "over-2min", "video-mime"])
 def test_limits_are_checked_before_anything_is_sent(calls, audio, mime, word) -> None:
     sent, _ = calls
     audio = _wav(125) if audio is None else audio
