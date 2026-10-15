@@ -14,6 +14,8 @@ READ_ONLY_TOOLS = frozenset({
     "READ_FILE", "LIST_DIR", "GLOB", "SEARCH_CODE", "REPO_MAP",
     "WEB_SEARCH", "RESEARCH", "ASK_USER", "TASK_LIST", "EXPLORE", "BG_OUTPUT",
     "WEB_FETCH", "TODO_WRITE",
+    # Само гледа картинка (2026-10-15) — нищо не пише.
+    "VIEW_IMAGE",
     # Под-агентът сам не променя нищо — всеки негов инструмент минава пак през
     # тази проверка (genesis_skills._before_tool), така че в план той само чете.
     "AGENT",

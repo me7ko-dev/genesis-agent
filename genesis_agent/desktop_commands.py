@@ -66,8 +66,8 @@ def _provider_name(key: str) -> str:
 
 
 def _estimate(messages: Any) -> int:
-    gta = _gta()
-    return sum(gta.estimate_tokens(str(m.get("content") or "")) for m in messages)
+    from genesis_agent.vision import content_chars  # картинка ≈ 1.5K токена
+    return sum(content_chars(m.get("content")) // 4 for m in messages)
 
 
 # ── /status ────────────────────────────────────────────────────────────────
@@ -327,7 +327,8 @@ def _history_files() -> list[str]:
 def _preview(messages: list) -> str:
     for m in messages:
         if m.get("role") == "user":
-            text = " ".join(str(m.get("content") or "").split())
+            from genesis_agent.vision import text_of
+            text = " ".join(text_of(m.get("content")).split())
             return text[:140]
     return ""
 
@@ -353,10 +354,21 @@ def replay(emit: Callable[..., Any], messages: Any) -> None:
     телефонът и Desktop рисуват историята от нулата. Общо за /history и за
     /resume и /rewind от чата (2026-10-15: там се виждаха само бележките, а
     заредената или отрязаната история — не)."""
+    from genesis_agent import vision
     emit("cleared")
     for m in messages:
+        if vision.is_attachment(m):
+            continue            # снимки от инструмент — не реплика на оператора
         if m.get("role") == "user":
-            emit("user", text=str(m.get("content") or ""))
+            # Картинката — само име и вид (2026-10-15): base64 в събитие би
+            # стигнал до телефона в всеки отговор на `events`.
+            content = m.get("content")
+            pics = vision.images_in(content)
+            if isinstance(content, list) and pics:
+                emit("user", text=vision.text_of([p for p in content if not vision.is_image_part(p)]),
+                     images=[vision.image_ref(p) for p in pics])
+            else:
+                emit("user", text=str(content or ""))
         elif m.get("role") == "assistant" and m.get("content"):
             emit("assistant", text=str(m.get("content")))
 

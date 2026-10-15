@@ -23,6 +23,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 RUNNER = Path(__file__).with_name("page_check_runner.py")
@@ -121,12 +122,60 @@ def pages_for(files: set[Path]) -> list[Path]:
     return [p for p in pages if p.is_file() and site(p)][:3]
 
 
+# Снимките към модела: компютър и телефон, светла тема — тъмната удвоява
+# цената (~1.5K токена картинка) за същото оформление.
+_SHOT_NAMES = ("desktop-light.png", "mobile-light.png")
+_MAX_SHOTS = 2
+
+
+def _top_of(data: bytes, ratio: float) -> bytes:
+    """Горната част на снимка на цялата страница: 1440×6000 смалена до 1568 px
+    по дългата страна е 376 px широка — нечетима. С Pillow се реже до
+    височина ≤ ширина × ratio; без него — цялата (vision я смалява/отказва)."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return data
+    import io
+    try:
+        img = Image.open(io.BytesIO(data))
+        w, h = img.size
+        if h <= w * ratio:
+            return data
+        out = io.BytesIO()
+        img.crop((0, 0, w, int(w * ratio))).save(out, format="PNG")
+        return out.getvalue()
+    except (OSError, ValueError):
+        return data
+
+
+def _shots_of(folder: Path, page: str) -> list[dict]:
+    from genesis_agent import vision
+    parts = []
+    for name in _SHOT_NAMES:
+        try:
+            data = (folder / name).read_bytes()
+        except OSError:
+            continue
+        ratio = 2.2 if name.startswith("mobile") else 1.0
+        try:
+            parts.append(vision.image_part(_top_of(data, ratio), "image/png", f"{page} {name}"))
+        except vision.ImageError:
+            continue
+    return parts
+
+
 class FinalCheck:
     """Проверката в края на хода. Цикълът на агента вика `observe` за всеки
     резултат на инструмент и `check()`, когато моделът спре да вика инструменти."""
 
-    def __init__(self, runner=None) -> None:
+    def __init__(self, runner=None, *, shots: bool = False) -> None:
         self._run = runner  # None → модулният `run`, търсен при всяко извикване
+        # shots (2026-10-15): моделът вижда картинки → с находките идват и
+        # снимките на страницата (`images`, части за vision.attachment_message).
+        # Числата казват „контраст 1.65:1“; снимката показва кое и къде.
+        self.shots = shots
+        self.images: list[dict] = []
         self._dirty: set[Path] = set()
         self.runs = 0
         self.passed = False  # последната проверка е чиста — доказва „проверено в браузър“
@@ -149,6 +198,7 @@ class FinalCheck:
     def check(self) -> tuple[str, str]:
         """(бележка за модела, ред за оператора). Празна бележка = няма какво
         да се поправя (чисто, пропуснато или нищо уеб в хода)."""
+        self.images = []
         if not self.due():
             return "", ""
         if not self._dirty:
@@ -162,10 +212,17 @@ class FinalCheck:
             return "", ""
         self.runs += 1
         notes: list[str] = []
+        shots: list[dict] = []
         for page in pages:
-            findings, why = (self._run or run)(page)
-            if findings is None:
-                return "", f"[проверка в браузър] пропусната — {why}"
+            with tempfile.TemporaryDirectory(prefix="genesis-shots-") as tmp:
+                if self.shots:
+                    findings, why = (self._run or run)(page, Path(tmp))
+                else:
+                    findings, why = (self._run or run)(page)
+                if findings is None:
+                    return "", f"[проверка в браузър] пропусната — {why}"
+                if findings and self.shots and len(shots) < _MAX_SHOTS:
+                    shots += _shots_of(Path(tmp), page.name)[:_MAX_SHOTS - len(shots)]
             if findings:
                 notes.append(f"{page.name}:\n" + "\n".join(f"  • {f}" for f in findings[:12]))
         names = ", ".join(p.name for p in pages)
@@ -176,6 +233,7 @@ class FinalCheck:
                         "(Chromium: 1440 px светла и тъмна тема, 390 px телефон)")
         self.passed = False
         self._unanswered = True
+        self.images = shots
         last = self.runs >= MAX_RUNS
         body = "\n".join(notes)
         note = ("[проверка в браузър] Отворих страницата в Chromium (1440 px светла и тъмна "

@@ -42,7 +42,7 @@ HISTORY_MAXLEN = 200
 
 
 def restored_history(saved: list[dict], system_prompt: str,
-                     maxlen: int = HISTORY_MAXLEN) -> deque:
+                     maxlen: int = HISTORY_MAXLEN, image_store: Path | None = None) -> deque:
     """Заредена от диска сесия → живата `messages` структура на фронтенда.
 
     Съществува, защото `deque(maxlen=N)` изхвърля от ПРЕДНИЯ край (bug fix,
@@ -73,6 +73,10 @@ def restored_history(saved: list[dict], system_prompt: str,
     tail = body[-(maxlen - 1 - len(summaries)):]
     while tail and tail[0].get("role") == "tool":
         tail = tail[1:]       # резултат без извикването си е невалидна история
+    # Картинките са записани като препратки (vision.for_disk, 2026-10-15) —
+    # обратно в картинки; изтритата става бележка, разговорът пак се зарежда.
+    from genesis_agent import vision
+    tail = vision.from_disk(tail, image_store)
     return deque([{"role": "system", "content": system_prompt}, *summaries, *tail], maxlen=maxlen)
 
 

@@ -66,7 +66,10 @@ def _tool_name(schema: Any) -> str:
 
 def _text(content: Any) -> int:
     if isinstance(content, list):   # части (текст + картинка)
-        return sum(_chars(p.get("text")) if isinstance(p, dict) and "text" in p else _chars(p)
+        # Картинката — колкото модел я брои (~1.5K токена), не base64-а ѝ (2026-10-15).
+        from genesis_agent.vision import IMAGE_CHARS, is_image_part
+        return sum(IMAGE_CHARS if is_image_part(p)
+                   else _chars(p.get("text")) if isinstance(p, dict) and "text" in p else _chars(p)
                    for p in content)
     return _chars(content)
 

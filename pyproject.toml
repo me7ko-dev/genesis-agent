@@ -49,8 +49,12 @@ signing = ["cryptography>=42"]           # cryptography_utils.py — RSA skill s
 premium = ["anthropic>=0.40"]
 # `genesis serve` — the phone app (mobile/): encrypted channel + QR pairing.
 mobile = ["cryptography>=42", "qrcode>=7.4"]
+# Images in the chat (genesis_agent/vision.py): downscale to 1568 px and EXIF
+# rotation. Optional — without it images up to 5 MB are sent as they are.
+vision = ["pillow>=10"]
 all = [
     "qrcode>=7.4",
+    "pillow>=10",
     "playwright>=1.40",
     "ruff>=0.6",
     "cryptography>=42",

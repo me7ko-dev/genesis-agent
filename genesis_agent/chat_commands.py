@@ -17,7 +17,8 @@ from pathlib import Path
 from typing import Any
 
 BUILTIN = ("/init", "/memory", "/plan", "/undo", "/compact", "/hooks", "/commands", "/bg", "/mcp",
-           "/agents", "/todos", "/context", "/resume", "/rewind", "/doctor", "/permissions")
+           "/agents", "/todos", "/context", "/resume", "/rewind", "/doctor", "/permissions",
+           "/image")
 # Буква или цифра в която и да е азбука, после букви/цифри/_/-. Одит
 # 2026-10-11: правилото искаше ASCII първи знак, а /commands показваше
 # `преглед.md` като /преглед — и /преглед отиваше при модела като обикновен
@@ -32,6 +33,7 @@ _YES = ("", "да", "д", "d", "da", "y", "yes")
 class Result:
     prompt: str | None = None      # run this as a turn for the model
     messages: Any = None           # the history, replaced (/compact)
+    images: list | None = None     # image parts that go with `prompt` (/image)
 
 
 @dataclass
@@ -59,7 +61,7 @@ RESERVED = {"help", "clear", "model", "models", "agent", "backup", "status", "hi
             "export", "update", "skills", "tasks", "done", "drop", "state", "maxcoding",
             "local_model_max", "local_model_normal", "exit", "quit",
             "задачи", "умения", "предай", "ъпдейт", "макскод", "готово",
-            "локален_макс", "локален_нормал", "разрешения"}
+            "локален_макс", "локален_нормал", "разрешения", "картинка"}
 
 
 def command_dirs(workspace: Path) -> list[Path]:
@@ -287,6 +289,9 @@ def handle(text: str, *, messages: Any, workspace: Path,
                                  int(info.get("last") or 0)))
         return Result()
 
+    if cmd in ("/image", "/картинка"):
+        return _image(rest, workspace, out)
+
     m = _NAME.match(stripped)
     if m and m.group(1).lower() not in {b[1:] for b in BUILTIN}:
         cmd_file = custom_commands(workspace).get(m.group(1).lower())
@@ -294,6 +299,43 @@ def handle(text: str, *, messages: Any, workspace: Path,
             out(f"↪ /{m.group(1)} ({cmd_file.name})")
             return Result(prompt=expand_command(cmd_file, (m.group(2) or "").strip()))
     return None
+
+
+IMAGE_QUESTION = "Какво виждаш на картинката?"
+
+
+def _image_path(rest: str, workspace: Path) -> tuple[str, str]:
+    """(път, въпрос) от `/image <път> [въпрос]`. Пътят може да е в кавички или с
+    интервали без кавички (`/image Screen Shot.png защо е празно`): взима се
+    най-дългото начало от думи, което е съществуващ файл."""
+    text = rest.strip()
+    if text[:1] in ("'", '"'):
+        end = text.find(text[0], 1)
+        if end > 0:
+            return text[1:end], text[end + 1:].strip()
+    words = text.split()
+    for n in range(len(words), 0, -1):
+        candidate = " ".join(words[:n]).replace("\\ ", " ")
+        p = Path(candidate).expanduser()
+        if (p if p.is_absolute() else workspace / p).is_file():
+            return candidate, " ".join(words[n:])
+    return (words[0] if words else ""), " ".join(words[1:])
+
+
+def _image(rest: str, workspace: Path, out: Callable[[str], None]) -> Result:
+    """`/image <път> [въпрос]` — картинката към модела (2026-10-15)."""
+    from genesis_agent import vision
+    path, question = _image_path(rest, workspace)
+    if not path:
+        out("Употреба: /image <път до картинка> [въпрос] — или @картинка.png в съобщението.")
+        return Result()
+    try:
+        part = vision.load_image(path, workspace=workspace)
+    except vision.ImageError as e:
+        out(f"⚠ {e}")
+        return Result()
+    out(f"📎 {vision.image_name(part)}: прикачена картинка ({vision.describe(part)})")
+    return Result(prompt=question or IMAGE_QUESTION, images=[part])
 
 
 def _hooks(rest: str, workspace: Path, out: Callable[[str], None],
