@@ -181,20 +181,27 @@ def _parse(stdout: str) -> dict[str, Any] | None:
     return None
 
 
-def usage_of(data: dict[str, Any]) -> dict[str, int] | None:
-    """В смисъла на OpenAI: prompt_tokens е С кеша (като _call_anthropic)."""
+def usage_of(data: dict[str, Any]) -> dict[str, Any] | None:
+    """В смисъла на OpenAI: prompt_tokens е С кеша (като _call_anthropic).
+    `cost_usd` е total_cost_usd на самия `claude` — с абонамента е ориентир
+    (колко би струвало по API), не сметка; `genesis -p --output-format json`
+    го показва, щом го има (2026-10-15)."""
     u = data.get("usage")
     if not isinstance(u, dict):
         return None
     read = int(u.get("cache_read_input_tokens") or 0)
     write = int(u.get("cache_creation_input_tokens") or 0)
-    return {"prompt_tokens": int(u.get("input_tokens") or 0) + read + write,
-            "completion_tokens": int(u.get("output_tokens") or 0),
-            "cached_read_tokens": read, "cached_write_tokens": write}
+    out: dict[str, Any] = {"prompt_tokens": int(u.get("input_tokens") or 0) + read + write,
+                           "completion_tokens": int(u.get("output_tokens") or 0),
+                           "cached_read_tokens": read, "cached_write_tokens": write}
+    cost = data.get("total_cost_usd")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+        out["cost_usd"] = float(cost)
+    return out
 
 
 def complete(messages: list[dict], model: str = DEFAULT_MODEL,
-             timeout: int | None = None) -> tuple[str, dict[str, int] | None]:
+             timeout: int | None = None) -> tuple[str, dict[str, Any] | None]:
     """Един ход. (текст, usage) или RuntimeError с HTTP_* код, по който веригата
     на Brain решава: 429 → cooldown, 401 → ключът (тук входът) е мъртъв."""
     path = cli_path()

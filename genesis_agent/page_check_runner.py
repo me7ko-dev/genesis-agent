@@ -29,6 +29,7 @@ import sys
 import threading
 import urllib.parse
 from pathlib import Path
+from typing import Literal
 
 # Всичко за един изглед; Python решава кое е находка.
 _MEASURE = r"""
@@ -295,8 +296,11 @@ def check(html: Path, shots: Path | None, single: bool = False) -> dict:
     url = f"http://127.0.0.1:{port}/{html.name}"
     findings: list[str] = []
     saved: list[str] = []
-    views = [("компютър", (1440, 900), "light"), ("компютър, тъмна тема", (1440, 900), "dark"),
-             ("телефон", (390, 844), "light")]
+    # Темата е Literal (2026-10-15): с инсталиран playwright mypy отказваше `str`
+    # за emulate_media(color_scheme=…) — без него грешката не се виждаше.
+    views: list[tuple[str, tuple[int, int], Literal["light", "dark"]]] = [
+        ("компютър", (1440, 900), "light"), ("компютър, тъмна тема", (1440, 900), "dark"),
+        ("телефон", (390, 844), "light")]
     measured: dict[str, dict] = {}
     has_toggle = False
     try:

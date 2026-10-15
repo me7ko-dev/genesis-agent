@@ -14,11 +14,13 @@ self-modify, 24/7 цикъл): всички минават през Brain.comple
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import posixpath
 import re
 from collections import defaultdict
+from collections.abc import Iterator
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -407,10 +409,30 @@ def cache_stable_history(messages, *, limit: int = MAX_SENT_MESSAGES,
     return msgs
 
 
+# Слушатели на текущия процес (`genesis -p --output-format json`): всеки запис
+# отива и в тях. Лога не става за това — в него пишат и други процеси (чатът,
+# bench-ът) едновременно, а „кои записи са от този ход“ не личи от него.
+_collectors: list[list[dict]] = []
+
+
+@contextlib.contextmanager
+def collect() -> Iterator[list[dict]]:
+    """Записите на record_usage, докато трае блокът — моделите и токените на
+    един ход, точно както доставчикът ги е отчел (2026-10-15)."""
+    bucket: list[dict] = []
+    _collectors.append(bucket)
+    try:
+        yield bucket
+    finally:
+        with contextlib.suppress(ValueError):
+            _collectors.remove(bucket)
+
+
 def record_usage(*, provider: str, model: str, prompt_tokens: int,
                   completion_tokens: int, context: str = "",
                   cached_read_tokens: int = 0,
-                  cached_write_tokens: int = 0) -> None:
+                  cached_write_tokens: int = 0,
+                  cost_usd: float | None = None) -> None:
     """Append-only запис. Безопасно — никога не хвърля (логването не бива
     да чупи мисии).
 
@@ -433,6 +455,12 @@ def record_usage(*, provider: str, model: str, prompt_tokens: int,
             "cached_write_tokens": cached_write_tokens,
             "context": context[:120],
         }
+        # Цена само когато доставчикът я казва сам (`claude` CLI: total_cost_usd);
+        # таблица с цени тук би остаряла тихо.
+        if cost_usd is not None:
+            entry["cost_usd"] = float(cost_usd)
+        for bucket in tuple(_collectors):   # копие: друга нишка може да затвори своя блок
+            bucket.append(entry)
         with LOG_PATH.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:
