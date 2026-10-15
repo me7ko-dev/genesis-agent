@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import socket
 import struct
@@ -283,3 +284,87 @@ def test_a_braked_address_cannot_upload_audio(live_voice) -> None:
     except (ConnectionError, urllib.error.URLError):
         status = 429
     assert status == 429 and fakes.stt_calls == []
+
+
+# ── ревю 2026-10-15: паметта на големия плик и счупен WAV ──────────────────
+
+def test_a_big_body_with_an_envelope_head_and_json_after_it_is_not_parsed(live_voice) -> None:
+    """Без ключа: началото на плика е публично, а след него 4 MiB `{},{},…`
+    ставаха ~100 MiB речници в json.loads, преди Cipher.open да откаже (17 MiB
+    → 430 MiB, мерено с tracemalloc). Голямото тяло трябва да е точно плик."""
+    import tracemalloc
+    base, server, fakes = live_voice
+    body = (b'{"v":1,"n":"AAAAAAAAAAAAAAAA","c":"' + b"A" * 200 + b'","z":['
+            + b"{}," * ((4 << 20) // 3) + b"{}]}")
+    assert len(body) > rs._MAX_BODY
+    tracemalloc.start()
+    try:
+        try:
+            status, reply = _post(base, body)
+        except (ConnectionError, urllib.error.URLError):
+            status, reply = 413, {"error": "size"}       # RST на Windows — отказано
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert status == 413 and reply == {"error": "size"}
+    assert peak < 30 * 1024 * 1024, f"{peak / 1048576:.0f} MiB"
+    assert len(server._failures["127.0.0.1"]) == 1 and fakes.stt_calls == []
+
+
+class _Conn:
+    def settimeout(self, _t) -> None:
+        pass
+
+    def shutdown(self, _how) -> None:
+        pass
+
+
+class _Body:
+    """Като rfile на сокет: всяко read1 е нов обект (BytesIO връща своя буфер
+    без копие и трупането не би личало)."""
+
+    def __init__(self, size: int) -> None:
+        self.left = size
+
+    def read1(self, n: int) -> bytes:
+        n = min(n, self.left, 1 << 20)
+        self.left -= n
+        return b"x" * n
+
+
+def test_the_refused_rest_of_a_big_body_is_drained_not_kept(live_voice) -> None:
+    """429 „busy“ (зает голям плик) и 429 от спрян адрес четат остатъка, за да
+    стигне отговорът (_linger_close) — до 19 MiB на връзка, без ключ. Изхвърля
+    се на парчета; трупаше се 2× остатъка на всяка от 16-те връзки на адрес."""
+    import tracemalloc
+    _, server, _ = live_voice
+    httpd = server.make_http("127.0.0.1", 0)
+    try:
+        handler = httpd.RequestHandlerClass.__new__(httpd.RequestHandlerClass)
+        size = 16 * 1024 * 1024
+        handler.rfile = body = _Body(size)
+        handler.wfile = io.BytesIO()
+        handler.connection = _Conn()
+        tracemalloc.start()
+        try:
+            handler._linger_close(size)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+    finally:
+        httpd.server_close()
+    assert body.left == 0                              # остатъкът е прочетен (FIN, не RST)
+    assert peak < 2 * 1024 * 1024, f"{peak / 1048576:.1f} MiB"
+
+
+def test_a_wav_with_a_broken_chunk_size_is_a_reply_not_a_dropped_connection() -> None:
+    """Размер на fmt блока над файла (прекъснат запис, чужд кодер): wave хвърля
+    RuntimeError, която не беше хваната — телефонът получаваше прекъсната
+    връзка, а терминалът traceback. Продължителността просто не е известна."""
+    server, fakes, _ = _server()
+    audio = bytearray(_wav(1))
+    audio[16:20] = struct.pack("<I", 0x16000010)
+    assert voice.audio_seconds(bytes(audio), "audio/wav") is None
+    reply = server._dispatch({"op": "transcribe", "mime": "audio/wav",
+                              "data": base64.b64encode(bytes(audio)).decode()})
+    assert reply == {"ok": True, "text": "пусни тестовете"} and len(fakes.stt_calls) == 1

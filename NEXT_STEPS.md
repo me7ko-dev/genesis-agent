@@ -82,7 +82,8 @@ VIEW_IMAGE за един ход; абсолютен път до картинка
 - Тестовете вече не пишат в истинската история на чата: файл, пуснат сам, с
   `import genesis_terminal_agent` в тялото на тест, пишеше session_*.json и
   by_workspace.json в ~/.local/share/genesis-agent/history (4 теста); conftest задава
-  GENESIS_HISTORY_DIR и пада на теста, който я пипне (`_real_history_untouched`).
+  GENESIS_HISTORY_DIR и пада на теста, който я пипне (`_real_history_untouched`;
+  от 2026-10-15 гледа и `storage.history_dir` от config.yaml).
 Не е направено: ~~картинки в чата~~ (#81); C901 преработките на
 #43 (преструктуриране без полза за модела, големи конфликти — #43 затворен).
 **Наживо на лаптопа (след `genesis --version` с новия комит):** `/doctor` на Windows;

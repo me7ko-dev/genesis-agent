@@ -145,7 +145,9 @@ def _top_of(data: bytes, ratio: float) -> bytes:
         out = io.BytesIO()
         img.crop((0, 0, w, int(w * ratio))).save(out, format="PNG")
         return out.getvalue()
-    except (OSError, ValueError):
+    # DecompressionBombError не е OSError (ревю 2026-10-15): страница над
+    # ~124 000 px при 1440 px сваляше хода; vision.image_part после я отказва.
+    except (OSError, ValueError, Image.DecompressionBombError):
         return data
 
 

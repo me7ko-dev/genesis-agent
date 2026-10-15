@@ -52,16 +52,41 @@ _PACKAGE_BEFORE = _package_entries()
 # в пълния пакет друг файл го внася по-рано, затова там не личеше. Мерено:
 # 4 теста в 4 файла. При оператора това са чужди разговори в /resume и
 # `genesis -c`.
+from genesis_agent.paths import CONFIG_PATH as _CONFIG_PATH
 from genesis_agent.paths import history_dir as _history_dir
 
-_REAL_HISTORY = _history_dir()
+
+def _real_histories(config_path: Path) -> list[Path]:
+    """paths.history_dir и `storage.history_dir` от config.yaml (ревю
+    2026-10-15): genesis_terminal_agent предпочита второто пред
+    GENESIS_HISTORY_DIR, тоест тест, който го внася в тялото си, пише там —
+    а пазачът гледаше само първото."""
+    import yaml
+    found = [_history_dir()]
+    try:
+        cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError, yaml.YAMLError):   # няма го или е счупен — само подразбиращата се
+        cfg = {}
+    storage = cfg.get("storage") if isinstance(cfg, dict) else None
+    override = storage.get("history_dir") if isinstance(storage, dict) else ""
+    if override:
+        found.append(Path(str(override)).expanduser())
+    return found
+
+
+_REAL_HISTORIES = _real_histories(_CONFIG_PATH)
+_REAL_HISTORY = _REAL_HISTORIES[0]
 
 
 def _history_entries() -> dict[str, int]:
-    try:
-        return {e.name: e.stat().st_mtime_ns for e in os.scandir(_REAL_HISTORY)}
-    except OSError:
-        return {}
+    found: dict[str, int] = {}
+    for folder in _REAL_HISTORIES:
+        try:
+            found.update({os.path.join(folder, e.name): e.stat().st_mtime_ns
+                          for e in os.scandir(folder)})
+        except OSError:
+            continue
+    return found
 
 
 _HISTORY_BEFORE = _history_entries()
@@ -389,4 +414,4 @@ def _real_history_untouched():
     changed = sorted(n for n, m in now.items() if _HISTORY_BEFORE.get(n) != m)
     _HISTORY_BEFORE.clear()
     _HISTORY_BEFORE.update(now)
-    assert not changed, f"тестът писа в истинската история {_REAL_HISTORY}: {changed}"
+    assert not changed, f"тестът писа в истинската история {_REAL_HISTORIES}: {changed}"

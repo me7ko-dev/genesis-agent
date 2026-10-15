@@ -158,6 +158,7 @@ _BRAKED_READ_S = 2.0
 # След 429 без прочетено тяло: колко най-много да се изхвърля остатъкът, за да
 # стигне отговорът до клиента вместо RST (виж _linger_close).
 _LINGER_S = 0.5
+_DRAIN_CHUNK = 64 * 1024
 
 
 class ProtocolError(Exception):
@@ -1162,12 +1163,20 @@ class RemoteServer:
                 `left` байта и до _LINGER_S се изхвърлят. На Windows close() с
                 непрочетени данни праща RST — клиентът, който още праща тялото,
                 получаваше WinError 10053 вместо 429 (лаптопът, 2026-10-11).
-                Срокът е общ и кратък, за да не върне вълна 5 (място за 30 s)."""
+                Срокът е общ и кратък, за да не върне вълна 5 (място за 30 s).
+                Изхвърля се на парчета (ревю 2026-10-15): _read_by трупаше
+                остатъка — до 19 MiB (×2 при join) на всяка отказана голяма
+                заявка без ключ, 16 връзки на адрес."""
                 self.close_connection = True
                 try:
                     self.wfile.flush()
                     self.connection.shutdown(socket.SHUT_WR)
-                    self._read_by(max(left, 0), time.monotonic() + _LINGER_S)
+                    deadline = time.monotonic() + _LINGER_S
+                    while left > 0:
+                        got = len(self._read_by(min(left, _DRAIN_CHUNK), deadline))
+                        if not got:
+                            break
+                        left -= got
                 except OSError:
                     pass
 
@@ -1253,6 +1262,15 @@ class RemoteServer:
                     if len(body) != length:
                         server.record_failure(ip)
                         self.close_connection = True
+                        return
+                    # Цялото тяло — точно плик, преди json.loads (ревю 2026-10-15):
+                    # проверено беше само началото, а след него `","z":[{},{},…]`
+                    # без ключ ставаше речници — 17 MiB → 430 MiB (tracemalloc),
+                    # преди Cipher.open да откаже. Телефонът и Desktop пращат
+                    # точно {v, n, c} (protocol.ts); регулярният израз е линеен.
+                    if not _ENVELOPE_SHAPE.fullmatch(body):
+                        server.record_failure(ip)
+                        self._json(413, {"error": "size"})
                         return
                     self._answer(ip, body, large=True)
                 finally:
