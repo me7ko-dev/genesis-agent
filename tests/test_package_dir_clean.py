@@ -32,9 +32,9 @@ def test_data_dir_of_the_test_session_is_not_the_package() -> None:
 
 def test_databases_created_at_import_were_not_in_the_package() -> None:
     # Пътищата, с които модулите са се внесли (conftest ги подменя после за
-    # всеки тест — затова се гледа DATA_DIR, от който са изведени).
-    assert not (PACKAGE_DIR / "episodes.db").exists()
-    assert not (PACKAGE_DIR / "persistent_memory.db").exists()
+    # всеки тест — затова се гледа DATA_DIR, от който са изведени). Не „файлът
+    # го няма“: в checkout на оператора там е истинската му памет и тестът
+    # падаше завинаги (2026-10-15); нов файл там хваща _package_dir_untouched.
     assert not _inside_package(episodic_memory.DB_PATH)
     assert not _inside_package(memory.DB_PATH)
 
