@@ -52,8 +52,6 @@ try:  # POSIX-only; resource limits са best-effort на не-Linux платф�
 except ImportError:  # pragma: no cover
     resource = None  # type: ignore
 
-log = logging.getLogger("genesis.sandbox")
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Резултат и нива на риск
