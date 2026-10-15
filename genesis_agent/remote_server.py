@@ -45,6 +45,23 @@ Code на телефона управлява сесия, която тече д
 „За тази сесия“ би запомнила) — само тогава приложението показва третия бутон и
 праща `confirm` с "session": true. "confirm_done" носи "session": true, ако е
 запомнено. Старо приложение не праща "session" — Изпълни/Откажи както досега.
+
+2026-10-15 — гласът (genesis_agent/voice.py), "features" съдържа "voice":
+
+    {"op":"transcribe","mime":"audio/m4a|audio/webm|audio/wav|…","data":b64,
+     "language":"bg"?}  → {"ok":true,"text":"…"}
+    {"op":"speak","text":"…","voice":"bg-BG-BorislavNeural"?}
+                        → {"ok":true,"mime":"audio/mpeg","data":b64,"text":"изговореното"}
+
+`data` е base64 (обикновен или url-safe, с или без `=`, може и `data:…;base64,`
+отпред); отговорът е обикновен base64 с `=`. Говорът става текст ТУК, с ключовете
+на компютъра; текстът НЕ се праща сам — приложението го показва и операторът
+го праща с `send`, както написан. Тавани: ≤ 10 MB аудио, ≤ 2 мин (wav/m4a се
+проверяват), `speak` ≤ 20 000 знака (изговаря се началото, без код и markdown).
+Грешки: "too_large", "too_long", "bad_mime", "bad_args", "empty", "busy" (друг
+запис се обработва), "rate_limited", "stt_failed"/"tts_failed" (+ "detail" на
+български). Плик над 256 KiB се приема само за тези две операции — до
+_MAX_VOICE_BODY, по един наведнъж; за всяка друга — "too_large".
 """
 from __future__ import annotations
 
@@ -81,6 +98,18 @@ _TOOL_PREVIEW = 4000
 # (втори одит 2026-10-11: най-новите + reset губеха дупката и целия разговор
 # на телефон, събуден след ~130 инструмента).
 _REPLY_BYTES = 512 * 1024
+# Гласът от телефона (2026-10-15). 10 MB аудио → 13.3 MB base64 в JSON → още
+# веднъж base64 в плика = 18.7 MB; 19 MiB оставя място за полетата. Голямо тяло
+# се чете с общ срок (_VOICE_READ_S), само от незаспрян адрес и по едно наведнъж —
+# иначе 16 връзки × 19 MiB от непознат биха държали 300 MB памет.
+_VOICE_OPS = frozenset({"transcribe", "speak"})
+_MAX_VOICE_BODY = 19 * 1024 * 1024
+_VOICE_READ_S = 120.0
+# Обръщения на минута: Groq безплатно е 20 заявки/мин за Whisper (2026-10-15).
+_VOICE_PER_MIN = {"transcribe": 20, "speak": 30}
+_SPEAK_MAX_CHARS = 20000
+_LANGUAGE = re.compile(r"[a-z]{2,3}|auto")
+_TTS_VOICE = re.compile(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,24}){0,3}")
 # Колко последни `mid` на `send` помним (2026-10-11): повторен опит след
 # изгубен отговор не пуска хода втори път.
 _SENT_MIDS = 256
@@ -118,6 +147,17 @@ def _b64e(raw: bytes) -> str:
 
 def _b64d(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def _b64_any(text: str) -> bytes:
+    """Аудиото от телефона: обикновен или url-safe base64, с или без `=`, и с
+    `data:audio/…;base64,` отпред (уеб версията чете файла като data URL).
+    Невалиден знак → ValueError (binascii.Error), не тихо изрязване."""
+    s = text.strip()
+    if s.startswith("data:") and "," in s:
+        s = s.split(",", 1)[1]
+    s = s.replace("-", "+").replace("_", "/")
+    return base64.b64decode(s + "=" * (-len(s) % 4), validate=True)
 
 
 def utf8_bytes(text: str) -> bytes:
@@ -547,7 +587,10 @@ class RemoteTurnUI:
 _TERMINAL_ONLY = frozenset({"/model", "/models", "/agent", "/backup", "/status", "/history",
                             "/export", "/предай", "/update", "/ъпдейт", "/done", "/drop",
                             "/готово", "/maxcoding", "/макскод", "/local_model_max",
-                            "/local_model_normal", "/локален_макс", "/локален_нормал"})
+                            "/local_model_normal", "/локален_макс", "/локален_нормал",
+                            # Микрофонът и високоговорителят на КОМПЮТЪРА; телефонът
+                            # има свои — операциите `transcribe` и `speak` (2026-10-15).
+                            "/voice", "/глас", "/listen", "/mic", "/слушай"})
 
 PHONE_HELP = """Команди от телефона:
 /plan — режим план: само чете и планира; /plan пак — изпълнява плана
@@ -704,7 +747,10 @@ class RemoteServer:
                  status: Callable[[], dict] | None = None,
                  clear: Callable[[], None] | None = None,
                  commands: Callable[[str, dict], dict] | None = None,
-                 web_root: Path | None = None, replay_path: Path | None = None) -> None:
+                 web_root: Path | None = None, replay_path: Path | None = None,
+                 voice: bool = False,
+                 stt: Callable[[bytes, str, str], str] | None = None,
+                 tts: Callable[[str, str | None], tuple[bytes, str]] | None = None) -> None:
         self.key = key
         self.cipher = Cipher(key)
         self.replay = ReplayGuard(path=replay_path)
@@ -721,15 +767,26 @@ class RemoteServer:
         # казва „няма връзка“, операторът натиска пак — ходът вървеше два пъти).
         self._sent: dict[str, dict] = {}
         self._send_lock = threading.Lock()
+        # Гласът: `voice=True` (genesis serve) ползва genesis_agent.voice;
+        # тестовете подават свои stt/tts. Без тях операциите са "unknown_op".
+        if voice and stt is None:
+            stt = _default_stt
+        if voice and tts is None:
+            tts = _default_tts
+        self.stt, self.tts = stt, tts
+        self._voice_calls: dict[str, deque[float]] = {k: deque() for k in _VOICE_OPS}
+        self._voice_locks = {k: threading.Lock() for k in _VOICE_OPS}
+        self._big_body = threading.BoundedSemaphore(1)
 
     # -- заявки --
     def hello(self) -> dict:
         from genesis_agent import __version__
         return {"app": "genesis", "v": PROTOCOL, "key_id": key_id(self.key),
                 "name": self.name, "version": __version__,
-                "features": ["commands"] if self.commands else []}
+                "features": (["commands"] if self.commands else [])
+                + (["voice"] if self.stt is not None and self.tts is not None else [])}
 
-    def handle(self, envelope: Any) -> tuple[dict, str]:
+    def handle(self, envelope: Any, *, large: bool = False) -> tuple[dict, str]:
         """(отговор, rid) за вече декодиран JSON плик. Хвърля ProtocolError
         САМО за плик, който не се отваря с ключа или е стар/повторен.
 
@@ -739,6 +796,10 @@ class RemoteServer:
         сдвои отново“ и го броеше за спирачката срещу налучкване."""
         payload = self.cipher.open(envelope, _REQ_AAD)
         rid = self.replay.check(payload)
+        # Голям плик е позволен само за аудиото (2026-10-15) — с ключа е, тоест
+        # грешка в заявката, не налучкване.
+        if large and payload.get("op") not in _VOICE_OPS:
+            return {"ok": False, "error": "too_large"}, rid
         return self._dispatch(payload), rid
 
     def _dispatch(self, p: dict) -> dict:
@@ -793,6 +854,10 @@ class RemoteServer:
         if op == "command" and self.commands is not None:
             arg = p.get("arg")
             return self.commands(str(p.get("name") or ""), arg if isinstance(arg, dict) else {})
+        if op == "transcribe" and self.stt is not None:
+            return self._voice_op("transcribe", p)
+        if op == "speak" and self.tts is not None:
+            return self._voice_op("speak", p)
         # По-ново приложение с операция, която този `genesis serve` не знае.
         return {"ok": False, "error": "unknown_op"}
 
@@ -807,6 +872,78 @@ class RemoteServer:
         if text.strip().lower() in ("/clear", "/нов"):
             return self._dispatch({"op": "clear"})
         return {"ok": True} if self.session.send(text) else {"ok": False, "error": "busy"}
+
+    # -- гласът (2026-10-15) --
+    def _voice_op(self, kind: str, p: dict) -> dict:
+        """Таван на минута и по една заявка наведнъж: Whisper/edge-tts са
+        секунди, а телефон в цикъл не бива да изгори квотата на Groq."""
+        now = time.monotonic()
+        with self._lock:
+            calls = self._voice_calls[kind]
+            while calls and now - calls[0] >= 60:
+                calls.popleft()
+            if len(calls) >= _VOICE_PER_MIN[kind]:
+                return {"ok": False, "error": "rate_limited"}
+            calls.append(now)
+        lock = self._voice_locks[kind]
+        if not lock.acquire(blocking=False):
+            return {"ok": False, "error": "busy"}
+        try:
+            return self._transcribe(p) if kind == "transcribe" else self._speak(p)
+        finally:
+            lock.release()
+
+    def _transcribe(self, p: dict) -> dict:
+        from genesis_agent import voice
+        data, mime, language = p.get("data"), p.get("mime") or "audio/wav", p.get("language")
+        if not isinstance(data, str) or not isinstance(mime, str):
+            return {"ok": False, "error": "bad_args"}
+        if not data.strip():
+            return {"ok": False, "error": "empty"}
+        # Преди декодиране: 30 MB base64 не се разгъва, за да се откаже после.
+        if len(data) > voice.MAX_AUDIO_BYTES * 4 // 3 + 64:
+            return {"ok": False, "error": "too_large"}
+        try:
+            mime = voice.normalize_mime(mime)
+        except voice.VoiceError:
+            return {"ok": False, "error": "bad_mime"}
+        try:
+            audio = _b64_any(data)
+        except ValueError:
+            return {"ok": False, "error": "bad_args"}
+        if not audio:
+            return {"ok": False, "error": "empty"}
+        if len(audio) > voice.MAX_AUDIO_BYTES:
+            return {"ok": False, "error": "too_large"}
+        seconds = voice.audio_seconds(audio, mime)
+        if seconds is not None and seconds > voice.MAX_AUDIO_SECONDS + 1:
+            return {"ok": False, "error": "too_long"}
+        lang = language if isinstance(language, str) and _LANGUAGE.fullmatch(language) else ""
+        assert self.stt is not None
+        try:
+            text = self.stt(audio, mime, lang)
+        except voice.VoiceError as e:
+            return {"ok": False, "error": "stt_failed", "detail": str(e)[:300]}
+        return {"ok": True, "text": text}
+
+    def _speak(self, p: dict) -> dict:
+        from genesis_agent import voice
+        text, name = p.get("text"), p.get("voice")
+        if not isinstance(text, str):
+            return {"ok": False, "error": "bad_args"}
+        if len(text) > _SPEAK_MAX_CHARS:
+            return {"ok": False, "error": "too_long"}
+        spoken = voice.speech_text(text)
+        if not spoken.strip():
+            return {"ok": False, "error": "empty"}
+        chosen = name if isinstance(name, str) and _TTS_VOICE.fullmatch(name) else None
+        assert self.tts is not None
+        try:
+            audio, mime = self.tts(spoken, chosen)
+        except voice.VoiceError as e:
+            return {"ok": False, "error": "tts_failed", "detail": str(e)[:300]}
+        return {"ok": True, "mime": mime, "data": base64.b64encode(audio).decode("ascii"),
+                "text": spoken}
 
     def seal(self, response: dict, rid: str) -> dict:
         return self.cipher.seal(response, _RES_AAD + rid.encode("ascii"))
@@ -950,8 +1087,11 @@ class RemoteServer:
                     length = int(self.headers.get("Content-Length") or 0)
                 except ValueError:
                     length = -1
-                if not 0 < length <= _MAX_BODY:
+                if not 0 < length <= _MAX_VOICE_BODY or (length > _MAX_BODY and server.stt is None):
                     self._json(413, {"error": "size"})
+                    return
+                if length > _MAX_BODY:
+                    self._voice_post(ip, length)
                     return
                 try:
                     if server.too_many_failures(ip):
@@ -981,9 +1121,51 @@ class RemoteServer:
                     server.record_failure(ip)
                     self._json(429, {"error": "slow_down"})
                     return
+                self._answer(ip, body)
+
+            def _voice_post(self, ip: str, length: int) -> None:
+                """Плик над _MAX_BODY — аудио за `transcribe` (2026-10-15).
+
+                Само от незаспрян адрес, по един наведнъж за целия сървър, с
+                общ срок за четенето и с начало, което е плик; иначе отказ, без
+                да се чете останалото. Какво е вътре личи чак с ключа — там
+                handle(large=True) пуска само гласовите операции."""
+                if server.too_many_failures(ip):
+                    server.record_failure(ip)
+                    self._json(429, {"error": "slow_down"})
+                    self._linger_close(length)
+                    return
+                if not server._big_body.acquire(blocking=False):
+                    self._json(429, {"error": "busy"})
+                    self._linger_close(length)
+                    return
+                try:
+                    deadline = time.monotonic() + _VOICE_READ_S
+                    try:
+                        head = self._read_by(_HEAD_BYTES, deadline)
+                        if len(head) != _HEAD_BYTES or not _ENVELOPE_HEAD.fullmatch(head):
+                            server.record_failure(ip)
+                            self._json(413, {"error": "size"})
+                            self._linger_close(length - len(head))
+                            return
+                        body = head + self._read_by(length - len(head), deadline)
+                    except OSError:   # таймаут — провал за спирачката, както горе
+                        server.record_failure(ip)
+                        self.close_connection = True
+                        return
+                    if len(body) != length:
+                        server.record_failure(ip)
+                        self.close_connection = True
+                        return
+                    self._answer(ip, body, large=True)
+                finally:
+                    server._big_body.release()
+
+            def _answer(self, ip: str, body: bytes, *, large: bool = False) -> None:
                 try:
                     envelope = json.loads(body.decode("utf-8"))
-                    response, rid = server.handle(envelope)
+                    response, rid = (server.handle(envelope, large=True) if large
+                                     else server.handle(envelope))
                 # RecursionError: `[` × 200 000 без ключ — traceback в терминала
                 # на оператора на всяка заявка и без провал за спирачката (одит
                 # 2026-10-11).
@@ -1003,6 +1185,16 @@ class RemoteServer:
         httpd = _QuietServer((host, port), Handler)
         httpd.daemon_threads = True
         return httpd
+
+
+def _default_stt(audio: bytes, mime: str, language: str) -> str:
+    from genesis_agent import voice
+    return voice.transcribe(audio, mime, language or voice.settings().language)
+
+
+def _default_tts(text: str, name: str | None) -> tuple[bytes, str]:
+    from genesis_agent import voice
+    return voice.synthesize(text, name)
 
 
 class _QuietServer(ThreadingHTTPServer):
@@ -1288,7 +1480,8 @@ def serve(args: list[str]) -> int:
     server = RemoteServer(key, session, name=name, status=status, clear=clear,
                           commands=lambda n, a: desktop_commands.run(n, a, ctx),
                           web_root=_web_root(),
-                          replay_path=_config_path().with_name("remote_seen.json"))
+                          replay_path=_config_path().with_name("remote_seen.json"),
+                          voice=True)
     try:
         httpd = server.make_http(bind, port)
     except OSError as e:
