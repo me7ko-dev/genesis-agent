@@ -714,7 +714,11 @@ def _run_player(player: Player, audio: bytes, mime: str) -> None:
     if player.kind == "winsound":
         if sys.platform == "win32":
             import winsound
-            winsound.PlaySound(audio, winsound.SND_MEMORY)
+            _CURRENT["winsound"] = True
+            try:
+                winsound.PlaySound(audio, winsound.SND_MEMORY)
+            finally:
+                _CURRENT.pop("winsound", None)
         return
     with tempfile.TemporaryDirectory(prefix="genesis-tts-") as tmp:
         path = os.path.join(tmp, f"speech.{_ext(mime)}")
@@ -759,12 +763,16 @@ def stop_speaking() -> None:
     proc = _CURRENT.get("proc")
     if proc is not None and proc.poll() is None:
         proc.kill()
+    # Системният звук се пипа само ако НИЕ пускаме нещо (2026-10-15): преди
+    # всяко /listen и всеки нов отговор викаше winsound.PlaySound(None, …) —
+    # ненужно, а на Windows CI без звукова карта тестът висеше.
     if sys.platform == "win32":
         if _CURRENT.get("mci"):
             import ctypes
             ctypes.WinDLL("winmm").mciSendStringW(f"stop {_MCI_ALIAS}", None, 0, None)
-        import winsound
-        winsound.PlaySound(None, winsound.SND_PURGE)
+        if _CURRENT.get("winsound"):
+            import winsound
+            winsound.PlaySound(None, winsound.SND_PURGE)
 
 
 def speak(text: str, *, block: bool = False, cfg: Settings | None = None,
