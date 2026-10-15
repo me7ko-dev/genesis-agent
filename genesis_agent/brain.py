@@ -79,7 +79,7 @@ def _post_with_deadline(url: str, *, headers: dict, json: dict, timeout: int) ->
     def _run() -> None:
         try:
             box["r"] = requests.post(url, headers=headers, json=json, timeout=timeout)
-        except BaseException as e:  # предава се на викащия
+        except BaseException as e:  # noqa: BLE001 — предава се на викащата нишка, която я хвърля
             box["e"] = e
 
     worker = threading.Thread(target=_run, daemon=True, name="genesis-http")
@@ -122,7 +122,7 @@ def _output_cap(model: str) -> int:
                     if entry.get("model") and entry.get("max_tokens"):
                         caps[entry["model"]] = int(entry["max_tokens"])
         except Exception as e:
-            log.debug("_output_cap: config.yaml не се чете (%s), таванът остава общ", e)
+            log.debug("_output_cap: config.yaml не се чете (%s), таванът остава общ", e, exc_info=True)
         _OUTPUT_CAPS = caps
     return _OUTPUT_CAPS.get(model, MAX_OUTPUT_TOKENS)
 
@@ -345,6 +345,7 @@ def _ollama_installed() -> list[str]:
         if r.status_code == 200:
             return [str(m.get("name", "")) for m in r.json().get("models", [])]
     except Exception:
+        log.debug("локалният Ollama не отговори", exc_info=True)
         return []
     return []
 
@@ -373,6 +374,7 @@ def _installed_local_tier(names: list[str] | None = None) -> str | None:
     try:
         from genesis_agent.model_router import LOCAL_TIERS
     except Exception:
+        log.debug("model_router не се зареди", exc_info=True)
         return None
     if names is None:
         names = _ollama_installed()
@@ -571,6 +573,7 @@ def _load_chain() -> list[dict]:
     try:
         cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
     except Exception:
+        log.debug("config.yaml не се прочете — веригата е без него", exc_info=True)
         cfg = {}
     models = cfg.get("models", {})
     fallback_list = models.get("fallback_models", [])
@@ -607,7 +610,7 @@ def _load_chain() -> list[dict]:
                  bool(fm.get("supports_tools", False)))
     except Exception as e:
         # Резервен слой — никога не спира старта.
-        log.debug("_load_chain: без автоматично открити модели (%s)", e)
+        log.debug("_load_chain: без автоматично открити модели (%s)", e, exc_info=True)
 
     # Мъртвите според последната `genesis models --check` (404/410) се
     # прескачат, докато следваща проверка не ги види живи — без да се пипа
@@ -628,7 +631,7 @@ def _dead_models() -> set:
         from genesis_agent.model_check import dead_models
         return set(dead_models())
     except Exception as e:
-        log.debug("model_check недостъпен (%s)", e)
+        log.debug("model_check недостъпен (%s)", e, exc_info=True)
         return set()
 
 
@@ -649,6 +652,7 @@ def _load_coding_chain() -> list[dict]:
     try:
         cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
     except Exception:
+        log.debug("config.yaml не се прочете — без безплатната верига", exc_info=True)
         return []
     out: list[dict] = []
     dead = _dead_models()
@@ -669,6 +673,7 @@ def _load_light_chain() -> list[dict]:
     try:
         cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
     except Exception:
+        log.debug("config.yaml не се прочете — без леките модели", exc_info=True)
         return []
     out: list[dict] = []
     dead = _dead_models()
@@ -700,6 +705,7 @@ def _load_premium_chain() -> list[dict]:
     try:
         cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
     except Exception:
+        log.debug("config.yaml не се прочете — без premium моделите", exc_info=True)
         return []
     out: list[dict] = []
     for entry in (cfg.get("models", {}) or {}).get("premium_models", []) or []:
@@ -740,6 +746,7 @@ def any_model_reachable() -> bool:
                 if vertex_auth.projects():
                     return True
             except Exception:
+                log.debug("проектите на Vertex не се прочетоха — опитваме", exc_info=True)
                 return True          # не знаем — по-добре опит, отколкото отказ
             continue
         if str(keys.get(key_env) or "").strip():
@@ -749,6 +756,7 @@ def any_model_reachable() -> bool:
         r = requests.get("http://localhost:11434/api/tags", timeout=2)
         names = [m.get("name", "") for m in r.json().get("models", [])] if r.status_code == 200 else []
     except Exception:
+        log.debug("локалният Ollama не отговори", exc_info=True)
         return False
     return any(m and m.split(":")[0] in n for m in local_models for n in names)
 
@@ -934,7 +942,7 @@ class Brain:
             if m:
                 self._set_local(m)
         except Exception as e:
-            log.debug("route_for_goal: model_router недостъпен, местният модел остава по подразбиране: %s", e)
+            log.debug("route_for_goal: model_router недостъпен, местният модел остава по подразбиране: %s", e, exc_info=True)
 
     def escalate(self) -> bool:
         """Качва ЛОКАЛНИЯ мозък на следващия по-голям НАЛИЧЕН модел. True ако е сменен.
@@ -979,7 +987,7 @@ class Brain:
                               nxt, self.current)
                 return True
         except Exception as e:
-            log.debug("escalate: model_router недостъпен, оставам на текущия модел: %s", e)
+            log.debug("escalate: model_router недостъпен, оставам на текущия модел: %s", e, exc_info=True)
         return False
 
     def escalate_to_coding_chain(self) -> bool:
@@ -1062,6 +1070,7 @@ class Brain:
                             f"# от умение: {h['name']}\n" + "\n".join(lines_code)
                         )
                     except Exception:
+                        log.debug("умението %s не се зареди", h["name"], exc_info=True)
                         code_names.discard(h["name"])  # неуспешно зареждане → трети в списъка
                 if code_blocks:
                     parts.append(
@@ -1075,7 +1084,7 @@ class Brain:
                     lines = [f"- {h['name']}: {h.get('description', '')[:80]}" for h in rest]
                     parts.append("Други подобни умения (само за идея):\n" + "\n".join(lines))
         except Exception as e:
-            log.debug("build_context: skill_loader недостъпен, без инжектирани умения: %s", e)
+            log.debug("build_context: skill_loader недостъпен, без инжектирани умения: %s", e, exc_info=True)
         try:
             from genesis_agent.memory import memory_search
             eps = memory_search(goal, top_k=3)
@@ -1086,7 +1095,7 @@ class Brain:
             if lessons:
                 parts.append("Уроци от минали мисии:\n" + "\n".join(lessons))
         except Exception as e:
-            log.debug("build_context: memory_search недостъпен, без инжектирани уроци: %s", e)
+            log.debug("build_context: memory_search недостъпен, без инжектирани уроци: %s", e, exc_info=True)
         return "\n\n".join(parts)
 
     def _trim_messages(self, messages: list[dict], max_chars: int = 6000) -> list[dict]:
@@ -1248,6 +1257,7 @@ class Brain:
             if not summary or summary.startswith("Error:"):
                 raise ValueError(f"неизползваемо резюме: {summary[:80] or 'празно'}")
         except Exception:
+            log.debug("резюмето на историята не стана — пазим последните", exc_info=True)
             # Fallback: просто пази последните, без резюме (губи старото честно,
             # не гърми разговора).
             return _rebuild([system_msg] + recent_part)
@@ -1640,6 +1650,7 @@ class Brain:
                 from genesis_agent import vertex_auth
                 kids = [f"key::VERTEX#{i}" for i in range(1, len(vertex_auth.projects()) + 1)]
             except Exception:
+                log.debug("проектите на Vertex не се прочетоха", exc_info=True)
                 kids = []
         elif provider == "claude_cli":
             kids = ["key::claude_cli"]   # лимитът на абонамента (_call_claude_cli)
@@ -1861,6 +1872,7 @@ class Brain:
                     self._log_usage()
                     return raw_text, code
             except Exception as e:
+                log.debug("локалният модел се провали", exc_info=True)
                 last_error = f"локален: {e}"
         self._last_local_error = last_error
         return None
@@ -1889,6 +1901,7 @@ class Brain:
             avail = available_tiers()
             installed = [t for t, ok in zip(LOCAL_TIERS, avail) if ok]
         except Exception:
+            log.debug("локалните нива не се прочетоха", exc_info=True)
             installed = []
         base_model = self.local["model"]
         others = [m for m in installed if m != base_model]
@@ -1929,6 +1942,7 @@ class Brain:
                 cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
                 Brain._TAG_PROMPT_CACHE = (cfg.get("tool_tag_prompt") or "").strip()
             except Exception:
+                log.debug("tool_tag_prompt не се прочете от config.yaml", exc_info=True)
                 Brain._TAG_PROMPT_CACHE = ""
         return Brain._TAG_PROMPT_CACHE
 
@@ -2094,7 +2108,7 @@ class Brain:
             from genesis_agent.provider_stats import deprioritize_flaky
             chain = deprioritize_flaky(chain)
         except Exception as e:
-            log.debug("provider_stats недостъпен, реда на веригата остава непроменен: %s", e)
+            log.debug("provider_stats недостъпен, реда на веригата остава непроменен: %s", e, exc_info=True)
 
         # tools заявен → tools-способните (config.yaml supports_tools) вървят
         # ПРЪВ (native, реален tool_calls), останалите — след тях, в стария
@@ -2370,7 +2384,7 @@ class Brain:
             from genesis_agent.provider_stats import record_call
             record_call(provider, latency_s, success)
         except Exception as e:
-            log.debug("provider_stats недостъпен, повикването не е записано: %s", e)
+            log.debug("provider_stats недостъпен, повикването не е записано: %s", e, exc_info=True)
 
     def _log_usage(self) -> None:
         """Безопасно логва token usage за последното успешно извикване (ако има).
@@ -2389,4 +2403,4 @@ class Brain:
                 cost_usd=self._last_usage.get("cost_usd"),
             )
         except Exception as e:
-            log.debug("budget недостъпен, usage не е записан: %s", e)
+            log.debug("budget недостъпен, usage не е записан: %s", e, exc_info=True)

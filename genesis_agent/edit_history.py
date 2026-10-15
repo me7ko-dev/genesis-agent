@@ -16,6 +16,7 @@ operator message the turn answered (`mark`): no second mechanism.
 """
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,6 +24,8 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from genesis_agent.checkpoints import Survey
+
+log = logging.getLogger("genesis.edit_history")
 
 _MAX_BYTES = 2_000_000
 _MAX_TURNS = 30
@@ -215,6 +218,7 @@ def _open_window(turn: _Turn, ws: Path, stop: Callable[[], bool] | None = None) 
             return
         turn.window = _Window(tree, found)
     except Exception as e:
+        log.debug("снимката преди командата не стана", exc_info=True)
         turn.note = str(e)
 
 
@@ -243,6 +247,7 @@ def after_command() -> None:
             raise OSError("снимката след командата не стана")
         found = checkpoints.changes(turn.workspace, window.before, tree)
     except Exception as e:
+        log.debug("снимката след командата не стана", exc_info=True)
         turn.note = turn.lost = f"промените от команда не могат да се върнат ({e})"
         return
     existed = window.survey.files
@@ -463,6 +468,7 @@ def _undo_commands(turn: _Turn, ws: Path) -> list[tuple[Path | None, str]]:
                 if not same or moded:
                     done.append((path, f"върнат {path}"))
         except Exception as e:
+            log.debug("/undo не върна %s", path, exc_info=True)
             done.append((path, f"❌ {path}: {e}"))
     return done
 

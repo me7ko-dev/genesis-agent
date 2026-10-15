@@ -10,11 +10,14 @@ can serve the phone later.
 """
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger("genesis.chat_commands")
 
 BUILTIN = ("/init", "/memory", "/plan", "/undo", "/compact", "/hooks", "/commands", "/bg", "/mcp",
            "/agents", "/todos", "/context", "/resume", "/rewind", "/doctor", "/permissions")
@@ -226,6 +229,7 @@ def handle(text: str, *, messages: Any, workspace: Path,
         try:
             new = compact(messages)
         except Exception as e:
+            log.debug("/compact се провали", exc_info=True)
             out(f"❌ Компресията не стана: {e}")
             return Result()
         out(f"🗜 Историята е компресирана: {before} → {len(new)} съобщения."

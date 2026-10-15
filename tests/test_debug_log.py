@@ -119,3 +119,33 @@ def test_unwritable_home_does_not_stop_genesis(monkeypatch, tmp_path, capsys) ->
     assert cli.main(["--version"]) == 0
     assert "debug.log" in capsys.readouterr().err
     assert debug_log._handler is None
+
+
+# 2026-10-15 (BLE001, втората половина): инструментите, чатът, sandbox-ът и
+# сървърът за телефона също записват погълнатата грешка. Два представителя —
+# пътят, по който модел вижда само „Грешка при изпълнение: e“, и мястото, където
+# параметърът `log` (файлът за изхода) засенчва логера на модула.
+
+def test_a_tool_crash_keeps_its_traceback(caplog) -> None:
+    import genesis_skills
+
+    def boom(_arg):
+        raise ZeroDivisionError("деление на нула")
+    with caplog.at_level(logging.DEBUG, logger="genesis.skills"):
+        out = genesis_skills._safe_tool("LIST_DIR", boom, ".")
+    assert "Грешка при изпълнение: деление на нула" in out          # поведението е същото
+    rec = next(r for r in caplog.records if r.name == "genesis.skills")
+    assert rec.exc_info and rec.exc_info[0] is ZeroDivisionError
+
+
+def test_a_background_start_that_fails_is_recorded(caplog, tmp_path) -> None:
+    from genesis_agent import sandbox
+    blocker = tmp_path / "a_file"
+    blocker.write_text("x", encoding="utf-8")
+    policy = sandbox.SandboxPolicy(mode="interactive", confirm_fn=lambda *_: True)
+    with caplog.at_level(logging.DEBUG, logger="genesis.sandbox"):
+        proc, err = sandbox.start_shell("echo hi", cwd=tmp_path, log=blocker / "out.log",
+                                        policy=policy)
+    assert proc is None and err.startswith("[sandbox] стартът се провали")
+    rec = next(r for r in caplog.records if r.name == "genesis.sandbox")
+    assert rec.exc_info and issubclass(rec.exc_info[0], OSError)
