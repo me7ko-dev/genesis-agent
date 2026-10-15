@@ -30,7 +30,7 @@
   „след“ на непусната команда; на Linux с git по 0.7 s: 6.79 → 0.4 s. Тестът печата
   хронология; да се потвърди на следващия windows-latest. ~~Job без
   CREATE_SUSPENDED изпуска внук~~ — процесът влиза в job-а спрян, после NtResumeProcess
-  (`_popen_in_job`; тестът с внук върви само на windows-latest). `!` (shell_mode) е без job.
+  (`_popen_in_job`; тестът с внук мина на windows-latest, 6.5 s). ~~`!` (shell_mode) е без job~~ — и той минава през `_popen_in_job`.
 - `GENESIS_DEBUG=1` → `~/.genesis/debug.log` (маскиран); 88 погълнати грешки в 37
   модула оставят следа; ruff BLE001/S110 включени, `per-file-ignores` изброява
   непрегледаните файлове (#74). Подписът на умение: срив на проверката = отказ
