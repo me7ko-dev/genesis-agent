@@ -303,3 +303,37 @@ def test_doctor_from_the_phone(monkeypatch, tmp_path) -> None:
                                  messages=[], workspace=tmp_path)
     assert prompt is None and any("✓ git" in t for t in infos)
     assert "/doctor" in rs.PHONE_HELP
+
+
+def _npm_tree(root: Path, layout: str) -> Path:
+    """Фалшив npm: Windows (`nodejs/npm.cmd`) или POSIX (`bin/npm-cli.js`)."""
+    if layout == "windows":
+        exe, pkg = root / "nodejs" / "npm.cmd", root / "nodejs" / "node_modules" / "npm" / "package.json"
+    else:
+        exe, pkg = root / "npm" / "bin" / "npm-cli.js", root / "npm" / "package.json"
+    exe.parent.mkdir(parents=True)
+    pkg.parent.mkdir(parents=True, exist_ok=True)
+    exe.write_text("", encoding="utf-8")
+    pkg.write_text(json.dumps({"name": "npm", "version": "10.9.4"}), encoding="utf-8")
+    return exe
+
+
+def test_npm_version_is_read_from_disk_without_starting_npm(monkeypatch, tmp_path) -> None:
+    # 2026-10-15: npm.cmd на Windows CI не отговори за 15 s (PR #87).
+    for layout in ("windows", "posix"):
+        exe = _npm_tree(tmp_path / layout, layout)
+        monkeypatch.setattr(doctor.shutil, "which", lambda name, exe=exe: str(exe) if name == "npm" else None)
+        monkeypatch.setattr(doctor, "_run", lambda argv, timeout=0: pytest.fail(f"пуснат процес: {argv}"))
+        npm = doctor.check_node(tmp_path)[1]
+        assert (npm.status, npm.detail) == ("ok", "10.9.4"), layout
+
+
+def test_npm_without_its_package_json_is_still_asked(monkeypatch, tmp_path) -> None:
+    exe = tmp_path / "npm.cmd"
+    exe.write_text("", encoding="utf-8")
+    (tmp_path / "package.json").write_text('{"name": "not-npm", "version": "1"}', encoding="utf-8")
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: str(exe) if name == "npm" else None)
+    asked: list[list[str]] = []
+    monkeypatch.setattr(doctor, "_run", lambda argv, timeout=0: (asked.append(argv), (0, "9.0.0"))[1])
+    npm = doctor.check_node(tmp_path)[1]
+    assert npm.detail == "9.0.0" and asked == [[str(exe), "--version"]]
