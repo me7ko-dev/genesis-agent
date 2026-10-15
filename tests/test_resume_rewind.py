@@ -569,3 +569,68 @@ def test_rewind_from_the_phone_asks_on_a_card_and_restores(proj) -> None:
     new, prompt = result["out"]
     assert prompt is None and [m["content"] for m in new] == ["SYS"]
     assert app.read_text(encoding="utf-8") == "v0\n"
+
+
+# ── приложението рисува историята наново (2026-10-15) ────────────────────────
+# След /resume и /rewind от телефона/Desktop се виждаха само бележките, а не
+# заредената или отрязаната история. Сега — "cleared" и репликите, както /history.
+
+def _after_cleared(session) -> list[tuple[str, str]]:
+    events = session.events_after(0)["events"]
+    types = [e["type"] for e in events]
+    assert "cleared" in types, types
+    tail = events[len(types) - 1 - types[::-1].index("cleared") + 1:]
+    return [(e["type"], e.get("text", "")) for e in tail]
+
+
+def test_resume_from_the_phone_redraws_the_loaded_conversation(dirs) -> None:
+    rs, session = _phone_session()
+    hist, ws, _ = dirs
+    _session(hist, ws, "session_1.json", _qa("стар въпрос", "стар отговор"), 1_700_000_000)
+    from genesis_agent.remote_server import RemoteTurnUI
+    rs.phone_command("/resume 1", RemoteTurnUI(session), session, messages=_fresh(), workspace=ws,
+                     conversations=Calls().conversations(hist))
+    shown = _after_cleared(session)
+    assert shown[:2] == [("user", "стар въпрос"), ("assistant", "стар отговор")]
+    notes = [t for k, t in shown[2:] if k == "info"]
+    assert len(notes) == 1 and notes[0].startswith("✓ Зареден")   # без повторен „последен отговор“
+
+
+def test_a_listing_or_a_refused_rewind_does_not_redraw(proj) -> None:
+    rs, session = _phone_session()
+    from genesis_agent.remote_server import RemoteTurnUI
+    msgs = _fresh()
+    _turn(msgs, "едно")
+    rs.phone_command("/rewind", RemoteTurnUI(session), session, messages=msgs, workspace=proj)
+    rs.phone_command("/resume", RemoteTurnUI(session), session, messages=msgs, workspace=proj,
+                     conversations=Calls().conversations(proj))
+    assert "cleared" not in [e["type"] for e in session.events_after(0)["events"]]
+
+
+def test_rewind_from_the_phone_redraws_the_cut_conversation(proj) -> None:
+    rs, session = _phone_session()
+    from genesis_agent.remote_server import RemoteTurnUI
+    msgs = _fresh()
+    _turn(msgs, "едно", lambda: _write(proj / "app.py", "v1\n"))
+    _turn(msgs, "две", lambda: _write(proj / "app.py", "v2\n"))
+    result: dict = {}
+
+    def go() -> None:
+        result["out"] = rs.phone_command("/rewind 2", RemoteTurnUI(session), session,
+                                         messages=msgs, workspace=proj)
+    t = threading.Thread(target=go)
+    t.start()
+    deadline = time.time() + 5
+    card = None
+    while card is None and time.time() < deadline:
+        card = next((e for e in session.events_after(0)["events"] if e["type"] == "confirm"), None)
+        time.sleep(0.01)
+    assert card is not None and session.answer(card["id"], True)
+    t.join(5)
+    shown = _after_cleared(session)
+    assert shown[:2] == [("user", "едно"), ("assistant", "готово: едно")]
+    assert ("user", "две") not in shown
+    infos = [t for k, t in shown if k == "info"]
+    assert infos[0].startswith("↶ Върнато") and infos[1].startswith("Съобщението беше:\nдве")
+    assert not any(t.startswith("Връщам разговора") for t in infos)   # планът остава преди "cleared"
+    assert (proj / "app.py").read_text(encoding="utf-8") == "v1\n"

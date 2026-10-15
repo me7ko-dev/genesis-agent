@@ -589,6 +589,7 @@ def phone_command(text: str, ui: Any, session: RemoteSession, *, messages: Any,
             return messages, None
 
         said: list[str] = []
+        answered_at = [0]
 
         def out(line: str) -> None:
             said.append(line)
@@ -598,6 +599,7 @@ def phone_command(text: str, ui: Any, session: RemoteSession, *, messages: Any,
             # Въпросът на командата (/undo) става карта „Изпълни/Откажи“ на
             # телефона; какво точно ще стане е последното, което командата каза.
             reason = question.split("(", 1)[0].strip(" >") or question
+            answered_at[0] = len(said)
             return "да" if session.confirm(said[-1] if said else question, [reason]) else "не"
 
         # Без `choose`: картата на телефона е да/не, не поле за номер — /resume и
@@ -608,6 +610,8 @@ def phone_command(text: str, ui: Any, session: RemoteSession, *, messages: Any,
         if res is not None:
             if res.messages is not None:
                 messages = res.messages
+                if cmd in _REDRAWN:
+                    _redraw(session, messages, said[answered_at[0]:])
             if not res.prompt:
                 return messages, None
             stripped = res.prompt
@@ -619,6 +623,22 @@ def phone_command(text: str, ui: Any, session: RemoteSession, *, messages: Any,
     for note in notes:
         ui.info(f"📎 {note}")
     return messages, stripped
+
+
+# Командите, след които историята в приложението е друга (заредена или
+# отрязана) — то я рисува наново, по същите събития като /history.
+_REDRAWN = frozenset({"/resume", "/rewind"})
+
+
+def _redraw(session: RemoteSession, messages: Any, result: list[str]) -> None:
+    """"cleared" + репликите (desktop_commands.replay), после какво стана —
+    бележките преди "cleared" изчезват с него. „Последният отговор“ не се
+    повтаря: той вече е в нарисуваната история."""
+    from genesis_agent import desktop_commands
+    desktop_commands.replay(session.emit, messages)
+    for line in result:
+        if not line.startswith("Последният отговор:"):
+            session.emit("info", text=line)
 
 
 def show_agent_progress(session: RemoteSession) -> None:

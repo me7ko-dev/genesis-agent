@@ -345,6 +345,19 @@ def cmd_history(_arg: dict, _ctx: CommandContext) -> dict:
     return {"ok": True, "sessions": items}
 
 
+def replay(emit: Callable[..., Any], messages: Any) -> None:
+    """Разговорът наново в приложението: "cleared", после репликите — с тях
+    телефонът и Desktop рисуват историята от нулата. Общо за /history и за
+    /resume и /rewind от чата (2026-10-15: там се виждаха само бележките, а
+    заредената или отрязаната история — не)."""
+    emit("cleared")
+    for m in messages:
+        if m.get("role") == "user":
+            emit("user", text=str(m.get("content") or ""))
+        elif m.get("role") == "assistant" and m.get("content"):
+            emit("assistant", text=str(m.get("content")))
+
+
 def cmd_load_history(arg: dict, ctx: CommandContext) -> dict:
     gta = _gta()
     if ctx.busy():
@@ -360,12 +373,7 @@ def cmd_load_history(arg: dict, ctx: CommandContext) -> dict:
     ctx.set_messages(messages)
     # Следващите ходове се пишат в нов файл: старата сесия остава непокътната.
     gta.session_start_time = time.time()
-    ctx.emit("cleared")
-    for m in messages:
-        if m.get("role") == "user":
-            ctx.emit("user", text=str(m.get("content") or ""))
-        elif m.get("role") == "assistant" and m.get("content"):
-            ctx.emit("assistant", text=str(m.get("content")))
+    replay(ctx.emit, messages)
     return {"ok": True, "messages": sum(1 for m in messages if m.get("role") in ("user", "assistant"))}
 
 
