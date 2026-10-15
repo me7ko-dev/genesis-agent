@@ -28,6 +28,7 @@ CONFIRM/BLOCKED бариерата) и се записва в genesis_agent.memo
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import stat
@@ -45,21 +46,26 @@ from genesis_agent import sandbox
 from genesis_agent.code_edit import decode_text, displayable, encode_text, has_raw_bytes
 from genesis_agent.tool_schemas import load_tool_arguments
 
+log = logging.getLogger("genesis.skills")
+
 # Паметта/уеб търсенето са meko-опционални — ако липсва зависимост (напр.
 # scikit-learn), мостът пак работи, само без логване/търсене.
 try:
     from genesis_agent.memory import memory_record_episode
 except Exception:  # pragma: no cover
+    log.debug("паметта не се зареди — епизодите не се записват", exc_info=True)
     memory_record_episode = None  # type: ignore
 
 try:
     from genesis_agent import web_search
 except Exception:  # pragma: no cover
+    log.debug("web_search не се зареди", exc_info=True)
     web_search = None  # type: ignore
 
 try:
     from genesis_agent import browser as _browser_mod
 except Exception:  # pragma: no cover
+    log.debug("браузърът не се зареди", exc_info=True)
     _browser_mod = None  # type: ignore
 
 
@@ -115,6 +121,7 @@ def _cancelled() -> bool:
     try:
         return bool(_CANCEL and _CANCEL())
     except Exception:
+        log.debug("проверката за спиране се провали", exc_info=True)
         return False
 
 
@@ -127,7 +134,7 @@ def set_workspace(path) -> None:
         from genesis_agent import workspace_memory
         workspace_memory.set_workspace(path)
     except Exception:
-        pass
+        log.debug("паметта за работата не смени папката", exc_info=True)
 
 
 def _resolve(path_str: str) -> Path:
@@ -318,7 +325,8 @@ def _log_episode(goal: str, outcome: str, tags: list[str]) -> None:
         memory_record_episode(goal=goal, outcome=outcome[:2000],
                               skill_path="genesis_skills.bridge", tags=tags)
     except Exception:
-        pass  # логването никога не бива да чупи изпълнението
+        # логването никога не бива да чупи изпълнението
+        log.debug("епизодът не се записа", exc_info=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -990,7 +998,7 @@ def _tool_run_cmd(arg: str) -> str:
             from genesis_agent.notifier import notify
             notify(f"🛡️ **Genesis Sandbox** блокира опасна команда:\n`{command[:300]}`\n{res.stderr[:200]}")
         except Exception:
-            pass
+            log.debug("известието за блокирана команда не тръгна", exc_info=True)
         return f"[RUN_CMD: {command}]\n{res.stderr}"
     out = res.stdout.strip()
     err = res.stderr.strip()
@@ -1039,6 +1047,7 @@ def _missing_package_hint(output: str) -> str:
         py = project_python(_WORKSPACE)
         return missing_module_hint(output, Path(_WORKSPACE), f'"{py}"' if " " in py else py)
     except Exception:
+        log.debug("подсказката за липсващ модул не се построи", exc_info=True)
         return ""
 
 
@@ -1075,6 +1084,7 @@ def _tool_web_search(arg: str) -> str:
     try:
         results = web_search.search(query, max_results=5)
     except Exception as e:
+        log.debug("WEB_SEARCH се провали", exc_info=True)
         return f"[WEB_SEARCH: {query}] Грешка: {e}"
     if not results:
         return f"[WEB_SEARCH: {query}] Няма резултати."
@@ -1092,6 +1102,7 @@ def _tool_research(arg: str) -> str:
     try:
         from genesis_agent.research import grounded_research
     except Exception as e:
+        log.debug("research не се зареди", exc_info=True)
         return f"[RESEARCH] research модулът не е наличен: {e}"
     return grounded_research(arg.strip())
 
@@ -1194,6 +1205,7 @@ def _tool_use_skill(name_arg: str, driver: str) -> str:
     try:
         from genesis_agent.skill_loader import use_skill
     except Exception as e:
+        log.debug("skill_loader не се зареди", exc_info=True)
         return f"[USE_SKILL] skill_loader модулът не е наличен: {e}"
     result = use_skill(name_arg, driver)
     _log_episode(f"USE_SKILL {name_arg.strip()}", result[:300], ["tool", "use_skill"])
@@ -1209,6 +1221,7 @@ def _tool_remember(arg: str) -> str:
     try:
         from genesis_agent import workspace_memory as wm
     except Exception as e:
+        log.debug("workspace_memory не се зареди", exc_info=True)
         return f"[REMEMBER] workspace_memory не е наличен: {e}"
     parts = [p.strip() for p in arg.split("|")]
     kind = parts[0].lower() if parts else ""
@@ -1229,6 +1242,7 @@ def _tool_task_add(arg: str) -> str:
     try:
         from genesis_agent import workspace_memory as wm
     except Exception as e:
+        log.debug("workspace_memory не се зареди", exc_info=True)
         return f"[TASK_ADD] workspace_memory не е наличен: {e}"
     parts = [p.strip() for p in arg.split("|")]
     return wm.add_thread(parts[0], parts[1] if len(parts) > 1 else "")
@@ -1239,6 +1253,7 @@ def _tool_task_update(arg: str) -> str:
     try:
         from genesis_agent import workspace_memory as wm
     except Exception as e:
+        log.debug("workspace_memory не се зареди", exc_info=True)
         return f"[TASK_UPDATE] workspace_memory не е наличен: {e}"
     parts = [p.strip() for p in arg.split("|")]
     return wm.update_thread(parts[0],
@@ -1251,6 +1266,7 @@ def _tool_task_list(arg: str = "") -> str:
     try:
         from genesis_agent import workspace_memory as wm
     except Exception as e:
+        log.debug("workspace_memory не се зареди", exc_info=True)
         return f"[TASK_LIST] workspace_memory не е наличен: {e}"
     status = (arg or "open").strip().lower() or "open"
     rows = wm.list_threads(status, 30)
@@ -1268,6 +1284,7 @@ def _tool_delegate(arg: str) -> str:
     try:
         from genesis_agent.delegate import delegate_task, wait_all
     except Exception as e:
+        log.debug("delegate не се зареди", exc_info=True)
         return f"[DELEGATE: {goal}] delegate модулът не е наличен: {e}"
     task = delegate_task(goal, agent="autonomous", timeout=600)
     wait_all([task], timeout=600)
@@ -1421,6 +1438,7 @@ def _safe_tool(name: str, fn: Callable[..., str], *args) -> str:
     try:
         out = fn(*args)
     except Exception as e:
+        log.debug("инструментът %s гръмна", name, exc_info=True)
         out = f"[{name}] Грешка при изпълнение: {e}"
     return _after_tool(name, payload, out)
 
@@ -1490,6 +1508,7 @@ def _before_tool(name: str, args: dict) -> str | None:
         if blocked:
             return blocked
     except Exception as e:
+        log.debug("проверката преди %s се провали — не е изпълнен", name, exc_info=True)
         return f"[{name}] ⛔ Проверката преди инструмента се провали ({e}) — не е изпълнен."
     elided = _copies_elided_mark(name, args)
     if elided:
@@ -1499,7 +1518,7 @@ def _before_tool(name: str, args: dict) -> str | None:
             from genesis_agent import edit_history
             edit_history.record(_resolve_noted(str(args["path"]), redirect=False)[0])
         except Exception:
-            pass
+            log.debug("снимката за /undo преди запис не стана", exc_info=True)
     elif _may_change_files(name, args):
         # Команда, умение, MCP: пипат файлове, които никой не е назовал —
         # снимка на проекта преди и след тях, за /undo (2026-10-09).
@@ -1516,7 +1535,7 @@ def _before_tool(name: str, args: dict) -> str | None:
                 edit_history.before_command(Path(_WORKSPACE),
                                             at_exec=name in ("RUN_CMD", "USE_SKILL"))
         except Exception:
-            pass
+            log.debug("снимката за /undo преди команда не стана", exc_info=True)
     return None
 
 
@@ -1558,6 +1577,7 @@ def _may_change_files(name: str, args: dict) -> bool:
             from genesis_agent import mcp_client
             return not mcp_client.is_read_only(name)
         except Exception:
+            log.debug("MCP не каза дали %s само чете — смятаме, че пише", name, exc_info=True)
             return True
     return True
 
@@ -1568,6 +1588,7 @@ def _after_tool(name: str, args: dict, result: str) -> str:
         hook_name, hook_args = _hook_view(name, args)
         out = hooks.post_tool(hook_name, hook_args, result)
     except Exception:
+        log.debug("куките след %s се провалиха", name, exc_info=True)
         out = result
     # СЛЕД PostToolUse hooks: `ruff format` след EDIT_FILE иначе изглеждаше
     # като чужда промяна и /undo оставяше файла (одит 2026-10-09).
@@ -1576,7 +1597,7 @@ def _after_tool(name: str, args: dict, result: str) -> str:
             from genesis_agent import edit_history
             edit_history.forget_if_unchanged(_resolve_noted(str(args["path"]), redirect=False)[0])
         except Exception:
-            pass
+            log.debug("/undo не забрави непроменения файл", exc_info=True)
     elif _may_change_files(name, args) and not (
             name == "RUN_BG" or (name == "RUN_CMD" and str(args.get("background", "")).strip()
                                  .lower() in ("true", "1", "yes"))):
@@ -1584,7 +1605,7 @@ def _after_tool(name: str, args: dict, result: str) -> str:
             from genesis_agent import edit_history
             edit_history.after_command()
         except Exception:
-            pass
+            log.debug("промените от командата не се записаха за /undo", exc_info=True)
     return out
 
 
@@ -2008,6 +2029,7 @@ def _dispatch(name: str, arguments: dict) -> str:
             return _tool_task_list(arguments.get("status", "open"))
         return f"[{name}] Непознат tool."
     except Exception as e:
+        log.debug("инструментът %s гръмна", name, exc_info=True)
         return f"[{name}] Грешка при изпълнение: {e}"
 
 
