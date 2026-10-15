@@ -1,7 +1,7 @@
 """
 genesis_agent.chat_commands — the chat commands that steer the agent the way
 Claude Code's do: /init, /memory, /plan, /undo, /compact, /hooks, /commands,
-/bg, /context, /review, and the operator's own commands from .genesis/commands/*.md.
+/bg, /context, /review, /doctor, and the operator's own commands from .genesis/commands/*.md.
 
 Kept out of genesis_terminal_agent.main() (already a long if-chain) and free
 of rich/console: `out` prints, `ask` asks a yes/no question, so the same code
@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 BUILTIN = ("/init", "/memory", "/plan", "/undo", "/compact", "/hooks", "/commands", "/bg", "/mcp",
-           "/agents", "/todos", "/context")
+           "/agents", "/todos", "/context", "/doctor")
 # Буква или цифра в която и да е азбука, после букви/цифри/_/-. Одит
 # 2026-10-11: правилото искаше ASCII първи знак, а /commands показваше
 # `преглед.md` като /преглед — и /преглед отиваше при модела като обикновен
@@ -242,6 +242,14 @@ def handle(text: str, *, messages: Any, workspace: Path,
         prompt, note = review.build(workspace, rest)
         out(note)
         return Result(prompt=prompt)
+
+    if cmd == "/doctor":
+        # Същото като `genesis doctor`; без мрежа, освен с --models (2026-10-15).
+        from genesis_agent import doctor
+        online = any(w in ("--models", "models", "модели") for w in rest.lower().split())
+        out("Проверявам…" + (" (и моделите — по една заявка)" if online else ""))
+        out(doctor.format_report(doctor.run_checks(workspace, online=online)))
+        return Result()
 
     if cmd == "/context":
         from genesis_agent import context_usage
