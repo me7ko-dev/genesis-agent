@@ -96,3 +96,13 @@ def test_only_exactly_1_turns_it_on(monkeypatch, value) -> None:
     monkeypatch.setenv("GENESIS_DEBUG", value)
     assert debug_log.install_from_env() is None
     assert not (paths.GENESIS_HOME / "debug.log").exists()
+
+
+def test_unwritable_home_does_not_stop_genesis(monkeypatch, tmp_path, capsys) -> None:
+    blocker = tmp_path / "not_a_dir"
+    blocker.write_text("x", encoding="utf-8")
+    monkeypatch.setattr("genesis_agent.paths.GENESIS_HOME", blocker / "home")
+    monkeypatch.setenv("GENESIS_DEBUG", "1")
+    assert cli.main(["--version"]) == 0
+    assert "debug.log" in capsys.readouterr().err
+    assert debug_log._handler is None

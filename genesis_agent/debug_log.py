@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -47,7 +48,13 @@ def install_from_env() -> Path | None:
     Връща пътя до файла или None, когато е изключено."""
     if not enabled():
         return None
-    return install()
+    try:
+        return install()
+    except OSError as e:
+        # Ключ за диагностика не бива да спира самия `genesis` (папка без
+        # право на запис, GENESIS_HOME сочи файл).
+        print(f"[genesis] debug.log не се отвори: {e}", file=sys.stderr)
+        return None
 
 
 def install() -> Path:
