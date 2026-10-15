@@ -36,7 +36,11 @@ from pathlib import Path
 log = logging.getLogger("genesis.doctor")
 
 MARK = {"ok": "✓", "fail": "✗", "skip": "·"}
-_RUN_TIMEOUT = 8.0       # `git --version` и подобни
+# `git --version` и подобни. Беше 8 s: на Windows CI (2026-10-15, PR #67) една
+# такава проба не отговори за 8 s, докато всички вървят едновременно — `npm`
+# е .cmd, който пуска node, а pytest/playwright внасят в същото време. 15 s
+# оставя място под общия срок (_DEADLINE) и пак не виси.
+_RUN_TIMEOUT = 15.0
 _PY_TIMEOUT = 20.0       # Python с pytest/playwright — първото внасяне е бавно
 _MCP_TIMEOUT = 10.0      # старт на един MCP сървър (в чата: 20 s)
 _CLAUDE_TIMEOUT = 10.0

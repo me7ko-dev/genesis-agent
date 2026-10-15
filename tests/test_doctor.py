@@ -250,7 +250,8 @@ def test_every_real_probe_answers_in_time(monkeypatch, tmp_path) -> None:
     assert {"Python", "git", "ruff", "pytest", "API ключове", "Модели", "Диск",
             "Playwright/Chromium", "claude CLI"} <= names
     assert all(c.status in doctor.MARK for c in checks)
-    assert not any("не отговори" in c.detail for c in checks)
+    slow = [f"{c.name}: {c.detail}" for c in checks if "не отговори" in c.detail]
+    assert not slow, slow   # коя проба — иначе на CI се вижда само „assert not True“
 
 
 # ── откъде се стига ─────────────────────────────────────────────────────────

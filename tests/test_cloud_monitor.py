@@ -230,8 +230,10 @@ def test_spend_failed_turns_and_lockouts_over_the_threshold(env) -> None:
     spend = env.findings(s)["spend"]
     assert not spend.ok and f"#{ana} 150.00" in spend.detail and f"#{bob} " not in spend.detail
     assert "ana@example.com" not in spend.detail                  # номер, не имейл
-    # Час по-късно разходът е стар — пак наред.
-    assert env.findings(s, after=3601)["spend"].ok
+    # Час след ЗАПИСИТЕ разходът е стар — пак наред. Не след env.now: на Windows
+    # CI създаването на двамата потребители (хеш на паролата) трае секунди и
+    # „now + 3601“ още хващаше записите (PR #75, 2026-10-15).
+    assert env.findings(s, after=time.time() - env.now + 3601)["spend"].ok
     # Общо над тавана, никой поотделно.
     many = monitor.Settings(min_free_gb=0, max_user_spend=1000 * MICRO, max_total_spend=100 * MICRO)
     assert not env.findings(many)["spend"].ok
