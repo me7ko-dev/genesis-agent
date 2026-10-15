@@ -154,14 +154,23 @@ def skill_view(name: str, *, file_path: Path | None = None) -> dict[str, Any]:
     # silently executed, because everything that calls skill_view() (USE_SKILL,
     # run_skill) feeds its "code" straight into sandbox
     # execution. Fails OPEN only on the crypto tooling itself being
-    # unavailable (ImportError etc.) — an optional integrity check must not
+    # unavailable (ImportError) — an optional integrity check must not
     # turn into an outage for every already-working skill the moment the
     # `cryptography` package goes missing; a genuine signature MISMATCH still
     # refuses regardless.
+    # Проверка, която ХВЪРЛЯ при наличен пакет, е провал, не „не знам“
+    # (2026-10-15): досега `except Exception: sig_ok = True` пускаше умението
+    # като потвърдено. verify_signature хваща само OSError/ValueError/TypeError
+    # при зареждане на ключа; UnsupportedAlgorithm (неподдържан ключ в
+    # подменен public_key.pem) или PermissionError от have_keys минаваха и
+    # пускаха и подправено умение. Сега това е отказ, като при несъвпадение.
     signature = (skill_meta or {}).get("signature") or ""
     if signature:
         try:
             from genesis_agent.cryptography_utils import have_keys, verify_signature
+        except ImportError:
+            have_keys = verify_signature = None  # type: ignore[assignment]
+        try:
             # Липсващ публичен ключ НЕ е провалена проверка (bug found
             # end-to-end, 2026-08-12): verify_signature() връща False и в двата
             # случая, а третирането им еднакво значи, че всяко клониране без
@@ -173,13 +182,16 @@ def skill_view(name: str, *, file_path: Path | None = None) -> dict[str, Any]:
             # public_key.pem при наличен частен ключ не изключва проверката —
             # публичният се извежда от частния (одит 2026-10-07: код, пуснат
             # от умение, трие public_key.pem и подменя умението трайно).
-            if not have_keys():
+            if have_keys is None or verify_signature is None or not have_keys():
                 sig_ok = True
             else:
                 sig_ok = verify_signature(code, signature)
-        except Exception:
-            log.debug("проверката на подписа хвърли — като неподписано умение", exc_info=True)
-            sig_ok = True
+        except Exception as e:
+            raise ValueError(
+                f"Умение '{name}' носи подпис, но проверката на подписа не завърши "
+                f"({type(e).__name__}: {e}). Отказвам да го заредя, "
+                f"докато подписът не може да се потвърди."
+            ) from e
         if not sig_ok:
             from genesis_agent.cryptography_utils import KEY_DIR as _KEY_DIR
             raise ValueError(
