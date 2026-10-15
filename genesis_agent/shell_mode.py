@@ -23,6 +23,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 log = logging.getLogger("genesis.shell_mode")
 
@@ -45,11 +46,16 @@ def _decode(raw: bytes) -> str:
     return sandbox._decode_line(raw, sandbox._legacy_codepages())
 
 
-def _kill_group(proc: subprocess.Popen) -> None:
+def _kill_group(proc: subprocess.Popen, job: Any = None) -> None:
     """Спира командата и всичко, пуснато от нея — и когато самата обвивка вече
     е излязла: `sleep 100 &` остава в групата ѝ и държи изхода отворен (одит
     2026-10-09: sandbox.stop_process виждаше излязла обвивка и не спираше нищо,
-    а чатът чакаше 600 s)."""
+    а чатът чакаше 600 s).
+
+    На Windows същото важеше до 2026-10-15: `start /b` дете на излязъл cmd.exe
+    оставаше — stop_process вижда излязъл процес и се връща, а `taskkill /T`
+    не стига дете на мъртъв родител. Job object-ът (sandbox._popen_in_job, като
+    RUN_CMD след #85) държи цялото дърво, независимо кой е излязъл."""
     if sys.platform != "win32":
         for sig, wait in ((signal.SIGTERM, 2.0), (signal.SIGKILL, 0.0)):
             try:
@@ -65,6 +71,12 @@ def _kill_group(proc: subprocess.Popen) -> None:
                 time.sleep(0.05)
         return
     from genesis_agent import sandbox
+    if job is not None and job.terminate():
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        return
     try:
         sandbox.stop_process(proc)
     except Exception:
@@ -79,7 +91,7 @@ def run(command: str, workspace: Path, out: Callable[[str], None],
     from genesis_agent import sandbox
     started = time.monotonic()
     try:
-        proc = subprocess.Popen(
+        proc, job = sandbox._popen_in_job(
             sandbox._shell_argv(command), cwd=str(workspace), stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             # Python дете на Windows иначе пише в cp1251 и кирилицата излиза
@@ -154,12 +166,15 @@ def run(command: str, workspace: Path, out: Callable[[str], None],
                 size -= len(collected.pop(0)) + 1
     except KeyboardInterrupt:
         note = "прекъсната (Ctrl-C)"
-    _kill_group(proc)
     try:
-        code = proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        code = proc.wait()
+        _kill_group(proc, job)
+        try:
+            code = proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            code = proc.wait()
+    finally:
+        job.close()
     # Затваря се само когато четящата нишка е свършила: затварянето чакаше
     # нейния readline и блокираше и Ctrl-C (одит 2026-10-09).
     pumper.join(timeout=1)

@@ -319,3 +319,63 @@ def test_continue_with_a_malformed_session_starts_fresh(tmp_path, monkeypatch, c
     session_index.record(tmp_path, tmp_path, bad)
     start = deque([{"role": "system", "content": "s"}])
     assert gta._continue_session(start, "s") is start
+
+
+class _FakeProc:
+    def __init__(self) -> None:
+        self.killed = 0
+
+    def kill(self) -> None:
+        self.killed += 1
+
+
+class _FakeJob:
+    def __init__(self, works: bool) -> None:
+        self.works, self.terminated = works, 0
+
+    def terminate(self) -> bool:
+        self.terminated += 1
+        return self.works
+
+
+def test_bang_stop_on_windows_goes_through_the_job_first(monkeypatch) -> None:
+    # 2026-10-15: stop_process се връща, щом обвивката е излязла — job-ът не.
+    from genesis_agent import sandbox
+    stopped: list[object] = []
+    monkeypatch.setattr(sandbox, "stop_process", stopped.append)
+    monkeypatch.setattr(sys, "platform", "win32")
+    proc, job = _FakeProc(), _FakeJob(works=True)
+    shell_mode._kill_group(proc, job)   # type: ignore[arg-type]
+    assert job.terminated == 1 and proc.killed == 1 and stopped == []
+
+
+def test_bang_stop_on_windows_without_a_job_falls_back_to_the_tree(monkeypatch) -> None:
+    from genesis_agent import sandbox
+    stopped: list[object] = []
+    monkeypatch.setattr(sandbox, "stop_process", stopped.append)
+    monkeypatch.setattr(sys, "platform", "win32")
+    proc, job = _FakeProc(), _FakeJob(works=False)
+    shell_mode._kill_group(proc, job)   # type: ignore[arg-type]
+    assert job.terminated == 1 and stopped == [proc]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="job object е само на Windows")
+def test_bang_background_child_of_an_exited_shell_dies_on_windows(tmp_path) -> None:
+    # Дете, пуснато отделно (без да чака), живее след излязлата команда; преди
+    # job-а stop_process виждаше излязъл процес и детето пишеше маркера.
+    import time
+    marker = tmp_path / "marker.txt"
+    (tmp_path / "late.py").write_text(
+        "import sys, time\ntime.sleep(3)\nopen(sys.argv[1], 'w').write('alive')\n",
+        encoding="utf-8")
+    (tmp_path / "spawn.py").write_text(
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])\n"
+        "print('spawned', flush=True)\n", encoding="utf-8")
+    started = time.monotonic()
+    ctx = shell_mode.run(
+        f'"{sys.executable}" "{tmp_path / "spawn.py"}" "{tmp_path / "late.py"}" "{marker}"',
+        tmp_path, lambda _: None, timeout=60)
+    assert "spawned" in ctx and time.monotonic() - started < 10
+    time.sleep(5)
+    assert not marker.exists()
