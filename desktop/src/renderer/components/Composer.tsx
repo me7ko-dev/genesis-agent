@@ -34,6 +34,7 @@ export const COMMANDS: SlashCommand[] = [
   { group: 'Система', name: '/backup', hint: 'Архивирай работната папка в GENESIS_BACKUP_DIR' },
   { group: 'Система', name: '/export', aliases: ['/предай'], hint: 'Проектът за предаване: zip + отчет (тестове, как се пуска)' },
   { group: 'Система', name: '/update', aliases: ['/ъпдейт'], hint: 'Има ли нова версия на Genesis' },
+  { group: 'Система', name: '/doctor', hint: 'Работи ли всичко: git, Python, ruff/pytest, ключове, MCP, Chromium (/doctor --models — и моделите)' },
   { group: 'Система', name: '/folder', aliases: ['/папка'], hint: 'Отвори друга папка' },
   { group: 'Система', name: '/terminal', hint: 'Genesis в терминала' },
   { group: 'Система', name: '/logs', hint: 'Дневникът на агента' },

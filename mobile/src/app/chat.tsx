@@ -109,6 +109,7 @@ function Chat({ pairing }: { pairing: Pairing }) {
               <MenuItem label="Задачи (/todos)" onPress={() => command('/todos')} />
               <MenuItem label="Под-агенти (/agents)" onPress={() => command('/agents')} />
               <MenuItem label="Контекстът (/context)" onPress={() => command('/context')} />
+              <MenuItem label="Проверка на компютъра (/doctor)" onPress={() => command('/doctor')} />
               <MenuItem label="Команди (/help)" onPress={() => command('/help')} />
             </>
           )}
