@@ -1958,12 +1958,22 @@ class Brain:
         return Brain._TAG_PROMPT_CACHE
 
     @classmethod
-    def _with_tool_tag_docs(cls, messages: list[dict]) -> list[dict]:
+    def _with_tool_tag_docs(cls, messages: list[dict],
+                            tools: list[dict] | None = None) -> list[dict]:
         """Добавя тул-таговете към system съобщението — САМО за модели без
-        native tool-calling, които иначе не биха знали как да викат инструмент."""
+        native tool-calling, които иначе не биха знали как да викат инструмент.
+
+        VIEW_IMAGE (2026-10-15) — един ред, само ако е сред `tools`: предлага
+        се, когато във веригата има виждащ модел; иначе редът е само разход."""
         tags = cls._tool_tag_prompt()
         if not tags:
             return messages
+        if any(isinstance(t, dict) and (t.get("function") or {}).get("name") == "VIEW_IMAGE"
+               for t in tools or []):
+            line = ("- [VIEW_IMAGE: /path/to/image.png] — look at an image file (png/jpg/webp/gif), "
+                    "e.g. a screenshot; it is attached to the next message.")
+            head, sep, tail = tags.partition("\n\nMEMORY TAGS:")
+            tags = f"{head}\n{line}{sep}{tail}"
         out = list(messages)
         for i, m in enumerate(out):
             if m.get("role") == "system":
@@ -1982,7 +1992,7 @@ class Brain:
         if msgs is None:
             return fallback
         if tools:
-            return self._with_tool_tag_docs(self._sanitize_for_textmode(msgs))
+            return self._with_tool_tag_docs(self._sanitize_for_textmode(msgs), tools)
         if any(m.get("role") == "tool" or m.get("tool_calls") for m in msgs):
             return self._sanitize_for_textmode(msgs)
         return msgs
@@ -2094,7 +2104,7 @@ class Brain:
             # (виж _call_local) — единственият му път е text-tag режимът, а той
             # изисква точно тази документация в system съобщението.
             local_messages = (
-                self._with_tool_tag_docs(self._sanitize_for_textmode(messages))
+                self._with_tool_tag_docs(self._sanitize_for_textmode(messages), tools)
                 if tools else messages
             )
             hit = self._call_local(vision.without_images(local_messages), attempts=2)
@@ -2138,7 +2148,7 @@ class Brain:
             # Текстовият вариант получава И документацията на таговете — native
             # моделите я НЕ получават (имат JSON схемите), което е спестяването.
             messages_notools = self._with_tool_tag_docs(
-                self._sanitize_for_textmode(messages)
+                self._sanitize_for_textmode(messages), tools
             )
         else:
             ordered_chain = chain

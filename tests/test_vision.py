@@ -565,3 +565,100 @@ def test_conversation_memory_sees_a_note_not_base64() -> None:
     from genesis_agent import workspace_memory
     text = workspace_memory.operator_text(vision.user_message("запомни логото", [_part()])["content"])
     assert text == "запомни логото\n[картинка: shot.png]"
+
+
+# ── ревю 2026-10-15 ──────────────────────────────────────────────────────────
+
+def test_a_small_rotated_phone_photo_is_sent_upright_and_without_its_location() -> None:
+    """Под 1568 px и 5 MB байтовете тръгваха както са: EXIF ориентацията
+    оставаше (моделът я вижда легнала, а width/height казваха изправена), а с
+    нея и GPS координатите на снимката — към чужд доставчик."""
+    Image = pytest.importorskip("PIL.Image")
+    import io
+    exif = Image.Exif()
+    exif[0x0112] = 6                                   # завъртяна на 90°
+    exif[0x8825] = {2: (42.0, 41.0, 0.0)}              # GPS
+    buf = io.BytesIO()
+    Image.new("RGB", (200, 100), (255, 0, 0)).save(buf, format="JPEG", exif=exif.tobytes())
+    part = vision.image_part(buf.getvalue(), "image/jpeg", "photo.jpg")
+    sent = Image.open(io.BytesIO(_data_of(part)))
+    assert sent.size == (100, 200) == (part["genesis"]["width"], part["genesis"]["height"])
+    assert not sent.getexif().get_ifd(0x8825) and sent.getexif().get(0x0112, 1) == 1
+
+
+def test_a_plain_small_image_still_goes_byte_for_byte() -> None:
+    pytest.importorskip("PIL.Image")
+    assert _data_of(vision.image_part(png(40, 30), "image/png", "a.png")) == png(40, 30)
+
+
+def test_a_session_ref_is_only_a_hash_name_in_the_store(tmp_path) -> None:
+    """Препратката в записания разговор е `<sha256>.<ext>` в images/. Друго
+    име (`CON`/`COM1` на Windows е устройство — /resume би чакал конзолата;
+    FIFO висеше) не се отваря изобщо; `../` така или иначе не излизаше."""
+    store = tmp_path / "images"
+    store.mkdir()
+    data = png()
+    sha = __import__("hashlib").sha256(data).hexdigest()
+    (store / "CON").write_bytes(data)
+    (tmp_path / "outside.png").write_bytes(data)
+    meta = {"name": "x.png", "mime": "image/png", "sha256": sha}
+    for ref in ("CON", "../outside.png", "x.png"):
+        msg = {"role": "user", "content": [
+            {"type": "text", "text": "t"},
+            {"type": "image_url", "image_url": {"url": vision.REF_SCHEME + ref}, "genesis": meta}]}
+        assert vision.from_disk([msg], store)[0]["content"] == \
+            "t\n[картинка: x.png — файлът ѝ вече го няма в историята]", ref
+
+
+def test_a_hand_edited_session_with_odd_image_parts_still_loads(tmp_path) -> None:
+    """`image_url` като низ (форматът на някои клиенти), `genesis` не речник:
+    from_disk/for_disk гърмяха с AttributeError/ValueError — /resume падаше."""
+    odd = {"role": "user", "content": [
+        {"type": "text", "text": "t"},
+        {"type": "image_url", "image_url": "genesis-image:abc.png"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}, "genesis": "x"}]}
+    loaded = vision.from_disk([odd], tmp_path)
+    assert loaded[0]["role"] == "user"
+    vision.for_disk(loaded, tmp_path / "images")
+
+
+def test_text_tag_models_learn_view_image_only_when_it_is_offered(monkeypatch) -> None:
+    """Моделите без native инструменти четат таговете от tool_tag_prompt —
+    там VIEW_IMAGE липсваше, т.е. виждащ модел в текстов режим не знаеше, че
+    го има. Ред само когато инструментът е предложен: иначе е разход."""
+    monkeypatch.setattr(Brain, "_TAG_PROMPT_CACHE", "TOOLS:\n- [READ_FILE: path]\n\nMEMORY TAGS:\n- x")
+    history = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
+    read_file = {"type": "function", "function": {"name": "READ_FILE", "parameters": {}}}
+    offered = Brain._with_tool_tag_docs(history, [read_file, vision.TOOL_SCHEMA])[0]["content"]
+    assert "[VIEW_IMAGE: " in offered
+    assert offered.index("[VIEW_IMAGE: ") < offered.index("MEMORY TAGS:")
+    for tools in ([read_file], None):
+        assert "VIEW_IMAGE" not in Brain._with_tool_tag_docs(history, tools)[0]["content"]
+
+
+def test_a_text_tag_model_in_the_chain_gets_the_view_image_line(wire, monkeypatch) -> None:
+    """През Brain.complete: инструментите от хода стигат до документацията."""
+    monkeypatch.setattr(Brain, "_TAG_PROMPT_CACHE", "TOOLS:\n- [READ_FILE: path]")
+    make, sent, _ = wire
+    b = make([("groq", "openai/gpt-oss-120b", 120)])
+    b.complete([{"role": "system", "content": "s"}, {"role": "user", "content": "u"}],
+               tools=[vision.TOOL_SCHEMA])
+    assert "[VIEW_IMAGE: " in sent[0]["messages"][0]["content"]
+
+
+def test_a_page_screenshot_over_pillows_bomb_limit_is_skipped_not_a_crash(tmp_path) -> None:
+    """Снимка на цялата страница над 2× Image.MAX_IMAGE_PIXELS: Image.open
+    хвърля DecompressionBombError (не е OSError) — _top_of я пускаше нагоре и
+    ходът падаше в проверката в браузър."""
+    pytest.importorskip("PIL.Image")
+    from genesis_agent import page_check
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + kind + data
+                + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
+    tall = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1440, 130_000, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(b"\x00" * 64)) + chunk(b"IEND", b""))
+    (tmp_path / "desktop-light.png").write_bytes(tall)
+    (tmp_path / "mobile-light.png").write_bytes(png(39, 80))
+    shots = page_check._shots_of(tmp_path, "index.html")
+    assert [vision.image_name(p) for p in shots] == ["index.html mobile-light.png"]

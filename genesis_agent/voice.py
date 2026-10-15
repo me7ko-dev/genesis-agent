@@ -243,7 +243,9 @@ def audio_seconds(audio: bytes, mime: str) -> float | None:
             with wave.open(io.BytesIO(audio), "rb") as w:
                 rate = w.getframerate()
                 return w.getnframes() / rate if rate else None
-        except (wave.Error, EOFError):
+        # RuntimeError: блок с размер над файла (wave/chunk.seek) — ревю
+        # 2026-10-15, от телефона това прекъсваше връзката с traceback.
+        except (wave.Error, EOFError, RuntimeError, ValueError, struct.error):
             return None
     if kind == "m4a":
         return _mp4_seconds(audio)
