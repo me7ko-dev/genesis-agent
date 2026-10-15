@@ -122,20 +122,57 @@ class TestSignedSkillVerification:
         with pytest.raises(ValueError, match="подпис"):
             sl.skill_view("fibonacci")
 
-    def test_verification_fails_open_when_crypto_tooling_errors(
+    def test_a_check_that_raises_fails_closed(
         self, _isolated_skills, _isolated_keys, monkeypatch
     ) -> None:
-        """A signature IS present, but verify_signature() itself blows up
-        (e.g. cryptography package went missing between save and load) — must
-        not turn into every existing signed skill suddenly refusing to run."""
-        sm.save_skill(slug="fibonacci", code="print(1)", goal="fibonacci helper")
+        """Подпис ИМА, ключ ИМА, но самата проверка хвърля (2026-10-15).
+        Досега това значеше sig_ok=True — умение, чийто подпис не е потвърден,
+        се пускаше като потвърдено. Хвърлящата проверка не е „не мога да
+        преценя" (това е липсващ ключ/липсващ cryptography), а провал на
+        проверката: подменен public_key.pem с ключ, който cryptography не
+        поддържа (UnsupportedAlgorithm не е OSError/ValueError/TypeError),
+        стигаше, за да мине всяко подправено умение."""
+        path = sm.save_skill(slug="fibonacci", code="print(1)", goal="fibonacci helper")
+        _tamper_code_block(path, "print('tampered')")
 
         def _boom(_code, _sig):
-            raise RuntimeError("cryptography backend unavailable")
+            raise RuntimeError("неподдържан ключ")
         monkeypatch.setattr("genesis_agent.cryptography_utils.verify_signature", _boom)
 
-        data = sl.skill_view("fibonacci")
-        assert data["code"] == "print(1)"
+        with pytest.raises(ValueError, match="проверката на подписа"):
+            sl.skill_view("fibonacci")
+        out = sl.use_skill("fibonacci")
+        assert "Грешка при зареждане" in out and "print('tampered')" not in out
+
+    def test_have_keys_that_raises_fails_closed(
+        self, _isolated_skills, _isolated_keys, monkeypatch
+    ) -> None:
+        sm.save_skill(slug="fibonacci", code="print(1)", goal="fibonacci helper")
+
+        def _boom():
+            raise PermissionError("KEY_DIR не се чете")
+        monkeypatch.setattr("genesis_agent.cryptography_utils.have_keys", _boom)
+        with pytest.raises(ValueError, match="проверката на подписа"):
+            sl.skill_view("fibonacci")
+
+    def test_missing_cryptography_package_still_loads_like_unsigned(
+        self, _isolated_skills, _isolated_keys, monkeypatch
+    ) -> None:
+        """Липсващ пакет `cryptography` = не мога да преценя, като липсващ
+        ключ (решение 2026-08-12): умението се зарежда като неподписано,
+        за да не спре цялата библиотека."""
+        import builtins
+        import sys
+        sm.save_skill(slug="fibonacci", code="print(1)", goal="fibonacci helper")
+        monkeypatch.delitem(sys.modules, "genesis_agent.cryptography_utils")
+        real_import = builtins.__import__
+
+        def _no_crypto(name, *args, **kwargs):
+            if name == "genesis_agent.cryptography_utils" or name.startswith("cryptography"):
+                raise ModuleNotFoundError(f"No module named {name!r}")
+            return real_import(name, *args, **kwargs)
+        monkeypatch.setattr(builtins, "__import__", _no_crypto)
+        assert sl.skill_view("fibonacci")["code"] == "print(1)"
 
     def test_use_skill_refuses_a_tampered_signed_skill(self, _isolated_skills, _isolated_keys) -> None:
         """End-to-end through the actual USE_SKILL entry point, not just the
