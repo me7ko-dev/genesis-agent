@@ -41,6 +41,31 @@ def _package_entries() -> set[str]:
 
 _PACKAGE_BEFORE = _package_entries()
 
+# Истинската папка с историята на чата (2026-10-15) — сметната точно както я
+# смята кодът (paths.history_dir), ПРЕДИ пренасочването по-долу. Пуснат сам
+# (`pytest tests/test_claude_code_parity.py`, както го пускат агентите), файл
+# оставяше в ~/.local/share/genesis-agent/history session_*.json с фикстури
+# („направи го“, „[hook Stop на оператора …]“) и by_workspace.json с ключове —
+# worktree-ите на агентите. Тест, който внася genesis_terminal_agent ЧАК в
+# тялото си, получаваше HISTORY_DIR от внасянето, а не от
+# _isolated_operator_settings (тя го подменя само ако модулът вече е внесен);
+# в пълния пакет друг файл го внася по-рано, затова там не личеше. Мерено:
+# 4 теста в 4 файла. При оператора това са чужди разговори в /resume и
+# `genesis -c`.
+from genesis_agent.paths import history_dir as _history_dir
+
+_REAL_HISTORY = _history_dir()
+
+
+def _history_entries() -> dict[str, int]:
+    try:
+        return {e.name: e.stat().st_mtime_ns for e in os.scandir(_REAL_HISTORY)}
+    except OSError:
+        return {}
+
+
+_HISTORY_BEFORE = _history_entries()
+
 # Затова DATA_DIR на целия пакет — и на подпроцесите, които наследяват средата —
 # е временна папка, зададена ПРЕДИ genesis_agent.config да се внесе. Операторски
 # GENESIS_DATA_DIR/GENESIS_MEMORY_DIR също не стига до тестовете: и той е
@@ -49,6 +74,11 @@ _SESSION_DATA = Path(tempfile.mkdtemp(prefix="genesis-tests-"))
 atexit.register(shutil.rmtree, _SESSION_DATA, ignore_errors=True)
 os.environ["GENESIS_DATA_DIR"] = str(_SESSION_DATA / "data")
 os.environ.pop("GENESIS_MEMORY_DIR", None)
+# Историята на чата — също (2026-10-15, виж _REAL_HISTORY): paths.history_dir
+# чете GENESIS_HISTORY_DIR първо, така че и genesis_terminal_agent, внесен
+# късно в тяло на тест, и подпроцесите получават временна папка, не
+# истинската. Всеки тест пак получава своя (_isolated_operator_settings).
+os.environ["GENESIS_HISTORY_DIR"] = str(_SESSION_DATA / "history")
 
 
 _OLLAMA_PORT = 11434
@@ -191,11 +221,15 @@ def _isolated_operator_settings(monkeypatch, tmp_path):
     # Историята на чата: тестове с run_turn пишеха session_*.json и
     # by_workspace.json в истинската ~/.local/share/genesis-agent/history —
     # `genesis -c` после продължаваше тестов разговор (одит 2026-10-09).
+    # Внесен още преди теста модул се подменя направо; внесен чак в тялото на
+    # теста (`import genesis_terminal_agent as gta` вътре — 2026-10-15) смята
+    # HISTORY_DIR от средата, затова и тя сочи папката на теста.
     import sys as _sys
+    history = tmp_path / "history"
+    history.mkdir(exist_ok=True)
+    monkeypatch.setenv("GENESIS_HISTORY_DIR", str(history))
     gta = _sys.modules.get("genesis_terminal_agent")
     if gta is not None:
-        history = tmp_path / "history"
-        history.mkdir(exist_ok=True)
         monkeypatch.setattr(gta, "HISTORY_DIR", history)
         monkeypatch.setattr(gta, "_SESSION_FILE", None)
     # Глобалната политика на sandbox-а и куката преди изпълнение: `rs.serve`
@@ -300,3 +334,17 @@ def _package_dir_untouched():
     # Пада само тестът, който ги е оставил — следващите не наследяват грешката.
     _PACKAGE_BEFORE.update(new)
     assert not new, f"тестът остави файлове в genesis_agent/: {sorted(new)}"
+
+
+@pytest.fixture(autouse=True)
+def _real_history_untouched():
+    """Нито един тест не пише в истинската история на чата (виж _REAL_HISTORY):
+    нов или променен файл там пада на теста, който го е оставил. Genesis,
+    пуснат от оператора по време на тестовете, също би се хванал — тогава
+    пусни отново."""
+    yield
+    now = _history_entries()
+    changed = sorted(n for n, m in now.items() if _HISTORY_BEFORE.get(n) != m)
+    _HISTORY_BEFORE.clear()
+    _HISTORY_BEFORE.update(now)
+    assert not changed, f"тестът писа в истинската история {_REAL_HISTORY}: {changed}"
