@@ -26,6 +26,7 @@ import hashlib
 import os
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -118,7 +119,14 @@ def _index(store: Path) -> Path:
     return store / f"index-{_TAG}"
 
 
-def _git(workspace: Path, *args: str, input: bytes | None = None) -> bytes:
+def _git(workspace: Path, *args: str, input: bytes | None = None,
+         stop: Callable[[], bool] | None = None) -> bytes:
+    # `stop` — „Стоп“ на оператора по време на снимката преди команда
+    # (2026-10-15, Windows CI job 116436795903): 7 git процеса подред, нито
+    # един не гледаше Стоп, и ходът свърши 6.9 s след него. Гледа се преди
+    # всеки процес — чака се най-много текущият.
+    if stop is not None and stop():
+        raise OSError("спряно от оператора")
     store = _store(workspace)
     env = {**os.environ, "GIT_DIR": str(store), "GIT_WORK_TREE": str(workspace),
            "GIT_INDEX_FILE": str(_index(store)), "GIT_TERMINAL_PROMPT": "0",
@@ -168,11 +176,11 @@ def _escape(rel: str) -> str:
     return "/" + ("\\" + out if out[:1] in "#!" else out)
 
 
-def _prepare(workspace: Path, big: list[str]) -> None:
+def _prepare(workspace: Path, big: list[str], stop: Callable[[], bool] | None = None) -> None:
     store = _store(workspace)
     if not (store / "HEAD").is_file():
         store.mkdir(mode=0o700, parents=True, exist_ok=True)
-        _git(workspace, "init", "-q")
+        _git(workspace, "init", "-q", stop=stop)
     (store / "info").mkdir(exist_ok=True)
     from genesis_agent.repo_map import _SKIP_DIRS
     lines = [f"/{d}/" if d in _ONLY_AT_TOP else f"{d}/" for d in sorted(_SKIP_DIRS)]
@@ -188,7 +196,7 @@ def _prepare(workspace: Path, big: list[str]) -> None:
     if store not in _pruned:
         _pruned.add(store)
         _seed_index(store)
-        _cleanup(workspace, store)
+        _cleanup(workspace, store, stop)
 
 
 def _seed_index(store: Path) -> None:
@@ -242,14 +250,14 @@ def _stale(tag: str, store: Path) -> bool:
     return age > 3600 and not (pid.isdigit() and _alive(int(pid)))
 
 
-def _cleanup(workspace: Path, store: Path) -> None:
+def _cleanup(workspace: Path, store: Path, stop: Callable[[], bool] | None = None) -> None:
     """Веднъж на процес: историята за /undo живее в паметта на процеса, затова
     версиите на мъртвите процеси са боклук (5 хода по 50 MB → +250 MB, нищо не
     чистеше). Живите си пазят своите с refs/genesis/<pid>/ — prune на един
     процес триеше нужното на друг (одит 2026-10-09). `--expire=1.hour.ago`:
     обектите на снимка, която тъкмо се прави, още нямат ref."""
     try:
-        refs = _git(workspace, "for-each-ref", "--format=%(refname)", "refs/genesis/")
+        refs = _git(workspace, "for-each-ref", "--format=%(refname)", "refs/genesis/", stop=stop)
         dead = [ref for ref in refs.decode("utf-8", "replace").split()
                 if len(ref.split("/")) > 2 and _stale(ref.split("/")[2], store)]
         if dead:
@@ -260,7 +268,7 @@ def _cleanup(workspace: Path, store: Path) -> None:
             tag = old.name[len("index-"):] if old.name.startswith("index-") else ""
             if old.is_file() and not old.name.endswith(".lock") and (not tag or _stale(tag, store)):
                 old.unlink()
-        _git(workspace, "prune", "--expire=1.hour.ago")
+        _git(workspace, "prune", "--expire=1.hour.ago", stop=stop)
     except (OSError, subprocess.SubprocessError, ValueError):
         pass
 
@@ -279,24 +287,27 @@ def keep(workspace: Path, tree: str) -> None:
 
 
 def snapshot(workspace: Path, big: list[str] | None = None, *,
-             tracked_only: bool = False) -> str | None:
-    """The tree of the folder as it is now (or None)."""
+             tracked_only: bool = False, stop: Callable[[], bool] | None = None) -> str | None:
+    """The tree of the folder as it is now (or None — also when `stop()` turns
+    true before one of its git processes)."""
     ws = Path(workspace).resolve()
     try:
-        _prepare(ws, big or [])
+        _prepare(ws, big or [], stop)
         if big:
             # exclude не важи за вече пазен файл: app.db, пораснал до 100 MB,
             # пак влизаше в хранилището (одит 2026-10-09). Вън от index-а —
             # с update-index (и в git преди 2.26, без pathspec магия).
-            _git(ws, "update-index", "--force-remove", "-z", "--stdin",
+            _git(ws, "update-index", "--force-remove", "-z", "--stdin", stop=stop,
                  input=b"\0".join(rel.encode("utf-8", "surrogateescape") for rel in big) + b"\0")
         try:
             # Над границата (20 000 файла/200 MB след командата): само вече
             # пазените файлове, не всичко ново — но поне тях (одит 2026-10-09).
-            _git(ws, "add", "-u" if tracked_only else "-A", "--ignore-errors", ".")
+            _git(ws, "add", "-u" if tracked_only else "-A", "--ignore-errors", ".", stop=stop)
         except OSError:
             pass   # нечетим файл: --ignore-errors пак записва останалите
-        tree = _git(ws, "write-tree").decode("ascii").strip() or None
+        tree = _git(ws, "write-tree", stop=stop).decode("ascii").strip() or None
+        if stop is not None and stop():
+            return None
         if tree:
             keep(ws, tree)
         return tree
