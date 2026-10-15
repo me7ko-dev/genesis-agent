@@ -275,9 +275,9 @@ def test_old_versions_are_pruned_once_per_process(ws, monkeypatch) -> None:
     calls: list[tuple[str, ...]] = []
     real = checkpoints._git
 
-    def spy(workspace, *args):
+    def spy(workspace, *args, **kwargs):
         calls.append(args)
-        return real(workspace, *args)
+        return real(workspace, *args, **kwargs)
     monkeypatch.setattr(checkpoints, "_git", spy)
     monkeypatch.setattr(checkpoints, "_pruned", set())
     _turn_with_command(ws, lambda: _command(ws))
@@ -329,9 +329,9 @@ def test_a_failed_snapshot_after_a_command_never_undoes_the_turn_before(ws, monk
     real = checkpoints.snapshot
     calls = {"n": 0}
 
-    def flaky(workspace, big=None):
+    def flaky(workspace, big=None, **kwargs):
         calls["n"] += 1
-        return real(workspace, big) if calls["n"] == 1 else None   # след командата — не
+        return real(workspace, big, **kwargs) if calls["n"] == 1 else None   # след командата — не
     monkeypatch.setattr(checkpoints, "snapshot", flaky)
     _turn_with_command(ws, lambda: app.write_text("print('v2')\n", encoding="utf-8"))
     assert any("не може" in ln for ln in edit_history.pending())

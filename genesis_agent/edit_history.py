@@ -16,7 +16,7 @@ operator message the turn answered (`mark`): no second mechanism.
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -180,21 +180,36 @@ def _exec_starts() -> None:
     turn = _current
     if turn is not None and turn.waiting is not None and turn.window is None:
         ws, turn.waiting = turn.waiting, None
-        _open_window(turn, ws)
+        from genesis_agent import sandbox
+        _open_window(turn, ws, stop=sandbox._stop_requested)
 
 
-def _open_window(turn: _Turn, ws: Path) -> None:
+def _open_window(turn: _Turn, ws: Path, stop: Callable[[], bool] | None = None) -> None:
+    """`stop` — само за снимката точно преди процеса (sandbox.before_exec).
+    Стоп по време на нея = sandbox няма да пусне командата (гледа същото
+    веднага след куката), значи снимката не трябва: без прозорец и снимката
+    „след“ не се прави. Windows CI 2026-10-15 (job 116436795903): Стоп дойде
+    по време на тази снимка, тя довърши своите 7 git процеса, после 4 за
+    „след“ на команда, която не е тръгнала — 6.9 s до края на хода. Със
+    същото на Linux (git по 0.7 s): 6.79 s преди, под 1 s след поправката."""
     from genesis_agent import checkpoints
+
+    def stopped() -> bool:
+        return stop is not None and stop()
     try:
         why = checkpoints.why_not(ws)
         if why:
             turn.note = why
             return
+        if stopped():
+            return
         found = checkpoints.survey(ws)
         if found.over:
             turn.note = found.over
             return
-        tree = checkpoints.snapshot(ws, found.big)
+        tree = checkpoints.snapshot(ws, found.big, stop=stop)
+        if stopped():
+            return
         if tree is None:
             turn.note = "снимката на проекта не стана"
             return
