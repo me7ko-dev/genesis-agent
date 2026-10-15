@@ -1593,6 +1593,7 @@ def _vision_on() -> bool:
         from genesis_agent import vision
         return vision.chain_sees((current_provider, current_model_id))
     except Exception:
+        log.debug("проверката за зрение се провали", exc_info=True)
         return False
 
 
