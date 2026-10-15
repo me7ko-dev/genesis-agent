@@ -14,7 +14,7 @@ const api: GenesisApi = {
   send: (text) => ipcRenderer.invoke('send', text),
   stop: () => ipcRenderer.invoke('stop'),
   clear: () => ipcRenderer.invoke('clear'),
-  confirm: (id, allow) => ipcRenderer.invoke('confirm', id, allow),
+  confirm: (id, allow, session) => ipcRenderer.invoke('confirm', id, allow, session === true),
   command: (name, arg) => ipcRenderer.invoke('command', name, arg ?? {}),
   openWorkspace: (path) => ipcRenderer.invoke('open-workspace', path),
   forgetWorkspace: (path) => ipcRenderer.invoke('forget-workspace', path),

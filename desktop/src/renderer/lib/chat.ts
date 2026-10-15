@@ -6,7 +6,18 @@ export type ChatItem =
   | { kind: 'tool'; key: string; name: string; result: string; clipped: boolean; ts: number }
   | { kind: 'note'; key: string; tone: 'info' | 'warn' | 'error' | 'asked' | 'progress'; text: string; ts: number }
   | { kind: 'confirm'; key: string; id: string; operation: string; reasons: string[];
-      state: 'pending' | 'allowed' | 'denied'; note: string; ts: number };
+      state: 'pending' | 'allowed' | 'denied'; note: string; ts: number;
+      /** What „За тази сесия“ remembers; '' = the agent does not offer it. */
+      sessionRule: string; remembered: boolean };
+
+export type ConfirmChoice = 'deny' | 'allow' | 'session';
+
+/** The buttons of a pending confirmation (same rule as mobile/src/lib/chat.ts):
+ *  the third one only when the agent said the command can be remembered. */
+export function confirmChoices(item: Extract<ChatItem, { kind: 'confirm' }>): ConfirmChoice[] {
+  if (item.state !== 'pending') return [];
+  return item.sessionRule ? ['allow', 'session', 'deny'] : ['allow', 'deny'];
+}
 
 /** The server's event log → what the chat shows (same rules as mobile/src/lib/chat.ts). */
 export function toChatItems(events: GenesisEvent[]): ChatItem[] {
@@ -39,13 +50,16 @@ export function toChatItems(events: GenesisEvent[]): ChatItem[] {
       case 'confirm':
         confirms.set(e.id ?? '', items.length);
         items.push({ kind: 'confirm', key, id: e.id ?? '', operation: e.operation ?? '',
-                     reasons: e.reasons ?? [], state: 'pending', note: '', ts });
+                     reasons: e.reasons ?? [], state: 'pending', note: '', ts,
+                     sessionRule: typeof e.session_rule === 'string' ? e.session_rule : '',
+                     remembered: false });
         break;
       case 'confirm_done': {
         const at = confirms.get(e.id ?? '');
         const item = at === undefined ? undefined : items[at];
         if (item && item.kind === 'confirm') {
-          items[at as number] = { ...item, state: e.allow ? 'allowed' : 'denied', note: e.note ?? '' };
+          items[at as number] = { ...item, state: e.allow ? 'allowed' : 'denied', note: e.note ?? '',
+                                  remembered: !!e.allow && e.session === true };
         }
         break;
       }

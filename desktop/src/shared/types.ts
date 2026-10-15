@@ -16,6 +16,10 @@ export type GenesisEvent = {
   note?: string;
   busy?: boolean;
   label?: string;
+  /** "confirm": what „За тази сесия“ would remember; absent = no such button (server 2026-10-15). */
+  session_rule?: string;
+  /** "confirm_done": allowed for the rest of the session. */
+  session?: boolean;
 };
 
 /** The agent's task list (the TODO tool), sent with every `events` reply. */
@@ -142,7 +146,7 @@ export interface GenesisApi {
   send(text: string): Promise<SendResult>;
   stop(): Promise<SendResult>;
   clear(): Promise<SendResult>;
-  confirm(id: string, allow: boolean): Promise<SendResult>;
+  confirm(id: string, allow: boolean, session?: boolean): Promise<SendResult>;
   command<T extends CommandResult = CommandResult>(name: string, arg?: Record<string, unknown>): Promise<T>;
   openWorkspace(path?: string): Promise<BackendState>;
   forgetWorkspace(path: string): Promise<Settings>;

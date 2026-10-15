@@ -66,8 +66,8 @@ export function App() {
 
   const stop = useCallback(() => { void api.stop(); }, []);
 
-  const answer = useCallback((id: string, allow: boolean) => {
-    void api.confirm(id, allow).then(() => setFocusKey((k) => k + 1));
+  const answer = useCallback((id: string, allow: boolean, session = false) => {
+    void api.confirm(id, allow, session).then(() => setFocusKey((k) => k + 1));
   }, []);
 
   const toggleSidebar = useCallback(() => {
