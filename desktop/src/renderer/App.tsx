@@ -92,7 +92,7 @@ export function App() {
   const command = useCallback((name: string, arg: string) => {
     // The chat's own commands (genesis_agent/chat_commands.py) travel as text:
     // the agent runs them in the turn and answers in the conversation.
-    const chat = ['/plan', '/undo', '/compact', '/context', '/todos', '/review', '/bg',
+    const chat = ['/plan', '/undo', '/rewind', '/resume', '/compact', '/context', '/todos', '/review', '/bg',
                   '/agents', '/memory', '/init', '/commands', '/hooks', '/mcp'];
     if (chat.includes(name)) return false;
     // Everything but the window's own commands needs a genesis.exe that knows them.
