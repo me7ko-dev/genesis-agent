@@ -1689,7 +1689,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI",
     преди, Stop след — код 2 връща хода на модела), режим план, и снимка на
     файловете, които ходът променя, за /undo.
     """
-    from genesis_agent import edit_history, hooks, plan_mode
+    from genesis_agent import edit_history, hooks, plan_mode, vision
     hooks.notify = ui.warn
     extra = ""
     try:
@@ -1707,6 +1707,9 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI",
     if plan_mode.active():
         extra += "\n\n" + plan_mode.PROMPT_NOTE
     edit_history.begin_turn(user_input)
+    # Тук, не в _run_turn_once: продължението от hook Stop е същият ход и
+    # не получава нови 8 картинки (2026-10-15).
+    vision.begin_turn()
     watched = _WatchedUI(ui)
     genesis_skills._set_cancel(watched.cancelled)
     try:

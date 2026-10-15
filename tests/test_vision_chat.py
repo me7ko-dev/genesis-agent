@@ -80,6 +80,25 @@ def test_a_dragged_absolute_path_is_attached_and_a_bare_name_is_not(ws, tmp_path
     assert images == [], "голо име в текста не е молба да се прати картинката"
 
 
+def test_a_path_inside_code_is_not_attached_but_plain_text_still_is(ws, tmp_path_factory) -> None:
+    # Ревю на зрението (2026-10-15): път в ``` блок или в `код` се прикачваше.
+    other = tmp_path_factory.mktemp("logs")
+    shot = other / "shot.png"
+    shot.write_bytes(png())
+    fenced = f"защо пада?\n```\nOSError: {shot}\n```\nкрай"
+    for text in (fenced, f"виж `{shot}` в лога", f"виж ``'{shot}'`` в лога",
+                 f"~~~\n{shot.as_uri()}\n~~~"):
+        images: list[dict] = []
+        mentions.expand(text, ws, images)
+        assert images == [], "пътят е в кодов участък"
+    images = []
+    mentions.expand(f"`код` и после {shot} в текста", ws, images)
+    assert [p["genesis"]["name"] for p in images] == ["shot.png"]
+    images = []
+    mentions.expand(f"```\nx\n```\n{shot}", ws, images)
+    assert len(images) == 1, "след затворен блок пътят пак е текст"
+
+
 def test_at_most_four_images_per_message(ws) -> None:
     for i in range(6):
         (ws / f"s{i}.png").write_bytes(png(2, 2, (i, 0, 0)))
@@ -151,6 +170,43 @@ def test_view_image_queues_the_picture_for_the_next_request(ws) -> None:
     assert result.startswith("[VIEW_IMAGE: ") and "] ✓ shot.png (4×3 px" in result
     assert "следващото съобщение" in result
     assert [p["genesis"]["name"] for p in vision.take_pending()] == ["shot.png"]
+
+
+def test_view_image_has_a_cap_per_turn_and_a_new_turn_resets_it(ws) -> None:
+    # Ревю на зрението (2026-10-15): моделът в цикъл трупаше картинки без край.
+    cap = vision.MAX_VIEWS_PER_TURN
+    for _ in range(cap):
+        assert "✓" in gs.dispatch_tool_call("VIEW_IMAGE", {"path": "shot.png"})
+    refused = gs.dispatch_tool_call("VIEW_IMAGE", {"path": "shot.png"})
+    assert "✗" in refused and f"най-много {cap} картинки за един ход" in refused
+    assert len(vision.take_pending()) == cap
+    # Взетите (прикачени) не освобождават място — броят е за целия ход.
+    assert "✗" in gs.dispatch_tool_call("VIEW_IMAGE", {"path": "shot.png"})
+    assert vision.take_pending() == []
+    vision.begin_turn()
+    assert "✓" in gs.dispatch_tool_call("VIEW_IMAGE", {"path": "shot.png"})
+
+
+def test_a_failed_view_does_not_use_up_the_cap(ws) -> None:
+    for _ in range(vision.MAX_VIEWS_PER_TURN + 2):
+        assert "не съществува" in gs.dispatch_tool_call("VIEW_IMAGE", {"path": "няма.png"})
+    assert "✓" in gs.dispatch_tool_call("VIEW_IMAGE", {"path": "shot.png"})
+
+
+def test_run_turn_caps_view_image_and_the_next_turn_starts_over(ws, monkeypatch) -> None:
+    cap = vision.MAX_VIEWS_PER_TURN
+    # Различни файлове: еднакво извикване спира пазачът за повторения.
+    for i in range(cap + 1):
+        (ws / f"s{i}.png").write_bytes(png(2, 2, (i, 0, 0)))
+    calls = [_call("VIEW_IMAGE", {"path": f"s{i}.png"}, f"c{i}") for i in range(cap + 1)]
+    seen = _script(monkeypatch, [("", calls), ("Видях.", None),
+                                 ("", [_call("VIEW_IMAGE", {"path": "shot.png"})]), ("Пак.", None)])
+    messages = gta.run_turn(deque([{"role": "system", "content": "s"}]), "погледни", gta.TurnUI())
+    results = [m["content"] for m in seen[1] if m.get("role") == "tool"]
+    assert sum("✓" in r for r in results) == cap and "✗" in results[-1]
+    assert len(_images([seen[1][-1]])) == cap
+    gta.run_turn(messages, "още веднъж", gta.TurnUI())
+    assert "✓ shot.png" in seen[3][-2]["content"], "нов ход — таванът е отначало"
 
 
 def test_view_image_text_tag(ws) -> None:
