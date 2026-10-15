@@ -302,7 +302,7 @@ def bench_one(name: str, task: str, files: dict[str, str], rounds: int, repair) 
         out = repair(root, task, test_command=test_command,
                      max_rounds=rounds, on_status=lambda msg: None)
         reported, used_rounds = out.success, out.rounds
-    except Exception as e:  # a crash is a failed fix, recorded as such
+    except Exception as e:  # noqa: BLE001 — сривът е неуспешна поправка и се печата
         reported, used_rounds = False, 0
         print(f"    ! {type(e).__name__}: {e}"[:120])
     elapsed = time.time() - t0
@@ -321,7 +321,7 @@ def _budget_offset() -> tuple[Path | None, int]:
     try:
         from genesis_agent import budget
         path = Path(budget.LOG_PATH)
-    except Exception:  # без лога остава само броячът на успешните извиквания
+    except Exception:  # noqa: BLE001 — без лога остава само броячът на успешните извиквания
         return None, 0
     return path, path.stat().st_size if path.exists() else 0
 

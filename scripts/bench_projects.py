@@ -221,7 +221,7 @@ def _drop_checkpoints(workdir: Path) -> None:
     try:
         from genesis_agent import checkpoints
         store = checkpoints._store(workdir.resolve())
-    except Exception:  # чистенето не бива да чупи измерването
+    except Exception:  # noqa: BLE001 — чистенето не бива да чупи измерването
         return
     shutil.rmtree(store, ignore_errors=True)
 

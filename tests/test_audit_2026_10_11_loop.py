@@ -133,7 +133,7 @@ def test_an_error_mid_turn_hands_back_the_work_done(ws, monkeypatch):
     # Точно както main(): `messages = run_turn(...)` в try / except Exception.
     try:
         messages = gta.run_turn(messages, "направи made.py", _UI())
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — точно както main(); тестът проверява грешката
         assert "ReadTimeout" in str(e)
         messages = gta.history_after_error(e, messages)
     assert (ws / "made.py").exists()

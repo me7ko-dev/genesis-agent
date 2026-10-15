@@ -69,6 +69,48 @@ def test_normal_stop_is_returned_unchanged(monkeypatch) -> None:
     assert content == "just a plain answer"
 
 
+class _NotJson(_FakeResponse):
+    def json(self):
+        raise ValueError("Expecting value")
+
+
+# 2026-10-15 (BLE001): `except Exception` около разчитането на грешката и на
+# празния отговор на Gemini е стеснен до възможните грешки на тези форми.
+# Поведението за тях трябва да е същото като преди.
+@pytest.mark.parametrize("resp", [
+    _NotJson(502),
+    _FakeResponse(500, ["не", "обект"]),
+    _FakeResponse(500, {"error": "низ, не обект"}),
+], ids=["not-json", "json-list", "error-is-a-string"])
+def test_an_odd_error_body_still_gives_the_status(monkeypatch, resp) -> None:
+    resp.text = "bad gateway"
+    monkeypatch.setattr(gta.requests, "post", lambda *a, **kw: resp)
+    with pytest.raises(RuntimeError, match=rf"^HTTP_{resp.status_code}: bad gateway$"):
+        gta.call_openai_compatible([{"role": "user", "content": "hi"}], "openai", "gpt-4")
+
+
+def test_a_connection_error_keeps_its_cause(monkeypatch) -> None:
+    def boom(*a, **kw):
+        raise gta.requests.ConnectionError("refused")
+    monkeypatch.setattr(gta.requests, "post", boom)
+    with pytest.raises(RuntimeError, match="^CONN: refused") as info:
+        gta.call_openai_compatible([{"role": "user", "content": "hi"}], "openai", "gpt-4")
+    assert isinstance(info.value.__cause__, gta.requests.ConnectionError)
+
+
+@pytest.mark.parametrize("body", [
+    {},
+    {"candidates": []},
+    {"candidates": [{"finishReason": "SAFETY"}]},
+    {"candidates": [{"content": {"parts": [{"text": None}]}}]},
+    {"candidates": "не списък"},
+], ids=["no-candidates", "empty", "blocked", "text-none", "wrong-type"])
+def test_an_empty_gemini_answer_is_reported(monkeypatch, body) -> None:
+    monkeypatch.setitem(gta.KEYS, "GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(gta.requests, "post", lambda *a, **kw: _FakeResponse(200, body))
+    assert gta.call_gemini([{"role": "user", "content": "hi"}], "gemini-x") == "[Грешка: Празен отговор]"
+
+
 class TestRestoreSession:
     """`/history` used to do a bare `messages = json.load(f)` (fixed 2026-08-12).
 

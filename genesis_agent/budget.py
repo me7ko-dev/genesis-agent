@@ -474,7 +474,7 @@ def record_usage(*, provider: str, model: str, prompt_tokens: int,
         with LOG_PATH.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:
-        pass
+        log.debug("разходът не се записа в бюджетния лог", exc_info=True)
 
 
 def _read_entries():
@@ -489,7 +489,7 @@ def _read_entries():
                 try:
                     entry = json.loads(line)
                 except Exception as e:
-                    log.debug("budget: пропускам развален JSONL ред: %s", e)
+                    log.debug("budget: пропускам развален JSONL ред: %s", e, exc_info=True)
                     continue
                 # Валиден JSON, но не запис (`7`, `[...]`) сриваше `genesis budget`.
                 if isinstance(entry, dict):

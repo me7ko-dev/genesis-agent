@@ -186,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
     ok, error = True, ""
     try:
         gta.run_turn(messages, text, JsonTurnUI())
-    except Exception as e:  # всяка грешка трябва да стигне до клиента
+    except Exception as e:  # noqa: BLE001 — видът и текстът на всяка грешка отиват при клиента в error
         ok, error = False, f"{type(e).__name__}: {e}"[:500]
     # Изчерпана верига не хвърля — идва като отговор „[Грешка: ...]". Без това
     # задачата, в която нито един модел не отговори, щеше да е „успешна" и

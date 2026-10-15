@@ -300,7 +300,7 @@ def _safe(name: str, fn: Callable[[], tuple[bool, str]]) -> Finding:
         ok, detail = fn()
     except check.CheckFailed as e:
         return Finding(name, False, str(e))
-    except Exception as e:   # каквото и да е, то е проблемът
+    except Exception as e:  # noqa: BLE001 — грешката е находката: видът и текстът ѝ отиват в доклада
         return Finding(name, False, f"{type(e).__name__}: {e}"[:500])
     return Finding(name, ok, detail)
 

@@ -45,12 +45,12 @@ from enum import IntEnum
 from pathlib import Path
 from typing import Any
 
+log = logging.getLogger("genesis.sandbox")
+
 try:  # POSIX-only; resource limits са best-effort на не-Linux платформи.
     import resource  # type: ignore
 except ImportError:  # pragma: no cover
     resource = None  # type: ignore
-
-log = logging.getLogger("genesis.sandbox")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1521,6 +1521,7 @@ def assess_command(command: str, cwd: Path | None = None, *, arguments: bool = T
         try:
             secret = _secret_in_arguments(command, cwd)
         except Exception:
+            log.debug("проверката за тайни в аргументите се провали", exc_info=True)
             secret = None
         if secret:
             if secret not in reasons:
@@ -1530,6 +1531,7 @@ def assess_command(command: str, cwd: Path | None = None, *, arguments: bool = T
     try:
         return verdict.merge(_assess_file_ops(command, cwd))
     except Exception as e:
+        log.debug("прегледът на файловите операции се провали", exc_info=True)
         verdict.reasons.append(f"(преглед на файловите операции неуспешен: {e})")
         return verdict
 
@@ -1783,6 +1785,7 @@ def _shell_rule(command: str, verdict: RiskVerdict) -> str | None:
         from genesis_agent import permissions
         return permissions.allowed_by(command, verdict.reasons)
     except Exception:
+        log.debug("правилата на оператора не се прочетоха — питаме", exc_info=True)
         return None
 
 
@@ -1791,6 +1794,7 @@ def _session_offer(command: str, verdict: RiskVerdict) -> str | None:
         from genesis_agent import permissions
         return permissions.session_candidate(command, verdict.reasons)
     except Exception:
+        log.debug("предложението „за тази сесия“ не се построи", exc_info=True)
         return None
 
 
@@ -1829,7 +1833,7 @@ def _decide(operation: str, verdict: RiskVerdict, policy: SandboxPolicy, *,
             from genesis_agent import permissions
             permissions.remember(offer)
         except Exception:
-            pass
+            log.debug("правилото „за тази сесия“ не се запомни", exc_info=True)
     if allowed:
         return True, ""
     return False, "[SANDBOX DECLINED] Операторът отказа изпълнението."
@@ -1958,6 +1962,7 @@ def _stop_requested() -> bool:
     try:
         return bool(check and check())
     except Exception:
+        log.debug("проверката за спиране се провали", exc_info=True)
         return False
 
 
@@ -1978,7 +1983,7 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
         try:
             hook()
         except Exception:
-            pass
+            log.debug("before_exec (снимката за /undo) се провали", exc_info=True)
         if _stop_requested():
             return _stopped_before_start()
     env = _build_env(policy, env_extra)
@@ -2004,6 +2009,7 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
             preexec_fn=(lambda: _preexec(policy, nproc_cap)) if os.name == "posix" else None,
         )
     except Exception as e:
+        log.debug("процесът не тръгна", exc_info=True)
         return SandboxResult(ok=False, stdout="", stderr=f"[sandbox] стартът се провали: {e}",
                              returncode=None)
     deadline = time.monotonic() + timeout
@@ -2092,7 +2098,7 @@ def _legacy_codepages() -> list[str]:
             names += [f"cp{cp}" for cp in (kernel32.GetConsoleOutputCP(), kernel32.GetOEMCP(),
                                            kernel32.GetACP()) if cp]
         except Exception:
-            pass
+            log.debug("кодовите страници на Windows не се прочетоха", exc_info=True)
         names.append(locale.getpreferredencoding(False))
         found: list[str] = []
         for name in names:
@@ -2171,6 +2177,7 @@ class _WinJob:
             self.handle = job
             self._k32 = k32
         except Exception:
+            log.debug("Job обектът на Windows не се създаде", exc_info=True)
             self.handle = None
 
     def terminate(self) -> bool:
@@ -2182,6 +2189,7 @@ class _WinJob:
             self._k32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
             return bool(self._k32.TerminateJobObject(self.handle, 1))
         except Exception:
+            log.debug("Job обектът на Windows не се прекрати", exc_info=True)
             return False
 
     def close(self) -> None:
@@ -2190,7 +2198,7 @@ class _WinJob:
         try:
             self._k32.CloseHandle(self.handle)
         except Exception:
-            pass
+            log.debug("Job обектът на Windows не се затвори", exc_info=True)
         self.handle = None
 
 
@@ -2494,6 +2502,8 @@ def start_shell(command: str, *, cwd: Path | None = None, log: Path,
                 creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
             )
     except Exception as e:
+        # `log` тук е параметърът (файлът за изхода), не логерът на модула.
+        logging.getLogger("genesis.sandbox").debug("фоновият процес не тръгна", exc_info=True)
         return None, f"[sandbox] стартът се провали: {e}"
     return proc, ""
 

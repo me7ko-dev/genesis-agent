@@ -93,7 +93,7 @@ def planned(kind: str) -> set[str] | None:
     if kind == "fix":
         try:
             return set(_script("bench_fix").PROJECTS)
-        except Exception:  # без зависимостите на Genesis — без изискване за покритие
+        except Exception:  # noqa: BLE001 — без зависимостите на Genesis няма изискване за покритие
             return None
     return None
 
@@ -103,7 +103,7 @@ def fcc_dir() -> Path:
     (2026-10-11: bench_all гледаше GENESIS_HOME/fcc, bench_fcc — ~/.genesis/fcc)."""
     try:
         return Path(_script("bench_fcc").FCC_DIR)
-    except Exception:
+    except Exception:  # noqa: BLE001 — bench_fcc не се зареди: пътят по подразбиране
         return Path.home() / ".genesis" / "fcc"
 
 

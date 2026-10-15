@@ -31,6 +31,7 @@ from __future__ import annotations
 import atexit
 import itertools
 import json
+import logging
 import os
 import queue
 import re
@@ -42,6 +43,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger("genesis.mcp_client")
 
 PROTOCOL_VERSION = "2025-06-18"
 _START_TIMEOUT = 20.0
@@ -405,6 +408,7 @@ class HttpServer(Server):
             try:
                 token = mcp_oauth.access_token(_expand(self.url))
             except Exception:   # „никога не хвърля“ — без токен, сървърът ще каже 401
+                log.debug("токенът от /mcp login не се прочете", exc_info=True)
                 token = ""
             if token:
                 h["Authorization"] = f"Bearer {token}"
@@ -436,6 +440,7 @@ class HttpServer(Server):
                          and mcp_oauth.refresh(_expand(self.url),
                                                stale=headers["Authorization"][7:]))
             except Exception:
+                log.debug("токенът на MCP сървъра не се поднови", exc_info=True)
                 fresh = None
             if fresh:
                 return self._post(msg, deadline, retried=True)
@@ -529,7 +534,7 @@ class HttpServer(Server):
                 import requests
                 requests.delete(_expand(self.url), headers=self._headers(), timeout=3)
             except Exception:
-                pass
+                log.debug("MCP сесията не се затвори на сървъра", exc_info=True)
         self._ready = False
 
 
@@ -547,6 +552,7 @@ def _workspace() -> Path:
         import genesis_skills
         return Path(genesis_skills._WORKSPACE)
     except Exception:
+        log.debug("папката на genesis_skills не се прочете — текущата", exc_info=True)
         return Path.cwd()
 
 
@@ -555,6 +561,7 @@ def _version() -> str:
         from genesis_agent.version_info import __version__  # type: ignore[attr-defined]
         return str(__version__)
     except Exception:
+        log.debug("версията не се прочете", exc_info=True)
         return "dev"
 
 
@@ -688,6 +695,7 @@ def start_all(ws: Path | None = None) -> list[str]:
             # Програма от проекта — само ако сървърът е от доверения .mcp.json.
             srv.start([] if srv.source == project_file(ws) else forbidden)
         except Exception as e:  # всеки сървър сам за себе си
+            log.debug("MCP сървърът %s не тръгна", srv.name, exc_info=True)
             srv.error = str(e) or type(e).__name__
             srv.stop()
 
