@@ -503,9 +503,16 @@ class Handler(BaseHTTPRequestHandler):
         self._send(status, data)
 
 
+# socketserver слуша с опашка 5: при 20 едновременни заявки Linux
+# (syncookies) приема връзката и после я реже — клиентът получава
+# ConnectionResetError вместо 409/429 (CI 3.13, 2026-10-11).
+class _Server(ThreadingHTTPServer):
+    request_queue_size = 128
+
+
 def make_server(gw: Gateway, host: str = "0.0.0.0", port: int = 8090) -> ThreadingHTTPServer:
     handler = type("BoundHandler", (Handler,), {"gw": gw})
-    server = ThreadingHTTPServer((host, port), handler)
+    server = _Server((host, port), handler)
     server.daemon_threads = True
     return server
 

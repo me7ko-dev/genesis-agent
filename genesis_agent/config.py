@@ -269,6 +269,41 @@ FRESH_TOOL_RESULTS: int = _int_env("GENESIS_FRESH_TOOL_RESULTS", 2)
 ELIDE_OLD_WRITES: int = _int_env("GENESIS_ELIDE_OLD_WRITES", 1)
 ELIDE_WRITE_ROUNDS: int = _int_env("GENESIS_ELIDE_WRITE_ROUNDS", 6, minimum=2)
 
+# Доставчик с prompt caching (Anthropic) получава историята САМО ДОПЪЛВАНА, като
+# Claude Code (2026-10-11): кешът е съвпадение по префикс, а свиването на още
+# един стар резултат и плъзгащият се с по едно прозорец сменяха префикса на
+# всеки рунд — bench egn-check с claude-opus-5: 218 849 от 315 468 входни токена
+# платени изцяло, $1.60 на пуск. Кеширан токен струва 0.1×, свит но изпратен
+# наново — 1×. Над CACHE_HISTORY_MAX_CHARS отпада наведнъж цяло парче от
+# CACHE_TRIM_CHUNK съобщения (не по едно), за да остане префиксът същият до
+# следващото парче.
+CACHE_HISTORY_MAX_CHARS: int = _int_env("GENESIS_CACHE_HISTORY_MAX_CHARS", 300_000)
+CACHE_TRIM_CHUNK: int = _int_env("GENESIS_CACHE_TRIM_CHUNK", 20, minimum=2)
+# Безплатните доставчици кешират сами по префикс, без маркери (budget_log до
+# 2026-10-11: ollama_cloud gpt-oss-120b 69% от входа, groq 7%, nvidia 3%,
+# openrouter 6%) — и при тях свиването сменя префикса всеки рунд. Тези от
+# списъка получават историята само допълвана; таванът е по-нисък, защото
+# прозорецът им е по-малък (gpt-oss: 131k токена), а кирилицата е ~2-3 знака на
+# токен. Anthropic е винаги вътре (виж brain._NATIVE_PROVIDERS).
+# Измерено 2026-10-11 (egn-check + iban-check, по 1 пуск, всички верни): само
+# допълвана история — ollama_cloud 69% → 83% от кеша, некеширани токени на
+# заявка 2 770 → 1 126.
+# Реплей по модел (2026-10-11, 14 рунда растяща история с инструменти, свиване
+# срещу само допълване): ollama_cloud gpt-oss-120b 73% → 88% от кеша, некеширани
+# на заявка 3 093 → 1 653; nvidia nemotron-3-super 44% → 81%, 7 036 → 3 059;
+# nvidia nemotron-3-ultra 17% → 35%, 10 644 → 10 241. Groq (безплатният план)
+# не кешира: три еднакви заявки към gpt-oss-20b — без cached_tokens, лимитът в
+# минута се изяжда цял всеки път; там по-малкото пратено е икономията, затова
+# groq остава на свиването. Запис е доставчик („nvidia“) или един модел
+# („groq::openai/gpt-oss-120b“).
+def _names(raw: str) -> frozenset[str]:
+    """"a, b" → {"a", "b"}; празен низ → празно множество."""
+    return frozenset(p.strip() for p in raw.split(",") if p.strip())
+
+
+CACHE_PROVIDERS: frozenset[str] = _names(os.environ.get("GENESIS_CACHE_PROVIDERS", "ollama_cloud,nvidia"))
+CACHE_HISTORY_MAX_CHARS_FREE: int = _int_env("GENESIS_CACHE_HISTORY_MAX_CHARS_FREE", 120_000)
+
 # Колко tool рунда има правото да направи агентът за ЕДНО съобщение, преди
 # цикълът да спре и да върне контрола. Това е предпазителят срещу зацикляне,
 # НЕ бюджет за работа — а на 8 беше точно бюджет: реална многостъпкова задача

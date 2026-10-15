@@ -928,7 +928,10 @@ _COMPACT_THRESHOLD = 16  # съобщения (без system) преди ком�
 _COMPACT_KEEP_RECENT = 10  # колко последни съобщения остават сурови
 # Твърдият таван на живата история. Компресията по-горе е ПРЕВАНТИВНА и обикновено
 # се задейства далеч преди този таван — той е последната преграда.
-_HISTORY_MAXLEN = 30
+# 200, не 30 (2026-10-11): deque(maxlen=30) изхвърляше по едно съобщение
+# отпред на всеки рунд след ~14-ия — префиксът към модел с кеш се сменяше
+# всеки път. Безплатните модели пак получават най-много 30 (budget.request_window).
+_HISTORY_MAXLEN = 200
 
 
 def _restore_session(loaded: list, system_prompt: str) -> "deque":
@@ -1630,7 +1633,8 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
     # „готово“ (genesis_agent.page_check, план Г.11).
     _page_check = _PageCheck()
     # .py, записан и непуснат след последната промяна (genesis_agent.code_check).
-    _run_check = _RunCheck()
+    # Със заявката: буквалните думи от нея („ред ОБЩО“) се сверяват с кода.
+    _run_check = _RunCheck(user_input)
     # Приемни тестове само от заявката (genesis_agent.acceptance): с безплатен
     # модел — включени, с Claude/платен — не; GENESIS_ACCEPTANCE=1/0 решава изрично.
     _accept = _AcceptanceCheck(user_input, Path(genesis_skills._WORKSPACE), rules=knowledge,

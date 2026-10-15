@@ -50,6 +50,23 @@ class _Recorder:
         self.params = params
         return _FakeResponse(self.usage)
 
+    def stream(self, **params):
+        """Заявката е поточна (2026-10-11) — същите параметри, краен отговор."""
+        self.params = params
+        response = _FakeResponse(self.usage)
+
+        class _Stream:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc) -> None:
+                return None
+
+            def get_final_message(self):
+                return response
+
+        return _Stream()
+
 
 @pytest.fixture
 def sent(monkeypatch):
@@ -104,7 +121,7 @@ class TestTheRequestCarriesACacheBreakpoint:
         assert isinstance(system, list), "суров низ не може да носи cache_control"
         assert system[0]["type"] == "text"
         assert system[0]["text"] == "ти си Genesis"
-        assert system[0]["cache_control"] == {"type": "ephemeral"}
+        assert system[0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
 
     def test_the_tools_are_still_sent_and_stay_before_the_breakpoint(self, sent) -> None:
         """Редът на рендиране е tools → system → messages, затова точката на
@@ -188,4 +205,4 @@ class TestParametersMatchWhatTheModelAccepts:
 
     def test_the_system_prompt_is_still_cached_on_every_model(self, sent) -> None:
         Brain()._call_anthropic("k", "claude-haiku-4-5", MESSAGES, TOOLS, "high")
-        assert sent.params["system"][0]["cache_control"] == {"type": "ephemeral"}
+        assert sent.params["system"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}

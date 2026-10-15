@@ -32,7 +32,10 @@ COMPACT_KEEP_RECENT = 10
 # Твърдият таван на живата история. Компресията (compact_chat_history) е
 # ПРЕВАНТИВНА и обикновено се задейства далеч преди него — това е последната
 # преграда, не основният механизъм.
-HISTORY_MAXLEN = 30
+# 200, не 30 (2026-10-11): deque(maxlen=30) изхвърляше по едно съобщение
+# отпред на всеки рунд след ~14-ия — префиксът към модел с кеш се сменяше
+# всеки път. Безплатните модели пак получават най-много 30 (budget.request_window).
+HISTORY_MAXLEN = 200
 
 
 def restored_history(saved: list[dict], system_prompt: str,
@@ -455,7 +458,9 @@ def run_tool_loop(
     # Уеб страниците от хода — в браузър, когато моделът каже „готово“ (page_check).
     page_check = FinalCheck()
     # .py, записан и непуснат след последната промяна (code_check).
-    run_check = RunCheck()
+    # Заявката преди превода: буквалните думи от нея („ред ОБЩО“) се сверяват с кода.
+    run_check = RunCheck(next((str(m.get("content") or "") for m in reversed(messages)
+                               if m.get("role") == "user"), ""))
 
     _translate_last_user_message_to_en(messages)
     text, tool_calls, prov, model = core.complete(messages)

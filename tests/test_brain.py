@@ -857,3 +857,37 @@ def test_a_real_failure_still_gets_the_retry_rounds(monkeypatch) -> None:
     monkeypatch.setattr(brain, "_record_stat", lambda *a: None)
     monkeypatch.setattr(brain_mod.time, "sleep", lambda s: None)
     assert brain.complete([{"role": "user", "content": "x"}]).raw_text == "ok"
+
+
+def test_a_request_too_large_for_a_model_is_not_sent_to_it_again_until_smaller(monkeypatch) -> None:
+    """Безплатният Groq: над 8 000 токена → HTTP_413 на всеки рунд (bench
+    all-2026-10-11-mega: 127 отказа), броени за провал на доставчика. Сега:
+    по-голяма или равна заявка не тръгва към модела, по-малка — да, и 413 не е
+    провал в статистиката."""
+    sent: list[tuple[str, int]] = []
+    recorded: list[tuple[str, bool]] = []
+
+    def _fake_call(self, provider, model, messages, tools=None, extra=None):
+        size = len(messages[-1]["content"])
+        sent.append((model, size))
+        if model == "fast" and size > 1000:
+            raise RuntimeError('HTTP_413: {"error":{"message":"Request too large for model"}}')
+        return "ok", None
+
+    monkeypatch.setattr(Brain, "_call", _fake_call)
+    monkeypatch.setattr(Brain, "_record_stat",
+                        lambda self, prov, lat, ok: recorded.append((self.current["model"]
+                                                                     if ok else "?", ok)))
+    b = Brain(use_local=False)
+    b.chain = [{"provider": "groq", "model": "fast"}, {"provider": "ollama_cloud", "model": "big"}]
+    b.local = None
+    b._pinned = None
+
+    def ask(chars: int) -> None:
+        assert b.complete([{"role": "user", "content": "x" * chars}]).raw_text == "ok"
+
+    ask(2000)
+    ask(3000)
+    ask(500)
+    assert sent == [("fast", 2000), ("big", 2000), ("big", 3000), ("fast", 500)]
+    assert all(ok for _, ok in recorded), recorded

@@ -25,6 +25,8 @@ from typing import Any
 log = logging.getLogger("genesis.budget")
 
 from genesis_agent.config import (
+    CACHE_HISTORY_MAX_CHARS,
+    CACHE_TRIM_CHUNK,
     DATA_DIR,
     ELIDE_OLD_WRITES,
     ELIDE_WRITE_ROUNDS,
@@ -151,6 +153,47 @@ def request_window(messages, limit: int = MAX_SENT_MESSAGES) -> list[dict]:
     room -= len(after)
     before = _whole_rounds(before[-room:] if room > 0 else [])
     return msgs[:lead] + before + ([msgs[task]] if task is not None else []) + after
+
+
+def cache_history(messages, *, max_chars: int | None = None,
+                  chunk: int | None = None) -> list[dict]:
+    """Историята за доставчик с prompt caching — само допълвана, както в Claude Code.
+
+    Без свиване на стари резултати и без прозорец, който се плъзга с по едно:
+    и двете сменят префикса на всеки рунд и кешът не се чете (виж
+    config.CACHE_HISTORY_MAX_CHARS). Докато историята е под тавана, тя се
+    праща непокътната. Над него отпадат най-старите съобщения след задачата —
+    винаги кратно на `chunk`, изчислено наново от самата история, без
+    състояние. Броят на отпадналите само расте с допълването, затова между два
+    скока префиксът е същият. Водещите system съобщения и последното user
+    съобщение (задачата) остават винаги, както в request_window.
+    """
+    max_chars = CACHE_HISTORY_MAX_CHARS if max_chars is None else max_chars
+    chunk = CACHE_TRIM_CHUNK if chunk is None else max(chunk, 1)
+    msgs = list(messages)
+
+    def size(items: list[dict]) -> int:
+        return sum(len(str(m.get("content") or "")) + len(str(m.get("tool_calls") or ""))
+                   for m in items)
+
+    if max_chars <= 0 or size(msgs) <= max_chars:
+        return msgs
+    lead = 0
+    while lead < len(msgs) and msgs[lead].get("role") == "system":
+        lead += 1
+    head, body = msgs[:lead], msgs[lead:]
+    users = [i for i, m in enumerate(body) if m.get("role") == "user"]
+    task = users[-1] if users else None
+    drop = 0
+    while drop < len(body):
+        # Задачата е преди всичко отпаднало след нея — ако отпадне с парчето,
+        # стои първа след system и редът остава хронологичен.
+        pinned = [body[task]] if task is not None and task < drop else []
+        if size(head) + size(pinned) + size(body[drop:]) <= max_chars:
+            break
+        drop += chunk
+    pinned = [body[task]] if task is not None and task < drop else []
+    return head + pinned + _whole_rounds(body[drop:])
 
 
 def _whole_rounds(tail: list[dict]) -> list[dict]:

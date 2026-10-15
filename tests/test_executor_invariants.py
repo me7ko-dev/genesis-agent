@@ -72,6 +72,7 @@ class TestSecretsDoNotReachGeneratedCode:
         # и CI падна, без да изтича нищо (2026-10-12). Проверката по имена е
         # по-строга от прага и вярна на всяка платформа.
         from genesis_agent import sandbox
+        assert "N= " in res.stdout  # иначе празен списък минава, без да е проверен
         allowed = {name.upper() for name in sandbox.get_policy().env_passthrough}
         seen = res.stdout.split("\n")[0].split("|")
         leaked = sorted(name for name in seen if name and name.upper() not in allowed)

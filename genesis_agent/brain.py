@@ -127,11 +127,17 @@ def _output_cap(model: str) -> int:
     return _OUTPUT_CAPS.get(model, MAX_OUTPUT_TOKENS)
 
 # Anthropic native (само при quality="max"). max_tokens покрива И размисъла, И
-# отговора — 16k стига за код без да изисква streaming (над ~16k SDK-то иска
-# stream, за да не удари HTTP timeout). `xhigh` е препоръчаното ниво за кодинг
-# и агентна работа; отделен запис в config.yaml може да го смени за конкретен модел.
-ANTHROPIC_MAX_TOKENS = 16000
+# отговора. `xhigh` е препоръчаното ниво за кодинг и агентна работа; отделен
+# запис в config.yaml може да го смени за конкретен модел.
 ANTHROPIC_EFFORT = "xhigh"
+# Заявката към Anthropic е поточна (2026-10-11): при `max` размисълът расте и
+# една заявка минава 90-те секунди на CLOUD_TIMEOUT (най-дългият отговор при
+# xhigh в bench egn-check — 6 919 токена) — тогава веригата тихо падаше на
+# по-слабия модел. Потокът държи връзката жива и позволява по-голям таван;
+# плаща се само генерираното.
+ANTHROPIC_STREAM_MAX_TOKENS = 64000
+# Операторът избира усилието без да пипа config.yaml: GENESIS_EFFORT=max.
+_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 # Не всеки модел на Anthropic приема тези два параметъра. `output_config.effort`
 # и adaptive thinking вървят от поколение 4.6 нагоре; на Haiku 4.5 и по-старите
@@ -248,6 +254,24 @@ def _hit_output_cap(error: str) -> bool:
     return "HTTP_TRUNCATED" in error
 
 
+# Заявка над лимита на модела за един път (безплатният Groq: 8 000 токена в
+# минута → HTTP_413 „Request too large“). Bench all-2026-10-11-mega: 127 такива
+# отказа на groq/gpt-oss-120b (86 s), по един на всеки рунд, щом историята
+# порасне — и всеки се броеше за провал на доставчика, тоест бързият стартов
+# модел слизаше надолу във веригата за всички. Помни се най-малкият отказан
+# размер (знаци JSON) за модела: по-голяма или равна заявка не тръгва към него,
+# по-малка (нова задача, свита история) — пак.
+_TOO_LARGE: dict[str, int] = {}
+
+
+def _too_large(error: str) -> bool:
+    return error.startswith("HTTP_413")
+
+
+def _request_size(messages: list[dict], tools: list[dict] | None) -> int:
+    return len(json.dumps([messages, tools], ensure_ascii=False, default=str))
+
+
 def _openai_usage(usage: Any) -> Any:
     """usage от OpenAI-съвместим отговор + `cached_read_tokens` за budget.py.
 
@@ -255,12 +279,15 @@ def _openai_usage(usage: Any) -> Any:
     `prompt_tokens_details.cached_tokens` (измерено 2026-09-25: 4 064 от 4 089
     на второто обръщение със същия системен промпт). Досега полето не се
     четеше и `genesis budget` показваше кеш 0 при всички освен Anthropic.
-    Groq (gpt-oss) и NVIDIA не го връщат — тогава usage остава както е.
+    NVIDIA nemotron-3-super го връща също (2026-10-11: 6 864 от 8 343), ultra —
+    понякога; безплатният Groq — не. DeepSeek брои в `prompt_cache_hit_tokens`.
+    Без поле usage остава както е.
     """
     if not isinstance(usage, dict):
         return usage
     details = usage.get("prompt_tokens_details")
     cached = details.get("cached_tokens") if isinstance(details, dict) else None
+    cached = cached or usage.get("prompt_cache_hit_tokens")
     if not cached:
         return usage
     return {**usage, "cached_read_tokens": int(cached)}
@@ -776,7 +803,12 @@ class Brain:
             if claude_cli.chosen() and claude_cli.available():
                 self.chain.append({"provider": "claude_cli", "model": "haiku",
                                    "size_b": 0, "supports_tools": False})
-        self.quality = (quality or os.environ.get("GENESIS_QUALITY") or "").strip().lower()
+        # Леката работа не наследява GENESIS_QUALITY (2026-10-11): с `max` от
+        # средата резюмето между ходовете, паметта и графът на знанието тръгваха
+        # към claude-opus-5 при xhigh — платен размисъл за второстепенна работа.
+        # Изрично `quality=` пак важи.
+        env_quality = "" if light else os.environ.get("GENESIS_QUALITY")
+        self.quality = (quality or env_quality or "").strip().lower()
         self.premium: list[dict] = []
         self._premium_meta: dict[tuple[str, str], dict] = {}
 
@@ -1456,6 +1488,13 @@ class Brain:
             })
         return out
 
+    @staticmethod
+    def _anthropic_final(api: Any, params: dict[str, Any], **extra: Any) -> Any:
+        """Поточна заявка, върнат е само крайният отговор (виж
+        ANTHROPIC_STREAM_MAX_TOKENS) — за веригата същото като create()."""
+        with api.stream(**extra, **params) as stream:
+            return stream.get_final_message()
+
     def _call_anthropic(self, key: str, model: str, messages: list[dict],
                         tools: list[dict] | None, effort: str) -> tuple[str, list | None]:
         try:
@@ -1468,7 +1507,7 @@ class Brain:
             raise RuntimeError("няма съобщения за изпращане")
         params: dict[str, Any] = {
             "model": model,
-            "max_tokens": ANTHROPIC_MAX_TOKENS,
+            "max_tokens": ANTHROPIC_STREAM_MAX_TOKENS,
             "messages": msgs,
         }
         if _supports_adaptive_effort(model):
@@ -1476,7 +1515,9 @@ class Brain:
             # Точно това искаме тук — MAX режимът съществува заради трудните
             # случаи, а лесните не бива да плащат за размисъл, който не им трябва.
             params["thinking"] = {"type": "adaptive"}
-            params["output_config"] = {"effort": effort or ANTHROPIC_EFFORT}
+            chosen = os.environ.get("GENESIS_EFFORT", "").strip().lower()
+            params["output_config"] = {
+                "effort": chosen if chosen in _EFFORTS else (effort or ANTHROPIC_EFFORT)}
         if system:
             # Prompt caching (design note, 2026-09-20). Редът на рендиране е
             # tools → system → messages, затова една точка на последния
@@ -1490,8 +1531,17 @@ class Brain:
             # в средата на историята се променят между заявките. Кешът е
             # съвпадение по префикс — точка там щеше да се разминава почти
             # винаги и само да харчи запис в кеша.
+            # 1 час, не 5 минути (2026-10-11): между две съобщения на оператора
+            # минават повече от 5 минути, а записът за час струва 2× веднъж,
+            # не 1.25× при всяко връщане. По-дългият TTL трябва да е пред
+            # по-краткия — този е първият.
             params["system"] = [{"type": "text", "text": system,
-                                 "cache_control": {"type": "ephemeral"}}]
+                                 "cache_control": {"type": "ephemeral", "ttl": "1h"}}]
+        # Опашката на разговора — като Claude Code (2026-10-11): автоматичната
+        # точка стои на последния блок и се мести напред с всеки рунд, а
+        # complete() праща на native доставчика историята само допълвана
+        # (budget.cache_history) — следващият рунд чете от кеша всичко досегашно.
+        params["cache_control"] = {"type": "ephemeral"}
         if tools:
             params["tools"] = self._to_anthropic_tools(tools)
 
@@ -1500,14 +1550,15 @@ class Brain:
             # Класификаторите за безопасност могат да откажат заявка (връща се
             # 200 с stop_reason="refusal"). `fallbacks="default"` оставя сървъра
             # да я довърши на друг модел вместо да ни върне празен отговор.
-            resp = client.beta.messages.create(
-                betas=["server-side-fallback-2026-07-01"], fallbacks="default", **params)
+            resp = self._anthropic_final(client.beta.messages, params,
+                                         betas=["server-side-fallback-2026-07-01"],
+                                         fallbacks="default")
         except anthropic.BadRequestError as e:
             # Акаунт без достъп до тази beta (или SDK, който не я познава) —
             # същата заявка без нея. Нашата собствена верига поема отказа.
             if "fallback" not in str(e).lower() and "beta" not in str(e).lower():
                 raise RuntimeError(f"HTTP_400: {e}") from e
-            resp = client.messages.create(**params)
+            resp = self._anthropic_final(client.messages, params)
         except anthropic.AuthenticationError as e:
             raise RuntimeError(f"HTTP_401: {e}") from e
         except anthropic.PermissionDeniedError as e:
@@ -1565,7 +1616,7 @@ class Brain:
         if getattr(resp, "stop_reason", "") == "max_tokens" and _is_truncated(text):
             raise RuntimeError(
                 f"HTTP_TRUNCATED: отговорът е отрязан на тавана от "
-                f"{ANTHROPIC_MAX_TOKENS} токена, посред код-ограда "
+                f"{ANTHROPIC_STREAM_MAX_TOKENS} токена, посред код-ограда "
                 f"(stop_reason=max_tokens)."
             )
         return text, (tool_calls or None)
@@ -1967,7 +2018,26 @@ class Brain:
         # мисиите, ensemble, orchestrator. Историята на извикващия
         # остава пълна (budget_history не мутира входа); свива се само копието,
         # което тръгва по мрежата.
-        from genesis_agent.budget import budget_history
+        from genesis_agent.budget import budget_history, cache_history
+        from genesis_agent.config import (
+            CACHE_HISTORY_MAX_CHARS,
+            CACHE_HISTORY_MAX_CHARS_FREE,
+            CACHE_PROVIDERS,
+        )
+        # Доставчик, който кешира по префикс (Anthropic винаги, безплатните от
+        # GENESIS_CACHE_PROVIDERS), получава историята само допълвана, без
+        # свиването на budget_history, което сменя средата ѝ на всеки рунд
+        # (виж config.CACHE_HISTORY_MAX_CHARS). Изгледът се смята при нужда.
+        raw_history = list(messages)
+        cache_views: dict[int, list[dict]] = {}
+
+        def cache_view(provider: str) -> list[dict]:
+            limit = (CACHE_HISTORY_MAX_CHARS if provider in _NATIVE_PROVIDERS
+                     else CACHE_HISTORY_MAX_CHARS_FREE)
+            if limit not in cache_views:
+                cache_views[limit] = cache_history(raw_history, max_chars=limit)
+            return cache_views[limit]
+
         full_history = messages
         messages = budget_history(messages)
         stable_notools: list[dict] | None = None   # за claude_cli (кеш по префикс)
@@ -2113,11 +2183,19 @@ class Brain:
                         continue  # временно изчерпан → пропускаме
                     use_tools = tools if (tools and attempt.get("supports_tools")) else None
                     msgs = messages if use_tools else messages_notools
+                    if use_tools and (prov in _NATIVE_PROVIDERS or prov in CACHE_PROVIDERS
+                                      or key in CACHE_PROVIDERS):
+                        msgs = cache_view(prov)
                     if prov == "claude_cli":
                         if stable_notools is None:
                             stable_notools = self._cache_stable_textmode(
                                 full_history, tools, messages_notools)
                         msgs = stable_notools
+                    size = _request_size(msgs, use_tools)
+                    if size >= _TOO_LARGE.get(key, size + 1):
+                        only_unconfigured = False
+                        last_error = f"{prov}/{model}: заявката е над лимита му за един път"
+                        continue
                     t0 = time.time()
                     self._attempt_id = (prov, model)
                     self._usage_attempt = None
@@ -2187,7 +2265,9 @@ class Brain:
                         if not synthetic:
                             sent_any = True
                             last_real_error = last_error
-                            if not _hit_output_cap(last_error):
+                            if _too_large(last_error):
+                                _TOO_LARGE[key] = min(_TOO_LARGE.get(key, size), size)
+                            elif not _hit_output_cap(last_error):
                                 retry_useful = retry_useful or not cools
                                 # Изяден таван не е болен доставчик (2026-10-11):
                                 # 5 отрязани големи WRITE_FILE на groq даваха
