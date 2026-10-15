@@ -320,6 +320,14 @@ def check_claude(_ws: Path) -> list[Check]:
     return [Check("claude CLI", "ok", f"вход: {label}")]
 
 
+def check_voice(_ws: Path) -> list[Check]:
+    """Гласът (2026-10-15): доставчиците за говор ↔ текст, микрофонът, плейърът.
+    Само кое е инсталирано и настроено — без мрежа и без запис. Гласът е по
+    желание: липсващ пакет е „·“, не проблем."""
+    from genesis_agent import voice
+    return [Check(name, status, detail, fix) for name, status, detail, fix in voice.doctor_lines()]
+
+
 # ── пускане ─────────────────────────────────────────────────────────────────
 
 def probes(online: bool = False) -> list[tuple[str, Callable[[Path], list[Check]]]]:
@@ -327,7 +335,7 @@ def probes(online: bool = False) -> list[tuple[str, Callable[[Path], list[Check]
             ("ruff", check_ruff), ("pytest", check_pytest), ("API ключове", check_keys),
             ("Модели", lambda ws: check_models(ws, online)), ("MCP", check_mcp),
             ("Hooks", check_hooks), ("Диск", check_disk), ("Playwright/Chromium", check_playwright),
-            ("claude CLI", check_claude)]
+            ("claude CLI", check_claude), ("Глас", check_voice)]
 
 
 def run_checks(workspace: Path | str | None = None, *, online: bool = False,
@@ -402,7 +410,7 @@ def format_report(checks: list[Check]) -> str:
 
 USAGE = """Употреба: genesis doctor [--models] [--json] [--cwd ПАПКА]
   без мрежа и бързо: Python, git, Node/npm, ruff, pytest, ключовете (само имената),
-  MCP сървърите, hooks, диска, Playwright/Chromium, входа на `claude`
+  MCP сървърите, hooks, диска, Playwright/Chromium, входа на `claude`, гласа и микрофона
   --models   и по една малка заявка до всеки модел от config.yaml (мрежа)
   --json     резултатът като JSON (status: ok | fail | skip)
   --cwd      проектът, чиито .mcp.json, hooks и Python се проверяват"""

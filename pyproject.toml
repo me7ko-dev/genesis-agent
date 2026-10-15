@@ -49,7 +49,16 @@ signing = ["cryptography>=42"]           # cryptography_utils.py — RSA skill s
 premium = ["anthropic>=0.40"]
 # `genesis serve` — the phone app (mobile/): encrypted channel + QR pairing.
 mobile = ["cryptography>=42", "qrcode>=7.4"]
+# Глас и микрофон (genesis_agent/voice.py, 2026-10-15): запис от микрофона и
+# edge-tts (онлайн, безплатно, с български гласове). Говор → текст върви през
+# Groq с ключа, който веригата вече ползва — без допълнителни пакети.
+voice = ["sounddevice>=0.4.6", "edge-tts>=6.1"]
+# Офлайн говор → текст: faster-whisper тегли ctranslate2 и модел от 0.5–3 GB
+# при първото ползване — затова отделно, не в [voice].
+voice-local = ["faster-whisper>=1.0"]
 all = [
+    "sounddevice>=0.4.6",
+    "edge-tts>=6.1",
     "qrcode>=7.4",
     "playwright>=1.40",
     "ruff>=0.6",

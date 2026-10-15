@@ -16,6 +16,34 @@ workspace:
 storage:
   history_dir: ""
 
+# Глас и микрофон (genesis_agent/voice.py, 2026-10-15). В терминала: /listen
+# (запис → текст → потвърждение) и /voice on (отговорите на глас). Пакетите:
+# pip install "genesis-agent[voice]"; офлайн говор → текст — [voice-local].
+# Променливите на средата са над тези стойности (GENESIS_STT_BACKENDS,
+# GENESIS_TTS_BACKENDS, GENESIS_TTS_VOICE, GENESIS_STT_BASE_URL, GENESIS_VOICE_SPEAK).
+voice:
+  language: "bg"
+  speak_answers: false          # /voice on|off — само за текущата сесия
+  stt:
+    # Ред на опитване. groq — с GROQ_API_KEY[_2.._10] от веригата; openai —
+    # само ако openai_base_url е попълнен (аудиото отива ТАМ); local — faster-whisper.
+    backends: ["groq", "openai", "local"]
+    groq_models: ["whisper-large-v3", "whisper-large-v3-turbo"]
+    openai_base_url: ""
+    openai_key_env: "OPENAI_API_KEY"
+    openai_model: "whisper-1"
+    local_model: "small"         # tiny/base/small/medium/large-v3
+    prompt: ""                   # думи, които Whisper да очаква (имена, термини)
+    timeout_s: 60
+  tts:
+    backends: ["edge", "espeak", "pyttsx3"]
+    voice: "bg-BG-KalinaNeural"  # или bg-BG-BorislavNeural
+    max_sentences: 4             # по-дългото: „Останалото е на екрана.“
+    max_chars: 600
+  mic:
+    max_seconds: 60
+    silence_seconds: 3           # тишина след реч спира записа; 0 = само с клавиш
+
 models:
   # Верига от големи+бързи модели, няколко доставчика с ОТДЕЛНИ квоти.
   # brain.py я обхожда ВИНАГИ отгоре надолу, прескачайки временно изчерпаните
