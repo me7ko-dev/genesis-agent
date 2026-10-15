@@ -2417,6 +2417,7 @@ def main():
                 help_table.add_row("!команда", "Пусни команда сам (без модела); изходът отива при модела със следващото съобщение")
                 help_table.add_row("@път", "Прикачи файл или списък на папка към съобщението")
                 help_table.add_row("/hooks [trust]", "Твоите команди около работата (hooks.json)")
+                help_table.add_row("/permissions [add|remove|clear]", "Командите без въпрос: за сесията и постоянните за проекта")
                 help_table.add_row("/commands", "Твоите команди от .genesis/commands/*.md")
                 help_table.add_row("/bg", "Фоновите команди (dev сървъри) — състояние")
                 help_table.add_row("/mcp [trust|restart]", "MCP сървърите (~/.genesis/mcp.json, .mcp.json) и инструментите им")

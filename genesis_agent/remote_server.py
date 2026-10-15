@@ -540,9 +540,10 @@ PHONE_HELP = """Команди от телефона:
 /context — с какво е пълен контекстът
 /review [клон] — преглед на промените за грешки
 /memory, /init, /bg, /hooks, /mcp, /commands, /skills, /tasks
+/permissions — одобрените команди (remove маха правило)
 /clear — нов разговор
 @файл — прикача файл от работната папка
-Само в терминала: /model, /history, /backup, /export, /update и доверяването (/hooks trust, /mcp trust)."""
+Само в терминала: /model, /history, /backup, /export, /update, доверяването (/hooks trust, /mcp trust) и /permissions add."""
 
 
 def phone_command(text: str, ui: Any, session: RemoteSession, *, messages: Any,
@@ -571,6 +572,12 @@ def phone_command(text: str, ui: Any, session: RemoteSession, *, messages: Any,
         # на телефон, който може да е в чужди ръце.
         if cmd in ("/hooks", "/mcp") and rest.strip().lower() == "trust":
             ui.warn(f"{cmd} trust е само в терминала на компютъра — там се вижда целият файл.")
+            return messages, None
+        # Ново правило пуска команди без въпрос — по същата причина се дава
+        # само в терминала. Списъкът и махането (само стесняват) — и оттук.
+        if cmd in ("/permissions", "/разрешения") and \
+                chat_commands._split(rest)[0].lower() in ("add", "добави"):
+            ui.warn(f"{cmd} add е само в терминала на компютъра.")
             return messages, None
         # Входът в MCP сървър отваря браузър на компютъра и чака там (2026-10-09).
         if cmd == "/mcp" and chat_commands._split(rest)[0].lower() in ("login", "logout"):
