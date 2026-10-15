@@ -2,10 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 
 import { mergeEvents, reuseItems, thinkingLabel, toChatItems, type ChatItem } from './chat';
-import { errorText, MAX_MESSAGE, messageLength, replyErrorText } from './messages';
+import { checkImages, hasFeature, limitsFrom } from './media';
+import { errorText, MAX_MESSAGE, messageLength, replyErrorText, sendErrorText, voiceErrorText } from './messages';
 import { Outbox } from './outbox';
 import {
-  b64urlEncode, GenesisClient, ProtocolError, type GenesisEvent, type Pairing, type PhoneState, type StatusReply,
+  b64urlEncode, GenesisClient, ProtocolError, type GenesisEvent, type OutgoingImage, type Pairing, type PhoneState,
+  type StatusReply,
 } from './protocol';
 import { random } from './random';
 
@@ -115,7 +117,10 @@ export function useGenesis(pairing: Pairing) {
     try {
       return await fn();
     } catch (e) {
-      fail(e);
+      // Отговор на сървъра (413, 429 "busy" на голям плик, 500) значи, че
+      // компютърът е тук — не „няма връзка“: точката ставаше червена и
+      // „Изпрати“ стоеше изключено до следващото допитване (2026-10-15).
+      if (!(e instanceof ProtocolError && e.kind === 'server')) fail(e);
       // На екрана — на български; суровото съобщение е за дневника (одит
       // 2026-10-11: „cannot reach http://…“ и „server error 413“ стигаха
       // до оператора дословно).
@@ -125,17 +130,34 @@ export function useGenesis(pairing: Pairing) {
     }
   }, [fail]);
 
-  const send = useCallback(async (text: string) => {
+  const features = useMemo(() => ({
+    voice: hasFeature(status, 'voice'),
+    images: hasFeature(status, 'images'),
+  }), [status]);
+  const limits = useMemo(() => limitsFrom(status), [status]);
+
+  // `images` — снимките над полето (2026-10-15). Проверката на сървъра се прави
+  // и тук: 10 MiB не пътуват, за да чуем „не“. Повторният опит носи същия `mid`
+  // само със същите снимки (outbox, `attachments`).
+  const send = useCallback(async (text: string, images: readonly OutgoingImage[] = []) => {
     if (outbox.sending) return false;
     if (messageLength(text) > MAX_MESSAGE) {
       setError(replyErrorText('too_long'));
       return false;
     }
+    if (images.length) {
+      const problem = features.images ? checkImages(images, limits, text) : 'unknown_op';
+      if (problem) {
+        setError(problem === 'unknown_op' ? 'Genesis на компютъра не приема снимки — обнови го.' : replyErrorText(problem));
+        return false;
+      }
+    }
     setSending(true);
     try {
-      const reply = await act(() => outbox.send(text, (t, mid) => client.send(t, mid)));
+      const reply = await act(() => outbox.send(text, (t, mid) => client.send(t, mid, images),
+                                                images.map((i) => i.id).join(',')));
       if (reply && !reply.ok) {
-        setError(replyErrorText(reply.error));
+        setError(sendErrorText(reply));
         return false;
       }
       if (reply) setBusy(true);
@@ -143,7 +165,33 @@ export function useGenesis(pairing: Pairing) {
     } finally {
       setSending(false);
     }
-  }, [act, client, outbox]);
+  }, [act, client, outbox, features.images, limits]);
+
+  // Гласът (2026-10-15): говор → текст за полето (НЕ се праща сам) и
+  // отговор → mp3. null — грешката вече е на екрана.
+  const transcribe = useCallback(async (mime: string, data: string): Promise<string | null> => {
+    const reply = await act(() => client.transcribe(mime, data));
+    if (!reply) return null;
+    if (!reply.ok || typeof reply.text !== 'string') {
+      setError(voiceErrorText('transcribe', reply));
+      return null;
+    }
+    if (!reply.text.trim()) {
+      setError(voiceErrorText('transcribe', { error: 'empty' }));
+      return null;
+    }
+    return reply.text;
+  }, [act, client]);
+
+  const speak = useCallback(async (text: string): Promise<{ mime: string; data: string } | null> => {
+    const reply = await act(() => client.speak(text));
+    if (!reply) return null;
+    if (!reply.ok || typeof reply.data !== 'string' || !reply.data) {
+      setError(voiceErrorText('speak', reply));
+      return null;
+    }
+    return { mime: reply.mime || 'audio/mpeg', data: reply.data };
+  }, [act, client]);
 
   const confirm = useCallback(async (id: string, allow: boolean, session = false) => {
     const reply = await act(() => client.confirm(id, allow, session));
@@ -169,8 +217,8 @@ export function useGenesis(pairing: Pairing) {
   }, [events]);
   const label = useMemo(() => thinkingLabel(events), [events]);
 
-  return { connection, status, items, busy, sending, label, error, send, confirm, stop, clear,
-           plan: phone.plan, todos: phone.todos };
+  return { connection, status, items, busy, sending, label, error, setError, send, confirm, stop, clear,
+           transcribe, speak, features, limits, plan: phone.plan, todos: phone.todos };
 }
 
 function sleep(ms: number) {
