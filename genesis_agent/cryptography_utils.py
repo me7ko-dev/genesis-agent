@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import logging
 import os
 from pathlib import Path
 
@@ -20,6 +21,8 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 # When GENESIS_HOME is unset this resolves to `~/.genesis`, exactly as before,
 # so a single-environment install sees no change and needs no migration.
 from genesis_agent.paths import GENESIS_HOME as _GENESIS_HOME
+
+log = logging.getLogger("genesis.cryptography_utils")
 
 KEY_DIR = Path(os.environ.get("GENESIS_KEY_DIR", _GENESIS_HOME))
 PRIVATE_KEY_PATH = KEY_DIR / "private_key.pem"
@@ -157,6 +160,7 @@ def verify_signature(code_text: str, signature_hex: str) -> bool:
         )
         return True
     except Exception:
+        log.debug("подписът не се потвърди", exc_info=True)
         return False
 
 if __name__ == "__main__":

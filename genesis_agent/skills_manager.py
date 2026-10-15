@@ -352,7 +352,7 @@ def save_skill(
                     log.warning("умението %s: записаният код не съвпада с проверения — без подпис",
                                 final_slug)
             except Exception:
-                pass
+                log.debug("умението не се подписа", exc_info=True)
 
         rel = str(md_path.relative_to(SKILLS_ROOT)).replace("\\", "/")
         entry: dict[str, Any] = {
@@ -388,7 +388,7 @@ def save_skill(
         from genesis_agent.embeddings import index_skill
         index_skill(slug, f"{slug.replace('_', ' ')}. {goal}")
     except Exception:
-        pass
+        log.debug("умението не се индексира за embeddings", exc_info=True)
 
     return md_path
 

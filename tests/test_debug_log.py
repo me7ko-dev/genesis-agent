@@ -35,6 +35,19 @@ def test_off_by_default_no_file(monkeypatch) -> None:
     assert debug_log._handler is None
 
 
+def test_on_a_swallowed_error_lands_in_the_file_with_traceback(monkeypatch) -> None:
+    monkeypatch.setenv("GENESIS_DEBUG", "1")
+    assert cli.main(["--version"]) == 0
+    from genesis_agent import provider_stats
+    provider_stats._STATS_PATH.write_text("{счупен json", encoding="utf-8")
+    assert provider_stats._load() == {}          # поведението е същото
+    text = _log_text()
+    assert "genesis.provider_stats" in text
+    assert "Traceback (most recent call last)" in text
+    assert "JSONDecodeError" in text
+    assert Path(debug_log._handler.baseFilename).parent == paths.GENESIS_HOME
+
+
 def test_installed_once(monkeypatch) -> None:
     monkeypatch.setenv("GENESIS_DEBUG", "1")
     cli.main(["--version"])
