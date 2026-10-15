@@ -957,6 +957,8 @@ CONFIRM_PROMPT = "[Enter = изпрати, e = редактирай, Esc = от�
 
 def _posix_key(timeout: float | None) -> str | None:
     """Един клавиш без Enter (cbreak); None — нищо до `timeout`."""
+    if sys.platform == "win32":   # termios/tty ги няма; mypy на Windows ги отказва
+        return None
     import select
     import termios
     import tty
@@ -1016,16 +1018,17 @@ def read_key(timeout: float | None = None) -> str | None:
 def edit_line(text: str, ask: Callable[[str], str] = input) -> str:
     """Поправка на разпознатото: на Linux/macOS readline слага текста в реда;
     без readline (Windows) — нов текст, празно = без промяна."""
-    try:
-        import readline
-    except ImportError:
-        readline = None   # type: ignore[assignment]
-    if readline is not None and sys.stdin.isatty():
-        readline.set_startup_hook(lambda: readline.insert_text(text))
+    if sys.platform != "win32" and sys.stdin.isatty():
         try:
-            return ask("✎ ").strip()
-        finally:
-            readline.set_startup_hook()
+            import readline
+        except ImportError:
+            pass
+        else:
+            readline.set_startup_hook(lambda: readline.insert_text(text))
+            try:
+                return ask("✎ ").strip()
+            finally:
+                readline.set_startup_hook()
     new = ask("✎ поправеният текст (Enter = остави както е): ").strip()
     return new or text
 
