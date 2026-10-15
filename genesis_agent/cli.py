@@ -219,6 +219,8 @@ def _fix(args: list[str]) -> int:
 def main(argv: list[str] | None = None) -> int:
     from genesis_agent.paths import ensure_utf8_streams
     ensure_utf8_streams()
+    from genesis_agent.debug_log import install_from_env
+    install_from_env()  # GENESIS_DEBUG=1 → ~/.genesis/debug.log
     argv = list(sys.argv[1:] if argv is None else argv)
     cmd = argv[0] if argv else "chat"
 
