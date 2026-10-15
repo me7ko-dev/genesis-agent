@@ -58,8 +58,17 @@ class ApiError(Exception):
 
 # ── модели ──────────────────────────────────────────────────────────────────
 
+# Никога през API-то, дори със „ключ“: claude_cli е абонаментът на оператора —
+# по правилата в genesis_agent/claude_cli.py само за личната му работа, не вход
+# за друга програма (лекият Brain го слага накрая, щом е избран, 2026-10-12);
+# ollama_local е бавен за 20-секундния срок на играта.
+_NEVER_PROVIDERS = frozenset({"claude_cli", "ollama_local"})
+
+
 def _has_key(brain: Any, provider: str) -> bool:
     from genesis_agent.brain import _PROVIDERS
+    if provider in _NEVER_PROVIDERS:
+        return False
     env = _PROVIDERS.get(provider, ("", None))[1]
     return bool(env and str(brain.keys.get(env) or "").strip())
 
@@ -71,7 +80,9 @@ def _make_brain() -> Any:
     Стартовият (groq gpt-oss-120b) е пръв, защото наживо 2026-10-06 говори
     по-чист български от леките 20B при същото време (0.5–1 s срещу 0.7–1.4 s)."""
     from genesis_agent.brain import Brain, _load_chain
-    # quality="normal": иначе GENESIS_QUALITY=max от средата слага платените отпред.
+    # quality="normal": лекият Brain и без това не чете GENESIS_QUALITY
+    # (2026-10-11), но изричното тук пази платените вън и ако това се смени.
+    # Разходът се записва в budget_log от самия Brain.complete.
     brain = Brain(light=True, use_local=False, quality="normal")
     start = _load_chain()[:1]
     first = {(c["provider"], c["model"]) for c in start}

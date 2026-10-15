@@ -236,6 +236,56 @@ def test_make_brain_is_text_only_fast_and_free(monkeypatch) -> None:
     assert {c["provider"] for c in b.chain} == {"groq", "nvidia"}  # без ключ → вън
 
 
+def test_make_brain_never_uses_the_claude_subscription(monkeypatch) -> None:
+    """Абонаментът (claude_cli) е за личната работа на оператора в терминала
+    (правилата в genesis_agent/claude_cli.py), не вход за друга програма — и
+    когато е избран, и когато някой го сложи във веригата на config.yaml."""
+    from genesis_agent import brain as brain_mod
+    from genesis_agent import claude_cli
+    monkeypatch.setenv("GENESIS_START_PROVIDER", "claude_cli")
+    monkeypatch.setattr(claude_cli, "available", lambda: True)
+    monkeypatch.setattr(brain_mod, "_load_keys", lambda: {"GROQ_API_KEY": "k"})
+    monkeypatch.setattr(brain_mod, "_load_chain", lambda: [
+        {"provider": "claude_cli", "model": "sonnet", "size_b": 0},
+        {"provider": "groq", "model": "m0", "size_b": 70}])
+    monkeypatch.setattr(brain_mod, "_load_light_chain", list)
+    b = llm_api._make_brain()
+    assert _light_brain_offers_claude_cli(brain_mod)  # лекият Brain наистина я добавя
+    assert [c["provider"] for c in b.chain] == ["groq"]
+    assert b.current == {"provider": "groq", "model": "m0", "size_b": 70}
+
+
+def _light_brain_offers_claude_cli(brain_mod) -> bool:
+    return any(c["provider"] == "claude_cli"
+               for c in brain_mod.Brain(light=True, use_local=False).chain)
+
+
+def test_generate_goes_through_the_real_chain_and_records_usage(monkeypatch) -> None:
+    """Истинският Brain.complete (не фалшив): без tools към доставчика и с
+    разхода в budget_log — `genesis budget` трябва да вижда и заявките на играта."""
+    from genesis_agent import brain as brain_mod
+    from genesis_agent import budget
+    monkeypatch.setattr(brain_mod, "_load_keys", lambda: {"GROQ_API_KEY": "k"})
+    monkeypatch.setattr(brain_mod, "_load_chain", lambda: [
+        {"provider": "groq", "model": "m0", "size_b": 70, "supports_tools": True}])
+    monkeypatch.setattr(brain_mod, "_load_light_chain", list)
+    sent: list = []
+
+    def fake_call(self, provider, model, messages, tools=None, extra=None):
+        sent.append((provider, model, tools))
+        self._last_usage = {"prompt_tokens": 12, "completion_tokens": 3}
+        return "Добър ден, чедо.", None
+
+    monkeypatch.setattr(brain_mod.Brain, "_call", fake_call)
+    text, used, usage = llm_api.generate(CHAT["messages"], json_mode=False)
+    assert (text, used) == ("Добър ден, чедо.", "groq/m0")
+    assert usage == {"prompt_tokens": 12, "completion_tokens": 3}
+    assert sent == [("groq", "m0", None)]
+    day = budget.today_totals()
+    assert day["calls"] == 1 and day["total_tokens"] == 15
+    assert day["by_provider"]["groq"]["calls"] == 1
+
+
 def test_serve_rejects_bad_port(capsys) -> None:
     assert llm_api.serve(["--port", "abc"]) == 2
     assert llm_api.serve(["--bogus"]) == 2
