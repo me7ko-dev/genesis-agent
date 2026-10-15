@@ -2386,6 +2386,7 @@ class Brain:
                 completion_tokens=int(self._last_usage.get("completion_tokens", 0) or 0),
                 cached_read_tokens=int(self._last_usage.get("cached_read_tokens", 0) or 0),
                 cached_write_tokens=int(self._last_usage.get("cached_write_tokens", 0) or 0),
+                cost_usd=self._last_usage.get("cost_usd"),
             )
         except Exception as e:
             log.debug("budget недостъпен, usage не е записан: %s", e)

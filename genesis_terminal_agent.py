@@ -2435,6 +2435,7 @@ def main():
                 help_table.add_row("/context", "С какво е пълен контекстът: промпт, инструменти, разговор")
                 help_table.add_row("/agents", "Собствените под-агенти (.genesis/agents/*.md)")
                 help_table.add_row("/todos", "Списъкът със задачи, който агентът води")
+                help_table.add_row("/doctor [--models]", "Работи ли всичко: git, Python, ruff/pytest, ключове, MCP, Chromium, claude")
                 help_table.add_row("!команда", "Пусни команда сам (без модела); изходът отива при модела със следващото съобщение")
                 help_table.add_row("@път", "Прикачи файл или списък на папка към съобщението")
                 help_table.add_row("/hooks [trust]", "Твоите команди около работата (hooks.json)")

@@ -576,3 +576,45 @@ class TestElideOldWrites:
         monkeypatch.setattr(budget, "ELIDE_WRITE_ROUNDS", 2)
         out = budget.budget_history(self._turn(), stale_limit=0)
         assert budget.ELIDED_MARK in self._args(out, "w1")["content"]
+
+
+# ── collect(): записите на един ход (`genesis -p --output-format json`, 2026-10-15) ──
+
+def test_collect_sees_only_the_records_inside_the_block() -> None:
+    budget.record_usage(provider="groq", model="before", prompt_tokens=1, completion_tokens=1)
+    with budget.collect() as seen:
+        budget.record_usage(provider="groq", model="inside", prompt_tokens=10, completion_tokens=2,
+                            cached_read_tokens=4, cost_usd=0.5)
+    budget.record_usage(provider="groq", model="after", prompt_tokens=1, completion_tokens=1)
+    assert [e["model"] for e in seen] == ["inside"]
+    assert seen[0]["cached_read_tokens"] == 4 and seen[0]["cost_usd"] == 0.5
+    assert budget._collectors == []
+
+
+def test_collect_works_even_when_the_log_cannot_be_written(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(budget, "LOG_PATH", tmp_path / "missing" / "dir" / "log.jsonl")
+    with budget.collect() as seen:
+        budget.record_usage(provider="p", model="m", prompt_tokens=1, completion_tokens=1)
+    assert len(seen) == 1
+
+
+def test_no_cost_key_unless_the_provider_reports_one(tmp_path, monkeypatch) -> None:
+    log = tmp_path / "budget_log.jsonl"
+    monkeypatch.setattr(budget, "LOG_PATH", log)
+    budget.record_usage(provider="groq", model="m", prompt_tokens=1, completion_tokens=1)
+    assert "cost_usd" not in json.loads(log.read_text(encoding="utf-8"))
+
+
+def test_claude_cli_cost_reaches_the_record() -> None:
+    from genesis_agent import claude_cli
+    from genesis_agent.brain import Brain
+    usage = claude_cli.usage_of({"usage": {"input_tokens": 10, "output_tokens": 3},
+                                 "total_cost_usd": 0.0421})
+    assert usage is not None and usage["cost_usd"] == 0.0421
+    assert "cost_usd" not in (claude_cli.usage_of({"usage": {"input_tokens": 1}}) or {})
+    brain = Brain.__new__(Brain)
+    brain._last_usage = usage
+    brain.current = {"provider": "claude_cli", "model": "sonnet"}
+    with budget.collect() as seen:
+        brain._log_usage()
+    assert seen[0]["cost_usd"] == 0.0421 and seen[0]["prompt_tokens"] == 10
