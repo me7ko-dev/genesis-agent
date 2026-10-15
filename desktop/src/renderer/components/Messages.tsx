@@ -4,7 +4,7 @@ import {
   Save, Search, ShieldAlert, Sparkles, Terminal, TriangleAlert, Wrench, X,
 } from 'lucide-react';
 import { memo, useEffect, useState, type MouseEvent } from 'react';
-import { elapsed, toolHeader, toolLook, type ChatItem } from '../lib/chat';
+import { confirmChoices, elapsed, toolHeader, toolLook, type ChatItem } from '../lib/chat';
 import { renderMarkdown } from '../lib/markdown';
 
 const TOOL_ICONS = {
@@ -116,14 +116,24 @@ export function Note({ item }: { item: Extract<ChatItem, { kind: 'note' }> }) {
 
 export function ConfirmCard({ item, onAnswer }: {
   item: Extract<ChatItem, { kind: 'confirm' }>;
-  onAnswer: (id: string, allow: boolean) => void;
+  onAnswer: (id: string, allow: boolean, session?: boolean) => void;
 }) {
-  const pending = item.state === 'pending';
+  // One click answers: the buttons go away at once (the agent keeps the first
+  // answer too — RemoteSession.answer), so a double click cannot flip it.
+  const [sent, setSent] = useState(false);
+  const pending = item.state === 'pending' && !sent;
+  const choices = confirmChoices(item);
+  const answer = (allow: boolean, session = false) => {
+    if (sent) return;
+    setSent(true);
+    onAnswer(item.id, allow, session);
+  };
   return (
     <div className={`confirm ${item.state}`}>
       <div className="confirm-title">
         <ShieldAlert size={16} />
-        {pending ? 'Genesis иска разрешение' : item.state === 'allowed' ? 'Разрешено' : 'Отказано'}
+        {item.state === 'pending' ? (sent ? 'Изпратено…' : 'Genesis иска разрешение')
+          : item.state === 'allowed' ? (item.remembered ? 'Разрешено за тази сесия' : 'Разрешено') : 'Отказано'}
         {item.note && <span className="confirm-note">{item.note}</span>}
       </div>
       <pre className="confirm-op">{item.operation}</pre>
@@ -132,10 +142,16 @@ export function ConfirmCard({ item, onAnswer }: {
       )}
       {pending && (
         <div className="confirm-actions">
-          <button className="btn primary" onClick={() => onAnswer(item.id, true)}>
+          <button className="btn primary" onClick={() => answer(true)}>
             <Check size={14} /> Разреши <kbd>Enter</kbd>
           </button>
-          <button className="btn" onClick={() => onAnswer(item.id, false)}>
+          {choices.includes('session') && (
+            <button className="btn" title={`Без въпрос до края на сесията: ${item.sessionRule}`}
+                    onClick={() => answer(true, true)}>
+              <Check size={14} /> За тази сесия
+            </button>
+          )}
+          <button className="btn" onClick={() => answer(false)}>
             <X size={14} /> Откажи <kbd>Esc</kbd>
           </button>
         </div>

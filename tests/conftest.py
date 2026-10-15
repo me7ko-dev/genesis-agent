@@ -171,14 +171,20 @@ def _isolated_operator_settings(monkeypatch, tmp_path):
     # Домашната папка на уменията е в системната временна папка (2026-10-09).
     from genesis_agent import skill_loader
     monkeypatch.setattr(skill_loader, "SKILL_HOME_ROOT", tmp_path / "skill_tmp")
-    from genesis_agent import agents, edit_history, plan_mode, todos
+    from genesis_agent import agents, edit_history, permissions, plan_mode, todos
     plan_mode.set_active(False)
     edit_history.clear()
     todos.clear()
+    # Одобренията „за тази сесия“ са на модула (2026-10-15): одобрено в един
+    # тест не бива да се пуска без въпрос в следващия. Постоянните правила са
+    # в GENESIS_HOME отгоре.
+    permissions.clear_session()
+    monkeypatch.setattr(permissions, "workspace", None)
     yield
     plan_mode.set_active(False)
     edit_history.clear()
     todos.clear()
+    permissions.clear_session()
     agents.progress = None
     from genesis_agent import debug_log
     debug_log.uninstall()

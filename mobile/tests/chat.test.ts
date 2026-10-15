@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import {
-  MAX_EVENTS, mergeEvents, reuseItems, thinkingLabel, todoSummary, toChatItems, trimEvents,
+  confirmChoices, MAX_EVENTS, mergeEvents, reuseItems, thinkingLabel, todoSummary, toChatItems, trimEvents,
 } from '../src/lib/chat.ts';
 import { splitBlocks, splitInline } from '../src/lib/markdown.ts';
 import { errorText, MAX_MESSAGE, messageLength, replyErrorText, trimDraft } from '../src/lib/messages.ts';
@@ -30,6 +30,39 @@ test('a confirm card follows its answer', () => {
     ev(2, 'confirm_done', { id: 'a', allow: false, note: 'няма отговор — отказано' }),
   ]);
   assert.equal(answered[0].kind === 'confirm' && answered[0].state, 'denied');
+});
+
+test('„За тази сесия“ only when the server offers it (2026-10-15)', () => {
+  const card = (extra: Partial<GenesisEvent>) => {
+    const [item] = toChatItems([ev(1, 'confirm', { id: 'a', operation: 'pip install x', reasons: ['r'], ...extra })]);
+    assert.equal(item.kind, 'confirm');
+    return item as Extract<typeof item, { kind: 'confirm' }>;
+  };
+  // An older server (no session_rule) — the two buttons as before.
+  assert.deepEqual(confirmChoices(card({})), ['deny', 'allow']);
+  assert.deepEqual(confirmChoices(card({ session_rule: '' })), ['deny', 'allow']);
+  const offered = card({ session_rule: 'pip install x' });
+  assert.equal(offered.sessionRule, 'pip install x');
+  assert.deepEqual(confirmChoices(offered), ['deny', 'session', 'allow']);
+  // Answered — no buttons at all; "session" from the server says it was remembered.
+  const [done] = toChatItems([ev(1, 'confirm', { id: 'a', operation: 'pip install x', session_rule: 'pip install x' }),
+    ev(2, 'confirm_done', { id: 'a', allow: true, session: true })]);
+  assert.ok(done.kind === 'confirm' && done.state === 'allowed' && done.remembered);
+  assert.deepEqual(confirmChoices(done as Extract<typeof done, { kind: 'confirm' }>), []);
+  const [once] = toChatItems([ev(1, 'confirm', { id: 'a', operation: 'x', session_rule: 'x' }),
+    ev(2, 'confirm_done', { id: 'a', allow: true })]);
+  assert.ok(once.kind === 'confirm' && once.state === 'allowed' && !once.remembered);
+  // A refusal is never "remembered", whatever the event says.
+  const [no] = toChatItems([ev(1, 'confirm', { id: 'a', operation: 'x', session_rule: 'x' }),
+    ev(2, 'confirm_done', { id: 'a', allow: false, session: true })]);
+  assert.ok(no.kind === 'confirm' && no.state === 'denied' && !no.remembered);
+});
+
+test('the confirm card ignores a second tap and offers the session button from the server', () => {
+  const cards = readFileSync(new URL('../src/components/Cards.tsx', import.meta.url), 'utf8');
+  assert.match(cards, /if \(sent\) return;/);
+  assert.match(cards, /choices\.includes\('session'\)/);
+  assert.match(cards, /answer\(true, true\)/);
 });
 
 test('"cleared" starts the chat over', () => {

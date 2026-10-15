@@ -1,8 +1,8 @@
 """
 genesis_agent.chat_commands — the chat commands that steer the agent the way
 Claude Code's do: /init, /memory, /plan, /undo, /rewind, /resume, /compact,
-/hooks, /commands, /bg, /context, /review, /doctor, and the operator's own
-commands from .genesis/commands/*.md.
+/hooks, /commands, /bg, /context, /review, /doctor, /permissions, and the
+operator's own commands from .genesis/commands/*.md.
 
 Kept out of genesis_terminal_agent.main() (already a long if-chain) and free
 of rich/console: `out` prints, `ask` asks a yes/no question, so the same code
@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 BUILTIN = ("/init", "/memory", "/plan", "/undo", "/compact", "/hooks", "/commands", "/bg", "/mcp",
-           "/agents", "/todos", "/context", "/resume", "/rewind", "/doctor")
+           "/agents", "/todos", "/context", "/resume", "/rewind", "/doctor", "/permissions")
 # Буква или цифра в която и да е азбука, после букви/цифри/_/-. Одит
 # 2026-10-11: правилото искаше ASCII първи знак, а /commands показваше
 # `преглед.md` като /преглед — и /преглед отиваше при модела като обикновен
@@ -59,7 +59,7 @@ RESERVED = {"help", "clear", "model", "models", "agent", "backup", "status", "hi
             "export", "update", "skills", "tasks", "done", "drop", "state", "maxcoding",
             "local_model_max", "local_model_normal", "exit", "quit",
             "задачи", "умения", "предай", "ъпдейт", "макскод", "готово",
-            "локален_макс", "локален_нормал"}
+            "локален_макс", "локален_нормал", "разрешения"}
 
 
 def command_dirs(workspace: Path) -> list[Path]:
@@ -233,6 +233,9 @@ def handle(text: str, *, messages: Any, workspace: Path,
     if cmd == "/hooks":
         return _hooks(rest, workspace, out, ask)
 
+    if cmd in ("/permissions", "/разрешения"):
+        return _permissions(rest, workspace, out)
+
     if cmd == "/commands":
         found = custom_commands(workspace)
         if not found:
@@ -312,6 +315,51 @@ def _hooks(rest: str, workspace: Path, out: Callable[[str], None],
         out(f"{h.event:<17} {h.matcher or '*':<22} {h.command}")
     if untrusted:
         out(f"⚠ {untrusted} съществува, но не е доверен — не се пуска. Прегледай го и /hooks trust.")
+    return Result()
+
+
+PERMISSIONS_HELP = ("/permissions add <команда> — без въпрос в този проект (напр. `npm test`, "
+                    "`pytest *`); /permissions remove <команда>; /permissions clear — забрави "
+                    "одобренията за сесията.")
+
+
+def _permissions(rest: str, workspace: Path, out: Callable[[str], None]) -> Result:
+    """Одобрените команди: за сесията („да, за тази сесия“) и постоянните за
+    проекта (~/.genesis/permissions.json, подписани). Само пропускат въпроса за
+    CONFIRM команда — BLOCKED си остава отказан (2026-10-15)."""
+    from genesis_agent import permissions
+    verb, arg = _split(rest)
+    verb = verb.lower()
+    if verb in ("add", "добави"):
+        rule, why = permissions.add(arg, workspace)
+        if rule is None:
+            out(f"❌ Правилото не е прието: {why}.")
+            return Result()
+        out(f"✓ „{rule}“ се пуска без въпрос в {permissions.project_key(workspace)}.")
+        if rule.endswith(" *"):
+            out("  „*“ покрива всякакви прости аргументи след тези думи — и опасните опции на "
+                "командата. Верига (; && |), пренасочване и $(…) пак питат.")
+        return Result()
+    if verb in ("remove", "rm", "del", "махни"):
+        out(f"✓ „{arg}“ е премахнато." if permissions.remove(arg, workspace)
+            else f"Няма правило „{arg}“. /permissions — списъкът.")
+        return Result()
+    if verb in ("clear", "изчисти"):
+        permissions.clear_session()
+        out("✓ Одобренията за сесията са забравени.")
+        return Result()
+    if verb:
+        out(PERMISSIONS_HELP)
+        return Result()
+    session = permissions.session_rules(workspace)
+    rules = permissions.project_rules(workspace)
+    out(f"Проект: {permissions.project_key(workspace)}")
+    out("За тази сесия (до /clear):\n  " + ("\n  ".join(session) if session else "(няма)"))
+    out(f"Постоянни ({permissions.store_file()}):\n  " + ("\n  ".join(rules) if rules else "(няма)"))
+    if permissions.tampered(workspace):
+        out("⚠ Записът за този проект не е подписан от Genesis (променен е отвън) — пренебрегнат.")
+    out("Важат само за цели прости команди; верига, пренасочване, $(…) и всичко BLOCKED "
+        "пак минават през проверката. " + PERMISSIONS_HELP)
     return Result()
 
 

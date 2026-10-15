@@ -121,7 +121,8 @@ function registerIpc(): void {
   ipcMain.handle('send', (_e, text: string) => backend.send(String(text)));
   ipcMain.handle('stop', () => backend.stop());
   ipcMain.handle('clear', () => backend.clear());
-  ipcMain.handle('confirm', (_e, id: string, allow: boolean) => backend.confirm(String(id), !!allow));
+  ipcMain.handle('confirm', (_e, id: string, allow: boolean, session?: boolean) =>
+    backend.confirm(String(id), !!allow, session === true));
   ipcMain.handle('command', (_e, name: string, arg: Record<string, unknown>) =>
     backend.command(String(name), arg && typeof arg === 'object' ? arg : {}));
   ipcMain.handle('open-workspace', (_e, path?: string) => openWorkspace(path));

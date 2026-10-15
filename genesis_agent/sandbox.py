@@ -64,6 +64,9 @@ class RiskLevel(IntEnum):
 class RiskVerdict:
     level: RiskLevel
     reasons: list[str] = field(default_factory=list)
+    # Какво би запомнил отговорът „да, за тази сесия“ (permissions.py) — само
+    # във въпроса към оператора за проста shell команда; иначе None.
+    session_rule: str | None = None
 
     @property
     def is_safe(self) -> bool:
@@ -173,8 +176,10 @@ _SECRET_PATHS = (
 # беше SAFE и в режим „deny“, а следващият инструмент пускаше подхвърлената
 # команда, която виждаше API ключа, скрит от самия RUN_CMD. Отделна причина, не
 # в _SECRET_PATHS: READ_FILE на тези файлове (за /hooks) остава без въпрос.
+# permissions.json (2026-10-15) — правилата от /permissions: подписани са, но
+# записът в него пак се пита, а правило не покрива тази причина.
 _GENESIS_CONTROL = (
-    _GENESIS_DIR + r"\b[^\n]{0,40}?\b(?:hooks|mcp|settings|trusted_\w+)\.json\b"
+    _GENESIS_DIR + r"\b[^\n]{0,40}?\b(?:hooks|mcp|settings|permissions|trusted_\w+)\.json\b"
     r"|\btrusted_hooks\b|" + _GENESIS_DIR + r"[/\\](?:agents|commands)\b"
 )
 # Проектният `.mcp.json` на Claude Code е в КОРЕНА, не под `.genesis/` — горният
@@ -1676,7 +1681,27 @@ def too_long_to_confirm(operation: str) -> bool:
     return len(operation) > MAX_SHOWN_OPERATION
 
 
-def _default_confirm(prompt: str, verdict: RiskVerdict) -> bool:
+# Отговорът „да, за тази сесия“ — confirm_fn връща този низ вместо True.
+ALLOW_SESSION = "session"
+_SESSION_ANSWERS = ("s", "с", "session", "сесия", "за сесията", "да, за тази сесия",
+                    "да за тази сесия", "за тази сесия")
+
+
+def confirm_question(verdict: RiskVerdict) -> str:
+    if verdict.session_rule:
+        return "    Да се изпълни ли? [y = да / s = да, за тази сесия / N = не] "
+    return "    Да се изпълни ли? [y/N] "
+
+
+def parse_answer(ans: str, verdict: RiskVerdict) -> bool | str:
+    """True / False / ALLOW_SESSION (само ако въпросът го е предложил)."""
+    ans = ans.strip().lower()
+    if verdict.session_rule and ans in _SESSION_ANSWERS:
+        return ALLOW_SESSION
+    return ans in ("y", "yes", "да", "d")
+
+
+def _default_confirm(prompt: str, verdict: RiskVerdict) -> bool | str:
     """Терминален confirmation prompt (само в интерактивен режим)."""
     if too_long_to_confirm(prompt):
         print(f"\n⛔ Операция от {len(prompt)} знака — твърде дълга, за да се одобри "
@@ -1687,10 +1712,10 @@ def _default_confirm(prompt: str, verdict: RiskVerdict) -> bool:
         print(f"    • {r}", file=sys.stderr)
     print(f"    Операция ({len(prompt)} знака):\n{prompt}", file=sys.stderr)
     try:
-        ans = input("    Да се изпълни ли? [y/N] ").strip().lower()
+        ans = input(confirm_question(verdict))
     except (EOFError, KeyboardInterrupt):
         return False
-    return ans in ("y", "yes", "да", "d")
+    return parse_answer(ans, verdict)
 
 
 @dataclass
@@ -1704,7 +1729,8 @@ class SandboxPolicy:
     BLOCKED винаги се отказва, независимо от mode.
     """
     mode: str = "auto"
-    confirm_fn: Callable[[str, RiskVerdict], bool] = _default_confirm
+    # Връща True/False или ALLOW_SESSION („да, за тази сесия“).
+    confirm_fn: Callable[[str, RiskVerdict], bool | str] = _default_confirm
     env_passthrough: tuple[str, ...] = (
         "PATH", "HOME", "USER", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR",
         "PYTHONPATH", "PYTHONIOENCODING",
@@ -1747,8 +1773,31 @@ def get_policy() -> SandboxPolicy:
     return _POLICY
 
 
-def _decide(operation: str, verdict: RiskVerdict, policy: SandboxPolicy) -> tuple[bool, str]:
-    """Връща (allowed, denial_reason)."""
+def _shell_rule(command: str, verdict: RiskVerdict) -> str | None:
+    """Правилото на оператора (permissions.py), което покрива тази CONFIRM
+    команда. Грешка в тях = няма правило: пита се, както досега."""
+    try:
+        from genesis_agent import permissions
+        return permissions.allowed_by(command, verdict.reasons)
+    except Exception:
+        return None
+
+
+def _session_offer(command: str, verdict: RiskVerdict) -> str | None:
+    try:
+        from genesis_agent import permissions
+        return permissions.session_candidate(command, verdict.reasons)
+    except Exception:
+        return None
+
+
+def _decide(operation: str, verdict: RiskVerdict, policy: SandboxPolicy, *,
+            shell: bool = False) -> tuple[bool, str]:
+    """Връща (allowed, denial_reason).
+
+    `shell=True` — операцията е shell команда (run_shell/start_shell): само за
+    нея важат одобренията за сесията и правилата от /permissions. Те се гледат
+    СЛЕД отказа на BLOCKED — никое правило не го разрешава (2026-10-15)."""
     if verdict.level == RiskLevel.BLOCKED:
         return False, "[SANDBOX BLOCKED] " + "; ".join(verdict.reasons)
     if verdict.level == RiskLevel.SAFE:
@@ -1757,13 +1806,27 @@ def _decide(operation: str, verdict: RiskVerdict, policy: SandboxPolicy) -> tupl
     mode = policy.resolve_mode()
     if mode == "allow":
         return True, ""
+    if shell and _shell_rule(operation, verdict):
+        return True, ""
     if mode == "deny":
         return False, ("[SANDBOX DENIED] Операцията изисква потвърждение, но режимът е "
                        "неинтерактивен (autonomous). Причини: " + "; ".join(verdict.reasons))
+    offer = _session_offer(operation, verdict) if shell else None
+    asked = replace(verdict, session_rule=offer) if offer else verdict
     # interactive — по един въпрос: паралелните четения (виж _parallel_reads в
     # чата) иначе питаха едновременно и отговорът отиваше към грешния въпрос.
     with _CONFIRM_LOCK:
-        allowed = policy.confirm_fn(operation, verdict)
+        # Докато се чакаше отговор, същата команда може да е одобрена за
+        # сесията от предишния въпрос (паралелни команди) — не пита пак.
+        if shell and offer and _shell_rule(operation, verdict):
+            return True, ""
+        allowed = policy.confirm_fn(operation, asked)
+    if allowed == ALLOW_SESSION and offer:
+        try:
+            from genesis_agent import permissions
+            permissions.remember(offer)
+        except Exception:
+            pass
     if allowed:
         return True, ""
     return False, "[SANDBOX DECLINED] Операторът отказа изпълнението."
@@ -2317,7 +2380,7 @@ def run_shell(command: str, *, cwd: Path | None = None,
     # cwd се подава на оценката, за да могат относителните glob-ове да се
     # разгънат спрямо СЪЩАТА директория, в която командата ще се изпълни.
     verdict = assess_command(command, cwd=work)
-    allowed, reason = _decide(command, verdict, policy)
+    allowed, reason = _decide(command, verdict, policy, shell=True)
     if not allowed:
         return SandboxResult(ok=False, stdout="", stderr=reason, returncode=None,
                              blocked=True, verdict=verdict)
@@ -2338,7 +2401,7 @@ def start_shell(command: str, *, cwd: Path | None = None, log: Path,
     policy = policy or _POLICY
     work = cwd if (cwd and cwd.is_dir()) else _sandbox_dir()
     verdict = assess_command(command, cwd=work)
-    allowed, reason = _decide(command, verdict, policy)
+    allowed, reason = _decide(command, verdict, policy, shell=True)
     if not allowed:
         return None, reason
     _hide_own_environ()

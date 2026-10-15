@@ -1,7 +1,7 @@
 import { memo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { todoSummary, type ChatItem } from '../lib/chat';
+import { confirmChoices, todoSummary, type ChatItem } from '../lib/chat';
 import type { Todo } from '../lib/protocol';
 import { mono, useTheme } from '../lib/theme';
 import { RichText } from './RichText';
@@ -104,17 +104,20 @@ export const ConfirmCard = memo(function ConfirmCard({ item, onAnswer }: {
   item: Item<'confirm'>;
   /** Стабилна функция (useGenesis.confirm), не нова стрелка на всеки рендер —
    *  иначе memo не пази картата (2026-10-11). */
-  onAnswer: (id: string, allow: boolean) => Promise<boolean>;
+  onAnswer: (id: string, allow: boolean, session?: boolean) => Promise<boolean>;
 }) {
   const theme = useTheme();
   // One tap answers: the buttons go away at once, not when the server's
-  // confirm_done arrives — a second tap could change the answer.
+  // confirm_done arrives — a second tap could change the answer. The server
+  // keeps the first answer too (RemoteSession.answer).
   const [sent, setSent] = useState(false);
   const pending = item.state === 'pending' && !sent;
-  const answer = async (allow: boolean) => {
+  const choices = confirmChoices(item);
+  const answer = async (allow: boolean, session = false) => {
+    if (sent) return;
     setSent(true);
     // Didn't reach the computer (offline) → the buttons come back to retry.
-    if (!(await onAnswer(item.id, allow))) setSent(false);
+    if (!(await onAnswer(item.id, allow, session))) setSent(false);
   };
   return (
     <View style={[styles.confirm, { backgroundColor: theme.surface, borderColor: pending ? theme.warn : theme.border }]}>
@@ -131,6 +134,15 @@ export const ConfirmCard = memo(function ConfirmCard({ item, onAnswer }: {
             style={[styles.btn, { borderColor: theme.border }]}>
             <Text style={[styles.btnText, { color: theme.text }]}>Откажи</Text>
           </Pressable>
+          {choices.includes('session') ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityHint={`Без въпрос до края на сесията: ${item.sessionRule}`}
+              onPress={() => answer(true, true)}
+              style={[styles.btn, { borderColor: theme.danger }]}>
+              <Text style={[styles.btnText, { color: theme.danger }]}>За тази сесия</Text>
+            </Pressable>
+          ) : null}
           <Pressable
             accessibilityRole="button"
             onPress={() => answer(true)}
@@ -141,7 +153,8 @@ export const ConfirmCard = memo(function ConfirmCard({ item, onAnswer }: {
       ) : (
         <Text style={[styles.small, { color: item.state === 'allowed' ? theme.ok : theme.muted }]}>
           {item.state === 'pending' ? '… изпратено'
-            : item.state === 'allowed' ? '✓ Разрешено' : '✕ Отказано'}{item.note ? ` — ${item.note}` : ''}
+            : item.state === 'allowed' ? (item.remembered ? '✓ Разрешено за тази сесия' : '✓ Разрешено')
+            : '✕ Отказано'}{item.note ? ` — ${item.note}` : ''}
         </Text>
       )}
     </View>
@@ -166,7 +179,7 @@ const styles = StyleSheet.create({
   confirmTitle: { fontWeight: '700', fontSize: 15 },
   reason: { fontSize: 14 },
   op: { fontSize: 12, padding: 8, borderRadius: 6, overflow: 'hidden' },
-  row: { flexDirection: 'row', gap: 10, justifyContent: 'flex-end' },
+  row: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, justifyContent: 'flex-end' },
   btn: { borderWidth: 1, borderRadius: 10, paddingHorizontal: 18, paddingVertical: 10, minWidth: 100, alignItems: 'center' },
   btnText: { fontWeight: '600', fontSize: 15 },
 });

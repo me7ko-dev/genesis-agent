@@ -271,6 +271,11 @@ export type GenesisEvent = {
   note?: string;
   busy?: boolean;
   label?: string;
+  /** "confirm": what „За тази сесия“ would remember; absent = no such button
+   *  (server 2026-10-15; older servers never send it). */
+  session_rule?: string;
+  /** "confirm_done": allowed for the rest of the session. */
+  session?: boolean;
 };
 
 export type Todo = { content: string; status: 'pending' | 'in_progress' | 'completed' };
@@ -391,8 +396,10 @@ export class GenesisClient {
     return this.call('send', mid ? { text, mid } : { text });
   }
 
-  confirm(id: string, allow: boolean): Promise<{ ok: boolean }> {
-    return this.call('confirm', { id, allow });
+  /** `session` — „За тази сесия“; only sent when true, so an older server
+   *  sees the same request as before (2026-10-15). */
+  confirm(id: string, allow: boolean, session = false): Promise<{ ok: boolean }> {
+    return this.call('confirm', session && allow ? { id, allow, session: true } : { id, allow });
   }
 
   stop(): Promise<{ ok: boolean }> {

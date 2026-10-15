@@ -66,8 +66,8 @@ export function App() {
 
   const stop = useCallback(() => { void api.stop(); }, []);
 
-  const answer = useCallback((id: string, allow: boolean) => {
-    void api.confirm(id, allow).then(() => setFocusKey((k) => k + 1));
+  const answer = useCallback((id: string, allow: boolean, session = false) => {
+    void api.confirm(id, allow, session).then(() => setFocusKey((k) => k + 1));
   }, []);
 
   const toggleSidebar = useCallback(() => {
@@ -93,7 +93,8 @@ export function App() {
     // The chat's own commands (genesis_agent/chat_commands.py) travel as text:
     // the agent runs them in the turn and answers in the conversation.
     const chat = ['/plan', '/undo', '/rewind', '/resume', '/compact', '/context', '/todos', '/review', '/bg',
-                  '/agents', '/memory', '/init', '/commands', '/hooks', '/mcp', '/doctor'];
+                  '/agents', '/memory', '/init', '/commands', '/hooks', '/mcp', '/doctor',
+                  '/permissions'];
     if (chat.includes(name)) return false;
     // Everything but the window's own commands needs a genesis.exe that knows them.
     const local = ['/clear', '/stop', '/folder', '/terminal', '/logs', '/help'];

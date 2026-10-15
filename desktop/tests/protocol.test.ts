@@ -10,7 +10,7 @@ import { once } from 'node:events';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { b64d, b64e, GenesisClient, keyId, open, ProtocolError, seal } from '../src/main/protocol.ts';
-import { mergeEvents, pendingConfirm, toChatItems, toolHeader, toolLook, turnInfo } from '../src/renderer/lib/chat.ts';
+import { confirmChoices, mergeEvents, pendingConfirm, toChatItems, toolHeader, toolLook, turnInfo } from '../src/renderer/lib/chat.ts';
 import type { GenesisEvent } from '../src/shared/types.ts';
 
 const FAKE = fileURLToPath(new URL('../../mobile/tests/fake_genesis.py', import.meta.url));
@@ -64,8 +64,21 @@ test('a whole conversation with the real server', async () => {
     const { hit: confirm, after: next } = await waitFor(client, (e) => e.type === 'confirm', after);
     assert.equal(confirm.operation, 'rm -rf build');
     assert.deepEqual(await client.call('confirm', { id: confirm.id, allow: false }), { ok: true });
-    const { hit: result } = await waitFor(client, (e) => e.type === 'info', next);
+    const { hit: result, after: done } = await waitFor(client, (e) => e.type === 'info', next);
     assert.equal(result.text, 'allowed=False');
+    assert.equal(confirm.session_rule, undefined);
+
+    // „За тази сесия“ (2026-10-15) — the same request Backend.confirm sends.
+    await waitFor(client, (e) => e.type === 'busy' && e.busy === false, done - 1);
+    assert.equal((await client.call<{ ok: boolean }>('send', { text: 'сесия' })).ok, true);
+    const { hit: offer, after: asked } = await waitFor(client, (e) => e.type === 'confirm', done);
+    assert.equal(offer.session_rule, 'pip install requests');
+    assert.deepEqual(await client.call('confirm', { id: offer.id, allow: true, session: true }), { ok: true });
+    assert.deepEqual(await client.call('confirm', { id: offer.id, allow: false }), { ok: false }, 'the first answer wins');
+    const { hit: closed } = await waitFor(client, (e) => e.type === 'confirm_done', asked);
+    assert.equal(closed.session, true);
+    const { hit: remembered } = await waitFor(client, (e) => e.type === 'info', asked);
+    assert.equal(remembered.text, 'allowed=session');
   } finally {
     stop();
   }
@@ -132,6 +145,23 @@ test('events become chat items; a confirmation is updated in place', () => {
   assert.deepEqual(items.map((i) => i.kind), ['user', 'tool', 'confirm', 'assistant']);
   assert.equal(items[2].kind === 'confirm' && items[2].state, 'allowed');
   assert.equal(pendingConfirm(items), undefined);
+});
+
+test('„За тази сесия“ only when the agent offers it (2026-10-15)', () => {
+  const card = (extra: Partial<GenesisEvent>) => {
+    const [item] = toChatItems([ev(1, 'confirm', { id: 'c', operation: 'pip install x', reasons: ['r'], ...extra })]);
+    assert.equal(item.kind, 'confirm');
+    return item as Extract<typeof item, { kind: 'confirm' }>;
+  };
+  assert.deepEqual(confirmChoices(card({})), ['allow', 'deny']);          // an older agent
+  assert.deepEqual(confirmChoices(card({ session_rule: 'pip install x' })), ['allow', 'session', 'deny']);
+  const [done] = toChatItems([ev(1, 'confirm', { id: 'c', operation: 'x', session_rule: 'x' }),
+    ev(2, 'confirm_done', { id: 'c', allow: true, session: true })]);
+  assert.ok(done.kind === 'confirm' && done.state === 'allowed' && done.remembered);
+  assert.deepEqual(confirmChoices(done as Extract<typeof done, { kind: 'confirm' }>), []);
+  const [no] = toChatItems([ev(1, 'confirm', { id: 'c', operation: 'x', session_rule: 'x' }),
+    ev(2, 'confirm_done', { id: 'c', allow: false, session: true })]);
+  assert.ok(no.kind === 'confirm' && no.state === 'denied' && !no.remembered);
 });
 
 test('cleared empties the chat; merge keeps order without duplicates', () => {

@@ -329,7 +329,10 @@ export class Backend extends EventEmitter {
   }
   stop() { return this.op('stop'); }
   clear() { return this.op('clear'); }
-  confirm(id: string, allow: boolean) { return this.op('confirm', { id, allow }); }
+  /** `session` — „За тази сесия“; sent only with allow, so an older agent sees the old request. */
+  confirm(id: string, allow: boolean, session = false) {
+    return this.op('confirm', session && allow ? { id, allow, session: true } : { id, allow });
+  }
 
   /** A `/` command the agent answers without the model. Some ask the network
    *  (a provider's model list, GitHub for /update), hence the long timeout. */
