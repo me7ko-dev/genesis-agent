@@ -26,6 +26,7 @@ Genesis): съобщения влизат, текст излиза. Нищо д�
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import threading
@@ -34,6 +35,8 @@ import uuid
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, cast
+
+log = logging.getLogger("genesis.llm_api")
 
 API_VERSION = 1
 DEFAULT_PORT = 8770           # 8765 е `genesis serve`
@@ -100,6 +103,7 @@ def health() -> dict:
     try:
         chain = _make_brain().chain
     except Exception:  # счупен config.yaml — API-то пак отговаря
+        log.debug("веригата не се зареди за /v1/health", exc_info=True)
         chain = []
     info["ready"] = bool(chain)
     info["providers"] = sorted({c["provider"] for c in chain})
@@ -232,7 +236,7 @@ class ApiServer(ThreadingHTTPServer):
         def work() -> None:
             try:
                 box["ok"] = fn()
-            except BaseException as e:
+            except BaseException as e:  # noqa: BLE001 — пренася се в нишката на заявката
                 box["err"] = e
             finally:
                 self.slots.release()
@@ -327,6 +331,7 @@ class _Handler(BaseHTTPRequestHandler):
             status = e.status
             self._send(status, {"error": {"message": e.message}}, origin)
         except Exception as e:
+            log.debug("вътрешна грешка в genesis api", exc_info=True)
             status = 500
             self._send(500, {"error": {"message": f"Вътрешна грешка: {type(e).__name__}"}}, origin)
         finally:

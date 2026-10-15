@@ -10,11 +10,14 @@ genesis_agent.provider_stats — data-driven ред на веригата (desig
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from threading import Lock
 
 from genesis_agent.config import DATA_DIR
+
+log = logging.getLogger("genesis.provider_stats")
 
 _STATS_PATH = DATA_DIR / "provider_stats.json"
 _MAX_SAMPLES = 30          # rolling прозорец на извикване по доставчик
@@ -36,6 +39,7 @@ def _load() -> dict:
     try:
         return json.loads(_STATS_PATH.read_text(encoding="utf-8"))
     except Exception:
+        log.debug("статистиката на доставчиците не се прочете", exc_info=True)
         return {}
 
 
@@ -49,7 +53,8 @@ def _save(data: dict) -> None:
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         os.replace(tmp, _STATS_PATH)
     except Exception:
-        pass  # статистиката е "nice to have" — никога не бива да чупи мисия
+        # статистиката е "nice to have" — никога не бива да чупи мисия
+        log.debug("статистиката на доставчиците не се записа", exc_info=True)
 
 
 def _across_processes():

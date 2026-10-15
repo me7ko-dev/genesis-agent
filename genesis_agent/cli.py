@@ -4,6 +4,7 @@ genesis_agent.cli — the `genesis` command.
 
     genesis                 start the terminal chat (default)
     genesis -c              continue the last conversation in this workspace
+    genesis -r [N]          pick an earlier conversation in this workspace (/resume)
     genesis -p "..."        one turn without the chat, answer on stdout (--output-format json, --plan)
     genesis doctor          is everything around the agent in place (--models probes them)
     genesis setup           configure API keys
@@ -221,6 +222,8 @@ def _fix(args: list[str]) -> int:
 def main(argv: list[str] | None = None) -> int:
     from genesis_agent.paths import ensure_utf8_streams
     ensure_utf8_streams()
+    from genesis_agent.debug_log import install_from_env
+    install_from_env()  # GENESIS_DEBUG=1 → ~/.genesis/debug.log
     argv = list(sys.argv[1:] if argv is None else argv)
     cmd = argv[0] if argv else "chat"
 
@@ -318,8 +321,8 @@ def main(argv: list[str] | None = None) -> int:
         from genesis_agent.llm_api import serve as serve_api
         return serve_api(argv[1:])
 
-    if cmd in ("chat", "-c", "--continue"):
-        # -c стига до чата през sys.argv (runpy сменя само argv[0]).
+    if cmd in ("chat", "-c", "--continue", "-r", "--resume"):
+        # -c и -r стигат до чата през sys.argv (runpy сменя само argv[0]).
         return _chat()
 
     print(f"Непозната команда: {cmd}\n")

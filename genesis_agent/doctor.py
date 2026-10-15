@@ -21,6 +21,7 @@ Python-а на проекта, Chromium не е свален, `.mcp.json` не �
 from __future__ import annotations
 
 import json
+import logging
 import os
 import platform
 import shutil
@@ -32,8 +33,14 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+log = logging.getLogger("genesis.doctor")
+
 MARK = {"ok": "✓", "fail": "✗", "skip": "·"}
-_RUN_TIMEOUT = 8.0       # `git --version` и подобни
+# `git --version` и подобни. Беше 8 s: на Windows CI (2026-10-15, PR #67) една
+# такава проба не отговори за 8 s, докато всички вървят едновременно — `npm`
+# е .cmd, който пуска node, а pytest/playwright внасят в същото време. 15 s
+# оставя място под общия срок (_DEADLINE) и пак не виси.
+_RUN_TIMEOUT = 15.0
 _PY_TIMEOUT = 20.0       # Python с pytest/playwright — първото внасяне е бавно
 _MCP_TIMEOUT = 10.0      # старт на един MCP сървър (в чата: 20 s)
 _CLAUDE_TIMEOUT = 10.0
@@ -63,6 +70,7 @@ def _env() -> dict[str, str]:
         from genesis_agent.page_check import _clean_env
         return _clean_env()
     except Exception:
+        log.debug("page_check._clean_env недостъпен", exc_info=True)
         return {k: v for k, v in os.environ.items() if "KEY" not in k and "TOKEN" not in k}
 
 
@@ -214,6 +222,7 @@ def check_mcp(ws: Path) -> list[Check]:
             srv.start([] if srv.source == project else forbidden, timeout=_MCP_TIMEOUT)
             results[srv.name] = Check(f"MCP {srv.name}", "ok", f"тръгва, {len(srv.tools)} инструмента")
         except Exception as e:
+            log.debug("MCP %s не тръгна", srv.name, exc_info=True)
             results[srv.name] = Check(f"MCP {srv.name}", "fail", (str(e) or type(e).__name__)[:200],
                                       f"провери командата в {srv.source}; /mcp показва подробности")
         finally:
@@ -334,6 +343,7 @@ def run_checks(workspace: Path | str | None = None, *, online: bool = False,
         try:
             results[i] = fn(ws)
         except Exception as e:  # една счупена проба не скрива другите
+            log.debug("пробата %s гръмна", name, exc_info=True)
             results[i] = [Check(name, "fail", f"проверката гръмна: {type(e).__name__}: {e}"[:200])]
 
     threads = [threading.Thread(target=work, args=(i, name, fn), daemon=True)
@@ -360,6 +370,7 @@ def _secret_values() -> list[str]:
         values = [str(v).strip() for k, v in _load_keys().items()
                   if k in provider_envs or _SECRET_ENV.search(k)]
     except Exception:
+        log.debug("ключовете за маскиране не се заредиха", exc_info=True)
         values = []
     # Къса стойност (`1`, `true`) не е ключ, а би изтрила половината текст.
     return sorted({v for v in values if len(v) >= 6}, key=len, reverse=True)

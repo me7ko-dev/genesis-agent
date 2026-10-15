@@ -11,10 +11,13 @@ loses the other one's entries (audit 2026-10-07: 3 processes × 25 saved skills
 """
 from __future__ import annotations
 
+import logging
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+
+log = logging.getLogger("genesis.file_lock")
 
 
 @contextmanager
@@ -32,7 +35,7 @@ def locked(path: Path) -> Iterator[None]:
             import fcntl
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
     except Exception:
-        pass
+        log.debug("файлът не се заключи — продължаваме без заключване", exc_info=True)
     try:
         yield
     finally:
@@ -43,5 +46,5 @@ def locked(path: Path) -> Iterator[None]:
                     fh.seek(0)
                     msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
             except Exception:
-                pass
+                log.debug("файлът не се отключи", exc_info=True)
             fh.close()

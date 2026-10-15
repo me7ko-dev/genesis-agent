@@ -13,6 +13,7 @@ genesis_agent.shell_mode — `!команда` в чата: операторът
 """
 from __future__ import annotations
 
+import logging
 import os
 import queue
 import signal
@@ -22,6 +23,8 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+
+log = logging.getLogger("genesis.shell_mode")
 
 _TIMEOUT = 600          # s — после командата се спира
 _MAX_CONTEXT = 8000     # знака от изхода, които стигат до модела (краят е най-важен)
@@ -65,6 +68,7 @@ def _kill_group(proc: subprocess.Popen) -> None:
     try:
         sandbox.stop_process(proc)
     except Exception:
+        log.debug("stop_process се провали — kill", exc_info=True)
         proc.kill()
 
 

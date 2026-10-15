@@ -103,18 +103,39 @@ ignore = [
     # no aware/naive mixing bug) or formats a filename/display string for the
     # user's local clock, where UTC would be the wrong, more confusing choice.
     "DTZ005", "DTZ006", "DTZ011",
-    # Accepted debt, not a false positive: ~220 call sites across the codebase
-    # (mostly best-effort optional-integration fallbacks) blindly catch or
-    # swallow exceptions. The security/reliability-critical modules (sandbox,
-    # brain, executor, budget) have been triaged —
-    # broad catches there are either narrowed, logged, or annotated with a
-    # specific `# noqa` explaining why. The remaining call sites (peripheral
-    # modules, terminal frontend) still need per-site review; enabling
-    # these two rules repo-wide now would make the CI gate fail on pre-existing
-    # code instead of catching new regressions. Tighten file-by-file as those
-    # modules get touched, then drop the corresponding ignore.
-    "BLE001", "S110",
+    # BLE001/S110 (сляп `except Exception` / `except: pass`) са включени
+    # (2026-10-15): преглеждат се файл по файл — грешката, която нарочно не
+    # спира работата, се записва с log.debug(..., exc_info=True) и с
+    # GENESIS_DEBUG=1 стига до ~/.genesis/debug.log. per-file-ignores отдолу е
+    # списъкът на ОЩЕ НЕПРЕГЛЕДАНИТЕ файлове; прегледан файл излиза от него.
 ]
+
+[tool.ruff.lint.per-file-ignores]
+"cloud/egress/proxy.py"                 = ["BLE001", "S110"]
+"cloud/monitor.py"                      = ["BLE001", "S110"]
+"cloud/runner/task.py"                  = ["BLE001", "S110"]
+"cloud/web/server.py"                   = ["BLE001", "S110"]
+"genesis_agent/brain.py"                = ["BLE001", "S110"]
+"genesis_agent/budget.py"               = ["BLE001", "S110"]
+"genesis_agent/chat_commands.py"        = ["BLE001", "S110"]
+"genesis_agent/edit_history.py"         = ["BLE001", "S110"]
+"genesis_agent/headless.py"             = ["BLE001", "S110"]
+"genesis_agent/mcp_client.py"           = ["BLE001", "S110"]
+"genesis_agent/page_check_runner.py"    = ["BLE001", "S110"]
+"genesis_agent/remote_server.py"        = ["BLE001", "S110"]
+"genesis_agent/sandbox.py"              = ["BLE001", "S110"]
+"genesis_skills.py"                     = ["BLE001", "S110"]
+"genesis_terminal_agent.py"             = ["BLE001", "S110"]
+"packaging/genesis_entry.py"            = ["BLE001", "S110"]
+"scripts/bench_all.py"                  = ["BLE001", "S110"]
+"scripts/bench_fix.py"                  = ["BLE001", "S110"]
+"scripts/bench_models.py"               = ["BLE001", "S110"]
+"scripts/bench_projects.py"             = ["BLE001", "S110"]
+"scripts/capability_report.py"          = ["BLE001", "S110"]
+"tests/conftest.py"                     = ["BLE001", "S110"]
+"tests/test_audit_2026_10_07.py"        = ["BLE001", "S110"]
+"tests/test_audit_2026_10_11_loop.py"   = ["BLE001", "S110"]
+"tests/test_state_isolation.py"         = ["BLE001", "S110"]
 
 [tool.mypy]
 # Optional third-party libs (playwright, google-auth, anthropic) may be

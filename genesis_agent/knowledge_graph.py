@@ -17,12 +17,15 @@ graph just doesn't grow this round.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from datetime import datetime, timezone
 from typing import Any
 
 from genesis_agent.config import MEMORY_DIR
+
+log = logging.getLogger("genesis.knowledge_graph")
 
 GRAPH_PATH = MEMORY_DIR / "knowledge_graph.json"
 
@@ -157,6 +160,7 @@ def compact_and_graph_memory(session_logs: str, workspace: str | None = None) ->
         if not isinstance(extracted, dict):
             raise TypeError(f"очакван обект, получен {type(extracted).__name__}")
     except Exception:
+        log.debug("извличането за графа се провали — графът не расте", exc_info=True)
         return graph  # fail-open — this round just doesn't grow the graph
 
     # Заредено отново под заключване: обръщението към модела е бавно, а друг

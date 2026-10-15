@@ -21,11 +21,14 @@ genesis_agent.agents — собствени под-агенти (като `.clau
 """
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger("genesis.agents")
 
 MAX_ROUNDS = 15
 _MAX_CALLS = 8
@@ -261,6 +264,7 @@ def _clip(text: str) -> str:
         from genesis_agent.budget import clip_for_context
         return clip_for_context(text)
     except Exception:
+        log.debug("clip_for_context се провали — режем до 8000 знака", exc_info=True)
         return text[:8000]
 
 
@@ -269,7 +273,7 @@ def _say(text: str) -> None:
         try:
             progress(text)
         except Exception:
-            pass
+            log.debug("progress callback-ът хвърли", exc_info=True)
 
 
 def run(name: str, task: str, workspace: Path, *,
@@ -297,7 +301,7 @@ def run(name: str, task: str, workspace: Path, *,
         from genesis_agent.agent_core import env_facts
         system += "\n\n" + env_facts(str(workspace))
     except Exception:
-        pass
+        log.debug("env_facts не се добави към промпта", exc_info=True)
     messages: list[dict] = [{"role": "system", "content": system},
                             {"role": "user", "content": task}]
     allowed = allowed_tools(agent)

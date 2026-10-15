@@ -148,6 +148,10 @@ def _isolated_operator_settings(monkeypatch, tmp_path):
     # Отказаните като твърде големи размери са на модула (2026-10-11) — тест с
     # HTTP_413 не бива да скрива модела от следващите тестове.
     monkeypatch.setattr("genesis_agent.brain._TOO_LARGE", {})
+    # debug.log (2026-10-15): операторски export GENESIS_DEBUG=1 не стига до
+    # тестовете, а handler-ът от тест с cli.main се маха след него — иначе
+    # следващите тестове пишат във файла на предишния tmp home.
+    monkeypatch.delenv("GENESIS_DEBUG", raising=False)
     # Историята на чата: тестове с run_turn пишеха session_*.json и
     # by_workspace.json в истинската ~/.local/share/genesis-agent/history —
     # `genesis -c` после продължаваше тестов разговор (одит 2026-10-09).
@@ -176,6 +180,8 @@ def _isolated_operator_settings(monkeypatch, tmp_path):
     edit_history.clear()
     todos.clear()
     agents.progress = None
+    from genesis_agent import debug_log
+    debug_log.uninstall()
     from genesis_agent import mcp_client
     mcp_client.stop_all()
 
