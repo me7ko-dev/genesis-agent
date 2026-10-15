@@ -436,7 +436,8 @@ def record_usage(*, provider: str, model: str, prompt_tokens: int,
                   completion_tokens: int, context: str = "",
                   cached_read_tokens: int = 0,
                   cached_write_tokens: int = 0,
-                  cost_usd: float | None = None) -> None:
+                  cost_usd: float | None = None,
+                  audio_seconds: float = 0.0) -> None:
     """Append-only запис. Безопасно — никога не хвърля (логването не бива
     да чупи мисии).
 
@@ -463,6 +464,11 @@ def record_usage(*, provider: str, model: str, prompt_tokens: int,
         # таблица с цени тук би остаряла тихо.
         if cost_usd is not None:
             entry["cost_usd"] = float(cost_usd)
+        # Говор → текст (genesis_agent.voice, 2026-10-15): таксува се по
+        # секунди аудио, не по токени — Groq Whisper има отделен лимит
+        # (секунди на час/ден), който `genesis budget` иначе не показва.
+        if audio_seconds:
+            entry["audio_seconds"] = round(float(audio_seconds), 2)
         for bucket in tuple(_collectors):   # копие: друга нишка може да затвори своя блок
             bucket.append(entry)
         with LOG_PATH.open("a", encoding="utf-8") as f:
@@ -493,6 +499,17 @@ def _read_entries():
         return
 
 
+def _add_audio(totals: dict, prov: str, entry: dict) -> None:
+    """Секундите аудио — само ако ги има, за да не се мени видът на
+    отчета за всички, които не ползват глас."""
+    seconds = entry.get("audio_seconds")
+    if not isinstance(seconds, (int, float)) or seconds <= 0:
+        return
+    totals["audio_seconds"] = round(totals.get("audio_seconds", 0.0) + seconds, 2)
+    stats = totals["by_provider"][prov]
+    stats["audio_seconds"] = round(stats.get("audio_seconds", 0.0) + seconds, 2)
+
+
 def daily_totals(day: date | None = None) -> dict:
     """Обобщение за конкретен ден (по подразбиране днес, UTC — записите се
     пазят с UTC timestamp, сравнение с локална дата дава грешен резултат
@@ -518,6 +535,7 @@ def daily_totals(day: date | None = None) -> dict:
         prov = e.get("provider", "?")
         totals["by_provider"][prov]["calls"] += 1
         totals["by_provider"][prov]["total_tokens"] += e.get("total_tokens", 0)
+        _add_audio(totals, prov, e)
     totals["by_provider"] = dict(totals["by_provider"])
     return totals
 
@@ -554,6 +572,7 @@ def range_totals(days: int = 7) -> dict:
         prov = e.get("provider", "?")
         totals["by_provider"][prov]["calls"] += 1
         totals["by_provider"][prov]["total_tokens"] += e.get("total_tokens", 0)
+        _add_audio(totals, prov, e)
     totals["by_provider"] = dict(totals["by_provider"])
     return totals
 
@@ -579,9 +598,12 @@ def format_report(totals: dict, *, title: str) -> str:
         prompt = totals["prompt_tokens"] or 1
         pct = 100 * read / prompt
         lines.append(f"Кеш: {read} прочетени ({pct:.0f}% от prompt), {write} записани")
+    if totals.get("audio_seconds"):
+        lines.append(f"Глас → текст: {totals['audio_seconds']:.0f} s аудио")
     for prov, stats in sorted(totals["by_provider"].items(),
                               key=lambda kv: -kv[1]["total_tokens"]):
-        lines.append(f"  {prov:<13} {stats['calls']:>4} обръщения  {stats['total_tokens']:>8} токена")
+        audio = f"  {stats['audio_seconds']:>6.0f} s аудио" if stats.get("audio_seconds") else ""
+        lines.append(f"  {prov:<13} {stats['calls']:>4} обръщения  {stats['total_tokens']:>8} токена{audio}")
     return "\n".join(lines)
 
 

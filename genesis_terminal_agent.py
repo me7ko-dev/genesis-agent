@@ -1387,10 +1387,14 @@ class _WatchedUI(TurnUI):
 
 
 class RichTurnUI(TurnUI):
+    # Последният показан отговор на хода — /voice on го казва на глас (2026-10-15).
+    last_text = ""
+
     def thinking(self, label: str, spinner: str = "dots"):
         return console.status(f"[dim]{label}[/]", spinner=spinner)
 
     def assistant(self, text: str) -> None:
+        self.last_text = text
         console.print()
         if text.strip():
             content: Markdown | Text
@@ -1421,6 +1425,50 @@ class RichTurnUI(TurnUI):
 
 
 RICH_UI = RichTurnUI()
+
+# /voice on|off (2026-10-15): отговорите на глас — само за сесията; при старта
+# от voice.speak_answers в config.yaml (GENESIS_VOICE_SPEAK).
+VOICE_ON = False
+
+
+def _voice_command(text: str) -> tuple[bool, str | None]:
+    """/voice [on|off], /listen (/mic, /слушай). (обработено ли е, текст за изпращане).
+
+    Разпознатият текст се връща в главния цикъл като НАПИСАН ред — минава
+    през същите проверки (`!`, вградените команди, sandbox-а), а преди това
+    операторът го е видял и потвърдил в listen_flow."""
+    global VOICE_ON
+    head, _, rest = text.strip().partition(" ")
+    cmd, arg = head.lower(), rest.strip().lower()
+    if cmd not in ("/voice", "/глас", "/listen", "/mic", "/слушай"):
+        return False, None
+    from genesis_agent import voice
+
+    def say(line: str) -> None:   # Text, не Rich разметка: „[…]“ от Whisper не изчезва
+        console.print(Text(line))
+    if cmd in ("/voice", "/глас"):
+        if arg in ("on", "вкл", "да", "1"):
+            ok, why = voice.tts_ready()
+            if not ok:
+                console.print(Text(f"🔇 {why}", style="yellow"))
+                return True, None
+            VOICE_ON = True
+            say(f"🔊 Гласът е включен ({why}) — казвам кратко крайния отговор. /voice off — изключва.")
+        elif arg in ("off", "изкл", "не", "0"):
+            VOICE_ON = False
+            voice.stop_speaking_quietly()
+            say("🔇 Гласът е изключен.")
+        elif arg:
+            console.print(Text("/voice on | /voice off", style="yellow"))
+        else:
+            ok, why = voice.tts_ready()
+            say(("🔊 включен" if VOICE_ON else "🔇 изключен") + f" — {why}. /listen — кажи съобщението.")
+        return True, None
+    if not sys.stdin.isatty():
+        console.print(Text("/listen иска терминал (клавишите Enter/Esc).", style="yellow"))
+        return True, None
+    voice.stop_speaking_quietly()   # да не записва собствения си глас
+    return True, voice.listen_flow(out=say)
 
 
 def build_system_prompt() -> tuple[str, str]:
@@ -2265,6 +2313,14 @@ def main():
         messages = _resume_at_start(messages, sys.argv[1:])
     # Изходът на `!команда` чака следващото съобщение — моделът го вижда с него.
     pending_shell = []
+    # Редът от /listen (потвърден от оператора) — следващият вход, като написан.
+    queued_input: list[str] = []
+    global VOICE_ON
+    try:
+        from genesis_agent import voice as _voice
+        VOICE_ON = _voice.settings().speak_answers
+    except Exception:
+        VOICE_ON = False
     from genesis_agent.chat_input import read_message
     from genesis_agent.model_router import CONFIRM_COMMANDS, command_for_request
 
@@ -2279,8 +2335,18 @@ def main():
             except Exception as e:
                 console.print(f"[dim]⚠ статус: {e}[/]")
 
-            user_input = read_message(lambda: console.input("[bold green]❯[/] "))
+            if queued_input:
+                user_input = queued_input.pop(0)
+                console.print(Text.assemble(("🎙 ❯ ", "bold green"), user_input))
+            else:
+                user_input = read_message(lambda: console.input("[bold green]❯[/] "))
             if not user_input: continue
+
+            _voice_handled, _heard = _voice_command(user_input)
+            if _voice_handled:
+                if _heard:
+                    queued_input.append(_heard)
+                continue
 
             # `!команда` — операторът пуска сам, без модела (като в Claude Code).
             from genesis_agent import shell_mode
@@ -2513,6 +2579,8 @@ def main():
                 help_table.add_row("/agents", "Собствените под-агенти (.genesis/agents/*.md)")
                 help_table.add_row("/todos", "Списъкът със задачи, който агентът води")
                 help_table.add_row("/doctor [--models]", "Работи ли всичко: git, Python, ruff/pytest, ключове, MCP, Chromium, claude")
+                help_table.add_row("/listen (/mic)", "Кажи съобщението: запис → текст → Enter праща, e поправя, Esc отказва")
+                help_table.add_row("/voice on|off", "Отговорите и на глас (кратко; кодът и подробностите остават на екрана)")
                 help_table.add_row("!команда", "Пусни команда сам (без модела); изходът отива при модела със следващото съобщение")
                 help_table.add_row("@път", "Прикачи файл или списък на папка към съобщението")
                 help_table.add_row("/image <път> [въпрос]",
@@ -2648,10 +2716,15 @@ def main():
             if _no_model_guard():
                 continue
             turn_input = _with_attachments(user_input, pending_shell, _images)
+            RICH_UI.last_text = ""
             # images само когато ги има: заместители на run_turn (тестове, телефонът)
             # с подписа отпреди картинките продължават да работят.
             messages = run_turn(messages, turn_input, RICH_UI,
                                 **({"images": _images} if _images else {}))
+            if VOICE_ON and RICH_UI.last_text.strip():
+                from genesis_agent import voice as _voice
+                _voice.speak(RICH_UI.last_text,
+                             on_error=lambda m: console.print(Text(f"🔇 {m}", style="yellow")))
             if not LAST_TURN_BLOCKED:   # спряно от hook → изходът чака следващото
                 pending_shell.clear()
 

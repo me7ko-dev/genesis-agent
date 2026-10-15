@@ -61,7 +61,9 @@ RESERVED = {"help", "clear", "model", "models", "agent", "backup", "status", "hi
             "export", "update", "skills", "tasks", "done", "drop", "state", "maxcoding",
             "local_model_max", "local_model_normal", "exit", "quit",
             "задачи", "умения", "предай", "ъпдейт", "макскод", "готово",
-            "локален_макс", "локален_нормал", "разрешения", "картинка"}
+            "локален_макс", "локален_нормал", "разрешения", "картинка",
+            # Гласът (2026-10-15) — терминалът ги обработва сам.
+            "voice", "listen", "mic", "глас", "слушай"}
 
 
 def command_dirs(workspace: Path) -> list[Path]:
