@@ -123,7 +123,7 @@ def _run_one(task: Task, core) -> TaskResult:
             core, [{"role": "user", "content": task.prompt}],
             on_assistant=on_assistant, on_tool_result=on_tool_result,
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — грешката влиза в доклада
         res.error = f"{type(e).__name__}: {e}"[:300]
 
     res.seconds = round(time.time() - started, 1)

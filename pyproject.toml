@@ -119,27 +119,11 @@ ignore = [
     # user's local clock, where UTC would be the wrong, more confusing choice.
     "DTZ005", "DTZ006", "DTZ011",
     # BLE001/S110 (сляп `except Exception` / `except: pass`) са включени
-    # (2026-10-15): преглеждат се файл по файл — грешката, която нарочно не
-    # спира работата, се записва с log.debug(..., exc_info=True) и с
-    # GENESIS_DEBUG=1 стига до ~/.genesis/debug.log. per-file-ignores отдолу е
-    # списъкът на ОЩЕ НЕПРЕГЛЕДАНИТЕ файлове; прегледан файл излиза от него.
+    # (2026-10-15) за всички файлове: грешката, която нарочно не спира
+    # работата, се записва с log.debug(..., exc_info=True) и с GENESIS_DEBUG=1
+    # стига до ~/.genesis/debug.log. Където лог няма смисъл (следата вече е
+    # другаде, процес без handler), мястото носи `# noqa: BLE001 — <защо>`.
 ]
-
-[tool.ruff.lint.per-file-ignores]
-"cloud/egress/proxy.py"                 = ["BLE001", "S110"]
-"cloud/monitor.py"                      = ["BLE001", "S110"]
-"cloud/runner/task.py"                  = ["BLE001", "S110"]
-"cloud/web/server.py"                   = ["BLE001", "S110"]
-"packaging/genesis_entry.py"            = ["BLE001", "S110"]
-"scripts/bench_all.py"                  = ["BLE001", "S110"]
-"scripts/bench_fix.py"                  = ["BLE001", "S110"]
-"scripts/bench_models.py"               = ["BLE001", "S110"]
-"scripts/bench_projects.py"             = ["BLE001", "S110"]
-"scripts/capability_report.py"          = ["BLE001", "S110"]
-"tests/conftest.py"                     = ["BLE001", "S110"]
-"tests/test_audit_2026_10_07.py"        = ["BLE001", "S110"]
-"tests/test_audit_2026_10_11_loop.py"   = ["BLE001", "S110"]
-"tests/test_state_isolation.py"         = ["BLE001", "S110"]
 
 [tool.mypy]
 # Optional third-party libs (playwright, google-auth, anthropic) may be
