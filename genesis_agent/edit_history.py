@@ -73,6 +73,9 @@ class _Turn:
 _turns: list[_Turn] = []
 _current: _Turn | None = None
 _last_note = ""     # защо командите на последния ход с команди не са проследени
+# Ходове с промени, записани от началото на процеса. Не len(_turns): той спира
+# на _MAX_TURNS, а `genesis -p` пита „записа ли ТОЗИ ход нещо“ (2026-10-15).
+_recorded = 0
 
 
 def begin_turn(label: str) -> None:
@@ -82,7 +85,7 @@ def begin_turn(label: str) -> None:
 
 
 def end_turn() -> None:
-    global _current, _last_note
+    global _current, _last_note, _recorded
     turn = _current
     if turn is not None and turn.window is not None:
         turn.depth = 1
@@ -94,7 +97,32 @@ def end_turn() -> None:
         _last_note = turn.note
     if turn.changed():
         _turns.append(turn)
+        _recorded += 1
         del _turns[:-_MAX_TURNS]
+
+
+def recorded() -> int:
+    """Колко хода с промени са записани досега (расте, не се връща назад)."""
+    return _recorded
+
+
+def last_changes() -> dict[str, list[str]]:
+    """Файловете на последния записан ход: създадени, променени, изтрити —
+    от WRITE_FILE/EDIT_FILE и от командите в папката на проекта. За отчета на
+    `genesis -p --output-format json`; само чете."""
+    out: dict[str, list[str]] = {"created": [], "edited": [], "deleted": []}
+    if not _turns:
+        return out
+    turn = _turns[-1]
+    seen: list[tuple[Path, bool]] = [(p, data is not None) for p, data in turn.before.items()]
+    seen += [(p, True) for p in turn.too_big]
+    seen += [(p, cmd.existed) for p, cmd in turn.commands.items()]
+    for path, existed in seen:
+        now = path.exists()
+        kind = ("edited" if now else "deleted") if existed else ("created" if now else "")
+        if kind and str(path) not in out[kind]:
+            out[kind].append(str(path))
+    return out
 
 
 def before_command(workspace: Path, *, at_exec: bool = False) -> None:
