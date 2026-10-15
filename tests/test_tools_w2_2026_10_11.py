@@ -54,7 +54,8 @@ def test_search_dollar_anchor_matches_crlf_lines(ws, engine):
 def test_one_latin1_letter_is_not_taken_for_cp1251(ws):
     from genesis_agent import code_edit
     raw = b"x = 'Caf\xe9'\n"
-    assert code_edit.decode_text(raw)[1] == "utf-8"
+    # 2026-10-15: буква с ударение в латинска дума е cp1252 — пак не cp1251.
+    assert code_edit.decode_text(raw)[1] == "cp1252"
     (ws / "m.py").write_bytes(raw)
     assert "й" not in gs._tool_read_file("m.py")
     # Истинската кирилица в cp1251 си остава cp1251.
@@ -67,7 +68,9 @@ def test_write_over_latin1_file_with_accented_letter_succeeds(ws):
     gs._tool_read_file("m.py")
     out = gs.dispatch_tool_call("WRITE_FILE", {"path": "m.py", "content": "x = 'Café'\n"})
     assert "✓" in out, out
-    assert p.read_bytes() == "x = 'Café'\n".encode()
+    # 2026-10-15: файлът е разпознат като cp1252 и остава в него (беше UTF-8:
+    # с U+FFFD в READ_FILE друг запис нямаше).
+    assert p.read_bytes() == "x = 'Café'\n".encode("cp1252")
 
 
 def test_write_over_cp1251_file_with_char_outside_cp1251_becomes_utf8(ws):
