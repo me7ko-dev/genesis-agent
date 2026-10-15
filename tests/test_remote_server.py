@@ -699,7 +699,7 @@ def test_command_op_reaches_the_commands_and_hello_says_so() -> None:
     calls: list[tuple] = []
     server = rs.RemoteServer(KEY, session, name="x",
                              commands=lambda n, a: calls.append((n, a)) or {"ok": True, "n": n})
-    assert server.hello()["features"] == ["commands"]
+    assert server.hello()["features"] == ["commands", "images"]   # картинки, 2026-10-15
     assert server._dispatch({"op": "command", "name": "usage", "arg": {"days": 7}}) == {"ok": True, "n": "usage"}
     assert server._dispatch({"op": "command", "name": "status", "arg": "junk"})["ok"]
     assert calls == [("usage", {"days": 7}), ("status", {})]
@@ -708,7 +708,7 @@ def test_command_op_reaches_the_commands_and_hello_says_so() -> None:
 def test_command_op_is_unknown_without_commands() -> None:
     session, _ = _session()
     server = rs.RemoteServer(KEY, session, name="x")
-    assert server.hello()["features"] == []
+    assert server.hello()["features"] == ["images"]
     assert server._dispatch({"op": "command", "name": "status"}) == {"ok": False, "error": "unknown_op"}
 
 

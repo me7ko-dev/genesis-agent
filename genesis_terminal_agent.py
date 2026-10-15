@@ -193,8 +193,12 @@ def _save_session(messages) -> None:
     if not PERSIST_HISTORY:
         return
     session_file = _session_file()
+    # Картинките — препратка към <history>/images/<sha256>.<ext>, не base64:
+    # файлът се пише наново след всеки ход (vision.for_disk, 2026-10-15).
+    from genesis_agent import vision
+    saved = vision.for_disk(messages, HISTORY_DIR / "images")
     with open(session_file, "w", encoding="utf-8", errors="replace") as f:
-        json.dump(list(messages), f, ensure_ascii=False, indent=None, separators=(',', ':'))
+        json.dump(saved, f, ensure_ascii=False, indent=None, separators=(',', ':'))
     try:
         from genesis_agent import session_index
         session_index.record(HISTORY_DIR, Path(WORKSPACE), session_file)
@@ -238,7 +242,8 @@ def count_usage(usage: dict | None, messages, reply_text: str) -> None:
         prompt = usage.get("prompt_tokens", 0) or 0
         completion = usage.get("completion_tokens", 0) or 0
     else:
-        prompt = sum(estimate_tokens(str(m.get("content", "") or "")) for m in messages)
+        from genesis_agent.vision import content_chars  # картинка ≈ 1.5K, не base64
+        prompt = sum(content_chars(m.get("content")) // 4 for m in messages)
         completion = estimate_tokens(reply_text or "")
     total_input_tokens += prompt
     total_output_tokens += completion
@@ -798,8 +803,13 @@ def _ask_via_legacy(messages, tools, prov, model):
     # резултати: 82 съобщения / 248 764 знака срещу 30 / 15 193 през
     # budget_history. Локалният ollama реже отпред при малък num_ctx и губеше
     # точно системния промпт и задачата (виж budget.request_window).
+    from genesis_agent import vision
     from genesis_agent.budget import budget_history
-    base = budget_history(list(messages))
+    # Старият път не превежда картинки (github/llmstudio/ollama) → бележка
+    # вместо части, които call_gemini/call_ollama не разбират (2026-10-15).
+    base = vision.without_images(budget_history(list(messages)),
+                                 f"{prov}/{model} не вижда картинки през този път; "
+                                 "избери модел от веригата (/model)")
     msgs = base if use_tools else _sanitize_for_textmode(base)
     try:
         response, tool_calls = _call_provider(prov, model, msgs, tools=use_tools)
@@ -846,13 +856,16 @@ def ask_genesis(messages, tools=None):
     if not _brain_handles(current_provider) and not os.environ.get("GENESIS_LOCAL_ONLY"):
         return _ask_via_legacy(messages, tools, current_provider, current_model_id)
 
-    from genesis_agent.brain import Brain
-
     # Лек въпрос → малък модел (виж model_router.is_light_turn). Не и в
     # /maxcoding — операторът изрично е поискал най-силните. Не и с избран
     # Claude абонамент (2026-10-12): операторът е избрал Claude за всичко, а без
     # безплатни ключове леката верига само минава празно през „skip: no KEY“.
-    if not _CODING_MODE and current_provider != "claude_cli":
+    # Не и с картинка в заявката (2026-10-15): лекият модел не я вижда, а
+    # „лек“ въпрос за картинка („а бутонът?“) е въпрос за нея.
+    from genesis_agent import vision
+    from genesis_agent.brain import Brain
+    if (not _CODING_MODE and current_provider != "claude_cli"
+            and not vision.has_images(vision.elide_old_images(list(messages)))):
         try:
             from genesis_agent.model_router import (
                 is_light_turn,
@@ -984,7 +997,8 @@ def _restore_session(loaded: list, system_prompt: str) -> "deque":
     извикващ и името ѝ казва какво прави в контекста на терминала.
     """
     from genesis_agent.agent_core import restored_history
-    return restored_history(loaded, system_prompt, maxlen=_HISTORY_MAXLEN)
+    return restored_history(loaded, system_prompt, maxlen=_HISTORY_MAXLEN,
+                            image_store=HISTORY_DIR / "images")
 
 
 def _tool_detail(args: object) -> str:
@@ -1548,7 +1562,31 @@ def _turn_tools():
         agent_schema = None
     if agent_schema is not None:
         extra = [*extra, agent_schema]
+    if _vision_on():
+        # Само когато има кой да види картинката (2026-10-15): иначе схемата е
+        # ~250 знака на всяко обръщение за инструмент, който дава само бележка.
+        from genesis_agent import vision
+        extra = [*extra, vision.TOOL_SCHEMA]
     return [*tools, *extra] if extra else tools
+
+
+def _vision_on() -> bool:
+    """Има ли във веригата (или в избрания модел) кой да види картинка."""
+    try:
+        from genesis_agent import vision
+        return vision.chain_sees((current_provider, current_model_id))
+    except Exception:
+        return False
+
+
+def _attach_viewed(messages: "deque") -> None:
+    """Картинките от VIEW_IMAGE в този рунд → едно user съобщение след
+    резултатите: при повечето доставчици tool резултатът не носи картинка."""
+    from genesis_agent import vision
+    pics = vision.take_pending()
+    if pics:
+        names = ", ".join(vision.image_name(p) for p in pics)
+        messages.append(vision.attachment_message(pics, f"VIEW_IMAGE: {names}"))
 
 
 def context_info() -> dict:
@@ -1620,7 +1658,8 @@ def _parallel_reads(tool_calls: list[dict]) -> dict[int, str]:
 LAST_TURN_BLOCKED = False
 
 
-def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
+def run_turn(messages: "deque", user_input: str, ui: "TurnUI",
+             images: list[dict] | None = None) -> "deque":
     """Една реплика на оператора: модел → инструменти → … → отговор.
 
     Общо за терминала и за `genesis serve` (телефона): двата различават само
@@ -1652,7 +1691,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     watched = _WatchedUI(ui)
     genesis_skills._set_cancel(watched.cancelled)
     try:
-        messages = _run_turn_once(messages, user_input, watched, extra)
+        messages = _run_turn_once(messages, user_input, watched, extra, images=images)
         for _ in range(_STOP_HOOK_ROUNDS):
             if watched.stopped_for:
                 break
@@ -1673,7 +1712,10 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI") -> "deque":
     return messages
 
 
-def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str = "") -> "deque":
+def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str = "",
+                   images: list[dict] | None = None) -> "deque":
+    from genesis_agent import vision
+    vision.take_pending()   # VIEW_IMAGE от прекъснат ход не отива в този
     content = user_input
     try:
         from genesis_agent.skill_loader import domain_context
@@ -1685,7 +1727,8 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
         # Веднъж на разговор: всяко продължение („смени цвета на сайта“) пак
         # съвпада със същото ръководство и историята растеше с ~16K знака на
         # ход — 4 копия след 4 реплики (одит 2026-10-07).
-        if any(head in str(m.get("content") or "") for m in messages if m.get("role") == "user"):
+        if any(head in vision.text_of(m.get("content")) for m in messages
+               if m.get("role") == "user"):
             knowledge = ""
     if knowledge:
         content = f"{user_input}\n\n{knowledge}"
@@ -1697,7 +1740,8 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
     # системния промпт и самата заявка (виж agent_core.bounded_history).
     limit = getattr(messages, "maxlen", None)
     messages = deque(messages)
-    operator_msg = {"role": "user", "content": content}
+    # С картинки — части (vision.user_message); без тях — низ, както винаги.
+    operator_msg = vision.user_message(content, images or [])
     messages.append(operator_msg)
     # /rewind намира ходовете след точката по самото съобщение (2026-10-15).
     from genesis_agent import edit_history
@@ -1723,7 +1767,8 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
     _executed: list[tuple[str, str]] = []
     # Уеб страниците, писани в хода, се отварят в браузър, когато моделът каже
     # „готово“ (genesis_agent.page_check, план Г.11).
-    _page_check = _PageCheck()
+    # Модел, който вижда картинки → и снимките на страницата (2026-10-15).
+    _page_check = _PageCheck(shots=_vision_on())
     # .py, записан и непуснат след последната промяна (genesis_agent.code_check).
     # Със заявката: буквалните думи от нея („ред ОБЩО“) се сверяват с кода.
     _run_check = _RunCheck(user_input)
@@ -1852,6 +1897,7 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                     break
                 if _repeat_note:
                     messages.append({"role": "system", "content": _repeat_note})
+                _attach_viewed(messages)
                 round_i += 1
                 if round_i >= _TOOL_ROUND_CAP:
                     ui.warn(f"Достигнат таван от {_TOOL_ROUND_CAP} инструмент-рунда "
@@ -1908,6 +1954,9 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                         _executed.append(("BROWSE", "page_check"))
                     if _page_note:
                         messages.append({"role": "system", "content": _page_note})
+                        if _page_check.images:
+                            messages.append(vision.attachment_message(
+                                _page_check.images, "снимки на страницата от проверката в браузър"))
                         with ui.thinking("Оправям според браузъра…", "aesthetic"):
                             response, tool_calls = ask_genesis(messages, tools=_turn_tools())
                         continue
@@ -2002,6 +2051,7 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                               "content": "[Резултат]:\n" +
                               "\n\n".join(clip_for_context(r) for r in tool_results) +
                               TEXT_RESULT_FOLLOWUP})
+            _attach_viewed(messages)
             with ui.thinking("Анализирам...", "aesthetic"):
                 response, tool_calls = ask_genesis(messages, tools=_turn_tools())
     except KeyboardInterrupt:
@@ -2091,14 +2141,17 @@ def _close_open_tool_calls(messages: "deque") -> None:
     messages.extend(items[:j] + filler + items[j:])
 
 
-def _with_attachments(user_input: str, pending_shell: list[str]) -> str:
+def _with_attachments(user_input: str, pending_shell: list[str],
+                      images: list[dict] | None = None) -> str:
     """Съобщението с прикачените `@файлове` и изхода от `!команди` преди него.
 
     `@` се разгъва само в написаното от оператора — не и в изхода на командите,
-    където `@нещо` е текст от програма, не молба да се прикачи файл."""
+    където `@нещо` е текст от програма, не молба да се прикачи файл.
+    `images` (2026-10-15): тук влизат `@картинка.png` и пуснатите с мишката
+    пътища до картинки — като части за модела, не като текст."""
     from genesis_agent import mentions
     try:
-        user_input, notes = mentions.expand(user_input, Path(WORKSPACE))
+        user_input, notes = mentions.expand(user_input, Path(WORKSPACE), images)
     except Exception as e:
         notes = [f"@: {e}"]
     for note in notes:
@@ -2201,7 +2254,7 @@ def _worth_capturing(convo: list[dict]) -> bool:
     („[Грешка: цялата верига…]“) → извличащият пас би минал през веригата пак
     за нищо (13 реда „[Brain] ✗“ при изход без ключове, одит 2026-10-11)."""
     for m in convo:
-        text = str(m.get("content") or "").strip()
+        text = str(m.get("content") or "").strip() if m.get("role") == "assistant" else ""
         if m.get("role") == "assistant" and text and not text.startswith(("[Грешка", "Error:")):
             return True
     return False
@@ -2530,6 +2583,8 @@ def main():
                 help_table.add_row("/voice on|off", "Отговорите и на глас (кратко; кодът и подробностите остават на екрана)")
                 help_table.add_row("!команда", "Пусни команда сам (без модела); изходът отива при модела със следващото съобщение")
                 help_table.add_row("@път", "Прикачи файл или списък на папка към съобщението")
+                help_table.add_row("/image <път> [въпрос]",
+                                   "Картинка към модела (и @shot.png, и пуснат с мишката път)")
                 help_table.add_row("/hooks [trust]", "Твоите команди около работата (hooks.json)")
                 help_table.add_row("/permissions [add|remove|clear]", "Командите без въпрос: за сесията и постоянните за проекта")
                 help_table.add_row("/commands", "Твоите команди от .genesis/commands/*.md")
@@ -2649,18 +2704,23 @@ def main():
                 out=lambda text: console.print(text, markup=False, highlight=False),
                 ask=console.input, compact=_force_compact, context=context_info,
                 conversations=_conversations(), choose=console.input)
+            _images: list[dict] = []
             if _res is not None:
                 if _res.messages is not None:
                     messages = _res.messages
                 if not _res.prompt:
                     continue
                 user_input = _res.prompt
+                _images = list(_res.images or [])   # /image
 
             if _no_model_guard():
                 continue
-            turn_input = _with_attachments(user_input, pending_shell)
+            turn_input = _with_attachments(user_input, pending_shell, _images)
             RICH_UI.last_text = ""
-            messages = run_turn(messages, turn_input, RICH_UI)
+            # images само когато ги има: заместители на run_turn (тестове, телефонът)
+            # с подписа отпреди картинките продължават да работят.
+            messages = run_turn(messages, turn_input, RICH_UI,
+                                **({"images": _images} if _images else {}))
             if VOICE_ON and RICH_UI.last_text.strip():
                 from genesis_agent import voice as _voice
                 _voice.speak(RICH_UI.last_text,

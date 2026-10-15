@@ -36,6 +36,7 @@ from genesis_agent.config import (
     STALE_TOOL_RESULT_MAX_CHARS,
     TOOL_RESULT_MAX_CHARS,
 )
+from genesis_agent.vision import content_chars, is_attachment
 
 LOG_PATH = DATA_DIR / "budget_log.jsonl"
 
@@ -145,7 +146,9 @@ def request_window(messages, limit: int = MAX_SENT_MESSAGES) -> list[dict]:
     lead = 0
     while lead < len(msgs) and msgs[lead].get("role") == "system":
         lead += 1
-    users = [i for i in range(lead, len(msgs)) if msgs[i].get("role") == "user"]
+    # Картинката от VIEW_IMAGE е user съобщение, но не е задачата (2026-10-15).
+    users = [i for i in range(lead, len(msgs)) if msgs[i].get("role") == "user"
+             and not is_attachment(msgs[i])]
     task = users[-1] if users else None
     pinned = msgs[:lead] + ([msgs[task]] if task is not None else [])
     before = msgs[lead:task] if task is not None else []
@@ -175,7 +178,8 @@ def cache_history(messages, *, max_chars: int | None = None,
     msgs = list(messages)
 
     def size(items: list[dict]) -> int:
-        return sum(len(str(m.get("content") or "")) + len(str(m.get("tool_calls") or ""))
+        # Картинката се брои като ~1.5K токена, не като base64 (2026-10-15).
+        return sum(content_chars(m.get("content")) + len(str(m.get("tool_calls") or ""))
                    for m in items)
 
     if max_chars <= 0 or size(msgs) <= max_chars:
@@ -184,7 +188,7 @@ def cache_history(messages, *, max_chars: int | None = None,
     while lead < len(msgs) and msgs[lead].get("role") == "system":
         lead += 1
     head, body = msgs[:lead], msgs[lead:]
-    users = [i for i, m in enumerate(body) if m.get("role") == "user"]
+    users = [i for i, m in enumerate(body) if m.get("role") == "user" and not is_attachment(m)]
     task = users[-1] if users else None
     drop = 0
     while drop < len(body):
@@ -404,7 +408,7 @@ def cache_stable_history(messages, *, limit: int = MAX_SENT_MESSAGES,
     if limit > 0 and excess > 0:
         drop = -(-excess // max(step, 1)) * max(step, 1)
         msgs = request_window(msgs, max(len(msgs) - drop, 1))
-    if sum(len(str(m.get("content") or "")) for m in msgs) > max_chars:
+    if sum(content_chars(m.get("content")) for m in msgs) > max_chars:
         return None
     return msgs
 

@@ -22,15 +22,16 @@ from pathlib import Path
 from typing import Any
 
 from genesis_agent.chat_commands import _YES, Conversations, Result
+from genesis_agent.vision import ATTACHMENT_PREFIX, text_of
 
 _SHOWN = 20
 # Служебните реплики с роля user: бележката на /undo и /rewind, подканата на
 # hook Stop и резултатите на текстовите инструменти — не са точки за връщане.
-_NOT_OPERATOR = ("[оператор]", "[hook Stop", "[Резултат от tool]")
+_NOT_OPERATOR = ("[оператор]", "[hook Stop", "[Резултат от tool]", ATTACHMENT_PREFIX)
 
 
-def _short(text: str, limit: int = 70) -> str:
-    flat = " ".join(text.split("\n\n", 1)[0].split())
+def _short(text: Any, limit: int = 70) -> str:
+    flat = " ".join(text_of(text).split("\n\n", 1)[0].split())
     return flat if len(flat) <= limit else flat[:limit - 1] + "…"
 
 
@@ -90,8 +91,9 @@ def resume(rest: str, *, messages: Any, workspace: Path, out: Callable[[str], No
     # Системният промпт е СЕГАШНИЯТ (свежи факти за машината), не записаният.
     system = str(messages[0].get("content") or "") if messages and \
         messages[0].get("role") == "system" else ""
+    # Картинките на разговора са до файла му (vision.for_disk, 2026-10-15).
     restored = restored_history(data, system, maxlen=getattr(messages, "maxlen", None)
-                                or HISTORY_MAXLEN)
+                                or HISTORY_MAXLEN, image_store=entry.path.parent / "images")
     # Продължението — в нов файл, старият остава (както /history и -c).
     conversations.new_file()
     when = datetime.fromtimestamp(entry.modified).strftime("%Y-%m-%d %H:%M")
@@ -107,9 +109,13 @@ def resume(rest: str, *, messages: Any, workspace: Path, out: Callable[[str], No
 # ── /rewind ─────────────────────────────────────────────────────────────────
 
 def _is_operator(m: Any) -> bool:
+    # Със картинка съдържанието е списък от части (2026-10-15) — пак е реплика.
     content = m.get("content") if isinstance(m, dict) else None
-    return (m.get("role") == "user" and isinstance(content, str) and bool(content.strip())
-            and not content.startswith(_NOT_OPERATOR))
+    if not isinstance(content, (str, list)):
+        return False
+    text = text_of(content)
+    return (m.get("role") == "user" and bool(text.strip())
+            and not text.startswith(_NOT_OPERATOR))
 
 
 def rewind(rest: str, *, messages: Any, out: Callable[[str], None], ask: Callable[[str], str],
@@ -183,6 +189,6 @@ def rewind(rest: str, *, messages: Any, out: Callable[[str], None], ask: Callabl
                 out(f"⚠ разговорът не се записа: {e}")
     out(f"↶ Върнато до преди съобщение {n}."
         + ("\n  " + "\n  ".join(done) if done else ""))
-    text = str(chosen["content"])
+    text = text_of(chosen["content"])
     out("Съобщението беше:\n" + text[:1500] + ("…" if len(text) > 1500 else ""))
     return Result(messages=new)

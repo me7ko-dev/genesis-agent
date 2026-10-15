@@ -1212,9 +1212,11 @@ class Brain:
         def _is_summary(m: dict) -> bool:
             return (m.get("role") == "system"
                     and str(m.get("content", "")).startswith("## Резюме на по-ранния разговор:"))
+        # text_of: картинката е „[картинка: име]“, не base64 в промпта (2026-10-15).
+        from genesis_agent.vision import text_of
         transcript = "\n".join(
             [f"system: {str(m.get('content', ''))[:3000]}" for m in old_part if _is_summary(m)]
-            + [f"{m.get('role', '?')}: {str(m.get('content', ''))[:500]}" for m in old_part
+            + [f"{m.get('role', '?')}: {text_of(m.get('content', ''))[:500]}" for m in old_part
                if not _is_summary(m)]
         )
         maxlen = getattr(messages, "maxlen", None)
@@ -1452,6 +1454,15 @@ class Brain:
                 # без съдържание, а такова носи и нулева информация.
                 if blocks:
                     out.append({"role": "assistant", "content": blocks})
+            elif isinstance(content, list):
+                # Части (текст + картинки, 2026-10-15): image_url → image блок
+                # с base64 източник — Messages API не приема data: адрес.
+                from genesis_agent.vision import anthropic_block, is_image_part
+                parts = [anthropic_block(p) if is_image_part(p)
+                         else {"type": "text", "text": str(p.get("text") or "")}
+                         for p in content if isinstance(p, dict)]
+                parts = [p for p in parts if p.get("type") != "text" or p["text"].strip()]
+                out.append({"role": "user", "content": parts or "(празно)"})
             else:
                 out.append({"role": "user", "content": content or "(празно)"})
         # Разговорът трябва да започва с user ход, и tool_result без своя
@@ -2018,16 +2029,22 @@ class Brain:
         # мисиите, ensemble, orchestrator. Историята на извикващия
         # остава пълна (budget_history не мутира входа); свива се само копието,
         # което тръгва по мрежата.
+        # Доставчик, който кешира по префикс (Anthropic винаги, безплатните от
+        # GENESIS_CACHE_PROVIDERS), получава историята само допълвана, без
+        # свиването на budget_history, което сменя средата ѝ на всеки рунд
+        # (виж config.CACHE_HISTORY_MAX_CHARS). Изгледът се смята при нужда.
+        # Картинки (2026-10-15): по-старите от KEEP_IMAGE_TURNS хода на оператора
+        # излизат от изпратеното копие още тук — така и трите изгледа долу
+        # (budget, кеш, claude_cli) виждат едно и също. Без картинки — нищо.
+        from genesis_agent import vision
         from genesis_agent.budget import budget_history, cache_history
         from genesis_agent.config import (
             CACHE_HISTORY_MAX_CHARS,
             CACHE_HISTORY_MAX_CHARS_FREE,
             CACHE_PROVIDERS,
         )
-        # Доставчик, който кешира по префикс (Anthropic винаги, безплатните от
-        # GENESIS_CACHE_PROVIDERS), получава историята само допълвана, без
-        # свиването на budget_history, което сменя средата ѝ на всеки рунд
-        # (виж config.CACHE_HISTORY_MAX_CHARS). Изгледът се смята при нужда.
+        messages = vision.elide_old_images(messages)
+        images = vision.has_images(messages)
         raw_history = list(messages)
         cache_views: dict[int, list[dict]] = {}
 
@@ -2066,7 +2083,7 @@ class Brain:
                 self._with_tool_tag_docs(self._sanitize_for_textmode(messages))
                 if tools else messages
             )
-            hit = self._call_local(local_messages, attempts=2)
+            hit = self._call_local(vision.without_images(local_messages), attempts=2)
             if hit:
                 raw_text, code = hit
                 return type("Obj", (object,), {"raw_text": raw_text, "code": code,
@@ -2139,6 +2156,30 @@ class Brain:
             ordered_chain = [c for c in ordered_chain
                              if (c["provider"], c["model"]) != avoid]
 
+        # Картинка в заявката (2026-10-15): първо моделите, които я виждат — и
+        # пред пина: избраният модел, който не вижда, би отговорил за картинка,
+        # която не е получил. Няма ли такъв в (филтрираната по size_b) верига —
+        # от цялата безплатна верига от config.yaml (gemma-4-31b е под прага
+        # от 32B на терминала, а е единственият безплатен vision модел там).
+        # Останалите остават отзад, с бележка вместо картинката.
+        image_note = vision.NO_VISION_NOTE
+        if images:
+            seeing = [c for c in ordered_chain if vision.can_see(c["provider"], c["model"])]
+            if not seeing:
+                have = {(c["provider"], c["model"]) for c in ordered_chain}
+                seeing = [c for c in _load_chain() if vision.can_see(c["provider"], c["model"])
+                          and (c["provider"], c["model"]) not in have
+                          and (c["provider"], c["model"]) != avoid]
+            if seeing:
+                image_note = ("моделите, които виждат картинки, не отговориха; "
+                              "този модел не я вижда")
+                first = ordered_chain[0] if ordered_chain else None
+                ordered_chain = seeing + [c for c in ordered_chain if c not in seeing]
+                if ordered_chain[0] is not first:
+                    print(f"  [Brain] 👁 картинка → {seeing[0]['provider']}/{seeing[0]['model']}")
+            else:
+                print(f"  [Brain] 👁 картинката не се праща — {vision.NO_VISION_NOTE}")
+
         n = len(ordered_chain)
         cut_hit: tuple | None = None  # (отговор, usage, запис) на първия отрязан tool_call
         if n > 0:
@@ -2191,6 +2232,8 @@ class Brain:
                             stable_notools = self._cache_stable_textmode(
                                 full_history, tools, messages_notools)
                         msgs = stable_notools
+                    if images:
+                        msgs = vision.for_provider(msgs, vision.can_see(prov, model), image_note)
                     size = _request_size(msgs, use_tools)
                     if size >= _TOO_LARGE.get(key, size + 1):
                         only_unconfigured = False
@@ -2349,7 +2392,8 @@ class Brain:
                              and (self.local["provider"], self.local["model"]) == avoid)
         if self.local and not local_avoided:
             print("  [Brain] ☁️ Облакът е изчерпан/недостъпен → 🏠 локален мозък като резерва...")
-            hit = self._call_local(messages_notools, attempts=1)
+            hit = self._call_local(vision.without_images(messages_notools, image_note),
+                                   attempts=1)
             if hit:
                 raw_text, code = hit
                 return type("Obj", (object,), {"raw_text": raw_text, "code": code,
