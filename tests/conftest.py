@@ -262,6 +262,36 @@ def _isolated_operator_settings(monkeypatch, tmp_path):
     mcp_client.stop_all()
 
 
+class _RealDeviceInTest(BaseException):
+    """Тест стигна до истински микрофон или високоговорител."""
+
+
+@pytest.fixture(autouse=True)
+def _no_real_audio(monkeypatch):
+    """Микрофонът и високоговорителите на машината не се пипат (2026-10-15):
+    всяко истинско записване минава през voice._capture_sounddevice или
+    voice._capture_arecord, всяко пускане — през voice._run_player. Тест, който ги стигне без фалшив заместител, пада
+    веднага, вместо да запише стаята или да проговори на лаптопа. Средата на
+    оператора (GENESIS_STT_*/GENESIS_TTS_*/GENESIS_VOICE_*) не стига до
+    тестовете — те задават сами каквото искат."""
+    from genesis_agent import voice
+
+    def refuse(*_a, **_k):
+        # BaseException: `except Exception` в _capture не бива да го превърне
+        # в тиха резерва (arecord) и тестът да мине.
+        raise _RealDeviceInTest("tests: истински микрофон/звук — подмени го с фалшив")
+
+    # Само тези пипат устройство; изборът преди тях (_capture, choose_player)
+    # остава истински и се проверява.
+    monkeypatch.setattr(voice, "_capture_sounddevice", refuse)
+    monkeypatch.setattr(voice, "_capture_arecord", refuse)
+    monkeypatch.setattr(voice, "_run_player", refuse)
+    monkeypatch.setattr(voice, "_LOCAL_MODELS", {})
+    for name in list(os.environ):
+        if name.startswith(("GENESIS_STT_", "GENESIS_TTS_", "GENESIS_VOICE_")):
+            monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture(autouse=True)
 def _no_real_stripe(monkeypatch):
     """Stripe ключове от shell-а на разработчика не включват истинско плащане
