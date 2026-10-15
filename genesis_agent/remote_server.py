@@ -62,6 +62,18 @@ Code на телефона управлява сесия, която тече д
 запис се обработва), "rate_limited", "stt_failed"/"tts_failed" (+ "detail" на
 български). Плик над 256 KiB се приема само за тези две операции — до
 _MAX_VOICE_BODY, по един наведнъж; за всяка друга — "too_large".
+
+2026-10-15 — картинки, "features" съдържа "images". `send` може да носи
+    "images": [{"mime": "image/png", "data": "<base64>", "name": "shot.png"}, …]
+до 4 картинки, общо до 10 MiB след декодиране (PNG/JPEG/WebP/GIF по първите
+байтове; mime е подсказка; base64 — като при аудиото); "text" може да е
+празен, щом има картинки. Отказ — {"ok": false, "error": "too_many_images"|
+"images_too_large"|"bad_image"|"bad_args", "name"/"max"/"detail": …}, без ход.
+Плик над 256 KiB минава по същия път като аудиото (_MAX_VOICE_BODY, по един
+наведнъж) — само за `send` с "images". `hello` казва "limits". Събитието
+"user" носи "images": [{name, mime, bytes, width, height}] — без байтовете.
+Сървърът смалява до 1568 px сам, но смалена на телефона снимка (~300 KB) е
+обикновен плик и пести мрежа и батерия.
 """
 from __future__ import annotations
 
@@ -104,6 +116,11 @@ _REPLY_BYTES = 512 * 1024
 # иначе 16 връзки × 19 MiB от непознат биха държали 300 MB памет.
 _VOICE_OPS = frozenset({"transcribe", "speak"})
 _MAX_VOICE_BODY = 19 * 1024 * 1024
+# Картинките в `send` (2026-10-15): същият голям плик, затова общо колкото
+# аудиото — 10 MiB × (4/3)² ≈ 17.8 MiB < _MAX_VOICE_BODY с място за текста.
+# Четири снимки от телефона в пълен размер не се събират; смалени — да.
+_MAX_IMAGES = 4
+_MAX_IMAGES_BYTES = 10 * 1024 * 1024
 _VOICE_READ_S = 120.0
 # Обръщения на минута: Groq безплатно е 20 заявки/мин за Whisper (2026-10-15).
 _VOICE_PER_MIN = {"transcribe": 20, "speak": 30}
@@ -453,23 +470,35 @@ class RemoteSession:
     def busy(self) -> bool:
         return self._busy
 
-    def send(self, text: str) -> bool:
+    def send(self, text: str, images: list[dict] | None = None) -> bool:
+        """`images` — части от vision.image_part (вече проверени). Събитието
+        "user" носи само име/вид/размер ("images"), не байтовете (2026-10-15)."""
         text = text.strip()
-        if not text:
+        if not text and not images:
             raise ProtocolError("empty message")
         with self._cond:
             if self._busy:
                 return False
             self._busy = True
             self._stop.clear()
-        self.emit("user", text=text)
-        threading.Thread(target=self._run, args=(text,), daemon=True, name="genesis-turn").start()
+        if images:
+            from genesis_agent.vision import image_ref
+            self.emit("user", text=text, images=[image_ref(p) for p in images])
+        else:
+            self.emit("user", text=text)
+        threading.Thread(target=self._run, args=(text, images or None), daemon=True,
+                         name="genesis-turn").start()
         return True
 
-    def _run(self, text: str) -> None:
+    def _run(self, text: str, images: list[dict] | None = None) -> None:
         self.emit("busy", busy=True)
         try:
-            self._runner(text, RemoteTurnUI(self))
+            # С картинки — като ключова дума: runner-и с подписа отпреди тях
+            # (тестове, вграждане) продължават да работят без тях.
+            if images:
+                self._runner(text, RemoteTurnUI(self), images=images)  # type: ignore[call-arg]
+            else:
+                self._runner(text, RemoteTurnUI(self))
         except Exception as e:
             self.emit("error", text=f"{type(e).__name__}: {e}")
         finally:
@@ -607,19 +636,23 @@ PHONE_HELP = """Команди от телефона:
 /memory, /init, /bg, /hooks, /mcp, /commands, /skills, /tasks
 /permissions — одобрените команди (remove маха правило)
 /clear — нов разговор
-@файл — прикача файл от работната папка
+@файл — прикача файл от работната папка (@shot.png — като картинка)
+/image <път> [въпрос] — картинка от компютъра към модела
 Само в терминала: /model, /history, /backup, /export, /update, доверяването (/hooks trust, /mcp trust) и /permissions add."""
 
 
 def phone_command(text: str, ui: Any, session: RemoteSession, *, messages: Any,
                   workspace: Path, compact: Callable[[Any], Any] | None = None,
                   context: Callable[[], dict] | None = None,
-                  conversations: Any = None) -> tuple[Any, str | None]:
+                  conversations: Any = None,
+                  images: list[dict] | None = None) -> tuple[Any, str | None]:
     """Съобщение от телефона, преди да стигне до модела.
 
     Връща (историята, текст за модела); None за текста = ходът свършва тук.
     Командите са същите като в терминала (chat_commands) — досега телефонът
     пращаше `/plan` и `/undo` на модела като обикновен текст (2026-10-09).
+    `images` (2026-10-15): списъкът с картинките на хода — в него влизат и
+    `/image <път>` и `@shot.png` от компютъра; извикващият ги подава на run_turn.
     """
     from genesis_agent import chat_commands
     stripped = text.strip()
@@ -685,9 +718,11 @@ def phone_command(text: str, ui: Any, session: RemoteSession, *, messages: Any,
             if not res.prompt:
                 return messages, None
             stripped = res.prompt
+            if res.images and images is not None:
+                images.extend(res.images)
     from genesis_agent import mentions
     try:
-        stripped, notes = mentions.expand(stripped, workspace)
+        stripped, notes = mentions.expand(stripped, workspace, images)
     except Exception as e:
         notes = [f"@: {e}"]
     for note in notes:
@@ -738,6 +773,42 @@ def phone_state() -> dict:
     return {"plan": plan_mode.active(), "todos": todos.items()}
 
 
+def parse_images(raw: Any) -> tuple[list[dict], dict | None]:
+    """"images" от `send` → (части за vision.user_message, грешка или None).
+
+    Всеки елемент: {"mime": "image/png", "data": "<base64>", "name": "shot.png"}
+    (mime е подсказка — решават първите байтове; base64 — като при аудиото,
+    _b64_any). Най-много _MAX_IMAGES, общо до _MAX_IMAGES_BYTES след
+    декодиране; иначе грешка без ход (2026-10-15)."""
+    if raw is None or raw == []:
+        return [], None
+    if not isinstance(raw, list) or not all(isinstance(x, dict) for x in raw):
+        return [], {"ok": False, "error": "bad_args"}
+    if len(raw) > _MAX_IMAGES:
+        return [], {"ok": False, "error": "too_many_images", "max": _MAX_IMAGES}
+    from genesis_agent import vision
+    # Оценка по дължината преди декодирането: 4 base64 знака = 3 байта —
+    # 30 MB base64 не се разгъва, за да се откаже после.
+    total = sum(len(x.get("data") or "") * 3 // 4 for x in raw if isinstance(x.get("data"), str))
+    if total > _MAX_IMAGES_BYTES + 3 * len(raw):
+        return [], {"ok": False, "error": "images_too_large", "max": _MAX_IMAGES_BYTES}
+    parts: list[dict] = []
+    for item in raw:
+        data = item.get("data")
+        name = str(item.get("name") or "")[:120]
+        if not isinstance(data, str) or not data.strip():
+            return [], {"ok": False, "error": "bad_image", "name": name}
+        try:
+            raw_bytes = _b64_any(data)
+        except ValueError:
+            return [], {"ok": False, "error": "bad_image", "name": name, "detail": "невалиден base64"}
+        try:
+            parts.append(vision.image_part(raw_bytes, str(item.get("mime") or "") or None, name))
+        except vision.ImageError as e:
+            return [], {"ok": False, "error": "bad_image", "name": name, "detail": str(e)[:200]}
+    return parts, None
+
+
 # ── HTTP ────────────────────────────────────────────────────────────────────
 
 class RemoteServer:
@@ -784,7 +855,12 @@ class RemoteServer:
         return {"app": "genesis", "v": PROTOCOL, "key_id": key_id(self.key),
                 "name": self.name, "version": __version__,
                 "features": (["commands"] if self.commands else [])
-                + (["voice"] if self.stt is not None and self.tts is not None else [])}
+                + (["voice"] if self.stt is not None and self.tts is not None else [])
+                + ["images"],
+                # Колко картинки приема `send` (2026-10-15) и над какъв плик
+                # заявката е „голяма“ (по един наведнъж, до large_body).
+                "limits": {"images": _MAX_IMAGES, "images_bytes": _MAX_IMAGES_BYTES,
+                           "body": _MAX_BODY, "large_body": _MAX_VOICE_BODY}}
 
     def handle(self, envelope: Any, *, large: bool = False) -> tuple[dict, str]:
         """(отговор, rid) за вече декодиран JSON плик. Хвърля ProtocolError
@@ -796,9 +872,10 @@ class RemoteServer:
         сдвои отново“ и го броеше за спирачката срещу налучкване."""
         payload = self.cipher.open(envelope, _REQ_AAD)
         rid = self.replay.check(payload)
-        # Голям плик е позволен само за аудиото (2026-10-15) — с ключа е, тоест
-        # грешка в заявката, не налучкване.
-        if large and payload.get("op") not in _VOICE_OPS:
+        # Голям плик е позволен само за аудиото и за `send` с картинки
+        # (2026-10-15) — с ключа е, тоест грешка в заявката, не налучкване.
+        voice_op = payload.get("op") in _VOICE_OPS and self.stt is not None
+        if large and not voice_op and not (payload.get("op") == "send" and payload.get("images")):
             return {"ok": False, "error": "too_large"}, rid
         return self._dispatch(payload), rid
 
@@ -865,13 +942,20 @@ class RemoteServer:
         text = str(p.get("text") or "")
         if len(text) > 20000:
             return {"ok": False, "error": "too_long"}
+        images, error = parse_images(p.get("images"))
+        if error:
+            return error
         # Python strip(), не JS trim(): "\x1c" или "\x85" минават trim() на
         # телефона и тук са празно (одит 2026-10-11).
-        if not text.strip():
+        if not text.strip() and not images:
             return {"ok": False, "error": "empty"}
         if text.strip().lower() in ("/clear", "/нов"):
             return self._dispatch({"op": "clear"})
-        return {"ok": True} if self.session.send(text) else {"ok": False, "error": "busy"}
+        if images and not text.strip():
+            from genesis_agent.chat_commands import IMAGE_QUESTION
+            text = IMAGE_QUESTION
+        sent = self.session.send(text, images) if images else self.session.send(text)
+        return {"ok": True} if sent else {"ok": False, "error": "busy"}
 
     # -- гласът (2026-10-15) --
     def _voice_op(self, kind: str, p: dict) -> dict:
@@ -1087,7 +1171,9 @@ class RemoteServer:
                     length = int(self.headers.get("Content-Length") or 0)
                 except ValueError:
                     length = -1
-                if not 0 < length <= _MAX_VOICE_BODY or (length > _MAX_BODY and server.stt is None):
+                # Голям плик и без гласа: `send` с картинки го ползва (2026-10-15);
+                # какво има вътре решава handle(large=True), след ключа.
+                if not 0 < length <= _MAX_VOICE_BODY:
                     self._json(413, {"error": "size"})
                     return
                 if length > _MAX_BODY:
@@ -1124,12 +1210,14 @@ class RemoteServer:
                 self._answer(ip, body)
 
             def _voice_post(self, ip: str, length: int) -> None:
-                """Плик над _MAX_BODY — аудио за `transcribe` (2026-10-15).
+                """Плик над _MAX_BODY — аудио за `transcribe` или `send` с
+                картинки (2026-10-15).
 
                 Само от незаспрян адрес, по един наведнъж за целия сървър, с
                 общ срок за четенето и с начало, което е плик; иначе отказ, без
                 да се чете останалото. Какво е вътре личи чак с ключа — там
-                handle(large=True) пуска само гласовите операции."""
+                handle(large=True) пуска само гласовите операции (с включен
+                глас) и `send` с "images"."""
                 if server.too_many_failures(ip):
                     server.record_failure(ip)
                     self._json(429, {"error": "slow_down"})
@@ -1404,14 +1492,18 @@ def serve(args: list[str]) -> int:
     state: dict[str, Any] = {"messages": deque([{"role": "system", "content": system_prompt}],
                                                maxlen=gta._HISTORY_MAXLEN)}
 
-    def runner(text: str, ui: Any) -> None:
+    def runner(text: str, ui: Any, images: list[dict] | None = None) -> None:
+        # Картинките от телефона + `@shot.png` и /image от компютъра (2026-10-15).
+        pictures = list(images or [])
         messages, prompt = phone_command(text, ui, session, messages=state["messages"],
                                          workspace=Path(gta.WORKSPACE), compact=gta._force_compact,
-                                         context=gta.context_info, conversations=gta._conversations())
+                                         context=gta.context_info, conversations=gta._conversations(),
+                                         images=pictures)
         state["messages"] = messages
         if prompt is not None:
             try:
-                state["messages"] = gta.run_turn(state["messages"], prompt, ui)
+                state["messages"] = gta.run_turn(state["messages"], prompt, ui,
+                                                 **({"images": pictures} if pictures else {}))
             except Exception as e:
                 # Свършеното до грешката остава в разговора (одит 2026-10-11).
                 state["messages"] = gta.history_after_error(e, state["messages"])
@@ -1446,6 +1538,8 @@ def serve(args: list[str]) -> int:
         kind = event["type"]
         if kind == "user":
             console.print(Text.assemble("\n", ("📱 ❯ ", "bold green"), str(event["text"])))
+            for pic in event.get("images") or []:
+                console.print(Text(f"   📎 картинка: {pic.get('name') or '?'}", style="dim"))
         elif kind == "assistant":
             gta.RICH_UI.assistant(event["text"])
         elif kind == "tool":

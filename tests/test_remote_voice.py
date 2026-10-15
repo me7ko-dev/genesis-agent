@@ -259,13 +259,13 @@ def test_a_body_over_the_voice_cap_or_without_voice_is_413(live_voice) -> None:
     httpd = plain.make_http("127.0.0.1", 0)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     try:
+        # Без глас големият плик пак се чете — за `send` с картинки (2026-10-15),
+        # но гласова операция в него е "too_large", не транскрипция.
         payload = _request("transcribe", data="A" * (rs._MAX_BODY + 10))
-        try:
-            status, _ = _post(f"http://127.0.0.1:{httpd.server_address[1]}",
-                              json.dumps(_client_seal(KEY, payload)).encode())
-        except (ConnectionError, urllib.error.URLError):
-            status = 413
-        assert status == 413
+        status, env = _post(f"http://127.0.0.1:{httpd.server_address[1]}",
+                            json.dumps(_client_seal(KEY, payload)).encode())
+        assert status == 200
+        assert _client_open(KEY, env, payload["rid"]) == {"ok": False, "error": "too_large"}
     finally:
         httpd.shutdown()
         httpd.server_close()
