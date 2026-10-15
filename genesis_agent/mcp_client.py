@@ -138,7 +138,8 @@ class Server:
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
 
-    def start(self, forbidden: list[Path] | None = None) -> None:
+    def start(self, forbidden: list[Path] | None = None, timeout: float | None = None) -> None:
+        """`timeout` — по-къс срок за целия старт (`genesis doctor`: 10 s, не 20)."""
         env = _server_env(self.env)
         exe = _resolve_command(self.command, env, forbidden or [])
         # Сървър от ~/.genesis/mcp.json тръгва от празна папка, не от проекта
@@ -162,7 +163,7 @@ class Server:
         # Целият старт (initialize + tools/list) — в един срок: сървър, който
         # праща известия всяка секунда, иначе никога не изтичаше и чатът не
         # тръгваше (одит 2026-10-08).
-        deadline = time.monotonic() + _START_TIMEOUT
+        deadline = time.monotonic() + (_START_TIMEOUT if timeout is None else timeout)
         self.request("initialize", {
             "protocolVersion": PROTOCOL_VERSION, "capabilities": {},
             "clientInfo": {"name": "genesis", "version": _version()}}, deadline=deadline)
@@ -386,8 +387,8 @@ class HttpServer(Server):
     def alive(self) -> bool:
         return self._ready and not self.error
 
-    def start(self, forbidden: list[Path] | None = None) -> None:
-        deadline = time.monotonic() + _START_TIMEOUT
+    def start(self, forbidden: list[Path] | None = None, timeout: float | None = None) -> None:
+        deadline = time.monotonic() + (_START_TIMEOUT if timeout is None else timeout)
         self.request("initialize", {
             "protocolVersion": PROTOCOL_VERSION, "capabilities": {},
             "clientInfo": {"name": "genesis", "version": _version()}}, deadline=deadline)

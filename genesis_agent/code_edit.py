@@ -35,6 +35,7 @@ import ast
 import codecs
 import difflib
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -54,8 +55,9 @@ _MAX_HINTS = 5
 _BOMS = ((b"\x00\x00\xfe\xff", "utf-32-be"), (b"\xff\xfe\x00\x00", "utf-32-le"),
          (b"\xfe\xff", "utf-16-be"), (b"\xff\xfe", "utf-16-le"))
 # При utf-8 и cp1251 непознатите байтове стават сурогати U+DC80–U+DCFF и при
-# запис се връщат същите байтове (cp1251 има дупка на 0x98).
-_ESCAPED = ("utf-8", "cp1251")
+# запис се връщат същите байтове (cp1251 има дупка на 0x98). cp1252 се избира
+# само без дупките си, но и там записът е байт по байт.
+_ESCAPED = ("utf-8", "cp1251", "cp1252")
 _RAW_BYTE = re.compile("[\udc80-\udcff]")
 _NON_ASCII = bytes(range(0x80))
 _CYRILLIC_WORD = re.compile(rb"[\xc0-\xff]{3,}")
@@ -82,6 +84,99 @@ def _looks_cp1251(raw: bytes) -> bool:
     return in_words / len(upper) >= 0.5
 
 
+# ── cp1252 (Latin-1 плюс €, кавички и тирета) ─────────────────────────────
+# Ревю 2026-10-15: „Café crème“ в cp1252 се виждаше като „Caf� cr�me“; ред с
+# ударение не се редактираше (anchor-ът от READ_FILE носи U+FFFD, файлът —
+# байта), нова „é“ влизаше като UTF-8 до latin-1 байтовете, READ→WRITE се
+# отказваше. Mojibake идва от ГРЕШНО разпознаване, не от cp1252: UTF-8 с един
+# чужд байт, прочетен като cp1252, дава „CafÃ©“, cp1251 — „Çäðàâåé“, cp1250 —
+# „Pøíliš“; моделът копира това, а UTF-8 резервата на WRITE_FILE (знак извън
+# cp1252) го заковава на диска. Затова cp1252 се избира само при ясни
+# доказателства, иначе остава старото (UTF-8 + сурови байтове, U+FFFD).
+_UTF8_SEQ = re.compile(rb"[\xc2-\xdf][\x80-\xbf]|[\xe0-\xef][\x80-\xbf]{2}|[\xf0-\xf4][\x80-\xbf]{3}")
+# „Ã©“, „Â«“, „â€™“: UTF-8 за U+0080–U+FFFF. В cp1252 текст „Ã“/„Â“ пред
+# пунктуация или малка буква с ударение пред два такива знака почти няма.
+_UTF8_TELL = re.compile(rb"[\xc2\xc3][\x80-\xbf]|[\xe0-\xef][\x80-\xbf]{2}|[\xf0-\xf4][\x80-\xbf]{3}")
+# Дума: латински букви и не-ASCII знаци (цифри, ASCII пунктуация и интервали делят).
+_WORD = re.compile(r"[^\s!-@\[-`{-~]+")
+_OPENERS = "“‘„‚«‹¿¡"
+_CLOSERS = "”’»›…™®©°²³¹ªº‰†‡"
+_INNER = "’‘·–—\xad´"   # „l’été“, „col·lecció“, „A–B“
+# cp1250 (чешки, полски, унгарски, румънски, хърватски), прочетен като
+# cp1252, дава букви, които никой западен език не смесва: ř→ø с ě→ì/ů→ù/č→è,
+# č→è/ě→ì/ň→ò/ů→ù с á (италиански и каталунски нямат „á“), ő→õ с ö/ü/ű→û,
+# ă→ã с ţ→þ, č→è с ć→æ/đ→ð, ń→ñ с ę→ê/ś→œ/ć→æ. Полските ą→¹, ł→³, ż→¿
+# вътре в дума и румънското ş→º пред буква — също.
+_CP1250_PAIRS = (("ø", "ìùèòïšžý"), ("ìùèò", "šžý"), ("èìòù", "á"), ("õ", "öüû"),
+                 ("ã", "þ"), ("è", "æð"), ("ñ", "êœæ"), ("ð", "èšž"))
+_CP1250_WORD = re.compile(r"[ºª][^\W\d_]")
+_SAMPLE_WORDS = 2000
+
+
+def _accented_words(text: str) -> Iterator[str]:
+    """Думите с не-ASCII буква, без кавичките около тях — първите
+    _SAMPLE_WORDS: латински файл от 2 MB иначе струваше 0.6 s (мерено
+    2026-10-15), а толкова думи решават еднакво."""
+    n = 0
+    for line in text.split("\n"):
+        if line.isascii():
+            continue
+        for m in _WORD.finditer(line):
+            core = m.group().lstrip(_OPENERS).rstrip(_CLOSERS)
+            if any(not c.isascii() and c.isalpha() for c in core):
+                yield core
+                n += 1
+                if n >= _SAMPLE_WORDS:
+                    return
+
+
+def _looks_cp1252(raw: bytes) -> bool:
+    """Западноевропейски текст в cp1252 — само ако е ясно (иначе False).
+
+    Кирилицата в cp1251 и буквите с ударение в cp1252 са едни и същи байтове
+    0xC0–0xFF; различава ги мястото им. Ударената латинска буква стои в дума
+    с ASCII букви („Café“, „Müller“, „São“), кирилската дума е цяла от високи
+    байтове („Да“ = „Äà“). Една буква сама („é“ = „и“, „à“ = „а“) не решава
+    нищо; знак без буква („©“, „€“, „—“) — също.
+
+    Мерено 2026-10-15 (думи и абзаци на 13 западни езика, 7 централно-
+    европейски, български, руски, украински, сръбски; всяка проба и с CRLF
+    минава decode→encode байт по байт): cp1251 — 0 от 29 като cp1252;
+    cp1252 — 52 от 65 разпознати, останалите 13 (една буква сама, само
+    знаци, Fuß в кавички — „ß“ и затварящата кавичка са валиден UTF-8)
+    остават U+FFFD; UTF-8 с
+    чужд байт — 0 от 7 като cp1252; cp1250 — 17 от 27 остават U+FFFD, 3 се
+    четат вярно (общите букви), 7 кратки с една-единствена различна буква се
+    виждат с двойничка („řeka“ → „øeka“, „őszi“ → „õszi“).
+    """
+    if b"\x00" in raw:
+        return False
+    high = len(raw.translate(None, _NON_ASCII))
+    if not high or _UTF8_TELL.search(raw):
+        return False
+    # Повечето високи байтове са валиден UTF-8: това е UTF-8 с чужд байт.
+    if sum(len(m) for m in _UTF8_SEQ.findall(raw)) * 2 >= high:
+        return False
+    try:
+        text = raw.decode("cp1252")   # 0x81, 0x8D, 0x8F, 0x90, 0x9D: не е cp1252
+    except UnicodeDecodeError:
+        return False
+    latin = cyrillic = 0
+    letters: set[str] = set()
+    for core in _accented_words(text):
+        accents = [c for c in core if not c.isascii()]
+        if any(not c.isalpha() and c not in _INNER for c in accents) or _CP1250_WORD.search(core):
+            return False
+        if any(c.isascii() and c.isalpha() for c in core):
+            latin += 1
+            letters.update(c.lower() for c in accents if c.isalpha())
+        elif len(accents) >= 2:
+            cyrillic += 1
+    if any(letters & set(a) and letters & set(b) for a, b in _CP1250_PAIRS):
+        return False
+    return latin >= 1 and cyrillic * 4 <= latin
+
+
 def decode_text(raw: bytes, *, partial: bool = False) -> tuple[str, str]:
     """(текст, кодиране) — `encode_text(текст, кодиране) == raw` винаги.
 
@@ -101,6 +196,9 @@ def decode_text(raw: bytes, *, partial: bool = False) -> tuple[str, str]:
         pass
     if _looks_cp1251(raw):
         return raw.decode("cp1251", "surrogateescape"), "cp1251"
+    # След cp1251: българският файл си остава какъвто беше преди cp1252.
+    if _looks_cp1252(raw):
+        return raw.decode("cp1252", "surrogateescape"), "cp1252"
     return raw.decode("utf-8", "surrogateescape"), "utf-8"
 
 

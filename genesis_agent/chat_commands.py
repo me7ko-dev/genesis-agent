@@ -1,8 +1,8 @@
 """
 genesis_agent.chat_commands — the chat commands that steer the agent the way
-Claude Code's do: /init, /memory, /plan, /undo, /compact, /hooks, /commands,
-/bg, /context, /review, /permissions, and the operator's own commands from
-.genesis/commands/*.md.
+Claude Code's do: /init, /memory, /plan, /undo, /rewind, /resume, /compact,
+/hooks, /commands, /bg, /context, /review, /doctor, /permissions, and the
+operator's own commands from .genesis/commands/*.md.
 
 Kept out of genesis_terminal_agent.main() (already a long if-chain) and free
 of rich/console: `out` prints, `ask` asks a yes/no question, so the same code
@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 BUILTIN = ("/init", "/memory", "/plan", "/undo", "/compact", "/hooks", "/commands", "/bg", "/mcp",
-           "/agents", "/todos", "/context", "/permissions")
+           "/agents", "/todos", "/context", "/resume", "/rewind", "/doctor", "/permissions")
 # Буква или цифра в която и да е азбука, после букви/цифри/_/-. Одит
 # 2026-10-11: правилото искаше ASCII първи знак, а /commands показваше
 # `преглед.md` като /преглед — и /преглед отиваше при модела като обикновен
@@ -32,6 +32,17 @@ _YES = ("", "да", "д", "d", "da", "y", "yes")
 class Result:
     prompt: str | None = None      # run this as a turn for the model
     messages: Any = None           # the history, replaced (/compact)
+
+
+@dataclass
+class Conversations:
+    """What /resume and /rewind need from the front end: where the saved
+    conversations are and how its session file works. Without it (None) the
+    two commands say they are not available here."""
+    history_dir: Path
+    new_file: Callable[[], None]               # the next save goes to a new session file
+    save: Callable[[Any], None] | None = None  # write the history to the session file now
+    current: Callable[[], Path | None] = lambda: None   # the file of THIS conversation
 
 
 def _home() -> Path:
@@ -117,12 +128,16 @@ def _split(text: str) -> tuple[str, str]:
 def handle(text: str, *, messages: Any, workspace: Path,
            out: Callable[[str], None], ask: Callable[[str], str],
            compact: Callable[[Any], Any] | None = None,
-           context: Callable[[], dict] | None = None) -> Result | None:
+           context: Callable[[], dict] | None = None,
+           conversations: Conversations | None = None,
+           choose: Callable[[str], str] | None = None) -> Result | None:
     """None = not one of these commands (the caller goes on as before).
 
     `context` gives /context what only the caller knows: {"tools": the schemas
     of this turn, "window": the context window, "last": tokens of the last
-    request as the provider counted them}."""
+    request as the provider counted them}. `choose` asks for a number (the
+    terminal); without it (the phone: `ask` is a yes/no card) /resume and
+    /rewind list and the number comes as an argument: `/rewind 3`."""
     stripped = text.strip()
     if not stripped.startswith("/"):
         return None
@@ -192,6 +207,16 @@ def handle(text: str, *, messages: Any, workspace: Path,
                 getattr(messages, "maxlen", None))
         return Result(messages=messages)
 
+    if cmd == "/resume":
+        from genesis_agent import resume
+        return resume.resume(rest, messages=messages, workspace=workspace, out=out,
+                             choose=choose, conversations=conversations)
+
+    if cmd == "/rewind":
+        from genesis_agent import resume
+        return resume.rewind(rest, messages=messages, out=out, ask=ask, choose=choose,
+                             conversations=conversations)
+
     if cmd == "/compact":
         if compact is None or messages is None:
             return Result()
@@ -246,6 +271,14 @@ def handle(text: str, *, messages: Any, workspace: Path,
         prompt, note = review.build(workspace, rest)
         out(note)
         return Result(prompt=prompt)
+
+    if cmd == "/doctor":
+        # Същото като `genesis doctor`; без мрежа, освен с --models (2026-10-15).
+        from genesis_agent import doctor
+        online = any(w in ("--models", "models", "модели") for w in rest.lower().split())
+        out("Проверявам…" + (" (и моделите — по една заявка)" if online else ""))
+        out(doctor.format_report(doctor.run_checks(workspace, online=online)))
+        return Result()
 
     if cmd == "/context":
         from genesis_agent import context_usage

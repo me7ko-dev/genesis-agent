@@ -374,3 +374,34 @@ test('the computer name from the server is cleaned before it is stored', () => {
 function range(n: number): number[] {
   return Array.from({ length: n }, (_, i) => i);
 }
+
+// /resume и /rewind (2026-10-15): телефонът виждаше само бележките — сега
+// сървърът праща "cleared" и репликите, както при /history, и чатът е новата история.
+test('/resume and /rewind redraw the conversation on the phone', async () => {
+  const { info, stop } = await startServer();
+  try {
+    const client = new GenesisClient(parsePairingUrl(info.url)!, random);
+    const shown = async () => toChatItems(mergeEvents([], (await client.events(0, 0)).events, true))
+      .map((i) => `${i.kind}:${'text' in i ? i.text : ''}`);
+
+    assert.equal((await client.send('/resume 1')).ok, true);
+    await waitFor(client, (e) => e.type === 'busy' && e.busy === false);
+    const loaded = await shown();
+    assert.deepEqual(loaded.slice(0, 2), ['user:стар въпрос', 'assistant:стар отговор']);
+    assert.equal(loaded.length, 3);
+    assert.match(loaded[2], /^note:✓ Зареден/);
+
+    const before = (await client.events(0, 0)).last;
+    assert.equal((await client.send('/rewind 1')).ok, true);
+    const { hit: card, after } = await waitFor(client, (e) => e.type === 'confirm', before);
+    assert.match(card.operation ?? '', /стар въпрос/);
+    assert.deepEqual(await client.confirm(card.id!, true), { ok: true });
+    await waitFor(client, (e) => e.type === 'busy' && e.busy === false, after);
+    const cut = await shown();
+    assert.equal(cut.some((t) => t.startsWith('user:') || t.startsWith('assistant:')), false);
+    assert.match(cut[0], /^note:↶ Върнато/);
+    assert.match(cut[1], /^note:Съобщението беше:\nстар въпрос/);
+  } finally {
+    stop();
+  }
+});

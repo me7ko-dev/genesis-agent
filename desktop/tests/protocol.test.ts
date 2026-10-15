@@ -84,6 +84,36 @@ test('a whole conversation with the real server', async () => {
   }
 });
 
+// /resume and /rewind (2026-10-15): the window showed only the notes. The server
+// now sends "cleared" and the messages, as /history does, so the chat is the new history.
+test('/resume and /rewind redraw the conversation in the window', async () => {
+  const { base, stop } = await startServer();
+  try {
+    const client = new GenesisClient(base, KEY);
+    const shown = async () => {
+      const reply = await client.call<{ events: GenesisEvent[] }>('events', { after: 0, wait: 0 });
+      return toChatItems(mergeEvents([], reply.events, true)).map((i) => `${i.kind}:${'text' in i ? i.text : ''}`);
+    };
+
+    assert.equal((await client.call<{ ok: boolean }>('send', { text: '/resume 1' })).ok, true);
+    const { after } = await waitFor(client, (e) => e.type === 'busy' && e.busy === false);
+    const loaded = await shown();
+    assert.deepEqual(loaded.slice(0, 2), ['user:стар въпрос', 'assistant:стар отговор']);
+    assert.equal(loaded.length, 3);
+    assert.match(loaded[2], /^note:✓ Зареден/);
+
+    assert.equal((await client.call<{ ok: boolean }>('send', { text: '/rewind 1' })).ok, true);
+    const { hit: card, after: next } = await waitFor(client, (e) => e.type === 'confirm', after);
+    assert.deepEqual(await client.call('confirm', { id: card.id, allow: true }), { ok: true });
+    await waitFor(client, (e) => e.type === 'busy' && e.busy === false, next);
+    const cut = await shown();
+    assert.equal(cut.some((t) => t.startsWith('user:') || t.startsWith('assistant:')), false);
+    assert.match(cut[0], /^note:↶ Върнато/);
+  } finally {
+    stop();
+  }
+});
+
 test('a wrong key is refused, not misread', async () => {
   const { base, stop } = await startServer();
   try {

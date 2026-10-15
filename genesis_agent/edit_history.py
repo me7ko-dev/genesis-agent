@@ -10,18 +10,25 @@ checkpoints.py (git snapshots, 2026-10-09); outside the folder it is not.
 
 In memory only, for this chat: the size is bounded by what the turns write,
 and a file over _MAX_BYTES is not kept (its undo is refused, not faked).
+
+`/rewind` (2026-10-15) is the same undo, turn after turn, back to the
+operator message the turn answered (`mark`): no second mechanism.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from genesis_agent.checkpoints import Survey
 
 _MAX_BYTES = 2_000_000
 _MAX_TURNS = 30
+# Съобщенията, на които е отговорено в този процес (и без промени по файлове):
+# /rewind казва честно, ако съобщението е от предишно пускане (/resume, -c).
+_MAX_KNOWN = 300
 
 
 @dataclass
@@ -65,6 +72,9 @@ class _Turn:
     # Команда, чиято снимка след нея не стана: ходът пак е „ход с промени“,
     # иначе /undo тихо връщаше ПРЕДИШНИЯ ход (одит 2026-10-09).
     lost: str = ""
+    # Съобщението на оператора, на което ходът отговаря (същият dict като в
+    # историята — по него /rewind намира ходовете след точката).
+    marker: Any = None
 
     def changed(self) -> bool:
         return bool(self.before or self.too_big or self.commands or self.lost)
@@ -73,6 +83,10 @@ class _Turn:
 _turns: list[_Turn] = []
 _current: _Turn | None = None
 _last_note = ""     # защо командите на последния ход с команди не са проследени
+_known: list[Any] = []
+# Ходове с промени, записани от началото на процеса. Не len(_turns): той спира
+# на _MAX_TURNS, а `genesis -p` пита „записа ли ТОЗИ ход нещо“ (2026-10-15).
+_recorded = 0
 
 
 def begin_turn(label: str) -> None:
@@ -82,7 +96,7 @@ def begin_turn(label: str) -> None:
 
 
 def end_turn() -> None:
-    global _current, _last_note
+    global _current, _last_note, _recorded
     turn = _current
     if turn is not None and turn.window is not None:
         turn.depth = 1
@@ -94,7 +108,32 @@ def end_turn() -> None:
         _last_note = turn.note
     if turn.changed():
         _turns.append(turn)
+        _recorded += 1
         del _turns[:-_MAX_TURNS]
+
+
+def recorded() -> int:
+    """Колко хода с промени са записани досега (расте, не се връща назад)."""
+    return _recorded
+
+
+def last_changes() -> dict[str, list[str]]:
+    """Файловете на последния записан ход: създадени, променени, изтрити —
+    от WRITE_FILE/EDIT_FILE и от командите в папката на проекта. За отчета на
+    `genesis -p --output-format json`; само чете."""
+    out: dict[str, list[str]] = {"created": [], "edited": [], "deleted": []}
+    if not _turns:
+        return out
+    turn = _turns[-1]
+    seen: list[tuple[Path, bool]] = [(p, data is not None) for p, data in turn.before.items()]
+    seen += [(p, True) for p in turn.too_big]
+    seen += [(p, cmd.existed) for p, cmd in turn.commands.items()]
+    for path, existed in seen:
+        now = path.exists()
+        kind = ("edited" if now else "deleted") if existed else ("created" if now else "")
+        if kind and str(path) not in out[kind]:
+            out[kind].append(str(path))
+    return out
 
 
 def before_command(workspace: Path, *, at_exec: bool = False) -> None:
@@ -335,29 +374,35 @@ def undo() -> tuple[str, list[str]]:
     if turn is None:
         return "", []
     _turns.pop()
-    done = []
+    return turn.label, [line for _path, line in _undo_turn(turn)]
+
+
+def _undo_turn(turn: _Turn) -> list[tuple[Path | None, str]]:
+    """Връща един ход; всеки ред — с файла си, за да може /rewind да сглоби
+    няколко хода в един отчет по файл."""
+    done: list[tuple[Path | None, str]] = []
     for path, data in turn.before.items():
         try:
             if _led_out(turn, path):
-                done.append(f"⚠ {path} (води извън проекта — оставен)")
+                done.append((path, f"⚠ {path} (води извън проекта — оставен)"))
             elif _moved_since(turn, path):
-                done.append(f"⚠ {path} (променен след хода — оставен както е)")
+                done.append((path, f"⚠ {path} (променен след хода — оставен както е)"))
             elif data is None:
                 if path.is_file():
                     path.unlink()
-                    done.append(f"изтрит {path}")
+                    done.append((path, f"изтрит {path}"))
             elif not path.exists() or path.read_bytes() != data:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(data)
-                done.append(f"върнат {path}")
+                done.append((path, f"върнат {path}"))
         except OSError as e:
-            done.append(f"❌ {path}: {e}")
+            done.append((path, f"❌ {path}: {e}"))
     if turn.commands and turn.workspace is not None:
         done += _undo_commands(turn, turn.workspace)
-    done += [f"❌ не е пазен (твърде голям): {p}" for p in turn.too_big]
+    done += [(p, f"❌ не е пазен (твърде голям): {p}") for p in turn.too_big]
     if turn.lost:
-        done.append(f"❌ {turn.lost}")
-    return turn.label, done
+        done.append((None, f"❌ {turn.lost}"))
+    return done
 
 
 def _led_out(turn: _Turn, path: Path) -> bool:
@@ -374,25 +419,25 @@ def _led_out(turn: _Turn, path: Path) -> bool:
     return not checkpoints.inside(ws, path)
 
 
-def _undo_commands(turn: _Turn, ws: Path) -> list[str]:
+def _undo_commands(turn: _Turn, ws: Path) -> list[tuple[Path | None, str]]:
     from genesis_agent import checkpoints
-    done = []
+    done: list[tuple[Path | None, str]] = []
     for path, cmd in turn.commands.items():
         try:
             if not checkpoints.inside(ws, path):
-                done.append(f"⚠ {path} (води извън проекта — оставен)")
+                done.append((path, f"⚠ {path} (води извън проекта — оставен)"))
             elif _moved_since(turn, path):
-                done.append(f"⚠ {path} (променен след хода — оставен както е)")
+                done.append((path, f"⚠ {path} (променен след хода — оставен както е)"))
             elif not cmd.existed:
                 if path.is_file() and not path.is_symlink():
                     path.unlink()
-                    done.append(f"изтрит {path}")
+                    done.append((path, f"изтрит {path}"))
             elif cmd.old == checkpoints.ZERO or cmd.old_mode == "120000":
                 # Съществувал е, но снимката не го е видяла (.gitignore, нечетим):
                 # нищо за връщане и в никакъв случай — триене (одит 2026-10-09).
-                done.append(f"⚠ {path} (не е бил в снимката — оставен)")
+                done.append((path, f"⚠ {path} (не е бил в снимката — оставен)"))
             elif path.is_symlink() or path.is_dir():
-                done.append(f"⚠ {path} (сега е папка или връзка — оставен)")
+                done.append((path, f"⚠ {path} (сега е папка или връзка — оставен)"))
             else:
                 data = checkpoints.blob(ws, cmd.old)
                 same = path.is_file() and path.read_bytes() == data
@@ -401,9 +446,9 @@ def _undo_commands(turn: _Turn, ws: Path) -> list[str]:
                     path.write_bytes(data)
                 moded = _restore_mode(path, cmd.old_mode)
                 if not same or moded:
-                    done.append(f"върнат {path}")
+                    done.append((path, f"върнат {path}"))
         except Exception as e:
-            done.append(f"❌ {path}: {e}")
+            done.append((path, f"❌ {path}: {e}"))
     return done
 
 
@@ -421,8 +466,125 @@ def _restore_mode(path: Path, mode: str) -> bool:
     return True
 
 
+# ── /rewind (2026-10-15) ─────────────────────────────────────────────────────
+# Назад до избрано съобщение на оператора = /undo на всеки ход от него насам,
+# най-новият пръв. Проверката „пипнат след хода?“ на /undo важи за всеки ход:
+# каквото операторът е променил междувременно, остава и се казва.
+
+def mark(message: Any) -> None:
+    """Съобщението на оператора, на което текущият ход отговаря. Само първото:
+    подканата на hook Stop в същия ход не е нова точка за връщане."""
+    turn = _current
+    if turn is None or turn.marker is not None:
+        return
+    turn.marker = message
+    _known.append(message)
+    del _known[:-_MAX_KNOWN]
+
+
+def tracked(message: Any) -> bool:
+    """Отговорено ли е на това съобщение в този процес — тогава промените по
+    файлове след него са известни. Не — съобщението е от /resume или -c."""
+    return any(m is message for m in _known)
+
+
+def turns_since(cut: Sequence[Any]) -> int:
+    """Колко от последните ходове /rewind връща: от първия, който отговаря на
+    някое от `cut` (махнатите съобщения), до най-новия. Ход от друг разговор
+    (преди /clear или /resume) не е след точката и не се пипа."""
+    _last()
+    for i, turn in enumerate(_turns):
+        if turn.marker is not None and any(turn.marker is m for m in cut):
+            return len(_turns) - i
+    return 0
+
+
+def _id_now(path: Path, expected: str | None) -> str | None:
+    if expected is not None and expected.startswith("big:"):
+        return _big_id(path)
+    from genesis_agent import checkpoints
+    try:
+        return checkpoints.current_id(path)
+    except OSError:
+        return None
+
+
+def rewind_plan(count: int) -> list[str]:
+    """Какво rewind(count) ще направи — по ред на файл, крайното състояние, не
+    всеки ход поотделно. Пресмята същото като поредицата /undo, без да пише."""
+    from genesis_agent import checkpoints
+    _last()
+    turns = _turns[len(_turns) - count:] if count > 0 else []
+    start: dict[Path, str | None] = {}
+    state: dict[Path, str | None] = {}
+    left: dict[Path, str] = {}
+    notes: list[str] = []
+    for turn in reversed(turns):
+        targets: dict[Path, str | None] = {
+            path: None if data is None else checkpoints.blob_id(data)
+            for path, data in turn.before.items()}
+        for path, cmd in turn.commands.items():
+            if path in targets:
+                continue
+            if not cmd.existed:
+                targets[path] = None
+            elif cmd.old == checkpoints.ZERO or cmd.old_mode == "120000":
+                notes.append(f"⚠ {path} (не е бил в снимката — оставен)")
+            else:
+                targets[path] = cmd.old
+        notes += [f"не може: {p} (над {_MAX_BYTES // 1_000_000} MB)" for p in turn.too_big]
+        if turn.lost:
+            notes.append(f"не може: {turn.lost}")
+        for path, before_id in targets.items():
+            expected = turn.after.get(path)
+            if path not in state:
+                start[path] = state[path] = _id_now(path, expected)
+            if path in turn.after and state[path] != expected:
+                # Пипнат отвън след този ход: /undo го оставя — и по-старите
+                # ходове вече не съвпадат с него, оставят го и те.
+                left.setdefault(path, turn.label)
+                continue
+            state[path] = before_id
+    lines = []
+    for path, was in start.items():
+        if path in left and state[path] == was:
+            lines.append(f"⚠ {path} — променен извън Genesis след „{left[path]}“; "
+                         "НЕ се презаписва")
+        elif path in left:
+            lines.append(f"⚠ {path} — променян извън Genesis между ходовете; връщам го само "
+                         "до версията отвън")
+        elif state[path] == was:
+            continue
+        elif state[path] is None:
+            lines.append(f"изтрий {path} (създаден от Genesis след тази точка)")
+        elif was is None:
+            lines.append(f"възстанови {path} (изтрит след тази точка)")
+        else:
+            lines.append(f"върни {path}")
+    return lines + list(dict.fromkeys(notes))
+
+
+def rewind(count: int) -> list[str]:
+    """Връща последните `count` хода, най-новия пръв. По ред на файл: какво
+    стана накрая; предупреждение или грешка по пътя — тя, не тихо „върнат“."""
+    by_path: dict[Path | None, list[str]] = {}
+    for _ in range(count):
+        turn = _last()
+        if turn is None:
+            break
+        _turns.pop()
+        for path, line in _undo_turn(turn):
+            by_path.setdefault(path, []).append(line)
+    done: list[str] = []
+    for lines in by_path.values():
+        warned = [ln for ln in lines if ln.startswith(("⚠", "❌"))]
+        done += list(dict.fromkeys(warned)) if warned else lines[-1:]
+    return done
+
+
 def clear() -> None:
     global _current, _last_note
     _turns.clear()
+    _known.clear()
     _current = None
     _last_note = ""

@@ -183,6 +183,33 @@ def _new_session() -> None:
         _permissions.clear_session()
     except Exception:
         pass
+
+
+def _save_session(messages) -> None:
+    """Историята — във файла на текущия разговор, и папката го помни (за
+    `genesis -c` и /resume). Изнесено от run_turn (2026-10-15): /rewind записва
+    отрязания разговор веднага — иначе изход без нов ход оставяше на диска
+    разговора отпреди връщането и `genesis -c` го възкресяваше."""
+    if not PERSIST_HISTORY:
+        return
+    session_file = _session_file()
+    with open(session_file, "w", encoding="utf-8", errors="replace") as f:
+        json.dump(list(messages), f, ensure_ascii=False, indent=None, separators=(',', ':'))
+    try:
+        from genesis_agent import session_index
+        session_index.record(HISTORY_DIR, Path(WORKSPACE), session_file)
+    except Exception:
+        pass
+
+
+def _conversations():
+    """За /resume и /rewind (chat_commands): HISTORY_DIR се чете при всяко
+    извикване — тестовете и config.yaml го сменят след внасянето."""
+    from genesis_agent.chat_commands import Conversations
+    return Conversations(history_dir=HISTORY_DIR, new_file=_new_session, save=_save_session,
+                         current=lambda: _SESSION_FILE)
+
+
 total_input_tokens = 0
 total_output_tokens = 0
 # Размерът на ПОСЛЕДНАТА заявка (prompt + отговор) — това е заетият контекст.
@@ -1622,7 +1649,11 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
     # системния промпт и самата заявка (виж agent_core.bounded_history).
     limit = getattr(messages, "maxlen", None)
     messages = deque(messages)
-    messages.append({"role": "user", "content": content})
+    operator_msg = {"role": "user", "content": content}
+    messages.append(operator_msg)
+    # /rewind намира ходовете след точката по самото съобщение (2026-10-15).
+    from genesis_agent import edit_history
+    edit_history.mark(operator_msg)
     _remember("user", user_input)
 
     # Итеративен tool цикъл (design note, 2026-07-25): преди спираше след 1
@@ -1764,6 +1795,13 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                     # СЕГА и казваме защо, вместо да догорим до тавана.
                     ui.spinning(_spinning)
                     break
+                if ui.cancelled():
+                    # Стоп по време на инструмент (2026-10-15): моделът се питаше
+                    # още веднъж и чак отговорът му спираше хода — с истински
+                    # модел секунди и платено обръщение след Стоп. Резултатите
+                    # вече са в историята, двойките извикване/резултат са цели.
+                    ui.warn("Спряно от оператора.")
+                    break
                 if _repeat_note:
                     messages.append({"role": "system", "content": _repeat_note})
                 round_i += 1
@@ -1898,6 +1936,10 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                 messages.append(_last_results)
                 ui.spinning(_spinning)
                 break
+            if ui.cancelled():      # същото като при native пътя (2026-10-15)
+                messages.append(_last_results)
+                ui.warn("Спряно от оператора.")
+                break
             if _text_note:
                 messages.append({"role": "system", "content": _text_note})
             round_i += 1
@@ -1940,16 +1982,7 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
         except Exception:
             pass
 
-    # Save session history — convert deque to list for JSON serialization!
-    if PERSIST_HISTORY:
-        session_file = _session_file()
-        with open(session_file, "w", encoding="utf-8", errors="replace") as f:
-            json.dump(list(messages), f, ensure_ascii=False, indent=None, separators=(',', ':'))
-        try:
-            from genesis_agent import session_index
-            session_index.record(HISTORY_DIR, Path(WORKSPACE), session_file)
-        except Exception:
-            pass
+    _save_session(messages)
     from genesis_agent.agent_core import bounded_history
     if _failure is not None:
         # Грешката продължава нагоре (headless и телефонът я показват), но
@@ -2035,12 +2068,8 @@ def _continue_session(messages: "deque", system_prompt: str) -> "deque":
         console.print("[yellow]Няма предишен разговор в тази папка — започвам нов.[/]")
         return messages
     try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
         # Валиден JSON, но не списък от съобщения, сриваше старта (одит 2026-10-09).
-        if not isinstance(data, list) or not all(isinstance(m, dict) for m in data):
-            raise ValueError("не е списък от съобщения")
-        restored = _restore_session(data, system_prompt)
+        restored = _restore_session(session_index.read(path), system_prompt)
     except (OSError, ValueError, TypeError, AttributeError) as e:
         console.print(Text(f"⚠ {path.name} не се зарежда: {e} — започвам нов.", style="yellow"))
         return messages
@@ -2052,6 +2081,18 @@ def _continue_session(messages: "deque", system_prompt: str) -> "deque":
         console.print(Panel(Text(last[:600] + ("…" if len(last) > 600 else "")),
                             title="[dim]последният отговор[/]", border_style="dim"))
     return restored
+
+
+def _resume_at_start(messages: "deque", argv: list[str]) -> "deque":
+    """`genesis -r [номер]`: /resume още при старта (като `claude --resume`)."""
+    from genesis_agent import chat_commands
+    flag = next(i for i, a in enumerate(argv) if a in ("-r", "--resume"))
+    pick = argv[flag + 1] if flag + 1 < len(argv) and argv[flag + 1].isdigit() else ""
+    res = chat_commands.handle(
+        f"/resume {pick}".strip(), messages=messages, workspace=Path(WORKSPACE),
+        out=lambda text: console.print(text, markup=False, highlight=False),
+        ask=console.input, conversations=_conversations(), choose=console.input)
+    return res.messages if res is not None and res.messages is not None else messages
 
 
 _NO_MODEL_HINT = ("⚠ Няма нито един API ключ (и локален Ollama) — съобщението НЕ е пратено "
@@ -2167,6 +2208,8 @@ def main():
     _agents.progress = lambda text: console.print(Text(text, style="dim"))
     if any(a in ("-c", "--continue") for a in sys.argv[1:]):
         messages = _continue_session(messages, SYSTEM_PROMPT)
+    elif any(a in ("-r", "--resume") for a in sys.argv[1:]):
+        messages = _resume_at_start(messages, sys.argv[1:])
     # Изходът на `!команда` чака следващото съобщение — моделът го вижда с него.
     pending_shell = []
     from genesis_agent.chat_input import read_message
@@ -2409,11 +2452,14 @@ def main():
                 help_table.add_row("/memory", "Кои инструкции за проекта важат (GENESIS.md/AGENTS.md/CLAUDE.md)")
                 help_table.add_row("/plan [задача]", "Режим план: само чете и планира; /plan пак = изпълни")
                 help_table.add_row("/undo", "Върни файловете от последния ход, който ги промени")
+                help_table.add_row("/rewind [номер]", "Назад до твое съобщение: реже разговора и връща файловете след него")
+                help_table.add_row("/resume [номер]", "По-ранен разговор от тази папка (genesis -r при старта)")
                 help_table.add_row("/compact", "Компресирай историята сега")
                 help_table.add_row("/review [клон]", "Прегледай промените за грешки (незаписаните или спрямо клона)")
                 help_table.add_row("/context", "С какво е пълен контекстът: промпт, инструменти, разговор")
                 help_table.add_row("/agents", "Собствените под-агенти (.genesis/agents/*.md)")
                 help_table.add_row("/todos", "Списъкът със задачи, който агентът води")
+                help_table.add_row("/doctor [--models]", "Работи ли всичко: git, Python, ruff/pytest, ключове, MCP, Chromium, claude")
                 help_table.add_row("!команда", "Пусни команда сам (без модела); изходът отива при модела със следващото съобщение")
                 help_table.add_row("@път", "Прикачи файл или списък на папка към съобщението")
                 help_table.add_row("/hooks [trust]", "Твоите команди около работата (hooks.json)")
@@ -2533,7 +2579,8 @@ def main():
                 # Без Rich разметка: `[a;touch PWNED;:]` в hooks.json изчезваше от
                 # прегледа преди /hooks trust (одит 2026-10-08).
                 out=lambda text: console.print(text, markup=False, highlight=False),
-                ask=console.input, compact=_force_compact, context=context_info)
+                ask=console.input, compact=_force_compact, context=context_info,
+                conversations=_conversations(), choose=console.input)
             if _res is not None:
                 if _res.messages is not None:
                     messages = _res.messages

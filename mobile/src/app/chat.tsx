@@ -106,9 +106,12 @@ function Chat({ pairing }: { pairing: Pairing }) {
               <MenuItem label="Нов разговор" onPress={() => { setMenuOpen(false); g.clear(); }} />
               <MenuItem label={g.plan ? 'Изпълни плана (/plan)' : 'Режим план (/plan)'} onPress={() => command('/plan')} />
               <MenuItem label="Върни последните промени (/undo)" onPress={() => command('/undo')} />
+              <MenuItem label="Назад до съобщение (/rewind)" onPress={() => command('/rewind')} />
+              <MenuItem label="По-ранни разговори (/resume)" onPress={() => command('/resume')} />
               <MenuItem label="Задачи (/todos)" onPress={() => command('/todos')} />
               <MenuItem label="Под-агенти (/agents)" onPress={() => command('/agents')} />
               <MenuItem label="Контекстът (/context)" onPress={() => command('/context')} />
+              <MenuItem label="Проверка на компютъра (/doctor)" onPress={() => command('/doctor')} />
               <MenuItem label="Команди (/help)" onPress={() => command('/help')} />
             </>
           )}

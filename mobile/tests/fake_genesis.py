@@ -22,10 +22,23 @@ KEY = bytes(range(32))
 def main() -> None:
     session: rs.RemoteSession
     workspace = Path(tempfile.mkdtemp(prefix="genesis-fake-"))
+    # One saved conversation of this folder, for /resume (2026-10-15).
+    from genesis_agent import chat_commands, session_index
+    history = Path(tempfile.mkdtemp(prefix="genesis-fake-history-"))
+    saved = history / "session_20261015_120000.json"
+    saved.write_text(json.dumps([{"role": "system", "content": "s"},
+                                 {"role": "user", "content": "стар въпрос"},
+                                 {"role": "assistant", "content": "стар отговор"}],
+                                ensure_ascii=False), encoding="utf-8")
+    session_index.record(history, workspace, saved)
+    conversations = chat_commands.Conversations(history_dir=history, new_file=lambda: None)
+    state = {"messages": deque([{"role": "system", "content": "s"}], maxlen=200)}
 
     def runner(text: str, ui) -> None:
         # The chat's own commands (/plan …) the way `genesis serve` runs them.
-        _, prompt = rs.phone_command(text, ui, session, messages=deque(), workspace=workspace)
+        state["messages"], prompt = rs.phone_command(
+            text, ui, session, messages=state["messages"], workspace=workspace,
+            conversations=conversations)
         if prompt is None:
             return
         if text == "агент":

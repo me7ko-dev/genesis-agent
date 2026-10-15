@@ -4,7 +4,9 @@ genesis_agent.cli — the `genesis` command.
 
     genesis                 start the terminal chat (default)
     genesis -c              continue the last conversation in this workspace
-    genesis -p "..."        one turn without the chat, answer on stdout (--json, --plan)
+    genesis -r [N]          pick an earlier conversation in this workspace (/resume)
+    genesis -p "..."        one turn without the chat, answer on stdout (--output-format json, --plan)
+    genesis doctor          is everything around the agent in place (--models probes them)
     genesis setup           configure API keys
     genesis mission "..."   run one autonomous mission and print the result
     genesis fix PATH "..."  fix a bug in an existing project (tests + diff)
@@ -236,6 +238,10 @@ def main(argv: list[str] | None = None) -> int:
         from genesis_agent.headless import run as headless_run
         return headless_run(argv[1:])
 
+    if cmd == "doctor":
+        from genesis_agent.doctor import main as doctor_main
+        return doctor_main(argv[1:])
+
     if cmd == "setup":
         from genesis_agent.setup_wizard import run
         return run()
@@ -306,8 +312,8 @@ def main(argv: list[str] | None = None) -> int:
         from genesis_agent.remote_server import serve
         return serve(argv[1:])
 
-    if cmd in ("chat", "-c", "--continue"):
-        # -c стига до чата през sys.argv (runpy сменя само argv[0]).
+    if cmd in ("chat", "-c", "--continue", "-r", "--resume"):
+        # -c и -r стигат до чата през sys.argv (runpy сменя само argv[0]).
         return _chat()
 
     print(f"Непозната команда: {cmd}\n")
