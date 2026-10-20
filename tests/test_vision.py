@@ -166,6 +166,7 @@ _BAD_EXIF = bytes.fromhex(
     "000000320000000000d800020005000000030000004400000000000000010000000100000002000000010000000300000001")
 
 
+@pytest.mark.filterwarnings("ignore:Corrupt EXIF data")
 @pytest.mark.parametrize("fmt,mime", [("PNG", "image/png"), ("WEBP", "image/webp"), ("JPEG", "image/jpeg")])
 def test_broken_exif_is_a_picture_without_exif_not_a_crash(fmt, mime) -> None:
     Image = pytest.importorskip("PIL.Image")
