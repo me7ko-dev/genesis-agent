@@ -80,6 +80,21 @@ def test_a_dragged_absolute_path_is_attached_and_a_bare_name_is_not(ws, tmp_path
     assert images == [], "голо име в текста не е молба да се прати картинката"
 
 
+def test_a_dropped_path_survives_apostrophes_and_punctuation(ws, tmp_path_factory) -> None:
+    """2026-10-20: „Here's /x.png — what's wrong“ (два апострофа = „кавички“) и
+    „/x.png.“ / „(/x.png)“ не прикачваха нищо и не казваха защо."""
+    shot = tmp_path_factory.mktemp("desk") / "shot.png"
+    shot.write_bytes(png())
+    for text in (f"Here's {shot} — what's wrong with it?", f"{shot}.", f"{shot}, what is it?",
+                 f"виж ({shot})", f"it's broken: {shot}", f"виж '{shot}' тук"):
+        images: list[dict] = []
+        mentions.expand(text, ws, images)
+        assert [p["genesis"]["name"] for p in images] == ["shot.png"], text
+    images = []
+    mentions.expand("Here's 'shot.png' — what's wrong", ws, images)
+    assert images == [], "голо име в кавички пак не е молба"
+
+
 def test_a_path_inside_code_is_not_attached_but_plain_text_still_is(ws, tmp_path_factory) -> None:
     # Ревю на зрението (2026-10-15): път в ``` блок или в `код` се прикачваше.
     other = tmp_path_factory.mktemp("logs")

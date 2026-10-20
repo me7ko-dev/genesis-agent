@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import struct
 import zlib
@@ -158,6 +159,25 @@ def config(tmp_path, monkeypatch):
     return write
 
 
+# EXIF с орientация 6 и сгрешен GPS IFD (фъз 2026-10-20): Pillow хвърля TypeError
+# от exif_transpose при PNG/WebP и срутваше `genesis -p @img`, `/image`, `send`.
+_BAD_EXIF = bytes.fromhex(
+    "4d4d002a000000080003010f0002000000024d0000000112000300000001000600008825000400000001"
+    "000000320000000000d800020005000000030000004400000000000000010000000100000002000000010000000300000001")
+
+
+@pytest.mark.filterwarnings("ignore:Corrupt EXIF data")
+@pytest.mark.parametrize("fmt,mime", [("PNG", "image/png"), ("WEBP", "image/webp"), ("JPEG", "image/jpeg")])
+def test_broken_exif_is_a_picture_without_exif_not_a_crash(fmt, mime) -> None:
+    Image = pytest.importorskip("PIL.Image")
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 48), (10, 200, 10)).save(buf, format=fmt, exif=_BAD_EXIF)
+    part = vision.image_part(buf.getvalue(), mime, f"bad.{fmt.lower()}")
+    assert (part["genesis"]["width"], part["genesis"]["height"]) == (64, 48)
+    out = Image.open(io.BytesIO(_data_of(part)))
+    assert not out.getexif(), "прекодирана без съмнителните метаданни"
+
+
 def test_known_names_see_and_text_models_do_not(config) -> None:
     for provider, model in [("groq", "meta-llama/llama-4-scout-17b-16e-instruct"),
                             ("openrouter", "google/gemma-4-31b-it:free"),
@@ -169,6 +189,9 @@ def test_known_names_see_and_text_models_do_not(config) -> None:
         assert vision.can_see(provider, model), (provider, model)
     for provider, model in [("groq", "openai/gpt-oss-120b"), ("ollama_cloud", "gpt-oss:120b-cloud"),
                             ("nvidia", "nvidia/nemotron-3-ultra-550b-a55b"),
+                            # само текст въпреки името (2026-10-20)
+                            ("ollama_local", "gemma3:1b"), ("openrouter", "google/gemma-3-1b-it"),
+                            ("gemini", "gemini-embedding-001"),
                             ("deepseek", "deepseek-chat"), ("huggingface", "Qwen/Qwen2.5-72B-Instruct")]:
         assert not vision.can_see(provider, model), (provider, model)
 

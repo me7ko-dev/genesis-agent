@@ -120,11 +120,27 @@ def _outside_code(text: str) -> str:
     return "\n".join(out)
 
 
+def _looks_like_path(raw: str) -> bool:
+    return raw.startswith(("/", "~")) or raw.lower().startswith("file://") \
+        or re.match(r"^[A-Za-z]:[\\/]", raw) is not None
+
+
 def _dropped_paths(text: str) -> list[str]:
     from genesis_agent.vision import IMAGE_SUFFIXES
     found: list[str] = []
+    # Кавички само около път („'Screen Shot.png'“ от терминала); „Here's /x.png,
+    # what's wrong“ има два апострофа и гълташе пътя (2026-10-20) → тогава
+    # текстът между тях се чете дума по дума. Пунктуацията след пътя („/x.png.“,
+    # „(/x.png)“) пада като при @път.
+    queue: list[str] = []
     for m in _DROPPED.finditer(_outside_code(text)):
-        raw = m.group("sq") or m.group("dq") or (m.group("bare") or "").replace("\\ ", " ")
+        quoted = m.group("sq") or m.group("dq")
+        if quoted and not _looks_like_path(quoted):
+            queue.extend(t for t in quoted.split() if _looks_like_path(t.lstrip("(")))
+            continue
+        queue.append(quoted or (m.group("bare") or "").replace("\\ ", " "))
+    for raw in queue:
+        raw = raw.lstrip("(").rstrip(_TRAIL)
         if raw.startswith("@"):
             continue           # @път е работа на _mentions
         if raw.lower().startswith("file://"):

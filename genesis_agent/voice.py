@@ -42,9 +42,11 @@ from __future__ import annotations
 import contextlib
 import io
 import logging
+import math
 import os
 import queue
 import re
+import select
 import shutil
 import struct
 import subprocess
@@ -147,10 +149,13 @@ def _names(value: Any, default: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def _num(value: Any, default: float) -> float:
+    # `.inf`/`.nan` от YAML са float, но int() от тях е OverflowError/ValueError
+    # и сриваха settings() → speak() и `speak` от телефона (2026-10-20).
     try:
-        return float(value)
+        v = float(value)
     except (TypeError, ValueError):
         return default
+    return v if math.isfinite(v) else default
 
 
 def _section() -> dict:
@@ -193,6 +198,9 @@ def settings() -> Settings:
         in ("1", "true", "yes", "on", "да"),
     )
     s.mic_max_seconds = min(max(s.mic_max_seconds, 1.0), MAX_AUDIO_SECONDS)
+    # timeout_s ≤ 0 → requests хвърля ValueError преди мрежата и от телефона
+    # ставаше 401 „rejected“ + спирачката по IP (2026-10-20).
+    s.stt_timeout_s = max(1.0, s.stt_timeout_s)
     s.max_sentences = max(1, s.max_sentences)
     s.max_chars = max(80, s.max_chars)
     return s
@@ -219,9 +227,38 @@ def pcm_to_wav(pcm: bytes, rate: int = SAMPLE_RATE) -> bytes:
     return buf.getvalue()
 
 
+def _mdat_ranges(audio: bytes) -> list[tuple[int, int]]:
+    """[начало, край) на `mdat` кутиите на горно ниво — там е звукът, а в него
+    четирите байта „mvhd“ се срещат случайно (~0.2 % за 10 MB). Непознат
+    строеж → празен списък (търсенето остава както преди)."""
+    ranges: list[tuple[int, int]] = []
+    pos, n = 0, len(audio)
+    while pos + 8 <= n:
+        size = int.from_bytes(audio[pos:pos + 4], "big")
+        kind = audio[pos + 4:pos + 8]
+        header = 8
+        if size == 1:
+            if pos + 16 > n:
+                break
+            size, header = int.from_bytes(audio[pos + 8:pos + 16], "big"), 16
+        elif size == 0:
+            size = n - pos
+        if size < header:
+            break
+        if kind == b"mdat":
+            ranges.append((pos, pos + size))
+        pos += size
+    return ranges
+
+
 def _mp4_seconds(audio: bytes) -> float | None:
-    """Продължителността от `mvhd` на m4a/mp4 (телефонът записва така)."""
+    """Продължителността от `mvhd` на m4a/mp4 (телефонът записва така).
+    Телефонът пише `moov` СЛЕД `mdat`, затова „mvhd“ вътре в звука се прескача
+    (2026-10-20: случайно съвпадение даваше 1000 s и „твърде дълъг“ завинаги)."""
+    skip = _mdat_ranges(audio)
     at = audio.find(b"mvhd")
+    while at >= 0 and any(lo <= at < hi for lo, hi in skip):
+        at = audio.find(b"mvhd", at + 4)
     if at < 0:
         return None
     try:
@@ -320,7 +357,9 @@ def _stt_http(provider: str, url: str, keys: list[str], models: tuple[str, ...],
             try:
                 r = _post_audio(url, key, model=model, audio=audio, mime=mime, language=language,
                                 prompt=cfg.stt_prompt, verbose=verbose, timeout=cfg.stt_timeout_s)
-            except requests.RequestException as e:
+            except (requests.RequestException, ValueError) as e:
+                # ValueError: requests отказва timeout ≤ 0 или счупен адрес —
+                # грешка на настройката, не на мрежата, но пак VoiceError.
                 raise VoiceError(f"{provider}: няма връзка ({type(e).__name__})") from None
             if r.status_code == 200:
                 text, seconds = _parse_reply(r)
@@ -911,12 +950,24 @@ def _capture_arecord(max_seconds: float, stop: threading.Event, detector: Silenc
         raise VoiceError("няма arecord")
     proc = subprocess.Popen([exe, "-q", "-f", "S16_LE", "-r", str(SAMPLE_RATE), "-c", "1", "-t", "raw"],
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+    return _drain_recorder(proc, max_seconds, stop, detector)
+
+
+def _drain_recorder(proc: subprocess.Popen, max_seconds: float, stop: threading.Event,
+                    detector: SilenceDetector) -> bytes:
+    """PCM от stdout на записващия процес до Стоп, тавана или тишина; процесът
+    се убива винаги. read() без данни блокира завинаги: заседнал arecord (жив,
+    но мълчи) държеше микрофона до края на сесията, Enter/Esc и таванът не
+    стигаха до тук (2026-10-20) — select прави чакането прекъсваемо."""
     pcm = bytearray()
     deadline = time.monotonic() + max_seconds
     try:
         assert proc.stdout is not None
+        fd = proc.stdout.fileno()
         while not stop.is_set() and time.monotonic() < deadline:
-            chunk = proc.stdout.read(SAMPLE_RATE // 10 * 2)
+            if sys.platform != "win32" and not select.select([fd], [], [], 0.1)[0]:
+                continue
+            chunk = os.read(fd, SAMPLE_RATE // 10 * 2)   # каквото има, не чака цяло парче
             if not chunk:
                 break
             pcm += chunk

@@ -884,8 +884,11 @@ class RemoteServer:
         rid = self.replay.check(payload)
         # Голям плик е позволен само за аудиото и за `send` с картинки
         # (2026-10-15) — с ключа е, тоест грешка в заявката, не налучкване.
-        voice_op = payload.get("op") in _VOICE_OPS and self.stt is not None
-        if large and not voice_op and not (payload.get("op") == "send" and payload.get("images")):
+        op = payload.get("op")
+        # `op` списък/речник е нехешируем: `in frozenset` → TypeError, traceback в
+        # терминала и без отговор (2026-10-20); сега е unknown_op от _dispatch.
+        voice_op = isinstance(op, str) and op in _VOICE_OPS and self.stt is not None
+        if large and not voice_op and not (op == "send" and payload.get("images")):
             return _LARGE_REFUSED, rid
         return self._dispatch(payload), rid
 
@@ -1193,6 +1196,10 @@ class RemoteServer:
                 # какво има вътре решава handle(large=True), след ключа.
                 if not 0 < length <= _MAX_VOICE_BODY:
                     self._json(413, {"error": "size"})
+                    # Клиентът още праща тялото: затворим ли веднага, на Linux
+                    # вижда EPIPE/RST вместо 413 (2026-10-20) — като другите откази.
+                    if length > 0:
+                        self._linger_close(length)
                     return
                 if length > _MAX_BODY:
                     self._voice_post(ip, length)

@@ -225,6 +225,48 @@ def test_m4a_duration_comes_from_the_mvhd_box() -> None:
     assert voice.audio_seconds(b"webm", "audio/webm") is None
 
 
+def _box(kind: bytes, payload: bytes) -> bytes:
+    return struct.pack(">I", 8 + len(payload)) + kind + payload
+
+
+def test_mvhd_bytes_inside_the_sound_data_are_not_the_duration() -> None:
+    """2026-10-20: телефонът пише moov СЛЕД mdat; „mvhd“ случайно в звука
+    даваше 1000 s и записът беше „твърде дълъг“ при всеки опит."""
+    bogus = b"mvhd" + b"\x00" * 4 + struct.pack(">IIII", 0, 0, 1, 1000)
+    sound = b"\x7f" * 100 + bogus + b"\x7f" * 100
+    real = _box(b"mvhd", b"\x00" * 4 + struct.pack(">IIII", 0, 0, 44100, 44100 * 5))
+    m4a = _box(b"ftyp", b"M4A \x00\x00\x00\x00") + _box(b"mdat", sound) + _box(b"moov", real)
+    assert voice.audio_seconds(m4a, "audio/m4a") == 5.0
+    assert voice._mdat_ranges(m4a) == [(16, 16 + 8 + len(sound))]
+    # само mdat без moov (отрязан файл) → „не знам“, не измислена дължина
+    assert voice.audio_seconds(_box(b"ftyp", b"") + _box(b"mdat", sound), "audio/m4a") is None
+    # 64-битова кутия (size == 1) се прескача по дългия размер
+    big = struct.pack(">I", 1) + b"mdat" + struct.pack(">Q", 16 + len(sound)) + sound
+    assert voice.audio_seconds(big + _box(b"moov", real), "audio/m4a") == 5.0
+
+
+def test_broken_numbers_in_config_never_crash_settings(monkeypatch, tmp_path) -> None:
+    """2026-10-20: timeout_s: 0 → requests ValueError → от телефона 401
+    „rejected“ + спирачката; max_sentences: .inf → OverflowError в speak()."""
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("voice:\n  stt:\n    timeout_s: 0\n  tts:\n    max_sentences: .inf\n"
+                        "    max_chars: .nan\n  mic:\n    max_seconds: -5\n", encoding="utf-8")
+    monkeypatch.setattr("genesis_agent.paths.CONFIG_PATH", cfg_file)
+    s = voice.settings()
+    d = Settings()
+    assert s.stt_timeout_s == 1.0 and s.mic_max_seconds == 1.0
+    assert (s.max_sentences, s.max_chars) == (d.max_sentences, d.max_chars)
+    assert voice.speech_text("Готово.", max_sentences=s.max_sentences, max_chars=s.max_chars) == "Готово."
+
+
+def test_a_timeout_requests_refuses_is_a_voice_error_not_a_crash(monkeypatch, calls) -> None:
+    _, replies = calls
+    monkeypatch.setenv("GROQ_API_KEY", GROQ_KEY)
+    replies.append(ValueError("Attempted to set connect timeout to 0.0"))
+    with pytest.raises(VoiceError, match="groq: няма връзка"):
+        voice.transcribe_detail(_wav(1.5), language="bg", cfg=_cfg(stt_backends=("groq",), stt_timeout_s=0.0))
+
+
 def test_settings_come_from_config_yaml_and_env(monkeypatch, tmp_path) -> None:
     cfg_file = tmp_path / "config.yaml"
     cfg_file.write_text("voice:\n  language: en\n  stt:\n    backends: [local]\n"
@@ -536,6 +578,27 @@ def test_linux_without_portaudio_falls_back_to_arecord(monkeypatch) -> None:
     monkeypatch.setattr(voice.sys, "platform", "linux")
     monkeypatch.setattr(voice.shutil, "which", _which("arecord"))
     assert voice.audio_seconds(voice.record(2), "audio/wav") == 1.0
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="arecord е само за Linux")
+def test_a_wedged_arecord_is_stopped_and_killed() -> None:
+    """2026-10-20: arecord жив, но без байтове → read() блокираше завинаги,
+    Enter/Esc/таванът не стигаха, микрофонът оставаше зает до края."""
+    import subprocess
+    import time
+    proc = subprocess.Popen(["sleep", "1000"], stdout=subprocess.PIPE)   # жив, без байтове
+    stop = threading.Event()
+    threading.Timer(0.3, stop.set).start()
+    t0 = time.monotonic()
+    pcm = voice._drain_recorder(proc, 30, stop, voice.SilenceDetector(0))
+    assert pcm == b"" and time.monotonic() - t0 < 3
+    assert proc.poll() is not None, "записващият процес остана жив"
+    # половин парче, после тишина: това, което е дошло, не се губи
+    proc = subprocess.Popen(["sh", "-c", "printf 'ab'; sleep 1000"], stdout=subprocess.PIPE)
+    stop = threading.Event()
+    threading.Timer(0.3, stop.set).start()
+    assert voice._drain_recorder(proc, 30, stop, voice.SilenceDetector(0)) == b"ab"
+    assert proc.poll() is not None
 
 
 # ── /listen ─────────────────────────────────────────────────────────────────

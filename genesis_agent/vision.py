@@ -136,15 +136,20 @@ def _normalize(data: bytes, mime: str, label: str) -> tuple[bytes, str, int, int
     # Завъртяна или с GPS → прекодира се и при малък размер (ревю 2026-10-15:
     # байтовете тръгваха както са — легнала снимка и координатите ѝ към
     # доставчика). Новият файл е без EXIF.
+    # Pillow хвърля какво ли не при счупени метаданни (TypeError от сгрешен GPS
+    # IFD в PNG/WebP, фъз 2026-10-20) и срутваше `genesis -p @img`, `/image` и
+    # `send` от телефона — тук всичко е „без завъртане“, картинката минава.
     try:
         exif = img.getexif()
         tagged = exif.get(0x0112, 1) != 1 or 0x8825 in exif
-    except (OSError, ValueError, SyntaxError, TypeError):
+    except Exception as e:  # noqa: BLE001 — виж горе
+        log.debug("vision: %s: EXIF не се чете: %s", label, e)
         tagged = False
     try:
         img = ImageOps.exif_transpose(img)
-    except (OSError, ValueError, SyntaxError):
-        pass
+    except Exception as e:  # noqa: BLE001 — виж горе
+        log.debug("vision: %s: EXIF не се прилага: %s", label, e)
+        tagged = True        # метаданните са съмнителни → прекодиране без тях
     if getattr(img, "is_animated", False):
         img.seek(0)   # първият кадър — моделите не четат анимация
     w, h = img.size
@@ -329,6 +334,7 @@ _VISION_NAME = re.compile(
     r"vision|[-_/.]vl(?:\b|[-_:])|\bvl[-_]|llama-?4|gemini|claude|gpt-4o|gpt-4\.1|gpt-5"
     r"|pixtral|gemma-?[34]|llava|moondream|minicpm-v|internvl|qwen[\d.]*-?vl",
     re.IGNORECASE)
+_TEXT_ONLY_NAME = re.compile(r"gemma-?3[-:]1b|embed", re.IGNORECASE)
 # `claude -p` приема картинки в stream-json входа (формата на Claude Code SDK),
 # но тук не е проверено с истински абонамент — затова само по изричен избор:
 # `vision_models: ["claude_cli/sonnet"]` (2026-10-15).
@@ -369,7 +375,12 @@ def can_see(provider: str, model: str) -> bool:
                 return bool(entry.get("vision"))
     if provider in _OPT_IN_ONLY:
         return False
-    return bool(_VISION_NAME.search(str(model or "")))
+    name = str(model or "")
+    # Само текст въпреки името (2026-10-20): gemma-3-1b и embedding моделите на
+    # Gemini; „виждащ“ се мести отпред във веригата и би изял картинката с 400.
+    if _TEXT_ONLY_NAME.search(name):
+        return False
+    return bool(_VISION_NAME.search(name))
 
 
 _sees_cache: tuple[float, tuple, bool] | None = None
