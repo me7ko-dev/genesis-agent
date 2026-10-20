@@ -8,6 +8,7 @@ import io
 import json
 import socket
 import struct
+import sys
 import threading
 import time
 import urllib.error
@@ -272,6 +273,25 @@ def test_a_body_over_the_voice_cap_or_without_voice_is_413(live_voice) -> None:
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="RST може да изпревари отговора (виж _post_unread)")
+def test_a_client_still_sending_an_oversized_body_reads_the_413(live_voice) -> None:
+    """2026-10-20: над тавана сървърът затваряше без да изчете нищо — клиентът,
+    който още праща тялото, получаваше EPIPE/RST, не 413 (другите откази
+    минават през _linger_close)."""
+    base, _, _ = live_voice
+    port = int(base.rsplit(":", 1)[1])
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+        s.sendall(b"POST /api/v1 HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                  + f"Content-Length: {rs._MAX_VOICE_BODY + 1}\r\n\r\n".encode())
+        try:
+            for _ in range(16):
+                s.sendall(b"A" * 65536)
+        except (BrokenPipeError, ConnectionResetError) as e:
+            pytest.fail(f"клиентът не стигна до отговора: {e!r}")
+        status_line = s.recv(256).split(b"\r\n", 1)[0]
+    assert b" 413 " in status_line, status_line
 
 
 def test_a_braked_address_cannot_upload_audio(live_voice) -> None:

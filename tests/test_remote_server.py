@@ -528,6 +528,10 @@ def test_a_request_error_with_the_right_key_is_not_a_401(live) -> None:
     assert _call(base, "newer_app_op") == {"ok": False, "error": "unknown_op"}
     assert _call(base, "send", text="\x1c") == {"ok": False, "error": "empty"}
     assert _call(base, "send", text=" \x85 ") == {"ok": False, "error": "empty"}
+    # `op` списък/речник (2026-10-20): `in frozenset` даваше TypeError, traceback
+    # в терминала на оператора и връзка без отговор.
+    assert _call(base, ["send"]) == {"ok": False, "error": "unknown_op"}
+    assert _call(base, {"a": 1}) == {"ok": False, "error": "unknown_op"}
     assert _call(base, "events", after="x") == {"ok": False, "error": "bad_args"}
     for _ in range(35):
         _call(base, "newer_app_op")      # 200 всеки път, не се брои за провал
