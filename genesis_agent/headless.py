@@ -111,7 +111,7 @@ class HeadlessUI:
     def event(self, kind: str, **data: Any) -> None:
         if self.stream is None:
             return
-        line = json.dumps({"type": kind, **data}, ensure_ascii=False)
+        line = json.dumps({"type": kind, **data}, ensure_ascii=True)   # вж. run(): сурогати
         with self._lock:
             print(line, file=self.stream, flush=True)
 
@@ -353,5 +353,9 @@ def run(argv: list[str]) -> int:
               "files": {k: [_shown(p, cwd) for p in v] for k, v in changes.items()},
               "workspace": str(cwd), "plan": bool(opts["plan"]),
               "seconds": round(seconds, 1), "duration_ms": int(seconds * 1000)}
-    print(json.dumps(result, ensure_ascii=False), file=out, flush=True)
+    # ensure_ascii=True: име на файл извън UTF-8 идва като сурогат
+    # (surrogateescape) — суров той чупеше строг UTF-8 stdout с
+    # UnicodeEncodeError, а CLI (errors=replace) печаташе `?.txt`; escape-нат
+    # (\udcff) е валиден JSON и json.loads го връща същия (одит 2026-10-21).
+    print(json.dumps(result, ensure_ascii=True), file=out, flush=True)
     return code

@@ -336,3 +336,26 @@ def test_text_stays_the_default(ws, monkeypatch, capsys) -> None:
     _script(monkeypatch, [("app.py печата hi.", None)])
     assert headless.run(["x", "--output-format", "text", "--cwd", str(ws)]) == 0
     assert capsys.readouterr().out == "app.py печата hi.\n"
+
+
+@pytest.mark.skipif(__import__("os").name == "nt", reason="име на файл извън UTF-8 е POSIX случай")
+def test_json_survives_a_file_name_that_is_not_utf8(ws, monkeypatch) -> None:
+    """Команда създаде файл с име извън UTF-8 (surrogateescape); json.dumps с
+    ensure_ascii=False даваше ред, който строг UTF-8 stdout не може да изпише
+    (UnicodeEncodeError), а CLI с errors=replace печаташе `?.txt` (одит
+    2026-10-21). Escape-нат сурогат е валиден JSON."""
+    import io
+    import sys
+    from pathlib import Path
+    py = Path(sys.executable).as_posix()
+    cmd = f'"{py}" -c "open(b\'\\xff.txt\',\'wb\').write(b\'1\')"'
+    _script(monkeypatch, [("", [_call("RUN_CMD", {"command": cmd})]), ("Създадох файла.", None)])
+    proj = ws / "proj"          # не самата tmp_path: там е и хранилището на снимките
+    proj.mkdir()
+    strict = io.TextIOWrapper(io.BytesIO(), encoding="utf-8", errors="strict")
+    monkeypatch.setattr(sys, "stdout", strict)
+    assert headless.run(["създай", "файл", "--output-format", "stream-json", "--cwd", str(proj)]) == 0
+    strict.flush()
+    lines = strict.buffer.getvalue().decode("utf-8").splitlines()
+    result = json.loads(lines[-1])
+    assert result["type"] == "result" and result["files"]["created"] == ["\udcff.txt"]

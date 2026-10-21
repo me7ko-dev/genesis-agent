@@ -87,6 +87,12 @@ _turns: list[_Turn] = []
 _current: _Turn | None = None
 _last_note = ""     # защо командите на последния ход с команди не са проследени
 _known: list[Any] = []
+# Ходове, паднали от _turns заради _MAX_TURNS: (съобщение, етикет). /rewind до
+# съобщение преди тях казва, че техните промени не се връщат — 32 хода и
+# /rewind 1 оставяха g00/g01 без дума (одит 2026-10-21).
+_dropped: list[tuple[Any, str]] = []
+_cap_note = ""      # бележката за това, сметната от turns_since за rewind_plan
+_LEFT = "променен след хода — оставен както е"
 # Ходове с промени, записани от началото на процеса. Не len(_turns): той спира
 # на _MAX_TURNS, а `genesis -p` пита „записа ли ТОЗИ ход нещо“ (2026-10-15).
 _recorded = 0
@@ -112,6 +118,8 @@ def end_turn() -> None:
     if turn.changed():
         _turns.append(turn)
         _recorded += 1
+        _dropped.extend((t.marker, t.label) for t in _turns[:-_MAX_TURNS] if t.marker is not None)
+        del _dropped[:-_MAX_KNOWN]
         del _turns[:-_MAX_TURNS]
 
 
@@ -251,8 +259,18 @@ def after_command() -> None:
         turn.note = turn.lost = f"промените от команда не могат да се върнат ({e})"
         return
     existed = window.survey.files
+    # Вложено git хранилище (lib/.git, подмодул): снимката не вижда вътре.
+    # Промяна там правеше хода „без промени“ и /undo тихо връщаше ПРЕДИШНИЯ
+    # (одит 2026-10-21) — същият клас като файла над 20 MB по-долу: ходът се
+    # записва с бележка, нищо не се лъже, че е върнато.
+    nested = checkpoints.nested_changed(window.survey, now)
+    if nested is not None:
+        _lose_nested(turn, turn.workspace / nested)
     for ch in found:
         path = turn.workspace / ch.path
+        if ch.is_repo():
+            _lose_nested(turn, path)
+            continue
         if path in recorded:
             # Снимката отпреди командата е по-рано от записа вътре в нея.
             turn.before.pop(path, None)
@@ -274,6 +292,11 @@ def after_command() -> None:
         else:
             turn.commands[path] = _FromCommand(checkpoints.ZERO, "100644", existed=False)
             turn.after[path] = _big_id(path)
+
+
+def _lose_nested(turn: _Turn, repo: Path) -> None:
+    if not turn.lost:
+        turn.lost = f"вложено git хранилище {repo} — промените в него не се връщат"
 
 
 def _big_id(path: Path) -> str | None:
@@ -353,7 +376,8 @@ def pending() -> list[str]:
     lines += [f"не може: {p} (над {_MAX_BYTES // 1_000_000} MB)" for p in turn.too_big]
     for path, cmd in turn.commands.items():
         if not cmd.existed:
-            lines.append(f"изтрий {path} (създаден от команда)" if path.exists() else "")
+            lines.append(f"изтрий {path} (създаден от команда)"
+                         if path.exists() or path.is_symlink() else "")
         else:
             lines.append(f"върни {path} (променен от команда)")
     if turn.lost:
@@ -397,16 +421,19 @@ def undo() -> tuple[str, list[str]]:
     return turn.label, [line for _path, line in _undo_turn(turn)]
 
 
-def _undo_turn(turn: _Turn) -> list[tuple[Path | None, str]]:
+def _undo_turn(turn: _Turn, skip: frozenset[Path] = frozenset()) -> list[tuple[Path | None, str]]:
     """Връща един ход; всеки ред — с файла си, за да може /rewind да сглоби
-    няколко хода в един отчет по файл."""
+    няколко хода в един отчет по файл. `skip` — файлове, които по-нов ход в
+    същия /rewind е оставил („променен след хода“): по-старият ход не ги пипа,
+    както обещава rewind_plan (одит 2026-10-21: ход 1 → v1, ход 2 → v2,
+    операторът върна v1 на ръка — ход 1 „съвпадаше“ и презаписваше с v0)."""
     done: list[tuple[Path | None, str]] = []
     for path, data in turn.before.items():
         try:
             if _led_out(turn, path):
                 done.append((path, f"⚠ {path} (води извън проекта — оставен)"))
-            elif _moved_since(turn, path):
-                done.append((path, f"⚠ {path} (променен след хода — оставен както е)"))
+            elif path in skip or _moved_since(turn, path):
+                done.append((path, f"⚠ {path} ({_LEFT})"))
             elif data is None:
                 if path.is_file():
                     path.unlink()
@@ -418,7 +445,7 @@ def _undo_turn(turn: _Turn) -> list[tuple[Path | None, str]]:
         except OSError as e:
             done.append((path, f"❌ {path}: {e}"))
     if turn.commands and turn.workspace is not None:
-        done += _undo_commands(turn, turn.workspace)
+        done += _undo_commands(turn, turn.workspace, skip)
     done += [(p, f"❌ не е пазен (твърде голям): {p}") for p in turn.too_big]
     if turn.lost:
         done.append((None, f"❌ {turn.lost}"))
@@ -439,17 +466,21 @@ def _led_out(turn: _Turn, path: Path) -> bool:
     return not checkpoints.inside(ws, path)
 
 
-def _undo_commands(turn: _Turn, ws: Path) -> list[tuple[Path | None, str]]:
+def _undo_commands(turn: _Turn, ws: Path,
+                   skip: frozenset[Path] = frozenset()) -> list[tuple[Path | None, str]]:
     from genesis_agent import checkpoints
     done: list[tuple[Path | None, str]] = []
     for path, cmd in turn.commands.items():
         try:
             if not checkpoints.inside(ws, path):
                 done.append((path, f"⚠ {path} (води извън проекта — оставен)"))
-            elif _moved_since(turn, path):
-                done.append((path, f"⚠ {path} (променен след хода — оставен както е)"))
+            elif path in skip or _moved_since(turn, path):
+                done.append((path, f"⚠ {path} ({_LEFT})"))
             elif not cmd.existed:
-                if path.is_file() and not path.is_symlink():
+                # Връзка, направена от командата, се маха като връзка (unlink
+                # не следва към целта); pending я обещаваше, а тук оставаше
+                # (одит 2026-10-21). Папка — не.
+                if path.is_symlink() or path.is_file():
                     path.unlink()
                     done.append((path, f"изтрит {path}"))
             elif cmd.old == checkpoints.ZERO or cmd.old_mode == "120000":
@@ -513,7 +544,14 @@ def turns_since(cut: Sequence[Any]) -> int:
     """Колко от последните ходове /rewind връща: от първия, който отговаря на
     някое от `cut` (махнатите съобщения), до най-новия. Ход от друг разговор
     (преди /clear или /resume) не е след точката и не се пипа."""
+    global _cap_note
     _last()
+    _cap_note = ""
+    if any(m is dropped for dropped, _label in _dropped for m in cut):
+        _cap_note = (f"⚠ ходовете преди „{_turns[0].label}“ са над лимита от {_MAX_TURNS}"
+                     if _turns else
+                     f"⚠ ходовете до „{_dropped[-1][1]}“ са над лимита от {_MAX_TURNS}"
+                     ) + " — промените им не се връщат"
     for i, turn in enumerate(_turns):
         if turn.marker is not None and any(turn.marker is m for m in cut):
             return len(_turns) - i
@@ -560,9 +598,13 @@ def rewind_plan(count: int) -> list[str]:
             expected = turn.after.get(path)
             if path not in state:
                 start[path] = state[path] = _id_now(path, expected)
+            if path in left:
+                # Оставен от по-нов ход: по-старите не го пипат (rewind() —
+                # същото през `skip`; одит 2026-10-21: иначе по-стар ход,
+                # чието „след“ съвпада с ръчното връщане, го презаписваше).
+                continue
             if path in turn.after and state[path] != expected:
-                # Пипнат отвън след този ход: /undo го оставя — и по-старите
-                # ходове вече не съвпадат с него, оставят го и те.
+                # Пипнат отвън след този ход: /undo го оставя.
                 left.setdefault(path, turn.label)
                 continue
             state[path] = before_id
@@ -582,20 +624,27 @@ def rewind_plan(count: int) -> list[str]:
             lines.append(f"възстанови {path} (изтрит след тази точка)")
         else:
             lines.append(f"върни {path}")
+    if _cap_note:
+        notes.append(_cap_note)
     return lines + list(dict.fromkeys(notes))
 
 
 def rewind(count: int) -> list[str]:
     """Връща последните `count` хода, най-новия пръв. По ред на файл: какво
-    стана накрая; предупреждение или грешка по пътя — тя, не тихо „върнат“."""
+    стана накрая; предупреждение или грешка по пътя — тя, не тихо „върнат“.
+    Файл, който ход остави („променен след хода“), по-старите ходове не пипат
+    — както rewind_plan го е казал (одит 2026-10-21)."""
     by_path: dict[Path | None, list[str]] = {}
+    skip: set[Path] = set()
     for _ in range(count):
         turn = _last()
         if turn is None:
             break
         _turns.pop()
-        for path, line in _undo_turn(turn):
+        for path, line in _undo_turn(turn, frozenset(skip)):
             by_path.setdefault(path, []).append(line)
+            if path is not None and line.endswith(f"({_LEFT})"):
+                skip.add(path)
     done: list[str] = []
     for lines in by_path.values():
         warned = [ln for ln in lines if ln.startswith(("⚠", "❌"))]
@@ -604,8 +653,9 @@ def rewind(count: int) -> list[str]:
 
 
 def clear() -> None:
-    global _current, _last_note
+    global _current, _last_note, _cap_note
     _turns.clear()
     _known.clear()
+    _dropped.clear()
     _current = None
-    _last_note = ""
+    _last_note = _cap_note = ""

@@ -64,6 +64,13 @@ class Survey:
     big: list[str] = field(default_factory=list)
     total: int = 0
     over: str = ""
+    # Файловете под вложено git хранилище (`lib/.git`, подмодул) → (размер,
+    # mtime). Мерено 2026-10-21 (git 2.43): `git add -A` прави от такава папка
+    # gitlink (160000) — id-то ѝ е HEAD на вложеното хранилище, не файловете —
+    # а без commit вътре я пропуска изцяло; редакция в нея не се вижда в
+    # diff-tree. Само отпечатъкът преди/след командата я показва.
+    nested: dict[str, tuple[int, int]] = field(default_factory=dict)
+    repos: list[str] = field(default_factory=list)
 
 
 def survey(workspace: Path) -> Survey:
@@ -72,14 +79,21 @@ def survey(workspace: Path) -> Survey:
     for dirpath, dirnames, filenames in os.walk(workspace):
         rel_dir = Path(dirpath).relative_to(workspace)
         depth = len(rel_dir.parts)
+        here = rel_dir.as_posix()
+        if depth and (".git" in dirnames or ".git" in filenames):
+            out.repos.append(here)        # `.git` файл = подмодул / worktree
+        in_repo = any(here == r or here.startswith(r + "/") for r in out.repos)
         dirnames[:] = [d for d in dirnames if not _skip(d, depth)]
         for name in filenames:
             rel = (rel_dir / name).as_posix()
             out.files.add(rel)
             try:
-                size = os.lstat(os.path.join(dirpath, name)).st_size
+                st = os.lstat(os.path.join(dirpath, name))
             except OSError:
                 continue
+            size = st.st_size
+            if in_repo:
+                out.nested[rel] = (size, st.st_mtime_ns)
             if size > limit:
                 out.big.append(rel)
             else:
@@ -100,6 +114,24 @@ class Change:
     old: str           # blob before (ZERO when created)
     new: str           # blob after (ZERO when deleted)
     old_mode: str = "100644"
+    # 160000 = вложено git хранилище (gitlink): нищо за връщане, но ходът
+    # трябва да го каже, не да го пропусне (одит 2026-10-21).
+    new_mode: str = "100644"
+
+    def is_repo(self) -> bool:
+        return "160000" in (self.old_mode, self.new_mode)
+
+
+def nested_changed(before: Survey, after: Survey) -> str | None:
+    """Вложеното хранилище, в което команда е променила нещо (пътят му спрямо
+    проекта), или None. По отпечатък размер+mtime: снимката не вижда вътре."""
+    if before.over or after.over:
+        return None       # непълен обход — не гадаем
+    for rel in sorted(set(before.nested) | set(after.nested)):
+        if before.nested.get(rel) != after.nested.get(rel):
+            repos = [r for r in after.repos + before.repos if rel.startswith(r + "/")]
+            return max(repos, key=len) if repos else rel.rsplit("/", 1)[0]
+    return None
 
 
 def _store(workspace: Path) -> Path:
@@ -316,7 +348,9 @@ def snapshot(workspace: Path, big: list[str] | None = None, *,
 
 
 def changes(workspace: Path, before: str, after: str) -> list[Change]:
-    """Files that differ between two snapshots (submodules left out)."""
+    """Files that differ between two snapshots. A nested repository (gitlink,
+    mode 160000) is listed too — Change.is_repo(): its content is not kept,
+    but dropping it silently left the turn „without changes“ (2026-10-21)."""
     ws = Path(workspace).resolve()
     if before == after:
         return []
@@ -331,9 +365,7 @@ def changes(workspace: Path, before: str, after: str) -> list[Change]:
         if len(fields) < 5:
             continue
         old_mode, new_mode, old, new, status = fields[:5]
-        if "160000" in (old_mode, new_mode):
-            continue
-        out.append(Change(path, status[0], old, new, old_mode))
+        out.append(Change(path, status[0], old, new, old_mode, new_mode))
     return out
 
 
@@ -347,7 +379,13 @@ def blob_id(data: bytes) -> str:
 
 
 def current_id(path: Path) -> str | None:
-    if path.is_symlink() or not path.is_file():
+    """git's id of what is at `path` now: a file's bytes, or a symlink's target
+    (git keeps it as a blob of the target string). None for a directory or
+    nothing. A link gave None, so a link a command made was always „changed
+    since“ for /undo and never removed (audit 2026-10-21)."""
+    if path.is_symlink():
+        return blob_id(os.readlink(path).encode("utf-8", "surrogateescape"))
+    if not path.is_file():
         return None
     return blob_id(path.read_bytes())
 

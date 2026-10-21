@@ -1576,8 +1576,9 @@ def serve(args: list[str]) -> int:
         # Нов разговор от телефона/приложението = нова сесия и за брояча
         # (NEXT_STEPS В.8): иначе статус редът носеше Σ на стария разговор.
         gta.reset_usage()
-        from genesis_agent import todos
+        from genesis_agent import edit_history, todos
         todos.clear()   # както /clear в терминала
+        edit_history.clear()   # иначе /undo връщаше хода на стария разговор (2026-10-21)
 
     def status() -> dict:
         return {"model": f"{gta.current_provider}/{gta.current_model_id}",
