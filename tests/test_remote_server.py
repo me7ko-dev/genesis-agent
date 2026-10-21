@@ -126,6 +126,12 @@ def test_stale_request_is_rejected() -> None:
     payload["ts"] -= 10 * 60 * 1000
     with pytest.raises(rs.ProtocolError, match="stale"):
         guard.check(payload)
+    # NaN/inf (json.loads ги приема) минаваха проверката за време (2026-10-20)
+    for ts in (float("nan"), float("inf"), True):
+        payload = _request("status")
+        payload["ts"] = ts
+        with pytest.raises(rs.ProtocolError, match="stale"):
+            guard.check(payload)
 
 
 def test_key_is_created_once_and_private(tmp_path, monkeypatch) -> None:

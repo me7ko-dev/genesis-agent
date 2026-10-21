@@ -81,6 +81,7 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -335,7 +336,10 @@ class ReplayGuard:
         # гърмеше в seal() СЛЕД като операцията вече е изпълнена (одит 2026-10-09).
         if not isinstance(rid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", rid):
             raise ProtocolError("bad rid")
-        if not isinstance(ts, (int, float)) or abs(now_ms - ts) > self._max_skew_ms:
+        # NaN минаваше: abs(now - NaN) > skew е False, а записът с t=NaN никога не
+        # изтича от _seen (одит 2026-10-20; само с ключ, телефонът не го праща).
+        if (not isinstance(ts, (int, float)) or not math.isfinite(ts)
+                or abs(now_ms - ts) > self._max_skew_ms):
             raise ProtocolError("stale request (check the phone's clock)")
         with self._lock:
             horizon = now_ms - 2 * self._max_skew_ms
