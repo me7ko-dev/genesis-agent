@@ -51,6 +51,10 @@ _LAUNCHERS = frozenset({
     "sudo", "doas", "su", "env", "xargs", "eval", "exec", "source", ".",
     "nohup", "time", "timeout", "nice", "ionice", "command", "builtin",
     "setsid", "stdbuf", "watch", "ssh", "chroot", "unshare", "script",
+    # Обвивки, които пускат остатъка като команда (одит 2026-10-21: `flock *`
+    # се приемаше и покриваше `flock /tmp/l sudo apt-get install …`).
+    "flock", "strace", "ltrace", "setarch", "taskset", "chrt", "numactl",
+    "prlimit", "systemd-run", "runuser", "pkexec", "proot", "firejail",
 })
 _INTERPRETERS = re.compile(r"^(python[\d.]*|py|pypy[\d.]*|perl|ruby|node|deno|bun|php|lua|osascript)$")
 # Флагът веднага след интерпретатора, който значи „кодът е тук“ (или „пусни

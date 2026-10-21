@@ -2420,8 +2420,12 @@ def main():
                     console.print(Text(f"⚠ системният промпт не се обнови: {e}", style="yellow"))
                 messages = deque([{"role": "system", "content": SYSTEM_PROMPT}], maxlen=_HISTORY_MAXLEN)
                 pending_shell.clear()
+                from genesis_agent import edit_history as _edit_history
                 from genesis_agent import todos as _todos
                 _todos.clear()
+                # Ходовете за /undo са на стария разговор: без това /undo
+                # връщаше хода отпреди /clear (одит 2026-10-21).
+                _edit_history.clear()
                 reset_usage()
                 _new_session()
                 print_minimal_banner()

@@ -441,3 +441,46 @@ def test_duplicate_tool_call_ids_are_made_unique(ws, monkeypatch):
     assert len(set(ids)) == 2
     assistant = next(m for m in msgs if m.get("tool_calls"))
     assert [tc["id"] for tc in assistant["tool_calls"]] == ids
+
+
+# ── одит 2026-10-21: /clear забравя и ходовете за /undo ──────────────────────
+
+def _turn_that_changed(path) -> None:
+    from genesis_agent import edit_history
+    edit_history.begin_turn("в предишния разговор")
+    edit_history.record(path)
+    path.write_text("v1\n", encoding="utf-8")
+    edit_history.forget_if_unchanged(path)
+    edit_history.end_turn()
+    assert edit_history.pending()
+
+
+def test_clear_from_the_phone_forgets_the_turns_of_the_previous_conversation(ws, monkeypatch):
+    """/undo след „Нов разговор“ връщаше хода на ПРЕДИШНИЯ разговор —
+    edit_history.clear() не се викаше (одит 2026-10-21)."""
+    from genesis_agent import edit_history
+    monkeypatch.setattr(gta, "build_system_prompt", lambda: ("SYS", ""))
+    app = ws / "app.py"
+
+    def scenario(srv):
+        _turn_that_changed(app)
+        srv._dispatch({"op": "send", "text": "/clear"})
+        _wait(srv.session)
+    _drive_serve(monkeypatch, scenario)
+    assert edit_history.pending() == [] and app.read_text(encoding="utf-8") == "v1\n"
+
+
+def test_clear_in_the_terminal_forgets_the_turns_of_the_previous_conversation(ws, monkeypatch):
+    from genesis_agent import brain, chat_input, edit_history, model_check
+    monkeypatch.setattr(brain, "any_model_reachable", lambda: True, raising=False)
+    monkeypatch.setattr(gta, "print_minimal_banner", lambda: None)
+    monkeypatch.setattr(gta, "show_status_bar", lambda: None)
+    monkeypatch.setattr(gta, "build_system_prompt", lambda: ("SYS", ""))
+    monkeypatch.setattr(model_check, "needs_check", lambda: False)
+    monkeypatch.setattr(gta.sys, "argv", ["genesis"])
+    app = ws / "app.py"
+    _turn_that_changed(app)
+    lines = iter(["/clear", "exit"])
+    monkeypatch.setattr(chat_input, "read_message", lambda read: next(lines))
+    gta.main()
+    assert edit_history.pending() == [] and app.read_text(encoding="utf-8") == "v1\n"

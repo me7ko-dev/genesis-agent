@@ -634,3 +634,39 @@ def test_rewind_from_the_phone_redraws_the_cut_conversation(proj) -> None:
     assert infos[0].startswith("↶ Върнато") and infos[1].startswith("Съобщението беше:\nдве")
     assert not any(t.startswith("Връщам разговора") for t in infos)   # планът остава преди "cleared"
     assert (proj / "app.py").read_text(encoding="utf-8") == "v1\n"
+
+
+# ── одит 2026-10-21 ──────────────────────────────────────────────────────────
+
+def test_rewind_does_what_its_plan_says_when_an_older_turn_matches_the_outside_edit(proj) -> None:
+    """Ход 1 → v1, ход 2 → v2, операторът връща v1 на ръка. Планът казваше
+    „НЕ се презаписва“ (по-новият ход го оставя), а rewind() пускаше ход 1 —
+    чийто „след“ съвпада с v1 — и презаписваше с v0, като скриваше реда и
+    казваше на модела „НЕ са върнати“ (одит 2026-10-21)."""
+    a = proj / "a.py"
+    msgs = _fresh()
+    _turn(msgs, "направи v1", lambda: _write(a, "v1\n"))
+    _turn(msgs, "направи v2", lambda: _write(a, "v2\n"))
+    a.write_text("v1\n", encoding="utf-8")                      # операторът, на ръка
+    res, out, _ = _run("/rewind 1", messages=msgs, ws=proj)
+    plan = out.split("↶")[0]
+    assert "НЕ се презаписва" in plan and "връщам го само" not in plan
+    assert a.read_text(encoding="utf-8") == "v1\n"
+    assert res is not None and "НЕ са върнати" in res.messages[-1]["content"]
+
+
+def test_rewind_past_the_turn_cap_says_what_it_cannot_undo(proj) -> None:
+    """32 хода с промени, /rewind 1: ходовете над _MAX_TURNS са забравени и
+    g00/g01 оставаха без дума (одит 2026-10-21)."""
+    msgs = deque([{"role": "system", "content": "SYS"}], maxlen=500)
+    for i in range(edit_history._MAX_TURNS + 2):
+        _turn(msgs, f"създай g{i}", lambda i=i: _write(proj / f"g{i:02}.txt", f"{i}\n"))
+    _, out, _ = _run("/rewind 1", messages=msgs, ws=proj)
+    assert f"над лимита от {edit_history._MAX_TURNS}" in out and "„създай g2“" in out
+    assert sorted(p.name for p in proj.glob("g*.txt")) == ["g00.txt", "g01.txt"]
+    # До съобщение 3 всичко е в лимита — без бележка.
+    msgs = deque([{"role": "system", "content": "SYS"}], maxlen=500)
+    for i in range(3):
+        _turn(msgs, f"създай h{i}", lambda i=i: _write(proj / f"h{i}.txt", f"{i}\n"))
+    _, out, _ = _run("/rewind 1", messages=msgs, ws=proj)
+    assert "над лимита" not in out and not list(proj.glob("h*.txt"))

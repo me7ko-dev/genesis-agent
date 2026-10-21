@@ -81,6 +81,7 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -335,7 +336,10 @@ class ReplayGuard:
         # гърмеше в seal() СЛЕД като операцията вече е изпълнена (одит 2026-10-09).
         if not isinstance(rid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", rid):
             raise ProtocolError("bad rid")
-        if not isinstance(ts, (int, float)) or abs(now_ms - ts) > self._max_skew_ms:
+        # NaN минаваше: abs(now - NaN) > skew е False, а записът с t=NaN никога не
+        # изтича от _seen (одит 2026-10-20; само с ключ, телефонът не го праща).
+        if (not isinstance(ts, (int, float)) or not math.isfinite(ts)
+                or abs(now_ms - ts) > self._max_skew_ms):
             raise ProtocolError("stale request (check the phone's clock)")
         with self._lock:
             horizon = now_ms - 2 * self._max_skew_ms
@@ -1572,8 +1576,9 @@ def serve(args: list[str]) -> int:
         # Нов разговор от телефона/приложението = нова сесия и за брояча
         # (NEXT_STEPS В.8): иначе статус редът носеше Σ на стария разговор.
         gta.reset_usage()
-        from genesis_agent import todos
+        from genesis_agent import edit_history, todos
         todos.clear()   # както /clear в терминала
+        edit_history.clear()   # иначе /undo връщаше хода на стария разговор (2026-10-21)
 
     def status() -> dict:
         return {"model": f"{gta.current_provider}/{gta.current_model_id}",

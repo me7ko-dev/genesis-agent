@@ -546,3 +546,74 @@ def test_a_new_process_starts_from_the_newest_index(ws, monkeypatch) -> None:
     monkeypatch.setattr(checkpoints, "_pruned", set())
     _turn_with_command(ws, lambda: None)
     assert (store / "index-99999-fresh0").stat().st_size > 0
+
+
+# ── одит 2026-10-21: вложено git хранилище и символни връзки ─────────────────
+
+def _nested_repo(ws: Path, commit: bool) -> Path:
+    lib = ws / "lib"
+    lib.mkdir()
+    (lib / "x.py").write_text("a\n", encoding="utf-8")
+    import subprocess
+    subprocess.run(["git", "init", "-q"], cwd=lib, check=True, capture_output=True)
+    if commit:
+        who = ["-c", "user.email=t@t", "-c", "user.name=t"]
+        subprocess.run(["git", *who, "add", "."], cwd=lib, check=True, capture_output=True)
+        subprocess.run(["git", *who, "commit", "-qm", "i"], cwd=lib, check=True, capture_output=True)
+    return lib
+
+
+@pytest.mark.parametrize("commit", [False, True], ids=["no-commit", "with-commit"])
+def test_a_change_only_inside_a_nested_repo_does_not_make_undo_hit_the_turn_before(ws, commit) -> None:
+    """Мерено 2026-10-21 (git 2.43): `git add -A` прави от `lib/` със свой .git
+    gitlink (160000) или го пропуска изцяло без commit; редакция вътре не се
+    вижда в diff-tree. Ходът оставаше „без промени“ и /undo връщаше ПРЕДИШНИЯ."""
+    lib = _nested_repo(ws, commit)
+    app = ws / "src" / "app.py"
+    _turn_with_command(ws, lambda: app.write_text("print('v2')\n", encoding="utf-8"))
+    _turn_with_command(ws, lambda: (lib / "x.py").write_text("b\n", encoding="utf-8"))
+    plan = edit_history.pending()
+    assert any("вложено git хранилище" in ln and "lib" in ln for ln in plan), plan
+    assert not any("app.py" in ln for ln in plan)
+    _label, done = edit_history.undo()
+    assert any("вложено git хранилище" in ln for ln in done)
+    assert app.read_text(encoding="utf-8") == "print('v2')\n"        # ход A не е пипнат
+    assert (lib / "x.py").read_text(encoding="utf-8") == "b\n"       # и не се лъже, че е върнат
+    edit_history.undo()
+    assert app.read_text(encoding="utf-8") == "print('v1')\n"
+
+
+def test_a_nested_repo_a_command_creates_or_commits_is_reported_not_dropped(ws) -> None:
+    """Записът 160000 в diff-tree (ново/махнато вложено хранилище, commit в
+    него) се пропускаше тихо (checkpoints.changes); сега ходът носи бележката."""
+    def make() -> None:
+        _nested_repo(ws, commit=True)
+    _turn_with_command(ws, make)
+    assert any("вложено git хранилище" in ln for ln in edit_history.pending())
+    found = checkpoints.changes
+    assert any(ch.new_mode == "160000" for ch in found(
+        ws.resolve(), *[r for r in _last_two_trees(ws)]))
+
+
+def _last_two_trees(ws: Path) -> list[str]:
+    refs = checkpoints._git(ws.resolve(), "for-each-ref", "--sort=refname", "--format=%(objectname)",
+                            f"refs/genesis/{checkpoints._TAG}/").decode().split()
+    return refs[-2:]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="символни връзки на Windows искат права")
+def test_a_symlink_a_command_created_is_removed_by_undo(ws, tmp_path) -> None:
+    """pending обещаваше „изтрий link“, а /undo казваше „променен след хода“ и
+    я оставяше: current_id връщаше None за връзка (одит 2026-10-21)."""
+    outside = tmp_path / "secret.txt"
+    outside.write_text("SECRET\n", encoding="utf-8")
+    link = ws / "link.txt"
+    try:
+        _turn_with_command(ws, lambda: os.symlink(outside, link))
+    except OSError as e:
+        pytest.skip(f"няма символни връзки: {e}")
+    assert any("link.txt" in ln and ln.startswith("изтрий") for ln in edit_history.pending())
+    _label, done = edit_history.undo()
+    assert any("link.txt" in ln and ln.startswith("изтрит") for ln in done), done
+    assert not link.is_symlink() and not link.exists()
+    assert outside.read_text(encoding="utf-8") == "SECRET\n"

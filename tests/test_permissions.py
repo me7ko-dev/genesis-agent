@@ -124,6 +124,7 @@ def test_a_prefix_rule_matches_only_plain_arguments() -> None:
     "bash *", "sh *", "sudo *", "env *", "xargs *", "cmd *", "powershell *", "pwsh.exe *",
     "/bin/bash *", "python *", "python3 -c *", "node -e *", "python -m *", "deno run *",
     "eval *", ". *", "git status \uff06", "gіt status",
+    "flock *", "strace *", "setarch *", "prlimit *", "taskset -c 0 *",   # 2026-10-21
 ])
 def test_rules_that_would_allow_anything_are_refused(rule) -> None:
     assert permissions.normalize_rule(rule)[0] is None

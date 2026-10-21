@@ -51,6 +51,9 @@ _START_TIMEOUT = 20.0
 _CALL_TIMEOUT = 120.0
 _MAX_RESULT = 20000
 _MAX_DESCRIPTION = 800
+# Името на инструмента се праща обратно на сървъра при tools/call, затова не
+# се реже, а по-дълго се пропуска (одит 2026-10-21).
+_MAX_NAME = 80
 _NAME_OK = re.compile(r"[^A-Za-z0-9_-]")
 
 
@@ -195,8 +198,11 @@ class Server:
                 continue  # сървър, който печата лог в stdout — пропускаме реда
             if isinstance(msg, dict) and "method" in msg and "id" in msg:
                 self._answer_server_request(msg)
-            elif isinstance(msg, dict):
+            elif isinstance(msg, dict) and "id" in msg:
                 self._inbox.put(msg)
+            # Известие (без id) никой не чака — не влиза в опашката: сървър,
+            # който ги праща между две извиквания, трупаше 100 000 съобщения
+            # (112 MB) до следващата заявка (одит 2026-10-21, възпроизведено).
         self._inbox.put({"_closed": True})
 
     def _drain_stderr(self) -> None:
@@ -265,7 +271,9 @@ class Server:
                     raise MCPError("сървърът спря")
                 if msg.get("id") != rid:
                     continue  # известие или закъснял отговор
-                if "error" in msg:
+                # `"error": null` до result (някои сървъри) не е грешка „None“
+                # (одит 2026-10-21).
+                if msg.get("error") is not None:
                     err = msg["error"]
                     text = err.get("message") if isinstance(err, dict) else None
                     raise MCPError(str(text or err)[:500])
@@ -284,12 +292,19 @@ class Server:
             for t in items if isinstance(items, list) else []:
                 if not isinstance(t, dict) or not t.get("name"):
                     continue
+                # Името — сплескано като описанието: нов ред + „## “ в него
+                # подправяше заглавие в системния промпт (одит 2026-10-21,
+                # възпроизведено); `]`/`|` чупят текстовия таг [MCP: s.t | …].
+                name = " ".join(str(t["name"]).split())
+                if not name or len(name) > _MAX_NAME or "]" in name or "|" in name:
+                    log.debug("MCP %s: инструмент с негодно име пропуснат: %r", self.name, name[:120])
+                    continue
                 notes = t.get("annotations")
                 schema = t.get("inputSchema")
                 if not isinstance(schema, dict) or not isinstance(schema.get("properties", {}), dict):
                     schema = {"type": "object", "properties": {}}
                 tools.append(Tool(
-                    server=self.name, name=str(t["name"]),
+                    server=self.name, name=name,
                     description=" ".join(str(t.get("description") or "").split())[:_MAX_DESCRIPTION],
                     schema=schema,
                     read_only=bool(notes.get("readOnlyHint")) if isinstance(notes, dict) else False))
@@ -418,16 +433,38 @@ class HttpServer(Server):
             h["MCP-Protocol-Version"] = PROTOCOL_VERSION
         return h
 
+    def _netloc(self) -> str:
+        """Хостът от НЕразгърнатия url (без user:pass@) — за съобщения: ключът
+        в пътя (Zapier, Smithery) или в ${VAR} не бива да излиза в тях."""
+        from urllib.parse import urlsplit
+        try:
+            netloc = urlsplit(self.url).netloc
+        except ValueError:
+            netloc = ""
+        return netloc.rpartition("@")[2] or self.name
+
     def _post(self, msg: dict, deadline: float, *, retried: bool = False):
         import requests
         left = max(0.5, deadline - time.monotonic())
         headers = self._headers()
         try:
+            # Без пренасочване: requests маха Authorization при смяна на хоста,
+            # но X-API-Key, Cookie и Mcp-Session-Id стигаха до чуждия адрес
+            # (одит 2026-10-21, възпроизведено с 307 към друг хост).
             resp = requests.post(_expand(self.url), data=json.dumps(msg, ensure_ascii=True),
                                  headers=headers, timeout=(min(10.0, left), left),
-                                 stream=True)
+                                 stream=True, allow_redirects=False)
         except requests.RequestException as e:
-            raise MCPError(f"не се свърза: {e}") from e
+            # Само типът: текстът на requests носи целия адрес (с ключа в
+            # пътя) и стойността на невалиден header (одит 2026-10-21).
+            log.debug("MCP %s: %s при POST", self.name, type(e).__name__)
+            raise MCPError(f"не се свърза с {self._netloc()}: {type(e).__name__}") from None
+        if 300 <= resp.status_code < 400:
+            from urllib.parse import urlsplit
+            location = resp.headers.get("Location", "")
+            resp.close()
+            where = urlsplit(location).netloc or location[:120] or f"HTTP {resp.status_code}"
+            raise MCPError(f"сървърът пренасочва към {where} — обнови url в mcp.json")
         challenge = resp.headers.get("WWW-Authenticate", "")
         # OAuth (2026-10-09) само ако mcp.json не дава свои headers: с X-API-Key
         # „/mcp login“ беше грешен съвет (одит) — там остава „провери headers“.
@@ -459,42 +496,113 @@ class HttpServer(Server):
                      if challenge.lower().startswith("bearer") else "")
             raise MCPError(f"HTTP {resp.status_code} — провери headers (токена) в mcp.json{login}")
         if resp.status_code >= 400:
-            body = resp.text[:300]
-            resp.close()
+            # Само началото на тялото и в срока: `resp.text` четеше цялото.
+            try:
+                body = next(self._chunks(resp, deadline), b"")[:300].decode("utf-8", errors="replace")
+            except MCPError:
+                body = ""
+            finally:
+                self._abort(resp)
             raise MCPError(f"HTTP {resp.status_code}: {body}")
         return resp
+
+    def _abort(self, resp) -> None:
+        """Затваря отговора изпод четящата нишка. `resp.close()` чака
+        заключването на буфера, което recv в _chunks държи — при капещ
+        сървър срокът изтичаше, а затварянето чакаше края на тялото (25 s
+        при срок 2 s, 2026-10-21, измерено). shutdown() на сокета не минава
+        през буфера: recv връща веднага (1 ms) и нишката приключва. Сокетът
+        се стига през публичното fileno() (urllib3 вече е дало сокета на
+        отговора, _connection.sock е None); detach() — да не го затворим ние."""
+        import socket as _socket
+        try:
+            sock = _socket.socket(fileno=resp.raw.fileno())
+        except (OSError, ValueError, AttributeError, TypeError):
+            sock = None
+        if sock is not None:
+            try:
+                sock.shutdown(_socket.SHUT_RDWR)
+            except OSError:
+                pass
+            finally:
+                sock.detach()
+        resp.close()
 
     def notify(self, method: str, params: dict | None = None) -> None:
         msg = {"jsonrpc": "2.0", "method": method, **({"params": params} if params else {})}
         self._post(msg, time.monotonic() + 15).close()
 
+    def _chunks(self, resp, deadline: float):
+        """Байтовете на отговора на парчета, в срока. Четенето е в нишка:
+        срокът на requests е за едно recv, не за цялото тяло — сървър, който
+        капе по байт в секунда, държеше извикване със срок 3 s цели 51 s
+        (одит 2026-10-21, възпроизведено). При изтичане връзката се затваря
+        (request → resp.close()) и нишката приключва сама."""
+        inbox: queue.Queue = queue.Queue()
+
+        def pump() -> None:
+            try:
+                for chunk in resp.iter_content(chunk_size=65536):
+                    inbox.put(chunk)
+            except Exception as e:  # прекъсната/затворена връзка — каквото и да хвърли requests
+                log.debug("MCP %s: четенето прекъсна", self.name, exc_info=True)
+                inbox.put(e)
+            inbox.put(None)
+        threading.Thread(target=pump, daemon=True).start()
+        while True:
+            try:
+                item = inbox.get(timeout=max(0.0, deadline - time.monotonic()))
+            except queue.Empty:
+                raise MCPError("няма отговор навреме") from None
+            if item is None:
+                return
+            if isinstance(item, Exception):
+                raise MCPError(f"връзката прекъсна: {type(item).__name__}") from None
+            yield item
+
     def _messages(self, resp, deadline: float):
-        """JSON-RPC съобщенията от отговора: един JSON (или списък), или SSE поток."""
+        """JSON-RPC съобщенията от отговора: един JSON (или списък), или SSE поток.
+        Таван _MAX_LINE като при stdio: 30 MB тяло влизаше цялото в паметта
+        (+143 MB RSS за едно извикване), за да се отреже на 20 000 знака
+        (одит 2026-10-21, възпроизведено)."""
+        too_big = f"отговорът на сървъра е над {_MAX_LINE / 1_000_000:g} MB — отказан"
         ctype = resp.headers.get("content-type", "")
         if "text/event-stream" not in ctype:
+            body = bytearray()
+            for chunk in self._chunks(resp, deadline):
+                body += chunk
+                if len(body) > _MAX_LINE:
+                    raise MCPError(too_big)
             try:
-                data = json.loads(resp.content.decode("utf-8", errors="replace") or "null")
+                data = json.loads(body.decode("utf-8", errors="replace") or "null")
             except ValueError:
                 return
             for item in data if isinstance(data, list) else [data]:
                 if isinstance(item, dict):
                     yield item
             return
-        buf: list[str] = []
-        for raw in resp.iter_lines(decode_unicode=False):
-            if time.monotonic() > deadline:
-                raise MCPError("няма отговор навреме")
-            line = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
-            if line.startswith("data:"):
-                buf.append(line[5:].lstrip())
-            elif not line.strip() and buf:
-                try:
-                    item = json.loads("\n".join(buf))
-                except ValueError:
-                    item = None
-                buf = []
-                if isinstance(item, dict):
-                    yield item
+        pending = bytearray()   # недовършен ред
+        buf: list[str] = []     # data: редовете на текущото събитие
+        buf_size = 0
+        for chunk in self._chunks(resp, deadline):
+            pending += chunk
+            if len(pending) + buf_size > _MAX_LINE:
+                raise MCPError(too_big)
+            *lines, rest = pending.split(b"\n")
+            pending = bytearray(rest)
+            for raw in lines:
+                line = raw.decode("utf-8", errors="replace").rstrip("\r")
+                if line.startswith("data:"):
+                    buf.append(line[5:].lstrip())
+                    buf_size += len(line)
+                elif not line.strip() and buf:
+                    try:
+                        item = json.loads("\n".join(buf))
+                    except ValueError:
+                        item = None
+                    buf, buf_size = [], 0
+                    if isinstance(item, dict):
+                        yield item
 
     def request(self, method: str, params: dict | None = None,
                 timeout: float | None = None, deadline: float | None = None) -> dict:
@@ -516,14 +624,14 @@ class HttpServer(Server):
                         continue
                     if msg.get("id") != rid:
                         continue
-                    if "error" in msg:
+                    if msg.get("error") is not None:   # `"error": null` до result не е грешка
                         err = msg["error"]
                         text = err.get("message") if isinstance(err, dict) else None
                         raise MCPError(str(text or err)[:500])
                     result = msg.get("result")
                     return result if isinstance(result, dict) else {}
             finally:
-                resp.close()
+                self._abort(resp)
             raise MCPError(f"сървърът не върна отговор ({method})")
         finally:
             self._lock.release()
@@ -532,7 +640,8 @@ class HttpServer(Server):
         if self._ready and self.session_id:
             try:
                 import requests
-                requests.delete(_expand(self.url), headers=self._headers(), timeout=3)
+                requests.delete(_expand(self.url), headers=self._headers(), timeout=3,
+                                allow_redirects=False)
             except Exception:
                 log.debug("MCP сесията не се затвори на сървъра", exc_info=True)
         self._ready = False
@@ -751,13 +860,19 @@ def _find(qualified: str) -> tuple[Server, Tool] | None:
     hit = _by_name.get(qualified)
     if hit is not None:
         return hit
-    if "." in qualified:
-        server, _, name = qualified.partition(".")
-        srv = _servers.get(server.strip())
-        if srv is not None:
-            for t in srv.tools:
-                if t.name == name.strip():
-                    return srv, t
+    # `сървър.инструмент` — сървърът може да има точка в името (`notion.so`):
+    # делене на първата точка не го намираше (одит 2026-10-21).
+    text = qualified.strip()
+    for srv in _servers.values():
+        if not text.startswith(srv.name):
+            continue
+        rest = text[len(srv.name):].lstrip()
+        if not rest.startswith("."):
+            continue
+        name = rest[1:].strip()
+        for t in srv.tools:
+            if t.name == name:
+                return srv, t
     return None
 
 
@@ -784,7 +899,9 @@ def prompt_section() -> str:
              'Извикване: [MCP: сървър.инструмент | {"аргумент": "стойност"}] — JSON по схемата.']
     size = sum(len(x) for x in lines)
     for t in available:
-        props = ", ".join(list((t.schema.get("properties") or {}).keys())[:8])
+        # Ключовете на схемата — сплескани като описанието и името (одит 2026-10-21).
+        props = ", ".join(" ".join(str(k).split())[:40]
+                          for k in list((t.schema.get("properties") or {}).keys())[:8])
         line = f"- {t.server}.{t.name}({props}) — {' '.join(t.description.split())[:160]}"
         if size + len(line) > _MAX_SECTION:
             lines.append(f"- … и още {len(available) - len(lines) + 2} (/mcp ги показва)")
