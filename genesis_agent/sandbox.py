@@ -689,6 +689,22 @@ def _assess_file_ops(command: str, cwd: Path | None = None) -> RiskVerdict:
         if cmd in _DESTRUCTIVE_MOVE_CMDS and len(operands) >= 2:
             sources, dest = operands[:-1], operands[-1]
             paths, had_glob = _expand_targets(sources, cwd)
+            # `cp e/hooks.json ~/.genesis/` — целта е папка и името идва от
+            # източника: никой аргумент не СЪДЪРЖА управляващия файл, а той се
+            # създава (одит 2026-10-21: SAFE, засаденият hook тръгваше при
+            # следващия инструмент с ключовете в средата). Проверява се къде
+            # ще КАЦНЕ всеки източник — управляващ файл или тайна → питане.
+            dest_dir = Path(os.path.expanduser(os.path.expandvars(dest)))
+            if not dest_dir.is_absolute() and cwd:
+                dest_dir = cwd / dest_dir
+            if dest.endswith(("/", "\\")) or dest_dir.is_dir():
+                names = [p.name for p in paths] or [os.path.basename(s.rstrip("/\\")) for s in sources]
+                for name in names[:_MAX_SECRET_GLOB]:
+                    landing = dest_dir / name
+                    why = control_path_reason(landing) or sensitive_path_reason(landing)
+                    if why:
+                        bump(RiskLevel.CONFIRM, f"{why}: {landing}")
+                        break
             recursive = any(f in ("-r", "-R", "-a", "--recursive") for f in flags)
             bulk = had_glob or len(sources) > 1 or recursive or len(paths) > 1
             verb = "преместване" if cmd == "mv" else "копиране"

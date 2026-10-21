@@ -8,7 +8,7 @@ import os
 
 import pytest
 
-from genesis_agent import sandbox
+from genesis_agent import permissions, sandbox
 from genesis_agent.sandbox import RiskLevel, SandboxPolicy
 
 SAFE, CONFIRM, BLOCKED = RiskLevel.SAFE, RiskLevel.CONFIRM, RiskLevel.BLOCKED
@@ -1292,6 +1292,32 @@ def test_a_link_to_the_genesis_folder_asks(tmp_path, monkeypatch) -> None:
         pytest.skip("no symlinks here")
     assert sandbox.assess_command("echo {} > g/hooks.json", cwd=tmp_path).level is CONFIRM
     assert sandbox.assess_command("echo {} > g/notes.txt", cwd=tmp_path).level is SAFE
+
+
+def test_copying_a_control_file_into_the_genesis_folder_by_directory_asks(tmp_path, monkeypatch) -> None:
+    """Одит 2026-10-21: `cp e/hooks.json ~/.genesis/` беше SAFE — целта е
+    папка, името идва от източника и никой аргумент не съдържа управляващия
+    файл; засаденият винаги включен hook тръгваше при следващия инструмент."""
+    home = tmp_path / "home"
+    (home / ".genesis").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    (tmp_path / "e").mkdir()
+    (tmp_path / "e" / "hooks.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "e" / "notes.txt").write_text("x", encoding="utf-8")
+    for cmd in ("cp e/hooks.json ~/.genesis/", "mv e/hooks.json ~/.genesis",
+                f"cp e/hooks.json {home / '.genesis'}/", "cp e/*.json ~/.genesis/",
+                "install -m 644 e/hooks.json ~/.genesis/", "cp e/hooks.json .genesis/"):
+        v = sandbox.assess_command(cmd, cwd=tmp_path)
+        assert v.level is CONFIRM and any("управляващ" in r for r in v.reasons), (cmd, v)
+        assert not permissions.coverable(v.reasons), cmd      # правило не го покрива
+    (tmp_path / "out").mkdir()
+    assert sandbox.assess_command("cp e/hooks.json out/", cwd=tmp_path).level is SAFE
+    assert sandbox.assess_command("cp e/notes.txt ~/.genesis/", cwd=tmp_path).level is SAFE
+    # тайна по име на кацане: `cp e/id_rsa ~/.ssh/`
+    (home / ".ssh").mkdir()
+    (tmp_path / "e" / "id_rsa").write_text("k", encoding="utf-8")
+    assert sandbox.assess_command("cp e/id_rsa ~/.ssh/", cwd=tmp_path).level is CONFIRM
 
 
 def test_gh_hosts_file_on_windows_is_a_secret() -> None:
