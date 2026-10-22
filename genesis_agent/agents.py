@@ -162,9 +162,12 @@ def _header(raw: str) -> dict[str, Any]:
             continue
         items = None
         key, sep, value = line.partition(":")
-        if sep and key.strip().lower() in ("name", "description", "tools", "model"):
-            meta[key.strip().lower()] = value.strip().strip("'\"")
-        if sep and key.strip().lower() == "tools":
+        # Ключ в кавички (`"tools": Read`) под счупен YAML се пропускаше — и
+        # агентът пак получаваше всички инструменти (преглед 2026-10-22).
+        key = key.strip().strip("'\"").lower()
+        if sep and key in ("name", "description", "tools", "model"):
+            meta[key] = value.strip().strip("'\"")
+        if sep and key == "tools":
             # Блоков (`tools:` + `  - Read`) или flow (`[Read, Grep]`) списък под
             # счупен YAML: дотук първият ставаше „всички инструменти“ (и WRITE_FILE,
             # RUN_CMD за рецензент), а вторият — `[Read`/`Grep]`, т.е. нито един
@@ -174,7 +177,9 @@ def _header(raw: str) -> dict[str, Any]:
                 items = []
                 meta["tools"] = items
             elif value.startswith("[") and value.endswith("]"):
-                meta["tools"] = value[1:-1]
+                # `["Read", "Grep"]` — кавичките не са част от името: оставаха
+                # и рецензентът оставаше без нито един инструмент (2026-10-22).
+                meta["tools"] = ",".join(w.strip().strip("'\"") for w in value[1:-1].split(","))
     if meta.get("tools") == []:
         meta["tools"] = _UNREADABLE
     return meta

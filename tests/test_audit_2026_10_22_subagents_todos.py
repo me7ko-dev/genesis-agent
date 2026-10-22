@@ -74,10 +74,17 @@ def test_a_broken_header_never_gives_the_agent_every_tool(ws) -> None:
     # Счупен YAML с празно `tools:` и нищо след него — нищо, не всичко.
     _agent(folder, "rev5", "---\nname: rev5\ndescription: Use this agent when: x\n"
            "tools:\n---\nReview only.\n")
+    # Счупен YAML + ключ в кавички / flow списък с кавички (преглед 2026-10-22).
+    _agent(folder, "rev6", '---\nname: rev6\ndescription: Use this agent when: x\n'
+           '"tools": Read, Grep\n---\nReview only.\n')
+    _agent(folder, "rev7", '---\nname: rev7\ndescription: Use this agent when: x\n'
+           'tools: ["Read", \'Grep\']\n---\nReview only.\n')
     found = agents.load(ws)
     read_only = frozenset({"READ_FILE", "SEARCH_CODE"})
     assert found["rev1"].tools == read_only
     assert found["rev2"].tools == read_only and found["rev2"].dropped == ()
+    assert found["rev6"].tools == read_only
+    assert found["rev7"].tools == read_only and found["rev7"].dropped == ()
     assert found["rev3"].tools == read_only and found["rev3"].prompt == "Review only."
     for name in ("rev4", "rev5"):
         a = found.get(name)
