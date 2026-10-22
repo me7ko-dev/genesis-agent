@@ -155,7 +155,7 @@ def test_browse_applies_the_web_fetch_address_policy(monkeypatch) -> None:
     monkeypatch.setattr(socket, "getaddrinfo", _resolve)
     page = _FakePage({"http://evil.public/": "http://169.254.169.254/latest/meta-data/"})
     monkeypatch.setattr(browser, "_page", page)
-    monkeypatch.setattr(browser, "_allow_loopback", False)
+    monkeypatch.setattr(browser, "_allow_loopback", False, raising=False)
     monkeypatch.setattr(browser, "_last_elements", [])
     for url in ("http://169.254.169.254/latest/meta-data/iam/security-credentials/role",
                 "http://192.168.0.1/", "http://router.internal/", "http://100.100.100.200/",
@@ -279,8 +279,38 @@ def test_textual_formats_beyond_text_star(site) -> None:
     site("/zip", b"PK\x03\x04\x00\x00", Content_Type="application/zip")
     site("/blob", b"\x89PNG\r\n\x1a\n\x00\x00\x00", Content_Type="")
     site("/octet", b"\x00\x01\x02binary", Content_Type="application/octet-stream")
-    for path in ("/zip", "/blob", "/octet"):
+    # Ревю 2026-10-22: startswith("application/x-sh") пускаше ELF .so като текст.
+    site("/so", b"\x7fELF\x02\x01\x01\x00\x00\x00", Content_Type="application/x-sharedlib")
+    site("/swf", b"FWS\x0a\x00\x00\x00", Content_Type="application/x-shockwave-flash")
+    for path in ("/zip", "/blob", "/octet", "/so", "/swf"):
         assert "не е текст" in wf.web_fetch(f"http://feeds.public{path}"), path
+    site("/sh", b"#!/bin/sh\necho payload-sh\n", Content_Type="application/x-shellscript")
+    assert "payload-sh" in wf.web_fetch("http://feeds.public/sh")
+
+
+def test_an_untyped_binary_is_refused_from_its_head(site, monkeypatch) -> None:
+    """Ревю 2026-10-22: без тип (или octet-stream) съдържанието се гледаше чак
+    след целия файл — release архив теглеше до 3 MB или до срока и излизаше
+    „над N s“ вместо „не е текст“."""
+    monkeypatch.setattr(wf, "_TIMEOUT", 2)
+
+    def big_binary(h):
+        h.send_response(200)
+        h.send_header("Content-Type", "application/octet-stream")
+        h.send_header("Content-Length", str(50_000_000))
+        h.end_headers()
+        try:
+            h.wfile.write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 70_000)
+            h.wfile.flush()
+            time.sleep(5)
+        except OSError:
+            pass
+
+    site.pages["/release.bin"] = big_binary
+    start = time.monotonic()
+    out = wf.web_fetch("http://dl.public/release.bin")
+    took = time.monotonic() - start
+    assert "не е текст" in out and took < 1.5, (round(took, 1), out[:200])
 
 
 def test_links_wrapping_code_and_definition_lists() -> None:
@@ -298,3 +328,54 @@ def test_links_wrapping_code_and_definition_lists() -> None:
     assert "timeoutSeconds" not in text and "wait.retries" not in text
     assert [ln.strip() for ln in text.splitlines() if ln.strip()] == \
         ["timeout", "Seconds to wait.", "retries", "Count."]
+
+
+def test_browse_intercepts_only_internal_looking_requests(monkeypatch) -> None:
+    """Ревю 2026-10-22: route("**/*") в sync API спира всяка заявка, докато
+    Python не е в извикване на Playwright — между ходовете на модела fetch/XHR
+    на страницата стояха. Сега драйверът пуска публичните имена сам."""
+    import re
+    import sys
+    import types
+
+    routes: list[tuple[Any, Any]] = []
+    page = types.SimpleNamespace(
+        set_default_timeout=lambda _ms: None,
+        context=types.SimpleNamespace(route=lambda pattern, handler: routes.append((pattern, handler))))
+    pw = types.SimpleNamespace(chromium=types.SimpleNamespace(
+        launch=lambda **_k: types.SimpleNamespace(new_page=lambda: page)))
+    sync_api = types.ModuleType("playwright.sync_api")
+    sync_api.sync_playwright = lambda: types.SimpleNamespace(start=lambda: pw)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api)
+    for attr in ("_pw", "_browser", "_page"):
+        monkeypatch.setattr(browser, attr, None)
+    assert browser._ensure_page() is page
+    [(pattern, handler)] = routes
+    assert handler is browser._route_guard
+    # re.Pattern отива в драйвера като regex; низ или функция — като „**/*“.
+    assert isinstance(pattern, re.Pattern), pattern
+    for url in ("http://169.254.169.254/latest/", "http://127.0.0.1:2375/containers",
+                "http://[::1]:8080/", "http://router.internal/", "http://localhost:3000/x",
+                "http://router/", "http://printer.local/", "http://10.0.0.1",
+                "http://metadata.google.internal/computeMetadata/v1/"):
+        assert pattern.search(url), url
+    for url in ("https://docs.public/app.js", "https://cdn.example.com/x.js",
+                "https://example.com/?u=http://10.0.0.1/", "https://user@example.com/",
+                "https://x.local.example.com/", "data:text/plain,x"):
+        assert not pattern.search(url), url
+
+
+def test_browse_refuses_an_address_it_cannot_resolve_cleanly(monkeypatch) -> None:
+    """Ревю 2026-10-22: етикет над 63 знака — getaddrinfo хвърля UnicodeError:
+    BROWSE връщаше „Грешка при изпълнение“, а заявката в _route_guard оставаше
+    нито пусната, нито спряна (виси до срока на Playwright)."""
+    page = _FakePage({})
+    monkeypatch.setattr(browser, "_page", page)
+    monkeypatch.setattr(browser, "_allow_loopback", False, raising=False)
+    long_host = "a" * 64
+    out = gs.dispatch_tool_call("BROWSE", {"url": f"http://{long_host}.com/"})
+    assert "❌" in out and "Грешка при изпълнение" not in out and page.visited == [], out
+    route = _FakeRoute(f"http://{long_host}.internal/")
+    browser._route_guard(route)
+    assert route.done == "abort"

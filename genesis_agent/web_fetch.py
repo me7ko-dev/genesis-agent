@@ -342,10 +342,11 @@ def _decode(data: bytes, ctype: str) -> str:
 # Текстови типове извън text/* (одит 2026-10-22: JS, RSS/Atom, ld+json и YAML
 # излизаха „не е текст“ и моделът минаваше през RUN_CMD curl -o — ход повече и
 # решение на sandbox-а за нещо, което WebFetch на Claude Code просто чете).
-_TEXT_TYPES = ("application/json", "application/xml", "application/javascript",
-               "application/ecmascript", "application/x-javascript", "application/yaml",
-               "application/x-yaml", "application/toml", "application/x-sh",
-               "application/x-ndjson", "application/sql", "application/graphql")
+_TEXT_TYPES = frozenset((
+    "application/javascript", "application/ecmascript", "application/x-javascript",
+    "application/yaml", "application/x-yaml", "application/toml", "application/x-sh",
+    "application/x-shellscript", "application/x-ndjson", "application/sql",
+    "application/graphql"))
 
 
 def _textual(ctype: str) -> bool | None:
@@ -353,7 +354,11 @@ def _textual(ctype: str) -> bool | None:
     application/octet-stream) и решава съдържанието (_looks_like_text)."""
     low = ctype.lower()
     mime = low.split(";", 1)[0].strip()
-    if "html" in low or "charset" in low or mime.startswith(("text/", *_TEXT_TYPES)) \
+    # Точно съвпадение, не startswith (ревю 2026-10-22): „application/x-sh“
+    # пускаше application/x-sharedlib (ELF .so) и x-shockwave-flash като текст.
+    # Префиксите json/xml са старото правило (json-seq, xml-dtd са текст).
+    if "html" in low or "charset" in low or mime in _TEXT_TYPES \
+            or mime.startswith(("text/", "application/json", "application/xml")) \
             or mime.endswith(("+json", "+xml")):
         return True
     if not mime or mime == "application/octet-stream":
@@ -450,6 +455,13 @@ def fetch(url: str) -> tuple[str, str, str]:
                 data = b""
                 for chunk in resp.iter_content(65536):
                     data += chunk
+                    # Без тип решава началото, щом го има — не след 3 MB (ревю
+                    # 2026-10-22: release файл като octet-stream се теглеше до
+                    # тавана или до срока и чак тогава излизаше „не е текст“).
+                    if textual is None and len(data) >= 2048:
+                        if not _looks_like_text(data[:2048]):
+                            raise FetchError(not_text)
+                        textual = True
                     if len(data) > _MAX_BYTES:
                         break
                     if time.monotonic() > deadline:

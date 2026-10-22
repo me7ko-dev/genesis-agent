@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any
 
 from genesis_agent import sandbox, web_fetch
@@ -87,8 +88,8 @@ def _address_refusal(url: str) -> str:
     сокета, се зареждаше в Chromium и текстът му отиваше при модела. Достатъчно
     е инжектиран README да каже „BROWSE http://192.168.0.1/“. Тук името се
     разрешава и всеки адрес минава през web_fetch._allowed_ip; Chromium
-    разрешава името сам, затова проверката е и на всяка заявка (_route_guard),
-    и на крайния адрес на страницата (_page_state_summary)."""
+    разрешава името сам, затова проверката е и на заявките към вътрешни по вид
+    адреси (_route_guard), и на крайния адрес на страницата (_page_state_summary)."""
     if not url.lower().startswith(_ALLOWED_SCHEMES):
         return ""   # about:blank, data:, chrome-error:// — не са мрежови адреси
     try:
@@ -96,12 +97,35 @@ def _address_refusal(url: str) -> str:
         web_fetch._precheck_through_proxy(host, url, _allow_loopback)
     except web_fetch.FetchError as e:
         return str(e)
+    except (ValueError, OSError) as e:
+        # Ревю 2026-10-22: етикет над 63 знака — getaddrinfo хвърля
+        # UnicodeError; BROWSE падаше с изключение, а заявката в _route_guard
+        # оставаше нито пусната, нито спряна. Неясното се отказва.
+        return f"невалиден адрес: {e}"
     return ""
 
 
+# Ревю 2026-10-22: route("**/*") спира ВСЯКА заявка, докато Python не отговори,
+# а sync API на Playwright отговаря само докато тече негово извикване (виж
+# playwright/_impl/_greenlets.wait_for_future) — между два хода на модела
+# fetch/XHR/картинките на страницата стояха, и BROWSER_READ виждаше още
+# спинъра. Regex-ът се проверява в драйвера: публичните имена минават без
+# Python; спират се за проверка само адресите, вътрешни по вид — IP литерали,
+# имена без точка (localhost, router, имена на docker услуги) и запазените
+# домейни. Име с публичен домейн, което сочи навътре, не се вижда тук — до
+# модела него го спира проверката на page.url (кръстосан произход не дава на
+# JS отговора без CORS).
+_INTERNAL_LOOKING_URL = re.compile(
+    r"^https?://(?:[^/?#@]*@)?"
+    r"(?:\[[^\]/?#]*\]|[0-9.]+|[^/?#:.\[\]@]+"
+    r"|[^/?#:\[\]@]*\.(?:localhost|local|localdomain|internal|intranet|lan|home|corp|private|test|arpa))"
+    r"\.?(?::[0-9]*)?(?:[/?#]|$)", re.IGNORECASE)
+
+
 def _route_guard(route: Any) -> None:
-    """Всяка заявка на страницата (ресурси, fetch, JS навигация, meta refresh)
-    към вътрешен адрес се спира, преди Chromium да я изпрати."""
+    """Заявка на страницата (ресурс, fetch, JS навигация, meta refresh) към
+    вътрешен по вид адрес (_INTERNAL_LOOKING_URL) се проверява, преди Chromium
+    да я изпрати."""
     url = route.request.url
     refusal = _address_refusal(url)
     try:
@@ -131,7 +155,7 @@ def _ensure_page():
     # На контекста, не на страницата — и прозорците, които страницата отваря.
     # Пренасочванията не минават през route (Playwright вика handler-а само за
     # първия адрес) — за тях е проверката на page.url в _page_state_summary.
-    _page.context.route("**/*", _route_guard)
+    _page.context.route(_INTERNAL_LOOKING_URL, _route_guard)
     return _page
 
 
