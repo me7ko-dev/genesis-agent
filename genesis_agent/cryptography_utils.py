@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import logging
 import os
-from pathlib import Path
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -21,10 +20,13 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 # When GENESIS_HOME is unset this resolves to `~/.genesis`, exactly as before,
 # so a single-environment install sees no change and needs no migration.
 from genesis_agent.paths import GENESIS_HOME as _GENESIS_HOME
+from genesis_agent.paths import env_path as _env_path
 
 log = logging.getLogger("genesis.cryptography_utils")
 
-KEY_DIR = Path(os.environ.get("GENESIS_KEY_DIR", _GENESIS_HOME))
+# Празна GENESIS_KEY_DIR = GENESIS_HOME (одит 2026-10-22: беше „.“ — ключът за
+# подписване се създаваше в текущата папка).
+KEY_DIR = _env_path("GENESIS_KEY_DIR", _GENESIS_HOME)
 PRIVATE_KEY_PATH = KEY_DIR / "private_key.pem"
 PUBLIC_KEY_PATH = KEY_DIR / "public_key.pem"
 

@@ -165,6 +165,24 @@ def check_pytest(ws: Path) -> list[Check]:
     return [Check("pytest", "ok", f"{_first(text)} ({py})")]
 
 
+def check_config(_ws: Path) -> list[Check]:
+    """config.yaml се парсва и е с правилната форма.
+
+    Одит 2026-10-22: с табулация в config.yaml (честа грешка) `genesis doctor`
+    мълчеше — редът „Модели“ казваше само „не е проверено (без мрежа)“, — а
+    `genesis` и `genesis -p` спираха с код 1. Диагностиката криеше точно
+    проблема, който спира агента."""
+    from genesis_agent.paths import CONFIG_PATH, config_problem
+    problem = config_problem(CONFIG_PATH)
+    if problem is None:
+        return [Check("config.yaml", "ok", str(CONFIG_PATH))]
+    if "табулация" in problem:
+        fix = f"смени табулацията на този ред с интервали в {CONFIG_PATH}"
+    else:
+        fix = f"поправи реда/ключа в {CONFIG_PATH} — докато не се парсва, чатът не тръгва"
+    return [Check("config.yaml", "fail", problem, fix)]
+
+
 def _key_names() -> list[str]:
     from genesis_agent.brain import _PROVIDERS, _load_keys
     keys = _load_keys()
@@ -354,7 +372,8 @@ def check_voice(_ws: Path) -> list[Check]:
 
 def probes(online: bool = False) -> list[tuple[str, Callable[[Path], list[Check]]]]:
     return [("Python", check_python), ("git", check_git), ("Node.js / npm", check_node),
-            ("ruff", check_ruff), ("pytest", check_pytest), ("API ключове", check_keys),
+            ("ruff", check_ruff), ("pytest", check_pytest), ("config.yaml", check_config),
+            ("API ключове", check_keys),
             ("Модели", lambda ws: check_models(ws, online)), ("MCP", check_mcp),
             ("Hooks", check_hooks), ("Диск", check_disk), ("Playwright/Chromium", check_playwright),
             ("claude CLI", check_claude), ("Глас", check_voice)]
@@ -431,7 +450,7 @@ def format_report(checks: list[Check]) -> str:
 
 
 USAGE = """Употреба: genesis doctor [--models] [--json] [--cwd ПАПКА]
-  без мрежа и бързо: Python, git, Node/npm, ruff, pytest, ключовете (само имената),
+  без мрежа и бързо: Python, git, Node/npm, ruff, pytest, config.yaml, ключовете (само имената),
   MCP сървърите, hooks, диска, Playwright/Chromium, входа на `claude`, гласа и микрофона
   --models   и по една малка заявка до всеки модел от config.yaml (мрежа)
   --json     резултатът като JSON (status: ok | fail | skip)

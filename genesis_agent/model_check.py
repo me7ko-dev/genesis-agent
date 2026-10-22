@@ -26,10 +26,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 import requests
-import yaml
 
 from genesis_agent.config import DATA_DIR
-from genesis_agent.paths import CONFIG_PATH
+from genesis_agent.paths import CONFIG_PATH, ConfigError, load_config
 
 log = logging.getLogger("genesis.model_check")
 
@@ -53,8 +52,10 @@ LABELS = {
 def configured_models() -> list[tuple[str, str]]:
     """Всички (provider, model) от config.yaml: старт, верига, кодинг, леки."""
     try:
-        models = (yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}).get("models", {}) or {}
-    except (OSError, yaml.YAMLError):
+        # С проверка на формата (одит 2026-10-22): `models: [1, 2]` гърмеше
+        # тук с AttributeError; причината казва `genesis models` (cli._models).
+        models = load_config(CONFIG_PATH, sections=("models",)).get("models") or {}
+    except (OSError, UnicodeDecodeError, ConfigError):
         return []
     out: list[tuple[str, str]] = []
     if models.get("default_provider") and models.get("default_model_id"):

@@ -36,9 +36,24 @@ FROZEN: bool = bool(getattr(sys, "frozen", False))
 # root; for an installed copy it is site-packages.
 PROJECT_ROOT: Path = PACKAGE_DIR.parent
 
+
+def env_path(name: str, default: Path | str) -> Path:
+    """Път от променлива на средата; зададена, но празна = `default`.
+
+    Одит 2026-10-22: `os.environ.get(NAME, default)` даваше `Path("")`, тоест
+    „.“, за `GENESIS_HOME=` (`docker run -e GENESIS_HOME` без стойност, ред в
+    профила с махната стойност — същото, което config._int_env вече пази).
+    Измерено: `genesis setup` записа всички ключове в ./.env на проекта, в
+    който стоеше потребителят (неследен файл, лесен за комитване), а
+    GENESIS_HISTORY_DIR= и GENESIS_SANDBOX_DIR= правеха историята и
+    пясъчника текущата папка."""
+    raw = os.environ.get(name, "").strip()
+    return Path(raw) if raw else Path(default)
+
+
 # User configuration lives here. Override with GENESIS_HOME if you keep
 # config elsewhere (e.g. an encrypted volume).
-GENESIS_HOME: Path = Path(os.environ.get("GENESIS_HOME", Path.home() / ".genesis"))
+GENESIS_HOME: Path = env_path("GENESIS_HOME", Path.home() / ".genesis")
 
 ENV_FILE: Path = GENESIS_HOME / ".env"
 
@@ -46,6 +61,100 @@ ENV_FILE: Path = GENESIS_HOME / ".env"
 # beside it, which meant an installed copy dropped `config.yaml` and `skills/`
 # straight into site-packages, where an unrelated project could import them.
 CONFIG_PATH: Path = PACKAGE_DIR / "config.yaml"
+
+
+class ConfigError(ValueError):
+    """config.yaml не става: синтаксисът или формата. Текстът е за човек."""
+
+
+# Секциите, които кодът чете с `.get(...)`, и списъците от записи в `models:`.
+_CONFIG_SECTIONS = {"workspace": "`path:`", "storage": "`history_dir:`",
+                    "models": "`default_provider:`, `fallback_models:` …"}
+_MODEL_LISTS = ("fallback_models", "coding_models", "light_models", "premium_models")
+
+
+def _kind(value: object) -> str:
+    if isinstance(value, bool):
+        return "да/не"
+    for kind, name in ((str, "текст"), (list, "списък"), (dict, "речник"), ((int, float), "число")):
+        if isinstance(value, kind):
+            return name
+    return type(value).__name__
+
+
+def _shown(value: object) -> str:
+    text = repr(value)
+    return text if len(text) <= 40 else text[:37] + "…"
+
+
+def _yaml_problem(err: Exception) -> str:
+    """„ред 14, колона 1: …“ от грешка на YAML парсера (редът е от 1)."""
+    mark = getattr(err, "problem_mark", None)
+    problem = str(getattr(err, "problem", "") or err).strip()
+    where = f"ред {mark.line + 1}, колона {mark.column + 1}: " if mark is not None else ""
+    if "\\t" in problem or "\t" in problem:
+        problem += " (табулация — YAML иска интервали за отстъп)"
+    return where + problem
+
+
+def load_config(path: Path | str | None = None, *,
+                sections: tuple[str, ...] = tuple(_CONFIG_SECTIONS)) -> dict:
+    """config.yaml като речник, проверен по форма.
+
+    Одит 2026-10-22: файл, който се парсва, но е с грешна форма (`workspace:
+    ~/proj` вместо `workspace:` и `path: ~/proj` под него, списък на върха,
+    `models: [1, 2]`), убиваше `genesis`, `genesis -p` и `genesis models` с
+    AttributeError и стектрейс, без дума кой ключ е грешен. Вдига ConfigError
+    с човешки текст (синтаксис — с реда и колоната); OSError (липсващ файл)
+    минава непроменен. `sections` — кои секции да се проверят: веригата на
+    Brain чете само `models` и сгрешен `workspace:` не бива да я изпразва за
+    `genesis fix` и мисиите, които него не четат."""
+    import yaml
+    target = Path(path) if path is not None else CONFIG_PATH
+    text = target.read_text(encoding="utf-8")
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        raise ConfigError(_yaml_problem(e)) from e
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ConfigError(f"config.yaml трябва да е речник (`ключ: стойност` на всеки ред), "
+                          f"а е {_kind(data)} ({_shown(data)})")
+    for section in sections:
+        value = data.get(section)
+        if value is not None and not isinstance(value, dict):
+            raise ConfigError(f"`{section}` трябва да е речник с {_CONFIG_SECTIONS[section]} на "
+                              f"отделен ред под него, а е {_kind(value)} ({_shown(value)})")
+    models = data.get("models") if "models" in sections else None
+    if not isinstance(models, dict):
+        return data
+    for group in _MODEL_LISTS:
+        entries = models.get(group)
+        if entries is None:
+            continue
+        if not isinstance(entries, list):
+            raise ConfigError(f"`models.{group}` трябва да е списък от записи с `provider:` и "
+                              f"`model:`, а е {_kind(entries)} ({_shown(entries)})")
+        for i, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                raise ConfigError(f"`models.{group}[{i}]` трябва да е запис с `provider:` и "
+                                  f"`model:`, а е {_kind(entry)} ({_shown(entry)})")
+    return data
+
+
+def config_problem(path: Path | str | None = None, *,
+                   sections: tuple[str, ...] = tuple(_CONFIG_SECTIONS)) -> str | None:
+    """Какво не е наред с config.yaml, или None — за `genesis doctor` и
+    `genesis models`, които иначе показваха празна верига без причина."""
+    try:
+        load_config(path, sections=sections)
+    except ConfigError as e:
+        return str(e)
+    except (OSError, UnicodeDecodeError) as e:
+        return f"не се чете: {e}"
+    return None
+
 
 # Searched in order. The project-local .env wins over the home one, so a
 # checkout can be pinned to different keys without touching global config.
@@ -257,10 +366,12 @@ def _registry_pythons() -> list[Path]:
 
 def history_dir() -> Path:
     """Chat history. XDG-correct, so it does not clutter the repo."""
-    default = Path(
-        os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")
-    ) / "genesis-agent" / "history"
-    return Path(os.environ.get("GENESIS_HISTORY_DIR", default))
+    # Спецификацията на XDG: празна или относителна XDG_DATA_HOME се
+    # пренебрегва (одит 2026-10-22: `XDG_DATA_HOME=` даваше относителната
+    # „genesis-agent/history“ — история в текущата папка).
+    xdg = os.environ.get("XDG_DATA_HOME", "").strip()
+    base = Path(xdg) if xdg and Path(xdg).is_absolute() else Path.home() / ".local" / "share"
+    return env_path("GENESIS_HISTORY_DIR", base / "genesis-agent" / "history")
 
 
 def _strip_inline_comment(value: str) -> str:
@@ -312,7 +423,12 @@ def read_env_files(key: str) -> str | None:
                 k = k.strip()
                 if k.startswith("export "):
                     k = k[len("export "):].strip()
-                if k == key:
+                # Празно `KEY=` не е попадение (одит 2026-10-22): `cp .env.example
+                # .env` в checkout-а оставя всеки доставчик като `NAME=`, и
+                # ключът от `genesis setup` в ~/.genesis/.env ставаше невидим —
+                # get_secret връщаше None, а setup казваше „✅ Записано“.
+                # Същото правило като за празна променлива на средата.
+                if k == key and env_value(v):
                     return env_value(v)
         except OSError:
             continue

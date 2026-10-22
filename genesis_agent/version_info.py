@@ -21,6 +21,7 @@ pip вече знае отговора и го записва: инсталац�
 """
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import urllib.error
@@ -39,6 +40,12 @@ _RELEASE_API = "https://api.github.com/repos/{owner_repo}/releases/latest"
 _COMPARE_API = "https://api.github.com/repos/{owner_repo}/compare/{base}...{head}"
 _TIMEOUT = 15
 _CHANGELOG_LIMIT = 10
+# http.client.HTTPException не е OSError и urllib не я обвива: BadStatusLine от
+# captive portal/счупен прокси и IncompleteRead от отрязан chunked отговор
+# излизаха от `genesis update` като стектрейс (одит 2026-10-22, измерено с
+# локален сокет сървър), въпреки обещанието „никога не хвърля“.
+_NETWORK_ERRORS = (urllib.error.URLError, OSError, ValueError, TimeoutError,
+                   http.client.HTTPException)
 
 
 @dataclass
@@ -129,7 +136,7 @@ def latest_commit(owner_repo: str, ref: str, *, timeout: int = _TIMEOUT) -> str 
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read(1 << 20).decode("utf-8", "replace"))
-    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+    except _NETWORK_ERRORS:
         return None
     sha = data.get("sha") if isinstance(data, dict) else None
     return sha if isinstance(sha, str) and sha else None
@@ -146,7 +153,7 @@ def latest_release_commit(owner_repo: str, *, timeout: int = _TIMEOUT) -> str | 
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read(1 << 20).decode("utf-8", "replace"))
-    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+    except _NETWORK_ERRORS:
         return None
     tag = data.get("tag_name") if isinstance(data, dict) else None
     if not isinstance(tag, str) or not tag:
@@ -174,7 +181,7 @@ def changelog(owner_repo: str, base: str, head: str, *,
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read(1 << 20).decode("utf-8", "replace"))
-    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+    except _NETWORK_ERRORS:
         return None
     commits = data.get("commits") if isinstance(data, dict) else None
     if not isinstance(commits, list):
