@@ -74,6 +74,25 @@ def test_a_withheld_key_never_reaches_the_report(tmp_path) -> None:
     assert _OPENAI not in _zip_text(d) and _OPENAI not in d.report
 
 
+def test_the_test_output_is_scrubbed_before_it_is_cut(tmp_path, monkeypatch) -> None:
+    # Ревю 2026-10-22: [-1500:] режеше изхода насред паролата и остатъкът
+    # (`ub4dor-3xyz-Qq`) не пасваше нито на стойността, нито на форма.
+    pw = "Tr0ub4dor-3xyz-Qq"
+    root = _write(tmp_path / "shop", {
+        ".env": f"DB_PASSWORD={pw}\n", "app.py": "x = 1\n",
+        "tests/test_app.py": "def test_x():\n    assert False\n",
+        "pyproject.toml": "[project]\nname='shop'\nversion='0'\n"})
+    head = "E   AssertionError: '"
+    out = head + pw + "' != 'x'\n"
+    out += "y" * (1500 - len(out) + len(head) + 3)        # срязът пада на 3-тия знак
+    assert out[-1500:].startswith(pw[3:])
+    monkeypatch.setattr(repo_agent, "run_tests",
+                        lambda root, cmd: repo_agent.TestRun(True, False, out, cmd))
+    d = deliver.export(root, tmp_path / "shop.zip", run_tests=True)
+    assert "❌ падат" in d.report
+    assert pw[3:] not in d.report and pw[3:] not in _zip_text(d)
+
+
 # ── 2: „поправено“ с отслабен или пропуснат тест ─────────────────────────────
 
 _CALC = "def add(a, b):\n    return a - b\n"
@@ -136,6 +155,37 @@ def test_a_key_after_the_first_256_kb_is_withheld(tmp_path) -> None:
     assert [p.name for p in keep] == ["main.py"]
     assert any(w.startswith("analysis.ipynb (съдържа ключ sk-p") for w in withheld)
     assert "big.py" in withheld
+
+
+def test_an_ignored_file_is_not_read_to_the_end(tmp_path) -> None:
+    # Ревю 2026-10-22: цялото четене е за файла, който заминава; игнорираните
+    # db.sqlite3/server.log и без това остават, а се четяха до 200 MB.
+    root = _write(tmp_path / "proj", {
+        "main.py": "print('hi')\n", ".gitignore": "*.log\n",
+        "server.log": "GET /api 200\n" * 40_000 + f"key={_OPENAI}\n"})
+    assert (root / "server.log").stat().st_size > deliver._SCAN_BYTES
+    _, withheld = deliver.project_files(root)
+    assert withheld == ["server.log (игнориран от .gitignore)"]
+
+
+def test_over_the_cap_nothing_is_read_to_the_end(tmp_path, monkeypatch) -> None:
+    # Ревю 2026-10-22: 3 × 100 MB .bin се четяха до края 32 s, само за да
+    # откаже export-ът заради тавана.
+    root = _write(tmp_path / "proj", {"main.py": "print('hi')\n"})
+    for i in range(3):
+        (root / f"data{i}.bin").write_bytes(os.urandom(300_000))
+    monkeypatch.setattr(deliver, "_MAX_INPUT_MB", 0.5)
+    whole: list[bool] = []
+    real = deliver._secret_file
+
+    def spy(p, rel, **kw):
+        whole.append(kw.get("whole", True))
+        return real(p, rel, **kw)
+
+    monkeypatch.setattr(deliver, "_secret_file", spy)
+    with pytest.raises(ValueError, match="таван"):
+        deliver.export(root, tmp_path / "proj.zip", run_tests=False)
+    assert whole and not any(whole)
 
 
 # ── 4: GitLab, npm, Telegram, SendGrid и парола в адрес ──────────────────────

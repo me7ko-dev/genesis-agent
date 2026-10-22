@@ -331,8 +331,9 @@ def _mcp_literal_secret(data: bytes) -> str | None:
     return None
 
 
-def _secret_file(p: Path, rel: str) -> str | None:
-    """None — файлът може да замине; иначе как да се впише в „извън архива“."""
+def _secret_file(p: Path, rel: str, *, whole: bool = True) -> str | None:
+    """None — файлът може да замине; иначе как да се впише в „извън архива“.
+    `whole=False` — само първите _SCAN_BYTES (остатъкът — в _scan_whole)."""
     from genesis_agent import sandbox
     if sandbox.sensitive_path_reason(rel) or sandbox.sensitive_path_reason(p.name):
         return rel
@@ -341,7 +342,7 @@ def _secret_file(p: Path, rel: str) -> str | None:
     is_mcp = p.name.lower() in (".mcp.json", "mcp.json")
     try:
         with p.open("rb") as f:
-            for i, (lines, data) in enumerate(_chunks(f)):
+            for i, (lines, data) in enumerate(_chunks(f, whole)):
                 if _SECRET_CONTENT.search(data):
                     return rel
                 if is_mcp and i == 0:
@@ -367,14 +368,16 @@ def _secret_file(p: Path, rel: str) -> str | None:
     return None
 
 
-def _chunks(f: BinaryIO) -> Iterator[tuple[int, bytes]]:
-    """(редове преди парчето, парче) за целия файл — виж _SCAN_BYTES."""
+def _chunks(f: BinaryIO, whole: bool = True) -> Iterator[tuple[int, bytes]]:
+    """(редове преди парчето, парче) за целия файл — виж _SCAN_BYTES;
+    `whole=False` — само първото парче."""
     lines = 0
     chunk = f.read(_SCAN_BYTES)
     total = len(chunk)
     while chunk:
         yield lines, chunk
-        more = f.read(_SCAN_BYTES) if total < _MAX_INPUT_MB * 1024 * 1024 else b""
+        more = (f.read(_SCAN_BYTES) if whole and total < _MAX_INPUT_MB * 1024 * 1024
+                else b"")
         if not more:
             return
         total += len(more)
@@ -557,7 +560,7 @@ def project_files(root: Path, *, exclude: Path | None = None) -> tuple[list[Path
                 continue
             if name == REPORT_NAME and p.parent == root:
                 continue  # regenerated below; an old one would be stale
-            secret = _secret_file(p, rel)
+            secret = _secret_file(p, rel, whole=False)
             if secret:
                 withheld.append(secret)
                 continue
@@ -565,7 +568,30 @@ def project_files(root: Path, *, exclude: Path | None = None) -> tuple[list[Path
                 withheld.append(f"{rel} ({_IGNORED})")
                 continue
             keep.append(p)
-    return keep, withheld
+    return _scan_whole(root, keep, withheld)
+
+
+def _scan_whole(root: Path, keep: list[Path], withheld: list[str]) -> tuple[list[Path], list[str]]:
+    """Остатъкът след първите _SCAN_BYTES — само на файловете, които заминават.
+    Ревю 2026-10-22: четено до края още в обхождането, игнорираното (и без
+    това извън архива) правеше project_files 12.4 s вместо 0.05 s при 60 MB
+    db.sqlite3 и 40 MB server.log, а проект с 3 × 100 MB .bin чакаше отказа
+    за тавана 32 s (сега 0.14 s) — над тавана не се чете нищо повече."""
+    sizes: dict[Path, int] = {}
+    for p in keep:
+        with contextlib.suppress(OSError):
+            sizes[p] = p.stat().st_size
+    if sum(sizes.values()) > _MAX_INPUT_MB * 1024 * 1024:
+        return keep, withheld          # export отказва
+    out: list[Path] = []
+    for p in keep:
+        if sizes.get(p, 0) > _SCAN_BYTES:
+            secret = _secret_file(p, p.relative_to(root).as_posix())
+            if secret:
+                withheld.append(secret)
+                continue
+        out.append(p)
+    return out, withheld
 
 
 # ── README ───────────────────────────────────────────────────────────────────
@@ -732,8 +758,6 @@ def _memory(root: Path) -> tuple[list[dict], list[dict]]:
     return decisions, threads
 
 
-# ── The report ───────────────────────────────────────────────────────────────
-
 # ── Тайни в отчета ───────────────────────────────────────────────────────────
 # Отчетът е единственият файл, който е СИГУРНО в архива, а носи чужд текст:
 # изхода на падащите тестове, разделите от README-то, решенията от паметта.
@@ -806,6 +830,8 @@ def _scrub(text: str, values: set[str] | None = None) -> str:
     return b"".join(out).decode("utf-8", "surrogatepass")
 
 
+# ── The report ───────────────────────────────────────────────────────────────
+
 def _size(n: float) -> str:
     if n < 1024:
         return f"{n:.0f} B"
@@ -820,6 +846,7 @@ def build_report(root: Path, files: list[Path], withheld: list[str], *,
 
     rel = [f.relative_to(root).as_posix() for f in files]
     info = detect_project(root)
+    secrets = _withheld_values(root, withheld)
     sections = readme_sections(root)
     lines = [f"# {root.name} — отчет за предаване",
              "",
@@ -886,15 +913,19 @@ def build_report(root: Path, files: list[Path], withheld: list[str], *,
     else:
         from genesis_agent.repo_agent import run_tests as _run
         res = _run(root, info.test_command)
+        # Изходът се чисти ПРЕДИ да се отреже: ревю 2026-10-22 — срязът на
+        # [-1500:] насред паролата оставяше `ub4dor-3xyz-Qq` от
+        # `Tr0ub4dor-3xyz-Qq`, а такъв къс вече не пасва на нищо.
+        output = _scrub(res.output, secrets)
         if not res.ran:
-            lines += [f"Не можаха да се пуснат: {res.output[:300]}", ""]
+            lines += [f"Не можаха да се пуснат: {output[:300]}", ""]
         else:
             passed = res.passed
             verdict = "✅ минават" if res.passed else "❌ падат"
-            lines += [f"{verdict} — `{_test_summary(res.output)}`",
+            lines += [f"{verdict} — `{_test_summary(output)}`",
                       "", f"Команда: `{_portable(info.test_command)}`", ""]
             if not res.passed:
-                lines += ["```", res.output[-1500:], "```", ""]
+                lines += ["```", output[-1500:], "```", ""]
 
     assumptions = _section(sections, _ASSUME_HEADINGS)
     decisions, threads = _memory(root)
@@ -923,7 +954,7 @@ def build_report(root: Path, files: list[Path], withheld: list[str], *,
                    "и имена, които не стават в zip:"), ""]
         lines += [f"- `{w}`" for w in withheld]
         lines.append("")
-    report = _scrub("\n".join(lines), _withheld_values(root, withheld))
+    report = _scrub("\n".join(lines), secrets)
     return report.rstrip() + "\n", passed
 
 
