@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from genesis_agent.chat_commands import _YES, Conversations, Result
+from genesis_agent.chat_commands import _NO, _YES, Conversations, Result, answer
 from genesis_agent.vision import ATTACHMENT_PREFIX, text_of
 
 _SHOWN = 20
@@ -73,7 +73,8 @@ def resume(rest: str, *, messages: Any, workspace: Path, out: Callable[[str], No
         if choose is None:
             out("Избери с /resume <номер>.")
             return Result()
-        pick = choose("Кой разговор да заредя? (номер, Enter = отказ) > ").strip()
+        # Ctrl-C/EOF — отказ, не изход от чата (одит 2026-10-22).
+        pick = answer(choose, "Кой разговор да заредя? (номер, Enter = отказ) > ", "").strip()
         if not pick:
             out("Нищо не е заредено.")
             return Result()
@@ -96,6 +97,13 @@ def resume(rest: str, *, messages: Any, workspace: Path, out: Callable[[str], No
                                 or HISTORY_MAXLEN, image_store=entry.path.parent / "images")
     # Продължението — в нов файл, старият остава (както /history и -c).
     conversations.new_file()
+    # Ходовете за /undo и задачите са на разговора, от който излизаме — както
+    # при /clear. Одит 2026-10-22: след /resume /undo връщаше app.py към „v0“
+    # от другия разговор и добавяше към заредения бележка за чужди промени;
+    # /todos показваше чуждите задачи. /rewind не зависи — брои по маркер.
+    from genesis_agent import edit_history, todos
+    edit_history.clear()
+    todos.clear()
     when = datetime.fromtimestamp(entry.modified).strftime("%Y-%m-%d %H:%M")
     out(f"✓ Зареден разговорът от {when} ({_plural(entry.count, 'реплика', 'реплики')}) — "
         "продължавай оттам.")
@@ -141,7 +149,7 @@ def rewind(rest: str, *, messages: Any, out: Callable[[str], None], ask: Callabl
         if choose is None:
             out("Избери с /rewind <номер>.")
             return Result()
-        pick = choose("Номер (Enter = отказ) > ").strip()
+        pick = answer(choose, "Номер (Enter = отказ) > ", "").strip()
         if not pick:
             out("Нищо не е върнато.")
             return Result()
@@ -165,7 +173,8 @@ def rewind(rest: str, *, messages: Any, out: Callable[[str], None], ask: Callabl
         said.append("⚠ Част от съобщенията са от предишно пускане (/resume, genesis -c) — "
                     "техните промени по файлове не се следят и не се връщат.")
     out("\n".join(said))
-    if ask("Да върна ли? (Enter = да / не) > ").strip().lower() not in _YES:
+    # „Enter = да“ — затова Ctrl-C тук е „не“, не празен отговор (2026-10-22).
+    if answer(ask, "Да върна ли? (Enter = да / не) > ", _NO).strip().lower() not in _YES:
         out("Нищо не е върнато.")
         return Result()
     done = edit_history.rewind(count) if count else []

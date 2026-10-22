@@ -30,6 +30,20 @@ _STEM = r"[^\W_][\w-]{0,40}"
 _NAME = re.compile(rf"^/({_STEM})(?:\s+(.*))?$", re.DOTALL)
 _STEM_RE = re.compile(rf"^{_STEM}$")
 _YES = ("", "да", "д", "d", "da", "y", "yes")
+_NO = "не"
+
+
+def answer(fn: Callable[[str], str], prompt: str, cancel: str) -> str:
+    """Отговорът на `fn(prompt)`; Ctrl-C или EOF при въпроса е `cancel`.
+
+    Одит 2026-10-22: Ctrl-C при „Кой разговор да заредя?“ стигаше до главния
+    цикъл и чатът свършваше („Довиждане!“), а при `genesis -r` излизаше суров
+    traceback. За въпрос с „Enter = да“ `cancel` е _NO — прекъсването не е
+    съгласие."""
+    try:
+        return fn(prompt)
+    except (KeyboardInterrupt, EOFError):
+        return cancel
 
 
 @dataclass
@@ -198,7 +212,7 @@ def handle(text: str, *, messages: Any, workspace: Path,
             return Result()
         out("Ще върна последния ход, който промени файлове:\n  " + "\n  ".join(plan)
             + (f"\n⚠ Командите на хода не са проследени: {note}." if note else ""))
-        if ask("Да върна ли? (Enter = да / не) > ").strip().lower() not in _YES:
+        if answer(ask, "Да върна ли? (Enter = да / не) > ", _NO).strip().lower() not in _YES:
             out("Нищо не е върнато.")
             return Result()
         label, done = edit_history.undo()

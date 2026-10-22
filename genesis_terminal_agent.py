@@ -209,8 +209,22 @@ def _save_session(messages) -> None:
     # файлът се пише наново след всеки ход (vision.for_disk, 2026-10-15).
     from genesis_agent import vision
     saved = vision.for_disk(messages, HISTORY_DIR / "images")
-    with open(session_file, "w", encoding="utf-8", errors="replace") as f:
-        json.dump(saved, f, ensure_ascii=False, indent=None, separators=(',', ':'))
+    # Във временен файл и после os.replace (както session_index._write). Одит
+    # 2026-10-22: 'w' изпразваше файла преди записа — пълен диск по средата на
+    # json.dump остави 60 KB от 84 KB JSON и /resume вече не предлагаше
+    # разговора: губеше се целият, не само последният ход.
+    tmp = session_file.with_name(f"{session_file.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8", errors="replace") as f:
+            json.dump(saved, f, ensure_ascii=False, indent=None, separators=(',', ':'))
+        os.replace(tmp, session_file)
+    except BaseException:
+        # И Ctrl-C по средата на голяма история: старият файл остава цял.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
     try:
         from genesis_agent import session_index
         session_index.record(HISTORY_DIR, Path(WORKSPACE), session_file)
@@ -2790,13 +2804,23 @@ def main():
                 table.add_row("0", "Назад", "")
                 console.print(table)
 
+                # Ctrl-C/EOF в избора е „0 Назад“, не изход от чата — както
+                # /resume (одит 2026-10-22: тук чатът свършваше с „Довиждане!“).
+                from genesis_agent.chat_commands import answer as _answer
                 try:
-                    hsel = int(console.input("\n[bold cyan]Избери сесия за зареждане > [/]").strip())
+                    hsel = int(_answer(console.input, "\n[bold cyan]Избери сесия за зареждане > [/]",
+                                       "0").strip())
                     if 0 < hsel <= len(shown):
                         with open(shown[hsel - 1], "r", encoding="utf-8") as f:
                             loaded = json.load(f)
                         messages = _restore_session(loaded, SYSTEM_PROMPT)
                         _new_session()   # продължението — в нов файл, старият остава
+                        # Както /clear и /resume: /undo връщаше хода от разговора
+                        # отпреди /history (одит 2026-10-22).
+                        from genesis_agent import edit_history as _edit_history
+                        from genesis_agent import todos as _todos
+                        _edit_history.clear()
+                        _todos.clear()
                         console.print(f"[green]✓ Сесията е заредена! ({len(messages)} съобщения)[/]")
                     elif hsel != 0:
                         console.print("[red]Невалиден избор.[/]")
