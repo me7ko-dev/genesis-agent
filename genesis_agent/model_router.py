@@ -56,14 +56,22 @@ def estimate_tier(goal: str) -> int:
 
 
 def available_tiers() -> list[bool]:
-    """Кои от LOCAL_TIERS са реално инсталирани в Ollama."""
+    """Кои от LOCAL_TIERS са реално инсталирани в Ollama — по точен таг.
+
+    Сравнението беше по подниз (одит 2026-10-22): с инсталиран само
+    `qwen2.5-coder:14b-instruct-q4_K_M` нивото `qwen2.5-coder:14b` излизаше
+    налично, route_for_goal сменяше работещия qwen2.5-coder:3b с него и
+    последната резерва получаваше HTTP 404 „model not found“. Същото правило
+    като brain._local_available (2026-10-11)."""
+    # Късно: brain внася model_router вътре във функциите си.
+    from genesis_agent.brain import _same_ollama_model
     try:
         r = requests.get("http://localhost:11434/api/tags", timeout=2)
         names = [m.get("name", "") for m in r.json().get("models", [])] if r.status_code == 200 else []
     except Exception:
         log.debug("Ollama не върна списъка с модели", exc_info=True)
         names = []
-    return [any(t.split(":")[0] in n and t.split(":")[-1] in n for n in names) for t in LOCAL_TIERS]
+    return [any(_same_ollama_model(t, str(n)) for n in names) for t in LOCAL_TIERS]
 
 
 def pick_model(goal: str) -> str | None:
@@ -191,8 +199,14 @@ _TOOL_TAG = re.compile(r"\[[A-Z][A-Z_]{2,}(?::|\])")
 def light_reply_needs_escalation(text: str, tool_calls) -> bool:
     """Лекият модел поиска инструмент → задачата не е била лека. Отговорът
     му се изхвърля и същият ход отива на силния модел — малкият модел не
-    върти работа по машината на оператора."""
-    return bool(tool_calls) or bool(_TOOL_TAG.search(text or "")) or (text or "").startswith("Error:")
+    върти работа по машината на оператора.
+
+    Празен текст без инструмент също (одит 2026-10-22): "" минаваше за отговор
+    и `genesis -p` завършваше с „няма отговор“, без силният модел да е питан."""
+    if tool_calls:
+        return True
+    t = text or ""
+    return not t.strip() or bool(_TOOL_TAG.search(t)) or t.startswith("Error:")
 
 # ── Команда вместо модел (design note, 2026-09-24) ───────────────────────────
 # „napravi backup" минаваше през силния модел с инструменти — поне две
