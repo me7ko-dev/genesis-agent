@@ -49,7 +49,7 @@ from genesis_agent.paths import (
     env_value,
     load_config,
 )
-from genesis_agent.tool_schemas import load_tool_arguments
+from genesis_agent.tool_schemas import load_tool_arguments, open_block_tag
 
 # Веригите четат само `models:` от config.yaml — load_config проверява формата
 # само там (одит 2026-10-22: `models: [1, 2]` гърмеше с AttributeError в
@@ -527,6 +527,12 @@ def _is_truncated(text: str) -> bool:
     рунд, и нищо никъде не показва, че истинската причина е ударен таван на
     токените, а не сгрешен код. `finish_reason` не се проверяваше НИКЪДЕ по
     целия LLM път до тази поправка.
+
+    Отворен WRITE_FILE/EDIT_FILE/USE_SKILL блок (одит 2026-10-22) се проверява
+    отделно в _http/_call_anthropic (tool_schemas.open_block_tag): там отрязаният
+    запис се пази за цикъла. Тук не — старият път на терминала
+    (call_openai_compatible, без верига) щеше да го превърне в грешка, а цикълът
+    вече казва на модела „записът е отрязан, раздели го“ (сливане 2026-10-22).
     """
     return text.count("```") % 2 == 1
 
@@ -1441,20 +1447,24 @@ class Brain:
         # отрязан на 4096, стигаше до цикъла като „невалидни аргументи“ и
         # моделът пренаписваше същия голям файл в същия таван рунд след рунд.
         cut_args = finish_reason == "length" and _has_cut_tool_arguments(tool_calls)
-        # Текстовият WRITE_FILE/EDIT_FILE без затварящ таг — също (одит 2026-10-22).
-        cut_tag = finish_reason == "length" and _has_open_file_tag(content or "")
-        if cut_args or cut_tag or (finish_reason == "length" and _is_truncated(content or "")):
+        # Текстовият WRITE_FILE/EDIT_FILE/USE_SKILL без затварящ таг е същото като
+        # отрязан tool_call (одит 2026-10-22): пази се за цикъла, който казва
+        # „раздели записа“.
+        cut_block = finish_reason == "length" and bool(
+            open_block_tag(content or "") or _has_open_file_tag(content or ""))
+        if cut_args or cut_block or (finish_reason == "length" and _is_truncated(content or "")):
             self._last_usage = _openai_usage(data.get("usage"))
             self._usage_attempt = getattr(self, "_attempt_id", None)
             # Отрязаният call се пази: ако го отреже ВСЕКИ модел, complete() го
             # връща на цикъла вместо „Error“ (ревю 2026-10-11, виж там). Също
             # текстовият таг (ревю 2026-10-22): без това файл над тавана на
             # всички текстови модели свършваше с „Error“, а преди — до цикъла.
-            self._cut_reply = ((content or "").strip(), tool_calls) if cut_args or cut_tag else None
+            self._cut_reply = (((content or "").strip(), tool_calls)
+                               if cut_args or cut_block else None)
             raise RuntimeError(
                 f"HTTP_TRUNCATED: отговорът е отрязан на тавана от {_output_cap(model)} "
-                f"токена, посред код-ограда, файлов таг или tool_call (finish_reason=length). Вдигни го с "
-                f"`max_tokens:` за модела в config.yaml, ако доставчикът го позволява."
+                f"токена, посред код-ограда, блоков таг или tool_call (finish_reason=length). "
+                f"Вдигни го с `max_tokens:` за модела в config.yaml, ако доставчикът го позволява."
             )
         # usage липсва при локален Ollama /v1 понякога — None е ОК, budget.py го обработва.
         self._last_usage = _openai_usage(data.get("usage"))
@@ -1678,18 +1688,35 @@ class Brain:
         text = "".join(text_parts).strip()
         if not text and not tool_calls:
             raise RuntimeError("празен отговор")
+        # tool_use, отрязан на max_tokens (одит 2026-10-22): SDK-то пълни
+        # block.input от частичния JSON, тоест идва ВАЛИДЕН, но непълен dict —
+        # WRITE_FILE записваше половин report.py с „✓ записани 45 символа“.
+        # Последният блок е този, който се е пишел, когато таванът е ударил.
+        # Като при _http: към следващия модел, а call-ът се пази за цикъла с
+        # видимо отрязан JSON (без затварящата `}`) — там dispatch_tool_call
+        # казва „раздели записа“ и не изпълнява половината.
+        if (getattr(resp, "stop_reason", "") == "max_tokens" and resp.content
+                and getattr(resp.content[-1], "type", "") == "tool_use"):
+            fn = tool_calls[-1]["function"]
+            fn["arguments"] = fn["arguments"][:-1]
+            self._cut_reply = (text, tool_calls)
+            raise RuntimeError(
+                f"HTTP_TRUNCATED: отговорът е отрязан на тавана от "
+                f"{ANTHROPIC_STREAM_MAX_TOKENS} токена, посред tool_use "
+                f"(stop_reason=max_tokens)."
+            )
         # Същото като при OpenAI-съвместимия път (виж _http): досега тук се
         # проверяваше само "refusal", а изчерпан max_tokens минаваше за
         # нормален отговор — с незатворена код-ограда това значи счупен
         # полукод, приет за завършен.
         capped = getattr(resp, "stop_reason", "") == "max_tokens"
-        cut_tag = capped and _has_open_file_tag(text)
-        if cut_tag or (capped and _is_truncated(text)):
+        cut_block = capped and bool(open_block_tag(text) or _has_open_file_tag(text))
+        if cut_block or (capped and _is_truncated(text)):
             # Отрязан текстов таг — към цикъла, ако го отреже всеки модел (виж _http).
-            self._cut_reply = (text, tool_calls or None) if cut_tag else None
+            self._cut_reply = (text, tool_calls or None) if cut_block else None
             raise RuntimeError(
                 f"HTTP_TRUNCATED: отговорът е отрязан на тавана от "
-                f"{ANTHROPIC_STREAM_MAX_TOKENS} токена, посред код-ограда или файлов таг "
+                f"{ANTHROPIC_STREAM_MAX_TOKENS} токена, посред код-ограда или блоков таг "
                 f"(stop_reason=max_tokens)."
             )
         return text, (tool_calls or None)

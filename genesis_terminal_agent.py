@@ -1990,15 +1990,10 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                 if (_malformed_tag_retries < 2
                         and genesis_skills.looks_like_attempted_tool_tag(response)):
                     _malformed_tag_retries += 1
-                    messages.append({
-                        "role": "system",
-                        "content": "[Система]: В последния отговор не намерих валиден tool "
-                                   "таг, но той изглежда като опит за такъв. Ако си искал да "
-                                   "викнеш инструмент — използвай точния синтаксис "
-                                   "`[TAG: аргумент]` (или `[WRITE_FILE: път]...[END_WRITE]` "
-                                   "за файлове). Ако вече си приключил — дай кратък финален "
-                                   "отговор БЕЗ скоби във формàт на таг.",
-                    })
+                    # Отрязаният WRITE_FILE получава „раздели записа“, не „грешен
+                    # синтаксис“ (одит 2026-10-22) — текстът е общ с agent_core.
+                    messages.append({"role": "system",
+                                     "content": genesis_skills.malformed_tag_note(response)})
                     with ui.thinking("Анализирам...", "aesthetic"):
                         response, tool_calls = ask_genesis(messages, tools=_turn_tools())
                     continue
