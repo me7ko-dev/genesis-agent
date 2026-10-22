@@ -83,6 +83,16 @@ def test_claude_code_json_decisions_block_like_exit_2(repo) -> None:
     gs.dispatch_tool_call("WRITE_FILE", {"path": "c.txt", "content": "x\n"})
     assert (repo / "c.txt").exists()
 
+    # `continue: false` спира инструмента; при Stop — ходът свършва (над block).
+    _write_hooks({
+        "PreToolUse": [{"matcher": "WRITE_FILE", "command": _prints(
+            {"continue": False, "stopReason": "halt"})}],
+        "Stop": [{"command": _prints({"continue": False, "decision": "block", "reason": "x"})}],
+    })
+    out = gs.dispatch_tool_call("WRITE_FILE", {"path": "h.txt", "content": "x\n"})
+    assert _BLOCK in out and "halt" in out and not (repo / "h.txt").exists()
+    assert not hooks.fire("Stop", {"last_assistant_message": "done"}).blocked
+
     _write_hooks({
         "UserPromptSubmit": [{"command": _prints({"decision": "block", "reason": "secret"})}],
         "Stop": [{"command": _prints({"decision": "block", "reason": "tests are red"})}],
@@ -112,6 +122,8 @@ def test_claude_code_json_decisions_block_like_exit_2(repo) -> None:
     "conda run *", "pdm run *", "hatch run *", "uv tool run *",
     "uv run --with pytest *", "npx -y *", "npm exec -- *",
     "uv run bash *", "poetry run python *", "npx sudo *",
+    # Шимът на Windows и пускачът през интерпретатора — същото (2026-10-22).
+    "npx.cmd *", "npm.cmd exec *", "python -m uv run *", "py -m poetry run *",
 ])
 def test_package_runner_rules_that_would_run_anything_are_refused(repo, rule) -> None:
     assert permissions.normalize_rule(rule)[0] is None
@@ -127,6 +139,30 @@ def test_package_runner_rules_that_would_run_anything_are_refused(repo, rule) ->
                                   "uv run python -m pytest *", "npm exec eslint *"])
 def test_a_runner_with_a_fixed_tool_is_still_a_rule(rule) -> None:
     assert permissions.normalize_rule(rule) == (rule, "")
+
+
+@pytest.mark.parametrize("rule, cmd", [
+    ("npm *", "npm exec rm -rf build"), ("uv *", "uv run rm -rf build"),
+    ("uv *", "uv --directory sub run rm -rf build"), ("uv tool *", "uv tool run rm -rf build"),
+    ("poetry *", "poetry run rm -rf build"), ("yarn *", "yarn dlx rm -rf build"),
+    ("uv run uv *", "uv run uv run rm -rf build"), ("python -m uv *", "python -m uv run rm -rf build"),
+])
+def test_a_shorter_rule_does_not_cover_the_runner_either(repo, rule, cmd) -> None:
+    # `uv run *` се отказва, но `uv *` се приема — и покриваше същото.
+    permissions._save(permissions.project_key(repo), [rule])
+    policy = SandboxPolicy(mode="deny", confirm_fn=lambda op, v: True)
+    assert permissions.project_rules(repo) == [rule]       # правилото важи…
+    assert not sandbox._decide(cmd, sandbox.assess_command(cmd), policy, shell=True)[0]
+
+
+@pytest.mark.parametrize("rule, cmd", [
+    ("npm *", "npm install"), ("uv *", "uv sync"), ("uv *", "uv pip install requests"),
+    ("uv run pytest *", "uv run pytest -q"), ("npm exec eslint *", "npm exec eslint --fix ."),
+    ("uv run uv *", "uv run uv sync"), ("python -m uv *", "python -m uv sync"),
+])
+def test_a_runner_rule_still_covers_its_own_commands(rule, cmd) -> None:
+    assert permissions.normalize_rule(rule) == (rule, "")
+    assert permissions.matches(cmd, rule)
 
 
 # ── 3. Matcher-ите и полетата на Claude Code ────────────────────────────────
@@ -155,8 +191,16 @@ def test_claude_code_matchers_and_payload_reach_genesis_tools(repo) -> None:
         "and d.get('cwd') else 0)")}]})
     gs.dispatch_tool_call("WRITE_FILE", {"path": ".env", "content": "SECRET=1\n"})
     assert not (repo / ".env").exists()
+    # Инструментът пише в `.env` и без интервалите — hook-ът вижда същия път.
+    gs.dispatch_tool_call("WRITE_FILE", {"path": ".env ", "content": "SECRET=1\n"})
+    assert not (repo / ".env").exists()
     gs.dispatch_tool_call("WRITE_FILE", {"path": "ok.txt", "content": "x\n"})
     assert (repo / "ok.txt").exists()
+
+    # `~/…` е домашната папка, не `<проект>/~/…` (както _resolve_noted).
+    view = hooks._tool_input({"path": " ~/notes.txt "})
+    assert view["file_path"] == str(Path("~/notes.txt").expanduser())
+    assert hooks._file_of({"path": ".env "}) == ".env"     # GENESIS_FILE
 
     # Същите имена, с които под-агентите четат `tools: Bash, Write` (agents.py).
     for genesis, names in hooks._CLAUDE_NAMES.items():
@@ -168,12 +212,13 @@ def test_claude_code_matchers_and_payload_reach_genesis_tools(repo) -> None:
 
 @pytest.mark.parametrize("raw, expected", [
     (0.5, 1), (-1, 1), (2.5, 3), ("abc", 60), (float("inf"), 60), ("7", 7),
+    # От 10**7 s communicate() хвърляше OverflowError — hook-ът не спираше.
+    (10**9, 24 * 3600), (1e300, 24 * 3600),
 ])
 def test_a_fractional_or_negative_timeout_still_lets_the_hook_block(repo, raw, expected) -> None:
     _write_hooks({"PreToolUse": [{"matcher": "WRITE_FILE",
                                   "hooks": [{"type": "command", "command": "exit 2", "timeout": raw}]}]})
     (hook,) = hooks._parse(_home() / "hooks.json")
     assert hook.timeout == expected
-    if expected == 1:
-        out = gs.dispatch_tool_call("WRITE_FILE", {"path": "t.txt", "content": "x\n"})
-        assert _BLOCK in out and not (repo / "t.txt").exists()
+    out = gs.dispatch_tool_call("WRITE_FILE", {"path": "t.txt", "content": "x\n"})
+    assert _BLOCK in out and not (repo / "t.txt").exists()

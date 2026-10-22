@@ -23,7 +23,7 @@ every tool): the Genesis name or Claude Code's (`Bash`, `Write|Edit`, `Read`).
 The command gets a JSON description on stdin (with Claude Code's keys too:
 `hook_event_name`, `cwd`, `tool_input.file_path`) and GENESIS_TOOL,
 GENESIS_FILE, GENESIS_WORKSPACE in its environment, runs in the workspace,
-for at most `timeout` seconds (default 60, at least 1).
+for at most `timeout` seconds (default 60; from 1 s up to a day).
 
 Exit code 2 is the one that matters, as in Claude Code:
   PreToolUse        → the tool does not run; stderr goes to the model.
@@ -57,6 +57,7 @@ log = logging.getLogger("genesis.hooks")
 
 EVENTS = ("PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop")
 _TIMEOUT = 60
+_MAX_TIMEOUT = 24 * 3600
 _MAX_OUT = 4000
 
 workspace: Path | None = None
@@ -226,9 +227,11 @@ def _parse(path: Path) -> list[Hook]:
                     # TimeoutExpired веднага, блокиращият hook се пропускаше и
                     # инструментът минаваше; `inf` срутваше четенето (одит
                     # 2026-10-22). Същият таван като stt.timeout_s във voice.py.
+                    # Горе — денонощие: от 10**7 s communicate() хвърля
+                    # OverflowError и UserPromptSubmit hook-ът не спираше нищо.
                     try:
                         raw = float(c.get("timeout") or entry.get("timeout") or _TIMEOUT)
-                        timeout = max(1, math.ceil(raw))
+                        timeout = min(_MAX_TIMEOUT, max(1, math.ceil(raw)))
                     except (TypeError, ValueError, OverflowError):
                         timeout = _TIMEOUT
                     out.append(Hook(event, matcher, str(c["command"]), timeout, path))
@@ -383,7 +386,8 @@ def fire(event: str, payload: dict, tool: str = "", file: str = "") -> Outcome:
 def _file_of(args: dict) -> str:
     for key in ("path", "file", "file_path"):
         if args.get(key):
-            return str(args[key])
+            # strip: инструментът пише в пътя без интервалите (одит 2026-10-22).
+            return str(args[key]).strip()
     return ""
 
 
@@ -395,7 +399,11 @@ def _tool_input(args: dict) -> dict:
     view = dict(args)
     path = _file_of(args)
     if path and "file_path" not in view:
-        view["file_path"] = os.path.normpath(os.path.join(str(_ws()), path))
+        # Както genesis_skills._resolve_noted: strip (в _file_of) и `~`.
+        # `.env ` (с интервал) се записваше в `.env`, а hook-ът виждаше
+        # `…/.env ` и го пускаше; `~/x` ставаше `<проект>/~/x` (одит 2026-10-22).
+        target = Path(path).expanduser()
+        view["file_path"] = os.path.normpath(target if target.is_absolute() else _ws() / target)
     return view
 
 
