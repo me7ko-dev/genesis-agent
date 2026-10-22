@@ -190,14 +190,31 @@ def cache_history(messages, *, max_chars: int | None = None,
     head, body = msgs[:lead], msgs[lead:]
     users = [i for i, m in enumerate(body) if m.get("role") == "user" and not is_attachment(m)]
     task = users[-1] if users else None
-    drop = 0
-    while drop < len(body):
+
+    def fits(drop: int) -> bool:
         # Задачата е преди всичко отпаднало след нея — ако отпадне с парчето,
         # стои първа след system и редът остава хронологичен.
         pinned = [body[task]] if task is not None and task < drop else []
-        if size(head) + size(pinned) + size(body[drop:]) <= max_chars:
-            break
+        return size(head) + size(pinned) + size(body[drop:]) <= max_chars
+
+    # Последният цял рунд след задачата (извикването + резултатите му) не
+    # отпада никога, както в request_window (одит 2026-10-22): парче от 20
+    # прескачаше тялото — 4 четения по 40K или 10 рунда по 12.5K при тавана от
+    # 120 000 → тръгваха само [system, задача], моделът не виждаше собственото
+    # си последно извикване и го повтаряше.
+    last = next((i for i in range(len(body) - 2, -1, -1)
+                 if (task is None or i > task) and body[i].get("role") == "assistant"
+                 and _is_tool_result(body[i + 1])), len(body))
+    drop = 0
+    while drop < last and not fits(drop):
         drop += chunk
+    if drop > last:
+        # Парчето прескача последния рунд: най-малкото отрязване до него, което
+        # се събира. Префиксът и така се мени, докато сме в тази зона.
+        drop = next((d for d in range(drop - chunk + 1, last + 1) if fits(d)), last)
+    if drop >= last and last < len(body) and not fits(drop):
+        # И последният рунд сам е над тавана: свитият изглед на всички.
+        return budget_history(msgs)
     pinned = [body[task]] if task is not None and task < drop else []
     return head + pinned + _whole_rounds(body[drop:])
 

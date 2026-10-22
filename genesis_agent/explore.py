@@ -101,7 +101,8 @@ def _loop(question: str, messages: list[dict], complete: Callable[..., Any],
                     f"({reads} прегледа).{' Последно: ' + last[:_MAX_ANSWER] if last else ''}")
         final = round_i == max_rounds - 1
         if final:  # последният рунд — без инструменти: отговор с каквото е намерено
-            messages.append({"role": "user", "content":
+            # system, за да остане въпросът задачата в request_window (виж agents._loop).
+            messages.append({"role": "system", "content":
                              "Стига търсене. Отговори сега с каквото намери (с път:ред)."})
         reply = complete(messages, tools=None if final else schemas)
         text = (getattr(reply, "raw_text", "") or "").strip()
@@ -133,7 +134,9 @@ def _loop(question: str, messages: list[dict], complete: Callable[..., Any],
                 outs.append(_clip(gs.dispatch_tool_call(m.group(1), args)))
                 reads += 1
             messages.append({"role": "assistant", "content": text})
-            messages.append({"role": "user", "content": "[резултати]\n" + "\n\n".join(outs)})
+            # system „[Резултат]:“ като в agents._loop — иначе budget_history не
+            # свива старите и request_window ги взима за задачата (одит 2026-10-22).
+            messages.append({"role": "system", "content": "[Резултат]:\n" + "\n\n".join(outs)})
             continue
         answer = text[:_MAX_ANSWER]
         return f"[EXPLORE: {question[:80]}] ({reads} прегледа)\n{answer}"
