@@ -38,6 +38,8 @@ import os
 import re
 import tarfile
 import time
+from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -674,6 +676,62 @@ def _verify_after_edit(root: Path, cmd: str | None, before: TestRun,
     return None
 
 
+# ── Присъдата не бива да идва от отслабен тест ───────────────────────────────
+# Одит 2026-10-22: присъдата беше „червено → зелено и има променен файл“, без
+# да се гледа КОЙ файл. Модел, сменил `assert add(2, 2) == 4` на `== 0` или
+# сложил @pytest.mark.skip, получаваше „✅ Поправено“ и код 0, а бъгът в
+# calc.py оставаше (възпроизведено с истински pytest). Пазеше го само правило
+# 3 в _SYSTEM; bench_fix го проверява, продуктът — не. Механизъм, не промпт.
+_TEST_FILE_RE = re.compile(
+    r"(?:^|/)(?:tests?|__tests__|spec)/"
+    r"|(?:^|/)(?:test_[^/]*\.py|[^/]*_test\.(?:py|go)|conftest\.py)$"
+    r"|\.(?:test|spec)\.[cm]?[jt]sx?$")
+_ASSERT_RE = re.compile(r"\bassert|\bexpect\s*\(|\.should\b|\bt\.(?:Error|Fatal)")
+_SKIP_RE = re.compile(
+    r"\bmark\.(?:skip|skipif|xfail)\b|\bpytest\.(?:skip|xfail|importorskip)\s*\("
+    r"|\bunittest\.(?:skip\w*|expectedFailure)\b|@(?:skip\w*|expectedFailure)\b"
+    r"|\b(?:it|test|describe)\.(?:skip|todo)\b|\bx(?:it|test|describe)\s*\(|\bt\.Skip\w*\s*\(")
+_MAX_TEST_SOURCE = 256 * 1024
+
+
+def _is_test_file(rel: str) -> bool:
+    return bool(_TEST_FILE_RE.search(rel))
+
+
+def _test_sources(root: Path, rels: Iterable[str]) -> dict[str, str]:
+    """Текстът на тестовите файлове преди поправката — за _weakened_tests."""
+    out: dict[str, str] = {}
+    for rel in rels:
+        if not _is_test_file(rel):
+            continue
+        try:
+            if (root / rel).stat().st_size <= _MAX_TEST_SOURCE:
+                out[rel] = (root / rel).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+    return out
+
+
+def _weakened_tests(root: Path, before: dict[str, str], files: list[str]) -> list[str]:
+    """Пипнатите тестови файлове с добавено пропускане (skip/xfail) или с
+    махнат/сменен ред с проверка (assert, expect) — изтрит файл е същото."""
+    found: list[str] = []
+    for rel in files:
+        if not _is_test_file(rel):
+            continue
+        try:
+            after = (root / rel).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            after = ""
+        old = Counter(ln.strip() for ln in before.get(rel, "").splitlines())
+        new = Counter(ln.strip() for ln in after.splitlines())
+        if any(_SKIP_RE.search(ln) for ln in new - old):
+            found.append(f"{rel}: добавено пропускане (skip/xfail)")
+        elif any(_ASSERT_RE.search(ln) for ln in old - new):
+            found.append(f"{rel}: сменена или махната проверка")
+    return found
+
+
 def _relative(root: Path, path_str: str) -> str:
     p = Path(path_str)
     if not p.is_absolute():
@@ -740,6 +798,7 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
     pre_tests = _fingerprint(root)
     before = run_tests(root, cmd)
     files_before = _fingerprint(root)
+    tests_src = _test_sources(root, files_before)
     test_noise = {rel for rel in set(pre_tests) | set(files_before)
                   if pre_tests.get(rel) != files_before.get(rel)}
 
@@ -923,7 +982,21 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
         # „Промените са направени“ при празен дифф и код 0).
         ok, summary = False, "Не е направена нито една промяна — нищо не е поправено."
     elif after.ran and after.passed and not before.passed:
-        ok, summary = True, f"Поправено: тестовете вече минават ({cmd})."
+        weakened = _weakened_tests(root, tests_src, files)
+        if weakened:
+            ok, summary = False, ("НЕ е поправено: тестовете минават, защото е пипнат самият тест — "
+                                  + "; ".join(weakened[:5])
+                                  + f". Прегледай диффа; {_undo_hint(root, snapshot, files)}")
+        elif all(_is_test_file(f) for f in files):
+            # Тест с истински дефект (липсващ import) е позволено да се поправи
+            # (правило 3), но тогава зеленото идва от сменения тест, не от кода —
+            # не е доказателство, а повод за преглед.
+            ok, summary = False, ("НЕ е доказано поправено: тестовете минават, но е променен само "
+                                  f"тестов код ({', '.join(files[:5])}), кодът на проекта е "
+                                  "непокътнат. Ако бъгът наистина е в теста, прегледай диффа; иначе "
+                                  + _undo_hint(root, snapshot, files))
+        else:
+            ok, summary = True, f"Поправено: тестовете вече минават ({cmd})."
     elif after.ran and not after.passed:
         ok, summary = False, (f"НЕ е поправено — тестовете още падат след {rounds} рунда. "
                               f"Промените са запазени за преглед; {_undo_hint(root, snapshot, files)}")
