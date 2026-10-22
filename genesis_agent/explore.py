@@ -81,11 +81,18 @@ def explore(question: str, workspace: str = "", *,
     # EXPLORE WRITE_FILE презаписваше файл, който главният никога не е чел
     # (одит 2026-10-08).
     seen_before = set(gs._SEEN_PATHS)
+    # Също отпечатъците и видяното отчасти (одит 2026-10-22): иначе диапазон,
+    # прочетен тук, допълваше прочетеното от главния до „видян цял“.
+    stamps_before, partly_before = dict(gs._SEEN_STAMPS), dict(gs._PARTLY_SEEN)
     try:
         return _loop(question, messages, complete, max_rounds, gs)
     finally:
         gs._SEEN_PATHS.clear()
         gs._SEEN_PATHS.update(seen_before)
+        gs._SEEN_STAMPS.clear()
+        gs._SEEN_STAMPS.update(stamps_before)
+        gs._PARTLY_SEEN.clear()
+        gs._PARTLY_SEEN.update(partly_before)
 
 
 def _loop(question: str, messages: list[dict], complete: Callable[..., Any],
