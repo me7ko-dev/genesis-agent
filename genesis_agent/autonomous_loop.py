@@ -23,6 +23,9 @@ from genesis_agent.tool_schemas import MISSION_TOOLS, load_tool_arguments
 
 log = logging.getLogger("genesis.autonomous_loop")
 
+# Имената, които мисията предлага на модела — и единствените, които изпълнява.
+_MISSION_TOOL_NAMES = frozenset(t["function"]["name"] for t in MISSION_TOOLS)
+
 # Колко ДОПЪЛНИТЕЛНИ кандидата (отвъд първия опит) да генерираме от локалния
 # tier, когато той не излезе перфектен от първия път (design note, 2026-08-11).
 # Локалният inference е безплатен — цената е само латентност, затова малко,
@@ -443,8 +446,18 @@ def _run_autonomous_loop_impl(
                         args = load_tool_arguments(fn.get("arguments"))
                     except (_json.JSONDecodeError, TypeError):
                         args = {}
-                    # Счупени аргументи → суровият низ: моделът получава „Невалидни аргументи“
-                    tool_out = genesis_skills.dispatch_tool_call(name, args or fn.get("arguments") or {})
+                    if name not in _MISSION_TOOL_NAMES:
+                        # Само предложеното се изпълнява (одит 2026-10-22): името
+                        # идваше от модела и отиваше направо в dispatch_tool_call —
+                        # мисия с read-only инструменти записа new_module.py и пусна
+                        # `echo pwned > marker.txt`. Текстовият път вече пазеше това
+                        # (parse_and_execute_readonly_tools), native — не.
+                        tool_out = (f"[{name}] не е достъпен в мисия — само "
+                                    f"{'/'.join(sorted(_MISSION_TOOL_NAMES))}. "
+                                    "Напиши кода в ```python``` блок.")
+                    else:
+                        # Счупени аргументи → суровият низ: моделът получава „Невалидни аргументи“
+                        tool_out = genesis_skills.dispatch_tool_call(name, args or fn.get("arguments") or {})
                     messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                                       "name": name, "content": tool_out[:4000]})
                     if _spin_guard.observe(name, args, tool_out).stop:
