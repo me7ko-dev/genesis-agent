@@ -27,7 +27,6 @@ from pathlib import Path
 from typing import Any
 
 import requests
-import yaml
 from rich import box
 from rich.console import Console
 from rich.markdown import Markdown
@@ -123,16 +122,20 @@ from genesis_agent.paths import (
     ENV_FILES,
     _strip_inline_comment,
     history_dir,
+    load_config,
     workspace_dir,
 )
 from genesis_agent.repeat_guard import RepeatGuard as _RepeatGuard
 from genesis_agent.tool_schemas import load_tool_arguments
 
+# load_config проверява и формата (одит 2026-10-22): `workspace: ~/proj` вместо
+# `workspace:` + `path:` убиваше чата по-долу с AttributeError и стектрейс.
 try:
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f) or {}
+    config = load_config(CONFIG_PATH)
 except Exception as e:  # noqa: BLE001 — грешката се печата и чатът спира с код 1
-    console.print(f"[red]Грешка при зареждане на config.yaml: {e}[/]")
+    from rich.markup import escape as _escape
+    console.print(f"[red]Грешка при зареждане на config.yaml ({_escape(str(CONFIG_PATH))}): "
+                  f"{_escape(str(e))}[/]")
     sys.exit(1)
 
 # config.yaml may override the workspace; empty (the default) means "use the

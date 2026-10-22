@@ -47,8 +47,14 @@ from genesis_agent.paths import (
     CONFIG_PATH,
     ENV_FILES,
     env_value,
+    load_config,
 )
 from genesis_agent.tool_schemas import load_tool_arguments
+
+# Веригите четат само `models:` от config.yaml — load_config проверява формата
+# само там (одит 2026-10-22: `models: [1, 2]` гърмеше с AttributeError в
+# `genesis models`; сгрешен `workspace:` не бива да изпразва веригата).
+_MODELS_ONLY = ("models",)
 
 # Extra ollama_cloud keys an operator may add THEMSELVES to their own
 # gitignored ~/.genesis/.env — OLLAMA_API_KEY_2 through _10. Not suggested,
@@ -116,7 +122,7 @@ def _output_cap(model: str) -> int:
     if _OUTPUT_CAPS is None:
         caps: dict[str, int] = {}
         try:
-            models = (yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}).get("models", {}) or {}
+            models = load_config(CONFIG_PATH, sections=_MODELS_ONLY).get("models") or {}
             for group in ("fallback_models", "coding_models"):
                 for entry in models.get(group, []) or []:
                     if entry.get("model") and entry.get("max_tokens"):
@@ -555,7 +561,12 @@ def _load_keys() -> dict[str, str]:
             line = line.strip().removeprefix("export ").strip()
             if "=" in line and not line.startswith("#"):
                 k, v = line.split("=", 1)
-                keys.setdefault(k.strip(), env_value(v))
+                # Празно `KEY=` в ./.env не скрива истинския ключ от
+                # ~/.genesis/.env (одит 2026-10-22, като paths.read_env_files):
+                # с `cp .env.example .env` Brain виждаше groq като без ключ.
+                k, v = k.strip(), env_value(v)
+                if not keys.get(k):
+                    keys[k] = v
     for k, v in os.environ.items():
         # Exported-but-empty is not an override — it falls through to the file,
         # exactly as get_secret does.
@@ -571,12 +582,12 @@ def _load_chain() -> list[dict]:
     Пази `size_b` (милиарди параметри) на всеки запис — Brain(min_size_b=...)
     филтрира по него за различни контексти (чат/терминал/умения)."""
     try:
-        cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        cfg = load_config(CONFIG_PATH, sections=_MODELS_ONLY)
     except Exception:
         log.debug("config.yaml не се прочете — веригата е без него", exc_info=True)
         cfg = {}
-    models = cfg.get("models", {})
-    fallback_list = models.get("fallback_models", [])
+    models = cfg.get("models") or {}
+    fallback_list = models.get("fallback_models") or []
     meta_lookup = {
         (fb.get("provider"), fb.get("model")): fb for fb in fallback_list
     }
@@ -650,7 +661,7 @@ def _load_coding_chain() -> list[dict]:
     ред и по-строг подбор.
     """
     try:
-        cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        cfg = load_config(CONFIG_PATH, sections=_MODELS_ONLY)
     except Exception:
         log.debug("config.yaml не се прочете — без безплатната верига", exc_info=True)
         return []
@@ -671,7 +682,7 @@ def _load_light_chain() -> list[dict]:
     """`models.light_models` — бързите модели за второстепенната работа
     (извличане на памет, резюмета). Виж коментара в config.yaml за мерките."""
     try:
-        cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        cfg = load_config(CONFIG_PATH, sections=_MODELS_ONLY)
     except Exception:
         log.debug("config.yaml не се прочете — без леките модели", exc_info=True)
         return []
@@ -703,7 +714,7 @@ def _load_premium_chain() -> list[dict]:
     публични, нито са смисленият критерий.
     """
     try:
-        cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        cfg = load_config(CONFIG_PATH, sections=_MODELS_ONLY)
     except Exception:
         log.debug("config.yaml не се прочете — без premium моделите", exc_info=True)
         return []

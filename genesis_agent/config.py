@@ -8,6 +8,8 @@ import sys
 import threading
 from pathlib import Path
 
+from genesis_agent.paths import env_path as _env_path
+
 log = logging.getLogger("genesis.config")
 
 stop_event = threading.Event()
@@ -184,8 +186,10 @@ def _default_skills_dir() -> Path:
 
 
 SKILLS_DIR: Path = Path(os.environ.get("GENESIS_SKILLS_DIR") or _default_skills_dir())
-SANDBOX_DIR: Path = Path(os.environ.get("GENESIS_SANDBOX_DIR",
-    str((Path.home() / ".genesis" / "sandbox_run") if _INSTALLED else PROJECT_ROOT / ".sandbox_run")))
+# Празна GENESIS_SANDBOX_DIR = подразбиращата се (одит 2026-10-22: беше „.“,
+# тоест пясъчникът ставаше текущата папка на потребителя).
+SANDBOX_DIR: Path = _env_path("GENESIS_SANDBOX_DIR",
+    (Path.home() / ".genesis" / "sandbox_run") if _INSTALLED else PROJECT_ROOT / ".sandbox_run")
 LOGS_DIR: Path = (Path.home() / ".genesis" / "logs") if _INSTALLED else PROJECT_ROOT / "logs"
 
 # Where the SQLite state lives: workspace memory, episodic memory, conversation

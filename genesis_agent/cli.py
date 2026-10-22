@@ -72,6 +72,18 @@ _FIX_USAGE = """Употреба:
 def _models(args: list[str]) -> int:
     """`genesis models [--refresh] [--check]` — какво реално ще бъде извикано и в какъв ред."""
     from genesis_agent import free_models, model_check
+    from genesis_agent.paths import CONFIG_PATH, config_problem
+
+    # Одит 2026-10-22: с табулация в config.yaml `genesis models` печаташе
+    # „Верига: 0 модела“ и съвет за `--refresh`, а `--check` — „0/0 отговарят“,
+    # и двете с код 0, докато чатът отказваше да тръгне. Причината — с ред и
+    # колона — и код 1.
+    problem = config_problem(CONFIG_PATH, sections=("models",))
+    if problem:
+        print(f"config.yaml не става ({CONFIG_PATH}): {problem}\n"
+              "Докато не се поправи, чатът не тръгва, а веригата е без моделите от него — "
+              "`genesis doctor` проверява файла.")
+        return 1
 
     if "--check" in args:
         models = model_check.configured_models()
@@ -219,6 +231,50 @@ def _fix(args: list[str]) -> int:
     return 0 if out.success else 1
 
 
+# Одит 2026-10-22: setup, models, skills, update и чатът не гледаха аргументите
+# си — `genesis setup --help` пускаше съветника за ключове, `genesis models
+# --chek` (печатна грешка) тихо печаташе веригата вместо да проверява, `genesis
+# -c --bogus` отваряше чата; всичко с код 0. Сега като doctor/export/fix:
+# -h/--help печата употребата (0), непознатото е грешка (2).
+_CHAT_COMMANDS = ("chat", "-c", "--continue", "-r", "--resume")
+_SUB_OPTIONS: dict[str, tuple[str, ...]] = {
+    "setup": (), "skills": (), "update": (),
+    "models": ("--refresh", "--check"),
+    "chat": ("-c", "--continue", "-r", "--resume"),
+}
+_SUB_USAGE = {
+    "setup": "Употреба: genesis setup\n  пита за API ключовете един по един, проверява всеки и ги "
+             "записва в ~/.genesis/.env",
+    "skills": "Употреба: genesis skills\n  състоянието на библиотеката с умения",
+    "update": "Употреба: genesis update\n  има ли по-нов комит на инсталирания клон (само пита, "
+              "не обновява — командата за обновяване се печата)",
+    "models": "Употреба: genesis models [--refresh] [--check]\n"
+              "  без опции   веригата от модели — какво ще бъде извикано и в какъв ред\n"
+              "  --refresh   сканира наново безплатните модели на доставчиците\n"
+              "  --check     по една малка заявка до всеки модел от config.yaml",
+    "chat": "Употреба: genesis [-c | --continue] [-r | --resume [N]]\n"
+            "  -c, --continue   продължава последния разговор в тази папка\n"
+            "  -r, --resume     избор на по-ранен разговор в тази папка (N — направо номерът му)",
+}
+
+
+def _check_args(cmd: str, argv: list[str]) -> int | None:
+    """None — аргументите са познати и командата тръгва; иначе кодът за изход."""
+    sub = "chat" if cmd in _CHAT_COMMANDS else cmd
+    allowed = _SUB_OPTIONS[sub]
+    prev = argv[0] if argv else ""
+    for a in argv[1:]:
+        if a in ("-h", "--help"):
+            print(_SUB_USAGE[sub])
+            return 0
+        resume_pick = sub == "chat" and a.isdigit() and prev in ("-r", "--resume")
+        if a not in allowed and not resume_pick:
+            print(f"Непозната опция: {a}\n\n{_SUB_USAGE[sub]}")
+            return 2
+        prev = a
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     from genesis_agent.paths import ensure_utf8_streams
     ensure_utf8_streams()
@@ -235,6 +291,11 @@ def main(argv: list[str] | None = None) -> int:
         from genesis_agent.version_info import describe
         print(describe(__version__))
         return 0
+
+    if cmd in _SUB_OPTIONS or cmd in _CHAT_COMMANDS:
+        refused = _check_args(cmd, argv)
+        if refused is not None:
+            return refused
 
     if cmd in ("-p", "--print"):
         sys.path.insert(0, str(_project_root()))
