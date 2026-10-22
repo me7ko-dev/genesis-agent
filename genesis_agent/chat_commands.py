@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -305,6 +305,33 @@ def handle(text: str, *, messages: Any, workspace: Path,
             out(f"↪ /{m.group(1)} ({cmd_file.name})")
             return Result(prompt=expand_command(cmd_file, (m.group(2) or "").strip()))
     return None
+
+
+# Една /дума без втора „/“ — опит за команда, не път (`/usr/lib/x гърми`).
+_COMMAND_WORD = re.compile(r"^/[^\W_][\w-]*$")
+
+
+def unknown_command(text: str, workspace: Path, known: Iterable[str] = ()) -> str | None:
+    """Съобщението за /дума, която не е команда; None = текстът е за модела.
+
+    Одит 2026-10-22: `/clera`, `/hlep`, `/exit` отиваха при модела като задача
+    (ход и квота, а моделът действаше по текста) — и в терминала, и от телефона.
+    `known` — командите, които извикващият обработва сам."""
+    head = _split(text)[0]
+    if not _COMMAND_WORD.match(head):
+        return None
+    names = ({*BUILTIN, "/review", *known} | {f"/{r}" for r in RESERVED}
+             | {f"/{c}" for c in custom_commands(workspace)})
+    if head.lower() in names:
+        return None
+    try:
+        if Path(head).exists():   # `/tmp е пълна` — истински път, за модела е
+            return None
+    except OSError:
+        pass
+    import difflib
+    near = difflib.get_close_matches(head.lower(), sorted(names), n=1, cutoff=0.6)
+    return f"Непозната команда {head}" + (f" (може би {near[0]}?)" if near else "") + " — /help"
 
 
 IMAGE_QUESTION = "Какво виждаш на картинката?"

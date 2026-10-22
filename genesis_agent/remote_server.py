@@ -632,7 +632,10 @@ _TERMINAL_ONLY = frozenset({"/model", "/models", "/agent", "/backup", "/status",
                             "/local_model_normal", "/локален_макс", "/локален_нормал",
                             # Микрофонът и високоговорителят на КОМПЮТЪРА; телефонът
                             # има свои — операциите `transcribe` и `speak` (2026-10-15).
-                            "/voice", "/глас", "/listen", "/mic", "/слушай"})
+                            "/voice", "/глас", "/listen", "/mic", "/слушай",
+                            # Изходът е от чата на компютъра; оттук отиваха при
+                            # модела като задача (одит 2026-10-22).
+                            "/exit", "/quit"})
 
 PHONE_HELP = """Команди от телефона:
 /plan — режим план: само чете и планира; /plan пак — изпълнява плана
@@ -723,6 +726,12 @@ def phone_command(text: str, ui: Any, session: RemoteSession, *, messages: Any,
         res = chat_commands.handle(stripped, messages=messages, workspace=workspace,
                                    out=out, ask=ask, compact=compact, context=context,
                                    conversations=conversations)
+        # `/clera`, `/hlep` — не при модела (одит 2026-10-22), както в терминала.
+        unknown = chat_commands.unknown_command(stripped, workspace, ("/help", "/нов")) \
+            if res is None else None
+        if unknown:
+            ui.warn(unknown)
+            return messages, None
         if res is not None:
             if res.messages is not None:
                 messages = res.messages

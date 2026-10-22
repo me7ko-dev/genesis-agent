@@ -58,12 +58,19 @@ def _kill_group(proc: subprocess.Popen, job: Any = None) -> None:
     RUN_CMD след #85) държи цялото дърво, независимо кой е излязъл."""
     if sys.platform != "win32":
         for sig, wait in ((signal.SIGTERM, 2.0), (signal.SIGKILL, 0.0)):
+            # poll() прибира излязлата обвивка: зомби водач на групата се брои
+            # от killpg(pid, 0) и чакането въртеше пълните 2 s — `!ls` и
+            # `!git status` траеха по 2.0 s срещу 0.004 s за subprocess.run,
+            # таванът на времето ставаше +2 s (одит 2026-10-22). Без зомбито
+            # остават само живите членове на групата — фоновите деца пак се спират.
+            proc.poll()
             try:
                 os.killpg(proc.pid, sig)   # start_new_session → групата е pid-ът
             except (ProcessLookupError, PermissionError):
                 return
             deadline = time.monotonic() + wait
             while time.monotonic() < deadline:
+                proc.poll()
                 try:
                     os.killpg(proc.pid, 0)
                 except (ProcessLookupError, PermissionError):
