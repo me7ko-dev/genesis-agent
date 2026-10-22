@@ -173,7 +173,8 @@ plan's limits; when the limit is hit, Genesis moves on to the next model.
    ANTHROPIC_API_KEY=sk-ant-...
    GENESIS_ANTHROPIC_MAX_USD=95     # по желание: таван в долари, под кредита
    ```
-2. Пакетът `anthropic`: при pipx — `pipx inject genesis-agent anthropic`;
+2. Пакетът `anthropic`: при pipx — `pipx inject genesis-agent anthropic`
+   (вече инжектиран отдавна → `pipx runpip genesis-agent install -U anthropic`);
    `genesis.exe` вече го съдържа.
 3. Изборът: в чата `/model` → „Anthropic (API ключ, платен)“, или от старта:
    ```bash
@@ -192,6 +193,9 @@ $2/$10, четене от кеша $0.20) и се трупа в `~/.genesis/anth
 безплатните модели“. Свърши ли кредитът (402 или „credit balance is too low“) —
 „Кредитът в Anthropic свърши — продължавам с безплатните модели“ и до края на
 сесията няма нов платен опит. Нов кредит → изтрий `anthropic_spend.json`.
+С таван модел, който го няма в ценоразписа (нов от живия списък на `/model`),
+не се вика — иначе разходът му не би влязъл в сбора; сгрешен таван („95 USD“)
+се казва с един ред и не важи, докато не стане число.
 
 За ориентир: bench egn-check с Opus 5 при xhigh и кеширане — $0.78 за 24
 заявки (около 120 такива задачи за $95). Opus 5.5 е с 20% по-евтин на токен,

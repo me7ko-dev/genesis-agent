@@ -1621,6 +1621,12 @@ class Brain:
                 raise RuntimeError(f"HTTP_{e.status_code}: {e}") from e
             except anthropic.APIConnectionError as e:
                 raise RuntimeError(f"мрежа: {e}") from e
+            except TypeError as e:
+                # SDK, който не познава параметър (`fallbacks`, `output_config`
+                # при anthropic>=0.40 отпреди тях), вдига TypeError, а не
+                # грешка на API-то. Ревю 2026-10-22: тя минаваше покрай
+                # веригата (там се ловят само RuntimeError) и ходът падаше.
+                raise RuntimeError(f"SDK: {e}") from e
 
         try:
             # Класификаторите за безопасност могат да откажат заявка (връща се
@@ -1632,9 +1638,18 @@ class Brain:
             # Акаунт без достъп до тази beta (или SDK, който не я познава) —
             # същата заявка без нея. Нашата собствена верига поема отказа.
             why = str(e).lower()
-            if not why.startswith("http_400") or ("fallback" not in why and "beta" not in why):
+            sdk_too_old = why.startswith("sdk:")
+            if not sdk_too_old and (not why.startswith("http_400")
+                                    or ("fallback" not in why and "beta" not in why)):
                 raise
-            resp = send(client.messages)
+            try:
+                resp = send(client.messages)
+            except RuntimeError as plain:
+                if not str(plain).startswith("SDK:"):
+                    raise
+                raise RuntimeError(
+                    f"skip: пакетът anthropic е твърде стар за тази заявка ({plain}) — "
+                    "обнови го: pipx runpip genesis-agent install -U anthropic") from plain
 
         usage = getattr(resp, "usage", None)
         # Прочетените от кеша токени се отчитат ОТДЕЛНО, за да е проверимо, че
@@ -1658,8 +1673,14 @@ class Brain:
         # смята по таблицата в anthropic_spend и влиза в budget (cost_usd) и в
         # сбора през сесиите, по който работи GENESIS_ANTHROPIC_MAX_USD. Тук,
         # преди проверките за отказ и отрязан отговор — и те са платени.
+        # Сметката не бива да чупи вече платения отговор (ревю 2026-10-22):
+        # странно `usage` тук е debug ред, не изгубен ход.
         if self._last_usage is not None:
-            cost = anthropic_spend.response_cost(model, resp)
+            try:
+                cost = anthropic_spend.response_cost(model, resp)
+            except Exception:
+                log.debug("цената на отговора не се изчисли", exc_info=True)
+                cost = None
             if cost is None:
                 anthropic_spend.note_unpriced(model)
             else:
@@ -1778,7 +1799,7 @@ class Brain:
         # (GENESIS_ANTHROPIC_MAX_USD) или свършен кредит в тази сесия — без
         # заявка, веригата минава на следващия модел като при мъртъв ключ.
         if provider in _NATIVE_PROVIDERS:
-            why = anthropic_spend.blocked()
+            why = anthropic_spend.blocked(model)
             if why:
                 raise RuntimeError(f"{_ANNOUNCED_SKIP} {why}")
 

@@ -68,6 +68,10 @@ class FakeSDK:
         self.stop_reason = "end_turn"
         self.usage: object = Usage(1000, 200)
         self.text = "от Claude"
+        # Параметри, които (по-старото) SDK не познава → TypeError, като
+        # истинското: `stream() got an unexpected keyword argument`.
+        self.unknown_kwargs: set[str] = set()
+        self.served_model: str | None = None
         self.module = self._build()
 
     def _build(self) -> types.ModuleType:
@@ -103,13 +107,16 @@ class FakeSDK:
                 self.beta = beta
 
             def stream(self, **params):
+                for name in sorted(sdk.unknown_kwargs & set(params)):
+                    raise TypeError(f"Messages.stream() got an unexpected keyword argument '{name}'")
                 sdk.calls.append({**params, "_beta": self.beta})
                 for i, (beta, err) in enumerate(sdk.errors):
                     if beta is None or beta == self.beta:
                         sdk.errors.pop(i)
                         raise err
                 resp = types.SimpleNamespace(stop_reason=sdk.stop_reason, content=[_Text(sdk.text)],
-                                             usage=sdk.usage, model=params["model"],
+                                             usage=sdk.usage,
+                                             model=sdk.served_model or params["model"],
                                              stop_details=None)
                 return contextlib.nullcontext(types.SimpleNamespace(get_final_message=lambda: resp))
 
@@ -487,6 +494,160 @@ def test_genesis_budget_shows_the_usd(monkeypatch, capsys) -> None:
     out = capsys.readouterr().out
     assert "$0.7800" in out                              # редът на доставчика
     assert "Anthropic (API ключ): похарчени $0.78 от тавана $95.00" in out
+
+
+# ── 7. ревю 2026-10-22: повреден файл, Windows, модели без цена, старо SDK ────
+
+def _no_nan(text: str):
+    def refuse(name):
+        raise AssertionError(f"{name} във файла")
+    return json.loads(text, parse_constant=refuse)
+
+
+@pytest.mark.parametrize("body", [b'{"total_usd": NaN}', b'{"total_usd": Infinity}',
+                                  b'{"total_usd": 1e400}', b'{"total_usd": -1e9}',
+                                  b'{"total_usd": 1, "by_model": {"claude-opus-5-5": NaN}}',
+                                  b"[1, 2]", b"garbage{", b"\xff\xfe"])
+def test_a_damaged_spend_file_counts_from_zero_and_never_blocks(monkeypatch, caplog, body) -> None:
+    """json.loads приема NaN/Infinity: „$nan“ спираше Anthropic завинаги, а
+    отрицателен сбор изключваше тавана. Боклук → 0, с debug следа."""
+    import logging
+    s = spend()
+    monkeypatch.setenv("GENESIS_ANTHROPIC_MAX_USD", "95")
+    s.SPEND_PATH.parent.mkdir(parents=True, exist_ok=True)
+    s.SPEND_PATH.write_bytes(body)
+    with caplog.at_level(logging.DEBUG, logger="genesis.anthropic_spend"):
+        assert s.total_usd() in (0.0, 1.0)
+        assert s.blocked() is None
+        total = s.add(0.5, "claude-opus-5-5")
+    assert any(r.name == "genesis.anthropic_spend" for r in caplog.records), "без debug следа"
+    assert total in (0.5, 1.5)
+    data = _no_nan(s.SPEND_PATH.read_text(encoding="utf-8"))
+    assert data["total_usd"] == total
+    assert all(v >= 0 for v in data["by_model"].values())
+
+
+def test_a_spend_file_busy_on_windows_is_not_overwritten(monkeypatch) -> None:
+    """PermissionError при четене (друг процес прави os.replace, антивирус):
+    досега {} → add() записваше само последния отговор и сборът се губеше."""
+    s = spend()
+    s.add(50.0, "claude-opus-5-5")
+    real = Path.read_text
+    busy = {"left": 2}
+
+    def read_text(self, *a, **kw):
+        if self == s.SPEND_PATH and busy["left"]:
+            busy["left"] -= 1
+            raise PermissionError(13, "The process cannot access the file")
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr("genesis_agent.anthropic_spend.time.sleep", lambda _s: None)
+    assert s.add(0.5, "claude-opus-5-5") == pytest.approx(50.5), "кратък повтор"
+    busy["left"] = 10**6                                  # зает докрай
+    s.add(0.5, "claude-opus-5-5")
+    monkeypatch.setattr(Path, "read_text", real)
+    assert s.total_usd() == pytest.approx(50.5), "незает файл не се презаписва"
+
+
+def test_a_failed_replace_leaves_no_temp_file(monkeypatch) -> None:
+    s = spend()
+    s.add(1.0, "claude-opus-5-5")
+
+    def replace(_src, _dst):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr("genesis_agent.anthropic_spend.os.replace", replace)
+    monkeypatch.setattr("genesis_agent.anthropic_spend.time.sleep", lambda _s: None)
+    s.add(0.5, "claude-opus-5-5")
+    assert not [p.name for p in s.SPEND_PATH.parent.iterdir() if p.name.endswith(".tmp")]
+    assert s.total_usd() == pytest.approx(1.0)
+
+
+def test_dated_ids_from_the_live_list_have_their_price(sdk) -> None:
+    """/model предлага живия списък на ключа — `claude-haiku-4-5-20251001`, а
+    `resp.model` носи същото име. Без цена таванът не важеше за тях."""
+    s = spend()
+    assert s.usage_cost("claude-haiku-4-5-20251001", Usage(inp=1_000_000)) == pytest.approx(1.0)
+    assert s.usage_cost("claude-fable-5", Usage(read=1_000_000)) == pytest.approx(1.0)
+    sdk.served_model = "claude-haiku-4-5-20251001"
+    sdk.usage = Usage(inp=100_000, out=10_000)          # $0.10 + $0.05
+    b = brain.Brain()
+    b._call_anthropic("k", "claude-haiku-4-5-20251001", HI, None, "")
+    assert b._last_usage["cost_usd"] == pytest.approx(0.15)
+    assert s.total_usd() == pytest.approx(0.15)
+
+
+def test_haiku_over_100k_input_is_billed_at_the_long_prompt_price() -> None:
+    usage = Usage(inp=50_000, read=60_000, out=1000)
+    assert spend().usage_cost("claude-haiku-5-5", usage) == pytest.approx(
+        (50_000 * 0.50 + 60_000 * 0.05 + 1000 * 2.50) / 1e6)
+
+
+def test_under_a_cap_a_model_without_a_price_is_not_called(chain, sdk, monkeypatch,
+                                                           capsys) -> None:
+    """Иначе таванът не го спира: разходът му не влиза в сбора."""
+    monkeypatch.setenv("GENESIS_ANTHROPIC_MAX_USD", "95")
+    assert _pinned("claude-future-9").complete(HI).raw_text == "от безплатния"
+    assert _pinned("claude-future-9").complete(HI).raw_text == "от безплатния"
+    assert sdk.calls == []
+    assert capsys.readouterr().out.count("няма цена за claude-future-9") == 1
+    # Без таван няма какво да пази — моделът се вика.
+    monkeypatch.delenv("GENESIS_ANTHROPIC_MAX_USD")
+    assert _pinned("claude-future-9").complete(HI).raw_text == "от Claude"
+
+
+def test_a_bad_cap_is_said_once_in_the_chat(chain, sdk, monkeypatch, capsys) -> None:
+    """„95 USD“ досега тихо значеше „без таван“ — казваше го само /doctor."""
+    monkeypatch.setenv("GENESIS_ANTHROPIC_MAX_USD", "95 USD")
+    assert _pinned().complete(HI).raw_text == "от Claude"   # стената е самият кредит
+    assert _pinned().complete(HI).raw_text == "от Claude"
+    assert capsys.readouterr().out.count("не е сума в долари") == 1
+
+
+def test_the_spend_line_never_prints_a_key_put_on_the_cap_line(monkeypatch) -> None:
+    """`genesis budget` не минава през маскирането на /doctor."""
+    secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789"
+    monkeypatch.setenv("GENESIS_ANTHROPIC_MAX_USD", secret)
+    line = spend().summary()
+    assert "не е сума в долари" in line
+    assert "abcdefghij" not in line
+
+
+@pytest.mark.parametrize("unknown,answer", [({"fallbacks"}, "от Claude"),
+                                            ({"fallbacks", "output_config"}, "от безплатния")])
+def test_an_older_sdk_does_not_break_the_turn(chain, sdk, unknown, answer) -> None:
+    """SDK отпреди `fallbacks`/`output_config` вдига TypeError — тя минаваше
+    покрай веригата (ловят се само RuntimeError) и ходът падаше."""
+    sdk.unknown_kwargs = unknown
+    assert _pinned().complete(HI).raw_text == answer
+
+
+def test_odd_usage_never_breaks_a_paid_answer(sdk) -> None:
+    sdk.usage = Usage(inp=float("nan"), out=10)
+    text, _ = brain.Brain()._call_anthropic("k", "claude-opus-5-5", HI, None, "xhigh")
+    assert text == "от Claude"
+
+
+def test_the_budget_report_skips_a_damaged_cost() -> None:
+    from genesis_agent import budget
+    budget.record_usage(provider="anthropic", model="claude-opus-5-5", prompt_tokens=1,
+                        completion_tokens=1, cost_usd=float("nan"))
+    budget.record_usage(provider="anthropic", model="claude-opus-5-5", prompt_tokens=1,
+                        completion_tokens=1, cost_usd=0.5)
+    assert budget.today_totals()["cost_usd"] == pytest.approx(0.5)
+
+
+def test_the_max_quality_chain_stops_at_the_cap_too(chain, sdk, monkeypatch) -> None:
+    """`genesis fix --max` / GENESIS_QUALITY=max: Opus 5.5 и Sonnet 5.5 отпред —
+    същата проверка в Brain._call, без нито една платена заявка."""
+    monkeypatch.setenv("GENESIS_ANTHROPIC_MAX_USD", "1")
+    spend().add(1.0, "claude-opus-5-5")
+    b = brain.Brain(quality="max", use_local=False)
+    assert [c["model"] for c in b.premium if c["provider"] == "anthropic"] == [
+        "claude-opus-5-5", "claude-sonnet-5-5"]
+    assert b.complete(HI).raw_text == "от безплатния"
+    assert sdk.calls == []
 
 
 # ── 6. README ────────────────────────────────────────────────────────────────

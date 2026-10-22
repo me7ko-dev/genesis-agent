@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import posixpath
 import re
 from collections import defaultdict
@@ -516,7 +517,10 @@ def _add_cost(totals: dict, prov: str, entry: dict) -> None:
     таблицата с цени, `claude` CLI по неговата сметка). Без такива записи
     отчетът остава какъвто беше."""
     cost = entry.get("cost_usd")
-    if isinstance(cost, bool) or not isinstance(cost, (int, float)) or cost <= 0:
+    # NaN/inf от повреден ред (json.loads ги приема) правеха целия отчет
+    # „Разход: $nan“ (ревю 2026-10-22).
+    if (isinstance(cost, bool) or not isinstance(cost, (int, float))
+            or not math.isfinite(cost) or cost <= 0):
         return
     totals["cost_usd"] = round(totals.get("cost_usd", 0.0) + cost, 6)
     stats = totals["by_provider"][prov]
