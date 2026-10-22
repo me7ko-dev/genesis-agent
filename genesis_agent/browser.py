@@ -24,8 +24,9 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 
-from genesis_agent import sandbox
+from genesis_agent import sandbox, web_fetch
 
 log = logging.getLogger("genesis.browser")
 
@@ -73,6 +74,44 @@ _pw = None
 _browser = None
 _page = None
 _last_elements: list[dict] = []
+# localhost само ако последният BROWSE сам е поискал loopback адрес — като
+# при WEB_FETCH: страница навън не може да прати браузъра към Docker API и т.н.
+_allow_loopback = False
+
+
+def _address_refusal(url: str) -> str:
+    """Защо браузърът не бива да отвори url („“ — може): правилото на WEB_FETCH.
+
+    Одит 2026-10-22: BROWSE е SAFE и не пита, а проверяваше само схемата —
+    http://169.254.169.254/… (metadata на облака), който WEB_FETCH отказва на
+    сокета, се зареждаше в Chromium и текстът му отиваше при модела. Достатъчно
+    е инжектиран README да каже „BROWSE http://192.168.0.1/“. Тук името се
+    разрешава и всеки адрес минава през web_fetch._allowed_ip; Chromium
+    разрешава името сам, затова проверката е и на всяка заявка (_route_guard),
+    и на крайния адрес на страницата (_page_state_summary)."""
+    if not url.lower().startswith(_ALLOWED_SCHEMES):
+        return ""   # about:blank, data:, chrome-error:// — не са мрежови адреси
+    try:
+        host = web_fetch._check_url(url)
+        web_fetch._precheck_through_proxy(host, url, _allow_loopback)
+    except web_fetch.FetchError as e:
+        return str(e)
+    return ""
+
+
+def _route_guard(route: Any) -> None:
+    """Всяка заявка на страницата (ресурси, fetch, JS навигация, meta refresh)
+    към вътрешен адрес се спира, преди Chromium да я изпрати."""
+    url = route.request.url
+    refusal = _address_refusal(url)
+    try:
+        if refusal:
+            log.info("BROWSE: спряна заявка към %s — %s", url[:200], refusal)
+            route.abort("blockedbyclient")
+        else:
+            route.continue_()
+    except Exception:
+        log.debug("route handler-ът не довърши заявката", exc_info=True)
 
 
 def _ensure_page():
@@ -89,6 +128,10 @@ def _ensure_page():
     _browser = _pw.chromium.launch(headless=not visible)
     _page = _browser.new_page()
     _page.set_default_timeout(15000)
+    # На контекста, не на страницата — и прозорците, които страницата отваря.
+    # Пренасочванията не минават през route (Playwright вика handler-а само за
+    # първия адрес) — за тях е проверката на page.url в _page_state_summary.
+    _page.context.route("**/*", _route_guard)
     return _page
 
 
@@ -130,6 +173,15 @@ def _format_elements(elements: list[dict]) -> str:
 
 def _page_state_summary() -> str:
     page = _ensure_page()
+    refusal = _address_refusal(page.url)
+    if refusal:
+        # Публичен адрес, пренасочил към вътрешен: нищо от страницата не
+        # стига до модела, и тя не остава отворена за BROWSER_READ.
+        try:
+            page.goto("about:blank")
+        except Exception:
+            log.debug("about:blank не се зареди", exc_info=True)
+        return f"❌ страницата стигна до {refusal}"
     try:
         title = page.title()
     except Exception:
@@ -203,9 +255,17 @@ def _resolve_element(target: str, *, kind: str = "any") -> dict | None:
 
 def navigate(url: str) -> str:
     """SAFE — зарежда URL и връща състоянието на страницата."""
+    global _allow_loopback
     url = url.strip()
     if not url.lower().startswith(_ALLOWED_SCHEMES):
         return f"[BROWSE] Отказано — само http(s) адреси са позволени: {url}"
+    try:
+        _allow_loopback = web_fetch._is_loopback_name(web_fetch._check_url(url))
+    except web_fetch.FetchError:
+        _allow_loopback = False
+    refusal = _address_refusal(url)
+    if refusal:
+        return f"[BROWSE: {url}] ❌ {refusal}"
     page = _ensure_page()
     try:
         page.goto(url, wait_until="domcontentloaded")

@@ -14,6 +14,8 @@ service (169.254.169.254) and hand what it finds to the model. Loopback
 """
 from __future__ import annotations
 
+import codecs
+import contextlib
 import ipaddress
 import logging
 import re
@@ -101,12 +103,21 @@ def _session():
     class _Guard:
         def _new_conn(self):  # type: ignore[no-untyped-def]
             try:
-                return _guarded_connection((self._dns_host, self.port), self.timeout,
+                sock = _guarded_connection((self._dns_host, self.port), self.timeout,
                                            self.source_address, self.socket_options)
             except socket.gaierror as e:
                 raise NameResolutionError(self.host, self, e) from e
             except OSError as e:
                 raise NewConnectionError(self, str(e)) from e
+            _watch(sock)
+            return sock
+
+        def connect(self):  # type: ignore[no-untyped-def]
+            # След connect self.sock е TLS сокетът (wrap_socket откача суровия
+            # от _new_conn) — пазим и него; по-късно conn.sock може да е None
+            # (отговор „Connection: close“ взема сокета за себе си).
+            super().connect()
+            _watch(self.sock)
 
     class _HTTP(_Guard, HTTPConnection):
         pass
@@ -159,6 +170,16 @@ def _check_url(url: str) -> str:
     except ValueError as e:
         raise FetchError(f"невалиден адрес: {e}") from e
     host = parsed.hostname.strip("[]").lower()
+    if not host.isascii():
+        # Одит 2026-10-22: urlparse дава хоста в Unicode, urllib3 — в IDNA
+        # (xn--…), и всеки .бг адрес излизаше „двусмислен хост“. Кодираме с
+        # кодера на urllib3, не с codecs „idna“ (IDNA 2003: straße.de →
+        # strasse.de, а urllib3 → xn--strae-oqa.de) — сравняват се двата
+        # парсера, не два кодера.
+        try:
+            host = (parse_url(f"http://{host}/").host or "").lower()
+        except ValueError as e:
+            raise FetchError(f"невалиден адрес: {e}") from e
     if other != host:
         raise FetchError(f"двусмислен хост ({host} / {other}) — не се отваря")
     if port is not None and not 0 < port < 65536:
@@ -213,13 +234,19 @@ class _Markdown(HTMLParser):
             self.out.append(f"[{text}]({self.href})" if text else "")
             self.href = None
 
+    def _code_mark(self) -> None:
+        """Одит 2026-10-22: в <a> кавичката отиваше в out, а текстът — в
+        link_text, и всяка препратка в API документация (Sphinx, MDN) излизаше
+        „``[Name](url)“."""
+        (self.link_text if self.href is not None else self.out).append("`")
+
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in self.SKIP:
             self.skip += 1
             return
         if self.skip:
             return
-        if tag == "a" or tag in self.BLOCK or tag in ("li", "pre", "td", "th") \
+        if tag == "a" or tag in self.BLOCK or tag in ("li", "pre", "td", "th", "dt", "dd") \
                 or re.fullmatch(r"h[1-6]", tag):
             self._flush_link()
         if tag == "title":
@@ -232,7 +259,7 @@ class _Markdown(HTMLParser):
             self.pre += 1
             self.out.append("\n```\n")
         elif tag == "code" and not self.pre:
-            self.out.append("`")
+            self._code_mark()
         elif tag == "a":
             href = dict(attrs).get("href") or ""
             if href and not href.startswith(("javascript:", "#")):
@@ -240,6 +267,9 @@ class _Markdown(HTMLParser):
                 self.link_text = []
         elif tag in self.BLOCK or tag in ("td", "th"):
             self.out.append(" | " if tag in ("td", "th") else "\n")
+        elif tag in ("dt", "dd"):
+            # Одит 2026-10-22: dt/dd не бяха блокове — „timeoutSeconds to wait.“
+            self.out.append("\n" if tag == "dt" else "\n  ")
 
     def handle_endtag(self, tag: str) -> None:
         if tag in self.SKIP:
@@ -253,7 +283,7 @@ class _Markdown(HTMLParser):
             self.pre = max(0, self.pre - 1)
             self.out.append("\n```\n")
         elif tag == "code" and not self.pre:
-            self.out.append("`")
+            self._code_mark()
         elif tag == "a" and self.href is not None:
             self._flush_link()
         elif re.fullmatch(r"h[1-6]", tag) or tag in self.BLOCK:
@@ -296,7 +326,9 @@ def _decode(data: bytes, ctype: str) -> str:
     """Charset от заглавката, иначе от <meta charset>, иначе UTF-8 — не
     ISO-8859-1, с което requests четеше кирилицата на всяка страница без
     charset в заглавката (одит 2026-10-09)."""
-    m = re.search(r"charset=([A-Za-z0-9_-]+)", ctype, re.IGNORECASE)
+    # charset="windows-1251" и charset = windows-1251 са валидни (одит
+    # 2026-10-22: без <meta> старите cp1251 сайтове излизаха като „����“).
+    m = re.search(r"charset\s*=\s*[\"']?([A-Za-z0-9_.:-]+)", ctype, re.IGNORECASE)
     charset = m.group(1) if m else ""
     if not charset:
         meta = _META_CHARSET.search(data[:4096])
@@ -305,6 +337,55 @@ def _decode(data: bytes, ctype: str) -> str:
         return data.decode(charset, errors="replace")
     except LookupError:
         return data.decode("utf-8", errors="replace")
+
+
+# Текстови типове извън text/* (одит 2026-10-22: JS, RSS/Atom, ld+json и YAML
+# излизаха „не е текст“ и моделът минаваше през RUN_CMD curl -o — ход повече и
+# решение на sandbox-а за нещо, което WebFetch на Claude Code просто чете).
+_TEXT_TYPES = ("application/json", "application/xml", "application/javascript",
+               "application/ecmascript", "application/x-javascript", "application/yaml",
+               "application/x-yaml", "application/toml", "application/x-sh",
+               "application/x-ndjson", "application/sql", "application/graphql")
+
+
+def _textual(ctype: str) -> bool | None:
+    """По типа: да/не; None — типът не казва нищо (липсва или е
+    application/octet-stream) и решава съдържанието (_looks_like_text)."""
+    low = ctype.lower()
+    mime = low.split(";", 1)[0].strip()
+    if "html" in low or "charset" in low or mime.startswith(("text/", *_TEXT_TYPES)) \
+            or mime.endswith(("+json", "+xml")):
+        return True
+    if not mime or mime == "application/octet-stream":
+        return None
+    return False
+
+
+def _looks_like_text(head: bytes) -> bool:
+    """Без NUL и валиден UTF-8 (недовършен последен знак се прощава)."""
+    if b"\0" in head:
+        return False
+    try:
+        codecs.getincrementaldecoder("utf-8")().decode(head, final=False)
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def _watch(sock: Any) -> None:
+    """Сокетите на текущото fetch() — за да може _cut да ги затвори."""
+    watched = getattr(_guard, "watched", None)
+    if watched is not None and sock is not None:
+        watched.append(sock)
+
+
+def _cut(watched: list[Any], fired: threading.Event) -> None:
+    """Срокът изтече: затваря връзките отвън, блокиращото четене се връща веднага.
+    Суров сокет, вече обвит в TLS, е откачен (fd -1) — грешката се прощава."""
+    fired.set()
+    for sock in list(watched):
+        with contextlib.suppress(OSError, ValueError):
+            sock.shutdown(socket.SHUT_RDWR)
 
 
 def fetch(url: str) -> tuple[str, str, str]:
@@ -319,6 +400,18 @@ def fetch(url: str) -> tuple[str, str, str]:
     # не може да пренасочи агента към kubectl proxy, Docker API и т.н.
     allow_loopback = _is_loopback_name(first_host)
     deadline = time.monotonic() + _TIMEOUT
+    over = f"над {_TIMEOUT} s"
+    # Одит 2026-10-22: срокът се проверяваше само между парчетата от 64 KB, а
+    # timeout-ът на сокета е за всяко recv. Тяло с Content-Length по 100 байта
+    # на 0.05 s държеше инструмента 33 s при срок 3 s (байт на 0.4 s — часове),
+    # заглавки по байт — 22.6 s, преди изобщо да стигнем до проверка. Таймерът
+    # затваря връзката отвън, където и да е блокирало четенето.
+    fired = threading.Event()
+    watched: list[Any] = []
+    _guard.watched = watched
+    timer = threading.Timer(_TIMEOUT, _cut, (watched, fired))
+    timer.daemon = True
+    timer.start()
     session = _session()
     try:
         for _ in range(_MAX_REDIRECTS + 1):
@@ -330,13 +423,15 @@ def fetch(url: str) -> tuple[str, str, str]:
             _guard.refused = ""
             left = deadline - time.monotonic()
             if left <= 0:
-                raise FetchError(f"над {_TIMEOUT} s")
+                raise FetchError(over)
             try:
                 resp = session.get(url, headers={"User-Agent": _UA,
                                                  "Accept": "text/html,text/plain,*/*"},
                                    timeout=(min(10.0, left), left), allow_redirects=False,
                                    stream=True)
             except requests.RequestException as e:
+                if fired.is_set():
+                    raise FetchError(over) from e
                 raise FetchError(getattr(_guard, "refused", "") or f"не се отвори: {e}") from e
             try:
                 if resp.status_code in (301, 302, 303, 307, 308):
@@ -348,29 +443,36 @@ def fetch(url: str) -> tuple[str, str, str]:
                 if resp.status_code >= 400:
                     raise FetchError(f"HTTP {resp.status_code}")
                 ctype = resp.headers.get("content-type", "")
-                low = ctype.lower()
-                textual = ("html" in low or "charset" in low
-                           or low.startswith(("text/", "application/json", "application/xml")))
-                if not textual:
-                    raise FetchError(f"не е текст ({ctype or 'неизвестен тип'}) — ползвай RUN_CMD curl -o")
+                textual = _textual(ctype)
+                not_text = f"не е текст ({ctype or 'неизвестен тип'}) — ползвай RUN_CMD curl -o"
+                if textual is False:
+                    raise FetchError(not_text)
                 data = b""
                 for chunk in resp.iter_content(65536):
                     data += chunk
                     if len(data) > _MAX_BYTES:
                         break
                     if time.monotonic() > deadline:
-                        raise FetchError(f"над {_TIMEOUT} s")
+                        raise FetchError(over)
+                # Тяло „до затваряне“ (без Content-Length) свършва тихо, когато
+                # таймерът затвори връзката — иначе отрязаното мина за цяло.
+                if fired.is_set():
+                    raise FetchError(over)
+                if textual is None and not _looks_like_text(data[:2048]):
+                    raise FetchError(not_text)
                 return url, ctype, _decode(data[:_MAX_BYTES], ctype)
             except requests.RequestException as e:
-                raise FetchError(f"прекъсна: {e}") from e
+                raise FetchError(over if fired.is_set() else f"прекъсна: {e}") from e
             finally:
                 resp.close()
         raise FetchError(f"над {_MAX_REDIRECTS} пренасочвания")
     except FetchError:
         raise
     except (ValueError, LookupError, UnicodeError, OSError) as e:
-        raise FetchError(str(e)) from e
+        raise FetchError(over if fired.is_set() else str(e)) from e
     finally:
+        timer.cancel()
+        _guard.watched = None
         session.close()
         _guard.allow_loopback = False
 
