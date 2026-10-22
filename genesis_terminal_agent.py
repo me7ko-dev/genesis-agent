@@ -48,12 +48,17 @@ except ImportError:
 
 # ── Споделено ядро (genesis_agent): памет + sandbox политика ────────────────────────
 # Всичко тук е меко-опционално: ако липсва зависимост, чатът пак работи.
+# Поотделно (одит 2026-10-22): повредена persistent_memory.db чупеше memory.py,
+# а общият try сваляше и conversation_memory, която с нея няма нищо общо.
 try:
     from genesis_agent import conversation_memory as _conv_mem
-    from genesis_agent.memory import memory_context as _memory_context
 except Exception:
     log.debug("паметта на разговора не се зареди — чатът е без нея", exc_info=True)
     _conv_mem: Any = None  # type: ignore[no-redef]
+try:
+    from genesis_agent.memory import memory_context as _memory_context
+except Exception:
+    log.debug("memory.py не се зареди — без скорошни мисии в промпта", exc_info=True)
     _memory_context: Any = None  # type: ignore[no-redef]
 
 

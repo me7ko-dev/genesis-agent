@@ -2026,8 +2026,13 @@ def _dispatch(name: str, arguments: dict) -> str:
             if name == "REMEMBER":
                 kind = str(arguments.get("kind", "decision")).lower()
                 if kind.startswith(("pref", "предпочит")):
-                    return wm.set_preference(arguments.get("topic", ""),
-                                             arguments.get("value", ""))
+                    value = str(arguments.get("value", "") or "")
+                    # Схемата иска само kind и value, а празна тема се
+                    # отказваше: моделът, спазил схемата, губеше извикването
+                    # (одит 2026-10-22). Темата — първите думи на стойността.
+                    topic = str(arguments.get("topic", "") or "").strip() \
+                        or " ".join(value.split()[:8])[:60]
+                    return wm.set_preference(topic, value)
                 return wm.add_decision(arguments.get("value", "") or arguments.get("topic", ""),
                                        arguments.get("why", ""))
             if name == "TASK_ADD":
