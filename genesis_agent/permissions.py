@@ -61,6 +61,20 @@ _INTERPRETERS = re.compile(r"^(python[\d.]*|py|pypy[\d.]*|perl|ruby|node|deno|bu
 # какъвто и да е модул/скрипт“): `python -c *`, `node -e *`, `deno run *`.
 _INLINE_FLAGS = frozenset({"-c", "-e", "-E", "--eval", "-p", "--print", "-r", "run", "eval", "-m"})
 
+# Пускачи на пакети: пускат остатъка като команда, също като `env`. Правило
+# `uv run *` се приемаше и покриваше `uv run rm -rf …` — в `genesis -p` то
+# минаваше без въпрос, а без правилото беше SANDBOX DENIED (одит 2026-10-22).
+# След пускача трябва да стои фиксиран инструмент (`uv run pytest *`), който
+# се проверява като правило сам по себе си: `uv run bash *` е `bash *`.
+_RUNNER_WORDS = frozenset({"uvx", "npx", "pnpx", "bunx"})
+_RUNNER_SUBCOMMANDS = {
+    "uv": frozenset({"run"}), "npm": frozenset({"exec", "x"}), "pnpm": frozenset({"exec", "dlx"}),
+    "yarn": frozenset({"exec", "dlx"}), "bun": frozenset({"x"}), "poetry": frozenset({"run"}),
+    "pipx": frozenset({"run"}), "conda": frozenset({"run"}), "mamba": frozenset({"run"}),
+    "micromamba": frozenset({"run"}), "pdm": frozenset({"run"}), "hatch": frozenset({"run"}),
+    "pixi": frozenset({"run"}), "rye": frozenset({"run"}),
+}
+
 # Причини, които никое правило не покрива: тайни и управляващите файлове на
 # Genesis (hooks/MCP/доверие/тези правила). `cat *` иначе четеше ключа, с
 # който се подписва доверието, а `cp *` пишеше ~/.genesis/hooks.json —
@@ -95,6 +109,20 @@ def _base(word: str) -> str:
     return name.removesuffix(".exe")
 
 
+def _after_runner(words: list[str]) -> list[str] | None:
+    """The words after a package runner (`uv run`, `npx` …), or None when the
+    command does not start with one. `uv tool run` and `uv --quiet run` count
+    too: the subcommand is looked for among all the fixed words."""
+    first = _base(words[0])
+    if first in _RUNNER_WORDS:
+        return words[1:]
+    subs = _RUNNER_SUBCOMMANDS.get(first)
+    for i, word in enumerate(words[1:], 1):
+        if subs and word in subs:
+            return words[i + 1:]
+    return None
+
+
 def normalize_rule(text: str) -> tuple[str | None, str]:
     """(the rule as stored, "") or (None, why it is refused)."""
     raw = text.strip(" \t\r\n")
@@ -112,6 +140,13 @@ def normalize_rule(text: str) -> tuple[str | None, str]:
         return None, ("само прости думи (букви, цифри, _ . , / : = + - @); „*“ — "
                       "само сам и последен; без ; & | < > $ ` кавички, ~ и %")
     if prefix:
+        rest = _after_runner(words)
+        if rest is not None:
+            if not rest or rest[0].startswith("-"):
+                return None, f"„{' '.join(words)} *“ би пуснало всяка команда"
+            inner, why = normalize_rule(" ".join(rest) + " *")
+            if inner is None:
+                return None, why
         first = _base(words[0])
         if first in _LAUNCHERS:
             return None, f"„{words[0]} *“ би пуснало всяка команда"

@@ -19,9 +19,11 @@ run the tests before the turn may end, log every command.
 
 Claude Code's nested form ({"matcher": ..., "hooks": [{"type": "command",
 "command": ...}]}) is read too. `matcher` is a regex on the tool name (empty =
-every tool). The command gets a JSON description on stdin and GENESIS_TOOL,
+every tool): the Genesis name or Claude Code's (`Bash`, `Write|Edit`, `Read`).
+The command gets a JSON description on stdin (with Claude Code's keys too:
+`hook_event_name`, `cwd`, `tool_input.file_path`) and GENESIS_TOOL,
 GENESIS_FILE, GENESIS_WORKSPACE in its environment, runs in the workspace,
-for at most `timeout` seconds (default 60).
+for at most `timeout` seconds (default 60, at least 1).
 
 Exit code 2 is the one that matters, as in Claude Code:
   PreToolUse        → the tool does not run; stderr goes to the model.
@@ -31,12 +33,19 @@ Exit code 2 is the one that matters, as in Claude Code:
   Stop              → the turn goes on: stderr goes to the model as the next
                       message (at most twice in a row).
 Any other code: the hook failed, the work goes on, the operator sees it.
+
+Exit 0 with Claude Code's JSON on stdout decides like exit 2:
+`{"hookSpecificOutput": {"permissionDecision": "deny", "permissionDecisionReason": ...}}`
+or `{"decision": "block", "reason": ...}` blocks (the reason is the message);
+`hookSpecificOutput.additionalContext` is the context. Such JSON is never
+added to the message as text.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -212,9 +221,15 @@ def _parse(path: Path) -> list[Hook]:
             commands = inner if isinstance(inner, list) else [entry]
             for c in commands:
                 if isinstance(c, dict) and str(c.get("command") or "").strip():
+                    # Таван ≥1 s и закръгляне нагоре, не int(): `timeout: 0.5`
+                    # ставаше 0, а -1 оставаше -1 — communicate() хвърляше
+                    # TimeoutExpired веднага, блокиращият hook се пропускаше и
+                    # инструментът минаваше; `inf` срутваше четенето (одит
+                    # 2026-10-22). Същият таван като stt.timeout_s във voice.py.
                     try:
-                        timeout = int(c.get("timeout") or entry.get("timeout") or _TIMEOUT)
-                    except (TypeError, ValueError):
+                        raw = float(c.get("timeout") or entry.get("timeout") or _TIMEOUT)
+                        timeout = max(1, math.ceil(raw))
+                    except (TypeError, ValueError, OverflowError):
                         timeout = _TIMEOUT
                     out.append(Hook(event, matcher, str(c["command"]), timeout, path))
     return out
@@ -235,13 +250,28 @@ def configured(ws: Path | None = None) -> tuple[list[Hook], Path | None]:
     return hooks, untrusted
 
 
+# Имената на инструментите в Claude Code (обратното на agents._CLAUDE_TOOLS).
+# hooks.json, копиран оттам, е с matcher `Bash` или `Write|Edit` и не
+# съвпадаше с нито един инструмент — hook-ът се пропускаше без дума и
+# записът/командата минаваше (одит 2026-10-22).
+_CLAUDE_NAMES: dict[str, tuple[str, ...]] = {
+    "RUN_CMD": ("Bash",), "WRITE_FILE": ("Write",), "EDIT_FILE": ("Edit", "MultiEdit"),
+    "READ_FILE": ("Read",), "SEARCH_CODE": ("Grep",), "GLOB": ("Glob",), "LIST_DIR": ("LS",),
+    "WEB_FETCH": ("WebFetch",), "WEB_SEARCH": ("WebSearch",), "TODO_WRITE": ("TodoWrite",),
+}
+
+
 def _matches(hook: Hook, tool: str) -> bool:
     if not hook.matcher or hook.matcher in ("*", ".*"):
         return True
-    try:
-        return re.fullmatch(hook.matcher, tool) is not None
-    except re.error:
-        return hook.matcher == tool
+    for name in (tool, *_CLAUDE_NAMES.get(tool, ())):
+        try:
+            if re.fullmatch(hook.matcher, name) is not None:
+                return True
+        except re.error:
+            if hook.matcher == name:
+                return True
+    return False
 
 
 def _run(hook: Hook, payload: dict, env_extra: dict[str, str]) -> subprocess.CompletedProcess | None:
@@ -268,21 +298,80 @@ def _run(hook: Hook, payload: dict, env_extra: dict[str, str]) -> subprocess.Com
     return subprocess.CompletedProcess(hook.command, proc.returncode, out or "", err or "")
 
 
+# Ключовете, по които stdout на изход 0 е отговор във формата на Claude Code,
+# а не текст за контекст (обикновен JSON без тях си остава контекст).
+_JSON_KEYS = frozenset({"hookSpecificOutput", "decision", "continue", "reason", "stopReason",
+                        "suppressOutput", "systemMessage"})
+
+
+def _json_answer(event: str, stdout: str) -> Outcome | None:
+    """Claude Code's JSON answer on exit 0, or None when stdout is plain text.
+
+    Изход 0 с JSON е обичайният начин hook от Claude Code да откаже. Genesis
+    гледаше само код 2 и лепеше JSON-а като контекст: PreToolUse
+    `permissionDecision: deny` пускаше WRITE_FILE, UserPromptSubmit
+    `decision: block` пращаше съобщението с тайната към модела, а Stop
+    `decision: block` приключваше хода (одит 2026-10-22)."""
+    text = stdout.strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or not _JSON_KEYS & data.keys():
+        return None
+    specific = data.get("hookSpecificOutput")
+    specific = specific if isinstance(specific, dict) else {}
+    out = Outcome()
+    permission = str(specific.get("permissionDecision") or "").lower()
+    if permission in ("deny", "ask"):
+        # „ask“: тук няма кого да пита преди инструмента — отказ, не тихо „да“.
+        # „allow“ не заобикаля sandbox-а: той решава сам.
+        out.blocked = True
+        out.message = str(specific.get("permissionDecisionReason") or data.get("reason")
+                          or ("hook поиска потвърждение" if permission == "ask" else ""))
+    elif str(data.get("decision") or "").lower() == "block":
+        out.blocked = True
+        out.message = str(data.get("reason") or "")
+    if data.get("continue") is False:
+        # Stop: „спри“ значи, че ходът свършва (над decision: block); другаде — отказ.
+        out.blocked = event != "Stop"
+        if out.blocked and not out.message:
+            out.message = str(data.get("stopReason") or "")
+    extra = specific.get("additionalContext")
+    if isinstance(extra, str):
+        out.context = extra.strip()
+    note = data.get("systemMessage")
+    if isinstance(note, str) and note.strip():
+        _say(f"hook ({event}): {note.strip()[:300]}")
+    return out
+
+
 def fire(event: str, payload: dict, tool: str = "", file: str = "") -> Outcome:
     hooks, _ = configured()
     result = Outcome()
     env = {"GENESIS_TOOL": tool, "GENESIS_FILE": file}
+    # hook_event_name и cwd — ключовете от Claude Code, до тези на Genesis.
+    full = dict(payload, hook_event=event, hook_event_name=event, cwd=str(_ws()))
     for hook in hooks:
         if hook.event != event or (tool and not _matches(hook, tool)):
             continue
-        done = _run(hook, dict(payload, hook_event=event), env)
+        done = _run(hook, full, env)
         if done is None:
             continue
         if done.returncode == 2:
             result.blocked = True
             result.message += (done.stderr or done.stdout or "").strip()[:_MAX_OUT] + "\n"
         elif done.returncode == 0:
-            if done.stdout.strip():
+            answer = _json_answer(event, done.stdout)
+            if answer is not None:
+                if answer.blocked:
+                    result.blocked = True
+                    result.message += answer.message.strip()[:_MAX_OUT] + "\n"
+                if answer.context:
+                    result.context += answer.context[:_MAX_OUT] + "\n"
+            elif done.stdout.strip():
                 result.context += done.stdout.strip()[:_MAX_OUT] + "\n"
         else:
             _say(f"⚠ hook ({event}) върна {done.returncode}: "
@@ -298,16 +387,28 @@ def _file_of(args: dict) -> str:
     return ""
 
 
+def _tool_input(args: dict) -> dict:
+    """The arguments as a hook sees them: the Genesis keys plus Claude Code's
+    absolute `file_path`. Hook „пази .env“ от Claude Code чете
+    `.tool_input.file_path`, виждаше само `path` и пускаше записа (одит
+    2026-10-22). Копие — аргументите на самия инструмент не се пипат."""
+    view = dict(args)
+    path = _file_of(args)
+    if path and "file_path" not in view:
+        view["file_path"] = os.path.normpath(os.path.join(str(_ws()), path))
+    return view
+
+
 def pre_tool(tool: str, args: dict) -> str | None:
     """A refusal for the model when a PreToolUse hook blocks the tool."""
-    out = fire("PreToolUse", {"tool_name": tool, "tool_input": args}, tool, _file_of(args))
+    out = fire("PreToolUse", {"tool_name": tool, "tool_input": _tool_input(args)}, tool, _file_of(args))
     if out.blocked:
         return f"[{tool}] ⛔ Спряно от hook на оператора:\n{out.message or '(без обяснение)'}"
     return None
 
 
 def post_tool(tool: str, args: dict, result: str) -> str:
-    out = fire("PostToolUse", {"tool_name": tool, "tool_input": args,
+    out = fire("PostToolUse", {"tool_name": tool, "tool_input": _tool_input(args),
                                "tool_response": result[:_MAX_OUT]}, tool, _file_of(args))
     if out.blocked and out.message:
         return f"{result}\n[hook на оператора след {tool}]\n{out.message}"
