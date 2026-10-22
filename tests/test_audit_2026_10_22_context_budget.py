@@ -149,3 +149,43 @@ def test_text_mode_subagent_results_are_shrunk_and_the_task_stays(monkeypatch) -
     assert chars(sent[9]) < 3 * one, chars(sent[9])
     assert chars(sent[14]) < 3 * one, chars(sent[14])
     assert all(any(task in str(m.get("content")) for m in req) for req in sent)
+
+
+def test_text_mode_explore_results_are_shrunk_and_the_question_stays(monkeypatch) -> None:
+    """Същото в explore._loop (ревю 2026-10-22): user „[резултати]“ по 28.6K
+    не се свиваха — на 9-ия рунд тръгваха 8 цели резултата (~229K знака)."""
+    from genesis_agent import explore
+
+    sent: list[list[dict]] = []
+
+    def fake_call(self, provider, model, messages, tools=None):
+        sent.append(messages)
+        return "[READ_FILE: big.log]", None
+
+    monkeypatch.setattr(brain_mod.Brain, "_call", fake_call)
+    monkeypatch.setattr(brain_mod, "_local_available", lambda m: False)
+    monkeypatch.setattr("genesis_agent.provider_stats.deprioritize_flaky", lambda c: c)
+    monkeypatch.setattr(brain_mod, "_EXHAUSTED", {})
+    monkeypatch.setattr(brain_mod, "_load_chain", lambda: [
+        {"provider": "groq", "model": "m", "size_b": 120, "supports_tools": False}])
+
+    calls = [0]
+
+    def dispatch(name, args):
+        calls[0] += 1
+        return f"[{name} {args.get('path')}] ред {calls[0]}\n" + "лог ред с кирилица\n" * 1500
+
+    gs = types.SimpleNamespace(_cancelled=lambda: False, dispatch_tool_call=dispatch)
+    question = "ВЪПРОСЪТ: къде се смята ДДС?"
+    messages = [{"role": "system", "content": "SYS"}, {"role": "user", "content": question}]
+    explore._loop(question, messages, Brain(use_local=False).complete, explore.MAX_ROUNDS, gs)
+
+    assert len(sent) == explore.MAX_ROUNDS
+
+    def chars(ms: list[dict]) -> int:
+        return sum(len(str(m.get("content") or "")) for m in ms)
+
+    one = 28_600
+    assert chars(sent[-2]) < 3 * one, chars(sent[-2])
+    assert chars(sent[-1]) < 3 * one, chars(sent[-1])
+    assert all(any(question in str(m.get("content")) for m in req) for req in sent)
