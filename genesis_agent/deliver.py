@@ -25,9 +25,11 @@ import os
 import re
 import subprocess
 import zipfile
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import BinaryIO
 
 from genesis_agent.code_edit import read_text_any
 
@@ -73,7 +75,14 @@ _EXPORT_SECRETS = re.compile(
     re.IGNORECASE)
 # И по съдържание — частен ключ в иначе невинно име (`config.json`, `deploy.txt`).
 _SECRET_CONTENT = re.compile(rb"-----BEGIN [A-Z ]*PRIVATE KEY-----|\"private_key\"\s*:\s*\"-----BEGIN")
+# Файлът се чете ЦЯЛ, на парчета от _SCAN_BYTES с припокриване (ключ на
+# границата иначе се цепи на две). Одит 2026-10-22: четяха се само първите
+# 256 KB — .ipynb с една графика (~300 KB base64) и клетка `OpenAI(api_key=
+# "sk-proj-…")` след нея заминаваше с ключа, а 360 KB .py с RSA ключ накрая —
+# също. По-нагоре от тавана на проекта не се чете: такъв файл и без това
+# спира export-а.
 _SCAN_BYTES = 256 * 1024
+_SCAN_OVERLAP = 4 * 1024
 
 
 @functools.lru_cache(maxsize=1)
@@ -128,6 +137,16 @@ _KEY_SHAPES = re.compile(
     rb"|(?:AKIA|ASIA)[0-9A-Z]{16}"
     rb"|nvapi-[A-Za-z0-9_-]{64}"
     rb"|hf_[A-Za-z]{34}"
+    # Одит 2026-10-22: GitLab `glpat-`, npm `npm_`, Telegram бот (`<id>:AA…`,
+    # и в адреса `…/bot<id>:AA…` — Genesis сам има Telegram известия) и
+    # SendGrid `SG.<22>.<43>` заминаваха; в .npmrc ги пазеше само името.
+    rb"|glpat-[A-Za-z0-9_-]{20,}"
+    rb"|npm_[A-Za-z0-9]{36}"
+    # Две алтернативи, не `(?:bot)?`: незадължителната група удвояваше времето
+    # на целия образец (0.18 → 0.36 s на 4 MB, 2026-10-22), а файлът вече се
+    # чете цял.
+    rb"|bot\d{8,10}:AA[A-Za-z0-9_-]{33}|\d{8,10}:AA[A-Za-z0-9_-]{33}"
+    rb"|SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}"
     rb")(?![A-Za-z0-9_-])")
 # Образец: думи-образци навсякъде, `your`/`here`/`fake`/`key` като отделна част
 # (`sk-your-api-key-here`), или 6 еднакви знака подред (`AIzaSyXXXXXX…`,
@@ -239,6 +258,31 @@ def _url_secret(text: str) -> bool:
     return bool(password) or any(v and _secret_env_name(k) for k, v in parse_qsl(parts.query))
 
 
+# Парола в адреса във ВСЕКИ файл, не само в .mcp.json. Одит 2026-10-22:
+# `git+https://deploy:<парола>@gitlab…` в requirements.txt и `url =
+# https://ci-bot:<парола>@git…` в .gitmodules заминаваха. Образците остават:
+# препратка (`${DB_PASS}`, `<password>`), парола като името (`postgres:postgres`),
+# думите от _URL_PLACEHOLDER_PW и думите-образци, под 6 знака (`u:p@host`).
+_URL_USERINFO = re.compile(
+    rb"\b[A-Za-z][A-Za-z0-9+.-]*://([^/\s:@'\"<>`]*):([^/\s@'\"<>`]+)@(?=[A-Za-z0-9\[])")
+_URL_PLACEHOLDER_PW = frozenset({b"password", b"passwd", b"pass", b"pwd", b"secret", b"postgres",
+                                 b"root", b"admin", b"user", b"test", b"guest", b"mysql", b"redis"})
+
+
+def _url_passwords(data: bytes) -> Iterator[re.Match[bytes]]:
+    """Адресите с истинска парола; group(2) е самата парола."""
+    if b"://" not in data:
+        return
+    for m in _URL_USERINFO.finditer(data):
+        user, pw = m.group(1), m.group(2)
+        low = pw.lower()
+        if (len(pw) < 6 or pw == user or low in _URL_PLACEHOLDER_PW
+                or re.search(rb"[${}<>*]|%\(", pw) or _PLACEHOLDER_RE.search(pw)
+                or any(w in low for w in _PLACEHOLDER_WORDS)):
+            continue
+        yield m
+
+
 def _mcp_literal_secret(data: bytes) -> str | None:
     """`сървър.headers.Authorization` / `сървър.env.DB_PASSWORD` / `сървър.args`
     / `сървър.url`, ако .mcp.json на проекта носи самата тайна, а не `${ПРОМЕНЛИВА}`.
@@ -287,33 +331,59 @@ def _mcp_literal_secret(data: bytes) -> str | None:
     return None
 
 
-def _secret_file(p: Path, rel: str) -> str | None:
-    """None — файлът може да замине; иначе как да се впише в „извън архива“."""
+def _secret_file(p: Path, rel: str, *, whole: bool = True) -> str | None:
+    """None — файлът може да замине; иначе как да се впише в „извън архива“.
+    `whole=False` — само първите _SCAN_BYTES (остатъкът — в _scan_whole)."""
     from genesis_agent import sandbox
     if sandbox.sensitive_path_reason(rel) or sandbox.sensitive_path_reason(p.name):
         return rel
     if _EXPORT_SECRETS.search(rel):
         return rel
+    is_mcp = p.name.lower() in (".mcp.json", "mcp.json")
     try:
         with p.open("rb") as f:
-            data = f.read(_SCAN_BYTES)
+            for i, (lines, data) in enumerate(_chunks(f, whole)):
+                if _SECRET_CONTENT.search(data):
+                    return rel
+                if is_mcp and i == 0:
+                    where = _mcp_literal_secret(data)
+                    if where:
+                        return f"{rel} (вписан ключ в {where} — сложи ${{ПРОМЕНЛИВА}} вместо него)"
+                # API ключ, вписан направо в кода или конфига (`GROQ_API_KEY =
+                # "gsk_…"`, `ghp_…` в settings.json, `AKIA…` в aws.cfg). Одит
+                # 2026-10-11: и трите заминаваха към клиента — пазеше се само блок
+                # PRIVATE KEY. Казва се къде е ключът (без самия него), за да го
+                # изнесе човекът в .env.
+                m = _find_key(data)
+                if m:
+                    line = lines + data.count(b"\n", 0, m.start()) + 1
+                    return (f"{rel} (съдържа ключ {m.group(0)[:4].decode('ascii', 'replace')}… "
+                            f"на ред {line})")
+                u = next(_url_passwords(data), None)
+                if u:
+                    line = lines + data.count(b"\n", 0, u.start()) + 1
+                    return f"{rel} (парола в адрес на ред {line})"
     except OSError:
         return None
-    if _SECRET_CONTENT.search(data):
-        return rel
-    if p.name.lower() in (".mcp.json", "mcp.json"):
-        where = _mcp_literal_secret(data)
-        if where:
-            return f"{rel} (вписан ключ в {where} — сложи ${{ПРОМЕНЛИВА}} вместо него)"
-    # API ключ, вписан направо в кода или конфига (`GROQ_API_KEY = "gsk_…"`,
-    # `ghp_…` в settings.json, `AKIA…` в aws.cfg). Одит 2026-10-11: и трите
-    # заминаваха към клиента — пазеше се само блок PRIVATE KEY. Казва се къде
-    # е ключът (без самия него), за да го изнесе човекът в .env.
-    m = _find_key(data)
-    if m:
-        line = data.count(b"\n", 0, m.start()) + 1
-        return f"{rel} (съдържа ключ {m.group(0)[:4].decode('ascii', 'replace')}… на ред {line})"
     return None
+
+
+def _chunks(f: BinaryIO, whole: bool = True) -> Iterator[tuple[int, bytes]]:
+    """(редове преди парчето, парче) за целия файл — виж _SCAN_BYTES;
+    `whole=False` — само първото парче."""
+    lines = 0
+    chunk = f.read(_SCAN_BYTES)
+    total = len(chunk)
+    while chunk:
+        yield lines, chunk
+        more = (f.read(_SCAN_BYTES) if whole and total < _MAX_INPUT_MB * 1024 * 1024
+                else b"")
+        if not more:
+            return
+        total += len(more)
+        cut = max(len(chunk) - _SCAN_OVERLAP, 0)
+        lines += chunk.count(b"\n", 0, cut)
+        chunk = chunk[cut:] + more
 
 
 _RUN_HEADINGS = ("how to run", "running", "usage", "quick start", "quickstart",
@@ -490,7 +560,7 @@ def project_files(root: Path, *, exclude: Path | None = None) -> tuple[list[Path
                 continue
             if name == REPORT_NAME and p.parent == root:
                 continue  # regenerated below; an old one would be stale
-            secret = _secret_file(p, rel)
+            secret = _secret_file(p, rel, whole=False)
             if secret:
                 withheld.append(secret)
                 continue
@@ -498,7 +568,30 @@ def project_files(root: Path, *, exclude: Path | None = None) -> tuple[list[Path
                 withheld.append(f"{rel} ({_IGNORED})")
                 continue
             keep.append(p)
-    return keep, withheld
+    return _scan_whole(root, keep, withheld)
+
+
+def _scan_whole(root: Path, keep: list[Path], withheld: list[str]) -> tuple[list[Path], list[str]]:
+    """Остатъкът след първите _SCAN_BYTES — само на файловете, които заминават.
+    Ревю 2026-10-22: четено до края още в обхождането, игнорираното (и без
+    това извън архива) правеше project_files 12.4 s вместо 0.05 s при 60 MB
+    db.sqlite3 и 40 MB server.log, а проект с 3 × 100 MB .bin чакаше отказа
+    за тавана 32 s (сега 0.14 s) — над тавана не се чете нищо повече."""
+    sizes: dict[Path, int] = {}
+    for p in keep:
+        with contextlib.suppress(OSError):
+            sizes[p] = p.stat().st_size
+    if sum(sizes.values()) > _MAX_INPUT_MB * 1024 * 1024:
+        return keep, withheld          # export отказва
+    out: list[Path] = []
+    for p in keep:
+        if sizes.get(p, 0) > _SCAN_BYTES:
+            secret = _secret_file(p, p.relative_to(root).as_posix())
+            if secret:
+                withheld.append(secret)
+                continue
+        out.append(p)
+    return out, withheld
 
 
 # ── README ───────────────────────────────────────────────────────────────────
@@ -665,6 +758,78 @@ def _memory(root: Path) -> tuple[list[dict], list[dict]]:
     return decisions, threads
 
 
+# ── Тайни в отчета ───────────────────────────────────────────────────────────
+# Отчетът е единственият файл, който е СИГУРНО в архива, а носи чужд текст:
+# изхода на падащите тестове, разделите от README-то, решенията от паметта.
+# Одит 2026-10-22: pytest показа ключа от задържания .env в assert-а
+# (`'sk-proj-…'.startswith`), а README, задържан заради ключа си, го даде в
+# „Как се пуска“. Затова целият отчет минава през същите проверки, по които
+# файл се задържа, плюс стойностите от задържаните файлове с тайни — парола
+# без позната форма (`DB_PASSWORD=…` в .env) pytest показва също толкова лесно.
+# Не notifier.redact: неговото `ИМЕ: стойност` прави `KeyError: 'x'` и
+# `token == x` в изхода на тестовете на `KeyError=***`, `token=***`.
+_PRIVATE_BLOCK = re.compile(
+    rb"-----BEGIN [A-Z ]*PRIVATE KEY-----(?:(?:\s|\\n)+[A-Za-z0-9+/=]{16,})*"
+    rb"(?:(?:\s|\\n)*-----END [A-Z ]*PRIVATE KEY-----)?")
+_ENV_ASSIGN = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*[=:]\s*(.+?)\s*$")
+
+
+def _withheld_values(root: Path, withheld: list[str]) -> set[str]:
+    """Стойностите на `ИМЕ=стойност` с тайно име в задържаните по име файлове
+    (`.env`, `secrets.toml`, …)."""
+    from genesis_agent import sandbox
+    out: set[str] = set()
+    for entry in withheld:
+        rel = entry.split(" (", 1)[0]
+        p = root / rel
+        if not (sandbox.sensitive_path_reason(rel) or sandbox.sensitive_path_reason(p.name)
+                or _EXPORT_SECRETS.search(rel)):
+            continue
+        try:
+            if p.is_symlink() or not p.is_file() or p.stat().st_size > _SCAN_BYTES:
+                continue
+            text = read_text_any(p)
+        except OSError:
+            continue
+        for line in text.splitlines():
+            m = _ENV_ASSIGN.match(line)
+            if not m or not _secret_env_name(m.group(1)):
+                continue
+            raw = m.group(2)
+            if raw[:1] in ("'", '"') and raw[0] in raw[1:]:
+                value = raw[1:raw.index(raw[0], 1)]
+            else:
+                value = raw.split(" #", 1)[0].strip()
+            if len(value) >= 6 and not value.startswith("$"):
+                out.add(value)
+    return out
+
+
+def _scrub(text: str, values: set[str] | None = None) -> str:
+    """`text` с `***` на мястото на всеки ключ, парола в адрес, частен ключ и
+    стойност от `values`."""
+    for v in sorted(values or (), key=len, reverse=True):
+        text = text.replace(v, "***")
+    data = text.encode("utf-8", "surrogatepass")
+    spans = [m.span() for m in _KEY_SHAPES.finditer(data) if _shaped_key(m, data)]
+    spans += [m.span() for m in _api_token_bytes().finditer(data)
+              if _real_key(m.group(0), data, m.start())]
+    spans += [m.span(2) for m in _url_passwords(data)]
+    spans += [m.span() for m in _PRIVATE_BLOCK.finditer(data)]
+    if not spans:
+        return text
+    out: list[bytes] = []
+    pos = 0
+    for start, end in sorted(spans):
+        if start < pos:
+            pos = max(pos, end)
+            continue
+        out += [data[pos:start], b"***"]
+        pos = end
+    out.append(data[pos:])
+    return b"".join(out).decode("utf-8", "surrogatepass")
+
+
 # ── The report ───────────────────────────────────────────────────────────────
 
 def _size(n: float) -> str:
@@ -681,6 +846,7 @@ def build_report(root: Path, files: list[Path], withheld: list[str], *,
 
     rel = [f.relative_to(root).as_posix() for f in files]
     info = detect_project(root)
+    secrets = _withheld_values(root, withheld)
     sections = readme_sections(root)
     lines = [f"# {root.name} — отчет за предаване",
              "",
@@ -747,15 +913,19 @@ def build_report(root: Path, files: list[Path], withheld: list[str], *,
     else:
         from genesis_agent.repo_agent import run_tests as _run
         res = _run(root, info.test_command)
+        # Изходът се чисти ПРЕДИ да се отреже: ревю 2026-10-22 — срязът на
+        # [-1500:] насред паролата оставяше `ub4dor-3xyz-Qq` от
+        # `Tr0ub4dor-3xyz-Qq`, а такъв къс вече не пасва на нищо.
+        output = _scrub(res.output, secrets)
         if not res.ran:
-            lines += [f"Не можаха да се пуснат: {res.output[:300]}", ""]
+            lines += [f"Не можаха да се пуснат: {output[:300]}", ""]
         else:
             passed = res.passed
             verdict = "✅ минават" if res.passed else "❌ падат"
-            lines += [f"{verdict} — `{_test_summary(res.output)}`",
+            lines += [f"{verdict} — `{_test_summary(output)}`",
                       "", f"Команда: `{_portable(info.test_command)}`", ""]
             if not res.passed:
-                lines += ["```", res.output[-1500:], "```", ""]
+                lines += ["```", output[-1500:], "```", ""]
 
     assumptions = _section(sections, _ASSUME_HEADINGS)
     decisions, threads = _memory(root)
@@ -784,7 +954,8 @@ def build_report(root: Path, files: list[Path], withheld: list[str], *,
                    "и имена, които не стават в zip:"), ""]
         lines += [f"- `{w}`" for w in withheld]
         lines.append("")
-    return "\n".join(lines).rstrip() + "\n", passed
+    report = _scrub("\n".join(lines), secrets)
+    return report.rstrip() + "\n", passed
 
 
 # ── Export ───────────────────────────────────────────────────────────────────

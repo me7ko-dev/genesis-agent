@@ -137,6 +137,12 @@ def skill_view(name: str, *, file_path: Path | None = None) -> dict[str, Any]:
             metadata = yaml.safe_load(fm_match.group(1)) or {}
         except yaml.YAMLError:
             metadata = {}
+    # Frontmatter списък или скалар (`- broken`) е валиден YAML, но не речник:
+    # setdefault хвърляше AttributeError, а domain_context хваща само
+    # OSError/ValueError/KeyError — едно такова умение гасеше и доброто на
+    # същата тема (одит 2026-10-22: knowledge='' за цялата заявка).
+    if not isinstance(metadata, dict):
+        metadata = {}
     metadata.setdefault("name", name)
 
     # Извличане на Python код
@@ -450,7 +456,9 @@ def domain_context(query: str) -> str:
             continue
         try:
             code = skill_view(h["name"])["code"]
-        except (OSError, ValueError, KeyError):
+        except Exception:
+            # Едно счупено умение не бива да спира останалите (одит 2026-10-22).
+            log.debug("умението %s не се зареди за контекста", h.get("name"), exc_info=True)
             continue
         # „Правилата оттук, имената от заявката“: първата версия само казваше
         # „ползвай кода“ и моделът го копира дословно — с validate_egn/parse_egn
