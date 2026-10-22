@@ -451,6 +451,20 @@ READONLY_TOOLS: list[dict] = [
 MISSION_TOOLS: list[dict] = READONLY_TOOLS + [
     t for t in FULL_TOOLS if t["function"]["name"] == "USE_SKILL"
 ]
+# Имената, които мисията предлага на модела — и единствените, които изпълнява
+# (одит 2026-10-22): името в native tool_call идва от модела и отиваше направо
+# в dispatch_tool_call — мисия с read-only инструменти записа new_module.py и
+# пусна `echo pwned > marker.txt`. И двата цикъла на мисиите (autonomous_loop,
+# orchestrator) питат тук; текстовият път вече пазеше това
+# (genesis_skills.parse_and_execute_readonly_tools).
+MISSION_TOOL_NAMES: frozenset[str] = frozenset(t["function"]["name"] for t in MISSION_TOOLS)
+
+
+def mission_tool_refusal(name: str) -> str:
+    """Резултатът за модела, когато поиска инструмент извън MISSION_TOOLS."""
+    return (f"[{name}] не е достъпен в мисия — само {'/'.join(sorted(MISSION_TOOL_NAMES))}. "
+            "Напиши кода в ```python``` блок.")
+
 
 # Поправка на ЧУЖД проект (design note, 2026-07-30, genesis_agent/repo_agent.py).
 # Умишлено по-тесен набор от FULL_TOOLS:

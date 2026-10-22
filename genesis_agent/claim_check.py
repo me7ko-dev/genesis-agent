@@ -101,6 +101,8 @@ _CATEGORIES: tuple[tuple[str, re.Pattern[str], frozenset[str], frozenset[str]], 
         # passing“ в множествено число, „N/N“ с еднакви числа. Броените („3 of
         # 5 tests pass“, „3/5“) са смесен отчет (_COUNTED_RE); единственото
         # число („Тестът минава.“) е честен отчет за един тест — e2e вълна 2.
+        # Голото „tests passing“ — не (ревю 2026-10-22): „Keep the tests
+        # passing.“ е заповед; „passing“ само след „are/now/all“.
         _PASS_KIND,
         re.compile(
             r"\b(тестовете (?:вече |сега |успешно )?(?:минаха|минават|преминават|преминаха)|"
@@ -111,8 +113,8 @@ _CATEGORIES: tuple[tuple[str, re.Pattern[str], frozenset[str], frozenset[str]], 
             r"(?P<n>\d+)/(?P=n) (?:теста|тестове|tests?) (?:вече |сега |успешно |now )?"
             r"(?:минаха|минават|преминават|преминаха|pass(?:ed)?)|"
             r"tests? (?:now pass(?:es)?|passed)|"
-            r"tests (?:now )?pass(?:ing)?|tests (?:are |now )+(?:passing|green)|"
-            r"all (?:the )?(?:\d+ )?tests (?:now )?pass(?:ed)?)\b",
+            r"tests (?:now )?pass|tests (?:are |now )+(?:passing|green)|"
+            r"all (?:the )?(?:\d+ )?tests (?:now )?pass(?:ed|ing)?)\b",
             re.IGNORECASE),
         frozenset({"RUN_CMD", "USE_SKILL", "DELEGATE"}),
         _TEST_WORDS,
@@ -169,14 +171,22 @@ _RED_WORDS_RE = re.compile(
     r"\b(?:пада|падат|падна|паднаха|паднал[аио]?|падащ\w*|"
     r"не мина\w*|не минава\w*|червен\w*|освен|с изключение|"
     r"fail(?:s|ed|ing|ures?)?|except|\d+ errors?)\b", re.IGNORECASE)
-# Предположенията и съветите (одит 2026-10-22: „This should make the tests
-# pass.“, „Run pytest to confirm the tests pass.“) са тук, откакто шаблонът
-# хваща и голото „tests pass“ — не твърдят нито зелено, нито пускане.
 _NOT_A_CLAIM_RE = re.compile(
-    r"\b(?:дали|ако|когато|докато|провери|проверете|увери|трябва|би|потвърдиш|потвърдите|"
-    r"if|whether|unless|when|until|check|ensure|make sure|should|would|will|could|might|"
-    r"confirm|verify)\b",
-    re.IGNORECASE)
+    r"\b(?:дали|ако|когато|докато|провери|проверете|увери|потвърдиш|потвърдите|"
+    r"if|whether|unless|when|until|check|ensure|make sure|confirm|verify)\b", re.IGNORECASE)
+# Предположение, цел или заповед ТОЧНО пред съвпадението (одит 2026-10-22),
+# откакто шаблонът хваща и голото „tests pass“: „This should make the tests
+# pass.“, „Once the tests pass, merge.“, „I changed X to make the tests pass.“,
+# „Make the tests pass by…“ не твърдят зелено. Само близо (до две думи), не
+# където и да е в изречението: ревю 2026-10-22 — с „would/will/би“ в
+# _NOT_A_CLAIM_RE „I fixed the bug that would crash on empty input and all
+# tests pass now.“ и „Поправих функцията, която би гърмяла…, и всички тестове
+# минават.“ след червено минаваха без подкана (на main — хващани).
+_HEDGED_RE = re.compile(
+    r"(?:\b(?:should|would|will|could|might|may|expect|hope|hopefully|probably|трябва|би)"
+    r"(?:\s+\S+){0,2}"
+    r"|\b(?:once|after|before|as soon as|so that|to make|to get|to keep)(?:\s+the)?"
+    r"|^\W*(?:make|keep|get)(?:\s+the)?)\s+$", re.IGNORECASE)
 # Броено или частично точно пред съвпадението („3 of 5 tests pass“, „3/5 tests
 # pass“, „some of the tests pass“, „only the unit tests pass“): смесен отчет —
 # твърди пускане, не зелено (одит 2026-10-22, по същата причина).
@@ -185,7 +195,9 @@ _COUNTED_RE = re.compile(
     r"\s+(?:the\s+)?$|\b(?:only|само)\s+(?:the\s+)?(?:\w+\s+)?$", re.IGNORECASE)
 # Отрицание само точно пред съвпадението („Не всички тестове минават“): „не“
 # другаде в изречението („Не беше лесно, но всички минаха“) не отменя твърдението.
-_NEGATED_RE = re.compile(r"\b(?:не|not)\s+$", re.IGNORECASE)
+# „no“ — ревю 2026-10-22: с голото „tests pass“ честното „No tests pass yet.“
+# след червено ставаше зелено твърдение.
+_NEGATED_RE = re.compile(r"\b(?:не|not|no)\s+$", re.IGNORECASE)
 
 
 # Какво е съвпадението за „тестовете минават“ (2026-10-11, вълна 5):
@@ -210,7 +222,8 @@ def _pass_sentence(text: str, match: re.Match[str]) -> str:
     sentence = text[start:end]
     before = text[start:match.start()]
     if (sentence.rstrip().endswith("?") or re.match(r"\s+ли\b", text[match.end():])
-            or _NOT_A_CLAIM_RE.search(before) or _NEGATED_RE.search(before)):
+            or _NOT_A_CLAIM_RE.search(before) or _NEGATED_RE.search(before)
+            or _HEDGED_RE.search(before)):
         return _NOT_A_CLAIM
     if _RED_WORDS_RE.search(sentence) or _COUNTED_RE.search(before):
         return _REPORT
@@ -392,7 +405,9 @@ _RED_SUMMARY_RE = re.compile(
     r"|^\s*[1-9]\d* failing\b"                                                 # mocha
     r"|^[#ℹ] fail [1-9]"                                                       # node --test
     r"|^test result: FAILED\b"                                                 # cargo
-    r"|^(?:--- )?FAIL\b",                                    # go, unittest „FAIL: test_x“, скриптове
+    # go, unittest „FAIL: test_x“, скриптове — но не броячът „FAIL: 0“ на зелен
+    # собствен скрипт („PASS: 5 / FAIL: 0“, ревю 2026-10-22).
+    r"|^(?:--- )?FAIL\b(?![:=]?[ \t]*0\b)",
     re.MULTILINE)
 
 

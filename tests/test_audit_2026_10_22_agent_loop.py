@@ -110,6 +110,69 @@ def test_a_mission_never_runs_a_tool_it_was_not_offered(mission) -> None:
     assert any(m["tool_call_id"] == "c3" and "изпълнено" in m["content"] for m in tool_msgs)
 
 
+def test_an_orchestrated_mission_never_runs_a_tool_it_was_not_offered(monkeypatch, tmp_path) -> None:
+    """Ревю 2026-10-22: orchestrator.py (Planner/Coder/Tester, `benchmark.py`)
+    има същия native клон — предлага MISSION_TOOLS и подаваше всяко върнато име
+    на dispatch_tool_call. Без проверката тук WRITE_FILE и RUN_CMD се изпълняваха."""
+    from types import SimpleNamespace
+
+    from genesis_agent import orchestrator as orch
+
+    def reply(raw_text: str = "", code: str = "", tool_calls=None) -> SimpleNamespace:
+        return SimpleNamespace(raw_text=raw_text, code=code, tool_calls=tool_calls)
+
+    replies = [
+        reply(raw_text="1. събери 2 и 3"),                                       # planner
+        reply(tool_calls=_tc("WRITE_FILE", {"path": "new_module.py", "content": "X = 0\n"}, "c1")
+              + _tc("RUN_CMD", {"command": "echo pwned > marker.txt"}, "c2")
+              + _tc("READ_FILE", {"path": "app.py"}, "c3")),
+        reply(code="assert 2 + 3 == 5\nprint('OK')"),
+    ]
+    calls: list[list[dict]] = []
+
+    class _Brain:
+        trim_round_history = staticmethod(RealBrain.trim_round_history)
+
+        def __init__(self, **kw) -> None:
+            pass
+
+        def route_for_goal(self, goal: str) -> None:
+            pass
+
+        def build_context(self, goal: str) -> str:
+            return ""
+
+        def system_prompt_base(self) -> str:
+            return "sys"
+
+        def complete(self, messages, tools=None):
+            calls.append(list(messages))
+            return replies.pop(0)
+
+    monkeypatch.setattr(orch, "Brain", _Brain)
+    monkeypatch.delenv("GENESIS_TDD", raising=False)
+    monkeypatch.setattr(orch.dna, "validate_goal_ethics", lambda goal: None)
+    monkeypatch.setattr(orch.dna, "assert_operator_if_strict", lambda operator_id: None)
+    monkeypatch.setattr("genesis_agent.reflection.lessons_for_prompt", lambda *a, **kw: "")
+    monkeypatch.setattr(orch, "SKILLS_ROOT", tmp_path)
+    monkeypatch.setattr(orch, "run_python_subprocess",
+                        lambda code: SimpleNamespace(ok=True, stdout="OK", stderr="", returncode=0))
+    monkeypatch.setattr(orch, "verify_skill",
+                        lambda code: SimpleNamespace(verified=True, method="self_test_passed", detail=""))
+    monkeypatch.setattr(orch, "save_skill", lambda **kw: tmp_path / "sum.md")
+    dispatched: list[str] = []
+    monkeypatch.setattr("genesis_skills.dispatch_tool_call",
+                        lambda name, args: dispatched.append(name) or f"[{name}] изпълнено")
+
+    out = orch.run_orchestrated("изчисли сбора на 2 и 3", max_rounds=3)
+
+    assert out.success
+    assert dispatched == ["READ_FILE"]
+    tool_msgs = {m["tool_call_id"]: m["content"] for m in calls[-1] if m.get("role") == "tool"}
+    assert "не е достъпен в мисия" in tool_msgs["c1"] and "не е достъпен в мисия" in tool_msgs["c2"]
+    assert "изпълнено" in tool_msgs["c3"]
+
+
 # ── 2. Червен итог на пускача с rc=0 не е зелено пускане ────────────────────
 
 def _run(cmd: str, rc: object, out: str = "") -> tuple[str, str] | None:
@@ -155,6 +218,9 @@ def test_a_red_summary_with_rc_zero_is_a_red_run(cmd, out) -> None:
                    "ValueError: 3 errors in input\n5 passed in 0.12s")),
     ("python -m unittest", "Ran 4 tests in 0.01s\n\nOK"),
     ("npm test", "# tests 35\n# pass 35\n# fail 0"),
+    # Броячът на собствен скрипт (ревю 2026-10-22): „FAIL: 0“ не е червен итог.
+    ("./run_tests.sh", "PASS: 5\nFAIL: 0\n"),
+    ("python run_tests.py", "PASS=5\nFAIL=0\n"),
 ])
 def test_a_green_run_with_red_words_in_its_log_stays_green(cmd, out) -> None:
     """Обратната страна: доверен rc=0 с „FAILED“/„3 errors“ в лога, но зелен
@@ -172,7 +238,8 @@ _RED = [("RUN_CMD", "python -m pytest -q (rc=1)")]
     "All tests are passing.", "I fixed the bug and the tests pass.", "Tests are now green.",
     "I just fixed it and the tests pass.", "I only changed one line and the tests pass.",
     "Тестовете са зелени.", "Всички тестове са зелени.", "Тестовете вече са зелени.",
-    "✅ 2/2 теста минават.", "Готово: 5/5 теста минаха.", "2/2 tests pass."])
+    "✅ 2/2 теста минават.", "Готово: 5/5 теста минаха.", "2/2 tests pass.",
+    "All tests passing."])
 def test_common_green_wordings_are_caught_after_a_red_run(text) -> None:
     """Шаблонът хващаше само „тестовете минават“, „всички … тестове“ и „all
     tests pass“: след pytest rc=1 „Done — the tests pass.“ даваше exit 0 без
@@ -188,13 +255,35 @@ def test_common_green_wordings_are_caught_after_a_red_run(text) -> None:
     "If the tests pass, merge it.", "This should make the tests pass.",
     "Run pytest to confirm the tests pass.", "1/2 теста минават.", "3/5 tests pass.",
     "Тестовете са зелени, освен test_vat.", "Не всички тестове са зелени.",
-    "Тестът минава.", "The test passes now."])
+    "Тестът минава.", "The test passes now.",
+    # Ревю 2026-10-22: цел, условие във времето, заповед, отрицание, сегашно
+    # причастие — с голото „tests pass“ всяко от тези ставаше зелено твърдение.
+    "Once the tests pass, merge it.", "After the tests pass, deploy it.",
+    "I changed the rounding to make the tests pass.", "So that the tests pass, I mocked the clock.",
+    "Make the tests pass by mocking the clock.", "Hopefully the tests pass now.",
+    "No tests pass yet.", "Keep the tests passing.",
+    "The tests passing locally doesn't mean CI is green."])
 def test_counted_reports_and_hedges_are_still_not_green_claims(text) -> None:
     """Броените и смесените отчети, въпросите и условията остават извън
     шаблона (виж tests/test_e2e_wave2_2026_10_11.py) — и единственото число:
     „Тестът минава.“ е честен отчет за един тест, не за пакета."""
     claims = claim_check.unsupported_claims(text, _RED)
     assert claim_check.green_claim_after_red(claims, _RED) == 0
+
+
+@pytest.mark.parametrize("text", [
+    "I fixed the bug that would crash on empty input and all tests pass now.",
+    "I fixed the parser which will now accept empty input, and all tests pass.",
+    "Поправих функцията, която би гърмяла при празен вход, и всички тестове минават.",
+    "I will summarize: I fixed X and all tests pass."])
+def test_a_modal_far_from_the_claim_does_not_hide_it(text) -> None:
+    """Ревю 2026-10-22: първата поправка сложи should/would/will/би в
+    _NOT_A_CLAIM_RE — навсякъде в изречението. Тези твърдения на main се
+    хващаха след червено; с поправката минаваха без подкана и с exit 0.
+    Предположението отменя твърдението само точно пред него (_HEDGED_RE)."""
+    claims = claim_check.unsupported_claims(text, _RED)
+    assert [c.kind for c in claims] == ["минаващи тестове"]
+    assert claim_check.green_claim_after_red(claims, _RED) == 1
 
 
 def test_a_counted_report_with_nothing_run_still_needs_a_run() -> None:
