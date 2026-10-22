@@ -230,9 +230,11 @@ class TestHooks:
             "UserPromptSubmit": [{"command": _py("print('branch: main')")}],
             "Stop": [{"command": _py(
                 "import json, sys; d = json.load(sys.stdin); "
-                "sys.exit(0 if 'tests pass' in d['last_assistant_message'] else 2)")}],
+                "sys.exit(0 if 'checklist ok' in d['last_assistant_message'] else 2)")}],
         })
-        replies = iter(["готово", "tests pass"])
+        # Белегът за Stop hook-а не е „tests pass“ (2026-10-22): без пускане на
+        # тестове това вече е твърдение, което claim_check оспорва с подкана.
+        replies = iter(["готово", "checklist ok"])
         seen: list[str] = []
 
         def fake(messages, tools=None):
@@ -242,7 +244,7 @@ class TestHooks:
         out = gta.run_turn(deque([{"role": "system", "content": "s"}]), "направи го", _ui(gta))
         assert "branch: main" in seen[0]
         assert "hook Stop" in seen[1]
-        assert out[-1]["content"] == "tests pass"
+        assert out[-1]["content"] == "checklist ok"
 
 
 def _ui(gta):

@@ -19,7 +19,12 @@ from genesis_agent.repeat_guard import RepeatGuard
 from genesis_agent.skill_loader import SKILLS_ROOT
 from genesis_agent.skills_manager import save_skill, slugify
 from genesis_agent.storage_monitor import check_storage, human_gb
-from genesis_agent.tool_schemas import MISSION_TOOLS, load_tool_arguments
+from genesis_agent.tool_schemas import (
+    MISSION_TOOL_NAMES,
+    MISSION_TOOLS,
+    load_tool_arguments,
+    mission_tool_refusal,
+)
 
 log = logging.getLogger("genesis.autonomous_loop")
 
@@ -443,8 +448,13 @@ def _run_autonomous_loop_impl(
                         args = load_tool_arguments(fn.get("arguments"))
                     except (_json.JSONDecodeError, TypeError):
                         args = {}
-                    # Счупени аргументи → суровият низ: моделът получава „Невалидни аргументи“
-                    tool_out = genesis_skills.dispatch_tool_call(name, args or fn.get("arguments") or {})
+                    if name not in MISSION_TOOL_NAMES:
+                        # Само предложеното се изпълнява (одит 2026-10-22, виж
+                        # tool_schemas.MISSION_TOOL_NAMES).
+                        tool_out = mission_tool_refusal(name)
+                    else:
+                        # Счупени аргументи → суровият низ: моделът получава „Невалидни аргументи“
+                        tool_out = genesis_skills.dispatch_tool_call(name, args or fn.get("arguments") or {})
                     messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                                       "name": name, "content": tool_out[:4000]})
                     if _spin_guard.observe(name, args, tool_out).stop:
