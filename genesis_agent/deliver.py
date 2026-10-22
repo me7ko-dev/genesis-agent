@@ -662,7 +662,11 @@ def _memory(root: Path) -> tuple[list[dict], list[dict]]:
         return [], []
     finally:
         wm._workspace = previous
-    return decisions, threads
+    # Отчетът заминава при клиента: ключ, записан с REMEMBER преди
+    # маскирането при запис (2026-10-22), влизаше дословно в GENESIS_REPORT.md.
+    clean = [{k: wm.mask_secrets(v) if isinstance(v, str) else v for k, v in row.items()}
+             for row in decisions + threads]
+    return clean[:len(decisions)], clean[len(decisions):]
 
 
 # ── The report ───────────────────────────────────────────────────────────────

@@ -33,11 +33,15 @@ import logging
 import os
 import re
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from genesis_agent import sqlite_store
 from genesis_agent.config import MEMORY_DIR
+from genesis_agent.notifier import API_TOKEN_RE
 
 log = logging.getLogger("genesis.workspace_memory")
 
@@ -103,18 +107,80 @@ def current_workspace() -> str:
 
 
 def _conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.executescript(_SCHEMA)
+    # Повреден файл отива настрани като .corrupt вместо всеки REMEMBER/TASK_ADD
+    # завинаги да връща „file is not a database“ (одит 2026-10-22).
+    conn = sqlite_store.connect(DB_PATH, _SCHEMA, timeout=10, wal=True)
     for table in ("threads", "decisions"):
         cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table});")}
         if "workspace" not in cols:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN workspace TEXT NOT NULL DEFAULT '';")
+            # Два процеса върху нова/стара база виждат колоната липсваща и
+            # двата; вторият ALTER гърмеше и неговият REMEMBER се губеше
+            # (одит 2026-10-22: 8 процеса върху нова база → 2 грешки).
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN workspace TEXT NOT NULL DEFAULT '';")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e):
+                    conn.close()
+                    raise
     return conn
+
+
+@contextmanager
+def _write() -> Iterator[sqlite3.Connection]:
+    """Транзакция, която заключва за запис ПРЕДИ проверката за дубликат.
+
+    sqlite3 отваря транзакцията чак при INSERT, тоест SELECT-ът за дубликат
+    и записът бяха разделени: два процеса (два терминала, терминал + телефон,
+    auto_capture на изход и в двата) пропускаха реда на другия и записваха и
+    двата. Одит 2026-10-22: 8 процеса × 5 заглавия → 14 нишки и 11 решения
+    вместо 5 и 5."""
+    conn = _conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def _clean(text: Any, limit: int = _MAX_TEXT) -> str:
     return str(text or "").strip()[:limit]
+
+
+# ─── Тайни ───────────────────────────────────────────────────────────────────
+# Одит 2026-10-22, възпроизведено: REMEMBER „stripe: ключът е sk_live_…“ влизаше
+# дословно в брифинга — в системния промпт на ВСЕКИ проект (предпочитанията са
+# общи), пратен до доставчика, който обслужва хода, — а решение „деплой с
+# GITHUB_TOKEN=ghp_…“ — в GENESIS_REPORT.md на архива от `genesis export`.
+# notifier.redact е за известия, където да хване повече не вреди; тук
+# „path: src/app.py“ и „basic auth за админа“ са истински решения, затова се
+# маскират само формите, които не са текст: познатите ключове, Stripe, парола
+# в адрес, Bearer и ИМЕ_С_KEY/TOKEN/SECRET/PASSWORD=стойност — стойност с цифра
+# или от 20+ знака (тайната е случаен низ; `sort_key=created_at` е решение,
+# `API_KEY=$API_KEY` — препратка).
+_SECRET_RES = (
+    (re.compile(r"(://)[^/\s:@]+:[^/\s@]+@"), r"\1***@"),
+    (re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]{16,}"), r"\1 ***"),
+    (re.compile(r"(?i)\b((?:[a-z0-9]+_)*(?:api_?key|key|token|secret|password|passwd)(?:_[a-z0-9]+)*)"
+                r"\s*=\s*(?![$<{%*])(?=\S*\d|\S{20})\S{6,}"), r"\1=***"),
+    (re.compile(r"\b[sr]k_(?:live|test)_[A-Za-z0-9]{10,}"), "***"),
+    (API_TOKEN_RE, "***"),
+)
+_SECRET_NOTE = (" ⚠️ Ключът/паролата е заменен(а) с *** — не пазя тайни в паметта (тя влиза в "
+                "промпта на всеки проект и в `genesis export`); сложи го в .env.")
+
+
+def mask_secrets(text: Any) -> str:
+    """Текстът с *** на мястото на ключове, токени и пароли в адреси."""
+    out = str(text or "")
+    for rx, repl in _SECRET_RES:
+        out = rx.sub(repl, out)
+    return out
+
+
+def _masked(*texts: str) -> tuple[list[str], bool]:
+    out = [mask_secrets(t) for t in texts]
+    return out, out != list(texts)
 
 
 # ─── Нишки работа ────────────────────────────────────────────────────────────
@@ -125,8 +191,10 @@ def add_thread(title: str, next_step: str = "", notes: str = "") -> str:
     title = _clean(title, 300)
     if not title:
         return "[TASK_ADD] Празно заглавие — нищо не е добавено."
+    (title, next_step, notes), masked = _masked(title, _clean(next_step), _clean(notes))
+    note = _SECRET_NOTE if masked else ""
     ws = current_workspace()
-    with _conn() as c:
+    with _write() as c:
         # Сравнение в Python, не със SQL lower(): той сгъва само ASCII и
         # „Миграция“/„миграция“ ставаха две нишки. Затворена нишка със същото
         # заглавие е стара работа — новата задача е отворена, не „вече съществува“.
@@ -140,13 +208,13 @@ def add_thread(title: str, next_step: str = "", notes: str = "") -> str:
             if _clean(next_step):
                 c.execute("UPDATE threads SET next_step = ?, updated_at = ? WHERE id = ?;",
                           (_clean(next_step), _now(), row[0]))
-            return f"[TASK_ADD] Нишка #{row[0]} вече съществува ({row[1]}) — обнових следващата стъпка."
+            return f"[TASK_ADD] Нишка #{row[0]} вече съществува ({row[1]}) — обнових следващата стъпка.{note}"
         cur = c.execute(
             "INSERT INTO threads (title, status, next_step, notes, created_at, updated_at, workspace)"
             " VALUES (?, 'open', ?, ?, ?, ?, ?);",
             (title, _clean(next_step), _clean(notes), _now(), _now(), ws),
         )
-        return f"[TASK_ADD] ✓ Нишка #{cur.lastrowid}: {title}"
+        return f"[TASK_ADD] ✓ Нишка #{cur.lastrowid}: {title}{note}"
 
 
 def update_thread(thread_id: Any, status: str = "", next_step: str = "", notes: str = "") -> str:
@@ -163,6 +231,7 @@ def update_thread(thread_id: Any, status: str = "", next_step: str = "", notes: 
               "stuck": "blocked", "waiting": "blocked"}.get(status, status)
     if status and status not in STATUSES:
         return f"[TASK_UPDATE] Невалиден статус {status!r}. Позволени: {', '.join(STATUSES)}."
+    (next_step, notes), masked = _masked(str(next_step or ""), str(notes or ""))
     sets: list[str] = []
     params: list[Any] = []  # съдържа и tid (int) накрая
     if status:
@@ -180,7 +249,7 @@ def update_thread(thread_id: Any, status: str = "", next_step: str = "", notes: 
         cur = c.execute(f"UPDATE threads SET {', '.join(sets)} WHERE id = ? AND workspace = ?;", params)
         if cur.rowcount == 0:
             return f"[TASK_UPDATE] Няма нишка #{tid}."
-    return f"[TASK_UPDATE] ✓ Нишка #{tid} обновена."
+    return f"[TASK_UPDATE] ✓ Нишка #{tid} обновена." + (_SECRET_NOTE if masked else "")
 
 
 def list_threads(status: str = "open", limit: int = 20) -> list[dict]:
@@ -221,60 +290,70 @@ def _is_semantic_dup(text: str, existing: list[str]) -> str | None:
     """
     if not existing:
         return None
-    # Регистър, интервали и точката накрая — нищо повече. Махането на всички
-    # знаци сливаше „C#“ с „C++“, „1.5 секунди“ с „15 секунди“, „<= 4“ с „>= 4“.
-    def norm(s: str) -> str:
-        return " ".join(s.casefold().split()).rstrip(".!;, ")
-    n_new = norm(text)
+    n_new = _same_text(text)
     for e in existing:
-        if norm(e) == n_new:
+        if _same_text(e) == n_new:
             return e
     return None
+
+
+def _same_text(s: str) -> str:
+    # Регистър, интервали и точката накрая — нищо повече. Махането на всички
+    # знаци сливаше „C#“ с „C++“, „1.5 секунди“ с „15 секунди“, „<= 4“ с „>= 4“.
+    return " ".join(s.casefold().split()).rstrip(".!;, ")
 
 
 def add_decision(what: str, why: str = "") -> str:
     what = _clean(what, 500)
     if not what:
         return "[REMEMBER] Празно решение — нищо не е записано."
+    (what, why), masked = _masked(what, _clean(why, 500))
+    note = _SECRET_NOTE if masked else ""
+    ws = current_workspace()
     # Дедупликация: auto_capture върви и при компресия, и на изход, често върху
     # застъпващо се съдържание — без това едно решение влиза 2-3 пъти с леко
     # различна формулировка и брифингът бързо става шум.
-    existing = [d["what"] for d in list_decisions(50)]
-    dup = _is_semantic_dup(what, existing)
-    if dup:
-        return f"[REMEMBER] Вече е записано (като «{dup[:60]}») — пропуснато."
-    with _conn() as c:
+    with _write() as c:
+        existing = [r[0] for r in c.execute(
+            "SELECT what FROM decisions WHERE workspace = ? ORDER BY id DESC LIMIT 50;", (ws,))]
+        dup = _is_semantic_dup(what, existing)
+        if dup:
+            return f"[REMEMBER] Вече е записано (като «{dup[:60]}») — пропуснато.{note}"
         c.execute("INSERT INTO decisions (what, why, created_at, workspace) VALUES (?, ?, ?, ?);",
-                  (what, _clean(why, 500), _now(), current_workspace()))
-    return f"[REMEMBER] ✓ Записано решение: {what[:80]}"
+                  (what, why, _now(), ws))
+    return f"[REMEMBER] ✓ Записано решение: {what[:80]}{note}"
 
 
 def set_preference(topic: str, value: str) -> str:
     topic, value = _clean(topic, 100), _clean(value, 500)
     if not topic or not value:
         return "[REMEMBER] Нужни са и тема, и стойност."
-    # Темата е PRIMARY KEY, така че същата тема се презаписва сама. Но същото
-    # предпочитание често идва под РАЗЛИЧНА тема ("стил на комуникация" vs
-    # "обяснения") — затова сравняваме и по стойност.
-    existing = list_preferences()
-    if topic not in existing:
-        dup_val = _is_semantic_dup(value, list(existing.values()))
-        if dup_val:
-            old_topic = next((t for t, v in existing.items() if v == dup_val), None)
+    (topic, value), masked = _masked(topic, value)
+    note = _SECRET_NOTE if masked else ""
+    with _write() as c:
+        existing = dict(c.execute("SELECT topic, value FROM preferences;").fetchall())
+        # Същата тема в друг регистър е СЪЩАТА тема. PRIMARY KEY-ят различава
+        # „език на комитите“ от „Език на комитите“ и брифингът показваше и
+        # старото „английски“, и новото „само български“ (одит 2026-10-22).
+        same = next((t for t in existing if _same_text(t) == _same_text(topic)), None)
+        if same is None:
+            # Същото предпочитание често идва под РАЗЛИЧНА тема ("стил на
+            # комуникация" vs "обяснения") — затова сравняваме и по стойност.
+            dup_val = _is_semantic_dup(value, list(existing.values()))
+            old_topic = next((t for t, v in existing.items() if v == dup_val), None) if dup_val else None
             if old_topic:
                 # Обновяваме съществуващия запис вместо да добавяме синоним.
-                with _conn() as c:
-                    c.execute("UPDATE preferences SET value = ?, updated_at = ? WHERE topic = ?;",
-                              (value, _now(), old_topic))
-                return f"[REMEMBER] Обединено със съществуващото «{old_topic}»."
-    with _conn() as c:
+                c.execute("UPDATE preferences SET value = ?, updated_at = ? WHERE topic = ?;",
+                          (value, _now(), old_topic))
+                return f"[REMEMBER] Обединено със съществуващото «{old_topic}».{note}"
+            same = topic
         c.execute(
             "INSERT INTO preferences (topic, value, updated_at) VALUES (?, ?, ?)"
             " ON CONFLICT(topic) DO UPDATE SET value = excluded.value,"
             " updated_at = excluded.updated_at;",
-            (topic, value, _now()),
+            (same, value, _now()),
         )
-    return f"[REMEMBER] ✓ Предпочитание «{topic}»: {value[:80]}"
+    return f"[REMEMBER] ✓ Предпочитание «{same}»: {value[:80]}{note}"
 
 
 def list_decisions(limit: int = 10) -> list[dict]:
@@ -294,6 +373,14 @@ def list_preferences() -> dict[str, str]:
 
 
 # ─── Брифинг (това се инжектира в промпта) ───────────────────────────────────
+
+# Предпочитанията са общи и влизат в промпта на всяка заявка във всеки проект,
+# а fit_system_prompt() минава преди брифингът да се залепи — нищо не ги реже
+# по-късно. Одит 2026-10-22: 300 записа → 100 128 знака брифинг. Най-новите
+# горе; таванът е и по брой, и по знаци (една стойност е до 500).
+_MAX_PREFS = 20
+_PREFS_CHARS = 3000
+
 
 def briefing(max_threads: int = 8, max_decisions: int = 5) -> str:
     """Компактен, ПОЛЕЗЕН контекст за начало на сесия — отворена работа със
@@ -317,24 +404,36 @@ def briefing(max_threads: int = 8, max_decisions: int = 5) -> str:
         for t in blocked:
             nxt = f" → блокирано: {t['next_step']}" if t["next_step"] else ""
             lines.append(f"  #{t['id']} ⛔ {t['title']}{nxt}")
-        parts.append("Отворена работа:\n" + "\n".join(lines))
+        # mask_secrets и при четене: записите отпреди 2026-10-22 са в базата
+        # такива, каквито са дошли.
+        parts.append("Отворена работа:\n" + mask_secrets("\n".join(lines)))
 
     if stale:
         lines = [f"  #{t['id']} {t['title'][:70]} ({_days_since(t['updated_at'])}д)"
                  for t in stale[:8]]
         extra = f"\n  … и още {len(stale) - 8}" if len(stale) > 8 else ""
         parts.append(f"Заспали нишки (>{STALE_DAYS} дни без движение — питай потребителят дали "
-                     f"да се затворят, не ги подхващай сам):\n" + "\n".join(lines) + extra)
+                     f"да се затворят, не ги подхващай сам):\n" + mask_secrets("\n".join(lines)) + extra)
 
     decisions = list_decisions(max_decisions)
     if decisions:
         lines = [f"  • {d['what']}" + (f" (защото: {d['why']})" if d["why"] else "")
                  for d in decisions]
-        parts.append("Взети решения (не ги предоговаряй без причина):\n" + "\n".join(lines))
+        parts.append("Взети решения (не ги предоговаряй без причина):\n" + mask_secrets("\n".join(lines)))
 
-    prefs = list_preferences()
+    with _conn() as c:
+        prefs = c.execute("SELECT topic, value FROM preferences"
+                          " ORDER BY updated_at DESC, rowid DESC;").fetchall()
     if prefs:
-        lines = [f"  • {k}: {v}" for k, v in prefs.items()]
+        lines, used = [], 0
+        for k, v in prefs:
+            line = mask_secrets(f"  • {k}: {v}")
+            if lines and (len(lines) >= _MAX_PREFS or used + len(line) > _PREFS_CHARS):
+                break
+            lines.append(line)
+            used += len(line)
+        if len(prefs) > len(lines):
+            lines.append(f"  … и още {len(prefs) - len(lines)} по-стари (не са в промпта)")
         parts.append("Предпочитания на потребителя:\n" + "\n".join(lines))
 
     return "\n\n".join(parts)
@@ -438,7 +537,7 @@ def auto_capture(messages: list[dict], max_chars: int = 6000) -> dict:
         from genesis_agent.brain import Brain
 
         reply = Brain(min_size_b=32, light=True).complete([
-            {"role": "system", "content": _CAPTURE_PROMPT + known},
+            {"role": "system", "content": _CAPTURE_PROMPT + mask_secrets(known)},
             {"role": "user", "content": text},
         ])
         raw = (reply.raw_text or "").strip()

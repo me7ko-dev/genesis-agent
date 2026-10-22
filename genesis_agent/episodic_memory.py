@@ -27,9 +27,11 @@ Persistently stores “episodes” – значими събития, които
 
 import datetime
 import json
+import logging
 import sqlite3
 
 # ---------- SQLite setup ----------
+from genesis_agent import sqlite_store
 from genesis_agent.config import MEMORY_DIR
 
 DB_PATH = MEMORY_DIR / "episodes.db"
@@ -46,15 +48,21 @@ CREATE TABLE IF NOT EXISTS episodes (
 """
 
 def _get_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    # Схемата при всяко отваряне и повреден файл настрани като .corrupt
+    # (одит 2026-10-22): нечетима episodes.db гърмеше при внасяне и сваляше
+    # memory.py, а с него паметта на разговора и записа на епизоди — тихо.
+    conn = sqlite_store.connect(DB_PATH, SCHEMA)
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
 
 def _init_db() -> None:
-    with _get_connection() as conn:
-        conn.executescript(SCHEMA)
+    _get_connection().close()
 
-_init_db()   # Ensure the DB exists on import
+try:
+    _init_db()   # Ensure the DB exists on import
+except (sqlite3.Error, OSError):
+    logging.getLogger("genesis.episodic").warning(
+        "episodes.db не се отвори — епизодите не се записват", exc_info=True)
 
 # ---------- Helper utilities ----------
 def _now_iso() -> str:
