@@ -89,6 +89,38 @@ def test_the_chat_names_the_bad_key_and_exits_1_without_a_traceback(tmp_path):
     assert "workspace" in out and "path:" in out, out
 
 
+@pytest.mark.parametrize("text", ["models:\n", "models:\n  default_provider: groq\n  fallback_models:\n"])
+def test_an_empty_section_or_list_is_empty_not_a_traceback(tmp_path, text):
+    # Ревю 2026-10-22: празни `models:` / `fallback_models:` (изтрито всичко
+    # под тях) минаваха проверката като None и чатът пак падаше със стектрейс.
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(text, encoding="utf-8")
+    data = paths.load_config(cfg)
+    assert isinstance(data["models"], dict)
+    assert data["models"].get("fallback_models", []) == []
+    code = ("import sys; from pathlib import Path; import genesis_agent.paths as p; "
+            "p.CONFIG_PATH = Path(sys.argv[1]); import genesis_terminal_agent")
+    env = dict(os.environ, HOME=str(tmp_path), USERPROFILE=str(tmp_path),
+               PYTHONIOENCODING="utf-8", PYTHONPATH=str(ROOT))
+    proc = subprocess.run([sys.executable, "-c", code, str(cfg)], cwd=str(tmp_path), env=env,
+                          capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          timeout=120, stdin=subprocess.DEVNULL, check=False)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0 and "Traceback" not in out, out
+
+
+def test_a_value_yaml_cannot_build_is_a_config_error(tmp_path, monkeypatch, capsys):
+    # Ревю 2026-10-22: PyYAML вдига гол ValueError (не YAMLError) за
+    # `2026-13-01` или `!!int abc` — `genesis models` гърмеше със стектрейс.
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("models:\n  default_provider: groq\nupdated: 2026-13-01\n", encoding="utf-8")
+    with pytest.raises(paths.ConfigError, match="month"):
+        paths.load_config(cfg)
+    monkeypatch.setattr(paths, "CONFIG_PATH", cfg)
+    assert cli.main(["models"]) == 1
+    assert "month" in capsys.readouterr().out
+
+
 # ── 3. празна променлива за път = „по подразбиране“, не текущата папка ──────
 
 def test_empty_path_variables_mean_the_default_not_the_current_directory(tmp_path):

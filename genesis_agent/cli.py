@@ -81,7 +81,8 @@ def _models(args: list[str]) -> int:
     problem = config_problem(CONFIG_PATH, sections=("models",))
     if problem:
         print(f"config.yaml не става ({CONFIG_PATH}): {problem}\n"
-              "Веригата е празна, докато не се поправи — `genesis doctor` проверява файла.")
+              "Докато не се поправи, чатът не тръгва, а веригата е без моделите от него — "
+              "`genesis doctor` проверява файла.")
         return 1
 
     if "--check" in args:

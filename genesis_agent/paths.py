@@ -114,7 +114,10 @@ def load_config(path: Path | str | None = None, *,
     text = target.read_text(encoding="utf-8")
     try:
         data = yaml.safe_load(text)
-    except yaml.YAMLError as e:
+    except (yaml.YAMLError, ValueError) as e:
+        # ValueError: PyYAML строи `2026-13-01` и `!!int abc` направо и вдига
+        # гол ValueError, не YAMLError (ревю 2026-10-22: `genesis models` с
+        # такъв ред гърмеше със стектрейс).
         raise ConfigError(_yaml_problem(e)) from e
     if data is None:
         return {}
@@ -123,7 +126,12 @@ def load_config(path: Path | str | None = None, *,
                           f"а е {_kind(data)} ({_shown(data)})")
     for section in sections:
         value = data.get(section)
-        if value is not None and not isinstance(value, dict):
+        if value is None and section in data:
+            # Празна секция = празен речник (ревю 2026-10-22: `models:` без
+            # нищо под него минаваше проверката като None и чатът падаше на
+            # `config.get("models", {}).get(...)` с AttributeError).
+            data[section] = {}
+        elif value is not None and not isinstance(value, dict):
             raise ConfigError(f"`{section}` трябва да е речник с {_CONFIG_SECTIONS[section]} на "
                               f"отделен ред под него, а е {_kind(value)} ({_shown(value)})")
     models = data.get("models") if "models" in sections else None
@@ -132,6 +140,8 @@ def load_config(path: Path | str | None = None, *,
     for group in _MODEL_LISTS:
         entries = models.get(group)
         if entries is None:
+            if group in models:
+                models[group] = []      # празно `fallback_models:` — същото (TypeError)
             continue
         if not isinstance(entries, list):
             raise ConfigError(f"`models.{group}` трябва да е списък от записи с `provider:` и "
