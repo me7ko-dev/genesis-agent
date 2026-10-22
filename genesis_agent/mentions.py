@@ -17,21 +17,49 @@ from pathlib import Path
 from typing import Any
 
 _MENTION = re.compile(r"(?<![\w@`])@(\"[^\"\n]+\"|[^\s`'\"]+)")
-_FENCE = re.compile(r"^\s*(```|~~~)")
-_TRAIL = ".,;:!?)]}>"
+_FENCE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
+# И българските/типографските кавички, многоточието и апострофите (одит
+# 2026-10-22): „@src/api.py“ търсеше файла `src/api.py“`, не го намираше и
+# мълчеше — операторът мислеше, че е прикачен. macOS сам подменя "" с “”.
+_TRAIL = ".,;:!?)]}>“”„«»…‘’"
+# `@src/api.py—после`, `@src/api.py:42`, `@src/api.py#L1-2` (място от pytest,
+# компилатора или GitHub) — пак без бележка, а файлът е там (одит 2026-10-22).
+# Прикача се целият файл.
+_DASHES = re.compile(r"[—–]")
+_LINE_SUFFIX = re.compile(r"(?::\d+){1,2}$|#L\d+(?:-L?\d+)?$")
 _MAX_FILE = 60_000
 _MAX_TOTAL = 150_000
 _MAX_ENTRIES = 200
 _MAX_MENTIONS = 10
 
 
+def _code_lines(lines: list[str]) -> list[bool]:
+    """Кои редове са в ``` блок (заедно с оградите му), по правилото на
+    CommonMark: блокът се затваря само от ограда със същия знак и поне същата
+    дължина. Одит 2026-10-22: `~~~` вътре в ``` блок (пример за markdown в
+    инструкциите) „затваряше“ блока, а истинският край го отваряше наново —
+    всичко след него се смяташе за код и @импортите там изпадаха."""
+    inside: list[bool] = []
+    fence = ""
+    for line in lines:
+        m = _FENCE.match(line)
+        if not fence:
+            # ``` с ` в инфо низа е код в ред (```x``` на един ред), не ограда.
+            if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+                fence = m.group(1)
+            inside.append(bool(fence))
+            continue
+        if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) \
+                and not m.group(2).strip():
+            fence = ""
+        inside.append(True)
+    return inside
+
+
 def _mentions(text: str) -> list[str]:
     found: list[str] = []
-    fenced = False
-    for line in text.splitlines():
-        if _FENCE.match(line):
-            fenced = not fenced
-            continue
+    lines = text.splitlines()
+    for line, fenced in zip(lines, _code_lines(lines)):
         if fenced:
             continue
         for m in _MENTION.finditer(line):
@@ -51,6 +79,62 @@ def _target(raw: str, workspace: Path) -> Path | None:
         return path if path.exists() else None
     except (OSError, ValueError, RuntimeError):
         return None
+
+
+def _find(raw: str, workspace: Path) -> tuple[str, Path] | None:
+    """(записът, пътят) за `raw` — или без залепеното след тире, или без :ред."""
+    tries = [raw]
+    cut = _DASHES.split(raw, maxsplit=1)[0].rstrip(_TRAIL)
+    if cut and cut != raw:
+        tries.append(cut)
+    for t in list(tries):
+        bare = _LINE_SUFFIX.sub("", t).rstrip(_TRAIL)
+        if bare and bare not in tries:
+            tries.append(bare)
+    for t in tries:
+        path = _target(t, workspace)
+        if path is not None:
+            return t, path
+    return None
+
+
+# Тайни, които образецът на sandbox-а не познава: той пази shell команди, където
+# `\.key\b` би спрял и `jq .key`. Тук се гледа името на файла — както при
+# `genesis export` (deliver._EXPORT_SECRETS) — плюс тези, които и там липсват.
+# Одит 2026-10-22: `config/master.key` (Rails), `certs/server.key`,
+# `.streamlit/secrets.toml`, `*.ppk`, `service-account.json`, `terraform.tfvars`,
+# `.dev.vars` (Cloudflare), `*.jks` и `.envrc` (direnv с AWS ключове) стигаха до
+# модела — по @път в чата и по @импорт в системния промпт на ВСЯКА заявка.
+# Ревю 2026-10-22: с импортите без разширение `@kubeconfig` (токенът или
+# client-key-data на клъстера) и `@.terraformrc` (токенът за Terraform Cloud)
+# вече стигаха до промпта. `kubeconfig.go` е код — не се пипа.
+_MODEL_SECRETS = re.compile(
+    r"\.tfvars(?:\.json)?$|\.tfstate(?:\.backup)?$|(?:^|/)\.dev\.vars$"
+    r"|(?:^|/)kubeconfig(?:\.ya?ml|\.json)?$|\.kubeconfig$|(?:^|/)(?:\.terraformrc|terraform\.rc)$",
+    re.IGNORECASE)
+# И по съдържание — частен ключ под невинно име (`deploy-notes.txt`). Само в
+# началото на ред: изходен код с такъв низ в кавички (тест на парсер) не е ключ.
+_PRIVATE_KEY = re.compile(r"^\s*-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----"
+                          r"|^PuTTY-User-Key-File-\d|\"private_key\"\s*:\s*\"-----BEGIN",
+                          re.MULTILINE)
+
+
+def secret_reason(path: str | os.PathLike[str]) -> str | None:
+    """Защо файлът не бива да стига до модела (ключ/тайна), или None."""
+    from genesis_agent.deliver import _EXPORT_SECRETS
+    from genesis_agent.sandbox import _SENSITIVE_PATH_EXEMPT_RE, sensitive_path_reason
+    why = sensitive_path_reason(path)
+    if why:
+        return why
+    text = os.fspath(path).replace("\\", "/")
+    if _SENSITIVE_PATH_EXEMPT_RE.search(text):   # secrets.example и подобни
+        return None
+    m = _EXPORT_SECRETS.search(text) or _MODEL_SECRETS.search(text)
+    return f"файл с тайни ({m.group(0).lstrip('/')})" if m else None
+
+
+def has_private_key(text: str) -> bool:
+    return _PRIVATE_KEY.search(text) is not None
 
 
 def _listing(folder: Path) -> str:
@@ -109,15 +193,9 @@ def _outside_code(text: str) -> str:
     лог или скрипт, поставен в кодов блок, с `/home/me/shot.png` вътре
     прикачваше картинката, без операторът да я праща — пътят там е текст за
     модела, не пусната с мишката картинка. Редовете остават (празни)."""
-    out: list[str] = []
-    fenced = False
-    for line in text.splitlines():
-        if _FENCE.match(line):
-            fenced = not fenced
-            out.append("")
-            continue
-        out.append("" if fenced else _INLINE_CODE.sub(" ", line))
-    return "\n".join(out)
+    lines = text.splitlines()
+    return "\n".join("" if fenced else _INLINE_CODE.sub(" ", line)
+                     for line, fenced in zip(lines, _code_lines(lines)))
 
 
 def _looks_like_path(raw: str) -> bool:
@@ -195,20 +273,25 @@ def expand(text: str, workspace: Path,
     attached = 0
     seen: set[Path] = set()
     for raw in _mentions(text):
-        path = _target(raw, workspace)
-        if path is None:
+        found = _find(raw, workspace)
+        if found is None:
             continue   # @property, имейл, несъществуващ път — не се броят
+        raw, path = found
+        real = Path(os.path.realpath(path))
+        # По истинския път (одит 2026-10-22): `@src/api.py и @./src/api.py`
+        # прикачваше файла два пъти и харчеше от тавана.
+        if real in seen:
+            continue
+        seen.add(real)
         if attached >= _MAX_MENTIONS:
             notes.append(f"@{raw}: не е прикачен — най-много {_MAX_MENTIONS} наведнъж")
             continue
         attached += 1
-        real = Path(os.path.realpath(path))
-        if sensitive_path_reason(str(real)):
+        if secret_reason(str(real)):
             notes.append(f"@{raw}: чувствителен файл — не е прикачен")
             continue
         if images is not None and real.is_file() and (
                 real.suffix.lower() in IMAGE_SUFFIXES or _is_image_file(real, sniff_mime)):
-            seen.add(real)
             _image(real, f"@{raw}", images, notes)
             continue
         if real.is_dir():
@@ -217,6 +300,9 @@ def expand(text: str, workspace: Path,
             content = _read(real)
             if content is None:
                 notes.append(f"@{raw}: двоичен, нечетим или не обикновен файл — не е прикачен")
+                continue
+            if has_private_key(content):
+                notes.append(f"@{raw}: чувствителен файл (частен ключ) — не е прикачен")
                 continue
             body, kind = content, "файл"
         if total + len(body) > _MAX_TOTAL:
@@ -229,10 +315,10 @@ def expand(text: str, workspace: Path,
         notes.append(f"@{raw}: прикачен {kind} ({len(body)} знака)")
     if images is not None:
         for raw in _dropped_paths(text):
-            path = _target(raw, workspace)
-            if path is None or not path.is_file():
+            hit = _target(raw, workspace)
+            if hit is None or not hit.is_file():
                 continue
-            real = Path(os.path.realpath(path))
+            real = Path(os.path.realpath(hit))
             if real in seen:
                 continue
             seen.add(real)
