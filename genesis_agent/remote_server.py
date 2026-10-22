@@ -682,6 +682,12 @@ def phone_command(text: str, ui: Any, session: RemoteSession, *, messages: Any,
         if cmd in _TERMINAL_ONLY:
             ui.warn(f"{head} е само в терминала на компютъра. /help — какво може оттук.")
             return messages, None
+        # _send чисти само при точно `/clear`; `/clear сега` отиваше при модела
+        # като задача — в терминала вече казва, че е без аргументи (преглед
+        # 2026-10-22).
+        if cmd in ("/clear", "/нов") and rest:
+            ui.warn(f"{head} е без аргументи — напиши само {head}.")
+            return messages, None
         # Доверяването пуска програми на компютъра при всеки следващ ход, без
         # да пита. Решава се пред целия файл в терминала, не с едно докосване
         # на телефон, който може да е в чужди ръце.

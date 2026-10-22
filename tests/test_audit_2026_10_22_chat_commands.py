@@ -117,6 +117,19 @@ def test_unknown_slash_word_exit_and_builtin_with_args_never_reach_the_model(cha
     assert prompt == "/usr/lib/x is broken"
 
 
+def test_a_project_folder_goes_to_the_model_and_phone_clear_with_words_does_not(chat):
+    # Преглед 2026-10-22: `/tests гърмят` е папка на проекта, не сгрешена команда.
+    (chat.ws / "tests").mkdir()
+    assert chat.drive("/tests гърмят").turns == ["/tests гърмят"]
+    # `/clear сега` от телефона отиваше при модела — _send чисти само при точно /clear.
+    for text in ("/clear сега", "/нов разговор"):
+        ui = _PhoneUI()
+        _, prompt = remote_server.phone_command(
+            text, ui, _PhoneSession(), messages=deque([{"role": "system", "content": "s"}]),
+            workspace=chat.ws)
+        assert prompt is None and "без аргументи" in ui.said[0], text
+
+
 # ── 2. `!команда` чакаше 2 s повече: зомби водачът на групата ───────────────
 
 @posix_only

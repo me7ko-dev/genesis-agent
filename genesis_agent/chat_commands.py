@@ -325,7 +325,10 @@ def unknown_command(text: str, workspace: Path, known: Iterable[str] = ()) -> st
     if head.lower() in names:
         return None
     try:
-        if Path(head).exists():   # `/tmp е пълна` — истински път, за модела е
+        # `/tmp е пълна` — истински път, за модела е. И папка/файл на проекта:
+        # `/tests гърмят` беше „Непозната команда /tests (може би /tasks?)“,
+        # а преди одита отиваше при модела (преглед 2026-10-22).
+        if Path(head).exists() or (Path(workspace) / head[1:]).exists():
             return None
     except OSError:
         pass
