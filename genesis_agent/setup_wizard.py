@@ -95,9 +95,11 @@ PROVIDERS: list[tuple[str, str, str, str, str]] = [
 # заявка. Ключ тук НЕ променя нищо от само себе си — моделите влизат във
 # веригата само при `GENESIS_QUALITY=max` (или `genesis fix --max`).
 PAID_PROVIDERS: list[tuple[str, str, str, str, str]] = [
+    # Пробата на ключа върви на първия модел от premium_models (2026-10-22:
+    # claude-opus-5-5) — 16 токена, част от цента.
     ("ANTHROPIC_API_KEY", "Anthropic (Claude)",
      "https://console.anthropic.com/settings/keys",
-     "native://anthropic", "claude-opus-5"),
+     "native://anthropic", "claude-opus-5-5"),
     ("OPENAI_API_KEY", "OpenAI",
      "https://platform.openai.com/api-keys",
      "https://api.openai.com/v1", "gpt-5.5"),
@@ -130,7 +132,10 @@ def _test_anthropic_key(key: str, model: str) -> tuple[bool, str]:
     except anthropic.RateLimitError:
         return True, "ключът работи (в момента е rate-limited)"
     except anthropic.APIStatusError as e:
-        if e.status_code == 400 and "credit" in str(e).lower():
+        # И 402 billing_error, не само старият 400 (2026-10-22, anthropic_spend).
+        from genesis_agent.anthropic_spend import is_credit_error
+        if is_credit_error(f"HTTP_{e.status_code}: {e}") or (
+                e.status_code == 400 and "credit" in str(e).lower()):
             return False, "няма кредит по сметката"
         return False, f"HTTP {e.status_code}: {str(e)[:120]}"
     except anthropic.APIConnectionError:

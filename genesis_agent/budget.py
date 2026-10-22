@@ -460,8 +460,9 @@ def record_usage(*, provider: str, model: str, prompt_tokens: int,
             "cached_write_tokens": cached_write_tokens,
             "context": context[:120],
         }
-        # Цена само когато доставчикът я казва сам (`claude` CLI: total_cost_usd);
-        # таблица с цени тук би остаряла тихо.
+        # Цена само когато е известна: `claude` CLI я казва сам (total_cost_usd),
+        # за Anthropic API я смята brain по таблицата в anthropic_spend
+        # (2026-10-22); непознат модел → без цена, не грешна.
         if cost_usd is not None:
             entry["cost_usd"] = float(cost_usd)
         # Говор → текст (genesis_agent.voice, 2026-10-15): таксува се по
@@ -510,6 +511,18 @@ def _add_audio(totals: dict, prov: str, entry: dict) -> None:
     stats["audio_seconds"] = round(stats.get("audio_seconds", 0.0) + seconds, 2)
 
 
+def _add_cost(totals: dict, prov: str, entry: dict) -> None:
+    """Доларите — само където записът ги носи (2026-10-22: Anthropic API по
+    таблицата с цени, `claude` CLI по неговата сметка). Без такива записи
+    отчетът остава какъвто беше."""
+    cost = entry.get("cost_usd")
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)) or cost <= 0:
+        return
+    totals["cost_usd"] = round(totals.get("cost_usd", 0.0) + cost, 6)
+    stats = totals["by_provider"][prov]
+    stats["cost_usd"] = round(stats.get("cost_usd", 0.0) + cost, 6)
+
+
 def daily_totals(day: date | None = None) -> dict:
     """Обобщение за конкретен ден (по подразбиране днес, UTC — записите се
     пазят с UTC timestamp, сравнение с локална дата дава грешен резултат
@@ -536,6 +549,7 @@ def daily_totals(day: date | None = None) -> dict:
         totals["by_provider"][prov]["calls"] += 1
         totals["by_provider"][prov]["total_tokens"] += e.get("total_tokens", 0)
         _add_audio(totals, prov, e)
+        _add_cost(totals, prov, e)
     totals["by_provider"] = dict(totals["by_provider"])
     return totals
 
@@ -573,6 +587,7 @@ def range_totals(days: int = 7) -> dict:
         totals["by_provider"][prov]["calls"] += 1
         totals["by_provider"][prov]["total_tokens"] += e.get("total_tokens", 0)
         _add_audio(totals, prov, e)
+        _add_cost(totals, prov, e)
     totals["by_provider"] = dict(totals["by_provider"])
     return totals
 
@@ -600,10 +615,13 @@ def format_report(totals: dict, *, title: str) -> str:
         lines.append(f"Кеш: {read} прочетени ({pct:.0f}% от prompt), {write} записани")
     if totals.get("audio_seconds"):
         lines.append(f"Глас → текст: {totals['audio_seconds']:.0f} s аудио")
+    if totals.get("cost_usd"):
+        lines.append(f"Разход: ${totals['cost_usd']:.4f} (където цената е известна)")
     for prov, stats in sorted(totals["by_provider"].items(),
                               key=lambda kv: -kv[1]["total_tokens"]):
         audio = f"  {stats['audio_seconds']:>6.0f} s аудио" if stats.get("audio_seconds") else ""
-        lines.append(f"  {prov:<13} {stats['calls']:>4} обръщения  {stats['total_tokens']:>8} токена{audio}")
+        usd = f"  ${stats['cost_usd']:.4f}" if stats.get("cost_usd") else ""
+        lines.append(f"  {prov:<13} {stats['calls']:>4} обръщения  {stats['total_tokens']:>8} токена{audio}{usd}")
     return "\n".join(lines)
 
 

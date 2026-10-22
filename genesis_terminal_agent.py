@@ -426,7 +426,9 @@ FALLBACKS = {
     "llmstudio":    ["local-model"],
     "claude_cli":   ["sonnet", "opus", "haiku"],
     # Редът е като premium_models в config.yaml; живият списък идва от ключа.
-    "anthropic":    ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
+    # 2026-10-22: текущото поколение — наследниците на същата или по-ниска цена
+    # (haiku-5-5 е 10× по-евтин от haiku-4-5).
+    "anthropic":    ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
 }
 
 MODELS_CACHE: dict[str, list[str]] = {}

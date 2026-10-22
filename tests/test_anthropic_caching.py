@@ -161,6 +161,9 @@ class TestCacheTokensAreReportedNotAssumed:
             "completion_tokens": 80,
             "cached_read_tokens": 4300,
             "cached_write_tokens": 0,
+            # Цената по таблицата (2026-10-22): Opus 5 — $5 вход, $25 изход,
+            # $0.50 четене от кеша за милион токена.
+            "cost_usd": (1200 * 5 + 80 * 25 + 4300 * 0.50) / 1e6,
         }
 
     def test_a_provider_without_cache_fields_reports_zero_not_an_error(self, sent) -> None:

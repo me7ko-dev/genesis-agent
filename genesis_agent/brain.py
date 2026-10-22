@@ -43,6 +43,7 @@ from typing import Any
 import requests
 import yaml
 
+from genesis_agent import anthropic_spend
 from genesis_agent.paths import (
     CONFIG_PATH,
     ENV_FILES,
@@ -146,7 +147,12 @@ _EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # на по-евтин — точно което прави човек, който пести — получаваше HTTP 400 без
 # следа защо. Списъкът е allowlist по префикс: непознат модел получава заявка
 # без тези параметри, което всеки модел приема.
+# 2026-10-22: изрично и текущото поколение — Opus 5.5 и Sonnet 5.5 минаваха и
+# досега по префикса на 5, но Haiku 5.5 (наследникът на haiku-4-5 в менюто, 10×
+# по-евтин) нямаше ред и тръгваше без effort. Opus 5.5 и Sonnet 5.5 отказват
+# изключен thinking и budget_tokens с 400 — adaptive е единственият им вид.
 _ADAPTIVE_EFFORT_MODELS = (
+    "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1",
     "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
     "claude-sonnet-5", "claude-sonnet-4-6",
     "claude-fable-5", "claude-mythos-5",
@@ -222,6 +228,8 @@ _PROVIDERS = {
 
 # Кои доставчици се викат през native SDK вместо през OpenAI-съвместим HTTP.
 _NATIVE_PROVIDERS = {"anthropic"}
+# Пропуск без заявка, вече обявен с един ред (таван/кредит на Anthropic).
+_ANNOUNCED_SKIP = "skip: anthropic —"
 
 
 def _print_skip(provider: str, model: str, error: str, seconds: float) -> None:
@@ -237,6 +245,10 @@ def _print_skip(provider: str, model: str, error: str, seconds: float) -> None:
     # и без безплатни ключове всяка лека задача при изход печаташе 13 реда
     # „skip: no GROQ_API_KEY configured“, а истинските причини се губеха в тях.
     if error.startswith("skip: no ") and error.rstrip().endswith("configured"):
+        return
+    # Таванът или свършеният кредит в Anthropic (2026-10-22) са казани веднъж
+    # със свой ред (anthropic_spend) — иначе всеки ход щеше да ги повтаря.
+    if error.startswith(_ANNOUNCED_SKIP):
         return
     reason = " ".join(error.split())[:80]
     print(f"  [Brain] ✗ {provider}/{model} след {seconds:.1f}s: {reason} → следващ")
@@ -1516,6 +1528,27 @@ class Brain:
         with api.stream(**extra, **params) as stream:
             return stream.get_final_message()
 
+    @staticmethod
+    def _no_trailing_assistant(msgs: list[dict]) -> list[dict]:
+        """Разговорът към Anthropic свършва с user ход (2026-10-22).
+
+        Последен assistant ход е prefill, а Opus 5.5, Sonnet 5.5 и цялото
+        поколение от 4.6 нагоре го отказват с 400 — на платен модел това е ход,
+        който пада на безплатния без причина. _to_anthropic_messages пазеше
+        само началото (user първо), не и края: история, която свършва с
+        отговора на модела, тръгваше точно така. Висящ tool_use без резултат
+        след него е 400 така или иначе — остава текстът му, а след него идва
+        кратка подкана да продължи."""
+        if not msgs or msgs[-1]["role"] != "assistant":
+            return msgs
+        last = msgs[-1]
+        kept = [b for b in last["content"]
+                if not (isinstance(b, dict) and b.get("type") == "tool_use")]
+        out = msgs[:-1] + ([{**last, "content": kept}] if kept else [])
+        if out and out[-1]["role"] == "assistant":
+            out.append({"role": "user", "content": "[system] Продължи."})
+        return out
+
     def _call_anthropic(self, key: str, model: str, messages: list[dict],
                         tools: list[dict] | None, effort: str) -> tuple[str, list | None]:
         try:
@@ -1524,6 +1557,7 @@ class Brain:
             raise RuntimeError("skip: липсва пакетът `anthropic` (pip install anthropic)")
 
         system, msgs = self._to_anthropic_messages(messages)
+        msgs = self._no_trailing_assistant(msgs)
         if not msgs:
             raise RuntimeError("няма съобщения за изпращане")
         params: dict[str, Any] = {
@@ -1567,29 +1601,40 @@ class Brain:
             params["tools"] = self._to_anthropic_tools(tools)
 
         client = anthropic.Anthropic(api_key=key, timeout=float(self.timeout))
+
+        def send(api: Any, **extra: Any) -> Any:
+            # Една и съща преводна таблица за двата опита (2026-10-22): повторът
+            # без beta-та беше извън нея, и 400 „credit balance is too low“ на
+            # него излизаше от complete() като сурово изключение на SDK-то —
+            # ходът падаше, вместо веригата да продължи.
+            try:
+                return self._anthropic_final(api, params, **extra)
+            except anthropic.BadRequestError as e:
+                raise RuntimeError(f"HTTP_400: {e}") from e
+            except anthropic.AuthenticationError as e:
+                raise RuntimeError(f"HTTP_401: {e}") from e
+            except anthropic.PermissionDeniedError as e:
+                raise RuntimeError(f"HTTP_403: {e}") from e
+            except anthropic.RateLimitError as e:
+                raise RuntimeError(f"HTTP_429: {e}") from e
+            except anthropic.APIStatusError as e:
+                raise RuntimeError(f"HTTP_{e.status_code}: {e}") from e
+            except anthropic.APIConnectionError as e:
+                raise RuntimeError(f"мрежа: {e}") from e
+
         try:
             # Класификаторите за безопасност могат да откажат заявка (връща се
             # 200 с stop_reason="refusal"). `fallbacks="default"` оставя сървъра
             # да я довърши на друг модел вместо да ни върне празен отговор.
-            resp = self._anthropic_final(client.beta.messages, params,
-                                         betas=["server-side-fallback-2026-07-01"],
-                                         fallbacks="default")
-        except anthropic.BadRequestError as e:
+            resp = send(client.beta.messages, betas=["server-side-fallback-2026-07-01"],
+                        fallbacks="default")
+        except RuntimeError as e:
             # Акаунт без достъп до тази beta (или SDK, който не я познава) —
             # същата заявка без нея. Нашата собствена верига поема отказа.
-            if "fallback" not in str(e).lower() and "beta" not in str(e).lower():
-                raise RuntimeError(f"HTTP_400: {e}") from e
-            resp = self._anthropic_final(client.messages, params)
-        except anthropic.AuthenticationError as e:
-            raise RuntimeError(f"HTTP_401: {e}") from e
-        except anthropic.PermissionDeniedError as e:
-            raise RuntimeError(f"HTTP_403: {e}") from e
-        except anthropic.RateLimitError as e:
-            raise RuntimeError(f"HTTP_429: {e}") from e
-        except anthropic.APIStatusError as e:
-            raise RuntimeError(f"HTTP_{e.status_code}: {e}") from e
-        except anthropic.APIConnectionError as e:
-            raise RuntimeError(f"мрежа: {e}") from e
+            why = str(e).lower()
+            if not why.startswith("http_400") or ("fallback" not in why and "beta" not in why):
+                raise
+            resp = send(client.messages)
 
         usage = getattr(resp, "usage", None)
         # Прочетените от кеша токени се отчитат ОТДЕЛНО, за да е проверимо, че
@@ -1609,6 +1654,17 @@ class Brain:
             "cached_read_tokens": cache_read,
             "cached_write_tokens": cache_write,
         } if usage else None
+        # Цената в долари (2026-10-22): Anthropic API не я казва, затова се
+        # смята по таблицата в anthropic_spend и влиза в budget (cost_usd) и в
+        # сбора през сесиите, по който работи GENESIS_ANTHROPIC_MAX_USD. Тук,
+        # преди проверките за отказ и отрязан отговор — и те са платени.
+        if self._last_usage is not None:
+            cost = anthropic_spend.response_cost(model, resp)
+            if cost is None:
+                anthropic_spend.note_unpriced(model)
+            else:
+                self._last_usage["cost_usd"] = round(cost, 6)
+                anthropic_spend.add(cost, model)
         # Отказан/отрязан отговор по-долу пак е платен — complete() го записва.
         self._usage_attempt = getattr(self, "_attempt_id", None) if usage else None
 
@@ -1718,6 +1774,14 @@ class Brain:
         if not key:
             raise RuntimeError(f"skip: no {key_env} configured")
 
+        # Предплатеният кредит (2026-10-22): стигнат таван
+        # (GENESIS_ANTHROPIC_MAX_USD) или свършен кредит в тази сесия — без
+        # заявка, веригата минава на следващия модел като при мъртъв ключ.
+        if provider in _NATIVE_PROVIDERS:
+            why = anthropic_spend.blocked()
+            if why:
+                raise RuntimeError(f"{_ANNOUNCED_SKIP} {why}")
+
         kid = f"key::{key_env}"
         if _is_exhausted(kid):
             raise RuntimeError(f"HTTP_429: {key_env} is rate-limited, cooling down")
@@ -1730,6 +1794,13 @@ class Brain:
             return self._http(base_url, key, model, messages, self.timeout, tools=tools)
         except RuntimeError as e:
             last = str(e)
+            # Свършен кредит (402 billing_error, или по-старият 400 „credit
+            # balance is too low“) не минава след 5 минути: с cooldown всеки
+            # няколко минути ходът започваше с провалена платена заявка, а 400
+            # не спираше ключа изобщо. До края на процеса, с един ред.
+            if provider in _NATIVE_PROVIDERS and anthropic_spend.is_credit_error(last):
+                anthropic_spend.mark_credit_gone()
+                raise RuntimeError(f"{_ANNOUNCED_SKIP} кредитът свърши") from e
             # 429/402 (quota gone) or 401/403 (bad or forbidden key): this
             # provider is unusable for a while. Mark it and let the chain move
             # on to the next provider rather than hammering a dead endpoint.

@@ -111,16 +111,17 @@ def _capture(b: brain.Brain, monkeypatch) -> list[dict]:
 
 def test_a_pinned_anthropic_model_answers_with_tools_and_the_config_effort(with_key, monkeypatch) -> None:
     """Същото като --max за този модел: native tools и effort от premium_models."""
-    b = brain.Brain(pin_model=("anthropic", "claude-sonnet-5"), use_local=False)
+    # 2026-10-22: Sonnet 5.5 е записът в premium_models (наследникът на Sonnet 5).
+    b = brain.Brain(pin_model=("anthropic", "claude-sonnet-5-5"), use_local=False)
     calls = _capture(b, monkeypatch)
     tools = [{"type": "function", "function": {"name": "READ_FILE", "parameters": {}}}]
     reply = b.complete([{"role": "user", "content": "здравей"}], tools=tools)
     assert reply.raw_text == "готово"
     assert b.current["provider"] == "anthropic"
-    assert calls[0]["model"] == "claude-sonnet-5"
+    assert calls[0]["model"] == "claude-sonnet-5-5"
     assert calls[0]["tools"]                      # не текстови тагове
     effort = next(c["effort"] for c in brain._load_premium_chain()
-                  if c["model"] == "claude-sonnet-5")
+                  if c["model"] == "claude-sonnet-5-5")
     assert calls[0]["effort"] == effort
 
 

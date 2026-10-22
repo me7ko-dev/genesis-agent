@@ -292,6 +292,12 @@ def main(argv: list[str] | None = None) -> int:
         print(budget.format_report(budget.today_totals(), title="Днес"))
         print()
         print(budget.format_report(budget.range_totals(days), title=f"Последните {days} дни"))
+        # Сборът с ANTHROPIC_API_KEY от началото (2026-10-22, предплатен
+        # кредит) — по него работи таванът GENESIS_ANTHROPIC_MAX_USD.
+        from genesis_agent import anthropic_spend
+        if anthropic_spend.total_usd() or anthropic_spend.cap_setting()[1]:
+            print()
+            print(f"Anthropic (API ключ): {anthropic_spend.summary()}")
         return 0
 
     if cmd == "models":
