@@ -6,6 +6,9 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
+import types
+from types import SimpleNamespace
 
 import pytest
 
@@ -156,8 +159,67 @@ def test_a_text_mode_write_cut_at_the_cap_goes_to_the_next_model(monkeypatch) ->
     assert r.raw_text == good and seen == ["A", "C"]
     assert not brain._is_exhausted("groq::A")   # таванът не е изчерпана квота
     # Отрязан EDIT_FILE — същото; затворен таг с finish_reason=length е цял.
-    assert brain._is_truncated("[EDIT_FILE: a.py]\nold\n=======\nne")
-    assert not brain._is_truncated(good)
+    assert brain._has_open_file_tag("[EDIT_FILE: a.py]\nold\n=======\nne")
+    assert not brain._has_open_file_tag(good)
+
+
+def test_a_text_mode_write_cut_on_every_model_still_reaches_the_loop(monkeypatch) -> None:
+    """Ревю 2026-10-22: с поправката горе текстов файл, по-голям от тавана на
+    ВСИЧКИ модели, свършваше с „Error: … HTTP_TRUNCATED“ — преди нея отрязаният
+    отговор стигаше до цикъла. Правилото на native пътя (ревю 2026-10-11):
+    един кръг, после първият отрязан отговор към цикъла, не грешка."""
+    monkeypatch.setattr(brain, "_load_chain",
+                        lambda: chain(("groq", "A"), ("nvidia", "C"), tools=False))
+    _two_keys(monkeypatch)
+    slept: list = []
+    monkeypatch.setattr(brain.time, "sleep", slept.append)
+    cut = "[WRITE_FILE: big.py]import os\n\ndef main():\n    data = load_all_the_th"
+    seen = _route(monkeypatch, lambda p: ok(cut, finish="length"))
+    r = brain.Brain(use_local=False).complete([{"role": "user", "content": "напиши big.py"}])
+    assert seen == ["A", "C"] and slept == []
+    assert r.raw_text == cut and not r.code
+    # Само отворена код-ограда (без файлов таг) остава грешка, както досега.
+    fence = "```python\ndef main():\n    data = load_all_the_th"
+    seen.clear()
+    _route(monkeypatch, lambda p: ok(fence, finish="length"))
+    r = brain.Brain(use_local=False).complete([{"role": "user", "content": "напиши big.py"}])
+    assert r.raw_text.startswith("Error:") and "HTTP_TRUNCATED" in r.raw_text
+    # Старият път на терминала (call_openai_compatible, без верига) ползва
+    # _is_truncated: там отрязаният таг си стига до цикъла, както преди.
+    assert not brain._is_truncated(cut)
+
+
+@pytest.mark.parametrize("text, kept", [
+    ("[WRITE_FILE: big.py]import os\nx = [", True),
+    ("```python\nx = [", False),
+])
+def test_anthropic_keeps_a_cut_text_tag_for_the_loop(monkeypatch, text, kept) -> None:
+    """Същото правило в _call_anthropic (stop_reason=max_tokens): отрязаният
+    текстов таг се пази за цикъла, отрязаната само код-ограда — не."""
+    final = SimpleNamespace(stop_reason="max_tokens", usage=None,
+                            content=[SimpleNamespace(type="text", text=text)])
+
+    class Stream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc) -> None:
+            return None
+
+        def get_final_message(self):
+            return final
+
+    api = SimpleNamespace(stream=lambda **kw: Stream())
+    fake = types.ModuleType("anthropic")
+    for name in ("BadRequestError", "AuthenticationError", "PermissionDeniedError",
+                 "RateLimitError", "APIStatusError", "APIConnectionError"):
+        setattr(fake, name, type(name, (Exception,), {}))
+    fake.Anthropic = lambda **kw: SimpleNamespace(beta=SimpleNamespace(messages=api), messages=api)
+    monkeypatch.setitem(sys.modules, "anthropic", fake)
+    b = brain.Brain(use_local=False)
+    with pytest.raises(RuntimeError, match="HTTP_TRUNCATED"):
+        b._call_anthropic("k", "claude-opus-5", [{"role": "user", "content": "x"}], None, "high")
+    assert b._cut_reply == ((text, None) if kept else None)
 
 
 # ── 5: локалните нива — по точен таг ─────────────────────────────────────────

@@ -516,19 +516,26 @@ def _is_truncated(text: str) -> bool:
     рунд, и нищо никъде не показва, че истинската причина е ударен таван на
     токените, а не сгрешен код. `finish_reason` не се проверяваше НИКЪДЕ по
     целия LLM път до тази поправка.
-
-    Също отворен файлов таг без затварящия си (одит 2026-10-22): текстовият
-    модел пише `[WRITE_FILE: p]…[END_WRITE]` без ограда; отрязан на тавана се
-    връщаше като нормален отговор, а цикълът казваше на модела, че синтаксисът
-    на тага е грешен (native пътят със същия отрязан запис минаваше нататък).
     """
-    if text.count("```") % 2 == 1:
-        return True
-    return any(text.count(opener) > text.count(closer) for opener, closer in _FILE_TAGS)
+    return text.count("```") % 2 == 1
 
 
 # Текстовите тагове с тяло до затварящ маркер (виж genesis_skills._WRITE_RE/_EDIT_RE).
 _FILE_TAGS = (("[WRITE_FILE:", "[END_WRITE]"), ("[EDIT_FILE:", "[END_EDIT]"))
+
+
+def _has_open_file_tag(text: str) -> bool:
+    """Отворен [WRITE_FILE:/[EDIT_FILE: без затварящия си таг — отрязан запис.
+
+    Одит 2026-10-22: текстовият модел пише `[WRITE_FILE: p]…[END_WRITE]` без
+    ограда; отрязан на тавана се връщаше като нормален отговор, а цикълът
+    казваше на модела, че синтаксисът на тага е грешен (native пътят със
+    същия отрязан запис минаваше към следващия модел). Цикълът не го изпълнява
+    (регексите искат затварящия таг), затова при отрязване на ВСЕКИ модел
+    complete() го връща на цикъла като отрязания tool_call, а не „Error“
+    (ревю 2026-10-22). Отделно от _is_truncated: старият път на терминала
+    (call_openai_compatible, без верига) го ползва и не бива да хвърля тук."""
+    return any(text.count(opener) > text.count(closer) for opener, closer in _FILE_TAGS)
 
 
 def _has_cut_tool_arguments(tool_calls: Any) -> bool:
@@ -1418,12 +1425,16 @@ class Brain:
         # отрязан на 4096, стигаше до цикъла като „невалидни аргументи“ и
         # моделът пренаписваше същия голям файл в същия таван рунд след рунд.
         cut_args = finish_reason == "length" and _has_cut_tool_arguments(tool_calls)
-        if cut_args or (finish_reason == "length" and _is_truncated(content or "")):
+        # Текстовият WRITE_FILE/EDIT_FILE без затварящ таг — също (одит 2026-10-22).
+        cut_tag = finish_reason == "length" and _has_open_file_tag(content or "")
+        if cut_args or cut_tag or (finish_reason == "length" and _is_truncated(content or "")):
             self._last_usage = _openai_usage(data.get("usage"))
             self._usage_attempt = getattr(self, "_attempt_id", None)
             # Отрязаният call се пази: ако го отреже ВСЕКИ модел, complete() го
-            # връща на цикъла вместо „Error“ (ревю 2026-10-11, виж там).
-            self._cut_reply = ((content or "").strip(), tool_calls) if cut_args else None
+            # връща на цикъла вместо „Error“ (ревю 2026-10-11, виж там). Също
+            # текстовият таг (ревю 2026-10-22): без това файл над тавана на
+            # всички текстови модели свършваше с „Error“, а преди — до цикъла.
+            self._cut_reply = ((content or "").strip(), tool_calls) if cut_args or cut_tag else None
             raise RuntimeError(
                 f"HTTP_TRUNCATED: отговорът е отрязан на тавана от {_output_cap(model)} "
                 f"токена, посред код-ограда, файлов таг или tool_call (finish_reason=length). Вдигни го с "
@@ -1654,10 +1665,14 @@ class Brain:
         # проверяваше само "refusal", а изчерпан max_tokens минаваше за
         # нормален отговор — с незатворена код-ограда това значи счупен
         # полукод, приет за завършен.
-        if getattr(resp, "stop_reason", "") == "max_tokens" and _is_truncated(text):
+        capped = getattr(resp, "stop_reason", "") == "max_tokens"
+        cut_tag = capped and _has_open_file_tag(text)
+        if cut_tag or (capped and _is_truncated(text)):
+            # Отрязан текстов таг — към цикъла, ако го отреже всеки модел (виж _http).
+            self._cut_reply = (text, tool_calls or None) if cut_tag else None
             raise RuntimeError(
                 f"HTTP_TRUNCATED: отговорът е отрязан на тавана от "
-                f"{ANTHROPIC_STREAM_MAX_TOKENS} токена, посред код-ограда "
+                f"{ANTHROPIC_STREAM_MAX_TOKENS} токена, посред код-ограда или файлов таг "
                 f"(stop_reason=max_tokens)."
             )
         return text, (tool_calls or None)
