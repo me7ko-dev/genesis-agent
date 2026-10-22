@@ -474,11 +474,17 @@ def _retry_after_s(r: Any) -> float | None:
     """Секунди до следващ опит според 429 отговора, или None без подсказка."""
     headers = getattr(r, "headers", None) or {}
     raw = headers.get("retry-after") or headers.get("Retry-After")
+    # Само крайно число (одит 2026-10-22): `retry-after: inf` или `1e999` дава
+    # float inf, а math.ceil(inf) в _http вдигаше OverflowError — не
+    # RuntimeError, затова излизаше от complete() и ходът падаше, без
+    # следващият модел да е питан. inf/nan се четат като липсваща подсказка.
     if raw:
         try:
-            return max(0.0, float(str(raw).strip()))
+            value = float(str(raw).strip())
         except ValueError:
-            pass  # HTTP-дата — рядко при тези доставчици; остава текстът
+            value = None  # HTTP-дата — рядко при тези доставчици; остава текстът
+        if value is not None and math.isfinite(value):
+            return max(0.0, value)
     m = _TRY_AGAIN_RE.search(getattr(r, "text", "") or "")
     if not m or not (m.group(1) or m.group(2)):
         return None
@@ -488,7 +494,7 @@ def _retry_after_s(r: Any) -> float | None:
             seconds += float(m.group(2)) / (1000 if m.group(3).lower() == "ms" else 1)
     except ValueError:
         return None
-    return seconds
+    return seconds if math.isfinite(seconds) else None
 
 
 def _cooldown_for(error: str) -> float:
@@ -510,8 +516,19 @@ def _is_truncated(text: str) -> bool:
     рунд, и нищо никъде не показва, че истинската причина е ударен таван на
     токените, а не сгрешен код. `finish_reason` не се проверяваше НИКЪДЕ по
     целия LLM път до тази поправка.
+
+    Също отворен файлов таг без затварящия си (одит 2026-10-22): текстовият
+    модел пише `[WRITE_FILE: p]…[END_WRITE]` без ограда; отрязан на тавана се
+    връщаше като нормален отговор, а цикълът казваше на модела, че синтаксисът
+    на тага е грешен (native пътят със същия отрязан запис минаваше нататък).
     """
-    return text.count("```") % 2 == 1
+    if text.count("```") % 2 == 1:
+        return True
+    return any(text.count(opener) > text.count(closer) for opener, closer in _FILE_TAGS)
+
+
+# Текстовите тагове с тяло до затварящ маркер (виж genesis_skills._WRITE_RE/_EDIT_RE).
+_FILE_TAGS = (("[WRITE_FILE:", "[END_WRITE]"), ("[EDIT_FILE:", "[END_EDIT]"))
 
 
 def _has_cut_tool_arguments(tool_calls: Any) -> bool:
@@ -1371,7 +1388,10 @@ class Brain:
         # одит 2026-10-11) — без него следващият модел не се пробваше изобщо.
         except (ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
             raise RuntimeError(f"HTTP_200_MALFORMED: {type(e).__name__}: {r.text[:150]}")
-        if not content and not tool_calls:
+        # `.strip()` (одит 2026-10-22): content="  \n " минаваше проверката,
+        # връщаше се "" като успешен отговор и следващият модел не се питаше —
+        # e2e `genesis -p` с такъв groq и здрав nvidia: rc=1 „няма отговор“.
+        if not (content or "").strip() and not tool_calls:
             # Причината в лога (2026-09-30): ollama връщаше празно след 0.3 s в 13
             # от 210 bench разговора, до края им — а редът не казваше защо.
             usage = data.get("usage") or {}
@@ -1406,7 +1426,7 @@ class Brain:
             self._cut_reply = ((content or "").strip(), tool_calls) if cut_args else None
             raise RuntimeError(
                 f"HTTP_TRUNCATED: отговорът е отрязан на тавана от {_output_cap(model)} "
-                f"токена, посред код-ограда или tool_call (finish_reason=length). Вдигни го с "
+                f"токена, посред код-ограда, файлов таг или tool_call (finish_reason=length). Вдигни го с "
                 f"`max_tokens:` за модела в config.yaml, ако доставчикът го позволява."
             )
         # usage липсва при локален Ollama /v1 понякога — None е ОК, budget.py го обработва.
@@ -1802,6 +1822,12 @@ class Brain:
             raise
         self._last_usage = usage
         self._usage_attempt = getattr(self, "_attempt_id", None) if usage else None
+        # Празен result (одит 2026-10-22, фалшив `claude` с "result": ""): Brain
+        # го връщаше като успешен отговор и следващият модел не се питаше —
+        # _http и _call_anthropic вдигат „празен отговор“. Тук, а не в
+        # claude_cli.complete, за да се запише разходът на хода (usage горе).
+        if not text.strip():
+            raise RuntimeError("празен отговор: claude CLI върна празен result")
         return text, None
 
     def _call_vertex(self, model: str, messages: list[dict],
