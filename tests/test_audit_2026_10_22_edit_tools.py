@@ -69,8 +69,18 @@ EXAMPLE = ("## WRITE_FILE\nПише файл. Блокът свършва с [EN
      None, ("amb.md", None)),
     # Два разделителя, нито един сам на ред — отказ, файлът е непроменен.
     (f"[EDIT_FILE: s.md]a{SEP}b{SEP}c[END_EDIT]", ("s.md", f"a{SEP}b\n"), ("s.md", f"a{SEP}b\n")),
+    # Ревю 2026-10-22: README с пример, чийто истински край е последван от
+    # текст на същия ред — два слаби края с вложен блок между тях. Отказ, а не
+    # README, отрязан до примера с ✓, или пример, който се изпълнява.
+    (f"[WRITE_FILE: weak.md]\n{EXAMPLE}[END_WRITE] Готово.\n", None, ("weak.md", None)),
+    (f"[WRITE_FILE: weak2.md]\n{LONE}[END_WRITE] Готово.\n", None, ("weak2.md", None)),
+    # Следващ блок на същия ред след слаб край: така изглежда и споменаване
+    # в текст — отказ, а не a.txt с b.txt вътре и ✓.
+    ("[WRITE_FILE: a.txt]\nA\n[END_WRITE] и тестът: [WRITE_FILE: t.txt]\nT\n[END_WRITE]\n",
+     None, ("a.txt", None)),
 ], ids=["readme", "tags-doc", "lone-closer", "mention-then-example", "sep-in-old", "end-in-new",
-        "ambiguous", "two-inline-seps"])
+        "ambiguous", "two-inline-seps", "weak-outer-closer", "weak-outer-closer-cmd",
+        "next-block-same-line"])
 def test_text_tag_body_that_mentions_the_tags_is_not_cut_and_runs_nothing(
         ws, ran, reply, before, expected) -> None:
     if before:
@@ -101,6 +111,23 @@ def test_separate_blocks_and_tags_after_them_still_run(ws, ran) -> None:
     assert (ws / "a.txt").read_text(encoding="utf-8") == "A\n"
     assert (ws / "b.py").read_text(encoding="utf-8") == "x = 2\n"
     assert (ws / "c.txt").read_text(encoding="utf-8") == "C"
+    assert ran == ["echo ok"]
+
+
+@pytest.mark.parametrize("tail", [". Сега b:", ", после:", "` и после"], ids=["dot", "comma", "backtick"])
+def test_closer_followed_by_text_then_next_block_still_writes_both(ws, ran, tail) -> None:
+    """Ревю 2026-10-22: затварящ таг, последван от текст на същия ред, и
+    следващ блок на нов ред. Поправката четеше втория блок като вложен пример:
+    a.txt се записваше с целия текст и ✓, b.txt и командата — изобщо не
+    (минава на стария код)."""
+    (ws / "e.txt").write_text("old\n", encoding="utf-8")
+    reply = (f"[WRITE_FILE: a.txt]\nA\n[END_WRITE]{tail}\n[WRITE_FILE: b.txt]\nB\n[END_WRITE]\n"
+             f"[EDIT_FILE: e.txt]\nold\n{SEP}\nnew\n[END_EDIT] готово.\n"
+             f"[EDIT_FILE: e.txt]\nnew\n{SEP}\nnewer\n[END_EDIT]\n[RUN_CMD: echo ok]")
+    results = gs.parse_and_execute_tools(reply)
+    assert (ws / "a.txt").read_text(encoding="utf-8") == "A\n", results
+    assert (ws / "b.txt").read_text(encoding="utf-8") == "B\n", results
+    assert (ws / "e.txt").read_text(encoding="utf-8") == "newer\n", results
     assert ran == ["echo ok"]
 
 
@@ -152,6 +179,30 @@ def test_write_after_a_partial_read_is_refused(ws) -> None:
         gs.dispatch_tool_call("READ_FILE", {"path": name, "offset": 81, "limit": 20})
         out = gs.dispatch_tool_call("WRITE_FILE", {"path": name, "content": "x\n"})
         assert "❌" in out, (name, out)
+
+
+def test_edit_after_a_partial_or_stale_read_does_not_unlock_write(ws) -> None:
+    """Ревю 2026-10-22: успешен EDIT_FILE правеше файла „видян цял“ и след
+    отрязан READ_FILE — WRITE_FILE с показаното минаваше и редовете изчезваха."""
+    p = ws / "big.py"
+    p.write_text("".join(f"SETTING_{i} = {'x' * 20!r}\n" for i in range(1, 251)), encoding="utf-8")
+    shown = _body(gs.dispatch_tool_call("READ_FILE", {"path": "big.py"}))
+    shown = shown.rsplit("\n… [отрязано", 1)[0]
+    assert "✓" in gs.dispatch_tool_call("EDIT_FILE", {"path": "big.py", "old": "SETTING_1 ",
+                                                      "new": "SETTING_ONE "})
+    out = gs.dispatch_tool_call("WRITE_FILE", {"path": "big.py", "content": shown})
+    assert "❌" in out, out
+    assert p.read_text(encoding="utf-8").count("\n") == 250
+
+    # Видян цял, после променен отвън: редакцията не „вижда“ чуждата промяна.
+    s = ws / "s.txt"
+    s.write_text("v1\n", encoding="utf-8")
+    gs.dispatch_tool_call("READ_FILE", {"path": "s.txt"})
+    s.write_text("v1\nuser line\n", encoding="utf-8")
+    assert "✓" in gs.dispatch_tool_call("EDIT_FILE", {"path": "s.txt", "old": "v1", "new": "v2"})
+    out = gs.dispatch_tool_call("WRITE_FILE", {"path": "s.txt", "content": "v3\n"})
+    assert "❌" in out, out
+    assert s.read_text(encoding="utf-8") == "v2\nuser line\n"
 
 
 # ── 3. WRITE_FILE върху файл, променен след четенето ────────────────────────
@@ -213,6 +264,24 @@ def test_read_range_never_drops_lines_silently(ws) -> None:
     shown = [ln for ln in out.splitlines() if re.match(r"\s*\d+\t", ln)]
     assert int(shown[-1].split("\t")[0]) == last
     assert f"offset {last + 1}" in out
+
+
+def test_a_long_line_can_still_be_read_whole(ws) -> None:
+    """Ревю 2026-10-22: с 2000 знака на ред навсякъде ред от 3000 не се
+    виждаше цял (преди се виждаше), а файлът му никога не ставаше „видян цял“
+    — WRITE_FILE се отказваше, колкото и пъти да се четеше."""
+    long = "L" * 2990 + "THE_END"
+    p = ws / "data.txt"
+    p.write_text("".join(f"row {i} {'x' * 90}\n" for i in range(1, 101)) + long + "\nlast\n",
+                 encoding="utf-8")
+    out = gs.dispatch_tool_call("READ_FILE", {"path": "data.txt", "offset": 101, "limit": 2})
+    assert "THE_END" not in out and "last" in out, out[-300:]
+    assert "READ_FILE: " in out and "| 101 | 1]" in out, out[-300:]
+    out = gs.dispatch_tool_call("READ_FILE", {"path": "data.txt", "offset": 101, "limit": 1})
+    assert "THE_END" in out and "отрязан" not in out, out[-300:]
+    gs.dispatch_tool_call("READ_FILE", {"path": "data.txt", "offset": 1, "limit": 60})
+    gs.dispatch_tool_call("READ_FILE", {"path": "data.txt", "offset": 61, "limit": 40})
+    assert "✓" in gs.dispatch_tool_call("WRITE_FILE", {"path": "data.txt", "content": "x\n"})
 
 
 # ── 6. WRITE_FILE на .py: ruff не сменя CRLF с LF ───────────────────────────

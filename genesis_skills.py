@@ -610,9 +610,16 @@ def _read_range(fh, path: Path, encoding: str, offset_i: int | None,
             continue
         line = displayable(raw.decode(encoding, "surrogateescape"))
         line = line.removesuffix("\n").removesuffix("\r")
-        cut = len(line) > _LINE_CLIP
+        # Един поискан ред (limit 1) се показва до тавана на отговора (ревю
+        # 2026-10-22): с 2000 знака навсякъде ред от 3000 не се виждаше цял с
+        # никой READ_FILE (преди се виждаше), а файлът му никога не ставаше
+        # „видян цял“ за WRITE_FILE — бележката сочеше четене, което пак реже.
+        clip = 8000 if limit_i == 1 else _LINE_CLIP
+        cut = len(line) > clip
         if cut:
-            line = line[:_LINE_CLIP] + f" … [редът е отрязан: {len(line)} знака]"
+            whole_hint = (f" — целият: READ_FILE: {path} | {total} | 1"
+                          if clip < 8000 and len(line) <= 8000 else "")
+            line = line[:clip] + f" … [редът е отрязан: {len(line)} знака{whole_hint}]"
         entry = f"{total:>5}\t{line}"
         if picked and size + len(entry) + 1 > 8000:
             truncated = True
@@ -951,6 +958,14 @@ def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False
             return f"[EDIT_FILE] {reason}{redirect}"
 
     from genesis_agent.code_edit import edit_file
+    # Успешна редакция брои файла за видян (виж test_write_file_allowed_on_
+    # existing_file_after_successful_edit) — но не и ако моделът го е видял само
+    # отчасти или преди чужда промяна (ревю 2026-10-22): READ_FILE до ред 153,
+    # EDIT на ред 10, после WRITE_FILE с показаното — и редове 154–250
+    # изчезваха с ✓ (мерено), точно дупката, която _PARTLY_SEEN затваря.
+    resolved = path.resolve()
+    counts_as_seen = not _unseen_reason(path) or (resolved not in _SEEN_PATHS
+                                                  and resolved not in _PARTLY_SEEN)
     res = edit_file(path, old, new, replace_all=replace_all)
     if not res.ok:
         _log_episode(f"EDIT_FILE {path}", f"отказана: {res.detail[:200]}",
@@ -959,7 +974,8 @@ def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False
         return f"[EDIT_FILE: {path}] ❌ {res.detail}{hint}{redirect}"
     # Новото състояние след собствената редакция — иначе следващият WRITE_FILE
     # се отказваше като „променен след четенето“ (2026-10-22).
-    _mark_seen(path)
+    if counts_as_seen:
+        _mark_seen(path)
     _log_episode(f"EDIT_FILE {path}", res.detail, ["tool", "edit_file"])
     # Диффът се връща на модела нарочно: така следващият рунд вижда какво РЕАЛНО
     # се е променило, вместо да разчита на спомена си какво е искал да промени.
@@ -1514,7 +1530,14 @@ def _find_blocks(text: str, open_re: re.Pattern, closer: str) -> list[_Block]:
     - няколко истински края преди следващия блок от същия вид: краят е
       последният; ако между тях има инструмент, не е ясно кой е — блокът е
       спорен, отказва се и нищо отвътре не се изпълнява;
-    - без истински край — първият затварящ таг, както преди.
+    - без истински край — първият „слаб“ край на ниво 1 (таг, после текст на
+      същия ред), а без такъв — първият затварящ таг, както преди; ако между
+      първия и последния слаб край има инструмент — спорно, отказ. Ревю
+      2026-10-22: `[END_WRITE]. Сега b:` и после `[WRITE_FILE: b.txt]` на нов
+      ред четеше втория блок като вложен пример — a.txt се записваше с целия
+      текст и ✓, а b.txt изобщо не (мерено; старият парсер пишеше двата).
+      Същото на един ред (`[END_WRITE] и тестът: [WRITE_FILE: t.py]`, тялото
+      на нов ред) е спорно и се отказва — така пише и споменаване в текст.
     Мерено върху 14-те файла на репото, които съдържат таговете (.md,
     тестовете, самият genesis_skills.py), всеки като тяло на един WRITE_FILE:
     старият парсер изпълняваше инструменти от съдържанието на 6 (до 24 от
@@ -1531,7 +1554,9 @@ def _find_blocks(text: str, open_re: re.Pattern, closer: str) -> list[_Block]:
             i += 1
             continue
         depth = 1
-        first_close: int | None = None     # първият затварящ (истински, ако има)
+        first_close: int | None = None     # първият затварящ таг изобщо
+        weak: list[int] = []               # слабите краища на ниво 1 (таг, после текст)
+        split: int | None = None           # слаб край, след който на същия ред почва блок
         closes: list[int] = []        # истинските краища на ниво 0 — кандидатите
         j = i + 1
         while j < len(tokens):
@@ -1540,21 +1565,35 @@ def _find_blocks(text: str, open_re: re.Pattern, closer: str) -> list[_Block]:
                     break                 # следващият блок от същия вид
                 if _nests(text, tokens[j][0], tokens[j][1], closer):
                     depth += 1
+                elif (depth == 1 and weak and _closes_line(text, tokens[j][1])
+                      and "\n" not in text[tokens[weak[-1]][1]:tokens[j][0]]):
+                    # `[END_WRITE] и тестът: [WRITE_FILE: t.py]`, тялото — на нов
+                    # ред: слабият край може да е истинският, а може и да е
+                    # споменат в съдържанието. Не може да се реши → спорно.
+                    split = weak[-1]
             else:
-                strong = _ends_block(text, tokens[j][1])
-                if first_close is None or (strong and not _ends_block(text, tokens[first_close][1])):
+                if first_close is None:
                     first_close = j
-                if strong:
+                if _ends_block(text, tokens[j][1]):
                     depth = max(depth - 1, 0)
                     if depth == 0:
                         closes.append(j)
                 elif depth > 1:
                     depth -= 1            # затваря вложен пример (`…[END_WRITE]`)
+                elif depth == 1:
+                    weak.append(j)
             j += 1
         if not closes:
-            if first_close is None:
+            if len(weak) > 1 and _runs_tool(text[tokens[weak[0]][1]:tokens[weak[-1]][0]]):
+                closes = [weak[0], weak[-1]]     # инструмент между два възможни края → спорно
+            elif weak:
+                closes = [weak[0]]
+            elif first_close is not None:
+                closes = [first_close]           # вложен пример без край
+            else:
                 break                     # незатворен — и след него няма блок
-            closes = [first_close]        # вложен пример без край
+        elif split is not None:
+            closes = [split, *closes]
         ambiguous = len(closes) > 1 and any(
             _runs_tool(text[tokens[a][1]:tokens[b][0]]) for a, b in pairwise(closes))
         end_tok = closes[-1]
