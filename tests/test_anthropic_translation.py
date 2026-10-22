@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 
+from genesis_agent import brain as brain_mod
 from genesis_agent.brain import Brain
 from genesis_agent.tool_schemas import REPAIR_TOOLS
 
@@ -96,10 +97,12 @@ def test_empty_tool_result_gets_a_placeholder_not_an_empty_string() -> None:
     assert msgs[-1]["content"][0]["content"] == "(празен резултат)"
 
 
-def test_a_tool_result_whose_call_was_cut_away_is_dropped() -> None:
+def test_a_leading_call_keeps_its_result_behind_a_placeholder_user_turn() -> None:
     """Одит 2026-10-07: след компресия/рязане историята започваше с
     `assistant(tool_calls)`, той отпадаше (трябва user първо), а резултатите
-    му оставаха — tool_result без tool_use → 400 на всеки ход."""
+    му оставаха — tool_result без tool_use → 400 на всеки ход. Одит 2026-10-22:
+    махането каскадно изяждаше и цялата пазена опашка — сега отпред влиза
+    user ход-заместител, а извикването и резултатът му остават по двойка."""
     _, msgs = Brain._to_anthropic_messages([
         {"role": "system", "content": "s"},
         {"role": "assistant", "content": "", "tool_calls": [
@@ -107,7 +110,11 @@ def test_a_tool_result_whose_call_was_cut_away_is_dropped() -> None:
         {"role": "tool", "tool_call_id": "c5", "content": "x"},
         {"role": "user", "content": "продължи"},
     ])
-    assert msgs == [{"role": "user", "content": "продължи"}]
+    assert [m["role"] for m in msgs] == ["user", "assistant", "user", "user"]
+    assert msgs[0]["content"] == brain_mod._ANTHROPIC_CUT_PLACEHOLDER
+    assert msgs[1]["content"][0]["id"] == "c5"
+    assert msgs[2]["content"][0]["tool_use_id"] == "c5"
+    assert msgs[-1] == {"role": "user", "content": "продължи"}
 
 
 def test_a_later_system_message_is_a_user_turn_not_part_of_the_system_prompt() -> None:
@@ -126,8 +133,10 @@ def test_conversation_is_forced_to_start_with_user() -> None:
         {"role": "assistant", "content": "водещ assistant ход"},
         {"role": "user", "content": "истинското начало"},
     ])
-    assert msgs[0]["role"] == "user"
-    assert msgs[0]["content"] == "истинското начало"
+    assert msgs[0] == {"role": "user", "content": brain_mod._ANTHROPIC_CUT_PLACEHOLDER}
+    assert msgs[1] == {"role": "assistant",
+                       "content": [{"type": "text", "text": "водещ assistant ход"}]}
+    assert msgs[2]["content"] == "истинското начало"
 
 
 def test_no_message_ever_carries_empty_content() -> None:

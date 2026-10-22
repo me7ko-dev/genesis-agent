@@ -332,7 +332,13 @@ def test_anthropic_history_never_starts_with_an_orphaned_result() -> None:
         {"role": "tool", "tool_call_id": "B", "content": "b"},
         {"role": "user", "content": "next"},
     ])
-    assert msgs == [{"role": "user", "content": "next"}]
+    # Осиротелият резултат A отпада; двойката B остава зад user заместител
+    # (одит 2026-10-22: махането ѝ изяждаше цялата опашка след компактиране).
+    assert msgs[0]["role"] == "user"
+    results = [b["tool_use_id"] for m in msgs if isinstance(m["content"], list)
+               for b in m["content"] if b.get("type") == "tool_result"]
+    assert results == ["B"]
+    assert msgs[-1] == {"role": "user", "content": "next"}
 
 
 @pytest.mark.parametrize("label", [

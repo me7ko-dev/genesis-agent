@@ -399,7 +399,10 @@ def _loop(agent: Agent, messages: list[dict], complete: Callable[..., Any],
                     f"({used} инструмента).{' Последно: ' + _report(last) if last else ''}")
         final = round_i == max_rounds - 1
         if final:  # последният рунд — без инструменти: доклад с каквото е свършено
-            messages.append({"role": "user", "content":
+            # system, не user (одит 2026-10-22): request_window пази последното
+            # user съобщение като задачата — на 15-ия рунд (31 съобщения) пазеше
+            # тази подкана, а истинската задача изпадаше от прозореца.
+            messages.append({"role": "system", "content":
                              "Рундовете свършиха. Докладвай сега какво свърши и какво остана."})
         reply = complete(messages, tools=None if final or not schemas else schemas)
         text = (getattr(reply, "raw_text", "") or "").strip()
@@ -426,7 +429,12 @@ def _loop(agent: Agent, messages: list[dict], complete: Callable[..., Any],
             messages.append({"role": "assistant", "content": text})
             # Всички резултати: таговете вече са изпълнени — скрит резултат е
             # действие, за което под-агентът не знае (одит 2026-10-09).
-            messages.append({"role": "user", "content": "[резултати]\n" +
+            # Във формата на терминала и agent_core (system „[Резултат]:“), не
+            # като user „[резултати]“ (одит 2026-10-22): budget_history не ги
+            # познаваше като резултати и не свиваше старите — мерено с резултати
+            # по 28.5K: рунд 10 тръгваше с 263 242 знака (сега 78 001), рунд 15 —
+            # 399 883 (сега 82 336), а request_window ги мислеше за задачата.
+            messages.append({"role": "system", "content": "[Резултат]:\n" +
                              "\n\n".join(_clip(o) for o in outs)})
             continue
         if not text:

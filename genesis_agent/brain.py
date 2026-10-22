@@ -144,6 +144,11 @@ ANTHROPIC_EFFORT = "xhigh"
 ANTHROPIC_STREAM_MAX_TOKENS = 64000
 # Операторът избира усилието без да пипа config.yaml: GENESIS_EFFORT=max.
 _EFFORTS = ("low", "medium", "high", "xhigh", "max")
+# Първият ход към Anthropic, когато историята започва с assistant (след
+# компактиране или рязане) — Messages API иска user отпред (виж
+# _to_anthropic_messages).
+_ANTHROPIC_CUT_PLACEHOLDER = ("[по-ранната част от разговора е съкратена или обобщена "
+                              "в системния промпт]")
 
 # Не всеки модел на Anthropic приема тези два параметъра. `output_config.effort`
 # и adaptive thinking вървят от поколение 4.6 нагоре; на Haiku 4.5 и по-старите
@@ -1517,27 +1522,28 @@ class Brain:
                 out.append({"role": "user", "content": parts or "(празно)"})
             else:
                 out.append({"role": "user", "content": content or "(празно)"})
-        # Разговорът трябва да започва с user ход, и tool_result без своя
-        # tool_use (изпаднал при рязане на историята) дава 400 на всеки ход.
-        # Двете се повтарят, докато нищо не се променя: махането на водещ
-        # assistant може да осироти резултатите му (преглед 2026-10-07).
-        while True:
-            while out and out[0]["role"] != "user":
-                out.pop(0)
-            asked = {b["id"] for m in out if m["role"] == "assistant"
-                     for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_use"}
-            cleaned: list[dict] = []
-            for m in out:
-                if m["role"] == "user" and isinstance(m["content"], list):
-                    kept = [b for b in m["content"]
-                            if not (b.get("type") == "tool_result" and b.get("tool_use_id") not in asked)]
-                    if not kept:
-                        continue
-                    m = {**m, "content": kept}
-                cleaned.append(m)
-            if len(cleaned) == len(out) and (not cleaned or cleaned[0]["role"] == "user"):
-                return "\n\n".join(system_parts), cleaned
-            out = cleaned
+        # tool_result без своя tool_use (изпаднал при рязане на историята) дава
+        # 400 на всеки ход — такъв резултат се маха.
+        asked = {b["id"] for m in out if m["role"] == "assistant"
+                 for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_use"}
+        cleaned: list[dict] = []
+        for m in out:
+            if m["role"] == "user" and isinstance(m["content"], list):
+                kept = [b for b in m["content"]
+                        if not (b.get("type") == "tool_result" and b.get("tool_use_id") not in asked)]
+                if not kept:
+                    continue
+                m = {**m, "content": kept}
+            cleaned.append(m)
+        # Разговорът трябва да започва с user ход. Водещият assistant досега се
+        # махаше, а това осиротяваше резултатите му и каскадно изяждаше цялата
+        # опашка (одит 2026-10-22): след компактирането на хода (16/10) пазените
+        # 10 съобщения започват с assistant(tool_calls) — от тях, вкл. финалния
+        # отговор, до Claude стигаше 0, само новият въпрос. Другите доставчици
+        # ги получаваха. Затова отпред влиза кратък user ход-заместител.
+        if cleaned and cleaned[0]["role"] != "user":
+            cleaned.insert(0, {"role": "user", "content": _ANTHROPIC_CUT_PLACEHOLDER})
+        return "\n\n".join(system_parts), cleaned
 
     @staticmethod
     def _to_anthropic_tools(tools: list[dict]) -> list[dict]:
