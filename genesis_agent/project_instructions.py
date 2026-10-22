@@ -44,6 +44,7 @@ _MAX_DEPTH = 3
 # @Dockerfile изпадаха без бележка. `@property`/`@john` не стигат до нищо —
 # _allowed иска съществуващ обикновен файл в проекта.
 _IMPORT = re.compile(r"(?<![\w`@])@((?:~|\.{1,2})?[\w./\\-]*[\w-])")
+_VCS_DIRS = frozenset({".git", ".hg"})
 
 
 @dataclass
@@ -134,9 +135,10 @@ def _allowed(path: Path, roots: list[Path]) -> Path | None:
         return None
     # Вътрешността на .git не е инструкция, а .git/config носи токена в адреса
     # на remote (`https://me:ghp_…@github.com`) — с импортите без разширение
-    # (2026-10-22) `@.git/config` вече би стигал до него.
+    # (2026-10-22) `@.git/config` вече би стигал до него. Също и .hg/hgrc
+    # (паролата в [auth]) — ревю 2026-10-22: стигаше до промпта.
     for root in roots:
-        if _under(real, [root]) and ".git" in (p.lower() for p in real.relative_to(root).parts):
+        if _under(real, [root]) and _VCS_DIRS & {p.lower() for p in real.relative_to(root).parts}:
             return None
     if str(real).startswith(("/proc/", "/dev/", "/sys/")):
         return None
@@ -157,7 +159,13 @@ def _expand(text: str, base: Path, roots: list[Path], depth: int, seen: set[Path
     for line in _outside_code(text).splitlines():
         for m in _IMPORT.finditer(line):
             raw = m.group(1)
-            target = Path(raw).expanduser() if raw.startswith("~") else base / raw
+            # `@~ivan` (непознат потребител): expanduser хвърля RuntimeError и
+            # целият раздел изпадаше без следа, а /memory падаше. С импортите
+            # без разширение (ревю 2026-10-22) стига и „пиши на @~ivan“.
+            try:
+                target = Path(raw).expanduser() if raw.startswith("~") else base / raw
+            except RuntimeError:
+                continue
             if all(target != t for _, t in found):
                 found.append((raw, target))
     extra = []

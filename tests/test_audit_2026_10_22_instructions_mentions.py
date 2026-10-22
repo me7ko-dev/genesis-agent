@@ -107,6 +107,28 @@ def test_imports_of_files_without_an_extension(repo) -> None:
     assert "### @property" not in section and "### @john" not in section
 
 
+def test_extensionless_imports_open_no_new_secret_and_do_not_crash(repo) -> None:
+    # Ревю 2026-10-22: без задължително разширение `@kubeconfig`, `@.terraformrc`
+    # и `@.hg/hgrc` стигаха до промпта, а `@~ivan` (непознат потребител)
+    # хвърляше RuntimeError — и целият раздел изпадаше.
+    _write(repo, {
+        "AGENTS.md": ("Пиши на @~nobody-here-2026-10-22. Виж @README.\n"
+                      "@kubeconfig @deploy/prod.kubeconfig @.terraformrc @.hg/hgrc\n"),
+        "README": "README-BODY",
+        "kubeconfig": "token: KUBE-SECRET\n",
+        "deploy/prod.kubeconfig": "token: KUBE2-SECRET\n",
+        ".terraformrc": 'credentials "app.terraform.io" { token = "TFRC-SECRET" }\n',
+        ".hg/hgrc": "[auth]\nx.password = HG-SECRET\n",
+        "pkg/kubeconfig.go": "package kubeconfig // KUBE-CODE\n",
+    })
+    section = project_instructions.prompt_section(repo)
+    assert "README-BODY" in section
+    assert [m for m in ("KUBE-SECRET", "KUBE2-SECRET", "TFRC-SECRET", "HG-SECRET")
+            if m in section] == []
+    _, notes = mentions.expand("виж @kubeconfig и @pkg/kubeconfig.go", repo)
+    assert "чувствителен" in notes[0] and "прикачен файл" in notes[1], notes
+
+
 # ── 4. двоичен файл като импорт ─────────────────────────────────────────────
 
 def test_binary_import_does_not_flood_the_prompt(repo) -> None:

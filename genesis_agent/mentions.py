@@ -105,8 +105,13 @@ def _find(raw: str, workspace: Path) -> tuple[str, Path] | None:
 # `.streamlit/secrets.toml`, `*.ppk`, `service-account.json`, `terraform.tfvars`,
 # `.dev.vars` (Cloudflare), `*.jks` и `.envrc` (direnv с AWS ключове) стигаха до
 # модела — по @път в чата и по @импорт в системния промпт на ВСЯКА заявка.
+# Ревю 2026-10-22: с импортите без разширение `@kubeconfig` (токенът или
+# client-key-data на клъстера) и `@.terraformrc` (токенът за Terraform Cloud)
+# вече стигаха до промпта. `kubeconfig.go` е код — не се пипа.
 _MODEL_SECRETS = re.compile(
-    r"\.tfvars(?:\.json)?$|\.tfstate(?:\.backup)?$|(?:^|/)\.dev\.vars$", re.IGNORECASE)
+    r"\.tfvars(?:\.json)?$|\.tfstate(?:\.backup)?$|(?:^|/)\.dev\.vars$"
+    r"|(?:^|/)kubeconfig(?:\.ya?ml|\.json)?$|\.kubeconfig$|(?:^|/)(?:\.terraformrc|terraform\.rc)$",
+    re.IGNORECASE)
 # И по съдържание — частен ключ под невинно име (`deploy-notes.txt`). Само в
 # началото на ред: изходен код с такъв низ в кавички (тест на парсер) не е ключ.
 _PRIVATE_KEY = re.compile(r"^\s*-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----"
