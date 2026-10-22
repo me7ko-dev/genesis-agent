@@ -62,30 +62,36 @@ def validate_code_with_ruff(code: str) -> tuple[bool, str]:
         return True, ""
 
     try:
-        fixed = subprocess.run(
+        # Байтове, не text=True (одит 2026-10-22): текстовият режим чете изхода
+        # с universal newlines и всеки `\r\n` ставаше `\n` — WRITE_FILE на .py
+        # (и с exact=true) записваше LF вместо дадения CRLF, а същото в .txt
+        # оставаше CRLF (мерено с ruff 0.16.8). ruff пази краищата, които получи.
+        fixed_run = subprocess.run(
             [_ruff_exe() or "ruff", "check", *_RULES, "--fix", "--exit-zero",
              "--stdin-filename", "generated.py", "-"],
-            input=code, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=_RUFF_TIMEOUT,
+            input=code.encode("utf-8", "replace"), capture_output=True, timeout=_RUFF_TIMEOUT,
             check=False,
         )
-        checked = subprocess.run(
+        fixed = fixed_run.stdout.decode("utf-8", "replace")
+        checked_run = subprocess.run(
             [_ruff_exe() or "ruff", "check", *_RULES, "--output-format", "json",
              "--stdin-filename", "generated.py", "-"],
-            input=fixed.stdout or code, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            input=(fixed or code).encode("utf-8", "replace"), capture_output=True,
             timeout=_RUFF_TIMEOUT, check=False,
         )
     except (subprocess.TimeoutExpired, OSError):
         return True, ""
 
-    if checked.returncode == 0:
-        return True, fixed.stdout or code
+    if checked_run.returncode == 0:
+        return True, fixed or code
 
+    checked_out = checked_run.stdout.decode("utf-8", "replace")
     try:
-        errors = json.loads(checked.stdout or "[]")
+        errors = json.loads(checked_out or "[]")
     except json.JSONDecodeError:
         # ruff's own crash/parse-error output isn't JSON — surface it as-is,
         # truncated, rather than silently passing broken code through.
-        return False, (checked.stdout or checked.stderr)[:1000]
+        return False, (checked_out or checked_run.stderr.decode("utf-8", "replace"))[:1000]
 
     lines = [
         f"  L{e['location']['row']}: {e['code']} {e['message']}"

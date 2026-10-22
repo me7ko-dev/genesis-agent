@@ -62,8 +62,10 @@ def test_fail_open_on_oserror(monkeypatch) -> None:
 
 class _FakeCompleted:
     def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
-        self.stdout = stdout
-        self.stderr = stderr
+        # Байтове, както истинският subprocess без text=True (2026-10-22): така
+        # validate_code_with_ruff пази CRLF. json.loads в lint_note приема и тях.
+        self.stdout = stdout.encode("utf-8")
+        self.stderr = stderr.encode("utf-8")
         self.returncode = returncode
 
 

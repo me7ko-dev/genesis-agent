@@ -370,6 +370,9 @@ def run(name: str, task: str, workspace: Path, *,
     # А файл, който под-агентът ПРОМЕНИ, вече не е „видян“ и от главния: старото
     # му копие иначе тихо връщаше поправката (одит 2026-10-09).
     seen_before = {p: _stamp(p) for p in gs._SEEN_PATHS}
+    # Също отпечатъците и видяното отчасти (одит 2026-10-22): диапазон, прочетен
+    # от под-агента, не допълва прочетеното от главния до „видян цял“.
+    stamps_before, partly_before = dict(gs._SEEN_STAMPS), dict(gs._PARTLY_SEEN)
     _say(f"↳ {agent.name}: {task[:100]}")
     try:
         gs._set_agent_scope((agent.name, allowed))
@@ -378,6 +381,10 @@ def run(name: str, task: str, workspace: Path, *,
         gs._set_agent_scope(None)
         gs._SEEN_PATHS.clear()
         gs._SEEN_PATHS.update(p for p, stamp in seen_before.items() if _stamp(p) == stamp)
+        gs._SEEN_STAMPS.clear()
+        gs._SEEN_STAMPS.update(stamps_before)
+        gs._PARTLY_SEEN.clear()
+        gs._PARTLY_SEEN.update(partly_before)
 
 
 def _stamp(path: Path) -> tuple[int, int] | None:
