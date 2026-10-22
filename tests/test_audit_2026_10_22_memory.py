@@ -56,15 +56,20 @@ def test_secrets_given_to_remember_reach_neither_other_prompts_nor_the_export(tm
                                            "next_step": f"git push https://me:{_GH}@github.com/a/b"}),
     ]
     assert all(".env" in r for r in replies), replies
-    # Запис отпреди поправката: вече е в базата, не бива да излезе навън.
+    # Записи отпреди поправката: вече са в базата, не бива да излязат навън —
+    # нито в отчета, нито в брифинга (предпочитанието — в този на всеки проект).
     with wm._conn() as c:
         c.execute("INSERT INTO decisions (what, why, created_at, workspace) VALUES (?, ?, ?, ?);",
                   (f"стар запис с {_GH}", "", wm._now(), wm._norm(shop)))
+        c.execute("INSERT INTO preferences (topic, value, updated_at) VALUES (?, ?, ?);",
+                  ("стар ключ", f"плащания с {_STRIPE}", wm._now()))
+    brief_shop = wm.briefing()
     gs.set_workspace(other)
     brief = wm.briefing()
     report = deliver.export(shop, tmp_path / "out.zip", run_tests=False).report
-    assert "stripe" in brief and "деплой с GITHUB_TOKEN" in report and "пусни деплоя" in report
-    for text in [brief, report, *replies]:
+    assert "stripe" in brief and "стар ключ" in brief and "стар запис с" in brief_shop
+    assert "деплой с GITHUB_TOKEN" in report and "пусни деплоя" in report
+    for text in [brief, brief_shop, report, *replies]:
         assert _GH not in text and _STRIPE not in text, text
 
 
@@ -113,6 +118,13 @@ def test_a_preference_topic_in_another_case_replaces_the_old_value() -> None:
     wm.set_preference("ЕЗИК  НА КОМИТИТЕ", "само български, никога английски")
     assert list(wm.list_preferences().values()) == ["само български, никога английски"]
     assert ": английски" not in wm.briefing()
+    # Двойници от преди поправката: следващото задаване ги слива в едно.
+    with wm._conn() as c:
+        c.executemany("INSERT INTO preferences (topic, value, updated_at) VALUES (?, ?, ?);",
+                      [("Стил", "кратко", wm._now()), ("стил", "подробно", wm._now())])
+    wm.set_preference("СТИЛ", "кратко и по същество")
+    assert sorted(wm.list_preferences().values()) == ["кратко и по същество",
+                                                      "само български, никога английски"]
 
 
 def test_the_preferences_block_of_the_briefing_is_bounded() -> None:
@@ -172,6 +184,29 @@ def test_concurrent_writers_do_not_duplicate_threads_or_decisions(tmp_path, monk
     assert errors == []
     assert len(wm.list_threads("all", 100)) == 5
     assert len(wm.list_decisions(100)) == 5
+
+
+def test_switching_a_busy_database_to_wal_waits_instead_of_failing(tmp_path) -> None:
+    # Ревю 2026-10-22: прагмата за WAL на база, която още не е WAL, не чака
+    # busy_timeout — тестът по-горе мигаше с „database is locked“.
+    import sqlite3
+    import threading
+
+    from genesis_agent import sqlite_store
+    db = tmp_path / "busy.db"
+    other = sqlite3.connect(db, check_same_thread=False, isolation_level=None)
+    other.execute("CREATE TABLE t (a);")
+    other.execute("BEGIN IMMEDIATE;")
+    other.execute("INSERT INTO t VALUES (1);")
+    timer = threading.Timer(0.3, other.execute, ("COMMIT;",))
+    timer.start()
+    try:
+        conn = sqlite_store.connect(db, "CREATE TABLE IF NOT EXISTS u (b);", timeout=10, wal=True)
+        assert conn.execute("PRAGMA journal_mode;").fetchone()[0] == "wal"
+        conn.close()
+    finally:
+        timer.join()
+        other.close()
 
 
 def test_a_remember_preference_without_topic_is_saved() -> None:

@@ -335,7 +335,12 @@ def set_preference(topic: str, value: str) -> str:
         # Същата тема в друг регистър е СЪЩАТА тема. PRIMARY KEY-ят различава
         # „език на комитите“ от „Език на комитите“ и брифингът показваше и
         # старото „английски“, и новото „само български“ (одит 2026-10-22).
-        same = next((t for t in existing if _same_text(t) == _same_text(topic)), None)
+        twins = [t for t in existing if _same_text(t) == _same_text(topic)]
+        same = twins[0] if twins else None
+        # Двойниците, записани преди поправката, остават в промпта с
+        # противоречащите си стари стойности — новата стойност е и за тях
+        # (ревю 2026-10-22).
+        c.executemany("DELETE FROM preferences WHERE topic = ?;", [(t,) for t in twins[1:]])
         if same is None:
             # Същото предпочитание често идва под РАЗЛИЧНА тема ("стил на
             # комуникация" vs "обяснения") — затова сравняваме и по стойност.

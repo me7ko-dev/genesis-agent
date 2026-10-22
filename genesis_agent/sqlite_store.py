@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any
 
@@ -28,11 +29,29 @@ def _unreadable(e: sqlite3.DatabaseError) -> bool:
     return any(m in str(e) for m in _UNREADABLE)
 
 
+def _set_wal(conn: sqlite3.Connection, timeout: float) -> None:
+    """PRAGMA journal_mode=WAL, като чака заета база до timeout.
+
+    Ревю 2026-10-22, мерено: на база, която още не е WAL (нова или стара),
+    прагмата вдига четене до запис, а там SQLite не вика busy_timeout и връща
+    „database is locked“ веднага — 8 процеса върху нова база губеха 1–3
+    REMEMBER/TASK_ADD в 4 от 30 пускания. Щом е WAL, прагмата не пише нищо."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            return
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.02)
+
+
 def _open(path: Any, schema: str, timeout: float, wal: bool) -> sqlite3.Connection:
     conn = sqlite3.connect(path, timeout=timeout)
     try:
         if wal:
-            conn.execute("PRAGMA journal_mode=WAL;")
+            _set_wal(conn, timeout)
         if schema:
             conn.executescript(schema)
     except BaseException:
