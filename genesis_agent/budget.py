@@ -76,7 +76,8 @@ _DEDUP_NOTICE_CLIPPED = ("[идентичен резултат — по-ново
                          "съкратено; ако ти трябва цялото, извикай пак]")
 
 
-def clip_for_context(text: str, limit: int | None = None) -> str:
+def clip_for_context(text: str, limit: int | None = None,
+                     notice: str = _CLIP_NOTICE_TEMPLATE) -> str:
     """Реже ЕДИН tool резултат до config.TOOL_RESULT_MAX_CHARS, преди да влезе
     в историята на разговора. Операторът вижда пълния изход както винаги —
     конзолата и GUI-то не минават оттук; пести се само контекстът на модела.
@@ -92,6 +93,9 @@ def clip_for_context(text: str, limit: int | None = None) -> str:
     последните редове на лога). Средата на дълъг изход е точно частта, която
     никой не чете. Обичайното `text[:limit]` изхвърля именно грешката накрая и
     после моделът гадае защо е паднало.
+
+    `notice` — друга бележка (с `{cut}`): докладът на под-агент не е изход,
+    който операторът вижда цял (одит 2026-10-22).
     """
     if limit is None:
         limit = TOOL_RESULT_MAX_CHARS
@@ -102,13 +106,13 @@ def clip_for_context(text: str, limit: int | None = None) -> str:
     # тавана "свиването" произвеждаше ПО-ДЪЛЪГ низ от оригинала — плащаше се
     # повече за по-малко съдържание, и то мълчаливо. Свиваме само когато реално
     # спестява (намерено от tests/test_stress_invariants.py, не на око).
-    if cut <= len(_CLIP_NOTICE_TEMPLATE) + 16:
+    if cut <= len(notice) + 16:
         return text
     head = limit * 2 // 3
     tail = limit - head
     return (
         text[:head]
-        + _CLIP_NOTICE_TEMPLATE.format(cut=cut)
+        + notice.format(cut=cut)
         + text[-tail:]
     )
 

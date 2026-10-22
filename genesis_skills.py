@@ -1985,7 +1985,7 @@ def _dispatch(name: str, arguments: dict) -> str:
             for alias in ("tasks", "items"):
                 if todo_list is None and isinstance(arguments.get(alias), list):
                     todo_list = arguments[alias]
-            return _todos().write(todo_list)
+            return _todos().write(todo_list, native=True)
         if name == "WEB_FETCH":
             return _tool_web_fetch(str(arguments.get("url", "") or ""))
         if name.startswith("mcp__"):
