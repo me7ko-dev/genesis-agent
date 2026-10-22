@@ -214,13 +214,14 @@ def test_ctrl_c_at_a_picker_cancels_it_and_the_chat_goes_on(ws, monkeypatch):
     assert res is not None and "Нищо не е върнато" in out
     assert app.read_text(encoding="utf-8") == "v1\n" and edit_history.pending()
 
-    # Истинският чат: `genesis -r` + Ctrl-C в избора, после /resume + Ctrl-C.
+    # Истинският чат: `genesis -r` + Ctrl-C в избора, после /resume и /history
+    # (същият избор, по-старата команда) + Ctrl-C.
     try:
-        read = _main_loop(monkeypatch, ["/resume", "/todos", "exit"],
-                          [KeyboardInterrupt, KeyboardInterrupt], argv=("genesis", "-r"))
+        read = _main_loop(monkeypatch, ["/resume", "/history", "/todos", "exit"],
+                          [KeyboardInterrupt] * 3, argv=("genesis", "-r"))
     except KeyboardInterrupt:
         pytest.fail("Ctrl-C в избора на `genesis -r` излезе от main()")
-    assert read == ["/resume", "/todos", "exit"]
+    assert read == ["/resume", "/history", "/todos", "exit"]
 
 
 # ── 4. Два чата едновременно не губят разговори от индекса ───────────────────

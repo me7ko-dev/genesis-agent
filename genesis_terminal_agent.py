@@ -2729,8 +2729,12 @@ def main():
                 table.add_row("0", "Назад", "")
                 console.print(table)
 
+                # Ctrl-C/EOF в избора е „0 Назад“, не изход от чата — както
+                # /resume (одит 2026-10-22: тук чатът свършваше с „Довиждане!“).
+                from genesis_agent.chat_commands import answer as _answer
                 try:
-                    hsel = int(console.input("\n[bold cyan]Избери сесия за зареждане > [/]").strip())
+                    hsel = int(_answer(console.input, "\n[bold cyan]Избери сесия за зареждане > [/]",
+                                       "0").strip())
                     if 0 < hsel <= len(shown):
                         with open(shown[hsel - 1], "r", encoding="utf-8") as f:
                             loaded = json.load(f)
