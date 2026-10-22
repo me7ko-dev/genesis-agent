@@ -95,6 +95,42 @@ def test_nested_source_folders_named_like_build_output_are_searched(ws, engine):
     assert "node_modules/" in gs._tool_glob("**/package.json")
 
 
+def test_build_output_of_a_subproject_does_not_crowd_out_the_source(ws, engine, monkeypatch):
+    """Ревю 2026-10-22: без това правило монорепо с packages/*/dist и
+    android/app/build даваше 60 попадения от изхода и 1 от 5-те в src/."""
+    files = {"android/app/build.gradle": "apply plugin: 'java'\n",
+             "android/app/src/main/java/W.java": "class makeWidget {}\n",
+             "svc/pom.xml": "<project/>\n",
+             "svc/src/main/java/W.java": "class makeWidget {}\n",
+             "svc/target/classes/W.txt": "makeWidget\n"}
+    for pkg in ("alpha", "beta", "gamma"):
+        files[f"packages/{pkg}/package.json"] = f'{{"name": "{pkg}"}}\n'
+        files[f"packages/{pkg}/src/index.ts"] = "export function makeWidget() {}\n"
+        for i in range(30):
+            files[f"packages/{pkg}/dist/chunk{i:02d}.js"] = "var makeWidget = 1\n"
+            files[f"android/app/build/gen{pkg}{i:02d}/R.java"] = "class makeWidget {}\n"
+    _write(ws, files)
+    want = ["android/app/src/main/java/W.java", "packages/alpha/src/index.ts",
+            "packages/beta/src/index.ts", "packages/gamma/src/index.ts",
+            "svc/src/main/java/W.java"]
+    assert sorted(_rel(repo_map.search_code("makeWidget", ws, top=ws), ws)) == want
+    assert gs._tool_search_code("makeWidget").startswith("[SEARCH_CODE: makeWidget] 5 съвпадения")
+    assert "chunk" not in gs._tool_glob("**/*.js")
+    assert "packages/  (6 файла)" in gs._tool_repo_map("")
+    if engine == "rg":
+        # rg и не влиза там, не само изхвърля попаденията после: 30k файла в
+        # android/app/build — `common` за 36 s вместо 0.008 s (мерено 2026-10-22).
+        cmds: list[list[str]] = []
+        real = repo_map.subprocess.run
+
+        def spy(cmd, *a, **kw):
+            cmds.append(cmd)
+            return real(cmd, *a, **kw)
+        monkeypatch.setattr(repo_map.subprocess, "run", spy)
+        repo_map.search_code("makeWidget", ws, top=ws)
+        assert "!/android/app/build/" in cmds[0] and "!/packages/alpha/dist/" in cmds[0], cmds
+
+
 # ── 3. Таванът (60/200) мълчеше, а под rg даваше случайна извадка ─────────────
 
 def test_capped_results_say_so_are_stable_and_keep_the_newest_file(ws, engine):
@@ -148,6 +184,19 @@ def test_glob_with_an_absolute_pattern_finds_the_files(ws):
         assert "a.py" in out and "b.py" in out and "top.txt" not in out, out
     out = gs._tool_glob(f"{ws}/src/*.py")
     assert "a.py" in out and "b.py" not in out, out
+    assert "няма име на файл" in gs._tool_glob(".."), gs._tool_glob("..")
+
+
+def test_search_code_with_an_absolute_or_dotdot_glob(ws, engine, tmp_path):
+    """Ревю 2026-10-22: същото като при GLOB — rg казваше „наистина го няма“,
+    Python пътят — „Грешка при изпълнение: Non-relative patterns are unsupported“."""
+    _write(ws, {"src/a.py": "x = 1\n", "top.txt": "x\n"})
+    for glob in (f"{ws}/src/*.py", f"{ws.as_posix()}/src/*.{{py,ts}}"):
+        out = gs.dispatch_tool_call("SEARCH_CODE", {"pattern": "x", "glob": glob})
+        assert "a.py:1" in out and "top.txt" not in out, out
+    _write(tmp_path, {".ssh/id_work": "x\n"})
+    out = gs.dispatch_tool_call("SEARCH_CODE", {"pattern": "x", "glob": "../.ssh/*"})
+    assert "id_work" not in out and "SANDBOX" in out, out
 
 
 # ── 6. Дълъг ред: съвпадението оставаше отвъд първите 200 знака ──────────────

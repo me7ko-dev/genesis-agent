@@ -77,13 +77,26 @@ class Match:
     text: str
 
 
+# Папка с такъв файл е корен на подпроект — нейните build/dist/target/vendor са
+# изходът му, както тези в корена. Ревю 2026-10-22, мерено: само с признаците
+# на repo_agent монорепо с packages/*/dist и android/app/build даваше на
+# SEARCH_CODE makeWidget 60 попадения, 59 от изхода, а 4 от 5-те дефиниции в
+# src/ оставаха зад тавана (преди поправката: 5 от 5). Снимката (repo_agent,
+# checkpoints) няма това правило нарочно: там пропусната папка е загубен файл
+# при връщане, тук — шум. `env/` не е в правилото: `src/env/` до манифест е код.
+_BUILD_MANIFESTS = ("package.json", "Cargo.toml", "pom.xml", "build.gradle", "build.gradle.kts",
+                    "build.sbt", "CMakeLists.txt", "pyproject.toml", "setup.py", "go.mod",
+                    "composer.json", "Gemfile", "pubspec.yaml")
+
+
 def _looks_like_artifact(path: Path) -> bool:
     """Вложена `build/`, `env/`, `target/`… е артефакт, ако си личи: venv
-    (pyvenv.cfg), кеш (CACHEDIR.TAG) или `target` до Cargo.toml — същите
-    признаци като repo_agent._skip_in_snapshot."""
+    (pyvenv.cfg), кеш (CACHEDIR.TAG) — признаците на repo_agent._skip_in_snapshot —
+    или е до манифест на подпроект (_BUILD_MANIFESTS), без `env/`."""
     try:
         return ((path / "pyvenv.cfg").is_file() or (path / "CACHEDIR.TAG").is_file()
-                or (path.name == "target" and (path.parent / "Cargo.toml").is_file()))
+                or (path.name != "env"
+                    and any((path.parent / m).is_file() for m in _BUILD_MANIFESTS)))
     except OSError:
         return False
 
@@ -229,6 +242,8 @@ def split_glob(pattern: str, root: Path) -> tuple[Path, str, bool]:
                len(parts) - 1)
     if pure.is_absolute():
         cut = max(cut, 1)
+    if parts[-1] == "..":   # `GLOB ..` — няма `*`, грешката за него подвеждаше
+        raise ValueError("шаблонът няма име на файл — напр. [GLOB: **/*.py | папка]")
     if ".." in parts[cut:]:
         raise ValueError("`..` след `*`/`**` не се поддържа — подай папката като път: "
                          "[GLOB: шаблон | папка]")
@@ -471,7 +486,10 @@ def _search_ripgrep(root: Path, pattern: str, glob: str | None,
       --sort path     същият ред като _walk — при тавана двата двигателя дават
                       едни и същи попадения, и при всяко извикване (одит 2026-10-22)
     """
-    out = _run_ripgrep(root, pattern, glob, max_results, None, top)
+    pruned = _nested_artifacts(root, top)
+    if pruned is None:
+        return None
+    out = _run_ripgrep(root, pattern, glob, max_results, None, top, pruned)
     # rg търси байтовете на шаблона в UTF-8, а cp1251 файл ги няма (одит
     # 2026-10-11: „Грешка“ → „наистина го няма“). Шаблон с не-ASCII знаци се
     # пуска втори път с windows-1251. От него се взимат само файловете, които
@@ -483,7 +501,7 @@ def _search_ripgrep(root: Path, pattern: str, glob: str | None,
             break
         if enc == "cp1252" and not any(not c.isascii() and _fits(c, enc) for c in pattern):
             continue   # само кирилица в шаблона: в cp1252 файл тя няма как да е
-        extra = _run_ripgrep(root, pattern, glob, max_results, rg_enc, top)
+        extra = _run_ripgrep(root, pattern, glob, max_results, rg_enc, top, pruned)
         seen = {(m.path, m.line) for m in out}
         known: dict[str, str] = {}
         for m in extra or []:
@@ -515,7 +533,8 @@ def _file_encoding(path: str, known: dict[str, str]) -> str:
 
 def _run_ripgrep(root: Path, pattern: str, glob: str | None,
                  max_results: int, encoding: str | None,
-                 top: Path | None = None) -> list[Match] | None:
+                 top: Path | None = None, pruned: list[str] | tuple[str, ...] = ()
+                 ) -> list[Match] | None:
     cmd = ["rg", "--json", "--max-count", str(max_results), "--sort", "path",
            "--hidden", "--no-ignore", "--max-filesize", str(_MAX_FILE_BYTES),
            *([] if _wants_cr(pattern) else ["--crlf"]), "-e", pattern]
@@ -527,12 +546,13 @@ def _run_ripgrep(root: Path, pattern: str, glob: str | None,
     root_abs = root.absolute()
     cwd = root_abs if root_abs.is_dir() else root_abs.parent
     lead = _lead(root, top)
-    base = top.absolute() if top is not None and lead else cwd
     for d in sorted(_SKIP_DIRS - _SEARCHED_CONFIG):
         if d not in _ONLY_AT_TOP:
             cmd += ["--glob", f"!{d}/"]
         elif not lead:
             cmd += ["--glob", f"!/{d}/"]
+    for rel in pruned:   # вложените артефакти (_nested_artifacts)
+        cmd += ["--glob", f"!/{_rg_escape(rel)}/"]
     for g in _rg_globs(glob):
         cmd += ["--glob", g]
     cmd.append(str(root_abs))
@@ -548,7 +568,6 @@ def _run_ripgrep(root: Path, pattern: str, glob: str | None,
         return None
     out: list[Match] = []
     known: dict[str, str] = {}
-    artifacts: dict[Path, bool] = {}
     for raw in proc.stdout.splitlines():
         try:
             ev = json.loads(raw)
@@ -568,8 +587,6 @@ def _run_ripgrep(root: Path, pattern: str, glob: str | None,
         if not isinstance(line_no, int):
             continue
         path = (data.get("path") or {}).get("text", "?")
-        if _in_nested_artifact(Path(path), base, artifacts):
-            continue
         if not root.is_absolute():
             # Пътят, както го дава Python пътят — спрямо подадения корен.
             try:
@@ -585,21 +602,45 @@ def _run_ripgrep(root: Path, pattern: str, glob: str | None,
     return out
 
 
-def _in_nested_artifact(path: Path, base: Path, cache: dict[Path, bool]) -> bool:
-    """Вложен venv/кеш под `build/`, `env/`… — rg няма как да ги познае по
-    glob, затова се махат тук, със същото правило като _walk (_pruned_dir)."""
-    try:
-        parts = path.relative_to(base).parts[:-1]
-    except ValueError:
-        return False
-    for depth, name in enumerate(parts):
-        if depth and name in _ONLY_AT_TOP:
-            here = base.joinpath(*parts[:depth + 1])
-            if here not in cache:
-                cache[here] = _looks_like_artifact(here)
-            if cache[here]:
-                return True
-    return False
+_RG_MAX_PRUNED = 200   # над толкова `--glob` (командният ред на Windows) — Python пътят
+
+
+def _nested_artifacts(root: Path, top: Path | None) -> list[str] | None:
+    """Вложените build/dist/env/target/vendor, в които _walk не влиза, като
+    пътища спрямо `root` — за `--glob !/път/` на rg (закотвен към cwd = `root`).
+
+    Ревю 2026-10-22, мерено: махани едва от изхода на rg, 30k файла в
+    android/app/build правеха търсене на `common` 36 s вместо 0.008 s — rg ги
+    четеше всичките. Обходът тук е само на папките, и пропуска същото като
+    _walk. None — твърде много за командния ред; тогава отговаря Python пътят."""
+    if not root.is_dir():
+        return []
+    lead = _lead(root, top)
+    out: list[str] = []
+    stack: list[tuple[str, tuple[str, ...]]] = [(os.fspath(root), ())]
+    while stack:
+        path, rel = stack.pop()
+        depth = len(lead) + len(rel)
+        try:
+            with os.scandir(path) as it:
+                dirs = [e for e in it if e.is_dir(follow_symlinks=False)]
+        except OSError:
+            continue
+        for e in dirs:
+            if not _pruned_dir(e.name, depth, Path(e.path)):
+                stack.append((e.path, (*rel, e.name)))
+            elif e.name in _ONLY_AT_TOP and depth:
+                parts = (*rel, e.name)
+                # `\` в име (само на POSIX) е escape за glob-а на rg.
+                if any("\\" in part for part in parts) or len(out) >= _RG_MAX_PRUNED:
+                    return None
+                out.append("/".join(parts))
+    return out
+
+
+def _rg_escape(rel: str) -> str:
+    """Буквално име в glob на rg: `[slug]/dist` → `[[]slug[]]/dist` (rg 14.1)."""
+    return "".join(f"[{c}]" if c in "*?[]{}" else c for c in rel)
 
 
 def _rg_span(data: dict, lines: dict, text: str, path: str,

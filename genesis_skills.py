@@ -875,6 +875,15 @@ def _tool_search_code(arg: str, path: str = "", glob: str = "") -> str:
     if not pattern:
         return "[SEARCH_CODE] Празен шаблон."
     from genesis_agent.repo_map import search_code
+    # Абсолютен glob или с `..` (ревю 2026-10-22): rg отговаряше „наистина го
+    # няма“, Python пътят — „Грешка: Non-relative patterns are unsupported“, а
+    # `[SEARCH_CODE: x | /път/*.py]` намираше. Както него: буквалната част е
+    # папката (и минава през пазача по-долу, като при GLOB), името — филтърът.
+    if glob and (Path(glob).is_absolute() or ".." in Path(glob).parts):
+        parts = (Path(path) / glob).parts if path else Path(glob).parts
+        cut = next((i for i, p in enumerate(parts) if any(ch in p for ch in "*?[{")),
+                   len(parts) - 1)
+        path, glob = str(Path(*parts[:cut])) if cut else "", parts[-1]
     # Шаблон, подаден като път (`site/**/*.html`): 2026-09-28 моделът получи
     # два пъти „няма такъв път“ и загуби два рунда. Частта до първия `*`/`?`
     # е папката, останалото — филтърът по име.
