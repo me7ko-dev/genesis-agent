@@ -293,3 +293,35 @@ def test_a_text_edit_written_with_crlf_applies_to_an_lf_file(ws):
         "A = 10\r\nB = 20\r\n[END_EDIT]")
     assert len(out) == 1 and "❌" not in out[0], out
     assert app.read_bytes() == b"A = 10\nB = 20\nC = 3\n"
+
+
+# ── ревю на сливането (2026-10-22) ────────────────────────────────────────────
+
+def test_many_block_tags_in_one_reply_stay_fast(ws):
+    """Блок от всеки отварящ таг беше кубично: 1000 тага — 162 s (мерено)."""
+    import time
+    t0 = time.monotonic()
+    gs.parse_and_execute_tools("[WRITE_FILE: x] a [END_WRITE] b\n" * 1000)
+    gs.parse_and_execute_tools("`[WRITE_FILE: x]` " * 1000 + "\n[WRITE_FILE: y.txt]\nY\n[END_WRITE]")
+    assert time.monotonic() - t0 < 20
+
+
+@pytest.mark.parametrize("text", [
+    ('[WRITE_FILE: tests/test_cut.py]\ndef test_cut():\n'
+     '    assert is_cut("[WRITE_FILE: a.py]print(1)")\n[END_WRITE]\nГотово.'),
+    '[EDIT_FILE: a.py]\nx = 1\n---GENESIS-REPLACE-WITH---\nx = "[EDIT_FILE: a.py]"\n[END_EDIT]',
+])
+def test_a_closed_block_with_a_tag_literal_is_whole_at_the_cap(monkeypatch, text):
+    """Броенето на таговете (_has_open_file_tag) хвърляше цял запис като отрязан."""
+    class _Resp:
+        status_code, headers = 200, {}
+        text = ""
+
+        def json(self):
+            return {"choices": [{"message": {"content": text}, "finish_reason": "length"}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 4096}}
+
+    monkeypatch.setattr(brain, "_post_with_deadline", lambda *a, **kw: _Resp())
+    b = brain.Brain.__new__(brain.Brain)
+    out, _calls = b._http("https://x/v1", "k", "m", [{"role": "user", "content": "x"}], 10)
+    assert out == text.strip()

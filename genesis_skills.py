@@ -1594,7 +1594,8 @@ def _runs_tool(text: str) -> bool:
 
 
 def _find_blocks(text: str, open_re: re.Pattern, closer: str,
-                 skip: Callable[[int], bool] | None = None) -> list[_Block]:
+                 skip: Callable[[int], bool] | None = None,
+                 first_only: bool = False) -> list[_Block]:
     """Блоковете WRITE_FILE/EDIT_FILE — с края, който наистина им е.
 
     Одит 2026-10-22: тялото свършваше на ПЪРВИЯ затварящ таг. README или
@@ -1678,6 +1679,8 @@ def _find_blocks(text: str, open_re: re.Pattern, closer: str,
         end_tok = closes[-1]
         blocks.append(_Block(start, tokens[end_tok][1], opener.group("path"),
                              text[body_start:tokens[end_tok][0]], ambiguous))
+        if first_only:
+            break
         i = end_tok + 1
     return blocks
 
@@ -2235,6 +2238,9 @@ def _quoted_spans(text: str, tags: list[tuple[int, int]]) -> list[tuple[int, int
     return spans
 
 
+_MAX_OVERLAP_OPENERS = 200
+
+
 def parse_and_execute_tools(response_text: str) -> list[str]:
     """
     Извлича и изпълнява всички тул-тагове в реда, в който се появяват.
@@ -2274,13 +2280,21 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
     # [END_WRITE] и поглъщаше истинския таг, а самият пример се прескача като
     # цитат → нищо не се записваше. Вложен кандидат пак се прескача, ако
     # външният е приет (_inside_block).
+    # Над _MAX_OVERLAP_OPENERS отварящи тага от вид — един проход без
+    # припокриване (както преди сливането): по блок от всеки таг е квадратично
+    # (ревю на сливането 2026-10-22: 1000 тага — 162 s).
     block_candidates: list[tuple[int, int, str, re.Match | _Block]] = []
     for kind, open_re, closer in (("WRITE_FILE", _WRITE_OPEN_RE, _END_WRITE),
                                   ("EDIT_FILE", _EDIT_OPEN_RE, _END_EDIT)):
-        for opener in open_re.finditer(response_text):
+        openers = list(open_re.finditer(response_text))
+        if len(openers) > _MAX_OVERLAP_OPENERS:
+            for blk in _find_blocks(response_text, open_re, closer):
+                block_candidates.append((blk.start, blk.end, kind, blk))
+            continue
+        for opener in openers:
             at_opener = opener.start()
             first = _find_blocks(response_text, open_re, closer,
-                                 partial(operator.gt, at_opener))[:1]
+                                 partial(operator.gt, at_opener), first_only=True)
             if first and first[0].start == at_opener:
                 block_candidates.append((first[0].start, first[0].end, kind, first[0]))
     pos = 0

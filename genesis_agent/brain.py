@@ -1461,9 +1461,10 @@ class Brain:
         cut_args = finish_reason == "length" and _has_cut_tool_arguments(tool_calls)
         # Текстовият WRITE_FILE/EDIT_FILE/USE_SKILL без затварящ таг е същото като
         # отрязан tool_call (одит 2026-10-22): пази се за цикъла, който казва
-        # „раздели записа“.
-        cut_block = finish_reason == "length" and bool(
-            open_block_tag(content or "") or _has_open_file_tag(content or ""))
+        # „раздели записа“. Само open_block_tag — той чете отляво надясно като
+        # парсера; броенето (_has_open_file_tag) хвърляше цял запис на тест с
+        # „[WRITE_FILE: a.py]“ в тялото като отрязан (ревю на сливането 2026-10-22).
+        cut_block = finish_reason == "length" and bool(open_block_tag(content or ""))
         if cut_args or cut_block or (finish_reason == "length" and _is_truncated(content or "")):
             self._last_usage = _openai_usage(data.get("usage"))
             self._usage_attempt = getattr(self, "_attempt_id", None)
@@ -1787,7 +1788,7 @@ class Brain:
         # нормален отговор — с незатворена код-ограда това значи счупен
         # полукод, приет за завършен.
         capped = getattr(resp, "stop_reason", "") == "max_tokens"
-        cut_block = capped and bool(open_block_tag(text) or _has_open_file_tag(text))
+        cut_block = capped and bool(open_block_tag(text))
         if cut_block or (capped and _is_truncated(text)):
             # Отрязан текстов таг — към цикъла, ако го отреже всеки модел (виж _http).
             self._cut_reply = (text, tool_calls or None) if cut_block else None
