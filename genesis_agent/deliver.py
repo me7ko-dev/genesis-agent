@@ -796,8 +796,12 @@ def export(project: str | Path, out: str | Path | None = None, *,
     root = Path(project).expanduser().resolve()
     if not root.is_dir():
         raise ValueError(f"Няма такава папка: {root}")
-    zip_path = (Path(out).expanduser() if out
-                else root.parent / f"{root.name}-{datetime.now().strftime('%Y%m%d-%H%M')}.zip").resolve()
+    default_name = f"{root.name}-{datetime.now().strftime('%Y%m%d-%H%M')}.zip"
+    zip_path = (Path(out).expanduser() if out else root.parent / default_name).resolve()
+    # Папка за цел (`/export ~/Desktop/`) — архивът влиза в нея. Беше
+    # ~/Desktop.zip до папката (одит 2026-10-22).
+    if out and (zip_path.is_dir() or str(out).endswith(("/", os.sep))):
+        zip_path = zip_path / default_name
     if zip_path.suffix.lower() != ".zip":
         zip_path = zip_path.with_suffix(zip_path.suffix + ".zip")
     files, withheld = project_files(root, exclude=zip_path)
