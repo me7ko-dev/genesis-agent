@@ -1659,7 +1659,14 @@ _XML_BLOCK_CLOSE_RE = re.compile(r"\n?[ \t]*</(?:parameter|invoke)>\s*(?=\[END_(
 # `<invoke name="RUN_CMD">…pytest -q` стигаше до `</invoke>` на СЛЕДВАЩИЯ
 # READ_FILE — той не тръгваше, а XML-ът му отиваше в shell командата
 # („Syntax error: newline unexpected“). Незатвореният остава текст.
-_XML_VALUE = r"(?:(?!<invoke).)*?"
+# Само друго извикване (`<invoke name="`) спира стойността, не всяко
+# `<invoke` (ревю 2026-10-22: `grep -n "<invoke" x.py` иначе не тръгваше).
+_XML_VALUE = r'(?:(?!<invoke name=").)*?'
+# Съдържанието на запис/редакция е данни и МОЖЕ да съдържа <invoke> (ревю
+# 2026-10-22, измерено): тест с `'<invoke name="RUN_CMD">echo … >> log.txt</invoke>'`
+# в content спираше външния WRITE_FILE — файлът не се записваше, а вътрешният
+# RUN_CMD се ИЗПЪЛНЯВАШЕ (преди поправката по-горе: запис, нищо пуснато).
+_XML_CONTENT_KEYS = "content|body|text|old_string|old_str|old|new_string|new_str|new"
 _XML_SIMPLE_RE = re.compile(
     r'<invoke name="(?P<tool>' + _XML_TOOLS + r')">\s*'
     r'(?:<parameter name="\w+">)?(?P<arg>' + _XML_VALUE + r')\s*(?:</parameter>\s*)?</invoke>',
@@ -1675,7 +1682,8 @@ _XML_WRAPPER_RE = re.compile(r"</?function_calls>\s*")
 # формата с един аргумент горе не го хваща и редакцията не се изпълняваше).
 _XML_FULL_INVOKE_RE = re.compile(
     r'<invoke name="(?P<tool>' + _XML_TOOLS + r')">'
-    r'(?P<params>(?:\s*<parameter name="[\w-]+">' + _XML_VALUE + r'</parameter>)+)\s*</invoke>',
+    r'(?P<params>(?:\s*(?:<parameter name="(?:' + _XML_CONTENT_KEYS + r')">.*?'
+    r'|<parameter name="[\w-]+">' + _XML_VALUE + r')</parameter>)+)\s*</invoke>',
     re.DOTALL)
 _XML_PARAM_RE = re.compile(r'<parameter name="(?P<key>[\w-]+)">(?P<value>.*?)</parameter>', re.DOTALL)
 _XML_ARG_ALIASES = {"file_path": "path", "filepath": "path", "filename": "path",
@@ -1698,7 +1706,10 @@ _XML_SLOT_RE = re.compile(r"\x00(\d+)\x00")
 
 def _xml_tag(tool: str, value: str, slots: list[str] | None) -> str:
     tag = f"[{tool}: {value}]"
-    if slots is None:
+    # Слотът се чете само от едноредовите тагове (ревю 2026-10-22): отварящият
+    # `[WRITE_FILE: път]` на `<invoke name="WRITE_FILE">a.py</invoke>…[END_WRITE]`
+    # получаваше път „\x000\x00“ и записът падаше като „извън workspace“.
+    if slots is None or tool not in _SIMPLE_DISPATCH:
         return tag
     m = _SIMPLE_RE.fullmatch(tag)
     if m and m.group("arg") == value.lstrip():
@@ -1865,8 +1876,15 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
     block_candidates: list[tuple[int, int, str, re.Match]] = []
     for kind, rx in (("WRITE_FILE", _WRITE_RE), ("EDIT_FILE", _EDIT_RE),
                      ("USE_SKILL", _USE_SKILL_RE)):
-        for m in rx.finditer(response_text):
+        # С припокриване, не finditer (ревю 2026-10-22, измерено): „Ще ползвам
+        # `[WRITE_FILE: път]`, за да…“ + истински запис — примерът стигаше до
+        # общия [END_WRITE] и поглъщаше истинския таг; той не беше кандидат,
+        # а примерът се прескача като цитат → нищо не се записваше. Вложен
+        # кандидат пак се прескача, ако външният е приет (_inside_block).
+        pos = 0
+        while (m := rx.search(response_text, pos)) is not None:
             block_candidates.append((m.start(), m.end(), kind, m))
+            pos = m.start() + 1
     # По-ранният старт печели; при равен старт — по-дългият блок е външният.
     block_candidates.sort(key=lambda c: (c[0], -c[1]))
 
@@ -2039,7 +2057,12 @@ def malformed_tag_note(response_text: str) -> str:
     изходния таван: „грешен синтаксис“ караше модела да пише същия голям файл
     пак и ходът свършваше без файл. Подсказката е като при native пътя
     (dispatch_tool_call, „Аргументите са отрязани“)."""
-    block = open_block_tag(response_text or "")
+    text = response_text or ""
+    # Таг, само споменат в `код` (ревю 2026-10-22): „създадох го с
+    # `[WRITE_FILE: app.py]`“ не е отрязан запис — „раздели записа“ пращаше
+    # модела да пише файла пак. Цитатите се махат, преди да се търси блокът.
+    cuts = [0, *(p for span in _quoted_spans(text, []) for p in span), len(text)]
+    block = open_block_tag("".join(text[a:b] for a, b in zip(cuts[::2], cuts[1::2])))
     if block:
         end = "[END_WRITE]" if block == "WRITE_FILE" else "[END_EDIT]"
         return (f"[Система]: Блокът [{block}: …] няма затварящ {end} — нищо не е "

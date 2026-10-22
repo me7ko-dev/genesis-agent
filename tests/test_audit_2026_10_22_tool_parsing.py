@@ -109,6 +109,24 @@ def test_a_tag_shown_in_backticks_or_a_fence_is_text_not_a_call(ws, monkeypatch)
     assert len([e for e in ui.log if e[0] == "tool" and e[1] == "RUN_CMD"]) == 1
 
 
+def test_a_quoted_block_tag_does_not_swallow_the_real_one_after_it(ws):
+    """Ревю 2026-10-22: `[WRITE_FILE: път]` в `код` стигаше до [END_WRITE] на
+    истинския запис след него — примерът се прескача, а истинският не тръгваше."""
+    out = gs.parse_and_execute_tools(
+        "Ще ползвам `[WRITE_FILE: път]`, за да запиша файла:\n"
+        "[WRITE_FILE: a.py]\nx = 1\n[END_WRITE]")
+    assert len(out) == 1 and (ws / "a.py").read_text(encoding="utf-8") == "x = 1\n", out
+    assert not (ws / "път").exists()
+    # Същото за EDIT_FILE, цитиран в тялото на README преди истинската редакция.
+    (ws / "app.py").write_text("X = 1\n", encoding="utf-8")
+    gs.parse_and_execute_tools("[READ_FILE: app.py]")
+    out = gs.parse_and_execute_tools(
+        "[WRITE_FILE: README.md]\nРедакция: `[EDIT_FILE: път]`.\n[END_WRITE]\n"
+        "[EDIT_FILE: app.py]\nX = 1\n---GENESIS-REPLACE-WITH---\nX = 2\n[END_EDIT]")
+    assert len(out) == 2 and (ws / "app.py").read_text(encoding="utf-8") == "X = 2\n", out
+    assert "[EDIT_FILE: път]" in (ws / "README.md").read_text(encoding="utf-8")
+
+
 # ── 2. текстов WRITE_FILE, отрязан на изходния таван ──────────────────────────
 
 _CUT = ("Пиша страницата.\n[WRITE_FILE: index.html]\n<!doctype html>\n<html><body>\n"
@@ -142,6 +160,10 @@ def test_a_text_write_cut_at_the_output_cap_is_reported_as_cut(ws, monkeypatch):
     assert notes, "моделът не получи никаква бележка"
     assert "отрязан" in notes[-1] and "Раздели" in notes[-1], notes[-1]
     assert "не намерих валиден tool таг" not in notes[-1]
+    # Таг, само споменат в `код` във финалното резюме, не е отрязан запис (ревю
+    # 2026-10-22): „раздели записа“ би пратило модела да пише файла пак.
+    note = gs.malformed_tag_note("Готово — създадох файла с `[WRITE_FILE: app.py]`.")
+    assert "Раздели" not in note and "не се изпълнява" in note, note
 
 
 # ── 3. Anthropic: tool_use, отрязан на max_tokens ─────────────────────────────
@@ -228,6 +250,36 @@ def test_an_xml_call_runs_with_exactly_its_parameter_value(ws):
         '<invoke name="READ_FILE">\n<parameter name="path">a.py</parameter>\n</invoke>')
     assert any("важен код" in r for r in out), out
     assert not any("<invoke" in r or "Syntax error" in r for r in out), out
+
+
+def test_an_xml_write_whose_content_holds_an_invoke_is_written_not_run(ws):
+    """Ревю 2026-10-22 на поправката горе: `(?!<invoke)` спираше и съдържанието —
+    тест с XML пример в content не се записваше, а примерът се ИЗПЪЛНЯВАШЕ;
+    само пътят на WRITE_FILE отиваше в слот („\\x000\\x00“, „извън workspace“)."""
+    log = ws / "log.txt"
+    out = gs.parse_and_execute_tools(
+        '<invoke name="WRITE_FILE"><parameter name="path">t.py</parameter>'
+        '<parameter name="content">S = \'<invoke name="RUN_CMD">echo no >> log.txt</invoke>\'\n'
+        '</parameter></invoke>')
+    assert len(out) == 1 and "✓" in out[0], out
+    assert (ws / "t.py").exists() and not log.exists()
+    (ws / "e.py").write_text("A = 1\n", encoding="utf-8")
+    gs.parse_and_execute_tools("[READ_FILE: e.py]")
+    gs.parse_and_execute_tools(
+        '<invoke name="EDIT_FILE"><parameter name="path">e.py</parameter>'
+        '<parameter name="old_string">A = 1</parameter><parameter name="new_string">'
+        'A = \'<invoke name="RUN_CMD">echo no >> log.txt</invoke>\'</parameter></invoke>')
+    assert "echo no" in (ws / "e.py").read_text(encoding="utf-8") and not log.exists()
+    # Отварящ <invoke> само с пътя, тялото до [END_WRITE] — пътят е истинският.
+    out = gs.parse_and_execute_tools('<invoke name="WRITE_FILE">w.py</invoke>X = 2\n[END_WRITE]')
+    assert (ws / "w.py").read_text(encoding="utf-8") == "X = 2\n", out
+    out = gs.parse_and_execute_tools(
+        '<invoke name="WRITE_FILE"><parameter name="path">w2.py</parameter></invoke>\n'
+        'X = 3\n[END_WRITE]')
+    assert (ws / "w2.py").read_text(encoding="utf-8") == "X = 3\n", out
+    # `<invoke` в самата команда (grep в този репо) не е второ извикване.
+    out = gs.parse_and_execute_tools('<invoke name="RUN_CMD">python -c "print(\'<invoke\')"</invoke>')
+    assert len(out) == 1 and "rc=0" in out[0], out
 
 
 # ── 6. текстов EDIT_FILE с CRLF ───────────────────────────────────────────────
