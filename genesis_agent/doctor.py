@@ -202,6 +202,49 @@ def check_keys(_ws: Path) -> list[Check]:
                   "genesis setup (безплатни ключове: Groq, NVIDIA, Ollama Cloud…)")]
 
 
+def _anthropic_sdk_installed() -> bool:
+    if sys.modules.get("anthropic") is not None:
+        return True
+    import importlib.util
+    try:
+        return importlib.util.find_spec("anthropic") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def check_anthropic(_ws: Path) -> list[Check]:
+    """Claude с API ключа (2026-10-22, предплатен кредит): колко е похарчено,
+    таванът GENESIS_ANTHROPIC_MAX_USD и дали кредитът е свършил в тази сесия.
+    Без ключа — само сумите, а редът минава и през _scrubbed."""
+    from genesis_agent import anthropic_spend
+    from genesis_agent.brain import _load_keys
+    name = "Anthropic (API ключ)"
+    has_key = bool(str(_load_keys().get("ANTHROPIC_API_KEY") or "").strip())
+    spent = anthropic_spend.total_usd()
+    if not has_key:
+        detail = "не се ползва (няма ANTHROPIC_API_KEY в ~/.genesis/.env)"
+        if spent:
+            detail += f"; похарчени досега ${spent:.2f}"
+        return [Check(name, "skip", detail)]
+    if not _anthropic_sdk_installed():
+        return [Check(name, "fail", "ключът е зададен, но пакетът anthropic липсва — Claude не се вика",
+                      f"pipx inject genesis-agent anthropic (или {_cmd(sys.executable, '-m', 'pip', 'install', 'anthropic')})")]
+    cap, raw = anthropic_spend.cap_setting()
+    detail = anthropic_spend.summary()
+    if raw and cap is None:
+        return [Check(name, "fail", detail,
+                      f"{anthropic_spend.CAP_ENV}=95 (сума в долари) в ~/.genesis/.env — "
+                      "иначе таванът не важи")]
+    if anthropic_spend.credit_gone():
+        return [Check(name, "skip", f"{detail}; кредитът свърши в тази сесия — работят безплатните",
+                      "зареди кредит в console.anthropic.com (Plans & Billing) и пусни Genesis наново")]
+    if cap is not None and spent >= cap:
+        return [Check(name, "skip", f"{detail}; таванът е достигнат — Anthropic се прескача",
+                      f"вдигни {anthropic_spend.CAP_ENV} в ~/.genesis/.env; нов кредит → изтрий "
+                      f"{anthropic_spend.SPEND_PATH}")]
+    return [Check(name, "ok", detail)]
+
+
 def check_models(_ws: Path, online: bool = False) -> list[Check]:
     from genesis_agent import model_check
     if online:
@@ -373,7 +416,7 @@ def check_voice(_ws: Path) -> list[Check]:
 def probes(online: bool = False) -> list[tuple[str, Callable[[Path], list[Check]]]]:
     return [("Python", check_python), ("git", check_git), ("Node.js / npm", check_node),
             ("ruff", check_ruff), ("pytest", check_pytest), ("config.yaml", check_config),
-            ("API ключове", check_keys),
+            ("API ключове", check_keys), ("Anthropic (API ключ)", check_anthropic),
             ("Модели", lambda ws: check_models(ws, online)), ("MCP", check_mcp),
             ("Hooks", check_hooks), ("Диск", check_disk), ("Playwright/Chromium", check_playwright),
             ("claude CLI", check_claude), ("Глас", check_voice)]
@@ -451,7 +494,8 @@ def format_report(checks: list[Check]) -> str:
 
 USAGE = """Употреба: genesis doctor [--models] [--json] [--cwd ПАПКА]
   без мрежа и бързо: Python, git, Node/npm, ruff, pytest, config.yaml, ключовете (само имената),
-  MCP сървърите, hooks, диска, Playwright/Chromium, входа на `claude`, гласа и микрофона
+  похарченото с ANTHROPIC_API_KEY и тавана, MCP сървърите, hooks, диска,
+  Playwright/Chromium, входа на `claude`, гласа и микрофона
   --models   и по една малка заявка до всеки модел от config.yaml (мрежа)
   --json     резултатът като JSON (status: ok | fail | skip)
   --cwd      проектът, чиито .mcp.json, hooks и Python се проверяват"""
