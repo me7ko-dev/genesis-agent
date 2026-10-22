@@ -44,7 +44,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from genesis_agent import sandbox
 from genesis_agent.code_edit import decode_text, displayable, encode_text, has_raw_bytes
-from genesis_agent.tool_schemas import load_tool_arguments
+from genesis_agent.tool_schemas import load_tool_arguments, open_block_tag
 
 log = logging.getLogger("genesis.skills")
 
@@ -312,9 +312,13 @@ def _strip_one_newline(part: str) -> str:
     Само по един: тагът и разделителят са на собствени редове, така че точно
     един \\n от всяка страна принадлежи на синтаксиса, а не на кода. По-агресивен
     strip() би изял отстъпа на първия ред и anchor-ът никога не би съвпаднал.
+
+    Новият ред може да е и CRLF (одит 2026-10-22): с `\\r\\n` в отговора котвата
+    започваше с `\\n` и свършваше с `\\r` — „Anchor-ът не е намерен“ срещу
+    обикновен LF файл, докато native EDIT_FILE и текстовият WRITE_FILE го приемат.
     """
-    part = part.removeprefix("\n")
-    part = part.removesuffix("\n")
+    part = part.removeprefix("\r\n") if part.startswith("\r\n") else part.removeprefix("\n")
+    part = part.removesuffix("\r\n") if part.endswith("\r\n") else part.removesuffix("\n")
     return part
 
 
@@ -1651,9 +1655,15 @@ _XML_BLOCK_OPEN_RE = re.compile(
     r'(?:</parameter>|</invoke>)?[ \t]*\n'
     r'(?:\s*<parameter name="(?:content|body)">)?')
 _XML_BLOCK_CLOSE_RE = re.compile(r"\n?[ \t]*</(?:parameter|invoke)>\s*(?=\[END_(?:WRITE|EDIT)\])")
+# Стойността не минава през друг `<invoke` (одит 2026-10-22): незатворен
+# `<invoke name="RUN_CMD">…pytest -q` стигаше до `</invoke>` на СЛЕДВАЩИЯ
+# READ_FILE — той не тръгваше, а XML-ът му отиваше в shell командата
+# („Syntax error: newline unexpected“). Незатвореният остава текст.
+_XML_VALUE = r"(?:(?!<invoke).)*?"
 _XML_SIMPLE_RE = re.compile(
     r'<invoke name="(?P<tool>' + _XML_TOOLS + r')">\s*'
-    r'(?:<parameter name="\w+">)?(?P<arg>.*?)\s*(?:</parameter>\s*)?</invoke>', re.DOTALL)
+    r'(?:<parameter name="\w+">)?(?P<arg>' + _XML_VALUE + r')\s*(?:</parameter>\s*)?</invoke>',
+    re.DOTALL)
 _XML_TAIL_RE = re.compile(r"\s*</parameter>\s*</invoke>\s*\]")
 _XML_WRAPPER_RE = re.compile(r"</?function_calls>\s*")
 
@@ -1665,7 +1675,8 @@ _XML_WRAPPER_RE = re.compile(r"</?function_calls>\s*")
 # формата с един аргумент горе не го хваща и редакцията не се изпълняваше).
 _XML_FULL_INVOKE_RE = re.compile(
     r'<invoke name="(?P<tool>' + _XML_TOOLS + r')">'
-    r'(?P<params>(?:\s*<parameter name="[\w-]+">.*?</parameter>)+)\s*</invoke>', re.DOTALL)
+    r'(?P<params>(?:\s*<parameter name="[\w-]+">' + _XML_VALUE + r'</parameter>)+)\s*</invoke>',
+    re.DOTALL)
 _XML_PARAM_RE = re.compile(r'<parameter name="(?P<key>[\w-]+)">(?P<value>.*?)</parameter>', re.DOTALL)
 _XML_ARG_ALIASES = {"file_path": "path", "filepath": "path", "filename": "path",
                     "old_string": "old", "old_str": "old", "new_string": "new", "new_str": "new",
@@ -1677,7 +1688,26 @@ _XML_MAIN_ARG = {"READ_FILE": "path", "LIST_DIR": "path", "REPO_MAP": "path", "G
                  "EXPLORE": "question", "TODO_WRITE": "todos", "BG_OUTPUT": "id", "BG_KILL": "id"}
 
 
-def _xml_full_invoke(m: re.Match) -> str:
+# Стойност, която скобовият регекс не би върнал цяла (одит 2026-10-22):
+# XML-ът се превръщаше в `[RUN_CMD: стойност]` и се парсваше пак, а той спира
+# на първата несдвоена `]` — `echo "a]b"` тръгваше като `echo "a`, а
+# `grep -c "[" a.txt` изобщо не тръгваше. Такава стойност отива в `slots`, а
+# тагът носи само номера ѝ; parse_and_execute_tools я взима оттам дословно.
+_XML_SLOT_RE = re.compile(r"\x00(\d+)\x00")
+
+
+def _xml_tag(tool: str, value: str, slots: list[str] | None) -> str:
+    tag = f"[{tool}: {value}]"
+    if slots is None:
+        return tag
+    m = _SIMPLE_RE.fullmatch(tag)
+    if m and m.group("arg") == value.lstrip():
+        return tag
+    slots.append(value)
+    return f"[{tool}: \x00{len(slots) - 1}\x00]"
+
+
+def _xml_full_invoke(m: re.Match, slots: list[str] | None = None) -> str:
     tool = m.group("tool")
     args: dict[str, str] = {}
     for p in _XML_PARAM_RE.finditer(m.group("params")):
@@ -1694,7 +1724,7 @@ def _xml_full_invoke(m: re.Match) -> str:
         return m.group(0)        # непознат вид — остава текст и получава подканата за синтаксис
     if tool == "RUN_CMD" and str(args.get("background", "")).lower() in ("true", "1", "yes"):
         tool = "RUN_BG"
-    return f"[{tool}: {main.strip()}]"
+    return _xml_tag(tool, main.strip(), slots)
 
 
 # Трета форма от същия bench_fix (3 от 50 отговора): `<tool_call>READ_FILE
@@ -1718,15 +1748,18 @@ def _tool_call_as_invoke(m: re.Match) -> str:
 _END_CMD = "[END_CMD]"
 
 
-def _normalize_xml_tool_calls(text: str) -> str:
-    """XML формата на Claude за нашите инструменти → нашите тагове."""
+def _normalize_xml_tool_calls(text: str, slots: list[str] | None = None) -> str:
+    """XML формата на Claude за нашите инструменти → нашите тагове.
+
+    С `slots` (само от parse_and_execute_tools) стойност, която скобите не
+    биха върнали цяла, се пази там — виж _xml_tag."""
     if _END_CMD in text and ("[RUN_CMD:" in text or "[RUN_BG:" in text):
         text = text.replace(_END_CMD, "]")
     if not any(mark in text for mark in ("<invoke", "</parameter>", "</invoke>", "<tool_call>")):
         return text
     text = _XML_WRAPPER_RE.sub("", text)
     text = _XML_TOOL_CALL_RE.sub(_tool_call_as_invoke, text)
-    text = _XML_FULL_INVOKE_RE.sub(_xml_full_invoke, text)
+    text = _XML_FULL_INVOKE_RE.sub(partial(_xml_full_invoke, slots=slots), text)
     text = _XML_BLOCK_OPEN_RE.sub(lambda m: f"[{m.group('tool')}: {m.group('path')}]\n", text)
     text = _XML_BLOCK_CLOSE_RE.sub("\n", text)
     text = _XML_TAIL_RE.sub("]", text)
@@ -1736,9 +1769,65 @@ def _normalize_xml_tool_calls(text: str) -> str:
         tag = f"[{m.group('tool')}: {m.group('arg')}]"
         # Същата команда и като XML, и като таг („<invoke name="RUN_CMD">pwd</invoke>
         # [RUN_CMD: pwd]“) — веднъж, не два пъти (команда със страничен ефект).
-        return "" if tag in original else tag
+        return "" if tag in original else _xml_tag(m.group("tool"), m.group("arg"), slots)
 
     return _XML_SIMPLE_RE.sub(simple, text)
+
+
+# Таг в `код` или в ``` ограда е пример или цитат, не извикване (одит
+# 2026-10-22). Измерено преди: „Genesis би изпълнил `[RUN_CMD: git stash]` …
+# Не пускам нищо“ скриваше незакомитнатата работа на оператора; финалното
+# резюме „командата `[RUN_CMD: echo ред >> log.txt]` добави ред“ я пускаше
+# втори път (два реда в log.txt); WRITE_FILE пример в ``` създаваше файла.
+# Промптът и без това казва „never inside ```code``` fences“. Ако моделът
+# все пак е обвил истинско извикване, нищо не тръгва, а подканата за
+# синтаксис му казва защо (looks_like_attempted_tool_tag, malformed_tag_note).
+_BACKTICKS_RE = re.compile(r"`+")
+_FENCE_CLOSE_RE = re.compile(r"^[ \t]*(`{3,})[ \t]*\r?$", re.MULTILINE)   # и CRLF отговор
+
+
+def _quoted_spans(text: str, tags: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Участъците (start, end) на затворените ``` огради и на `кода` в ред.
+
+    `tags` са (start, end) на кандидат-таговете: тялото или аргументът на таг,
+    започнал ИЗВЪН такъв участък, е съдържание — ``` в README от WRITE_FILE или
+    `date` в RUN_CMD не отварят нищо, иначе нечетен брой би скрил истинските
+    тагове след тях. Незатворена ограда не се брои (както незатворен `)."""
+    spans: list[tuple[int, int]] = []
+    starts = sorted(tags, key=lambda t: (t[0], -t[1]))
+    ti, pos, n = 0, 0, len(text)
+    while pos < n:
+        while ti < len(starts) and starts[ti][0] < pos:
+            ti += 1
+        b = text.find("`", pos)
+        if ti < len(starts) and (b < 0 or starts[ti][0] < b):
+            pos = max(pos + 1, starts[ti][1])     # таг извън код: прескачаме го цял
+            continue
+        if b < 0:
+            break
+        run = _BACKTICKS_RE.match(text, b)
+        width = len(run.group(0)) if run else 1
+        line_start = text.rfind("\n", 0, b) + 1
+        line_end = text.find("\n", b)
+        line_end = n if line_end < 0 else line_end
+        # Ограда: ``` в началото на ред и без ` след тях (```js``` е код в ред).
+        if (width >= 3 and not text[line_start:b].strip(" \t")
+                and "`" not in text[b + width:line_end]):
+            fence = next((c for c in _FENCE_CLOSE_RE.finditer(text, line_end)
+                          if len(c.group(1)) >= width), None)
+            if fence:
+                spans.append((line_start, fence.end()))
+                pos = fence.end()
+                continue
+        else:
+            close = next((c for c in _BACKTICKS_RE.finditer(text, b + width, line_end)
+                          if len(c.group(0)) == width), None)
+            if close:
+                spans.append((b, close.end()))
+                pos = close.end()
+                continue
+        pos = b + width
+    return spans
 
 
 def parse_and_execute_tools(response_text: str) -> list[str]:
@@ -1758,7 +1847,8 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
     """
     if not response_text:
         return []
-    response_text = _normalize_xml_tool_calls(response_text)
+    slots: list[str] = []
+    response_text = _normalize_xml_tool_calls(response_text, slots)
 
     # (позиция_в_текста, име, действие) — НИЩО не се изпълнява, докато не са
     # събрани всички тагове и не е решено влагането. После се изпълняват в
@@ -1785,6 +1875,15 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
     def _inside_block(pos: int) -> bool:
         return any(s <= pos < e for s, e in consumed_spans)
 
+    # Примерите в `код` и ``` огради — виж _quoted_spans.
+    quoted = _quoted_spans(response_text, [(c[0], c[1]) for c in block_candidates] + [
+        (m.start(), m.end()) for rx in (_BARE_USE_SKILL_RE, _SIMPLE_RE, _BROWSER_READ_RE,
+                                        _REPO_MAP_RE, _TASK_LIST_RE)
+        for m in rx.finditer(response_text)])
+
+    def _quoted(pos: int) -> bool:
+        return any(s <= pos < e for s, e in quoted)
+
     def _edit_action(m: re.Match) -> str:
         body = m.group("body")
         if _EDIT_SEPARATOR not in body:
@@ -1795,8 +1894,8 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
                           _strip_one_newline(old_part), _strip_one_newline(new_part))
 
     for start, end, kind, m in block_candidates:
-        if _inside_block(start):
-            continue  # вложен в вече приет блок → това е текст, не тул
+        if _inside_block(start) or _quoted(start):
+            continue  # вложен в вече приет блок или пример в код → текст, не тул
         consumed_spans.append((start, end))
         if kind == "WRITE_FILE":
             # Новият ред веднага след тага е синтаксис, не съдържание
@@ -1837,18 +1936,22 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
         return out
 
     for m in _BARE_USE_SKILL_RE.finditer(response_text):
-        if _inside_block(m.start()):
+        if _inside_block(m.start()) or _quoted(m.start()):
             continue
         consumed_spans.append((m.start(), m.end()))
         actions.append((m.start(), "USE_SKILL", partial(_bare_skill_action, m)))
 
     # ── 2. Едноредови тулове — прескачаме тези вътре в блоков таг ───────────
     for m in _SIMPLE_RE.finditer(response_text):
-        if _inside_block(m.start()):
+        if _inside_block(m.start()) or _quoted(m.start()):
             continue
         tool = m.group("tool")
+        arg = m.group("arg")
+        slot = _XML_SLOT_RE.fullmatch(arg.strip())
+        if slot and int(slot.group(1)) < len(slots):
+            arg = slots[int(slot.group(1))]     # дословната XML стойност (виж _xml_tag)
         actions.append((m.start(), tool, partial(
-            _safe_tool, tool, _SIMPLE_DISPATCH[tool], m.group("arg"))))
+            _safe_tool, tool, _SIMPLE_DISPATCH[tool], arg)))
 
     # 3. BROWSER_READ — без аргумент. 3b. REPO_MAP без аргумент — картира
     # текущия workspace. 4. TASK_LIST без аргумент — показва отворените нишки.
@@ -1858,7 +1961,7 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
         ("TASK_LIST", _TASK_LIST_RE, partial(_safe_tool, "TASK_LIST", _tool_task_list, "open")))
     for name, rx, thunk in no_arg:
         for m in rx.finditer(response_text):
-            if _inside_block(m.start()):
+            if _inside_block(m.start()) or _quoted(m.start()):
                 continue
             actions.append((m.start(), name, thunk))
 
@@ -1889,7 +1992,23 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
 # [END_WRITE] и т.н.) — вторият случай иначе тихо се третираше като финален
 # отговор (виж git история: "Fix local model narrating tool use without ever
 # executing" / "Fix Genesis handing work back instead of doing it").
-_ATTEMPTED_TAG_RE = re.compile(r"\[[A-Z][A-Z_]{2,30}(?::|\])")
+_ATTEMPTED_TAG_RE = re.compile(r"\[(?P<name>[A-Z][A-Z_]{2,30})(?P<end>:|\])")
+# Не всяка дума в скоби е опит (одит 2026-10-22): верен финален отговор с
+# `[ERROR]` / `[INFO]` (нива в лог), `[DONE]` или `os.environ[PATH]` получаваше
+# „не намерих валиден tool таг“ — още едно платено обръщение и втори, различен
+# отговор пред оператора (измерено: 2 обаждания вместо 1). Броят се: нашите
+# имена (и в `код` — там не се изпълняват), близки до тях (READFILE, RUN_CMDS)
+# и измислени с аргумент ([INSTALL: requests]) извън `код`.
+_KNOWN_TAG_NAMES = frozenset(_SIMPLE_DISPATCH) | {
+    "WRITE_FILE", "EDIT_FILE", "USE_SKILL", "BROWSER_READ", "REPO_MAP", "TASK_LIST",
+    "END_WRITE", "END_EDIT", "END_USE_SKILL"}
+
+
+def _near_known_tag(name: str) -> bool:
+    # До 1 поправка за кратките имена: с 2 `[API]` беше „близко“ до MCP.
+    def limit(k: str) -> int:
+        return 1 if min(len(name), len(k)) < 7 else 2
+    return any(_edit_distance(name, k, limit(k)) <= limit(k) for k in _KNOWN_TAG_NAMES)
 
 
 def looks_like_attempted_tool_tag(response_text: str) -> bool:
@@ -1899,8 +2018,40 @@ def looks_like_attempted_tool_tag(response_text: str) -> bool:
         return False
     # `<invoke name="…">`, останал след _normalize_xml_tool_calls, също е опит
     # за инструмент — иначе ходът свършваше тихо (2026-10-12, виж горе).
-    return bool(_ATTEMPTED_TAG_RE.search(response_text) or "<invoke name=" in response_text
-                or "<tool_call>" in response_text)
+    if "<invoke name=" in response_text or "<tool_call>" in response_text:
+        return True
+    quoted = _quoted_spans(response_text, [])
+    for m in _ATTEMPTED_TAG_RE.finditer(response_text):
+        name = m.group("name")
+        if name in _KNOWN_TAG_NAMES:
+            return True
+        if any(s <= m.start() < e for s, e in quoted):
+            continue
+        if m.group("end") == ":" or _near_known_tag(name):
+            return True
+    return False
+
+
+def malformed_tag_note(response_text: str) -> str:
+    """Системната бележка към модела, когато looks_like_attempted_tool_tag е True.
+
+    Незатворен WRITE_FILE/EDIT_FILE (одит 2026-10-22) почти винаги е отрязан на
+    изходния таван: „грешен синтаксис“ караше модела да пише същия голям файл
+    пак и ходът свършваше без файл. Подсказката е като при native пътя
+    (dispatch_tool_call, „Аргументите са отрязани“)."""
+    block = open_block_tag(response_text or "")
+    if block:
+        end = "[END_WRITE]" if block == "WRITE_FILE" else "[END_EDIT]"
+        return (f"[Система]: Блокът [{block}: …] няма затварящ {end} — нищо не е "
+                "изпълнено. Най-често отговорът е отрязан на изходния таван на модела "
+                "(твърде голям файл). Раздели записа: по-малки файлове или WRITE_FILE с "
+                "началото и EDIT_FILE за останалото — не пиши същия голям блок пак.")
+    return ("[Система]: В последния отговор не намерих валиден tool таг, но той изглежда "
+            "като опит за такъв. Ако си искал да викнеш инструмент — използвай точния "
+            "синтаксис [TAG: аргумент] (или [WRITE_FILE: път]...[END_WRITE] за файлове) "
+            "без ` или ``` около него: таг в `код` или в ``` ограда е само текст и не се "
+            "изпълнява. Ако вече си приключил — дай кратък финален отговор БЕЗ скоби във "
+            "формат на таг.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
