@@ -845,11 +845,45 @@ def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False
     return f"[EDIT_FILE: {path}] {res.detail}\n{diff}{ruff_note}{web_note(path)}{redirect}"
 
 
+_SEARCH_CAP = 60    # SEARCH_CODE показва толкова; repo_map._DEFAULT_MAX_RESULTS
+_GLOB_CAP = 200
+
+
+def _project_top(root: Path) -> Path | None:
+    """Workspace-ът, ако `root` е под него — дълбочината за пропуснатите
+    папки се мери от корена на проекта (`src/env/` е код, `env/` в корена — venv)."""
+    try:
+        return _WORKSPACE if root.absolute().is_relative_to(_WORKSPACE.absolute()) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _skipped_note(root: Path, top: Path | None) -> str:
+    """„ (не търсих в: node_modules/, build/ — …)“ или празно. Одит 2026-10-22:
+    празният отговор казваше „низът наистина го няма“ и когато търсенето
+    изобщо не е влизало там, където е."""
+    from genesis_agent.repo_map import skipped_here
+    names = skipped_here(root, top) if root.is_dir() else []
+    if not names:
+        return ""
+    return (f" (не търсих в: {', '.join(names[:8])} — зависимости/артефакти; "
+            "ако трябва там, подай папката като path)")
+
+
 def _tool_search_code(arg: str, path: str = "", glob: str = "") -> str:
     pattern = arg.strip()
     if not pattern:
         return "[SEARCH_CODE] Празен шаблон."
     from genesis_agent.repo_map import search_code
+    # Абсолютен glob или с `..` (ревю 2026-10-22): rg отговаряше „наистина го
+    # няма“, Python пътят — „Грешка: Non-relative patterns are unsupported“, а
+    # `[SEARCH_CODE: x | /път/*.py]` намираше. Както него: буквалната част е
+    # папката (и минава през пазача по-долу, като при GLOB), името — филтърът.
+    if glob and (Path(glob).is_absolute() or ".." in Path(glob).parts):
+        parts = (Path(path) / glob).parts if path else Path(glob).parts
+        cut = next((i for i, p in enumerate(parts) if any(ch in p for ch in "*?[{")),
+                   len(parts) - 1)
+        path, glob = str(Path(*parts[:cut])) if cut else "", parts[-1]
     # Шаблон, подаден като път (`site/**/*.html`): 2026-09-28 моделът получи
     # два пъти „няма такъв път“ и загуби два рунда. Частта до първия `*`/`?`
     # е папката, останалото — филтърът по име.
@@ -861,10 +895,16 @@ def _tool_search_code(arg: str, path: str = "", glob: str = "") -> str:
     refusal = _sensitive_root_refusal("SEARCH_CODE", root)
     if refusal:
         return refusal
+    cap = _SEARCH_CAP
+    top = _project_top(root)
     try:
-        hits = search_code(pattern, root, glob or None)
+        # Едно повече от показаното: така личи, че има още (одит 2026-10-22 —
+        # „60 съвпадения“ изглеждаше като всичко, а бяха 80).
+        hits = search_code(pattern, root, glob or None, max_results=cap + 1, top=top)
     except (ValueError, FileNotFoundError) as e:
         return f"[SEARCH_CODE: {pattern}] {e}"
+    more = len(hits) > cap
+    hits = hits[:cap]
     # Отделен от корена въпрос: единично чувствително попадение в иначе
     # нормална папка (`credentials.json` до кода). Решението е ЕДНО за всички
     # такива попадения — не по едно на ред — и е същото, което пази READ_FILE.
@@ -886,6 +926,10 @@ def _tool_search_code(arg: str, path: str = "", glob: str = "") -> str:
         return (f"[SEARCH_CODE: {pattern}] {len(hidden)} съвпадения, всички в "
                 "чувствителни файлове (ключове/тайни) — съдържанието им не се показва.")
     if not hits:
+        skipped = _skipped_note(root, top)
+        if skipped:
+            return (f"[SEARCH_CODE: {pattern}] Няма съвпадения в {root}{skipped}. "
+                    "В претърсеното низът наистина го няма.")
         return (f"[SEARCH_CODE: {pattern}] Няма съвпадения в {root}. "
                 "Това означава, че низът наистина го няма — не предполагай, че е скрит.")
     lines = [f"[SEARCH_CODE: {pattern}] {len(hits)} съвпадения в {root}"]
@@ -893,6 +937,8 @@ def _tool_search_code(arg: str, path: str = "", glob: str = "") -> str:
     if hidden:
         lines.append(f"  (+{len(hidden)} в чувствителни файлове — съдържанието "
                      "им не се показва)")
+    if more:
+        lines.append(f"  (показани първите {cap} — има още; стесни шаблона или подай path/glob)")
     _log_episode(f"SEARCH_CODE {pattern}", f"{len(hits)} съвпадения", ["tool", "search_code"])
     return "\n".join(lines)
 
@@ -905,21 +951,47 @@ def _tool_glob(arg: str) -> str:
     pattern, path = parts[0], (parts[1] if len(parts) > 1 else "")
     if not pattern:
         return "[GLOB] Празен шаблон."
-    from genesis_agent.repo_map import find_files
-    root = _resolve(path) if path else _WORKSPACE
+    from genesis_agent.repo_map import _GLOB_SCAN_CAP, find_files_counted, split_glob
+    given = _resolve(path) if path else _WORKSPACE
+    try:
+        # Абсолютен шаблон или с `..` носи собствен корен — пазачът гледа ТОЙ
+        # (одит 2026-10-22: `GLOB ../.ssh/*` изреждаше имената на ключовете).
+        root = split_glob(pattern, given)[0]
+    except ValueError as e:
+        return f"[GLOB: {pattern}] {e}"
     refusal = _sensitive_root_refusal("GLOB", root)
     if refusal:
         return refusal
+    top = _project_top(root)
     try:
-        hits = find_files(pattern, root)
+        hits, total = find_files_counted(pattern, given, _GLOB_CAP, top=top)
     except (ValueError, FileNotFoundError) as e:
         return f"[GLOB: {pattern}] {e}"
+    # Имената в чувствителна папка — същото решение като `LIST_DIR ~/.ssh`,
+    # какъвто и да е пътят дотам (`GLOB .ssh/* | ~`). Скритите се броят на глас.
+    sensitive = [h for h in hits if sandbox.sensitive_path_reason((root / h).parent.as_posix() + "/")]
+    hidden = 0
+    if sensitive:
+        reasons = sorted({sandbox.sensitive_path_reason((root / h).parent.as_posix() + "/") or ""
+                          for h in sensitive})
+        verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM, reasons)
+        allowed, reason = sandbox._decide(f"GLOB {pattern} в {root}", verdict, sandbox.get_policy())
+        if not allowed:
+            hidden = len(sensitive)
+            hits = [h for h in hits if h not in sensitive]
+            if not hits:
+                return f"[GLOB] {reason}"
     if not hits:
         empty = root.is_dir() and not any(root.iterdir())
-        return (f"[GLOB: {pattern}] Няма файлове по този шаблон в {root}."
+        return (f"[GLOB: {pattern}] Няма файлове по този шаблон в {root}{_skipped_note(root, top)}."
                 + (" Папката е празна — създай нужните файлове с WRITE_FILE." if empty else ""))
     _log_episode(f"GLOB {pattern}", f"{len(hits)} файла", ["tool", "glob"])
     lines = [f"[GLOB: {pattern}] {len(hits)} файла в {root}"] + [f"  {h}" for h in hits]
+    if hidden:
+        lines.append(f"  (+{hidden} в чувствителни папки — имената им не се показват)")
+    if total > len(hits) + hidden:
+        more = f"поне {total}" if total >= _GLOB_SCAN_CAP else str(total)
+        lines.append(f"  (показани {len(hits)} от {more} — най-новите по mtime; стесни шаблона)")
     return "\n".join(lines)
 
 
