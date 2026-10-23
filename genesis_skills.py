@@ -1588,6 +1588,15 @@ def _nests(text: str, start: int, end: int, closer: str) -> bool:
 
 
 def _runs_tool(text: str) -> bool:
+    # Таг в ``` или `код` не се изпълнява (_quoted_spans), затова не прави края
+    # спорен — README с пример `[RUN_CMD: pytest]` в ограда се отказваше (ревю на
+    # сливането 2026-10-22).
+    cut = 0
+    parts = []
+    for s, e in _quoted_spans(text, []):
+        parts.append(text[cut:s])
+        cut = e
+    text = "".join(parts) + text[cut:]
     return bool(_SIMPLE_RE.search(text) or _BLOCK_OPEN_RE.search(text)
                 or _BROWSER_READ_RE.search(text) or _REPO_MAP_RE.search(text)
                 or _TASK_LIST_RE.search(text))
@@ -1674,6 +1683,15 @@ def _find_blocks(text: str, open_re: re.Pattern, closer: str,
                 break                     # незатворен — и след него няма блок
         elif split is not None:
             closes = [split, *closes]
+        if len(closes) > 1:
+            # Затварящ таг в ограда/`код` в тялото е пример, не край (ревю на
+            # сливането 2026-10-22): `[END_WRITE]` в ``` СЛЕД истинския край
+            # ставаше краят и файлът получаваше опашката на отговора. Ако всички
+            # са в код — както преди.
+            fenced = [(body_start + a, body_start + b)
+                      for a, b in _quoted_spans(text[body_start:], [])]
+            kept = [c for c in closes if not any(a <= tokens[c][0] < b for a, b in fenced)]
+            closes = kept or closes
         ambiguous = len(closes) > 1 and any(
             _runs_tool(text[tokens[a][1]:tokens[b][0]]) for a, b in pairwise(closes))
         end_tok = closes[-1]

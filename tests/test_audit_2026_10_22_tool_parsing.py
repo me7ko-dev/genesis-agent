@@ -325,3 +325,32 @@ def test_a_closed_block_with_a_tag_literal_is_whole_at_the_cap(monkeypatch, text
     b = brain.Brain.__new__(brain.Brain)
     out, _calls = b._http("https://x/v1", "k", "m", [{"role": "user", "content": "x"}], 10)
     assert out == text.strip()
+
+
+def test_a_fenced_closer_after_the_real_end_is_an_example(ws, monkeypatch):
+    """Ревю на сливането 2026-10-22: `[END_WRITE]` в ``` след истинския край
+    ставаше краят (файлът получаваше опашката на отговора), а с RUN_CMD между
+    тях блокът се отказваше като спорен."""
+    ran: list = []
+    monkeypatch.setitem(gs._SIMPLE_DISPATCH, "RUN_CMD", lambda arg: ran.append(arg) or "ok")
+    gs.parse_and_execute_tools(
+        "[WRITE_FILE: a.txt]\nA\n[END_WRITE]\n[RUN_CMD: echo x]\n"
+        "Затвори блока така:\n```\n[END_WRITE]\n```\n")
+    assert (ws / "a.txt").read_text(encoding="utf-8") == "A\n" and ran == ["echo x"]
+    gs.parse_and_execute_tools("[WRITE_FILE: b.txt]\nB\n[END_WRITE]\nПример:\n```\n[END_WRITE]\n```\n")
+    assert (ws / "b.txt").read_text(encoding="utf-8") == "B\n"
+
+
+def test_a_fenced_tool_example_does_not_make_a_readme_ambiguous(ws, monkeypatch):
+    ran: list = []
+    monkeypatch.setitem(gs._SIMPLE_DISPATCH, "RUN_CMD", lambda arg: ran.append(arg) or "ok")
+    body = "End blocks with:\n```\n[END_WRITE]\n```\nRun:\n```\n[RUN_CMD: pytest]\n```\n"
+    out = gs.parse_and_execute_tools(f"[WRITE_FILE: README.md]\n{body}[END_WRITE]\n")
+    assert "✓" in out[0] and ran == []
+    assert (ws / "README.md").read_text(encoding="utf-8") == body
+
+
+def test_a_closed_write_with_an_odd_fence_is_whole():
+    """FENCE = "```" в затворен запис не е незатворена ограда."""
+    assert not brain._is_truncated('[WRITE_FILE: f.py]\nFENCE = "```"\nprint(FENCE)\n[END_WRITE]')
+    assert brain._is_truncated("```python\nx = [")

@@ -546,7 +546,13 @@ def _is_truncated(text: str) -> bool:
     (call_openai_compatible, без верига) щеше да го превърне в грешка, а цикълът
     вече казва на модела „записът е отрязан, раздели го“ (сливане 2026-10-22).
     """
-    return text.count("```") % 2 == 1
+    return _CLOSED_BLOCK_RE.sub("", text).count("```") % 2 == 1
+
+
+# Затворен WRITE_FILE/EDIT_FILE: оградите в тялото му са съдържание (`FENCE = "```"`
+# в .py), не незатворен код — цял запис на тавана минаваше за отрязан (ревю на
+# сливането 2026-10-22). Първият край, като tool_schemas.open_block_tag.
+_CLOSED_BLOCK_RE = re.compile(r"\[(WRITE|EDIT)_FILE:.*?\[END_\1\]", re.DOTALL)
 
 
 # Текстовите тагове с тяло до затварящ маркер (виж genesis_skills._WRITE_RE/_EDIT_RE).
