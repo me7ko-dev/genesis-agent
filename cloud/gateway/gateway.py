@@ -157,22 +157,14 @@ class Ledger:
         with self.lock:
             return self.jobs.get(job, Usage()).total_tokens
 
-    def reserve(self, job: str, budget: int, amount: int) -> bool:
-        """Запазва `amount` токена, ако разходът + запазеното още е под тавана."""
-        with self.lock:
-            spent = self.jobs.get(job, Usage()).total_tokens + self.reserved.get(job, 0)
-            if spent >= budget:
-                return False
-            self.reserved[job] = self.reserved.get(job, 0) + amount
-            return True
-
     def reserve_upto(self, job: str, budget: int, prompt: int, want: int) -> int:
         """Запазва min(`want`, остатъка) с една стъпка; 0 ако промптът не се събира.
 
         Одит 2026-10-22: left() и reserve() бяха две стъпки — две паралелни
         заявки четяха един и същ остатък, и двете получаваха таван почти до него
         и и двете се запазваха (reserve() гледа само дали вече е изчерпано):
-        бюджет 20 000 → 38 020 токена; на живо 8 нишки — 1.43× на TASK_BUDGET."""
+        бюджет 20 000 → 38 020 токена; на живо 8 нишки — 1.43× на TASK_BUDGET.
+        Двете са махнати (ревю 2026-10-22), за да не се върне някой към тях."""
         with self.lock:
             left = budget - self.jobs.get(job, Usage()).total_tokens - self.reserved.get(job, 0)
             if prompt >= left:
@@ -180,11 +172,6 @@ class Ledger:
             amount = min(max(want, prompt + 1), left)
             self.reserved[job] = self.reserved.get(job, 0) + amount
             return amount
-
-    def left(self, job: str, budget: int) -> int:
-        """Колко още може да се похарчи (без вече запазеното от други заявки)."""
-        with self.lock:
-            return budget - self.jobs.get(job, Usage()).total_tokens - self.reserved.get(job, 0)
 
     def release(self, job: str, amount: int) -> None:
         with self.lock:
