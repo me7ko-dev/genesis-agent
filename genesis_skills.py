@@ -27,6 +27,7 @@ CONFIRM/BLOCKED бариерата) и се записва в genesis_agent.memo
 
 from __future__ import annotations
 
+import bisect
 import json
 import logging
 import operator
@@ -2306,7 +2307,18 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
                                   ("EDIT_FILE", _EDIT_OPEN_RE, _END_EDIT)):
         openers = list(open_re.finditer(response_text))
         if len(openers) > _MAX_OVERLAP_OPENERS:
-            for blk in _find_blocks(response_text, open_re, closer):
+            # Отварящ таг в код се прескача и тук, иначе пример поглъща истинския
+            # блок след него (CI 2026-10-23). Участъците — без таговете, по-грубо
+            # от _quoted_spans с кандидатите, но само за такъв дълъг отговор.
+            pre = _quoted_spans(response_text, [])
+            starts = [a for a, _ in pre]
+
+            def _in_code(at: int, pre: list[tuple[int, int]] = pre,
+                         starts: list[int] = starts) -> bool:
+                k = bisect.bisect_right(starts, at) - 1
+                return k >= 0 and at < pre[k][1]
+
+            for blk in _find_blocks(response_text, open_re, closer, _in_code):
                 block_candidates.append((blk.start, blk.end, kind, blk))
             continue
         for opener in openers:

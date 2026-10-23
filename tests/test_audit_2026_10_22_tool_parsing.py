@@ -297,13 +297,20 @@ def test_a_text_edit_written_with_crlf_applies_to_an_lf_file(ws):
 
 # ── ревю на сливането (2026-10-22) ────────────────────────────────────────────
 
-def test_many_block_tags_in_one_reply_stay_fast(ws):
-    """Блок от всеки отварящ таг беше кубично: 1000 тага — 162 s (мерено)."""
+def test_many_block_tags_in_one_reply_stay_fast(ws, monkeypatch):
+    """Блок от всеки отварящ таг беше кубично: 1000 тага — 162 s (мерено).
+    Мери се само разборът: 1000 истински записа на windows-latest — 61 s (CI
+    2026-10-23), без да е виновен парсерът."""
     import time
+    written: list = []
+    monkeypatch.setattr(gs, "_tool_write_file", lambda path, content, *a, **kw:
+                        written.append(path) or "✓")
     t0 = time.monotonic()
-    gs.parse_and_execute_tools("[WRITE_FILE: x] a [END_WRITE] b\n" * 1000)
+    gs.parse_and_execute_tools("[WRITE_FILE: x] a [END_WRITE] b\n" * 1000)   # един проход
+    gs.parse_and_execute_tools("[WRITE_FILE: x] a [END_WRITE] b\n" * 200)    # с припокриване
     gs.parse_and_execute_tools("`[WRITE_FILE: x]` " * 1000 + "\n[WRITE_FILE: y.txt]\nY\n[END_WRITE]")
     assert time.monotonic() - t0 < 20
+    assert written[-1].strip() == "y.txt"
 
 
 @pytest.mark.parametrize("text", [
