@@ -22,6 +22,17 @@ test('a resource from model output loads only from data: or blob:', () => {
   assert.equal(resourceAllowed('img', 'alt', '//evil'), true);
 });
 
+test('an SVG url() attribute keeps only #id inside the same SVG', () => {
+  for (const attr of ['filter', 'clip-path', 'mask', 'fill', 'marker-start']) {
+    assert.equal(resourceAllowed('rect', attr, 'url(//evil/share/f.svg#f)'), false, attr);
+    assert.equal(resourceAllowed('rect', attr, 'URL( "\\\\evil\\share\\f.svg#f" )'), false, attr);
+    assert.equal(resourceAllowed('rect', attr, '\\75 rl(//evil/f.svg#f)'), false, attr);
+    assert.equal(resourceAllowed('rect', attr, 'url(#grad)'), true, attr);
+    assert.equal(resourceAllowed('rect', attr, "url('#grad') red"), true, attr);
+  }
+  assert.equal(resourceAllowed('rect', 'fill', 'red'), true);
+});
+
 test('style that can fetch an image is dropped', () => {
   assert.equal(styleAllowed('color: red'), true);
   assert.equal(styleAllowed('background: URL( //evil/x.png )'), false);

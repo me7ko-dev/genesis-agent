@@ -76,12 +76,19 @@ const bad = [
   ['table', 'background', '//evil.example/t.png'],
   ['image', 'href', '//evil.example/i.png'],
   ['feimage', 'xlink:href', '//evil.example/i.png'],
+  ['rect', 'filter', 'url(//evil.example/share/f.svg#f)'],
+  ['rect', 'clip-path', 'url("//evil.example/share/c.svg#c")'],
+  ['rect', 'mask', 'url(//evil.example/share/m.svg#m)'],
+  ['rect', 'fill', 'url(//evil.example/share/p.svg#p) red'],
+  ['path', 'marker-start', 'url(//evil.example/share/k.svg#k)'],
 ];
 const good = [
   ['img', 'src', 'data:image/png;base64,iVBORw0KGgo='],
   ['audio', 'src', 'blob:file:///0f1e2d3c'],
   ['a', 'href', 'https://example.com/docs'],
   ['img', 'alt', '//не е адрес'],
+  ['rect', 'fill', 'url(#grad)'],
+  ['rect', 'fill', 'red'],
 ];
 console.log(JSON.stringify({{
   bad: bad.filter(([t, n, v]) => resourceAllowed(t, n, v)),

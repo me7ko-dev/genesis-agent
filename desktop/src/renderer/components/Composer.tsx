@@ -313,7 +313,9 @@ export function Composer({ busy, disabled, placeholder, onSend, onStop, onComman
   }
 
   const recording = mic.phase === 'recording';
-  const hint = lengthHint(text);
+  // Сървърът брои изпратеното — след trim() в submit (ревю 2026-10-22).
+  const sent = text.trim();
+  const hint = lengthHint(sent);
   const full = attached.length + reading >= limits.images;
 
   return (
@@ -408,7 +410,7 @@ export function Composer({ busy, disabled, placeholder, onSend, onStop, onComman
           <kbd>Enter</kbd> изпраща · <kbd>Shift</kbd>+<kbd>Enter</kbd> нов ред · <kbd>/</kbd> команди
           {imagesOn && <> · <kbd>Ctrl</kbd>+<kbd>V</kbd> снимка</>}
         </span>
-        {hint && <span className={`length-hint ${messageLength(text) > MAX_MESSAGE ? 'over' : ''}`}>{hint}</span>}
+        {hint && <span className={`length-hint ${messageLength(sent) > MAX_MESSAGE ? 'over' : ''}`}>{hint}</span>}
         {voice && onSpeak && (
           <button className={`foot-toggle ${speak ? 'on' : ''}`} onClick={() => onSpeak(!speak)}
                   title="Всеки завършен отговор се чете на глас">

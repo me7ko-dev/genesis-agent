@@ -13,6 +13,23 @@
 /** Атрибути, по които браузърът тегли сам (без щракване). */
 const RESOURCE_ATTRS = new Set(['src', 'srcset', 'poster', 'background', 'xlink:href', 'href']);
 
+/**
+ * SVG атрибути с url(): DOMPurify ги пуска, а под Electron
+ * `<rect filter="url(//evil.example/share/f.svg#f)">` (и clip-path, mask,
+ * fill, marker-start) минаваше санитайзера и стигаше до Chromium — спираше
+ * го само CSP-то (ревю 2026-10-22: CSP-BLOCKED img-src, 0 заявки; след
+ * това правило атрибутите изобщо не остават). Остава само url(#id) в SVG-то.
+ */
+const SVG_URL_ATTRS = new Set([
+  'filter', 'clip-path', 'mask', 'fill', 'stroke', 'marker-start', 'marker-mid', 'marker-end', 'cursor',
+]);
+
+function fragmentOnly(value: string): boolean {
+  // CSS екранирането (`\75 rl(`) работи и тук — атрибутите се четат като CSS.
+  if (value.includes('\\')) return false;
+  return !/url\s*\(\s*(?!['"]?\s*#)/i.test(value);
+}
+
 /** Само картинките и звукът на самия прозорец: data: и blob:. */
 function localOnly(value: string): boolean {
   // Chromium маха водещи интервали и контролни знаци преди да разбере адреса.
@@ -28,6 +45,7 @@ function localOnly(value: string): boolean {
  */
 export function resourceAllowed(tag: string, name: string, value: string): boolean {
   const attr = name.toLowerCase();
+  if (SVG_URL_ATTRS.has(attr)) return fragmentOnly(value);
   if (!RESOURCE_ATTRS.has(attr)) return true;
   if (attr === 'href' && tag.toLowerCase() === 'a') return true;
   if (attr === 'srcset') return false;
