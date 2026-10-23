@@ -17,10 +17,19 @@ STATUSES = ("pending", "in_progress", "completed")
 _MARK = {"pending": "☐", "in_progress": "▶", "completed": "☑"}
 _MAX_ITEMS = 50
 _MAX_TEXT = 300
-_LINE = re.compile(r"^\s*(?:[-*•]\s*)?(?:\[(?P<mark>[ xX✓~>\-])\]\s*)?(?P<text>.+?)\s*$")
-_SPLIT = re.compile(r";\s*(?=(?:[-*•]\s*)?\[[ xX✓~>\-]\])")
+# Отметка: `[x]` или глифът, с който render() рисува (☑/▶/☐, плюс ✅/✔). Номер
+# `1.`/`1)` е водещ знак само пред отметка — „3.5 версия“ си остава текст.
+# Одит 2026-10-22 (мерено): `1. [x] прочети` и ехо на нарисувания списък
+# („☑ прочети\n▶ поправи“) ставаха „0/3 готови“ с отметката в текста.
+_MARKS = r"(?:\[[ xX✓~>\-]\]|[☑✅✔▶☐])"
+_BULLET = rf"(?:[-*•]\s*|\d+[.)]\s*(?={_MARKS}))?"
+_LINE = re.compile(rf"^\s*{_BULLET}(?:\[(?P<mark>[ xX✓~>\-])\]\s*|(?P<glyph>[☑✅✔▶☐])\ufe0f?\s*)?"
+                   r"(?P<text>.+?)\s*$")
+_SPLIT = re.compile(rf";\s*(?={_BULLET}{_MARKS})")
 _FROM_MARK = {" ": "pending", "x": "completed", "X": "completed", "✓": "completed",
-              "~": "in_progress", ">": "in_progress", "-": "in_progress"}
+              "~": "in_progress", ">": "in_progress", "-": "in_progress",
+              "☑": "completed", "✅": "completed", "✔": "completed",
+              "▶": "in_progress", "☐": "pending"}
 
 _items: list[dict[str, str]] = []
 
@@ -69,8 +78,8 @@ def parse_text(arg: str) -> list[dict[str, str]] | None:
     for line in lines:
         m = _LINE.match(line)
         if m:
-            out.append({"content": m.group("text"),
-                        "status": _FROM_MARK.get(m.group("mark") or " ", "pending")})
+            mark = m.group("mark") or m.group("glyph") or " "
+            out.append({"content": m.group("text"), "status": _FROM_MARK.get(mark, "pending")})
     return out
 
 
@@ -91,7 +100,7 @@ def _item(raw: dict) -> tuple[str, Any]:
 
 _UNREAD = ("[TODO_WRITE] ❌ Не разпознах нито една задача — всяка е "
            '{"content": "…", "status": "pending|in_progress|completed"}. Списъкът е непроменен.')
-_CHECKBOX = re.compile(r"^\s*(?:[-*•]\s*)?\[[ xX✓~>\-]\]", re.MULTILINE)
+_CHECKBOX = re.compile(rf"^\s*{_BULLET}{_MARKS}", re.MULTILINE)
 
 
 def _is_list_text(arg: str) -> bool:
