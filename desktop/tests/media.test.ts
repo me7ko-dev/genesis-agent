@@ -15,8 +15,8 @@ import { GenesisClient, ProtocolError } from '../src/main/protocol.ts';
 import { allowPermission } from '../src/main/permissions.ts';
 import {
   base64Bytes, baseMime, checkImages, clock, DEFAULT_LIMITS, fitSize, imageErrorText, imageMimeOf, limitsFrom,
-  micErrorText, pastedName, recorderMime, replyToSpeak, sanitizeImages, speechText, takeImages, voiceErrorText,
-  MAX_SPEAK_CHARS,
+  lengthHint, MAX_MESSAGE, messageLength, micErrorText, pastedName, recorderMime, replyToSpeak, sanitizeImages,
+  sendErrorText, speechText, takeImages, voiceErrorText, MAX_SPEAK_CHARS,
 } from '../src/shared/media.ts';
 import { toChatItems } from '../src/renderer/lib/chat.ts';
 import type { GenesisEvent } from '../src/shared/types.ts';
@@ -86,6 +86,20 @@ test('recording format, clock and the speak cap', () => {
   assert.equal(clock(120_000), '2:00');
   assert.equal(speechText('кратко'), 'кратко');
   assert.equal(speechText('я'.repeat(MAX_SPEAK_CHARS + 50)).length, MAX_SPEAK_CHARS);
+});
+
+test('a long message names the limit, not the code or pictures (audit 2026-10-22)', () => {
+  const long = sendErrorText({ ok: false, error: 'too_long' }, false);
+  assert.match(long, /най-много 20000 знака/);
+  assert.doesNotMatch(long, /too_long/);
+  // Над 256 KiB без картинки — пак е дълъг текст, не „съобщението с картинките“.
+  assert.equal(sendErrorText({ error: 'too_large' }, false), long);
+  assert.match(sendErrorText({ error: 'too_large' }, true), /картинките/);
+  assert.match(sendErrorText({ error: 'too_many_images', max: 4 }, true), /4 картинки/);
+  assert.equal(messageLength('\u{1F600}\u{1F600}x'), 3);
+  assert.equal(lengthHint('a'.repeat(1000)), undefined);
+  assert.equal(lengthHint('a'.repeat(19000)), `19000 / ${MAX_MESSAGE} знака`);
+  assert.match(lengthHint('a'.repeat(MAX_MESSAGE + 1))!, /твърде дълго/);
 });
 
 test('every server error reads as Bulgarian', () => {

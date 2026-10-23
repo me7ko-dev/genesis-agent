@@ -22,7 +22,11 @@ _PYTHON_CMD = re.compile(r"""(?:^|[\s"'/\\&|;(])(?:python(?:\d+(?:\.\d+)?)?|py|p
 # поотделно (bug fix, 2026-10-11). Измерено: търсено в целия ред,
 # `pip install -r requirements.txt && python solution.py` и
 # `python solution.py --version` оставяха „записан, но НЕ пуснат“.
-_NOT_A_RUN = re.compile(r"""["']?(?:\s+-\d+(?:\.\d+)?)?\s+(?:-m\s+pip3?\b|--version\b|-V(?:\s|$))""")
+# Одит 2026-10-22: и статичната проверка не е пускане — `python -m py_compile
+# solution.py` (и ruff/mypy/black/compileall) махаше „НЕ пуснат“, а кодът не беше
+# тръгвал (същото като непуснатия c229 в bench_fcc, 3/5). `-m pytest` остава пускане.
+_NOT_A_RUN = re.compile(r"""["']?(?:\s+-\d+(?:\.\d+)?)?\s+(?:-m\s+(?:pip3?|py_compile|compileall|ruff"""
+                        r"""|mypy|black|flake8|pyflakes|isort|pylint)\b|--version\b|-V(?:\s|$))""")
 _SEGMENT_SPLIT = re.compile(r"&&|\|\||[;|\n]")
 _CASES = ("по един случай за всяко правило или ограничение в условието, различен от примерите "
           "в заявката: по-сложен вход, граничните стойности и вход, който трябва да бъде "

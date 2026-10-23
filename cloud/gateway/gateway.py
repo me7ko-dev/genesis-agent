@@ -22,6 +22,7 @@ import argparse
 import base64
 import hashlib
 import hmac
+import http.client
 import json
 import logging
 import os
@@ -56,6 +57,9 @@ UPSTREAMS: dict[str, tuple[str, str]] = {
 MAX_BODY = 2 * 1024 * 1024
 UPSTREAM_TIMEOUT = 300
 _ROTATE_ON = {401, 403, 429}
+# Полета, с които доставчикът (OpenRouter) сам избира модела или пуска платени
+# добавки — виж forward() (одит 2026-10-22).
+_ROUTING_KEYS = ("models", "route", "plugins", "web_search_options")
 
 
 # ── жетони ───────────────────────────────────────────────────────────────────
@@ -153,19 +157,21 @@ class Ledger:
         with self.lock:
             return self.jobs.get(job, Usage()).total_tokens
 
-    def reserve(self, job: str, budget: int, amount: int) -> bool:
-        """Запазва `amount` токена, ако разходът + запазеното още е под тавана."""
-        with self.lock:
-            spent = self.jobs.get(job, Usage()).total_tokens + self.reserved.get(job, 0)
-            if spent >= budget:
-                return False
-            self.reserved[job] = self.reserved.get(job, 0) + amount
-            return True
+    def reserve_upto(self, job: str, budget: int, prompt: int, want: int) -> int:
+        """Запазва min(`want`, остатъка) с една стъпка; 0 ако промптът не се събира.
 
-    def left(self, job: str, budget: int) -> int:
-        """Колко още може да се похарчи (без вече запазеното от други заявки)."""
+        Одит 2026-10-22: left() и reserve() бяха две стъпки — две паралелни
+        заявки четяха един и същ остатък, и двете получаваха таван почти до него
+        и и двете се запазваха (reserve() гледа само дали вече е изчерпано):
+        бюджет 20 000 → 38 020 токена; на живо 8 нишки — 1.43× на TASK_BUDGET.
+        Двете са махнати (ревю 2026-10-22), за да не се върне някой към тях."""
         with self.lock:
-            return budget - self.jobs.get(job, Usage()).total_tokens - self.reserved.get(job, 0)
+            left = budget - self.jobs.get(job, Usage()).total_tokens - self.reserved.get(job, 0)
+            if prompt >= left:
+                return 0
+            amount = min(max(want, prompt + 1), left)
+            self.reserved[job] = self.reserved.get(job, 0) + amount
+            return amount
 
     def release(self, job: str, amount: int) -> None:
         with self.lock:
@@ -359,6 +365,14 @@ class Gateway:
             if key in request and not (request[key] is None or
                                        (type(request[key]) is int and request[key] == 1)):
                 return 400, _err(f"{key} различно от 1 не се поддържа през шлюза")
+        # Одит 2026-10-22: OpenRouter чете `models` като резервни модели и таксува
+        # този, който е отговорил — `model` от списъка + openai/o1-pro в `models`
+        # минаваше (200, отговорил o1-pro), а редът в сметката беше за евтиния.
+        # `plugins`/`web_search_options` са платено търсене извън токените.
+        # Genesis не праща нито едно от тях.
+        for key in _ROUTING_KEYS:
+            if key in request:
+                return 400, _err(f"{key} не се поддържа през шлюза")
         # Жетонът е проверен при заглавията, а тялото може да е идвало бавно
         # (ревю 2026-10-11). Сметката на хода става окончателна след изтичането
         # + UPSTREAM_TIMEOUT — заявка, тръгнала по-късно, би останала без такса.
@@ -367,15 +381,15 @@ class Gateway:
         # Отговорът се ограничава до оставащото: проверяваше се само дали вече е
         # похарчено — заявка от 1.9 MB с max_tokens 64k минаваше и струваше 1.8×
         # бюджета (одит 2026-10-09). Промпт, по-голям от остатъка, не минава.
-        left = self.ledger.left(grant.job, grant.budget)
-        prompt_est = len(body) // 3
-        if prompt_est >= left:
-            return 429, _err(f"бюджетът на задачата ({grant.budget} токена) е изчерпан")
-        body = _cap_completion(request, body, left - prompt_est)
-        estimate = _estimate(request, body)
-        if not self.ledger.reserve(grant.job, grant.budget, estimate):
+        # Остатъкът се чете и запазва с една стъпка (reserve_upto, 2026-10-22),
+        # а таванът на отговора е от запазеното, не от прочетения остатък.
+        prompt_est = len(body) // 3 + _media_tokens(request)
+        estimate = self.ledger.reserve_upto(grant.job, grant.budget, prompt_est,
+                                            prompt_est + _requested_cap(request))
+        if not estimate:
             return 429, _err(f"бюджетът на задачата ({grant.budget} токена) е изчерпан")
         try:
+            body = _cap_completion(request, body, estimate - prompt_est)
             return self._forward(provider, base, keys, body, model, grant, estimate)
         finally:
             self.ledger.release(grant.job, estimate)
@@ -399,8 +413,18 @@ class Gateway:
                     status, data = r.status, r.read()
             except urllib.error.HTTPError as e:
                 status, data = e.code, e.read()
-            except (urllib.error.URLError, TimeoutError, OSError) as e:
+            except urllib.error.URLError as e:
+                # urlopen обвива в URLError само грешките до изпращането
+                # (връзка, DNS, запис на тялото) — доставчикът не е генерирал.
                 status, data = 502, _err(f"{provider}: {type(e).__name__}")
+            except (TimeoutError, OSError, http.client.HTTPException) as e:
+                # Одит 2026-10-22: заявката е при доставчика, а отговорът не
+                # стига (срок, прекъсната връзка, IncompleteRead). Доставчикът
+                # таксува генерираното и без нас — 20 заявки до срока по 64k
+                # минаваха с 0 в сметката, а IncompleteRead (HTTPException, не
+                # OSError) събаряше обработчика без отговор към клиента.
+                self.ledger.add(grant.job, provider, model, {"total_tokens": estimate, "estimated": True})
+                return 502, _err(f"{provider}: {type(e).__name__}")
             if status not in _ROTATE_ON:
                 break
         if status == 200:
@@ -438,17 +462,39 @@ def _cap_completion(request: dict, body: bytes, allowed: int) -> bytes:
     return json.dumps(request).encode() if changed else body
 
 
-def _estimate(request: dict, body: bytes) -> int:
-    """Горна оценка на заявката: промптът (~3 байта на токен) + по-големият от
-    таваните на отговора (иначе 4 096)."""
+def _requested_cap(request: dict) -> int:
+    """По-големият от таваните на отговора, както ги чете _cap_completion
+    (липсващ или невалиден — 4 096)."""
     caps = []
     for key in ("max_tokens", "max_completion_tokens"):
+        if key not in request:
+            continue
         try:
-            caps.append(int(request.get(key) or 0))
+            caps.append(int(request.get(key) or 4096))
         except (TypeError, ValueError, OverflowError):
-            pass
-    cap = max(caps, default=0) or 4096
-    return len(body) // 3 + max(1, min(cap, 64_000))
+            caps.append(4096)
+    return max(1, max(caps, default=4096))
+
+
+# Горна граница за една не-текстова част (картинка, звук, файл). Одит
+# 2026-10-22: `image_url` по адрес е ~100 байта (~35 токена в оценката), а
+# доставчикът таксува стотици — 500 картинки в тяло от 52 KB минаха бюджет
+# 20 000 и записаха 382 510 (19×). gpt-4o high detail е до 1 445 на картинка,
+# gpt-4.1-mini (по парчета) — до ~2 490, затова 2 500.
+MEDIA_PART_TOKENS = 2_500
+
+
+def _media_tokens(request: dict) -> int:
+    """Сборът на горните граници за не-текстовите части на съобщенията."""
+    messages = request.get("messages")
+    if not isinstance(messages, list):
+        return 0
+    n = 0
+    for m in messages:
+        content = m.get("content") if isinstance(m, dict) else None
+        if isinstance(content, list):
+            n += sum(1 for p in content if not (isinstance(p, dict) and p.get("type") == "text"))
+    return n * MEDIA_PART_TOKENS
 
 
 def _err(message: str) -> bytes:

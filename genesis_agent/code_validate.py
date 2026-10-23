@@ -50,15 +50,24 @@ def _ruff_available() -> bool:
     return _ruff_exe() is not None
 
 
-def validate_code_with_ruff(code: str) -> tuple[bool, str]:
+def validate_code_with_ruff(code: str, *, fix: bool = True) -> tuple[bool, str]:
     """Lint `code` with ruff. Returns (ok, detail):
     - ruff missing / subprocess hiccup → (True, "") — never block on tooling.
     - clean (after auto-fix)          → (True, possibly-auto-fixed code).
     - unfixable issues remain         → (False, formatted error list) — the
       caller should feed this back to the LLM as the next round's context
       instead of spending a sandbox execution on code that can't even parse.
+    `fix=False` — само проверка: върнатият код е винаги `code` (WRITE_FILE с exact).
     """
     if not _ruff_available():
+        return True, ""
+    # Самотен сурогат (половин емоджи от JSON): с "replace" ruff получаваше „?“
+    # и WRITE_FILE записваше поправения код с „?“ вместо отказа „половин
+    # емоджи?“ (одит 2026-10-22, мерено). Такъв код не е наша работа тук —
+    # записът след това го отказва с българското съобщение.
+    try:
+        code.encode("utf-8")
+    except UnicodeEncodeError:
         return True, ""
 
     try:
@@ -66,13 +75,15 @@ def validate_code_with_ruff(code: str) -> tuple[bool, str]:
         # с universal newlines и всеки `\r\n` ставаше `\n` — WRITE_FILE на .py
         # (и с exact=true) записваше LF вместо дадения CRLF, а същото в .txt
         # оставаше CRLF (мерено с ruff 0.16.8). ruff пази краищата, които получи.
-        fixed_run = subprocess.run(
-            [_ruff_exe() or "ruff", "check", *_RULES, "--fix", "--exit-zero",
-             "--stdin-filename", "generated.py", "-"],
-            input=code.encode("utf-8", "replace"), capture_output=True, timeout=_RUFF_TIMEOUT,
-            check=False,
-        )
-        fixed = fixed_run.stdout.decode("utf-8", "replace")
+        fixed = ""
+        if fix:
+            fixed_run = subprocess.run(
+                [_ruff_exe() or "ruff", "check", *_RULES, "--fix", "--exit-zero",
+                 "--stdin-filename", "generated.py", "-"],
+                input=code.encode("utf-8", "replace"), capture_output=True,
+                timeout=_RUFF_TIMEOUT, check=False,
+            )
+            fixed = fixed_run.stdout.decode("utf-8", "replace")
         checked_run = subprocess.run(
             [_ruff_exe() or "ruff", "check", *_RULES, "--output-format", "json",
              "--stdin-filename", "generated.py", "-"],
@@ -92,6 +103,12 @@ def validate_code_with_ruff(code: str) -> tuple[bool, str]:
         # ruff's own crash/parse-error output isn't JSON — surface it as-is,
         # truncated, rather than silently passing broken code through.
         return False, (checked_out or checked_run.stderr.decode("utf-8", "replace"))[:1000]
+    if not errors:
+        # Срив на ruff (паника, exit 2, нищо на stdout) — fail-open като при
+        # timeout (одит 2026-10-22): иначе всеки .py получаваше празното
+        # „Ruff намери проблеми:“, а autonomous_loop връщаше верен код за поправка
+        # всеки рунд. Поправеният изход от такъв ruff също не се ползва.
+        return True, ""
 
     lines = [
         f"  L{e['location']['row']}: {e['code']} {e['message']}"
@@ -100,6 +117,32 @@ def validate_code_with_ruff(code: str) -> tuple[bool, str]:
     if len(errors) > _MAX_ERRORS_SHOWN:
         lines.append(f"  … и още {len(errors) - _MAX_ERRORS_SHOWN}")
     return False, "Ruff намери проблеми:\n" + "\n".join(lines)
+
+
+def ruff_parses(code: str) -> bool | None:
+    """Парсва ли се `code` от ruff — неговият парсер приема всяка версия на Python.
+
+    None — няма ruff или не отговори. Само синтактичните находки броят
+    (`invalid-syntax`; E999 в по-стари ruff), не F821 и останалите.
+    """
+    exe = _ruff_exe()
+    if exe is None:
+        return None
+    try:
+        run = subprocess.run(
+            [exe, "check", "--isolated", "--select", "E9", "--output-format", "json",
+             "--stdin-filename", "generated.py", "-"],
+            input=code.encode("utf-8"), capture_output=True, timeout=_RUFF_TIMEOUT, check=False,
+        )
+        if run.returncode not in (0, 1):
+            return None
+        found = json.loads(run.stdout.decode("utf-8", "replace") or "[]")
+    except (subprocess.TimeoutExpired, OSError, UnicodeEncodeError, ValueError):
+        return None
+    if not isinstance(found, list):
+        return None
+    return not any(e.get("code") in (None, "E999", "invalid-syntax")
+                   for e in found if isinstance(e, dict))
 
 
 def lint_note(code: str) -> str:
