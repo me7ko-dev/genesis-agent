@@ -194,6 +194,36 @@ def test_ctrl_c_in_parallel_reads_returns_at_once_and_keeps_done_results(ws, mon
     assert "прекъснато" in tools["r3"]
 
 
+def test_ctrl_c_in_parallel_reads_is_not_held_by_a_slow_read(ws, monkeypatch):
+    """Ctrl-C, който не буди чакащата нишка (така е на Windows до 3.14):
+    _thread.interrupt_main насрочва KeyboardInterrupt, без да прекъсва чакането.
+    С as_completed без таймаут ходът стоеше до края на бавното четене."""
+    import _thread
+    monkeypatch.setattr(hooks, "fire", _no_hooks)
+    (ws / "c.py").write_text("x = 1\n", encoding="utf-8")
+    release = threading.Event()
+    real = gs.dispatch_tool_call
+
+    def dispatch(name, args):
+        if args.get("path") == "c.py":
+            time.sleep(0.3)                 # главната нишка вече чака партидата
+            _thread.interrupt_main()
+            release.wait(10)                # бавен WEB_FETCH / SEARCH_CODE
+        return real(name, args)
+    monkeypatch.setattr(gs, "dispatch_tool_call", dispatch)
+    _script(monkeypatch, [("", [_call("READ_FILE", {"path": "app.py"}, "r1"),
+                                _call("READ_FILE", {"path": "c.py"}, "r2")])])
+    t0 = time.time()
+    try:
+        msgs = _turn(_fresh(), "read all", _UI())
+        took = time.time() - t0
+    finally:
+        release.set()
+    assert took < 5, f"Ctrl-C чака бавното четене ({took:.1f} s)"
+    tools = {m["tool_call_id"]: str(m["content"]) for m in msgs if m.get("role") == "tool"}
+    assert "PRICE = 42" in tools["r1"] and "прекъснато" in tools["r2"]
+
+
 # ── 6. Провалено обръщение (изчерпана верига) не добавя токени към Σ ────────
 
 def test_chain_error_adds_nothing_to_usage(monkeypatch):

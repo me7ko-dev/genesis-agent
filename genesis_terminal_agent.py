@@ -1733,7 +1733,7 @@ def _parallel_reads(tool_calls: list[dict], done: dict[int, str] | None = None) 
     # а после свършваше (одит 2026-10-09).
     if any(_may_ask(name, args) for name, args in calls):
         return {}
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
     results: dict[int, str] = {} if done is None else done
     # Без `with` (одит 2026-10-22): изходът от него чака всички нишки, тоест
     # Ctrl-C не правеше нищо до края на най-бавното четене (измерено: 6.1 s при
@@ -1742,8 +1742,15 @@ def _parallel_reads(tool_calls: list[dict], done: dict[int, str] | None = None) 
     futures = {pool.submit(genesis_skills.dispatch_tool_call, name, args): i
                for i, (name, args) in enumerate(calls)}
     try:
-        for fut in as_completed(futures):
-            results[futures[fut]] = fut.result()
+        pending = set(futures)
+        while pending:
+            # С таймаут, не as_completed (ревю 2026-10-22): на Windows (до 3.14)
+            # чакане без таймаут не се буди от Ctrl-C — сигналът стигаше чак със
+            # следващото готово четене. Измерено с _thread.interrupt_main (сигнал,
+            # който не буди чакането): as_completed — 3.3 s, wait(0.2) — 0.4 s.
+            finished, pending = wait(pending, timeout=0.2, return_when=FIRST_COMPLETED)
+            for fut in finished:
+                results[futures[fut]] = fut.result()
     except KeyboardInterrupt:
         for fut, i in futures.items():
             if fut.done() and not fut.cancelled() and fut.exception() is None:
