@@ -686,12 +686,16 @@ class Handler(BaseHTTPRequestHandler):
         # на първата бисквитка, която не харесва (consent={"ads":false},
         # theme=dark mode), и изпуска всички след нея — сесията изчезваше и
         # всеки адрес връщаше 401. Жетонът е token_urlsafe — няма какво да се
-        # разкавичва.
+        # разкавичва. При две бисквитки с това име печели последната — както
+        # при SimpleCookie досега (ревю 2026-10-22: първата се взимаше, а
+        # браузърът праща първа тази с по-дълъг Path — подхвърлена от съседен
+        # поддомейн с Path=/api, тя подменяше сесията на човека).
+        token = ""
         for part in self.headers.get("Cookie", "").split(";"):
             name, _, value = part.strip().partition("=")
             if name == COOKIE:
-                return value.strip()
-        return ""
+                token = value.strip()
+        return token
 
     def _user(self) -> dict[str, Any] | None:
         return self.app.store.session_user(self._token())

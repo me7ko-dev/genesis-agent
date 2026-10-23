@@ -124,7 +124,12 @@ def test_another_cookie_on_the_domain_does_not_hide_the_session(env, other) -> N
     _, client = env
     cl = client()
     assert cl.login() == 200
-    cl.cookie = f"{other}; {cl.cookie}; after=1"
+    session = cl.cookie
+    cl.cookie = f"{other}; {session}; after=1"
+    assert cl.req("GET", "/api/me")[0] == 200
+    # Две с името на сесията (подхвърлена с Path=/api идва първа): печели
+    # последната, както при SimpleCookie преди поправката.
+    cl.cookie = f"{other}; genesis_session=chuzhda; {session}"
     assert cl.req("GET", "/api/me")[0] == 200
 
 
