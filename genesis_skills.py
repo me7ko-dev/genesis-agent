@@ -2260,7 +2260,7 @@ def _quoted_spans(text: str, tags: list[tuple[int, int]]) -> list[tuple[int, int
 _MAX_OVERLAP_OPENERS = 200
 
 
-def parse_and_execute_tools(response_text: str) -> list[str]:
+def parse_and_execute_tools(response_text: str, results: list[str] | None = None) -> list[str]:
     """
     Извлича и изпълнява всички тул-тагове в реда, в който се появяват.
     Връща списък от резултати (по един низ на тул). Празен списък = няма тулове.
@@ -2274,9 +2274,16 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
     на "запиши ми в README как се вика умение" изпълняваше умението вместо (и
     освен) да запише файла. Сега най-външният блок печели, а всичко вътре в него
     е текст, какъвто и да е типът му.
+
+    `results` (2026-10-22): списък на викащия, в който всеки резултат влиза
+    веднага след изпълнението си. При Ctrl-C посред таговете той държи
+    свършеното, а прекъснатият и останалите тагове получават ред „прекъснато“ —
+    дотогава KeyboardInterrupt отнасяше и резултата на вече записания файл.
     """
+    if results is None:
+        results = []
     if not response_text:
-        return []
+        return results
     slots: list[str] = []
     response_text = _normalize_xml_tool_calls(response_text, slots)
 
@@ -2430,9 +2437,8 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
 
     # Изпълняваме по позиция в текста (sort е стабилен; позициите не се дублират).
     actions.sort(key=lambda a: a[0])
-    results: list[str] = []
     asked = False
-    for _pos, name, thunk in actions:
+    for _i, (_pos, name, thunk) in enumerate(actions):
         if asked:
             # Таговете СЛЕД ASK_USER чакат отговора (bug fix, 2026-10-11).
             # Измерено: „[ASK_USER: Да презапиша ли notes.txt?]“ + WRITE_FILE
@@ -2441,7 +2447,13 @@ def parse_and_execute_tools(response_text: str) -> list[str]:
             # не е направено.
             results.append(f"[{name}] не е изпълнено — чака отговора на оператора.")
             continue
-        out = thunk()
+        try:
+            out = thunk()
+        except KeyboardInterrupt:
+            results.append(f"[{name}] прекъснато от оператора (Ctrl-C) — не е довършено.")
+            results.extend(f"[{rest}] не е изпълнено — ходът е прекъснат от оператора."
+                           for _p, rest, _t in actions[_i + 1:])
+            raise
         results.append(out)
         if name == "ASK_USER" and ASK_USER_MARKER in out:
             asked = True
