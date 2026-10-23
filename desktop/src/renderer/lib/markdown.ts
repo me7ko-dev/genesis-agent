@@ -1,6 +1,7 @@
 import DOMPurify from 'dompurify';
 import hljs from 'highlight.js/lib/common';
 import { Marked } from 'marked';
+import { resourceAllowed, styleAllowed } from './safeurl';
 
 function escape(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -28,8 +29,20 @@ const marked = new Marked({
   },
 });
 
+// Одит 2026-10-22: DOMPurify пуска `//host/x.png` и `\\host\share\x.png` в
+// src, а на file:// страницата те са file://host/... — под Electron Chromium
+// ги поиска (img и video), под Windows това е SMB и NTLM хешът. Адрес, който
+// се тегли сам, остава само data:/blob: (виж safeurl.ts); CSP-то е втората стена.
+DOMPurify.addHook('uponSanitizeAttribute', (node, data) => {
+  const ok = data.attrName === 'style'
+    ? styleAllowed(data.attrValue)
+    : resourceAllowed(node.nodeName, data.attrName, data.attrValue);
+  if (!ok) data.keepAttr = false;
+});
+
 /** Agent Markdown → safe HTML (the agent may quote pages and files). */
 export function renderMarkdown(text: string): string {
   const raw = marked.parse(text, { async: false }) as string;
-  return DOMPurify.sanitize(raw, { ADD_ATTR: ['data-copy', 'target'] });
+  // <style> от модела тегли url() като style="" — не ни трябва.
+  return DOMPurify.sanitize(raw, { ADD_ATTR: ['data-copy', 'target'], FORBID_TAGS: ['style'] });
 }

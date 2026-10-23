@@ -27,6 +27,38 @@ export const MAX_RECORD_MS = 120_000;
 /** `speak` отказва над 20 000 знака ("too_long") — пращаме началото. */
 export const MAX_SPEAK_CHARS = 20_000;
 
+/** `send` отказва текст над 20 000 знака ("too_long", remote_server._send).
+ *  Одит 2026-10-22: прозорецът показваше „Не се изпрати: too_long“, а над
+ *  256 KiB — „Съобщението с картинките е твърде голямо.“ и без картинки. */
+export const MAX_MESSAGE = 20_000;
+
+/** От тук нататък под полето се вижда броячът. */
+export const MESSAGE_HINT_FROM = 18_000;
+
+/** Колко знака брои сървърът: Python len() — кодови точки, а не UTF-16
+ *  единиците на `.length` (емоджи е 1, не 2). */
+export function messageLength(text: string): number {
+  let n = text.length;
+  for (let i = 0; i < text.length - 1; i++) {
+    const c = text.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const d = text.charCodeAt(i + 1);
+      if (d >= 0xdc00 && d <= 0xdfff) { n--; i++; }
+    }
+  }
+  return n;
+}
+
+/** Броячът под полето близо до тавана; undefined — далеч е. */
+export function lengthHint(text: string): string | undefined {
+  if (text.length < MESSAGE_HINT_FROM) return undefined;
+  const n = messageLength(text);
+  if (n < MESSAGE_HINT_FROM) return undefined;
+  return n > MAX_MESSAGE
+    ? `${n} / ${MAX_MESSAGE} знака — твърде дълго; сложи текста във файл в папката и го посочи`
+    : `${n} / ${MAX_MESSAGE} знака`;
+}
+
 /** Транскрипцията и гласът са секунди до минута (Whisper, edge-tts). */
 export const VOICE_TIMEOUT_MS = 60_000;
 
@@ -153,6 +185,17 @@ export function imageErrorText(r: Reply, limits: MediaLimits = DEFAULT_LIMITS): 
     case 'too_large': return 'Съобщението с картинките е твърде голямо.';
     default: return undefined;
   }
+}
+
+/** Отказ на `send` → изречение за оператора. "too_large" без картинки е
+ *  плик над 256 KiB, тоест текст далеч над 20 000 знака. */
+export function sendErrorText(r: Reply, hasImages: boolean, limits: MediaLimits = DEFAULT_LIMITS): string {
+  if (r.error === 'busy') return 'Genesis още работи.';
+  if (r.error === 'old_agent') return 'Този genesis не приема картинки — обнови го (/update).';
+  if (r.error === 'too_long' || (r.error === 'too_large' && !hasImages)) {
+    return `Съобщението е твърде дълго — най-много ${MAX_MESSAGE} знака. Сложи дългия текст във файл в папката и го посочи.`;
+  }
+  return imageErrorText(r, limits) ?? `Не се изпрати: ${r.error ?? 'неизвестна грешка'}`;
 }
 
 /** Грешка на `transcribe` или `speak` → изречение за оператора. */
