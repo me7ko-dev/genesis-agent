@@ -135,9 +135,12 @@ def test_help_lists_what_the_phone_can_do(tmp_path) -> None:
     assert prompt is None and "/undo" in ui.infos[0] and "/plan" in ui.infos[0]
 
 
-def test_plain_text_and_unknown_commands_still_go_to_the_model(tmp_path) -> None:
+def test_plain_text_goes_to_the_model_and_an_unknown_command_does_not(tmp_path) -> None:
     assert _phone("здрасти", tmp_path)[2] == "здрасти"
-    assert _phone("/няма-такава", tmp_path)[2] == "/няма-такава"
+    assert _phone("/usr/lib/x гърми", tmp_path)[2] == "/usr/lib/x гърми"   # път, не команда
+    # Одит 2026-10-22: непознатата /дума отиваше при модела като задача.
+    ui, _, prompt = _phone("/няма-такава", tmp_path)
+    assert prompt is None and "Непозната команда /няма-такава" in ui.warns[0]
 
 
 def test_a_mention_attaches_the_file_from_the_phone(tmp_path) -> None:

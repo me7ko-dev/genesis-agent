@@ -27,7 +27,6 @@ from pathlib import Path
 from typing import Any
 
 import requests
-import yaml
 from rich import box
 from rich.console import Console
 from rich.markdown import Markdown
@@ -49,12 +48,17 @@ except ImportError:
 
 # ── Споделено ядро (genesis_agent): памет + sandbox политика ────────────────────────
 # Всичко тук е меко-опционално: ако липсва зависимост, чатът пак работи.
+# Поотделно (одит 2026-10-22): повредена persistent_memory.db чупеше memory.py,
+# а общият try сваляше и conversation_memory, която с нея няма нищо общо.
 try:
     from genesis_agent import conversation_memory as _conv_mem
-    from genesis_agent.memory import memory_context as _memory_context
 except Exception:
     log.debug("паметта на разговора не се зареди — чатът е без нея", exc_info=True)
     _conv_mem: Any = None  # type: ignore[no-redef]
+try:
+    from genesis_agent.memory import memory_context as _memory_context
+except Exception:
+    log.debug("memory.py не се зареди — без скорошни мисии в промпта", exc_info=True)
     _memory_context: Any = None  # type: ignore[no-redef]
 
 
@@ -123,16 +127,20 @@ from genesis_agent.paths import (
     ENV_FILES,
     _strip_inline_comment,
     history_dir,
+    load_config,
     workspace_dir,
 )
 from genesis_agent.repeat_guard import RepeatGuard as _RepeatGuard
 from genesis_agent.tool_schemas import load_tool_arguments
 
+# load_config проверява и формата (одит 2026-10-22): `workspace: ~/proj` вместо
+# `workspace:` + `path:` убиваше чата по-долу с AttributeError и стектрейс.
 try:
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f) or {}
+    config = load_config(CONFIG_PATH)
 except Exception as e:  # noqa: BLE001 — грешката се печата и чатът спира с код 1
-    console.print(f"[red]Грешка при зареждане на config.yaml: {e}[/]")
+    from rich.markup import escape as _escape
+    console.print(f"[red]Грешка при зареждане на config.yaml ({_escape(str(CONFIG_PATH))}): "
+                  f"{_escape(str(e))}[/]")
     sys.exit(1)
 
 # config.yaml may override the workspace; empty (the default) means "use the
@@ -201,8 +209,22 @@ def _save_session(messages) -> None:
     # файлът се пише наново след всеки ход (vision.for_disk, 2026-10-15).
     from genesis_agent import vision
     saved = vision.for_disk(messages, HISTORY_DIR / "images")
-    with open(session_file, "w", encoding="utf-8", errors="replace") as f:
-        json.dump(saved, f, ensure_ascii=False, indent=None, separators=(',', ':'))
+    # Във временен файл и после os.replace (както session_index._write). Одит
+    # 2026-10-22: 'w' изпразваше файла преди записа — пълен диск по средата на
+    # json.dump остави 60 KB от 84 KB JSON и /resume вече не предлагаше
+    # разговора: губеше се целият, не само последният ход.
+    tmp = session_file.with_name(f"{session_file.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8", errors="replace") as f:
+            json.dump(saved, f, ensure_ascii=False, indent=None, separators=(',', ':'))
+        os.replace(tmp, session_file)
+    except BaseException:
+        # И Ctrl-C по средата на голяма история: старият файл остава цял.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
     try:
         from genesis_agent import session_index
         session_index.record(HISTORY_DIR, Path(WORKSPACE), session_file)
@@ -426,7 +448,9 @@ FALLBACKS = {
     "llmstudio":    ["local-model"],
     "claude_cli":   ["sonnet", "opus", "haiku"],
     # Редът е като premium_models в config.yaml; живият списък идва от ключа.
-    "anthropic":    ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
+    # 2026-10-22: текущото поколение — наследниците на същата или по-ниска цена
+    # (haiku-5-5 е 10× по-евтин от haiku-4-5).
+    "anthropic":    ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
 }
 
 MODELS_CACHE: dict[str, list[str]] = {}
@@ -1323,6 +1347,31 @@ def show_agent_menu():
             os.environ.pop("GENESIS_CLAUDE_CLI_ACTIVE", None)
         console.print(f"[green]✓ {current_model_id}[/]")
 
+
+def pick_model_by_name(name: str) -> str:
+    """`/model <име>` — моделът от веригата с това име (или единственият, чието
+    име го съдържа). Одит 2026-10-22: `/model gpt-4o` отиваше при модела като
+    задача. Иначе казва как се ползва — менюто не се отваря наслуки."""
+    global current_provider, current_model_id
+    q = name.strip().lower()
+    hits = ([fb for fb in FALLBACK_CHAIN if fb["model"].lower() == q]
+            or [fb for fb in FALLBACK_CHAIN if q in fb["model"].lower()])
+    found = sorted({(fb["provider"], fb["model"]) for fb in hits})
+    if len(found) != 1:
+        some = ", ".join(m for _, m in found[:5])
+        return (f"„{name}“ съвпада с няколко: {some}. Напиши по-точно." if found else
+                f"Няма модел „{name}“ във веригата (/models). /model без име — менюто.")
+    pk, model = found[0]
+    ready, hint = provider_ready(pk)
+    if not ready:
+        return f"⚠ {PROVIDERS.get(pk, {}).get('name', pk)} не е готов: {hint}"
+    current_provider, current_model_id = pk, model
+    if pk == "claude_cli":
+        os.environ["GENESIS_CLAUDE_CLI_ACTIVE"] = "1"
+    else:
+        os.environ.pop("GENESIS_CLAUDE_CLI_ACTIVE", None)
+    return f"✓ {model}"
+
 # ── Main Loop ─────────────────────────────────────────────────────────────────
 class TurnUI:
     """Как `run_turn` показва напредъка. Терминалът рисува с rich,
@@ -1957,15 +2006,10 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                 if (_malformed_tag_retries < 2
                         and genesis_skills.looks_like_attempted_tool_tag(response)):
                     _malformed_tag_retries += 1
-                    messages.append({
-                        "role": "system",
-                        "content": "[Система]: В последния отговор не намерих валиден tool "
-                                   "таг, но той изглежда като опит за такъв. Ако си искал да "
-                                   "викнеш инструмент — използвай точния синтаксис "
-                                   "`[TAG: аргумент]` (или `[WRITE_FILE: път]...[END_WRITE]` "
-                                   "за файлове). Ако вече си приключил — дай кратък финален "
-                                   "отговор БЕЗ скоби във формàт на таг.",
-                    })
+                    # Отрязаният WRITE_FILE получава „раздели записа“, не „грешен
+                    # синтаксис“ (одит 2026-10-22) — текстът е общ с agent_core.
+                    messages.append({"role": "system",
+                                     "content": genesis_skills.malformed_tag_note(response)})
                     with ui.thinking("Анализирам...", "aesthetic"):
                         response, tool_calls = ask_genesis(messages, tools=_turn_tools())
                     continue
@@ -2287,6 +2331,18 @@ def _worth_capturing(convo: list[dict]) -> bool:
     return False
 
 
+# Командите на главния цикъл без аргументи. Сравняваше се целият ред:
+# `/help me`, `/clear now`, `/model gpt-4o` отиваха при модела като задача
+# (одит 2026-10-22). Показващите пренебрегват думите след себе си; тези, които
+# променят нещо, казват как се пишат, вместо да гадаят.
+_SHOW_ONLY = frozenset({"/help", "/status", "/skills", "/умения", "/tasks", "/задачи", "/state",
+                        "/models", "/history"})
+_NO_ARGS = frozenset({"/clear", "/backup", "/update", "/ъпдейт", "/maxcoding", "/макскод",
+                      "/local_model_max", "/локален_макс", "/local_model_normal", "/локален_нормал"})
+_EXIT_WORDS = ("exit", "quit", "изход", "/exit", "/quit")
+_SECOND_CTRL_C = 2.0   # s — второ Ctrl-C на подканата в този прозорец затваря чата
+
+
 def main():
     reset_usage()
 
@@ -2349,8 +2405,10 @@ def main():
     except Exception:
         log.debug("настройките за глас не се прочетоха", exc_info=True)
         VOICE_ON = False
+    from genesis_agent import chat_commands as _chat_commands
     from genesis_agent.chat_input import read_message
     from genesis_agent.model_router import CONFIRM_COMMANDS, command_for_request
+    last_ctrl_c = -_SECOND_CTRL_C
 
     while True:
         try:
@@ -2368,7 +2426,19 @@ def main():
                 user_input = queued_input.pop(0)
                 console.print(Text.assemble(("🎙 ❯ ", "bold green"), user_input))
             else:
-                user_input = read_message(lambda: console.input("[bold green]❯[/] "))
+                try:
+                    user_input = read_message(lambda: console.input("[bold green]❯[/] "))
+                except EOFError:
+                    break   # Ctrl-D или затворен stdin на подканата — изход
+                except KeyboardInterrupt:
+                    # Едно Ctrl-C отказва реда, второто до 2 s затваря чата — като
+                    # в Claude Code. Беше изход от първото, после auto_capture
+                    # (ход към модела) — одит 2026-10-22.
+                    if time.monotonic() - last_ctrl_c < _SECOND_CTRL_C:
+                        break
+                    last_ctrl_c = time.monotonic()
+                    console.print("[dim]Ctrl-C пак или exit — изход[/]")
+                    continue
             if not user_input: continue
 
             _voice_handled, _heard = _voice_command(user_input)
@@ -2403,8 +2473,21 @@ def main():
                 user_input = _cmd
 
             # ── Commands ──
-            if user_input.lower() in ["exit", "quit", "изход"]:
+            if user_input.lower() in _EXIT_WORDS:
                 break
+
+            # Вградените — по първата дума, не по целия ред (_SHOW_ONLY).
+            _head, _rest = _chat_commands._split(user_input)
+            _head = _head.lower()
+            if _rest and _head in ("/model", "/agent"):
+                console.print(Text(pick_model_by_name(_rest)))
+                continue
+            if _rest and _head in _SHOW_ONLY:
+                user_input = _head
+            elif _rest and _head in _NO_ARGS:
+                console.print(Text(f"{_head} е без аргументи — напиши само {_head} (/help — командите)",
+                                   style="yellow"))
+                continue
 
             if user_input.lower() == "/agent":
                 show_agent_menu()
@@ -2455,6 +2538,12 @@ def main():
                 # Zip + GENESIS_REPORT.md на текущия workspace (deliver.py) —
                 # без модел: отчетът се взима от проекта, не от разговора.
                 _arg = user_input.split(" ", 1)[1].strip() if " " in user_input else ""
+                # Пътят с интервали е в кавички (Windows, пуснат с мишката файл) —
+                # те не са част от името. Бяха: `"my out.zip".zip` и дърво от
+                # папки `'`, `'/tmp`… в проекта, което тръгваше със следващия
+                # export (одит 2026-10-22). Същото правило като /image.
+                if len(_arg) >= 2 and _arg[0] == _arg[-1] and _arg[0] in "'\"":
+                    _arg = _arg[1:-1].strip()
                 try:
                     from genesis_agent.deliver import export, summary
                     with console.status("[cyan]📦 Опаковам проекта и пускам тестовете…[/]"):
@@ -2587,7 +2676,7 @@ def main():
                 help_table = Table(box=box.ROUNDED, border_style="cyan", show_header=False, padding=(0, 2))
                 help_table.add_column("Команда", style="bold cyan", width=20)
                 help_table.add_column("Описание", style="white")
-                help_table.add_row("/model или /agent", "Смяна на AI модел/доставчик")
+                help_table.add_row("/model [име]", "Смяна на AI модел/доставчик (без име — менюто; и /agent)")
                 help_table.add_row("/models", f"Покажи целия fallback chain ({len(FALLBACK_CHAIN)} модела)")
                 help_table.add_row("/maxcoding", "Вкл./изкл. най-силните БЕЗПЛАТНИ модели за код")
                 help_table.add_row("/local_model_max", "Вкл./изкл. офлайн режим — само qwen3:14b (мощен, бавен)")
@@ -2625,7 +2714,7 @@ def main():
                 help_table.add_row("/bg", "Фоновите команди (dev сървъри) — състояние")
                 help_table.add_row("/mcp [trust|restart]", "MCP сървърите (~/.genesis/mcp.json, .mcp.json) и инструментите им")
                 help_table.add_row('"""', "Съобщение на много редове: \"\"\" … \"\"\" (поставеният текст е едно съобщение и без това)")
-                help_table.add_row("exit / quit", "Изход")
+                help_table.add_row("exit / /exit", "Изход (и quit, /quit; Ctrl-C два пъти)")
                 console.print(Panel(help_table, title="[bold cyan]◈ GENESIS КОМАНДИ ◈[/]", border_style="cyan"))
                 continue
 
@@ -2715,13 +2804,23 @@ def main():
                 table.add_row("0", "Назад", "")
                 console.print(table)
 
+                # Ctrl-C/EOF в избора е „0 Назад“, не изход от чата — както
+                # /resume (одит 2026-10-22: тук чатът свършваше с „Довиждане!“).
+                from genesis_agent.chat_commands import answer as _answer
                 try:
-                    hsel = int(console.input("\n[bold cyan]Избери сесия за зареждане > [/]").strip())
+                    hsel = int(_answer(console.input, "\n[bold cyan]Избери сесия за зареждане > [/]",
+                                       "0").strip())
                     if 0 < hsel <= len(shown):
                         with open(shown[hsel - 1], "r", encoding="utf-8") as f:
                             loaded = json.load(f)
                         messages = _restore_session(loaded, SYSTEM_PROMPT)
                         _new_session()   # продължението — в нов файл, старият остава
+                        # Както /clear и /resume: /undo връщаше хода от разговора
+                        # отпреди /history (одит 2026-10-22).
+                        from genesis_agent import edit_history as _edit_history
+                        from genesis_agent import todos as _todos
+                        _edit_history.clear()
+                        _todos.clear()
                         console.print(f"[green]✓ Сесията е заредена! ({len(messages)} съобщения)[/]")
                     elif hsel != 0:
                         console.print("[red]Невалиден избор.[/]")
@@ -2733,7 +2832,6 @@ def main():
             # Командите, които управляват агента като в Claude Code (/init,
             # /memory, /plan, /undo, /compact, /hooks, /commands, /bg) и
             # собствените на оператора от .genesis/commands/*.md.
-            from genesis_agent import chat_commands as _chat_commands
             _res = _chat_commands.handle(
                 user_input, messages=messages, workspace=Path(WORKSPACE),
                 # Без Rich разметка: `[a;touch PWNED;:]` в hooks.json изчезваше от
@@ -2742,6 +2840,10 @@ def main():
                 ask=console.input, compact=_force_compact, context=context_info,
                 conversations=_conversations(), choose=console.input)
             _images: list[dict] = []
+            _unknown = _chat_commands.unknown_command(user_input, Path(WORKSPACE)) if _res is None else None
+            if _unknown:
+                console.print(Text(_unknown, style="yellow"))
+                continue
             if _res is not None:
                 if _res.messages is not None:
                     messages = _res.messages
@@ -2766,10 +2868,13 @@ def main():
                 pending_shell.clear()
 
         except (KeyboardInterrupt, EOFError):
-            # EOF (Ctrl-D, or stdin closed when piped) used to fall through to
-            # the generic handler below, which printed the error and looped —
-            # forever, since the next read hit EOF again immediately.
-            break
+            # Ctrl-C/Ctrl-D във въпрос на команда (менюто на /model, „да/не“ на
+            # /undo и /rewind, /history) или в дълга команда (/export) отказва
+            # командата, не чата: беше `break` — изход и auto_capture (одит
+            # 2026-10-22). EOF на самата подкана излиза горе, така че затворен
+            # stdin не върти безкрайно.
+            console.print("[yellow]отказано[/]")
+            continue
         except Exception as e:
             log.debug("ходът в чата завърши с грешка", exc_info=True)
             messages = history_after_error(e, messages)

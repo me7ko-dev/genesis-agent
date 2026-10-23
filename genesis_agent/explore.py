@@ -22,6 +22,8 @@ log = logging.getLogger("genesis.explore")
 TOOLS = ("READ_FILE", "GLOB", "SEARCH_CODE", "REPO_MAP", "LIST_DIR")
 MAX_ROUNDS = 10
 _MAX_ANSWER = 6000
+_ANSWER_CUT = ("\n\n… [отрязани {cut} знака от средата на отговора — ако ти трябват, "
+               "задай по-тесен въпрос] …\n\n")
 
 PROMPT = """You are a read-only code explorer working for another agent. Answer ONE
 question about the project in the workspace by searching and reading the code.
@@ -58,6 +60,13 @@ def _clip(text: str) -> str:
         return text[:8000]
 
 
+def _answer(text: str) -> str:
+    # Не `text[:6000]`: краят се губеше мълчаливо и отговорът изглеждаше пълен
+    # (одит 2026-10-22, както докладът на AGENT) — без средата и с бележка.
+    from genesis_agent.budget import clip_for_context
+    return clip_for_context(text, _MAX_ANSWER, notice=_ANSWER_CUT)
+
+
 def explore(question: str, workspace: str = "", *,
             complete: Callable[..., Any] | None = None,
             max_rounds: int = MAX_ROUNDS) -> str:
@@ -81,11 +90,18 @@ def explore(question: str, workspace: str = "", *,
     # EXPLORE WRITE_FILE презаписваше файл, който главният никога не е чел
     # (одит 2026-10-08).
     seen_before = set(gs._SEEN_PATHS)
+    # Също отпечатъците и видяното отчасти (одит 2026-10-22): иначе диапазон,
+    # прочетен тук, допълваше прочетеното от главния до „видян цял“.
+    stamps_before, partly_before = dict(gs._SEEN_STAMPS), dict(gs._PARTLY_SEEN)
     try:
         return _loop(question, messages, complete, max_rounds, gs)
     finally:
         gs._SEEN_PATHS.clear()
         gs._SEEN_PATHS.update(seen_before)
+        gs._SEEN_STAMPS.clear()
+        gs._SEEN_STAMPS.update(stamps_before)
+        gs._PARTLY_SEEN.clear()
+        gs._PARTLY_SEEN.update(partly_before)
 
 
 def _loop(question: str, messages: list[dict], complete: Callable[..., Any],
@@ -98,10 +114,11 @@ def _loop(question: str, messages: list[dict], complete: Callable[..., Any],
         # 2026-10-11). Измерено: след Стоп EXPLORE викаше модела и 10-те рунда.
         if gs._cancelled():
             return (f"[EXPLORE: {question[:80]}] ⏹ Спрян от оператора след {round_i} рунда "
-                    f"({reads} прегледа).{' Последно: ' + last[:_MAX_ANSWER] if last else ''}")
+                    f"({reads} прегледа).{' Последно: ' + _answer(last) if last else ''}")
         final = round_i == max_rounds - 1
         if final:  # последният рунд — без инструменти: отговор с каквото е намерено
-            messages.append({"role": "user", "content":
+            # system, за да остане въпросът задачата в request_window (виж agents._loop).
+            messages.append({"role": "system", "content":
                              "Стига търсене. Отговори сега с каквото намери (с път:ред)."})
         reply = complete(messages, tools=None if final else schemas)
         text = (getattr(reply, "raw_text", "") or "").strip()
@@ -133,12 +150,14 @@ def _loop(question: str, messages: list[dict], complete: Callable[..., Any],
                 outs.append(_clip(gs.dispatch_tool_call(m.group(1), args)))
                 reads += 1
             messages.append({"role": "assistant", "content": text})
-            messages.append({"role": "user", "content": "[резултати]\n" + "\n\n".join(outs)})
+            # system „[Резултат]:“ като в agents._loop — иначе budget_history не
+            # свива старите и request_window ги взима за задачата (одит 2026-10-22).
+            messages.append({"role": "system", "content": "[Резултат]:\n" + "\n\n".join(outs)})
             continue
-        answer = text[:_MAX_ANSWER]
+        answer = _answer(text)
         return f"[EXPLORE: {question[:80]}] ({reads} прегледа)\n{answer}"
     return (f"[EXPLORE: {question[:80]}] спря след {max_rounds} рунда ({reads} прегледа) без "
-            f"окончателен отговор. Последно:\n{last[:_MAX_ANSWER]}")
+            f"окончателен отговор. Последно:\n{_answer(last)}")
 
 
 def _text_args(tool: str, arg: str) -> dict:

@@ -451,6 +451,20 @@ READONLY_TOOLS: list[dict] = [
 MISSION_TOOLS: list[dict] = READONLY_TOOLS + [
     t for t in FULL_TOOLS if t["function"]["name"] == "USE_SKILL"
 ]
+# Имената, които мисията предлага на модела — и единствените, които изпълнява
+# (одит 2026-10-22): името в native tool_call идва от модела и отиваше направо
+# в dispatch_tool_call — мисия с read-only инструменти записа new_module.py и
+# пусна `echo pwned > marker.txt`. И двата цикъла на мисиите (autonomous_loop,
+# orchestrator) питат тук; текстовият път вече пазеше това
+# (genesis_skills.parse_and_execute_readonly_tools).
+MISSION_TOOL_NAMES: frozenset[str] = frozenset(t["function"]["name"] for t in MISSION_TOOLS)
+
+
+def mission_tool_refusal(name: str) -> str:
+    """Резултатът за модела, когато поиска инструмент извън MISSION_TOOLS."""
+    return (f"[{name}] не е достъпен в мисия — само {'/'.join(sorted(MISSION_TOOL_NAMES))}. "
+            "Напиши кода в ```python``` блок.")
+
 
 # Поправка на ЧУЖД проект (design note, 2026-07-30, genesis_agent/repo_agent.py).
 # Умишлено по-тесен набор от FULL_TOOLS:
@@ -468,6 +482,32 @@ REPAIR_TOOLS: list[dict] = [
         "EDIT_FILE", "WRITE_FILE", "RUN_CMD",
     }
 ]
+
+
+# Текстов блоков таг без затварящия си маркер (одит 2026-10-22). WRITE_FILE,
+# отрязан на изходния таван (finish_reason=length), идваше като нормален
+# отговор: тялото му не е в ``` ограда, а brain._is_truncated гледаше само
+# оградите. Цикълът не намираше цял таг и два пъти пращаше „грешен синтаксис“,
+# моделът пишеше същия голям файл пак, ходът свършваше без файл (измерено:
+# 3 обаждания, index.html го няма). Тук, защото го ползват и brain, и
+# genesis_skills. USE_SKILL не е тук: `[USE_SKILL: име]` без край е валидна форма.
+_BLOCK_OPEN_RE = re.compile(r"\[(WRITE_FILE|EDIT_FILE):")
+_BLOCK_END = {"WRITE_FILE": "[END_WRITE]", "EDIT_FILE": "[END_EDIT]"}
+
+
+def open_block_tag(text: str) -> str:
+    """Името на WRITE_FILE/EDIT_FILE блок, който е отворен и не е затворен до
+    края на `text`; иначе "". Отляво надясно като парсера: таг в тялото на вече
+    затворен блок е съдържание (README с пример за EDIT_FILE)."""
+    pos = 0
+    while True:
+        m = _BLOCK_OPEN_RE.search(text or "", pos)
+        if not m:
+            return ""
+        end = text.find(_BLOCK_END[m.group(1)], m.end())
+        if end < 0:
+            return m.group(1)
+        pos = end + len(_BLOCK_END[m.group(1)])
 
 
 _JSON_ESCAPE = re.compile(r"\\(u[0-9a-fA-F]{4}|.)", re.DOTALL)

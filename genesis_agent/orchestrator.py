@@ -27,7 +27,12 @@ from genesis_agent.config import MAX_LLM_RETRIES, PROJECT_ROOT
 from genesis_agent.executor import run_python_subprocess
 from genesis_agent.skill_loader import SKILLS_ROOT
 from genesis_agent.skills_manager import save_skill, slugify
-from genesis_agent.tool_schemas import MISSION_TOOLS, load_tool_arguments
+from genesis_agent.tool_schemas import (
+    MISSION_TOOL_NAMES,
+    MISSION_TOOLS,
+    load_tool_arguments,
+    mission_tool_refusal,
+)
 from genesis_agent.verifier import verify_skill
 
 log = logging.getLogger("genesis.orchestrator")
@@ -160,8 +165,13 @@ def run_orchestrated(goal: str, *, max_rounds: int | None = None,
                         args = load_tool_arguments(fn.get("arguments"))
                     except (_json.JSONDecodeError, TypeError):
                         args = {}
-                    # Счупени аргументи → суровият низ: моделът получава „Невалидни аргументи“
-                    tool_out = genesis_skills.dispatch_tool_call(name, args or fn.get("arguments") or {})
+                    if name not in MISSION_TOOL_NAMES:
+                        # Само предложеното се изпълнява — същата дупка като в
+                        # autonomous_loop (одит 2026-10-22, tool_schemas.MISSION_TOOL_NAMES).
+                        tool_out = mission_tool_refusal(name)
+                    else:
+                        # Счупени аргументи → суровият низ: моделът получава „Невалидни аргументи“
+                        tool_out = genesis_skills.dispatch_tool_call(name, args or fn.get("arguments") or {})
                     messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                                       "name": name, "content": tool_out[:4000]})
             except Exception as _e:

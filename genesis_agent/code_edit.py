@@ -34,7 +34,9 @@ from __future__ import annotations
 import ast
 import codecs
 import difflib
+import os
 import re
+import stat
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -245,7 +247,11 @@ def _unified_diff(before: str, after: str, name: str) -> str:
         fromfile=f"a/{name}", tofile=f"b/{name}",
         n=_DIFF_CONTEXT,
     ))
-    return "".join(lines)
+    # Последният ред без `\n` (одит 2026-10-22): „-two“ и „+three“ се слепваха
+    # в „-two+three“, а броят излизаше +0/-1 — моделът четеше дифф, който не
+    # показва промяната му. Маркерът е този на git и patch.
+    return "".join(ln if ln.endswith("\n") else ln + "\n\\ No newline at end of file\n"
+                   for ln in lines)
 
 
 def _count_changed(diff: str) -> tuple[int, int]:
@@ -383,6 +389,16 @@ def edit_file(path: str | Path, old: str, new: str, *,
         #
         # Кодирането се пази по същата логика (одит 2026-10-11): cp1251 или
         # чужд байт в UTF-8 се записват обратно точно както са били.
+        #
+        # Само обикновен файл (одит 2026-10-22): върху FIFO read_bytes() чакаше
+        # вечно (мерено — нишката висеше над 5 s), точно като READ_FILE до
+        # 2026-10-11; затова и същият отказ.
+        st = os.stat(p)
+        if stat.S_ISDIR(st.st_mode):
+            return EditResult(False, f"{p} е папка, не файл.")
+        if not stat.S_ISREG(st.st_mode):
+            return EditResult(False, f"{p} не е обикновен файл (FIFO, устройство или сокет) — "
+                                     "не се редактира: четенето би чакало вечно или нямало край.")
         before, encoding = decode_text(p.read_bytes())
     except FileNotFoundError:
         return EditResult(False, f"Файлът не съществува: {p} "
@@ -438,7 +454,10 @@ def edit_file(path: str | Path, old: str, new: str, *,
         return EditResult(False, f"Грешка при запис: {e}")
 
     added, removed = _count_changed(diff)
-    n = len(hits) if replace_all else 1
+    # Колко замени реално направи str.replace — без застъпване (одит 2026-10-22):
+    # „aa“ в „aaa“ се отчиташе като 2 замени при една. `hits` нарочно брои и
+    # застъпените: такъв anchor без replace_all е двусмислен и се отказва.
+    n = before.count(old) if replace_all else 1
     return EditResult(
         True,
         f"✓ {p} — {n} замяна(и), +{added}/-{removed} реда"

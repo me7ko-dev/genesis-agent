@@ -170,6 +170,9 @@ _PERSISTED_STATE = (
     ("genesis_agent.knowledge_graph", "GRAPH_PATH", "knowledge_graph.json"),
     ("genesis_agent.provider_stats", "_STATS_PATH", "provider_stats.json"),
     ("genesis_agent.budget", "LOG_PATH", "budget_log.jsonl"),
+    # Сборът на похарченото с ANTHROPIC_API_KEY (2026-10-22) — по него работи
+    # таванът GENESIS_ANTHROPIC_MAX_USD; тест не бива да изяжда тавана на оператора.
+    ("genesis_agent.anthropic_spend", "SPEND_PATH", "anthropic_spend.json"),
     ("genesis_agent.free_models", "CACHE_PATH", "free_models.json"),
     ("genesis_agent.model_check", "CHECK_PATH", "model_check.json"),
     ("genesis_agent.telemetry", "STATUS_FILE", "live_status.json"),
@@ -239,6 +242,12 @@ def _isolated_operator_settings(monkeypatch, tmp_path):
     # Отказаните като твърде големи размери са на модула (2026-10-11) — тест с
     # HTTP_413 не бива да скрива модела от следващите тестове.
     monkeypatch.setattr("genesis_agent.brain._TOO_LARGE", {})
+    # Свършен кредит и казаните известия за Anthropic са на процеса
+    # (2026-10-22): тест с 402 не бива да спира Claude за следващите тестове.
+    # Таванът на оператора от средата — също не.
+    from genesis_agent import anthropic_spend
+    anthropic_spend.reset_session()
+    monkeypatch.delenv("GENESIS_ANTHROPIC_MAX_USD", raising=False)
     # debug.log (2026-10-15): операторски export GENESIS_DEBUG=1 не стига до
     # тестовете, а handler-ът от тест с cli.main се маха след него — иначе
     # следващите тестове пишат във файла на предишния tmp home.

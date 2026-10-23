@@ -162,6 +162,45 @@ personal use on your own machine. The online service (`cloud/`) never uses it,
 because a subscription may not serve other people. Usage counts toward your
 plan's limits; when the limit is hit, Genesis moves on to the next model.
 
+### Claude с API ключ (предплатен кредит)
+
+Кредит в Anthropic (например подарен, за ограничено време) Genesis ползва,
+докато свърши, и после продължава на безплатните модели — без грешки.
+
+1. Ключът — само в `~/.genesis/.env` (Windows: `%USERPROFILE%\.genesis\.env`),
+   никога в репото или в чат:
+   ```
+   ANTHROPIC_API_KEY=sk-ant-...
+   GENESIS_ANTHROPIC_MAX_USD=95     # по желание: таван в долари, под кредита
+   ```
+2. Пакетът `anthropic`: при pipx — `pipx inject genesis-agent anthropic`
+   (вече инжектиран отдавна → `pipx runpip genesis-agent install -U anthropic`);
+   `genesis.exe` вече го съдържа.
+3. Изборът: в чата `/model` → „Anthropic (API ключ, платен)“, или от старта:
+   ```bash
+   export GENESIS_START_PROVIDER=anthropic GENESIS_START_MODEL=claude-sonnet-5-5
+   # PowerShell: $env:GENESIS_START_PROVIDER="anthropic"; $env:GENESIS_START_MODEL="claude-sonnet-5-5"
+   genesis
+   ```
+   `claude-opus-5-5` е по-силният и 2× по-скъп; `--max` слага и двата отпред.
+4. Проверка: `/doctor` (или `genesis doctor`) показва похарченото и тавана —
+   никога ключа; `genesis budget` — разхода по дни, в долари.
+
+Цената на всеки отговор (и на отказан или отрязан — и те се плащат) се смята
+по ценоразписа (Opus 5.5 $4/$20 за милион токена вход/изход, Sonnet 5.5
+$2/$10, четене от кеша $0.20) и се трупа в `~/.genesis/anthropic_spend.json`.
+Стигне ли сборът тавана — един ред „Anthropic: похарчени $X от $Y — минавам на
+безплатните модели“. Свърши ли кредитът (402 или „credit balance is too low“) —
+„Кредитът в Anthropic свърши — продължавам с безплатните модели“ и до края на
+сесията няма нов платен опит. Нов кредит → изтрий `anthropic_spend.json`.
+С таван модел, който го няма в ценоразписа (нов от живия списък на `/model`),
+не се вика — иначе разходът му не би влязъл в сбора; сгрешен таван („95 USD“)
+се казва с един ред и не важи, докато не стане число.
+
+За ориентир: bench egn-check с Opus 5 при xhigh и кеширане — $0.78 за 24
+заявки (около 120 такива задачи за $95). Opus 5.5 е с 20% по-евтин на токен,
+Sonnet 5.5 — с 60%; с тях bench още не е пускан.
+
 **One key per provider.** Genesis does not rotate multiple accounts of the same
 provider to multiply a quota — that violates most providers' terms of service.
 Resilience comes from breadth instead. See [SECURITY.md](SECURITY.md).

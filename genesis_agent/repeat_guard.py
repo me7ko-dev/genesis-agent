@@ -112,6 +112,7 @@ class RepeatGuard:
         self._last: str = ""
         self._streak: int = 0
         self._recent: deque[tuple[str, str, bool]] = deque(maxlen=CYCLE_WINDOW)
+        self._writes: int = 0   # успешни записи в таг-режим — белегът им в _recent
 
     def observe(self, name: str, arguments: object, result: str) -> Verdict:
         """Отчита един изпълнен инструмент и казва дали ходът да продължи.
@@ -203,6 +204,14 @@ class RepeatGuard:
         # Успешен запис казва само път и брой знаци — три различни версии на
         # файл с еднаква дължина изглеждаха като въртене и спираха хода
         # (2026-10-07). Тук съдържанието не се вижда; запис не е повторение.
+        # Но е промяна — и нулира поредицата, както на native пътя, където
+        # аргументите на всяка редакция са различни (одит 2026-10-22). Без това
+        # RUN_CMD → EDIT ✓ → RUN_CMD → EDIT ✓ → RUN_CMD със същия червен изход
+        # се броеше за „3 пъти подред“ и ходът спираше преди третата поправка.
+        # Уникален белег в прозореца — и кръгът не се простира през записа.
         if name in ("WRITE_FILE", "EDIT_FILE") and "] ✓" in result.split("\n", 1)[0]:
+            self._writes += 1
+            self._last, self._streak = "", 0
+            self._recent.append((f"write-{self._writes}", name, False))
             return Verdict(repeats=1, stop=False, note="")
         return self.observe(name, None, result)

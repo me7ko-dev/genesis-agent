@@ -14,6 +14,7 @@ knowing about now, not on your first mission.
 from __future__ import annotations
 
 import datetime
+import getpass
 import os
 import sys
 from pathlib import Path
@@ -95,9 +96,11 @@ PROVIDERS: list[tuple[str, str, str, str, str]] = [
 # заявка. Ключ тук НЕ променя нищо от само себе си — моделите влизат във
 # веригата само при `GENESIS_QUALITY=max` (или `genesis fix --max`).
 PAID_PROVIDERS: list[tuple[str, str, str, str, str]] = [
+    # Пробата на ключа върви на първия модел от premium_models (2026-10-22:
+    # claude-opus-5-5) — 16 токена, част от цента.
     ("ANTHROPIC_API_KEY", "Anthropic (Claude)",
      "https://console.anthropic.com/settings/keys",
-     "native://anthropic", "claude-opus-5"),
+     "native://anthropic", "claude-opus-5-5"),
     ("OPENAI_API_KEY", "OpenAI",
      "https://platform.openai.com/api-keys",
      "https://api.openai.com/v1", "gpt-5.5"),
@@ -130,7 +133,10 @@ def _test_anthropic_key(key: str, model: str) -> tuple[bool, str]:
     except anthropic.RateLimitError:
         return True, "ключът работи (в момента е rate-limited)"
     except anthropic.APIStatusError as e:
-        if e.status_code == 400 and "credit" in str(e).lower():
+        # И 402 billing_error, не само старият 400 (2026-10-22, anthropic_spend).
+        from genesis_agent.anthropic_spend import is_credit_error
+        if is_credit_error(f"HTTP_{e.status_code}: {e}") or (
+                e.status_code == 400 and "credit" in str(e).lower()):
             return False, "няма кредит по сметката"
         return False, f"HTTP {e.status_code}: {str(e)[:120]}"
     except anthropic.APIConnectionError:
@@ -217,8 +223,32 @@ def _clean_key(raw: str) -> str:
     return key.strip(_QUOTES + " ")
 
 
+def _masked(key: str) -> str:
+    """`hf_…3456` — достатъчно, за да познаеш поставения ключ, без да го издаваш."""
+    return f"{key[:3]}…{key[-4:]}" if len(key) >= 12 else f"… ({len(key)} знака)"
+
+
 def _prompt_key(text: str) -> str:
-    return _clean_key(_prompt(text))
+    """Ключ от потребителя — в терминал без ехо.
+
+    Одит 2026-10-22 (pty): с input() всеки ключ се виждаше на екрана, докато се
+    поставя — в скролбека, при споделен екран, в запис на терминала, — а
+    модулът иначе пази ключовете (0600 от първия байт, чистене на копията).
+    Подканата се печата през stdout (UTF-8 от ensure_utf8_streams), а getpass
+    чете без ехо; после — маскирано потвърждение какво е поставено. Без
+    терминал (stdin от тръба, тестовете) остава input()."""
+    isatty = getattr(sys.stdin, "isatty", None)
+    if not (isatty and isatty()):
+        return _clean_key(_prompt(text))
+    print(text, end="", flush=True)
+    try:
+        key = _clean_key(getpass.getpass(""))
+    except (EOFError, KeyboardInterrupt):
+        print("\nПрекратено.")
+        sys.exit(1)
+    if key:
+        print(f"    ({_masked(key)})")
+    return key
 
 
 def _prompt(text: str) -> str:

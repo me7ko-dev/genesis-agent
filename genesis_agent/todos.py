@@ -89,9 +89,31 @@ def _item(raw: dict) -> tuple[str, Any]:
     return " ".join(str(text).split())[:_MAX_TEXT], status
 
 
-def write(todos: Any) -> str:
-    """Подменя целия списък. Връща го нарисуван (или защо е отказан)."""
+_UNREAD = ("[TODO_WRITE] ❌ Не разпознах нито една задача — всяка е "
+           '{"content": "…", "status": "pending|in_progress|completed"}. Списъкът е непроменен.')
+_CHECKBOX = re.compile(r"^\s*(?:[-*•]\s*)?\[[ xX✓~>\-]\]", re.MULTILINE)
+
+
+def _is_list_text(arg: str) -> bool:
+    """JSON списък/обект или редове с отметки — не произволен низ."""
+    try:
+        return isinstance(json.loads(arg), (list, dict))
+    except ValueError:
+        return bool(_CHECKBOX.search(arg))
+
+
+def write(todos: Any, *, native: bool = False) -> str:
+    """Подменя целия списък. Връща го нарисуван (или защо е отказан).
+
+    `native` — низ в полето `todos` на native извикването: приема се само JSON
+    или редове с отметки (`[ ]`/`[x]`)."""
     if isinstance(todos, str):
+        # Празен таг (`[TODO_WRITE: ]`) от слаб модел изтриваше целия списък,
+        # а `{"todos": "update"}` го подменяше с една задача „update“ (одит
+        # 2026-10-22) — същата грешка като липсващия ключ (2026-10-12): отказ.
+        # Чисти само изричното `[]`.
+        if not todos.strip() or (native and not _is_list_text(todos)):
+            return _UNREAD
         todos = parse_text(todos)
     if not isinstance(todos, list):
         return "[TODO_WRITE] ❌ Очаква се списък: [{content, status}]."
@@ -110,8 +132,7 @@ def write(todos: Any) -> str:
     if todos and not new:
         # Задачи имаше, но нито една не се прочете: не трием списъка мълчаливо
         # („празен“ караше модела да опитва пак и пак, 12 пъти в един ход).
-        return ("[TODO_WRITE] ❌ Не разпознах нито една задача — всяка е "
-                '{"content": "…", "status": "pending|in_progress|completed"}. Списъкът е непроменен.')
+        return _UNREAD
     _items[:] = new
     note = ""
     if sum(i["status"] == "in_progress" for i in new) > 1:

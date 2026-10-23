@@ -63,18 +63,23 @@ def _write(history_dir: Path, name: str, data: dict) -> None:
 
 def record(history_dir: Path, workspace: Path, session_file: Path) -> None:
     """Запомня, че последният разговор в `workspace` е `session_file`."""
+    from genesis_agent.file_lock import locked
     key = _key(workspace)
-    index = _load(history_dir)
-    index.pop(key, None)
-    index[key] = session_file.name
-    # Най-новите — накрая; старите папки отпадат, за да не расте без край.
-    _write(history_dir, INDEX_NAME, dict(list(index.items())[-_MAX_ENTRIES:]))
+    # Четене-промяна-запис под една ключалка за всички процеси с тази папка с
+    # история (терминал, `genesis serve`). Одит 2026-10-22: без нея два чата,
+    # по 60 разговора всеки, губеха чуждите записи — /resume показваше 48 и 51.
+    with locked(history_dir / INDEX_NAME):
+        index = _load(history_dir)
+        index.pop(key, None)
+        index[key] = session_file.name
+        # Най-новите — накрая; старите папки отпадат, за да не расте без край.
+        _write(history_dir, INDEX_NAME, dict(list(index.items())[-_MAX_ENTRIES:]))
 
-    every = _load_all(history_dir)
-    names = [n for n in every.pop(key, []) if n != session_file.name]
-    names.append(session_file.name)
-    every[key] = names[-_MAX_PER_WORKSPACE:]
-    _write(history_dir, ALL_NAME, dict(list(every.items())[-_MAX_ENTRIES:]))
+        every = _load_all(history_dir)
+        names = [n for n in every.pop(key, []) if n != session_file.name]
+        names.append(session_file.name)
+        every[key] = names[-_MAX_PER_WORKSPACE:]
+        _write(history_dir, ALL_NAME, dict(list(every.items())[-_MAX_ENTRIES:]))
 
 
 def _safe(history_dir: Path, name: str) -> Path | None:

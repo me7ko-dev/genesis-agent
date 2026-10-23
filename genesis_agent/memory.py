@@ -37,6 +37,7 @@ import sqlite3
 from typing import Any
 
 import genesis_agent.episodic_memory as episodic
+from genesis_agent import sqlite_store
 from genesis_agent.config import MEMORY_DIR
 
 log = logging.getLogger("genesis.memory")
@@ -56,15 +57,17 @@ CREATE TABLE IF NOT EXISTS kv_store (
 
 
 def _get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.executescript(_SCHEMA)
-    return conn
+    return sqlite_store.connect(DB_PATH, _SCHEMA, wal=True)
 
 
-# Инициализираме DB веднага при import
-with _get_conn() as _c:
-    pass
+# Инициализираме DB веднага при import — но без да гърми. Одит 2026-10-22:
+# повредена persistent_memory.db хвърляше тук, а genesis_terminal_agent и
+# genesis_skills внасят този модул заедно с паметта на разговора и записа на
+# епизоди — и трите тихо изчезваха заради KV база, в която кодът не пише.
+try:
+    _get_conn().close()
+except (sqlite3.Error, OSError):
+    log.warning("persistent_memory.db не се отвори — KV паметта не работи", exc_info=True)
 
 
 # ─── Key/Value операции ───────────────────────────────────────────────────────

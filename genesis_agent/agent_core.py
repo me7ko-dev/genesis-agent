@@ -578,15 +578,9 @@ def run_tool_loop(
             import genesis_skills as _gs
             if malformed_tag_retries < 2 and _gs.looks_like_attempted_tool_tag(text):
                 malformed_tag_retries += 1
-                messages.append({
-                    "role": "system",
-                    "content": "[Система]: В последния отговор не намерих валиден tool таг, "
-                               "но той изглежда като опит за такъв. Ако си искал да викнеш "
-                               "инструмент — използвай точния синтаксис `[TAG: аргумент]` "
-                               "(или `[WRITE_FILE: път]...[END_WRITE]` за файлове). Ако вече "
-                               "си приключил със задачата — дай кратък финален отговор БЕЗ "
-                               "скоби във формàт на таг.",
-                })
+                # Отрязаният WRITE_FILE получава „раздели записа“, не „грешен
+                # синтаксис“ (одит 2026-10-22) — текстът е общ с терминала.
+                messages.append({"role": "system", "content": _gs.malformed_tag_note(text)})
                 _status("проверява формат на tool tag…")
                 text, tool_calls, prov, model = core.complete(messages)
                 continue

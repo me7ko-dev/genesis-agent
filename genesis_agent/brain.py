@@ -43,12 +43,19 @@ from typing import Any
 import requests
 import yaml
 
+from genesis_agent import anthropic_spend
 from genesis_agent.paths import (
     CONFIG_PATH,
     ENV_FILES,
     env_value,
+    load_config,
 )
-from genesis_agent.tool_schemas import load_tool_arguments
+from genesis_agent.tool_schemas import load_tool_arguments, open_block_tag
+
+# Веригите четат само `models:` от config.yaml — load_config проверява формата
+# само там (одит 2026-10-22: `models: [1, 2]` гърмеше с AttributeError в
+# `genesis models`; сгрешен `workspace:` не бива да изпразва веригата).
+_MODELS_ONLY = ("models",)
 
 # Extra ollama_cloud keys an operator may add THEMSELVES to their own
 # gitignored ~/.genesis/.env — OLLAMA_API_KEY_2 through _10. Not suggested,
@@ -116,7 +123,7 @@ def _output_cap(model: str) -> int:
     if _OUTPUT_CAPS is None:
         caps: dict[str, int] = {}
         try:
-            models = (yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}).get("models", {}) or {}
+            models = load_config(CONFIG_PATH, sections=_MODELS_ONLY).get("models") or {}
             for group in ("fallback_models", "coding_models"):
                 for entry in models.get(group, []) or []:
                     if entry.get("model") and entry.get("max_tokens"):
@@ -138,6 +145,11 @@ ANTHROPIC_EFFORT = "xhigh"
 ANTHROPIC_STREAM_MAX_TOKENS = 64000
 # Операторът избира усилието без да пипа config.yaml: GENESIS_EFFORT=max.
 _EFFORTS = ("low", "medium", "high", "xhigh", "max")
+# Първият ход към Anthropic, когато историята започва с assistant (след
+# компактиране или рязане) — Messages API иска user отпред (виж
+# _to_anthropic_messages).
+_ANTHROPIC_CUT_PLACEHOLDER = ("[по-ранната част от разговора е съкратена или обобщена "
+                              "в системния промпт]")
 
 # Не всеки модел на Anthropic приема тези два параметъра. `output_config.effort`
 # и adaptive thinking вървят от поколение 4.6 нагоре; на Haiku 4.5 и по-старите
@@ -146,7 +158,12 @@ _EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # на по-евтин — точно което прави човек, който пести — получаваше HTTP 400 без
 # следа защо. Списъкът е allowlist по префикс: непознат модел получава заявка
 # без тези параметри, което всеки модел приема.
+# 2026-10-22: изрично и текущото поколение — Opus 5.5 и Sonnet 5.5 минаваха и
+# досега по префикса на 5, но Haiku 5.5 (наследникът на haiku-4-5 в менюто, 10×
+# по-евтин) нямаше ред и тръгваше без effort. Opus 5.5 и Sonnet 5.5 отказват
+# изключен thinking и budget_tokens с 400 — adaptive е единственият им вид.
 _ADAPTIVE_EFFORT_MODELS = (
+    "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1",
     "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
     "claude-sonnet-5", "claude-sonnet-4-6",
     "claude-fable-5", "claude-mythos-5",
@@ -222,6 +239,8 @@ _PROVIDERS = {
 
 # Кои доставчици се викат през native SDK вместо през OpenAI-съвместим HTTP.
 _NATIVE_PROVIDERS = {"anthropic"}
+# Пропуск без заявка, вече обявен с един ред (таван/кредит на Anthropic).
+_ANNOUNCED_SKIP = "skip: anthropic —"
 
 
 def _print_skip(provider: str, model: str, error: str, seconds: float) -> None:
@@ -237,6 +256,10 @@ def _print_skip(provider: str, model: str, error: str, seconds: float) -> None:
     # и без безплатни ключове всяка лека задача при изход печаташе 13 реда
     # „skip: no GROQ_API_KEY configured“, а истинските причини се губеха в тях.
     if error.startswith("skip: no ") and error.rstrip().endswith("configured"):
+        return
+    # Таванът или свършеният кредит в Anthropic (2026-10-22) са казани веднъж
+    # със свой ред (anthropic_spend) — иначе всеки ход щеше да ги повтаря.
+    if error.startswith(_ANNOUNCED_SKIP):
         return
     reason = " ".join(error.split())[:80]
     print(f"  [Brain] ✗ {provider}/{model} след {seconds:.1f}s: {reason} → следващ")
@@ -474,11 +497,17 @@ def _retry_after_s(r: Any) -> float | None:
     """Секунди до следващ опит според 429 отговора, или None без подсказка."""
     headers = getattr(r, "headers", None) or {}
     raw = headers.get("retry-after") or headers.get("Retry-After")
+    # Само крайно число (одит 2026-10-22): `retry-after: inf` или `1e999` дава
+    # float inf, а math.ceil(inf) в _http вдигаше OverflowError — не
+    # RuntimeError, затова излизаше от complete() и ходът падаше, без
+    # следващият модел да е питан. inf/nan се четат като липсваща подсказка.
     if raw:
         try:
-            return max(0.0, float(str(raw).strip()))
+            value = float(str(raw).strip())
         except ValueError:
-            pass  # HTTP-дата — рядко при тези доставчици; остава текстът
+            value = None  # HTTP-дата — рядко при тези доставчици; остава текстът
+        if value is not None and math.isfinite(value):
+            return max(0.0, value)
     m = _TRY_AGAIN_RE.search(getattr(r, "text", "") or "")
     if not m or not (m.group(1) or m.group(2)):
         return None
@@ -488,7 +517,7 @@ def _retry_after_s(r: Any) -> float | None:
             seconds += float(m.group(2)) / (1000 if m.group(3).lower() == "ms" else 1)
     except ValueError:
         return None
-    return seconds
+    return seconds if math.isfinite(seconds) else None
 
 
 def _cooldown_for(error: str) -> float:
@@ -510,8 +539,38 @@ def _is_truncated(text: str) -> bool:
     рунд, и нищо никъде не показва, че истинската причина е ударен таван на
     токените, а не сгрешен код. `finish_reason` не се проверяваше НИКЪДЕ по
     целия LLM път до тази поправка.
+
+    Отворен WRITE_FILE/EDIT_FILE/USE_SKILL блок (одит 2026-10-22) се проверява
+    отделно в _http/_call_anthropic (tool_schemas.open_block_tag): там отрязаният
+    запис се пази за цикъла. Тук не — старият път на терминала
+    (call_openai_compatible, без верига) щеше да го превърне в грешка, а цикълът
+    вече казва на модела „записът е отрязан, раздели го“ (сливане 2026-10-22).
     """
-    return text.count("```") % 2 == 1
+    return _CLOSED_BLOCK_RE.sub("", text).count("```") % 2 == 1
+
+
+# Затворен WRITE_FILE/EDIT_FILE: оградите в тялото му са съдържание (`FENCE = "```"`
+# в .py), не незатворен код — цял запис на тавана минаваше за отрязан (ревю на
+# сливането 2026-10-22). Първият край, като tool_schemas.open_block_tag.
+_CLOSED_BLOCK_RE = re.compile(r"\[(WRITE|EDIT)_FILE:.*?\[END_\1\]", re.DOTALL)
+
+
+# Текстовите тагове с тяло до затварящ маркер (виж genesis_skills._WRITE_RE/_EDIT_RE).
+_FILE_TAGS = (("[WRITE_FILE:", "[END_WRITE]"), ("[EDIT_FILE:", "[END_EDIT]"))
+
+
+def _has_open_file_tag(text: str) -> bool:
+    """Отворен [WRITE_FILE:/[EDIT_FILE: без затварящия си таг — отрязан запис.
+
+    Одит 2026-10-22: текстовият модел пише `[WRITE_FILE: p]…[END_WRITE]` без
+    ограда; отрязан на тавана се връщаше като нормален отговор, а цикълът
+    казваше на модела, че синтаксисът на тага е грешен (native пътят със
+    същия отрязан запис минаваше към следващия модел). Цикълът не го изпълнява
+    (регексите искат затварящия таг), затова при отрязване на ВСЕКИ модел
+    complete() го връща на цикъла като отрязания tool_call, а не „Error“
+    (ревю 2026-10-22). Отделно от _is_truncated: старият път на терминала
+    (call_openai_compatible, без верига) го ползва и не бива да хвърля тук."""
+    return any(text.count(opener) > text.count(closer) for opener, closer in _FILE_TAGS)
 
 
 def _has_cut_tool_arguments(tool_calls: Any) -> bool:
@@ -555,7 +614,12 @@ def _load_keys() -> dict[str, str]:
             line = line.strip().removeprefix("export ").strip()
             if "=" in line and not line.startswith("#"):
                 k, v = line.split("=", 1)
-                keys.setdefault(k.strip(), env_value(v))
+                # Празно `KEY=` в ./.env не скрива истинския ключ от
+                # ~/.genesis/.env (одит 2026-10-22, като paths.read_env_files):
+                # с `cp .env.example .env` Brain виждаше groq като без ключ.
+                k, v = k.strip(), env_value(v)
+                if not keys.get(k):
+                    keys[k] = v
     for k, v in os.environ.items():
         # Exported-but-empty is not an override — it falls through to the file,
         # exactly as get_secret does.
@@ -571,12 +635,12 @@ def _load_chain() -> list[dict]:
     Пази `size_b` (милиарди параметри) на всеки запис — Brain(min_size_b=...)
     филтрира по него за различни контексти (чат/терминал/умения)."""
     try:
-        cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        cfg = load_config(CONFIG_PATH, sections=_MODELS_ONLY)
     except Exception:
         log.debug("config.yaml не се прочете — веригата е без него", exc_info=True)
         cfg = {}
-    models = cfg.get("models", {})
-    fallback_list = models.get("fallback_models", [])
+    models = cfg.get("models") or {}
+    fallback_list = models.get("fallback_models") or []
     meta_lookup = {
         (fb.get("provider"), fb.get("model")): fb for fb in fallback_list
     }
@@ -650,7 +714,7 @@ def _load_coding_chain() -> list[dict]:
     ред и по-строг подбор.
     """
     try:
-        cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        cfg = load_config(CONFIG_PATH, sections=_MODELS_ONLY)
     except Exception:
         log.debug("config.yaml не се прочете — без безплатната верига", exc_info=True)
         return []
@@ -671,7 +735,7 @@ def _load_light_chain() -> list[dict]:
     """`models.light_models` — бързите модели за второстепенната работа
     (извличане на памет, резюмета). Виж коментара в config.yaml за мерките."""
     try:
-        cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        cfg = load_config(CONFIG_PATH, sections=_MODELS_ONLY)
     except Exception:
         log.debug("config.yaml не се прочете — без леките модели", exc_info=True)
         return []
@@ -703,7 +767,7 @@ def _load_premium_chain() -> list[dict]:
     публични, нито са смисленият критерий.
     """
     try:
-        cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        cfg = load_config(CONFIG_PATH, sections=_MODELS_ONLY)
     except Exception:
         log.debug("config.yaml не се прочете — без premium моделите", exc_info=True)
         return []
@@ -1371,7 +1435,10 @@ class Brain:
         # одит 2026-10-11) — без него следващият модел не се пробваше изобщо.
         except (ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
             raise RuntimeError(f"HTTP_200_MALFORMED: {type(e).__name__}: {r.text[:150]}")
-        if not content and not tool_calls:
+        # `.strip()` (одит 2026-10-22): content="  \n " минаваше проверката,
+        # връщаше се "" като успешен отговор и следващият модел не се питаше —
+        # e2e `genesis -p` с такъв groq и здрав nvidia: rc=1 „няма отговор“.
+        if not (content or "").strip() and not tool_calls:
             # Причината в лога (2026-09-30): ollama връщаше празно след 0.3 s в 13
             # от 210 bench разговора, до края им — а редът не казваше защо.
             usage = data.get("usage") or {}
@@ -1398,16 +1465,25 @@ class Brain:
         # отрязан на 4096, стигаше до цикъла като „невалидни аргументи“ и
         # моделът пренаписваше същия голям файл в същия таван рунд след рунд.
         cut_args = finish_reason == "length" and _has_cut_tool_arguments(tool_calls)
-        if cut_args or (finish_reason == "length" and _is_truncated(content or "")):
+        # Текстовият WRITE_FILE/EDIT_FILE/USE_SKILL без затварящ таг е същото като
+        # отрязан tool_call (одит 2026-10-22): пази се за цикъла, който казва
+        # „раздели записа“. Само open_block_tag — той чете отляво надясно като
+        # парсера; броенето (_has_open_file_tag) хвърляше цял запис на тест с
+        # „[WRITE_FILE: a.py]“ в тялото като отрязан (ревю на сливането 2026-10-22).
+        cut_block = finish_reason == "length" and bool(open_block_tag(content or ""))
+        if cut_args or cut_block or (finish_reason == "length" and _is_truncated(content or "")):
             self._last_usage = _openai_usage(data.get("usage"))
             self._usage_attempt = getattr(self, "_attempt_id", None)
             # Отрязаният call се пази: ако го отреже ВСЕКИ модел, complete() го
-            # връща на цикъла вместо „Error“ (ревю 2026-10-11, виж там).
-            self._cut_reply = ((content or "").strip(), tool_calls) if cut_args else None
+            # връща на цикъла вместо „Error“ (ревю 2026-10-11, виж там). Също
+            # текстовият таг (ревю 2026-10-22): без това файл над тавана на
+            # всички текстови модели свършваше с „Error“, а преди — до цикъла.
+            self._cut_reply = (((content or "").strip(), tool_calls)
+                               if cut_args or cut_block else None)
             raise RuntimeError(
                 f"HTTP_TRUNCATED: отговорът е отрязан на тавана от {_output_cap(model)} "
-                f"токена, посред код-ограда или tool_call (finish_reason=length). Вдигни го с "
-                f"`max_tokens:` за модела в config.yaml, ако доставчикът го позволява."
+                f"токена, посред код-ограда, блоков таг или tool_call (finish_reason=length). "
+                f"Вдигни го с `max_tokens:` за модела в config.yaml, ако доставчикът го позволява."
             )
         # usage липсва при локален Ollama /v1 понякога — None е ОК, budget.py го обработва.
         self._last_usage = _openai_usage(data.get("usage"))
@@ -1475,27 +1551,28 @@ class Brain:
                 out.append({"role": "user", "content": parts or "(празно)"})
             else:
                 out.append({"role": "user", "content": content or "(празно)"})
-        # Разговорът трябва да започва с user ход, и tool_result без своя
-        # tool_use (изпаднал при рязане на историята) дава 400 на всеки ход.
-        # Двете се повтарят, докато нищо не се променя: махането на водещ
-        # assistant може да осироти резултатите му (преглед 2026-10-07).
-        while True:
-            while out and out[0]["role"] != "user":
-                out.pop(0)
-            asked = {b["id"] for m in out if m["role"] == "assistant"
-                     for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_use"}
-            cleaned: list[dict] = []
-            for m in out:
-                if m["role"] == "user" and isinstance(m["content"], list):
-                    kept = [b for b in m["content"]
-                            if not (b.get("type") == "tool_result" and b.get("tool_use_id") not in asked)]
-                    if not kept:
-                        continue
-                    m = {**m, "content": kept}
-                cleaned.append(m)
-            if len(cleaned) == len(out) and (not cleaned or cleaned[0]["role"] == "user"):
-                return "\n\n".join(system_parts), cleaned
-            out = cleaned
+        # tool_result без своя tool_use (изпаднал при рязане на историята) дава
+        # 400 на всеки ход — такъв резултат се маха.
+        asked = {b["id"] for m in out if m["role"] == "assistant"
+                 for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_use"}
+        cleaned: list[dict] = []
+        for m in out:
+            if m["role"] == "user" and isinstance(m["content"], list):
+                kept = [b for b in m["content"]
+                        if not (b.get("type") == "tool_result" and b.get("tool_use_id") not in asked)]
+                if not kept:
+                    continue
+                m = {**m, "content": kept}
+            cleaned.append(m)
+        # Разговорът трябва да започва с user ход. Водещият assistant досега се
+        # махаше, а това осиротяваше резултатите му и каскадно изяждаше цялата
+        # опашка (одит 2026-10-22): след компактирането на хода (16/10) пазените
+        # 10 съобщения започват с assistant(tool_calls) — от тях, вкл. финалния
+        # отговор, до Claude стигаше 0, само новият въпрос. Другите доставчици
+        # ги получаваха. Затова отпред влиза кратък user ход-заместител.
+        if cleaned and cleaned[0]["role"] != "user":
+            cleaned.insert(0, {"role": "user", "content": _ANTHROPIC_CUT_PLACEHOLDER})
+        return "\n\n".join(system_parts), cleaned
 
     @staticmethod
     def _to_anthropic_tools(tools: list[dict]) -> list[dict]:
@@ -1516,6 +1593,27 @@ class Brain:
         with api.stream(**extra, **params) as stream:
             return stream.get_final_message()
 
+    @staticmethod
+    def _no_trailing_assistant(msgs: list[dict]) -> list[dict]:
+        """Разговорът към Anthropic свършва с user ход (2026-10-22).
+
+        Последен assistant ход е prefill, а Opus 5.5, Sonnet 5.5 и цялото
+        поколение от 4.6 нагоре го отказват с 400 — на платен модел това е ход,
+        който пада на безплатния без причина. _to_anthropic_messages пазеше
+        само началото (user първо), не и края: история, която свършва с
+        отговора на модела, тръгваше точно така. Висящ tool_use без резултат
+        след него е 400 така или иначе — остава текстът му, а след него идва
+        кратка подкана да продължи."""
+        if not msgs or msgs[-1]["role"] != "assistant":
+            return msgs
+        last = msgs[-1]
+        kept = [b for b in last["content"]
+                if not (isinstance(b, dict) and b.get("type") == "tool_use")]
+        out = msgs[:-1] + ([{**last, "content": kept}] if kept else [])
+        if out and out[-1]["role"] == "assistant":
+            out.append({"role": "user", "content": "[system] Продължи."})
+        return out
+
     def _call_anthropic(self, key: str, model: str, messages: list[dict],
                         tools: list[dict] | None, effort: str) -> tuple[str, list | None]:
         try:
@@ -1524,6 +1622,7 @@ class Brain:
             raise RuntimeError("skip: липсва пакетът `anthropic` (pip install anthropic)")
 
         system, msgs = self._to_anthropic_messages(messages)
+        msgs = self._no_trailing_assistant(msgs)
         if not msgs:
             raise RuntimeError("няма съобщения за изпращане")
         params: dict[str, Any] = {
@@ -1567,29 +1666,55 @@ class Brain:
             params["tools"] = self._to_anthropic_tools(tools)
 
         client = anthropic.Anthropic(api_key=key, timeout=float(self.timeout))
+
+        def send(api: Any, **extra: Any) -> Any:
+            # Една и съща преводна таблица за двата опита (2026-10-22): повторът
+            # без beta-та беше извън нея, и 400 „credit balance is too low“ на
+            # него излизаше от complete() като сурово изключение на SDK-то —
+            # ходът падаше, вместо веригата да продължи.
+            try:
+                return self._anthropic_final(api, params, **extra)
+            except anthropic.BadRequestError as e:
+                raise RuntimeError(f"HTTP_400: {e}") from e
+            except anthropic.AuthenticationError as e:
+                raise RuntimeError(f"HTTP_401: {e}") from e
+            except anthropic.PermissionDeniedError as e:
+                raise RuntimeError(f"HTTP_403: {e}") from e
+            except anthropic.RateLimitError as e:
+                raise RuntimeError(f"HTTP_429: {e}") from e
+            except anthropic.APIStatusError as e:
+                raise RuntimeError(f"HTTP_{e.status_code}: {e}") from e
+            except anthropic.APIConnectionError as e:
+                raise RuntimeError(f"мрежа: {e}") from e
+            except TypeError as e:
+                # SDK, който не познава параметър (`fallbacks`, `output_config`
+                # при anthropic>=0.40 отпреди тях), вдига TypeError, а не
+                # грешка на API-то. Ревю 2026-10-22: тя минаваше покрай
+                # веригата (там се ловят само RuntimeError) и ходът падаше.
+                raise RuntimeError(f"SDK: {e}") from e
+
         try:
             # Класификаторите за безопасност могат да откажат заявка (връща се
             # 200 с stop_reason="refusal"). `fallbacks="default"` оставя сървъра
             # да я довърши на друг модел вместо да ни върне празен отговор.
-            resp = self._anthropic_final(client.beta.messages, params,
-                                         betas=["server-side-fallback-2026-07-01"],
-                                         fallbacks="default")
-        except anthropic.BadRequestError as e:
+            resp = send(client.beta.messages, betas=["server-side-fallback-2026-07-01"],
+                        fallbacks="default")
+        except RuntimeError as e:
             # Акаунт без достъп до тази beta (или SDK, който не я познава) —
             # същата заявка без нея. Нашата собствена верига поема отказа.
-            if "fallback" not in str(e).lower() and "beta" not in str(e).lower():
-                raise RuntimeError(f"HTTP_400: {e}") from e
-            resp = self._anthropic_final(client.messages, params)
-        except anthropic.AuthenticationError as e:
-            raise RuntimeError(f"HTTP_401: {e}") from e
-        except anthropic.PermissionDeniedError as e:
-            raise RuntimeError(f"HTTP_403: {e}") from e
-        except anthropic.RateLimitError as e:
-            raise RuntimeError(f"HTTP_429: {e}") from e
-        except anthropic.APIStatusError as e:
-            raise RuntimeError(f"HTTP_{e.status_code}: {e}") from e
-        except anthropic.APIConnectionError as e:
-            raise RuntimeError(f"мрежа: {e}") from e
+            why = str(e).lower()
+            sdk_too_old = why.startswith("sdk:")
+            if not sdk_too_old and (not why.startswith("http_400")
+                                    or ("fallback" not in why and "beta" not in why)):
+                raise
+            try:
+                resp = send(client.messages)
+            except RuntimeError as plain:
+                if not str(plain).startswith("SDK:"):
+                    raise
+                raise RuntimeError(
+                    f"skip: пакетът anthropic е твърде стар за тази заявка ({plain}) — "
+                    "обнови го: pipx runpip genesis-agent install -U anthropic") from plain
 
         usage = getattr(resp, "usage", None)
         # Прочетените от кеша токени се отчитат ОТДЕЛНО, за да е проверимо, че
@@ -1609,6 +1734,23 @@ class Brain:
             "cached_read_tokens": cache_read,
             "cached_write_tokens": cache_write,
         } if usage else None
+        # Цената в долари (2026-10-22): Anthropic API не я казва, затова се
+        # смята по таблицата в anthropic_spend и влиза в budget (cost_usd) и в
+        # сбора през сесиите, по който работи GENESIS_ANTHROPIC_MAX_USD. Тук,
+        # преди проверките за отказ и отрязан отговор — и те са платени.
+        # Сметката не бива да чупи вече платения отговор (ревю 2026-10-22):
+        # странно `usage` тук е debug ред, не изгубен ход.
+        if self._last_usage is not None:
+            try:
+                cost = anthropic_spend.response_cost(model, resp)
+            except Exception:
+                log.debug("цената на отговора не се изчисли", exc_info=True)
+                cost = None
+            if cost is None:
+                anthropic_spend.note_unpriced(model)
+            else:
+                self._last_usage["cost_usd"] = round(cost, 6)
+                anthropic_spend.add(cost, model)
         # Отказан/отрязан отговор по-долу пак е платен — complete() го записва.
         self._usage_attempt = getattr(self, "_attempt_id", None) if usage else None
 
@@ -1630,14 +1772,35 @@ class Brain:
         text = "".join(text_parts).strip()
         if not text and not tool_calls:
             raise RuntimeError("празен отговор")
+        # tool_use, отрязан на max_tokens (одит 2026-10-22): SDK-то пълни
+        # block.input от частичния JSON, тоест идва ВАЛИДЕН, но непълен dict —
+        # WRITE_FILE записваше половин report.py с „✓ записани 45 символа“.
+        # Последният блок е този, който се е пишел, когато таванът е ударил.
+        # Като при _http: към следващия модел, а call-ът се пази за цикъла с
+        # видимо отрязан JSON (без затварящата `}`) — там dispatch_tool_call
+        # казва „раздели записа“ и не изпълнява половината.
+        if (getattr(resp, "stop_reason", "") == "max_tokens" and resp.content
+                and getattr(resp.content[-1], "type", "") == "tool_use"):
+            fn = tool_calls[-1]["function"]
+            fn["arguments"] = fn["arguments"][:-1]
+            self._cut_reply = (text, tool_calls)
+            raise RuntimeError(
+                f"HTTP_TRUNCATED: отговорът е отрязан на тавана от "
+                f"{ANTHROPIC_STREAM_MAX_TOKENS} токена, посред tool_use "
+                f"(stop_reason=max_tokens)."
+            )
         # Същото като при OpenAI-съвместимия път (виж _http): досега тук се
         # проверяваше само "refusal", а изчерпан max_tokens минаваше за
         # нормален отговор — с незатворена код-ограда това значи счупен
         # полукод, приет за завършен.
-        if getattr(resp, "stop_reason", "") == "max_tokens" and _is_truncated(text):
+        capped = getattr(resp, "stop_reason", "") == "max_tokens"
+        cut_block = capped and bool(open_block_tag(text))
+        if cut_block or (capped and _is_truncated(text)):
+            # Отрязан текстов таг — към цикъла, ако го отреже всеки модел (виж _http).
+            self._cut_reply = (text, tool_calls or None) if cut_block else None
             raise RuntimeError(
                 f"HTTP_TRUNCATED: отговорът е отрязан на тавана от "
-                f"{ANTHROPIC_STREAM_MAX_TOKENS} токена, посред код-ограда "
+                f"{ANTHROPIC_STREAM_MAX_TOKENS} токена, посред код-ограда или блоков таг "
                 f"(stop_reason=max_tokens)."
             )
         return text, (tool_calls or None)
@@ -1718,6 +1881,14 @@ class Brain:
         if not key:
             raise RuntimeError(f"skip: no {key_env} configured")
 
+        # Предплатеният кредит (2026-10-22): стигнат таван
+        # (GENESIS_ANTHROPIC_MAX_USD) или свършен кредит в тази сесия — без
+        # заявка, веригата минава на следващия модел като при мъртъв ключ.
+        if provider in _NATIVE_PROVIDERS:
+            why = anthropic_spend.blocked(model)
+            if why:
+                raise RuntimeError(f"{_ANNOUNCED_SKIP} {why}")
+
         kid = f"key::{key_env}"
         if _is_exhausted(kid):
             raise RuntimeError(f"HTTP_429: {key_env} is rate-limited, cooling down")
@@ -1730,6 +1901,13 @@ class Brain:
             return self._http(base_url, key, model, messages, self.timeout, tools=tools)
         except RuntimeError as e:
             last = str(e)
+            # Свършен кредит (402 billing_error, или по-старият 400 „credit
+            # balance is too low“) не минава след 5 минути: с cooldown всеки
+            # няколко минути ходът започваше с провалена платена заявка, а 400
+            # не спираше ключа изобщо. До края на процеса, с един ред.
+            if provider in _NATIVE_PROVIDERS and anthropic_spend.is_credit_error(last):
+                anthropic_spend.mark_credit_gone()
+                raise RuntimeError(f"{_ANNOUNCED_SKIP} кредитът свърши") from e
             # 429/402 (quota gone) or 401/403 (bad or forbidden key): this
             # provider is unusable for a while. Mark it and let the chain move
             # on to the next provider rather than hammering a dead endpoint.
@@ -1802,6 +1980,12 @@ class Brain:
             raise
         self._last_usage = usage
         self._usage_attempt = getattr(self, "_attempt_id", None) if usage else None
+        # Празен result (одит 2026-10-22, фалшив `claude` с "result": ""): Brain
+        # го връщаше като успешен отговор и следващият модел не се питаше —
+        # _http и _call_anthropic вдигат „празен отговор“. Тук, а не в
+        # claude_cli.complete, за да се запише разходът на хода (usage горе).
+        if not text.strip():
+            raise RuntimeError("празен отговор: claude CLI върна празен result")
         return text, None
 
     def _call_vertex(self, model: str, messages: list[dict],

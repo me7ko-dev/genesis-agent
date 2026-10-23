@@ -17,7 +17,6 @@ import json
 import logging
 import os
 import re
-import time
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -387,7 +386,15 @@ def cmd_load_history(arg: dict, ctx: CommandContext) -> dict:
     messages = gta._restore_session(loaded, system)
     ctx.set_messages(messages)
     # Следващите ходове се пишат в нов файл: старата сесия остава непокътната.
-    gta.session_start_time = time.time()
+    # _new_session(), не само session_start_time (одит 2026-10-22): файлът на
+    # разговора се помни в _SESSION_FILE и следващият ход презаписваше
+    # разговора отпреди зареждането със заредения — той изчезваше.
+    gta._new_session()
+    # Ходовете за /undo и задачите са на онзи разговор — както при /clear
+    # (одит 2026-10-22: /undo връщаше app.py към „v0“ от другия разговор).
+    from genesis_agent import edit_history, todos
+    edit_history.clear()
+    todos.clear()
     replay(ctx.emit, messages)
     return {"ok": True, "messages": sum(1 for m in messages if m.get("role") in ("user", "assistant"))}
 

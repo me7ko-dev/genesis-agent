@@ -32,7 +32,13 @@ log = logging.getLogger("genesis.agents")
 
 MAX_ROUNDS = 15
 _MAX_CALLS = 8
-_MAX_ANSWER = 8000
+# Докладът е единственото, което главният получава: 25 669 знака доклад
+# стигаха до него като първите 8 000, срязани по средата на ред и без бележка —
+# изглеждаше пълен (одит 2026-10-22). Сега до 20 000 (главният цикъл и без това
+# реже резултат над 40 000), а над тях — без средата и с бележка (_report).
+_MAX_ANSWER = 20_000
+_REPORT_CUT = ("\n\n… [отрязани {cut} знака от средата на доклада — ако ти трябват, "
+               "възложи по-тясна задача] …\n\n")
 _MAX_PROMPT = 20_000
 _MAX_AGENTS = 30        # на папка
 _MAX_SECTION = 4000     # знака в системния промпт (като MCP)
@@ -95,7 +101,14 @@ def _known_tools() -> set[str]:
     return {t["function"]["name"] for t in FULL_TOOLS}
 
 
+# `tools:` го има в заглавката, но не се прочете (счупен YAML) — нито един
+# инструмент, не всички (одит 2026-10-22).
+_UNREADABLE = object()
+
+
 def _tools(raw: Any) -> tuple[frozenset[str] | None, tuple[str, ...]]:
+    if raw is _UNREADABLE:
+        return frozenset(), ("(неразбираемо поле tools)",)
     if raw is None or raw == "" or raw == []:
         return None, ()
     if isinstance(raw, list) and all(isinstance(i, str) for i in raw):
@@ -118,7 +131,7 @@ def _tools(raw: Any) -> tuple[frozenset[str] | None, tuple[str, ...]]:
         if (name in known or name.startswith("mcp__")) and name not in _NEVER:
             picked.add(name)
         else:
-            dropped.append(word)
+            dropped.append(word[:60])   # за /agents, не цял ред скоби
     return frozenset(picked), tuple(dropped)
 
 
@@ -130,16 +143,45 @@ def _header(raw: str) -> dict[str, Any]:
     ограничение на инструментите (одит 2026-10-09)."""
     import yaml
     try:
-        loaded = yaml.safe_load(raw)
-    except yaml.YAMLError:
+        # 5 000 вложени `[` = 1,5 s в PyYAML до RecursionError, при всеки load()
+        # (няколко пъти на ход). Истинска заглавка няма и 20 скоби (2026-10-22).
+        loaded = yaml.safe_load(raw) if raw.count("[") + raw.count("{") <= 200 else None
+    except (yaml.YAMLError, ValueError, TypeError, OverflowError, RecursionError):
+        # Не само YAMLError: невъзможна дата (`updated: 2025-02-30`) хвърля
+        # ValueError, а `[[[…]]]` — RecursionError; един такъв файл сваляше
+        # ВСИЧКИ под-агенти, и тези на оператора (одит 2026-10-22). Каквото
+        # остане, load() го хваща за файла.
         loaded = None
     if isinstance(loaded, dict):
         return loaded
     meta: dict[str, Any] = {}
+    items: list[str] | None = None    # редовете `  - Read` под празно `tools:`
     for line in raw.splitlines():
+        if items is not None and line.strip().startswith("-"):
+            items.append(line.strip()[1:].strip().strip("'\""))
+            continue
+        items = None
         key, sep, value = line.partition(":")
-        if sep and key.strip().lower() in ("name", "description", "tools", "model"):
-            meta[key.strip().lower()] = value.strip().strip("'\"")
+        # Ключ в кавички (`"tools": Read`) под счупен YAML се пропускаше — и
+        # агентът пак получаваше всички инструменти (преглед 2026-10-22).
+        key = key.strip().strip("'\"").lower()
+        if sep and key in ("name", "description", "tools", "model"):
+            meta[key] = value.strip().strip("'\"")
+        if sep and key == "tools":
+            # Блоков (`tools:` + `  - Read`) или flow (`[Read, Grep]`) списък под
+            # счупен YAML: дотук първият ставаше „всички инструменти“ (и WRITE_FILE,
+            # RUN_CMD за рецензент), а вторият — `[Read`/`Grep]`, т.е. нито един
+            # (одит 2026-10-22).
+            value = value.strip()
+            if not value:
+                items = []
+                meta["tools"] = items
+            elif value.startswith("[") and value.endswith("]"):
+                # `["Read", "Grep"]` — кавичките не са част от името: оставаха
+                # и рецензентът оставаше без нито един инструмент (2026-10-22).
+                meta["tools"] = ",".join(w.strip().strip("'\"") for w in value[1:-1].split(","))
+    if meta.get("tools") == []:
+        meta["tools"] = _UNREADABLE
     return meta
 
 
@@ -169,11 +211,19 @@ def _parse(path: Path, roots: list[Path]) -> Agent | None:
         return None
     meta: dict[str, Any] = {}
     body = text
-    if text.startswith("---"):
+    # Празни редове преди `---` и незатворена заглавка: дотук заглавката се
+    # пропускаше и агентът получаваше ВСИЧКИ инструменти (одит 2026-10-22).
+    # Празните редове отпред вече не пречат; незатворена заглавка — файлът се
+    # пропуска, както в Claude Code (по-добре липсващ агент, отколкото
+    # рецензент с WRITE_FILE и RUN_CMD).
+    if text.lstrip().startswith("---"):
+        text = text.lstrip()
         end = text.find("\n---", 3)
-        if end != -1:
-            meta = _header(text[3:end])
-            body = text[end + 4:]
+        if end == -1:
+            log.debug("незатворена заглавка в %s — пропуснат", path)
+            return None
+        meta = _header(text[3:end])
+        body = text[end + 4:]
     name = (_text(meta.get("name")) or path.stem).strip().lower()
     if not _NAME.match(name):
         return None
@@ -199,7 +249,12 @@ def load(workspace: Path) -> dict[str, Agent]:
         # Таванът е за всяка папка: клонирано repo с 40 агента не изтласква
         # агентите на оператора (одит 2026-10-09).
         for f in files:
-            agent = _parse(f, roots)
+            try:
+                agent = _parse(f, roots)
+            except Exception:
+                # Един лош файл (от клонирано repo) не сваля другите (одит 2026-10-22).
+                log.debug("под-агентът %s не се прочете", f, exc_info=True)
+                continue
             if agent is not None and agent.name not in found:
                 found[agent.name] = agent
     return found
@@ -268,6 +323,11 @@ def _clip(text: str) -> str:
         return text[:8000]
 
 
+def _report(text: str) -> str:
+    from genesis_agent.budget import clip_for_context
+    return clip_for_context(text, _MAX_ANSWER, notice=_REPORT_CUT)
+
+
 def _say(text: str) -> None:
     if progress is not None:
         try:
@@ -310,6 +370,9 @@ def run(name: str, task: str, workspace: Path, *,
     # А файл, който под-агентът ПРОМЕНИ, вече не е „видян“ и от главния: старото
     # му копие иначе тихо връщаше поправката (одит 2026-10-09).
     seen_before = {p: _stamp(p) for p in gs._SEEN_PATHS}
+    # Също отпечатъците и видяното отчасти (одит 2026-10-22): диапазон, прочетен
+    # от под-агента, не допълва прочетеното от главния до „видян цял“.
+    stamps_before, partly_before = dict(gs._SEEN_STAMPS), dict(gs._PARTLY_SEEN)
     _say(f"↳ {agent.name}: {task[:100]}")
     try:
         gs._set_agent_scope((agent.name, allowed))
@@ -318,6 +381,10 @@ def run(name: str, task: str, workspace: Path, *,
         gs._set_agent_scope(None)
         gs._SEEN_PATHS.clear()
         gs._SEEN_PATHS.update(p for p, stamp in seen_before.items() if _stamp(p) == stamp)
+        gs._SEEN_STAMPS.clear()
+        gs._SEEN_STAMPS.update(stamps_before)
+        gs._PARTLY_SEEN.clear()
+        gs._PARTLY_SEEN.update(partly_before)
 
 
 def _stamp(path: Path) -> tuple[int, int] | None:
@@ -336,10 +403,13 @@ def _loop(agent: Agent, messages: list[dict], complete: Callable[..., Any],
     for round_i in range(max_rounds):
         if gs._cancelled():   # „Стоп“ на оператора спира и под-агента
             return (f"[AGENT: {agent.name}] ⏹ Спрян от оператора след {round_i} рунда "
-                    f"({used} инструмента).{' Последно: ' + last[:_MAX_ANSWER] if last else ''}")
+                    f"({used} инструмента).{' Последно: ' + _report(last) if last else ''}")
         final = round_i == max_rounds - 1
         if final:  # последният рунд — без инструменти: доклад с каквото е свършено
-            messages.append({"role": "user", "content":
+            # system, не user (одит 2026-10-22): request_window пази последното
+            # user съобщение като задачата — на 15-ия рунд (31 съобщения) пазеше
+            # тази подкана, а истинската задача изпадаше от прозореца.
+            messages.append({"role": "system", "content":
                              "Рундовете свършиха. Докладвай сега какво свърши и какво остана."})
         reply = complete(messages, tools=None if final or not schemas else schemas)
         text = (getattr(reply, "raw_text", "") or "").strip()
@@ -366,15 +436,20 @@ def _loop(agent: Agent, messages: list[dict], complete: Callable[..., Any],
             messages.append({"role": "assistant", "content": text})
             # Всички резултати: таговете вече са изпълнени — скрит резултат е
             # действие, за което под-агентът не знае (одит 2026-10-09).
-            messages.append({"role": "user", "content": "[резултати]\n" +
+            # Във формата на терминала и agent_core (system „[Резултат]:“), не
+            # като user „[резултати]“ (одит 2026-10-22): budget_history не ги
+            # познаваше като резултати и не свиваше старите — мерено с резултати
+            # по 28.5K: рунд 10 тръгваше с 263 242 знака (сега 78 001), рунд 15 —
+            # 399 883 (сега 82 336), а request_window ги мислеше за задачата.
+            messages.append({"role": "system", "content": "[Резултат]:\n" +
                              "\n\n".join(_clip(o) for o in outs)})
             continue
         if not text:
             return (f"[AGENT: {agent.name}] ❌ Празен отговор от модела след {round_i + 1} "
-                    f"рунда ({used} инструмента).{' Последно: ' + last[:_MAX_ANSWER] if last else ''}")
-        return f"[AGENT: {agent.name}] ({used} инструмента)\n{text[:_MAX_ANSWER]}"
+                    f"рунда ({used} инструмента).{' Последно: ' + _report(last) if last else ''}")
+        return f"[AGENT: {agent.name}] ({used} инструмента)\n{_report(text)}"
     return (f"[AGENT: {agent.name}] спря след {max_rounds} рунда ({used} инструмента) без "
-            f"окончателен доклад. Последно:\n{last[:_MAX_ANSWER]}")
+            f"окончателен доклад. Последно:\n{_report(last)}")
 
 
 def summary(workspace: Path) -> str:

@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import posixpath
 import re
 from collections import defaultdict
@@ -76,7 +77,8 @@ _DEDUP_NOTICE_CLIPPED = ("[идентичен резултат — по-ново
                          "съкратено; ако ти трябва цялото, извикай пак]")
 
 
-def clip_for_context(text: str, limit: int | None = None) -> str:
+def clip_for_context(text: str, limit: int | None = None,
+                     notice: str = _CLIP_NOTICE_TEMPLATE) -> str:
     """Реже ЕДИН tool резултат до config.TOOL_RESULT_MAX_CHARS, преди да влезе
     в историята на разговора. Операторът вижда пълния изход както винаги —
     конзолата и GUI-то не минават оттук; пести се само контекстът на модела.
@@ -92,6 +94,9 @@ def clip_for_context(text: str, limit: int | None = None) -> str:
     последните редове на лога). Средата на дълъг изход е точно частта, която
     никой не чете. Обичайното `text[:limit]` изхвърля именно грешката накрая и
     после моделът гадае защо е паднало.
+
+    `notice` — друга бележка (с `{cut}`): докладът на под-агент не е изход,
+    който операторът вижда цял (одит 2026-10-22).
     """
     if limit is None:
         limit = TOOL_RESULT_MAX_CHARS
@@ -102,13 +107,13 @@ def clip_for_context(text: str, limit: int | None = None) -> str:
     # тавана "свиването" произвеждаше ПО-ДЪЛЪГ низ от оригинала — плащаше се
     # повече за по-малко съдържание, и то мълчаливо. Свиваме само когато реално
     # спестява (намерено от tests/test_stress_invariants.py, не на око).
-    if cut <= len(_CLIP_NOTICE_TEMPLATE) + 16:
+    if cut <= len(notice) + 16:
         return text
     head = limit * 2 // 3
     tail = limit - head
     return (
         text[:head]
-        + _CLIP_NOTICE_TEMPLATE.format(cut=cut)
+        + notice.format(cut=cut)
         + text[-tail:]
     )
 
@@ -168,8 +173,8 @@ def cache_history(messages, *, max_chars: int | None = None,
     и двете сменят префикса на всеки рунд и кешът не се чете (виж
     config.CACHE_HISTORY_MAX_CHARS). Докато историята е под тавана, тя се
     праща непокътната. Над него отпадат най-старите съобщения след задачата —
-    винаги кратно на `chunk`, изчислено наново от самата история, без
-    състояние. Броят на отпадналите само расте с допълването, затова между два
+    кратно на `chunk` (освен ако парчето би изяло последния рунд, виж долу),
+    изчислено наново от самата история, без състояние. Броят на отпадналите само расте с допълването, затова между два
     скока префиксът е същият. Водещите system съобщения и последното user
     съобщение (задачата) остават винаги, както в request_window.
     """
@@ -190,14 +195,31 @@ def cache_history(messages, *, max_chars: int | None = None,
     head, body = msgs[:lead], msgs[lead:]
     users = [i for i, m in enumerate(body) if m.get("role") == "user" and not is_attachment(m)]
     task = users[-1] if users else None
-    drop = 0
-    while drop < len(body):
+
+    def fits(drop: int) -> bool:
         # Задачата е преди всичко отпаднало след нея — ако отпадне с парчето,
         # стои първа след system и редът остава хронологичен.
         pinned = [body[task]] if task is not None and task < drop else []
-        if size(head) + size(pinned) + size(body[drop:]) <= max_chars:
-            break
+        return size(head) + size(pinned) + size(body[drop:]) <= max_chars
+
+    # Последният цял рунд след задачата (извикването + резултатите му) не
+    # отпада никога, както в request_window (одит 2026-10-22): парче от 20
+    # прескачаше тялото — 4 четения по 40K или 10 рунда по 12.5K при тавана от
+    # 120 000 → тръгваха само [system, задача], моделът не виждаше собственото
+    # си последно извикване и го повтаряше.
+    last = next((i for i in range(len(body) - 2, -1, -1)
+                 if (task is None or i > task) and body[i].get("role") == "assistant"
+                 and _is_tool_result(body[i + 1])), len(body))
+    drop = 0
+    while drop < last and not fits(drop):
         drop += chunk
+    if drop > last:
+        # Парчето прескача последния рунд: най-малкото отрязване до него, което
+        # се събира. Префиксът и така се мени, докато сме в тази зона.
+        drop = next((d for d in range(drop - chunk + 1, last + 1) if fits(d)), last)
+    if drop >= last and last < len(body) and not fits(drop):
+        # И последният рунд сам е над тавана: свитият изглед на всички.
+        return budget_history(msgs)
     pinned = [body[task]] if task is not None and task < drop else []
     return head + pinned + _whole_rounds(body[drop:])
 
@@ -460,8 +482,9 @@ def record_usage(*, provider: str, model: str, prompt_tokens: int,
             "cached_write_tokens": cached_write_tokens,
             "context": context[:120],
         }
-        # Цена само когато доставчикът я казва сам (`claude` CLI: total_cost_usd);
-        # таблица с цени тук би остаряла тихо.
+        # Цена само когато е известна: `claude` CLI я казва сам (total_cost_usd),
+        # за Anthropic API я смята brain по таблицата в anthropic_spend
+        # (2026-10-22); непознат модел → без цена, не грешна.
         if cost_usd is not None:
             entry["cost_usd"] = float(cost_usd)
         # Говор → текст (genesis_agent.voice, 2026-10-15): таксува се по
@@ -510,6 +533,21 @@ def _add_audio(totals: dict, prov: str, entry: dict) -> None:
     stats["audio_seconds"] = round(stats.get("audio_seconds", 0.0) + seconds, 2)
 
 
+def _add_cost(totals: dict, prov: str, entry: dict) -> None:
+    """Доларите — само където записът ги носи (2026-10-22: Anthropic API по
+    таблицата с цени, `claude` CLI по неговата сметка). Без такива записи
+    отчетът остава какъвто беше."""
+    cost = entry.get("cost_usd")
+    # NaN/inf от повреден ред (json.loads ги приема) правеха целия отчет
+    # „Разход: $nan“ (ревю 2026-10-22).
+    if (isinstance(cost, bool) or not isinstance(cost, (int, float))
+            or not math.isfinite(cost) or cost <= 0):
+        return
+    totals["cost_usd"] = round(totals.get("cost_usd", 0.0) + cost, 6)
+    stats = totals["by_provider"][prov]
+    stats["cost_usd"] = round(stats.get("cost_usd", 0.0) + cost, 6)
+
+
 def daily_totals(day: date | None = None) -> dict:
     """Обобщение за конкретен ден (по подразбиране днес, UTC — записите се
     пазят с UTC timestamp, сравнение с локална дата дава грешен резултат
@@ -536,6 +574,7 @@ def daily_totals(day: date | None = None) -> dict:
         totals["by_provider"][prov]["calls"] += 1
         totals["by_provider"][prov]["total_tokens"] += e.get("total_tokens", 0)
         _add_audio(totals, prov, e)
+        _add_cost(totals, prov, e)
     totals["by_provider"] = dict(totals["by_provider"])
     return totals
 
@@ -573,6 +612,7 @@ def range_totals(days: int = 7) -> dict:
         totals["by_provider"][prov]["calls"] += 1
         totals["by_provider"][prov]["total_tokens"] += e.get("total_tokens", 0)
         _add_audio(totals, prov, e)
+        _add_cost(totals, prov, e)
     totals["by_provider"] = dict(totals["by_provider"])
     return totals
 
@@ -600,10 +640,13 @@ def format_report(totals: dict, *, title: str) -> str:
         lines.append(f"Кеш: {read} прочетени ({pct:.0f}% от prompt), {write} записани")
     if totals.get("audio_seconds"):
         lines.append(f"Глас → текст: {totals['audio_seconds']:.0f} s аудио")
+    if totals.get("cost_usd"):
+        lines.append(f"Разход: ${totals['cost_usd']:.4f} (където цената е известна)")
     for prov, stats in sorted(totals["by_provider"].items(),
                               key=lambda kv: -kv[1]["total_tokens"]):
         audio = f"  {stats['audio_seconds']:>6.0f} s аудио" if stats.get("audio_seconds") else ""
-        lines.append(f"  {prov:<13} {stats['calls']:>4} обръщения  {stats['total_tokens']:>8} токена{audio}")
+        usd = f"  ${stats['cost_usd']:.4f}" if stats.get("cost_usd") else ""
+        lines.append(f"  {prov:<13} {stats['calls']:>4} обръщения  {stats['total_tokens']:>8} токена{audio}{usd}")
     return "\n".join(lines)
 
 
