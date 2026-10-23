@@ -1,6 +1,6 @@
 import { ArrowDown, ClipboardList, Cpu, Folder, ListChecks, PanelLeftClose, PanelLeftOpen, RotateCw, X, Zap } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { DEFAULT_LIMITS, imageErrorText, replyToSpeak, speechText, voiceErrorText, type ImageAttachment } from '../shared/media';
+import { DEFAULT_LIMITS, replyToSpeak, sendErrorText, speechText, voiceErrorText, type ImageAttachment } from '../shared/media';
 import type { BackendState, CommandResult, GenesisEvent, Settings, UsageReport } from '../shared/types';
 import { Composer } from './components/Composer';
 import { AssistantMessage, ConfirmCard, Note, Thinking, ToolCard, UserMessage } from './components/Messages';
@@ -85,11 +85,7 @@ export function App() {
 
   const send = useCallback(async (text: string, images: ImageAttachment[] = []) => {
     const r = await api.send(text, images);
-    if (!r.ok) {
-      flash(r.error === 'busy' ? 'Genesis още работи.'
-        : r.error === 'old_agent' ? 'Този genesis не приема картинки — обнови го (/update).'
-        : imageErrorText(r, state.limits) ?? `Не се изпрати: ${r.error}`);
-    }
+    if (!r.ok) flash(sendErrorText(r, images.length > 0, state.limits));
     return r.ok;
   }, [flash, state.limits]);
 

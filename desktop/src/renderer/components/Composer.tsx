@@ -1,8 +1,8 @@
 import { ArrowUp, ImagePlus, LoaderCircle, Mic, Square, Volume2, VolumeX, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import {
-  baseMime, clock, DEFAULT_LIMITS, imageMimeOf, MAX_RECORD_MS, micErrorText, pastedName, takeImages, voiceErrorText,
-  type ImageAttachment, type MediaLimits,
+  baseMime, clock, DEFAULT_LIMITS, imageMimeOf, lengthHint, MAX_MESSAGE, MAX_RECORD_MS, messageLength, micErrorText,
+  pastedName, sendErrorText, takeImages, voiceErrorText, type ImageAttachment, type MediaLimits,
 } from '../../shared/media';
 import { blobToBase64, MicRecorder, toAttachment, type Attachment } from '../lib/capture';
 
@@ -263,6 +263,11 @@ export function Composer({ busy, disabled, placeholder, onSend, onStop, onComman
       return;
     }
     if (busy) return;
+    // Над тавана сървърът само казва "too_long" — отказ още тук, текстът остава в полето (2026-10-22).
+    if (messageLength(value) > MAX_MESSAGE) {
+      onFlash(sendErrorText({ error: 'too_long' }, false));
+      return;
+    }
     const pictures = attached.map(({ mime, data, name }) => ({ mime, data, name }));
     if (await onSend(value, pictures)) {
       if (value) history.current = [value, ...history.current.filter((h) => h !== value)].slice(0, HISTORY_MAX);
@@ -308,6 +313,7 @@ export function Composer({ busy, disabled, placeholder, onSend, onStop, onComman
   }
 
   const recording = mic.phase === 'recording';
+  const hint = lengthHint(text);
   const full = attached.length + reading >= limits.images;
 
   return (
@@ -402,6 +408,7 @@ export function Composer({ busy, disabled, placeholder, onSend, onStop, onComman
           <kbd>Enter</kbd> изпраща · <kbd>Shift</kbd>+<kbd>Enter</kbd> нов ред · <kbd>/</kbd> команди
           {imagesOn && <> · <kbd>Ctrl</kbd>+<kbd>V</kbd> снимка</>}
         </span>
+        {hint && <span className={`length-hint ${messageLength(text) > MAX_MESSAGE ? 'over' : ''}`}>{hint}</span>}
         {voice && onSpeak && (
           <button className={`foot-toggle ${speak ? 'on' : ''}`} onClick={() => onSpeak(!speak)}
                   title="Всеки завършен отговор се чете на глас">
