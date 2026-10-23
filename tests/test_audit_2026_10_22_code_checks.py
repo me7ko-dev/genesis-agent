@@ -6,6 +6,7 @@ from __future__ import annotations
 import ast
 import json
 import types
+from pathlib import Path
 
 import pytest
 
@@ -180,3 +181,12 @@ def test_lone_surrogate_in_py_write_and_edit_gives_the_bulgarian_refusal(ws) -> 
                                                          "new": '"\ud83d"'}))
     assert "ФАЙЛЪТ НЕ Е ПРОМЕНЕН" in out and "codec" not in out, out
     assert (ws / "b.py").read_text(encoding="utf-8") == 'MSG = "x"\n'
+
+
+def test_null_byte_value_error_is_not_valid_python(monkeypatch) -> None:
+    """Ревю 2026-10-22: на 3.10 ast.parse дава ValueError за NUL байт (3.11+ —
+    SyntaxError); `except ValueError` за сурогата го правеше „валиден“ само там."""
+    def parse(src, *a, **kw):
+        raise ValueError("source code string cannot contain null bytes")
+    monkeypatch.setattr(code_edit.ast, "parse", parse)
+    assert "null bytes" in code_edit.syntax_error(Path("a.py"), "x = 1\x00\n")

@@ -347,11 +347,16 @@ def syntax_error(path: Path, text: str) -> str:
         # UTF-8 BOM (Notepad на Windows): Python го приема във файл, ast.parse в
         # низ — не; без това всяка редакция се отказваше като „чупи синтаксиса“.
         ast.parse(source)
-    except ValueError:
+    except UnicodeEncodeError:
         # Самотен сурогат (`\ud83d`, UnicodeEncodeError) не е синтаксис: отказът
         # идва от записа, с българското „половин емоджи?“ (одит 2026-10-22:
         # дотук излизаше суровата английска грешка на кодека само за .py).
         return ""
+    except ValueError as e:
+        # Само сурогатът, не всеки ValueError (ревю 2026-10-22): на 3.10
+        # ast.parse дава ValueError за NUL байт, а 3.11+ — SyntaxError; с
+        # `except ValueError` такъв .py минаваше за валиден само на 3.10.
+        return f"{e}"
     except SyntaxError as e:
         # ast.parse е на Python-а, на който върви Genesis, не на проекта (одит
         # 2026-10-22, мерено с python3.11): `type X = …`, `def f[T]` и f"{", ".join(x)}"
