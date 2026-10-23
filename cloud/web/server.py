@@ -44,9 +44,9 @@ import threading
 import time
 import uuid
 import zipfile
+from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, wait
-from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -142,7 +142,11 @@ class App:
         self._failures: dict[str, list[float]] = {}
         self._noted: dict[str, float] = {}     # ключ → кога заключването е записано
         self._lock = threading.Lock()
-        self._downloading: set[str] = set()
+        # чат → колко сваляния текат сега. Брояч, не множество (одит
+        # 2026-10-22): второ сваляне от същия разговор, докато първото още
+        # тече, получаваше 409 „задачата още върви“, а задача нямаше. Свалянията
+        # не си пречат — само нов ход чака да свършат.
+        self._downloading: Counter[str] = Counter()
         self._cleanup = cleanup or launch.cleanup_leftovers
         self._stopping = threading.Event()
         self._futures: set[Future[None]] = set()
@@ -282,14 +286,16 @@ class App:
         ход, пуснат милисекунди след нея, подменяше папка с връзка посред
         архивирането и в zip-а влизаха файлове на сървъра."""
         with self._lock:
-            if self.store.busy(chat_id=chat_id) or chat_id in self._downloading:
+            if self.store.busy(chat_id=chat_id):
                 return False
-            self._downloading.add(chat_id)
+            self._downloading[chat_id] += 1
             return True
 
     def end_download(self, chat_id: str) -> None:
         with self._lock:
-            self._downloading.discard(chat_id)
+            self._downloading[chat_id] -= 1
+            if self._downloading[chat_id] <= 0:
+                del self._downloading[chat_id]
 
     # ── ходове ──────────────────────────────────────────────────────────────
     def workspace(self, user_id: int, chat_id: str) -> Path:
@@ -388,7 +394,7 @@ class App:
             if account["disabled"]:
                 # Сесията вече е невалидна (session_user) — това е само втора стена.
                 raise TurnRefused(403, "профилът е спрян — пиши на поддръжката")
-            if self.store.busy(user_id=uid) or chat_id in self._downloading:
+            if self.store.busy(user_id=uid) or self._downloading[chat_id] > 0:
                 raise TurnRefused(409, "предишната ти задача още върви")
             per_day, budget, cap = self.limits_for(account)
             if self.store.turns_today(uid) >= per_day:
@@ -431,6 +437,7 @@ class App:
             return
         self.store.set_status(turn_id, "running")
         on_token: Callable[[int], None] | None = None
+        minted = threading.Event()
         if prices is not None:
             # Жетонът се прави в run_task, след мрежата на задачата: дотогава —
             # оценка оттук (не NULL: settle смята NULL за „не е тръгнал“), а
@@ -440,6 +447,7 @@ class App:
                                                                  launch.token_ttl(self.limits)))
 
             def on_token(expires: int) -> None:
+                minted.set()
                 self.store.job_started(turn_id, expires + billing.LATE_MARGIN)
         ok, error, seconds = False, "", 0.0
         tokens: dict[str, int] = {}
@@ -462,8 +470,22 @@ class App:
             # като reconcile, независимо какво е върнал контейнерът. Грешка тук
             # не проваля хода: reconcile при следващия старт го таксува.
             try:
-                billing.charge_turn(self.store, prices, user_id, turn_id,
-                                    gw.usage_lines(gateway.usage, job, usage_start))
+                lines = gw.usage_lines(gateway.usage, job, usage_start)
+                if not minted.is_set() and not lines:
+                    # Одит 2026-10-22: run_task се връща преди жетона, ако
+                    # мрежата на задачата не стане (Docker демонът не отговаря).
+                    # Таксата на ход се взимаше (2.00 кредита) и целият бюджет
+                    # оставаше задържан ~17 мин — следващият ход беше 402 за
+                    # жетон, който не съществува. Като drop_job при спиране:
+                    # без жетон и без разход в шлюза няма такса и задържане.
+                    self.store.drop_job(turn_id)
+                    if not ok:
+                        # Суровата грешка на Docker (пътят на сокета) е за оператора.
+                        print(f"ход {turn_id}: контейнерът не тръгна: {error}", file=sys.stderr)
+                        if not self._stopping.is_set():
+                            error = "задачата не успя да тръгне — опитай пак след малко"
+                else:
+                    billing.charge_turn(self.store, prices, user_id, turn_id, lines)
             except Exception as e:  # noqa: BLE001 — вече се печата в stderr; reconcile при следващия старт го таксува
                 print(f"сметка: ход {turn_id} не е таксуван: {type(e).__name__}: {e}",
                       file=sys.stderr)
@@ -606,7 +628,10 @@ _TURNS = re.compile(r"^/api/chats/([0-9a-f]{32})/turns$")
 _FILES = re.compile(r"^/api/chats/([0-9a-f]{32})/files$")
 _ZIP = re.compile(r"^/api/chats/([0-9a-f]{32})/files\.zip$")
 _FILE = re.compile(r"^/api/chats/([0-9a-f]{32})/files/(.+)$")
-_EVENTS = re.compile(r"^/api/turns/(\d+)/events$")
+# До 18 цифри (одит 2026-10-22): 20 цифри гърмяха с OverflowError в sqlite,
+# 5000 — с ValueError в int(); връзката се затваряше без отговор. Сега — 404.
+_EVENTS = re.compile(r"^/api/turns/(\d{1,18})/events$")
+_MAX_ROWID = 2**63 - 1
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -657,14 +682,20 @@ class Handler(BaseHTTPRequestHandler):
         return self.client_address[0]
 
     def _token(self) -> str:
-        cookie = SimpleCookie()
-        try:
-            cookie.load(self.headers.get("Cookie", ""))
-        except Exception:
-            log.debug("бисквитката не се разчете", exc_info=True)
-            return ""
-        morsel = cookie.get(COOKIE)
-        return morsel.value if morsel else ""
+        # На ръка, не със SimpleCookie (одит 2026-10-22): той спира мълчаливо
+        # на първата бисквитка, която не харесва (consent={"ads":false},
+        # theme=dark mode), и изпуска всички след нея — сесията изчезваше и
+        # всеки адрес връщаше 401. Жетонът е token_urlsafe — няма какво да се
+        # разкавичва. При две бисквитки с това име печели последната — както
+        # при SimpleCookie досега (ревю 2026-10-22: първата се взимаше, а
+        # браузърът праща първа тази с по-дълъг Path — подхвърлена от съседен
+        # поддомейн с Path=/api, тя подменяше сесията на човека).
+        token = ""
+        for part in self.headers.get("Cookie", "").split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == COOKIE:
+                token = value.strip()
+        return token
 
     def _user(self) -> dict[str, Any] | None:
         return self.app.store.session_user(self._token())
@@ -698,6 +729,14 @@ class Handler(BaseHTTPRequestHandler):
             return None
         if not isinstance(data, dict):
             self._error(400, "очаква се обект")
+            return None
+        try:
+            # Одит 2026-10-22: половин двойка („\ud83d“ — текст, отрязан посред
+            # емоджи) минава през json.loads, а sqlite гърмеше с
+            # UnicodeEncodeError — връзката се затваряше без отговор.
+            json.dumps(data, ensure_ascii=False).encode("utf-8")
+        except UnicodeEncodeError:
+            self._error(400, "текстът има невалиден знак (отрязан емоджи?)")
             return None
         return data
 
@@ -748,6 +787,7 @@ class Handler(BaseHTTPRequestHandler):
                 after = int(parse_qs(url.query).get("after", ["0"])[0])
             except ValueError:
                 after = 0
+            after = min(max(after, 0), _MAX_ROWID)  # иначе OverflowError в sqlite (2026-10-22)
             self._json(200, _with_cost({
                 "status": turn["status"], "error": turn["error"], "tokens": turn["tokens"],
                 "seconds": turn["seconds"], "events": store.events(turn["id"], after),
@@ -1049,10 +1089,13 @@ def _admin(a: argparse.Namespace, store: Store) -> int:
     fields: dict[str, Any] = {}
     if a.clear:
         fields = {"turns_per_day": None, "max_tokens_per_turn": None, "monthly_cap": None}
-    if a.turns_per_day is not None:
-        fields["turns_per_day"] = a.turns_per_day
-    if a.max_tokens is not None:
-        fields["max_tokens_per_turn"] = a.max_tokens
+    for key, value in (("turns_per_day", a.turns_per_day), ("max_tokens_per_turn", a.max_tokens)):
+        if value is not None:
+            if value < 0:
+                # 2026-10-22: отрицателно се записваше без проверка.
+                print("лимитите не са отрицателни (0 спира човека)", file=sys.stderr)
+                return 2
+            fields[key] = value
     if a.monthly_cap is not None:
         try:
             fields["monthly_cap"] = billing.parse_credits(a.monthly_cap)
@@ -1062,8 +1105,14 @@ def _admin(a: argparse.Namespace, store: Store) -> int:
     store.set_account(uid, **fields)
     acc = store.account(uid)
     cap = acc["monthly_cap"]
-    print(f"{user['email']}: ходове на ден {acc['turns_per_day'] or 'подразбиране'}, "
-          f"токени на ход {acc['max_tokens_per_turn'] or 'подразбиране'}, "
+
+    def shown(v: Any) -> Any:
+        # Одит 2026-10-22: `v or 'подразбиране'` показваше 0 като подразбирането
+        # (50 хода), а limits_for ползва 0 — човекът е спрян.
+        return v if v is not None else "подразбиране"
+
+    print(f"{user['email']}: ходове на ден {shown(acc['turns_per_day'])}, "
+          f"токени на ход {shown(acc['max_tokens_per_turn'])}, "
           f"месечен таван {billing.fmt_credits(cap) if cap is not None else 'подразбиране'}")
     return 0
 
