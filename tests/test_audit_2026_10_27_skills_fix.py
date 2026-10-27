@@ -34,6 +34,8 @@ def _write(root: Path, files: dict[str, str]) -> Path:
 
 
 def _scripted_brain(rounds: list[list[tuple[str, dict]]]):
+    """Рунд е списък от (tool, args); callable вместо списък — странична стъпка
+    на „модела“ (напр. изтриване на файл без обвивка)."""
     step = {"n": 0}
 
     class _Brain:
@@ -44,8 +46,12 @@ def _scripted_brain(rounds: list[list[tuple[str, dict]]]):
             step["n"] += 1
             if step["n"] > len(rounds):
                 return type("R", (), {"raw_text": "Готово.", "tool_calls": None})()
+            this = rounds[step["n"] - 1]
+            if callable(this):
+                this()
+                return type("R", (), {"raw_text": "Махнах го.", "tool_calls": None})()
             calls = [{"id": str(i), "function": {"name": name, "arguments": json.dumps(args)}}
-                     for i, (name, args) in enumerate(rounds[step["n"] - 1])]
+                     for i, (name, args) in enumerate(this)]
             return type("R", (), {"raw_text": "", "tool_calls": calls})()
 
     return _Brain
@@ -80,11 +86,20 @@ def test_neutralising_the_failing_test_is_not_a_fix(tmp_path, monkeypatch, edit)
     assert "Поправено:" not in out.summary
 
 
-def test_deleting_the_failing_test_file_is_not_a_fix(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("through_shell", [
+    False,
+    pytest.param(True, marks=pytest.mark.skipif(os.name == "nt", reason="`rm` е само в bash")),
+], ids=["direct", "run-cmd-rm"])
+def test_deleting_the_failing_test_file_is_not_a_fix(tmp_path, monkeypatch, through_shell) -> None:
     files = {**_BASE, "tests/test_other.py": "def test_ok():\n    assert 1 == 1\n"}
-    rm = "del tests\\test_calc.py" if os.name == "nt" else "rm tests/test_calc.py"
-    root, out = _repair(tmp_path, monkeypatch, files, [
-        [("READ_FILE", {"path": "calc.py"})], [("RUN_CMD", {"command": rm})], [("EDIT_FILE", _COSMETIC)]])
+    root = tmp_path / "proj"
+    # На Windows CI RUN_CMD минава през Git Bash (`del` не съществува там), а на
+    # лаптопа без него — през cmd.exe (без `rm`): затова изтриването без обвивка
+    # е основният случай, а `rm` през sandbox-а — само на POSIX.
+    delete = ([("RUN_CMD", {"command": "rm tests/test_calc.py"})] if through_shell
+              else (lambda: (root / "tests/test_calc.py").unlink()))
+    _, out = _repair(tmp_path, monkeypatch, files, [
+        [("READ_FILE", {"path": "calc.py"})], delete, [("EDIT_FILE", _COSMETIC)]])
     assert not (root / "tests/test_calc.py").exists()
     assert out.success is False, out.summary
     assert "tests/test_calc.py" in out.files_touched, "изтритият файл трябва да е в диффа"
