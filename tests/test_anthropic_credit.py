@@ -342,6 +342,29 @@ def test_a_stream_cut_after_the_start_still_counts_the_input(sdk, cut) -> None:
     assert spend().total_usd() == pytest.approx(0.40, abs=1e-4)
 
 
+def test_a_stream_cut_mid_answer_counts_the_output_so_far(sdk) -> None:
+    # SDK-то пише output_tokens чак при message_delta (в края): снимката на
+    # скъсан поток носеше 1, а 30 000 байта текст вече бяха платени.
+    sdk.usage = Usage(inp=100_000, out=1)
+    sdk.text = "x" * 30_000
+    sdk.cut = KeyboardInterrupt()
+    with pytest.raises(KeyboardInterrupt):
+        brain.Brain()._call_anthropic("k", "claude-opus-5-5", HI, None, "xhigh")
+    # 100K вход × $4/M + 10K изход (30 000 байта / 3) × $20/M.
+    assert spend().total_usd() == pytest.approx(0.60, abs=1e-4)
+
+
+def test_cut_stream_estimate_counts_thinking_tool_input_and_cyrillic() -> None:
+    blocks = [types.SimpleNamespace(type="thinking", thinking="аб"),       # 4 байта
+              types.SimpleNamespace(type="tool_use", input={"p": "x"}),     # {"p": "x"} — 10
+              types.SimpleNamespace(type="redacted_thinking", data="Z" * 999)]
+    assert spend()._streamed_output_tokens(types.SimpleNamespace(content=blocks)) == 5
+    # Числото от message_delta, ако е по-голямо, остава.
+    stream = types.SimpleNamespace(current_message_snapshot=types.SimpleNamespace(
+        model="claude-opus-5-5", content=[_Text("x" * 3)], usage=Usage(inp=0, out=50_000)))
+    assert spend().charge_interrupted("claude-opus-5-5", stream) == pytest.approx(1.0)
+
+
 def test_a_stream_that_never_started_costs_nothing(sdk) -> None:
     class Snapshotless:
         def get_final_message(self):

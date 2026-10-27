@@ -181,13 +181,53 @@ def response_cost(requested: str, resp: Any) -> float | None:
     return usage_cost(served, usage)
 
 
+class _CutUsage:
+    """`usage` на скъсан поток с оценения изход; останалото — от истинския."""
+
+    def __init__(self, usage: Any, output_tokens: int) -> None:
+        self._usage = usage
+        self.output_tokens = output_tokens
+
+    def __getattr__(self, name: str) -> Any:
+        return _get(self._usage, name)
+
+
+def _streamed_output_tokens(snapshot: Any) -> int:
+    """Оценка на изхода, дошъл преди скъсването: UTF-8 байтове / 3.
+
+    SDK 2.3.0 (`accumulate_event`) записва `output_tokens` в снимката само при
+    message_delta, т.е. в края — посред хода там стои числото от message_start
+    (1–3). Токенизаторът не е тук; байтове/3 е нарочно нагоре (английски е
+    ~4 знака на токен, кирилицата е 2 байта на знак) — таванът да не брои по-малко."""
+    size = 0
+    for block in _get(snapshot, "content") or ():
+        for name in ("text", "thinking"):
+            value = _get(block, name)
+            if isinstance(value, str):
+                size += len(value.encode("utf-8"))
+        tool_input = _get(block, "input")
+        if tool_input:
+            try:
+                size += len(json.dumps(tool_input, ensure_ascii=False).encode("utf-8"))
+            except (TypeError, ValueError):
+                pass
+    return -(-size // 3)
+
+
 def charge_interrupted(model: str, stream: Any) -> float | None:
     """Записва платеното от поток, който не стигна до края: снимката на
     отговора след message_start (`current_message_snapshot`). Поток, скъсан
     преди нея, не е платен — нищо. Никога не хвърля: вика се, докато друго
-    изключение (Ctrl-C, мрежата) вече излиза."""
+    изключение (Ctrl-C, мрежата) вече излиза.
+
+    Изходът дотам се плаща също, а снимката не го носи (_streamed_output_tokens):
+    Ctrl-C след 10K токена мислене на Opus 5.5 губеше $0.20 от сбора (2026-10-27)."""
     try:
         snapshot = stream.current_message_snapshot
+        usage = _get(snapshot, "usage")
+        guess = _streamed_output_tokens(snapshot)
+        if usage is not None and guess > _tokens(usage, "output_tokens"):
+            snapshot = {"model": _get(snapshot, "model"), "usage": _CutUsage(usage, guess)}
         cost = response_cost(model, snapshot)
     except Exception:
         log.debug("anthropic_spend: прекъснатият поток няма снимка с usage", exc_info=True)
