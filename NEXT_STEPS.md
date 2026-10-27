@@ -17,10 +17,10 @@
 ~/.genesis). Прочети CLAUDE.md и раздела „На лаптопа — един промпт“ в NEXT_STEPS.md.
 
 А. Пусни сам, по ред, и запиши числата:
-1. git fetch origin; git checkout claude/sandbox-audit-oct27; git pull (докато не е
-   слят в main — съдържа и PR #98); pipx runpip genesis-agent install --force-reinstall
-   --no-deps "git+https://github.com/me7ko-dev/genesis-agent@claude/sandbox-audit-oct27";
-   genesis --version = последният комит на клона. Телефонът — от mobile/ на същия клон.
+1. git fetch origin; git checkout main; git pull (#98 и #100 са слети);
+   pipx runpip genesis-agent install --force-reinstall --no-deps
+   "git+https://github.com/me7ko-dev/genesis-agent@main";
+   genesis --version = последният комит на main. Телефонът — от mobile/ на main.
 2. python scripts/bench_all.py (Python-а на pipx venv-а). Сравни
    ~/.genesis/bench/all-<днес>/report.md с последния all-* отчет. Регресия → спри и
    ми покажи кой проект/задача и защо, преди всичко друго.
@@ -66,7 +66,7 @@
 
 ## 2026-10-27 — sandbox.py (отложеното от 22.10)
 
-Клон `claude/sandbox-audit-oct27`, `tests/test_audit_2026_10_27_sandbox.py`.
+PR #100 (слят), `tests/test_audit_2026_10_27_sandbox.py`.
 SAFE, т.е. и в „deny“ без въпрос: find `-execdir`/`-ok rm`; `python -c` с
 `Path.unlink()`/`from shutil import rmtree`, node `fs.rm()`; затриване на диск без mkfs
 (blkdiscard, sgdisk --zap-all, mke2fs, mkswap, diskutil eraseDisk, nvme format, dd към
