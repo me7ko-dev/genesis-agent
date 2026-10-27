@@ -373,4 +373,8 @@ test('a fast turn that ended before the send reply does not stay "busy"', () => 
   assert.match(hook, /if \(reply && allowBusy\(\)\) setBusy\(true\);/);
   assert.match(hook, /busyGate\.polled\(\);\s*setBusy\(reply\.busy\);/);
   assert.doesNotMatch(hook, /if \(reply\) setBusy\(true\);/);
+  // Четенето на глас разчиташе на това busy = true, за да знае, че ход е
+  // пратен оттук — сега и самото изпращане го казва.
+  const chat = readFileSync(new URL('../src/app/chat.tsx', import.meta.url), 'utf8');
+  assert.match(chat, /if \(g\.busy \|\| g\.sending\) \{\s*sawBusy\.current = true;/);
 });

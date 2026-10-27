@@ -137,7 +137,9 @@ function Chat({ pairing }: { pairing: Pairing }) {
   const speakRef = useRef(speakItem);
   speakRef.current = speakItem;
   useEffect(() => {
-    if (g.busy) {
+    // g.sending също: ход, свършил преди отговора на `send`, вече не оставя
+    // busy = true (lib/busy.ts, 2026-10-27) — и без това отговорът му не се четеше.
+    if (g.busy || g.sending) {
       sawBusy.current = true;
       return;
     }
@@ -146,7 +148,7 @@ function Chat({ pairing }: { pairing: Pairing }) {
     readFrom.current = lastSeqOf(g.items);
     // През ref: смяна на ▶ (нов speakItem) не бива да чете пак.
     if (pick) void speakRef.current(String(pick.seq), pick.text, false);
-  }, [g.busy, g.items, prefs.speakReplies, g.features.voice]);
+  }, [g.busy, g.sending, g.items, prefs.speakReplies, g.features.voice]);
 
   // Follow new output only while the reader is at the bottom: scrolling up to
   // read something must not be yanked back by the next tool result.
