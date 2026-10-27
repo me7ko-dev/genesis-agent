@@ -2009,7 +2009,11 @@ class SandboxPolicy:
     # Изключен по подразбиране (0). Истинска process-изолация иска cgroups/контейнер.
     # Fork bomb-овете се овладяват от regex BLOCK + RLIMIT_CPU + timeout + killpg.
     max_processes: int = 0
-    max_file_mb: int = 512
+    # 4 GB, не 512 MB (решение на оператора, 2026-10-27): 512 MB рязаха `dd` от
+    # 600 MB („File size limit exceeded“), CUDA wheel-а на torch (~2.5 GB), големи
+    # git пакети и набори данни. Таванът остава — безкраен цикъл, който пише
+    # във файл, пак спира, преди да напълни диска.
+    max_file_mb: int = 4096
 
     def resolve_mode(self) -> str:
         if self.mode != "auto":

@@ -277,3 +277,13 @@ def test_exit_stops_the_children_of_a_background_shell_that_already_exited(tmp_p
     finally:
         if _alive(pid):
             os.kill(pid, 9)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="RLIMIT_FSIZE — POSIX")
+def test_a_command_may_write_a_file_of_a_few_gigabytes(tmp_path) -> None:
+    """512 MB рязаха `dd` от 600 MB и CUDA torch (~2.5 GB); таванът е 4 GB
+    (решение на оператора 2026-10-27) — без да се пише истински файл."""
+    code = "import resource; print(resource.getrlimit(resource.RLIMIT_FSIZE)[0])"
+    res = sandbox._run([sys.executable, "-c", code], cwd=tmp_path, policy=ALLOW, timeout=30)
+    assert res.ok, res.stderr
+    assert int(res.stdout) == 4096 * 1024 * 1024
