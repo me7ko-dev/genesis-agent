@@ -76,6 +76,14 @@ CONFIRM вместо BLOCKED: rm -rf на корен зад `then`/`do`/`!`, `;`
 относителната цел спрямо папката (`rm -rf ..` от `~/proj`, `cd ~ && rm -rf *`).
 Фалшива тревога махната: `find -exec grep` не е „exec“.
 Съзнателна граница: `cd "$DIR" && rm -rf *` (непозната папка) само пита.
+Изпълнението (`tests/test_audit_2026_10_27_sandbox_run.py`): изходът с таван 4 MB на поток
+(`yes` за 3 s убиваше самия Genesis — 300 MB → 1067 MB RSS); фоново дете, държащо pipe-а
+(`app & sleep 1; curl`), се спира 2 s след края, кодът е на командата, не „Timeout“; Ctrl-C
+убива дървото; stdin=DEVNULL (детето четеше терминала); RLIMIT_DATA вместо AS на Linux
+(java, Node 22 fetch, 64 нишки не тръгваха); stop_process и stop_all спират групата и на
+излязъл водач, и дете, което не спира от SIGTERM.
+**Решение на оператора:** RLIMIT_FSIZE 512 MB (`max_file_mb`) реже по-голям файл (`dd` 600 MB,
+CUDA torch, git pack). Отворено (Windows, без тест тук): start_shell без job object.
 `mobile/` (клон `fixes/mobile-audit`, слят тук; `mobile/tests/{interop,chat}.test.ts`):
 срокът на заявката важи и за тялото (спрял отговор висеше завинаги); бърз ход не оставя
 „Genesis работи…“ до 20 s (`lib/busy.ts`); 429 при сдвояване не праща към Wi-Fi

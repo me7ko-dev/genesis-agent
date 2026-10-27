@@ -82,8 +82,10 @@ def test_a_background_child_holding_the_output_does_not_wait_for_the_timeout(
         assert not _alive(pid), "фоновото дете остана живо"
 
 
-def test_a_late_line_from_a_short_background_child_is_still_read(tmp_path) -> None:
-    """Обратната страна: дете, което свършва в рамките на чакането, не се убива."""
+def test_a_late_line_from_a_short_background_child_is_still_read(tmp_path, monkeypatch) -> None:
+    """Обратната страна: дете, което свършва в рамките на чакането, не се убива.
+    Чакането е вдигнато: на Windows CI самият старт на python е до ~1 s."""
+    monkeypatch.setattr(sandbox, "_LEFTOVER_GRACE_S", 10.0)
     code = ("import subprocess, sys\n"
             "subprocess.Popen([sys.executable, '-c', "
             "'import time; time.sleep(0.3); print(\"late\", flush=True)'], stdout=sys.stdout)\n"
@@ -251,3 +253,27 @@ def test_stop_process_never_signals_a_group_it_does_not_lead(monkeypatch) -> Non
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="група процеси — POSIX")
+def test_exit_stops_the_children_of_a_background_shell_that_already_exited(tmp_path) -> None:
+    """stop_all() при изход спираше само задачите с жив водач: `sleep 30 &` в
+    RUN_BG — обвивката излиза веднага, а sleep преживяваше Genesis (2026-10-27)."""
+    from genesis_agent import background
+    started = background.start("sleep 30 & echo $! > sleep.pid", cwd=tmp_path)
+    assert "▶" in started, started
+    pid_file = tmp_path / "sleep.pid"
+    deadline = time.monotonic() + 3
+    while not (pid_file.exists() and pid_file.read_text().strip()) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    pid = int(pid_file.read_text())
+    try:
+        assert not background._running(), "обвивката би трябвало вече да е излязла"
+        background.stop_all()
+        deadline = time.monotonic() + 2
+        while _alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not _alive(pid), "фоновият sleep преживя изхода"
+    finally:
+        if _alive(pid):
+            os.kill(pid, 9)
