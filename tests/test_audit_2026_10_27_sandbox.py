@@ -187,3 +187,16 @@ def test_ordinary_cleanup_still_only_asks(cmd):
 ])
 def test_harmless_shell_forms_stay_safe(cmd):
     assert _level(cmd) == SAFE
+
+
+def test_a_project_in_the_windows_temp_folder_only_asks():
+    # Windows CI 2026-10-27: %TEMP% е под AppData, и `rm -rf build` там ставаше
+    # BLOCKED (test_headless очакваше DENIED в режим „deny“).
+    temp = Path("C:/Users/runneradmin/AppData/Local/Temp/pytest-0/test0")
+    assert _level("rm -rf build", temp) == CONFIRM
+    assert _level("rm -rf *", temp) == CONFIRM
+    # Над папката и изрично изписаният корен — пак BLOCKED.
+    assert _level("rm -rf ../..", temp) == BLOCKED
+    assert _level("cd ~ && rm -rf *", temp) == BLOCKED
+    assert _level("cd / && rm -rf home", temp) == BLOCKED
+    assert _level("rm -rf C:/Users/runneradmin/AppData", temp) == BLOCKED

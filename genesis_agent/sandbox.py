@@ -1183,6 +1183,26 @@ def _next_dir(here: str | None, tokens: list[str]) -> str | None:
     return f"{here.rstrip('/')}/{arg}" if here else None
 
 
+def _relative_root_reason(here: str, target: str) -> str | None:
+    """Критичен корен, до който стига относителна цел от папката `here`.
+
+    Windows CI 2026-10-27: временната папка там е под `AppData\\Local\\Temp`, а
+    _WIN_CRITICAL брои за критично ВСИЧКО под AppData (за изрично изписан път —
+    там няма проекти). Така `rm -rf build` в проект във временната папка
+    ставаше BLOCKED. Цел под самата папка, когато тя вече е в такава зона,
+    само пита; излизането над нея (`..`) и истинските корени (`cd / && rm -rf
+    home`) остават BLOCKED."""
+    joined = f"{here.rstrip('/')}/{target.strip(chr(39) + chr(34))}"
+    reason = _critical_root_reason(joined)
+    if not reason:
+        return None
+    base = _normalise_target(here)
+    inside = _normalise_target(joined).startswith(base.rstrip("/") + "/")
+    if inside and _WIN_CRITICAL.match(base):
+        return None
+    return reason
+
+
 def _catastrophic_rm_reason(command: str, cwd: Path | None = None) -> str | None:
     """Описание, ако командата рекурсивно трие критичен корен; иначе None.
 
@@ -1226,7 +1246,7 @@ def _catastrophic_rm_reason(command: str, cwd: Path | None = None) -> str | None
                             f"изпълнение ({target}) — не може да бъде доказана за безопасна")
                 reason = _critical_root_reason(target)
                 if not reason and here and _is_relative_target(target):
-                    reason = _critical_root_reason(f"{here.rstrip('/')}/{target.strip(chr(39) + chr(34))}")
+                    reason = _relative_root_reason(here, target)
                 if reason:
                     return f"рекурсивно триене на {reason}"
 
