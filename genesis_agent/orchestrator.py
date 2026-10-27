@@ -73,6 +73,20 @@ def _write_tests_first(brain: Brain, goal: str) -> str:
     return tests.strip()
 
 
+_TDD_SENTINEL = "TDD_OK"
+
+
+def _tdd_script(code: str, tests: str) -> str:
+    """Скрипт за TDD рунда: кодът като модул, тестовете в неговото пространство,
+    сентинелът най-накрая — само той доказва, че тестовете са изпълнени."""
+    return (
+        "ns = {'__name__': 'skill'}\n"
+        f"exec(compile({code!r}, 'skill', 'exec'), ns)\n"
+        f"exec(compile({tests!r}, 'tests', 'exec'), ns)\n"
+        f"print({_TDD_SENTINEL!r})\n"
+    )
+
+
 def _extract_code(raw: str) -> str:
     if "```python" in raw:
         return raw.split("```python")[1].split("```")[0].strip()
@@ -196,9 +210,14 @@ def run_orchestrated(goal: str, *, max_rounds: int | None = None,
             # TDD: тестовете на Tester-а трябва реално да минат срещу кода — не
             # само собствените asserts на Coder-а (одит 2026-10-07: `fib(n) = n`
             # с `assert fib(1)==1` минаваше, а `assert fib(10)==55` не беше пуснат).
-            tdd_run = run_python_subprocess(f"{code}\n\n{tests}\nprint('OK')")
-            if not tdd_run.ok:
-                last_error = (tdd_run.stderr or tdd_run.stdout)[-1500:]
+            # Кодът се изпълнява като модул (`__name__ != "__main__"`), а тестовете —
+            # в същото пространство от имена, и се чака сентинел СЛЕД тях: залепени
+            # след кода, `sys.exit(0)` в self-test-а излизаше с 0 преди тестовете
+            # и грешното умение се записваше (одит 2026-10-27).
+            tdd_run = run_python_subprocess(_tdd_script(code, tests))
+            if not tdd_run.ok or _TDD_SENTINEL not in (tdd_run.stdout or ""):
+                last_error = ((tdd_run.stderr or tdd_run.stdout)[-1500:]
+                              or "скриптът излезе (sys.exit) преди тестовете")
                 messages.append({"role": "assistant", "content": reply.raw_text})
                 messages.append({"role": "user", "content": (
                     "Тестовете на Tester-а падат срещу кода ти:\n"

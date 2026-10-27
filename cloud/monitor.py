@@ -514,7 +514,14 @@ def run_once(s: Settings, *, data: Path, jobs: Path, backup_dir: Path, web: str 
         out("няма промяна — нищо за пращане")
     if not dry_run:
         state = new_state(load_state(state_path), findings, now)
-        save_state(state_path, {**state, "channels": delivered})
+        try:
+            save_state(state_path, {**state, "channels": delivered})
+        except OSError as e:
+            # Пълен диск (ENOSPC) — точно това, за което проверката алармира:
+            # пускането умираше с traceback след вече пратената аларма и я
+            # повтаряше на всеки тик (одит 2026-10-27). Код 1, за да се види.
+            print(f"ГРЕШКА: състоянието не се записа: {e}", file=sys.stderr)
+            return 1
     return 1 if failed else 0
 
 

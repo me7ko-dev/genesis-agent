@@ -25,6 +25,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -34,6 +35,7 @@ log = logging.getLogger("genesis.acceptance")
 _WRITTEN = re.compile(r"^\[(?:WRITE_FILE|EDIT_FILE): ([^\]\n]+)\] ✓", re.MULTILINE)
 _TIMEOUT = 120
 _MAX_OUTPUT = 2500
+_NO_PYTEST = re.compile(r"No module named '?pytest'?")
 
 # Временните папки с тестовете. Падналите остават до следващата проверка (на
 # модела е казан пътят им), останалите се трият веднага; при изход — всички.
@@ -166,15 +168,24 @@ class AcceptanceCheck:
             f"sys.path[:0] = [{str(ws)!r}, {str(ws / 'src')!r}]\n", encoding="utf-8")
         from genesis_agent import sandbox
         from genesis_agent.paths import project_python
-        py = project_python(ws)
-        py = f'"{py}"' if " " in py else py
-        cmd = (f'{py} -m pytest -q -p no:cacheprovider --rootdir "{folder}" '
-               f'"{self.test_file}"')
-        res = sandbox.run_shell(cmd, cwd=ws, timeout=_TIMEOUT)
-        if res.blocked or res.returncode is None:
+        # .venv на проекта без pytest: `-m pytest` връщаше rc 1 „No module named
+        # pytest“ и това стигаше до модела като „✗ падат“ (одит 2026-10-27). Тогава
+        # се пробва Python-ът на Genesis; няма ли и там — проверката се пропуска.
+        out = ""
+        for py in dict.fromkeys([project_python(ws), sys.executable]):
+            py = f'"{py}"' if " " in py else py
+            cmd = (f'{py} -m pytest -q -p no:cacheprovider --rootdir "{folder}" '
+                   f'"{self.test_file}"')
+            res = sandbox.run_shell(cmd, cwd=ws, timeout=_TIMEOUT)
+            if res.blocked or res.returncode is None:
+                _cleanup()
+                return "", "приемни тестове: не можаха да се пуснат — пропуснати"
+            out = ((res.stdout or "") + "\n" + (res.stderr or "")).strip()
+            if not _NO_PYTEST.search(out):
+                break
+        else:
             _cleanup()
-            return "", "приемни тестове: не можаха да се пуснат — пропуснати"
-        out = ((res.stdout or "") + "\n" + (res.stderr or "")).strip()
+            return "", "приемни тестове: няма pytest — пропуснати"
         summary = next((ln.strip(" =") for ln in reversed(out.splitlines())
                         if re.search(r"\d+ (passed|failed|error)", ln)), "")
         if res.returncode == 5:  # no tests collected

@@ -32,8 +32,10 @@ _TIMEOUT = 150
 _WEB = {".html", ".htm", ".css", ".js", ".mjs"}
 _WRITTEN = re.compile(r"^\[(?:WRITE_FILE|EDIT_FILE): ([^\]\n]+)\] ✓", re.MULTILINE)
 # Средата на проверката: без ключовете на Genesis — страницата изпълнява чужд JS.
-_SECRET_ENV = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|DSN|COOKIE|SESSION"
-                         r"|_PAT$|^PAT$|_SK$|DATABASE_URL", re.IGNORECASE)
+# `PWD$` (MYSQL_PWD) и `WEBHOOK` (SLACK_WEBHOOK_URL, DISCORD_WEBHOOK,
+# MONITOR_WEBHOOK_URL — адрес с токен в пътя) стигаха до браузъра (одит 2026-10-27).
+_SECRET_ENV = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD$|CREDENTIAL|AUTH|DSN|COOKIE|SESSION"
+                         r"|WEBHOOK|_PAT$|^PAT$|_SK$|DATABASE_URL", re.IGNORECASE)
 
 _python_cache: dict[str, str] = {}
 
