@@ -72,6 +72,9 @@ class FakeSDK:
         # истинското: `stream() got an unexpected keyword argument`.
         self.unknown_kwargs: set[str] = set()
         self.served_model: str | None = None
+        # Потокът се скъсва след message_start: get_final_message() вдига това,
+        # а снимката на отговора вече носи входните токени (2026-10-27).
+        self.cut: BaseException | None = None
         self.module = self._build()
 
     def _build(self) -> types.ModuleType:
@@ -118,6 +121,11 @@ class FakeSDK:
                                              usage=sdk.usage,
                                              model=sdk.served_model or params["model"],
                                              stop_details=None)
+                if sdk.cut is not None:
+                    def broken(err=sdk.cut):
+                        raise err
+                    return contextlib.nullcontext(types.SimpleNamespace(
+                        get_final_message=broken, current_message_snapshot=resp))
                 return contextlib.nullcontext(types.SimpleNamespace(get_final_message=lambda: resp))
 
         class Anthropic:
@@ -319,6 +327,37 @@ def test_a_refused_or_cut_response_is_billed_too(sdk) -> None:
     with pytest.raises(RuntimeError, match="REFUSAL"):
         brain.Brain()._call_anthropic("k", "claude-opus-5-5", HI, None, "xhigh")
     assert spend().total_usd() == pytest.approx(0.40)
+
+
+@pytest.mark.parametrize("cut", ["ctrl-c", "network"])
+def test_a_stream_cut_after_the_start_still_counts_the_input(sdk, cut) -> None:
+    # Одит 2026-10-27: входът се плаща още с message_start, а Ctrl-C или
+    # скъсана връзка посред мисленето прескачаше записа — таванът броеше по-малко
+    # от сметката (100K вход на Opus 5.5 = $0.40 на всяко прекъсване).
+    sdk.usage = Usage(inp=100_000, out=1)
+    sdk.cut = KeyboardInterrupt() if cut == "ctrl-c" else sdk.module.APIConnectionError("reset")
+    expected = KeyboardInterrupt if cut == "ctrl-c" else RuntimeError
+    with pytest.raises(expected):
+        brain.Brain()._call_anthropic("k", "claude-opus-5-5", HI, None, "xhigh")
+    assert spend().total_usd() == pytest.approx(0.40, abs=1e-4)
+
+
+def test_a_stream_that_never_started_costs_nothing(sdk) -> None:
+    class Snapshotless:
+        def get_final_message(self):
+            raise sdk.module.APIConnectionError("refused")
+
+        @property
+        def current_message_snapshot(self):
+            raise AssertionError        # като SDK-то преди message_start
+
+    sdk.module.Anthropic = lambda **_kw: types.SimpleNamespace(
+        beta=types.SimpleNamespace(messages=types.SimpleNamespace(
+            stream=lambda **_p: contextlib.nullcontext(Snapshotless()))),
+        messages=types.SimpleNamespace(stream=lambda **_p: contextlib.nullcontext(Snapshotless())))
+    with pytest.raises(RuntimeError):
+        brain.Brain()._call_anthropic("k", "claude-opus-5-5", HI, None, "xhigh")
+    assert spend().total_usd() == 0
 
 
 def test_an_unknown_model_adds_nothing_to_the_total(sdk) -> None:

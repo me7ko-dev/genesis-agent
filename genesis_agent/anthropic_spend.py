@@ -181,6 +181,22 @@ def response_cost(requested: str, resp: Any) -> float | None:
     return usage_cost(served, usage)
 
 
+def charge_interrupted(model: str, stream: Any) -> float | None:
+    """Записва платеното от поток, който не стигна до края: снимката на
+    отговора след message_start (`current_message_snapshot`). Поток, скъсан
+    преди нея, не е платен — нищо. Никога не хвърля: вика се, докато друго
+    изключение (Ctrl-C, мрежата) вече излиза."""
+    try:
+        snapshot = stream.current_message_snapshot
+        cost = response_cost(model, snapshot)
+    except Exception:
+        log.debug("anthropic_spend: прекъснатият поток няма снимка с usage", exc_info=True)
+        return None
+    if cost:
+        add(cost, model)
+    return cost
+
+
 # ── сборът през сесиите ────────────────────────────────────────────────────
 
 def _read(*, strict: bool = False) -> dict[str, Any]:
