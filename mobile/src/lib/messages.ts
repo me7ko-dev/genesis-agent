@@ -97,6 +97,30 @@ export function errorText(e: unknown): string {
   }
 }
 
+/** Неуспешно сдвояване → текст за екрана „Сдвои“.
+ *
+ *  Одит 2026-10-27: екранът делеше грешките на три — всяка не-ProtocolError
+ *  (записът в SecureStore) и 429 бяха „Не стигам до … защитната стена“, а
+ *  'server' (друго нещо на порта, 500) — „не прие ключа“. Измерено срещу
+ *  истинския remote_server: стар код след `genesis serve --reset`, пробван
+ *  31 пъти за минута, получава 429 — компютърът отговаря, а екранът пращаше
+ *  оператора да оправя Wi-Fi и защитната стена. */
+export function pairErrorText(e: unknown, base: string): string {
+  if (!isProtocolError(e)) return errorText(e);
+  switch (e.kind) {
+    case 'network':
+      // 429 — спирачката след много откази: компютърът е тук.
+      return e.status === 429 ? errorText(e)
+        : `Не стигам до ${base}. Телефонът и компютърът в една Wi-Fi мрежа ли са? На Windows защитната стена трябва да пуска „genesis“.`;
+    case 'clock':
+      return 'Часовникът на телефона или компютъра е разминат с повече от 5 минути.';
+    case 'server':
+      return errorText(e);
+    default:
+      return 'Компютърът не прие ключа. Сканирай кода отново (или `genesis serve --reset` е сменил ключа).';
+  }
+}
+
 // Python str.strip() маха и \x1c–\x1f и \x85, които JS trim() пази: такова
 // „съобщение“ минаваше проверката тук и сървърът го намираше празно (одит
 // 2026-10-11).

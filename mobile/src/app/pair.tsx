@@ -6,6 +6,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { pairErrorText } from '../lib/messages';
 import { usePairing } from '../lib/pairing';
 import {
   GenesisClient, ProtocolError, onLink, pairingFrom, parsePairingUrl, takeLink, type Pairing,
@@ -58,14 +59,9 @@ export default function Pair() {
       // оставяше втори жив чат отдолу (одит 2026-10-09).
       router.dismissTo('/chat');
     } catch (e) {
-      const kind = e instanceof ProtocolError ? e.kind : 'network';
-      setError(
-        kind === 'network'
-          ? `Не стигам до ${pairing.base}. Телефонът и компютърът в една Wi-Fi мрежа ли са? На Windows защитната стена трябва да пуска „genesis".`
-          : kind === 'clock'
-            ? 'Часовникът на телефона или компютъра е разминат с повече от 5 минути.'
-            : 'Компютърът не прие ключа. Сканирай кода отново (или `genesis serve --reset` е сменил ключа).',
-      );
+      // 429 и грешка на сървъра не са „не стигам“/„не прие ключа“ (lib/messages, 2026-10-27).
+      console.warn('genesis: pair', e instanceof Error ? e.message : String(e));
+      setError(pairErrorText(e, pairing.base));
     } finally {
       busy.current = false;
       setChecking(false);
