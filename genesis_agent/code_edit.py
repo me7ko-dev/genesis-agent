@@ -342,11 +342,31 @@ def syntax_error(path: Path, text: str) -> str:
     """Empty string when `text` parses (or `path` is not Python)."""
     if path.suffix != ".py":
         return ""
+    source = displayable(text).removeprefix("\ufeff")
     try:
         # UTF-8 BOM (Notepad на Windows): Python го приема във файл, ast.parse в
         # низ — не; без това всяка редакция се отказваше като „чупи синтаксиса“.
-        ast.parse(displayable(text).removeprefix("\ufeff"))
+        ast.parse(source)
+    except UnicodeEncodeError:
+        # Самотен сурогат (`\ud83d`, UnicodeEncodeError) не е синтаксис: отказът
+        # идва от записа, с българското „половин емоджи?“ (одит 2026-10-22:
+        # дотук излизаше суровата английска грешка на кодека само за .py).
+        return ""
+    except ValueError as e:
+        # Само сурогатът, не всеки ValueError (ревю 2026-10-22): на 3.10
+        # ast.parse дава ValueError за NUL байт, а 3.11+ — SyntaxError; с
+        # `except ValueError` такъв .py минаваше за валиден само на 3.10.
+        return f"{e}"
     except SyntaxError as e:
+        # ast.parse е на Python-а, на който върви Genesis, не на проекта (одит
+        # 2026-10-22, мерено с python3.11): `type X = …`, `def f[T]` и f"{", ".join(x)}"
+        # от проект за 3.12 се отказваха като „чупи синтаксиса“. Парсерът на ruff
+        # приема всяка версия и хваща всичко от ast.parse, което пробвахме (20
+        # случая, вкл. b'Мария', f(**x, *y), del f()) — отказ само ако и той не го
+        # парсва. Без ruff — както досега.
+        from genesis_agent.code_validate import ruff_parses
+        if ruff_parses(source):
+            return ""
         msg = f"{e.msg} (ред {e.lineno})"
         if "bytes can only contain ASCII" in (e.msg or ""):
             lines = [i for i, ln in enumerate(text.splitlines(), 1)

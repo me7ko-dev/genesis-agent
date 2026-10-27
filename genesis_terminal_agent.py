@@ -937,7 +937,11 @@ def ask_genesis(messages, tools=None):
 
     # Brain вече логва usage в genesis_agent.budget вътрешно — тук САМО обновяваме
     # брояча на status bar-а, за да не се дублира записът в !budget.
-    count_usage(getattr(reply, "usage", None), messages, text)
+    # Само при истински отговор (одит 2026-10-22): изчерпана верига идва без
+    # usage и оценката по целия prompt добавяше ~10K към Σ за обръщение, което
+    # не е похарчило нито един токен.
+    if not text.startswith("Error:"):
+        count_usage(getattr(reply, "usage", None), messages, text)
 
     # Ако Brain е паднал на друг доставчик ЗА ТОЗИ отговор (cooldown/грешка,
     # включително сгромолясване до локалния модел като последна резерва),
@@ -1088,9 +1092,11 @@ def _force_compact(messages: "deque") -> "deque":
 
 
 # ── Tools ─────────────────────────────────────────────────────────────────────
-def parse_and_execute_tools(response_text):
+def parse_and_execute_tools(response_text, done: list[str] | None = None):
+    """`done` — списък, в който влиза всеки готов резултат веднага: при Ctrl-C
+    посред таговете свършеното не се губи (виж _run_turn_once, 2026-10-22)."""
     try:
-        return genesis_skills.parse_and_execute_tools(response_text)
+        return genesis_skills.parse_and_execute_tools(response_text, done)
     except NameError:
         return ["[Грешка: genesis_skills не е зареден]"]
 
@@ -1402,6 +1408,10 @@ class TurnUI:
         спирането е Ctrl+C, затова тук винаги „не"."""
         return False
 
+    def stopped(self, reason: str) -> None:
+        """Ходът спря по причина, която hook Stop не бива да прескача
+        („cancel“ — Ctrl-C, „error“ — грешка на веригата). Само _WatchedUI я помни."""
+
 
 class _WatchedUI(TurnUI):
     """Препраща към истинския UI и помни ЗАЩО ходът спря: Stop hook не бива
@@ -1448,6 +1458,13 @@ class _WatchedUI(TurnUI):
             self.stopped_for = "cancel"
             return True
         return False
+
+    def stopped(self, reason: str) -> None:
+        # Изрично, не по текста на warn (одит 2026-10-22): след Ctrl-C и след
+        # „[Грешка: веригата е изчерпана]“ stopped_for оставаше празно и hook
+        # Stop с код 2 връщаше хода — измерено: 3 обръщения към модела вместо 1
+        # и два боклучави „[hook Stop…]“ в историята.
+        self.stopped_for = reason
 
 
 class RichTurnUI(TurnUI):
@@ -1697,8 +1714,10 @@ def _may_ask(name: str, args: dict) -> bool:
     return not inside or bool(sandbox.sensitive_path_reason(target))
 
 
-def _parallel_reads(tool_calls: list[dict]) -> dict[int, str]:
-    """Results by index when the whole batch is safe to run at once; else {}."""
+def _parallel_reads(tool_calls: list[dict], done: dict[int, str] | None = None) -> dict[int, str]:
+    """Results by index when the whole batch is safe to run at once; else {}.
+
+    `done` се пълни, докато резултатите идват — при Ctrl-C държи готовите."""
     calls = []
     for tc in tool_calls:
         fn = tc.get("function", {}) or {}
@@ -1714,10 +1733,33 @@ def _parallel_reads(tool_calls: list[dict]) -> dict[int, str]:
     # а после свършваше (одит 2026-10-09).
     if any(_may_ask(name, args) for name, args in calls):
         return {}
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=min(_PARALLEL_MAX, len(calls))) as pool:
-        results = list(pool.map(lambda c: genesis_skills.dispatch_tool_call(c[0], c[1]), calls))
-    return dict(enumerate(results))
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+    results: dict[int, str] = {} if done is None else done
+    # Без `with` (одит 2026-10-22): изходът от него чака всички нишки, тоест
+    # Ctrl-C не правеше нищо до края на най-бавното четене (измерено: 6.1 s при
+    # Ctrl-C на 0.5 s), а готовите резултати ставаха „не е изпълнено“.
+    pool = ThreadPoolExecutor(max_workers=min(_PARALLEL_MAX, len(calls)))
+    futures = {pool.submit(genesis_skills.dispatch_tool_call, name, args): i
+               for i, (name, args) in enumerate(calls)}
+    try:
+        pending = set(futures)
+        while pending:
+            # С таймаут, не as_completed (ревю 2026-10-22): на Windows (до 3.14)
+            # чакане без таймаут не се буди от Ctrl-C — сигналът стигаше чак със
+            # следващото готово четене. Измерено с _thread.interrupt_main (сигнал,
+            # който не буди чакането): as_completed — 3.3 s, wait(0.2) — 0.4 s.
+            finished, pending = wait(pending, timeout=0.2, return_when=FIRST_COMPLETED)
+            for fut in finished:
+                results[futures[fut]] = fut.result()
+    except KeyboardInterrupt:
+        for fut, i in futures.items():
+            if fut.done() and not fut.cancelled() and fut.exception() is None:
+                results[i] = fut.result()
+        # Четенията не пишат нищо — недовършените довършват на заден план.
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    pool.shutdown()
+    return dict(sorted(results.items()))
 
 
 # Съобщението спряно ли е от hook UserPromptSubmit (тогава чакащият изход от
@@ -1770,6 +1812,14 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI",
                          if m.get("role") == "assistant"), "")
             try:
                 stop = hooks.fire("Stop", {"last_assistant_message": last[:4000]})
+            except KeyboardInterrupt:
+                # Ctrl-C в бавен hook Stop (`pytest -q`, до 60 s) спира само
+                # hook-а (одит 2026-10-22). Измерено: KeyboardInterrupt излизаше
+                # от run_turn, main() пазеше СТАРАТА история и следващият ход не
+                # знаеше за записания notes.txt. Свършеният ход вече е в messages.
+                watched.stopped_for = "cancel"
+                ui.warn("⏹ hook Stop е прекъснат (Ctrl-C) — ходът остава в историята.")
+                break
             except Exception:
                 log.debug("куката Stop се провали", exc_info=True)
                 break
@@ -1858,6 +1908,9 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
     # остава в историята и се запазва; Ctrl-C спира хода, не чата. Дотогава
     # ходът изчезваше целия — файловете променени, а моделът не знаеше (одит 2026-10-09).
     _failure: Exception | None = None
+    # Готовите резултати на текстовите тагове, докато parse_and_execute_tools
+    # още върви (None извън него) — за Ctrl-C посред рунда (2026-10-22).
+    _text_done: list[str] | None = None
     try:
         with ui.thinking("Genesis мисли...", "dots2"):
             response, tool_calls = ask_genesis(messages, tools=_turn_tools())
@@ -1870,6 +1923,7 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                 # грешката влизаше в историята като реплика на модела. Сега —
                 # само към оператора, без подкани, ходът спира тук.
                 ui.warn(response)
+                ui.stopped("error")
                 break
             ui.assistant(response)
             assistant_msg = {"role": "assistant", "content": response}
@@ -1895,7 +1949,20 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                 # но без риск от грешно написан таг/синтаксис.
                 asked = ""
                 _repeat_note = ""
-                _prefetched = _parallel_reads(tool_calls)
+                _prefetched: dict[int, str] = {}
+                try:
+                    _parallel_reads(tool_calls, _prefetched)
+                except KeyboardInterrupt:
+                    # Готовите четения влизат в историята с истинския си резултат;
+                    # останалите ги допълва _close_open_tool_calls (2026-10-22).
+                    for _i, _tc in enumerate(tool_calls):
+                        if _i in _prefetched:
+                            _n = (_tc.get("function") or {}).get("name", "")
+                            ui.tool(_n, _prefetched[_i])
+                            messages.append({"role": "tool", "tool_call_id": _tc.get("id", ""),
+                                             "name": _n,
+                                             "content": clip_for_context(_prefetched[_i])})
+                    raise
                 for _tc_i, tc in enumerate(tool_calls):
                     fn = tc.get("function", {}) or {}
                     name = fn.get("name", "")
@@ -1933,7 +2000,11 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                         name, " ".join(str(v) for v in args.values()), result)
                     if _entry:
                         _executed.append(_entry)
-                    ui.tool(name, result)
+                    # Въпросът го показва ui.asked (одит 2026-10-22): тук панелът
+                    # „🔧 ASK_USER“ показваше същия въпрос втори път, с вътрешния
+                    # маркер __GENESIS_ASK_USER__ отпред.
+                    if not (name == "ASK_USER" and genesis_skills.ASK_USER_MARKER in result):
+                        ui.tool(name, result)
                     messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                                       "name": name,
                                       "content": clip_for_context(result)})
@@ -1986,7 +2057,9 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
             _first = re.search(r"\[([A-Z_]{3,}):\s*([^\]\n]{0,200})", response or "")
             if _first:
                 ui.tool_start(_first.group(1), _tool_detail({"command": _first.group(2)}))
-            tool_results = parse_and_execute_tools(response)
+            _text_done = []
+            tool_results = parse_and_execute_tools(response, _text_done)
+            _text_done = None
             _executed.extend(claim_check.executed_from_text_results(tool_results))
             for _r in tool_results:
                 # Резултатът — към оператора, както при native пътя (e2e
@@ -1994,7 +2067,8 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                 # резервен слой) телефонът не виждаше нито един резултат, а
                 # `genesis -p --json` даваше "tools": [] след EDIT_FILE и RUN_CMD.
                 _tag = re.match(r"\[([A-Z_]+)[:\]]", _r or "")
-                ui.tool(_tag.group(1) if _tag else "инструмент", _r)
+                if not (_r or "").startswith(genesis_skills.ASK_USER_MARKER):   # → ui.asked
+                    ui.tool(_tag.group(1) if _tag else "инструмент", _r)
                 _page_check.observe(_r)
                 _run_check.observe(_r)
                 _accept.observe(_r)
@@ -2123,6 +2197,18 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
             with ui.thinking("Анализирам...", "aesthetic"):
                 response, tool_calls = ask_genesis(messages, tools=_turn_tools())
     except KeyboardInterrupt:
+        if _text_done is not None:
+            # Таг-режим (одит 2026-10-22): parse_and_execute_tools връщаше
+            # резултатите чак накрая и Ctrl-C в RUN_CMD изхвърляше вече записания
+            # made.py — в историята оставаха само таговете, без „[Резултат]“.
+            for _r in _text_done:
+                _tag = re.match(r"\[([A-Z_]+)[:\]]", _r or "")
+                if not (_r or "").startswith(genesis_skills.ASK_USER_MARKER):
+                    ui.tool(_tag.group(1) if _tag else "инструмент", _r)
+            if _text_done:
+                messages.append({"role": "system", "content": "[Резултат]:\n" +
+                                 "\n\n".join(clip_for_context(r) for r in _text_done)})
+        ui.stopped("cancel")
         ui.warn("⏹ Прекъснато (Ctrl-C) — ходът спря; свършеното дотук е в историята.")
     except Exception as e:  # noqa: BLE001 — пази историята, после се хвърля наново (raise _failure)
         _failure = e
@@ -2132,23 +2218,38 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
     # не при него. Пести токени в дълги разговори, "помни" повече чрез резюме.
     before_len = len(messages)
     pre_compact = [m for m in messages if m.get("role") in ("user", "assistant")]
-    messages = _compact_messages(messages)
-    if len(messages) < before_len:
-        ui.info(f"🗜 История компресирана ({before_len} → {len(messages)} съобщения)")
-        # Компресията е моментът, в който старото съдържание се изхвърля —
-        # записваме трайното от НЕкомпресираната история, докато я имаме.
-        # Без това дълга сесия губи ранните решения (auto_capture на изход
-        # вижда само последните ~10 съобщения), а при рязко прекъсване
-        # (kill, затворен прозорец, спрян ток) се губи всичко от сесията.
-        try:
-            from genesis_agent import workspace_memory as _wm
-            saved = _wm.auto_capture(pre_compact)
-            if any(saved.values()):
-                ui.info(f"🧠 Запомнено преди компресията: {_memory_note(saved)}")
-        except Exception:
-            log.debug("запомнянето преди компресията не стана", exc_info=True)
+    uncompacted = messages
+    try:
+        messages = _compact_messages(messages)
+        if len(messages) < before_len:
+            ui.info(f"🗜 История компресирана ({before_len} → {len(messages)} съобщения)")
+            # Компресията е моментът, в който старото съдържание се изхвърля —
+            # записваме трайното от НЕкомпресираната история, докато я имаме.
+            # Без това дълга сесия губи ранните решения (auto_capture на изход
+            # вижда само последните ~10 съобщения), а при рязко прекъсване
+            # (kill, затворен прозорец, спрян ток) се губи всичко от сесията.
+            try:
+                from genesis_agent import workspace_memory as _wm
+                saved = _wm.auto_capture(pre_compact)
+                if any(saved.values()):
+                    ui.info(f"🧠 Запомнено преди компресията: {_memory_note(saved)}")
+            except Exception:
+                log.debug("запомнянето преди компресията не стана", exc_info=True)
+    except KeyboardInterrupt:
+        # Ctrl-C, докато моделът за резюмето отговаря (одит 2026-10-22): само
+        # компресията се пропуска. Измерено: KeyboardInterrupt излизаше от
+        # run_turn и ходът (WRITE_FILE + отговорът) изчезваше от историята.
+        messages = uncompacted
+        ui.stopped("cancel")
+        ui.warn("⏹ Компресията е прекъсната (Ctrl-C) — историята остава цяла.")
 
-    _save_session(messages)
+    try:
+        _save_session(messages)
+    except KeyboardInterrupt:
+        # Записът е атомарен (старият файл остава цял); ходът е в паметта и
+        # следващият ход пак ще го запише (одит 2026-10-22).
+        ui.stopped("cancel")
+        ui.warn("⏹ Записът на разговора е прекъснат (Ctrl-C) — ще се запише със следващия ход.")
     from genesis_agent.agent_core import bounded_history
     if _failure is not None:
         # Грешката продължава нагоре (headless и телефонът я показват), но
