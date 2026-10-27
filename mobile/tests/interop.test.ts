@@ -15,8 +15,8 @@ import { mergeEvents, toChatItems } from '../src/lib/chat.ts';
 import { errorText, MAX_MESSAGE, pairErrorText, replyErrorText, trimDraft } from '../src/lib/messages.ts';
 import { Outbox } from '../src/lib/outbox.ts';
 import {
-  GenesisClient, ProtocolError, b64urlDecode, b64urlEncode, cleanName, onLink, pairingFrom, parsePairingUrl, redirectFor,
-  takeLink, utf8Decode, utf8Encode, type FetchLike, type GenesisEvent, type StatusReply,
+  GenesisClient, ProtocolError, b64urlDecode, b64urlEncode, cleanName, onLink, open, pairingFrom, parsePairingUrl, redirectFor,
+  seal, takeLink, utf8Decode, utf8Encode, type FetchLike, type GenesisEvent, type StatusReply,
 } from '../src/lib/protocol.ts';
 
 const random = (n: number) => new Uint8Array(randomBytes(n));
@@ -437,6 +437,25 @@ test('a reply that stalls after its headers times out as a network error', async
     for (const s of sockets) s.destroy();
     server.close();
   }
+});
+
+// Отговорът на `speak` няма таван като `events`: 20 000 знака реч ≈ 7 MB mp3
+// → 9.6 MB base64 в JSON. Байтовете минаваха знак по знак (indexOf, number[],
+// `out +=`): този тест — 6.3 s на JS нишката под V8 с JIT (на Hermes —
+// няколко пъти повече, екранът стои). Сега ~0.9 s заедно със случайните
+// данни; таванът 2 s оставя място за бавна CI машина.
+test('a multi-megabyte reply is sealed and opened without freezing the screen', () => {
+  const key = random(32);
+  const data = randomBytes(Math.floor(9.6 * 1024 * 1024 * 0.75)).toString('base64');
+  const payload = { ok: true, mime: 'audio/mpeg', data, text: 'Готово — прочетох всичко 👋' };
+  const started = Date.now();
+  const envelope = seal(key, payload, 'genesis/1/res:abc', random);
+  const back = open(key, envelope, 'genesis/1/res:abc') as typeof payload;
+  const ms = Date.now() - started;
+  assert.equal(back.data, data);
+  assert.equal(back.text, payload.text);
+  assert.equal(envelope.c, Buffer.from(b64urlDecode(envelope.c)).toString('base64url'), 'still canonical base64url');
+  assert.ok(ms < 2000, `seal + open of 9.6 MB took ${ms} ms`);
 });
 
 // Екранът за сдвояване делеше грешките на три: всичко, което не е 'network'
