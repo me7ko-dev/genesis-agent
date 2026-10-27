@@ -405,3 +405,36 @@ test('/resume and /rewind redraw the conversation on the phone', async () => {
     stop();
   }
 });
+
+// ── одит 2026-10-27 ─────────────────────────────────────────────────────────
+
+// fetch() се изпълнява със заглавките; тялото идва после. Таймерът се махаше
+// веднага след заглавките и спряло насред тялото допитване (Wi-Fi изчезва
+// насред 512 KiB отговор на `events`) висеше завинаги — цикълът в useGenesis
+// не опитваше пак и екранът стоеше „на линия“ без нищо ново.
+test('a reply that stalls after its headers times out as a network error', async () => {
+  const { createServer } = await import('node:http');
+  const sockets = new Set<import('node:net').Socket>();
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': '1000' });
+    res.write('{"v":1,"n":"');   // и нищо повече
+  });
+  server.on('connection', (s) => sockets.add(s));
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const { port } = server.address() as { port: number };
+  try {
+    const client = new GenesisClient({ base: `http://127.0.0.1:${port}`, key: b64urlEncode(new Uint8Array(32)), name: 'x' }, random);
+    const started = Date.now();
+    const outcome = await Promise.race([
+      client.call('status', {}, 300).then(() => 'resolved', (e: unknown) => e),
+      new Promise((r) => setTimeout(() => r('hung'), 3000)),
+    ]);
+    assert.ok(outcome instanceof ProtocolError, `expected a ProtocolError, got ${String(outcome)}`);
+    assert.equal(outcome.kind, 'network');
+    assert.ok(Date.now() - started < 2000);
+  } finally {
+    for (const s of sockets) s.destroy();
+    server.close();
+  }
+});

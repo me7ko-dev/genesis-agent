@@ -395,23 +395,32 @@ export class GenesisClient {
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : undefined;
     const timer = setTimeout(() => controller?.abort(), timeoutMs);
     let response: { status: number; json(): Promise<unknown> };
+    let data: unknown;
+    // Срокът важи и за тялото, не само до заглавките (одит 2026-10-27):
+    // fetch() се изпълнява със заглавките, и отговор, спрял насред тялото
+    // (Wi-Fi изчезва насред 512 KiB `events`), висеше завинаги — цикълът в
+    // useGenesis не опитваше пак. Измерено с Node fetch срещу сървър, който
+    // праща заглавките и 12 байта: преди — виси (> 3 s при срок 0.3 s), сега —
+    // 'network' след 0.3 s. abort() прекъсва и четенето на тялото.
     try {
-      response = await this.fetcher(`${this.base}/api/v1`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body,
-        signal: controller?.signal,
-      });
-    } catch {
-      throw new ProtocolError(`cannot reach ${this.base}`, 'network');
+      try {
+        response = await this.fetcher(`${this.base}/api/v1`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+          signal: controller?.signal,
+        });
+      } catch {
+        throw new ProtocolError(`cannot reach ${this.base}`, 'network');
+      }
+      try {
+        data = await response.json();
+      } catch {
+        if (controller?.signal.aborted) throw new ProtocolError(`no reply from ${this.base} in time`, 'network');
+        throw new ProtocolError(`unexpected reply (${response.status})`, 'server');
+      }
     } finally {
       clearTimeout(timer);
-    }
-    let data: unknown;
-    try {
-      data = await response.json();
-    } catch {
-      throw new ProtocolError(`unexpected reply (${response.status})`, 'server');
     }
     if (response.status === 401) {
       const detail = String((data as { detail?: string })?.detail ?? '');
