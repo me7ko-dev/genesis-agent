@@ -17,8 +17,10 @@
 ~/.genesis). Прочети CLAUDE.md и раздела „На лаптопа — един промпт“ в NEXT_STEPS.md.
 
 А. Пусни сам, по ред, и запиши числата:
-1. git pull; pipx runpip genesis-agent install --force-reinstall --no-deps
-   "git+https://github.com/me7ko-dev/genesis-agent@main"; genesis --version = новият комит.
+1. git fetch origin; git checkout claude/sandbox-audit-oct27; git pull (докато не е
+   слят в main — съдържа и PR #98); pipx runpip genesis-agent install --force-reinstall
+   --no-deps "git+https://github.com/me7ko-dev/genesis-agent@claude/sandbox-audit-oct27";
+   genesis --version = последният комит на клона. Телефонът — от mobile/ на същия клон.
 2. python scripts/bench_all.py (Python-а на pipx venv-а). Сравни
    ~/.genesis/bench/all-<днес>/report.md с последния all-* отчет. Регресия → спри и
    ми покажи кой проект/задача и защо, преди всичко друго.
@@ -58,8 +60,8 @@
 - irm https://raw.githubusercontent.com/me7ko-dev/genesis-agent/main/scripts/install.ps1 | iex
   и после /update (Smart App Control може да спре неподписания exe — кажи ми).
 
-Накрая: обнови NEXT_STEPS.md накратко — задраскай минатото, запиши числата, отвори
-issue за всяка регресия. Не пипай код без тест, който пада без поправката.
+Накрая: обнови NEXT_STEPS.md накратко — задраскай минатото, запиши числата; commit
+и push в същия клон; issue за всяка регресия. Не пипай код без тест, който пада без поправката.
 ```
 
 ## 2026-10-27 — sandbox.py (отложеното от 22.10)
