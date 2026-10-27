@@ -108,10 +108,18 @@ API_TOKEN_RE = re.compile(
     r"\b(sk-[A-Za-z0-9_-]{8,}|sk-ant-[A-Za-z0-9_-]{8,}|ghp_[A-Za-z0-9]{16,}|gh[ousr]_[A-Za-z0-9]{16,}"
     r"|github_pat_[A-Za-z0-9_]{20,}|hf_[A-Za-z0-9]{16,}|gsk_[A-Za-z0-9]{16,}|nvapi-[A-Za-z0-9_-]{16,}"
     r"|xox[abpr]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,})")
+# Одит 2026-10-27: `deploy:hunter2@host` без `://` (scp), `--password x`,
+# `-p x`, `-u user:pass` минаваха нередактирани; а думата-ключ се търсеше и
+# вътре в думи — `path:`, `pattern:`, `bypass:`, `compass:`, `passage:` ставаха
+# `path=***`. Сега ключът е цяла дума (`_`-токен; слепен отпред само с главни
+# букви — PGPASSWORD — или с api/auth/access/db — apikey).
 _SECRET_PATTERNS = [
     (re.compile(r"(://)[^/\s:@]+:[^/\s@]+@"), r"\1***@"),
+    (re.compile(r"(?<![\w/@:])[\w.+-]+:[^\s@/:]+@(?=[\w.-]+)"), "***@"),
+    (re.compile(r"(?i)(?<!\S)(--?pass(?:word|wd)?|--?pwd|(?-i:-p|-u))[ =]\S+"), r"\1 ***"),
     (re.compile(r"(?i)\b(bearer|token|basic)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 ***"),
-    (re.compile(r"(?i)\b([A-Z0-9_]*(KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASS|PAT|DSN)[A-Z0-9_]*)\s*[=:]\s*\S+"),
+    (re.compile(r"(?i)\b((?:[A-Z0-9]+_)*(?:(?-i:[A-Z0-9]+)|api|auth|access|db)?"
+                r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|PASS|PAT|DSN)(?![A-Za-z])[A-Z0-9_]*)\s*[=:]\s*\S+"),
      r"\1=***"),
     (API_TOKEN_RE, "***"),
 ]

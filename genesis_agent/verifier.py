@@ -266,6 +266,75 @@ def _has_real_check(tree: ast.AST) -> bool:
 _OK_LINE_RE = re.compile(r"^OK\b")
 
 
+_MARKER = "__GENESIS_CHECKS__"
+_MARKER_RE = re.compile(rf"^{_MARKER}=(\d+),(\d+)$", re.MULTILINE)
+_HARNESS_FAIL_RE = re.compile(
+    r"^FAILED \((?:failures|errors)=\d+|^=* ?\d+ (?:failed|errors?)\b.* in [\d.]+s", re.MULTILINE)
+_PRELUDE = f"""import atexit as _genesis_atexit, sys as _genesis_sys
+_genesis_checks = [0, 0]
+def _genesis_check(ok):
+    _genesis_checks[0] += 1
+    if not ok:
+        _genesis_checks[1] += 1
+    return ok
+def _genesis_guard(cond):
+    _genesis_checks[0] += 1
+    return cond
+_genesis_atexit.register(lambda: _genesis_sys.stderr.write(
+    "\\n{_MARKER}=%d,%d\\n" % tuple(_genesis_checks)))
+"""
+
+
+class _Count(ast.NodeTransformer):
+    """`assert X` → `assert _genesis_check(X)`; `if C: raise …` →
+    `if _genesis_guard(C): raise …`. Броят се изпълнените и провалените
+    assert-и; при условния raise — само изпълнените (вдигнатото изключение
+    може да е очаквано от самия тест, напр. `parse("x")` → ValueError).
+    Имената са с една долна черта: с две вътре в клас се name-mangle-ват
+    (`_T__genesis_check` → NameError)."""
+
+    def visit_Assert(self, node: ast.Assert) -> ast.AST:
+        self.generic_visit(node)
+        node.test = ast.Call(ast.Name("_genesis_check", ast.Load()), [node.test], [])
+        return node
+
+    def visit_If(self, node: ast.If) -> ast.AST:
+        self.generic_visit(node)
+        if any(isinstance(b, ast.Raise) for b in node.body):
+            node.test = ast.Call(ast.Name("_genesis_guard", ast.Load()), [node.test], [])
+        return node
+
+
+def _instrumented(tree: ast.AST, code: str) -> str:
+    """Кодът с броячи на проверките; при неуспех на пренаписването — оригиналът."""
+    try:
+        new = _Count().visit(ast.parse(code))
+        body = new.body
+        # Прелюдията — след docstring и `from __future__` (те трябва да са първи).
+        at = 0
+        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+                and isinstance(body[0].value.value, str):
+            at = 1
+        while at < len(body) and isinstance(body[at], ast.ImportFrom) \
+                and body[at].module == "__future__":
+            at += 1
+        body[at:at] = ast.parse(_PRELUDE).body
+        return ast.unparse(ast.fix_missing_locations(new))
+    except (SyntaxError, ValueError, RecursionError):
+        return code
+
+
+def _split_marker(stderr: str) -> tuple[str, int, int]:
+    """stderr без реда-маркер, и (изпълнени, провалени) проверки; (0, 0) без
+    маркер — `os._exit` прескача atexit, тогава нищо не е доказано."""
+    m = None
+    for m in _MARKER_RE.finditer(stderr):
+        pass
+    if m is None:
+        return stderr, 0, 0
+    return _MARKER_RE.sub("", stderr).strip(), int(m.group(1)), int(m.group(2))
+
+
 def _printed_ok(stdout: str) -> bool:
     return any(_OK_LINE_RE.match(line.strip()) for line in (stdout or "").splitlines())
 
@@ -283,7 +352,13 @@ def verify_skill(code: str, *, timeout: int = 30) -> VerifyResult:
     has_self_test = _has_real_check(tree)
 
     # 2. Реално изпълнение в sandbox (deny режим → опасното не се пуска).
-    res = sandbox.run_python(code, policy=sandbox.SandboxPolicy(mode="deny"), timeout=timeout)
+    # Проверките се броят и по време на изпълнение (одит 2026-10-27):
+    # статичният обход виждаше assert зад `if "--test" in sys.argv` или
+    # `os.environ.get(...)`, които sandbox-ът никога не задава, и
+    # `except AssertionError: sys.exit(int("0"))` — счупена `add` минаваше
+    # като self_test_passed.
+    run_code = _instrumented(tree, code) if has_self_test else code
+    res = sandbox.run_python(run_code, policy=sandbox.SandboxPolicy(mode="deny"), timeout=timeout)
     if res.blocked:
         # Две много различни неща излизаха с една и съща дума. Измерено:
         # умение, което вика `git rev-parse` през subprocess, получаваше
@@ -296,8 +371,19 @@ def verify_skill(code: str, *, timeout: int = 30) -> VerifyResult:
         if _DENIED_RE.match(res.stderr.lstrip()):
             return VerifyResult(False, "needs_confirmation", res.stderr[:300])
         return VerifyResult(False, "blocked", res.stderr[:300])
+    stderr, executed, failed = _split_marker(res.stderr or "")
     if not res.ok:
-        return VerifyResult(False, "runtime_err", (res.stderr or res.stdout)[:300])
+        return VerifyResult(False, "runtime_err", (stderr or res.stdout)[:300])
+    if failed:
+        return VerifyResult(False, "runtime_err",
+                            f"{failed} проверка(и) се провали(ха), но грешката е погълната")
+    # pytest/unittest, пуснати от самия код (`pytest.main`, `unittest.main(
+    # exit=False)`), пишат присъдата си в изхода и излизат с код 0.
+    harness = _HARNESS_FAIL_RE.search(res.stdout or "") or _HARNESS_FAIL_RE.search(stderr)
+    if harness:
+        return VerifyResult(False, "runtime_err", f"тестовете в кода паднаха: {harness.group(0)[:200]}")
+    if has_self_test and not executed:
+        has_self_test = False      # нито една проверка не се е изпълнила
 
     # "OK" в stdout се изисква изрично навсякъде в промптите (autonomous_loop,
     # orchestrator, ensemble, brain.system_prompt_base — "print 'OK' on

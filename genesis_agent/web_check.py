@@ -44,6 +44,9 @@ _PLACEHOLDER_HOST = re.compile(r"(^|\.)example\.(com|org|net)$|^(your|my)?domain
 # Цена в лева: „120 лв“, „120 лв.“, „BGN 120“. От 1 януари 2026 валутата е еврото
 # (виж проверено знание bg_euro_bgn_conversion).
 _LEV_PRICE = re.compile(r"\d[\d\s.,]*\s?(лв\.?|лева|BGN)(?![а-яa-z])|\bBGN\s?\d", re.IGNORECASE)
+# Фиксираният курс „1 € = 1.95583 лв.“ в подножието не е цена (одит 2026-10-27:
+# броеше се като „цена в лева“ и моделът го „поправяше“).
+_FIXED_RATE = re.compile(r"1[.,]95583")
 
 
 class _Collector(HTMLParser):
@@ -124,7 +127,12 @@ def _is_local(ref: str) -> bool:
 # 2026-09-28 (bench fuel-prices): бележките за viewport/description и браузърната
 # проверка го накараха да „разкраси“ примера от 769 на 6 996 знака, тестовете
 # паднаха — 532 s и 215 хил. токена вместо ~100 s и ~46 хил.
-_DATA_NAME = re.compile(r"sample|fixture|mock|dummy|example|test|data|page_?\d", re.IGNORECASE)
+# Само цяла дума в името (по `-`/`_`, с цифри след нея): `test` в testimonials,
+# contest и latest, `data` в database и datasets, `mock` в mockups, `example` в
+# examples правеха страниците на сайта „данни“ — без находки и без браузър
+# (одит 2026-10-27). `page_2` остава данни (страници на скрейпър), `page2` — не.
+_DATA_NAME = re.compile(r"(?:^|[-_])(?:sample|fixture|mock|dummy|example|test|data)\d*(?:[-_]|$)"
+                        r"|^page_\d+$", re.IGNORECASE)
 _DATA_DIRS = {"test", "tests", "fixtures", "fixture", "samples", "data", "testdata", "__snapshots__"}
 _STYLED = re.compile(r"<link[^>]+stylesheet|<style[\s>]|<script[\s>]", re.IGNORECASE)
 
@@ -194,7 +202,8 @@ def check_html(path: Path, content: str) -> list[str]:
             found.append('няма <meta name="description"> (търсачките показват него)')
     # Всички наведнъж: с една цена в бележката моделът оправяше по една на рунд
     # (2026-09-28: 4 рунда за 4 стаи).
-    lev = [m.group(0).strip() for m in _LEV_PRICE.finditer(" ".join(c.text))]
+    lev = [m.group(0).strip() for m in _LEV_PRICE.finditer(" ".join(c.text))
+           if not _FIXED_RATE.search(m.group(0))]
     if lev:
         found.append(f"{len(lev)} {'цена' if len(lev) == 1 else 'цени'} в лева "
                      f"({', '.join(lev[:6])}) — от 1 януари 2026 "

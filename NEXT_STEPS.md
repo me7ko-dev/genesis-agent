@@ -64,6 +64,43 @@
 и push в същия клон; issue за всяка регресия. Не пипай код без тест, който пада без поправката.
 ```
 
+## 2026-10-27 — пети кръг (brain, умения/fix/verifier, мисия, web, облак)
+
+Клон `claude/audit-round5-oct27`; `tests/test_audit_2026_10_27_skills_fix.py`,
+`tests/test_brain_audit_2026_10_27.py`, `tests/test_audit_2026_10_27_mission_web.py`.
+Три одита с пускане (без ключове), 17 потвърдени бъга, всеки с тест, който падаше.
+`genesis fix`: присъдата „Поправено“ е по pytest-счетоводството (`TestRun.failed`,
+`count`) — преименуван, обвит в try, с ранен return или изтрит с `rm` тест минаваше за
+поправка (диффът на редовете не вижда нищо от това); изтритият файл е в промените;
+„No module named pytest“ / 127 / 9009 / pytest 3–4 е „не тръгна“, не червена сюита.
+verifier: assert-ите се броят и при изпълнение (`_instrumented`: assert зад `--test`/env,
+`except AssertionError: sys.exit(int("0"))`); `pytest.main`/`unittest.main(exit=False)`
+с паднали тестове и код 0 е runtime_err. Имената на броячите са с една долна черта
+(с две — name-mangling в клас).
+Умения: промяна само в `skills.json` на доставено умение (not_with на web_site_2026 от
+dfa1b47) никога не стигаше до засята инсталация — вече се слива, полетата на оператора
+остават. `/update`: `[/x]` в заглавие на commit или в грешка на pip е escape-нато.
+brain: 403 „moderation/flagged“ на OpenRouter спира само модела (ключът и другите
+модели под него работят); Anthropic 429 носи `[retry=N]` от retry-after (беше 300 s);
+usage/reasoning/tool_calls/cached_tokens с грешен тип в 200-отговор → следващ модел, не
+изключение; `function: null` в историята не събаря следващия ход; скъсан платен поток
+влиза и в budget_log (беше само в тавана).
+Мисия: TDD тестовете се пускат в пространството на кода, зареден като модул, и се чака
+сентинел след тях (`sys.exit(0)` в self-test-а ги прескачаше). web_check: „данни“ е
+само цяла дума в името (testimonials, contest, latest, database, page2 са сайт);
+1.95583 лв. не е цена. acceptance: `.venv` без pytest → Python-ът на Genesis или
+„пропуснати“. notifier.redact: `user:pass@host`, `--password x`, `-p x`, `-u x`;
+path:/pattern:/bypass: вече не се маскират. monitor: ENOSPC при запис → код 1, една
+аларма. page_check: `*_PWD`, `*WEBHOOK*` не стигат до браузъра.
+Проверено и наред (по-подробно в докладите): подписите на уменията, тригерите на 16-те
+доставени умения, `skill_home`, wizard (.env 0600, backup преди запис), `--revert`;
+_retry_after_s/cooldown-ите, provider_stats под 4 процеса, картинки по доставчик,
+claude_cli (чистене на env), 8 нишки × 40 complete(); DELEGATE timeout, acceptance в
+temp папка, web_check на 60 MB HTML, page_check runner (`/.env`, `..` → 404; Chromium
+наживо: alert/beforeunload/busy-loop), monitor (аларма само при промяна), billing
+(подпис, повторения, суми, ledger append-only, 20 паралелни add_entry).
+Отворено: `-phunter2` (слепено) не се маскира; `BYPASS:` с главни се маскира като env.
+
 ## 2026-10-27 — sandbox.py (отложеното от 22.10)
 
 PR #100 (слят), `tests/test_audit_2026_10_27_sandbox.py`.
