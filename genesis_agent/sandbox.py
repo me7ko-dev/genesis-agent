@@ -2895,12 +2895,14 @@ def start_shell(command: str, *, cwd: Path | None = None, log: Path,
     try:
         log.parent.mkdir(parents=True, exist_ok=True)
         with open(log, "wb") as fh:
-            proc = subprocess.Popen(
+            proc, job = _popen_in_job(
                 _shell_argv(command), cwd=str(work), stdout=fh, stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL, env=_build_env(policy),
-                preexec_fn=(lambda: _preexec(long_policy, nproc_cap)) if os.name == "posix" else None,  # noqa: PLW1509
+                preexec_fn=(lambda: _preexec(long_policy, nproc_cap)) if os.name == "posix" else None,
                 creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
             )
+        if job.handle is not None:
+            _BG_JOBS[proc] = job
     except Exception as e:
         # `log` тук е параметърът (файлът за изхода), не логерът на модула.
         logging.getLogger("genesis.sandbox").debug("фоновият процес не тръгна", exc_info=True)
@@ -2972,17 +2974,35 @@ def _stop_group_posix(proc: subprocess.Popen) -> None:
             time.sleep(0.05)
 
 
+# Job object-ите на фоновите команди от start_shell — stop_process ги взима
+# оттук (Popen няма къде другаде да ги носи). Празно извън Windows.
+_BG_JOBS: dict[subprocess.Popen, _WinJob] = {}
+
+
 def stop_process(proc: subprocess.Popen) -> None:
     """Спира процес, пуснат с start_shell (или друг в своя сесия), заедно с
-    децата му — и когато самият той вече е излязъл."""
+    децата му — и когато самият той вече е излязъл.
+
+    На Windows (2026-10-27, последното отворено от одита на изпълнението):
+    start_shell пускаше без job object, а тук излязъл водач значеше „няма
+    какво да се спира“ — `start /b server` или дете, пуснато без чакане,
+    оставаше живо след BG_KILL и след изхода на Genesis; `taskkill /T` не
+    стига дете на мъртъв родител. Сега job-ът спира цялото дърво, както при
+    RUN_CMD и `!` (_popen_in_job), а taskkill остава само без job."""
     try:
         if sys.platform != "win32":
             _stop_group_posix(proc)
-        elif proc.poll() is None:
-            _kill_tree_win32(proc.pid)
-            proc.kill()
         else:
-            return
+            job = _BG_JOBS.pop(proc, None)
+            stopped = job is not None and job.terminate()
+            if job is not None:
+                job.close()
+            if not stopped:
+                if proc.poll() is not None:
+                    return
+                _kill_tree_win32(proc.pid)
+            if proc.poll() is None:
+                proc.kill()
     except OSError:
         try:
             proc.kill()

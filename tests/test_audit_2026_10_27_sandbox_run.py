@@ -287,3 +287,69 @@ def test_a_command_may_write_a_file_of_a_few_gigabytes(tmp_path) -> None:
     res = sandbox._run([sys.executable, "-c", code], cwd=tmp_path, policy=ALLOW, timeout=30)
     assert res.ok, res.stderr
     assert int(res.stdout) == 4096 * 1024 * 1024
+
+
+# ── Windows: фоновата команда в job object (2026-10-27) ──────────────────────
+
+class _ExitedProc:
+    pid = 4242
+
+    def __init__(self) -> None:
+        self.killed = 0
+
+    def poll(self) -> int:
+        return 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
+
+    def kill(self) -> None:
+        self.killed += 1
+
+
+class _Job:
+    handle = 1
+
+    def __init__(self) -> None:
+        self.terminated = self.closed = 0
+
+    def terminate(self) -> bool:
+        self.terminated += 1
+        return True
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+def test_start_shell_keeps_the_job_and_stop_process_ends_it(tmp_path, monkeypatch) -> None:
+    """На Windows start_shell пускаше без job, а stop_process виждаше излязъл
+    водач и се връщаше — детето на `start /b` живееше след BG_KILL."""
+    proc, job = _ExitedProc(), _Job()
+    monkeypatch.setattr(sandbox, "_popen_in_job", lambda argv, **kw: (proc, job))
+    started, why = sandbox.start_shell("echo hi", cwd=tmp_path, log=tmp_path / "bg.log",
+                                       policy=ALLOW)
+    assert started is proc, why
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sandbox, "_kill_tree_win32", lambda pid: None)
+    sandbox.stop_process(proc)   # type: ignore[arg-type]
+    assert (job.terminated, job.closed) == (1, 1)
+    assert proc not in sandbox._BG_JOBS
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="job object е само на Windows")
+def test_stop_process_ends_the_child_of_an_exited_background_shell_on_windows(tmp_path) -> None:
+    marker = tmp_path / "marker.txt"
+    (tmp_path / "late.py").write_text(
+        "import sys, time\ntime.sleep(3)\nopen(sys.argv[1], 'w').write('alive')\n",
+        encoding="utf-8")
+    (tmp_path / "spawn.py").write_text(
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])\n", encoding="utf-8")
+    proc, why = sandbox.start_shell(
+        f'"{sys.executable}" "{tmp_path / "spawn.py"}" "{tmp_path / "late.py"}" "{marker}"',
+        cwd=tmp_path, log=tmp_path / "bg.log", policy=ALLOW)
+    assert proc is not None, why
+    proc.wait(timeout=20)
+    sandbox.stop_process(proc)
+    time.sleep(5)
+    assert not marker.exists(), "детето на излязлата фонова обвивка оцеля"
