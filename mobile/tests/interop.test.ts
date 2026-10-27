@@ -12,11 +12,11 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createInterface } from 'node:readline';
 import { mergeEvents, toChatItems } from '../src/lib/chat.ts';
-import { errorText, MAX_MESSAGE, replyErrorText, trimDraft } from '../src/lib/messages.ts';
+import { errorText, MAX_MESSAGE, pairErrorText, replyErrorText, trimDraft } from '../src/lib/messages.ts';
 import { Outbox } from '../src/lib/outbox.ts';
 import {
-  GenesisClient, ProtocolError, b64urlDecode, b64urlEncode, cleanName, onLink, pairingFrom, parsePairingUrl, redirectFor,
-  takeLink, utf8Decode, utf8Encode, type FetchLike, type GenesisEvent, type StatusReply,
+  GenesisClient, ProtocolError, b64urlDecode, b64urlEncode, cleanName, onLink, open, pairingFrom, parsePairingUrl, redirectFor,
+  seal, takeLink, utf8Decode, utf8Encode, type FetchLike, type GenesisEvent, type StatusReply,
 } from '../src/lib/protocol.ts';
 
 const random = (n: number) => new Uint8Array(randomBytes(n));
@@ -404,4 +404,89 @@ test('/resume and /rewind redraw the conversation on the phone', async () => {
   } finally {
     stop();
   }
+});
+
+// ── одит 2026-10-27 ─────────────────────────────────────────────────────────
+
+// fetch() се изпълнява със заглавките; тялото идва после. Таймерът се махаше
+// веднага след заглавките и спряло насред тялото допитване (Wi-Fi изчезва
+// насред 512 KiB отговор на `events`) висеше завинаги — цикълът в useGenesis
+// не опитваше пак и екранът стоеше „на линия“ без нищо ново.
+test('a reply that stalls after its headers times out as a network error', async () => {
+  const { createServer } = await import('node:http');
+  const sockets = new Set<import('node:net').Socket>();
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': '1000' });
+    res.write('{"v":1,"n":"');   // и нищо повече
+  });
+  server.on('connection', (s) => sockets.add(s));
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const { port } = server.address() as { port: number };
+  try {
+    const client = new GenesisClient({ base: `http://127.0.0.1:${port}`, key: b64urlEncode(new Uint8Array(32)), name: 'x' }, random);
+    const started = Date.now();
+    const outcome = await Promise.race([
+      client.call('status', {}, 300).then(() => 'resolved', (e: unknown) => e),
+      new Promise((r) => setTimeout(() => r('hung'), 3000)),
+    ]);
+    assert.ok(outcome instanceof ProtocolError, `expected a ProtocolError, got ${String(outcome)}`);
+    assert.equal(outcome.kind, 'network');
+    assert.ok(Date.now() - started < 2000);
+  } finally {
+    for (const s of sockets) s.destroy();
+    server.close();
+  }
+});
+
+// Отговорът на `speak` няма таван като `events`: 20 000 знака реч ≈ 7 MB mp3
+// → 9.6 MB base64 в JSON. Байтовете минаваха знак по знак (indexOf, number[],
+// `out +=`): този тест — 6.3 s на JS нишката под V8 с JIT (на Hermes —
+// няколко пъти повече, екранът стои). Сега ~0.9 s заедно със случайните
+// данни; таванът 2 s оставя място за бавна CI машина.
+test('a multi-megabyte reply is sealed and opened without freezing the screen', () => {
+  const key = random(32);
+  const data = randomBytes(Math.floor(9.6 * 1024 * 1024 * 0.75)).toString('base64');
+  const payload = { ok: true, mime: 'audio/mpeg', data, text: 'Готово — прочетох всичко 👋' };
+  const started = Date.now();
+  const envelope = seal(key, payload, 'genesis/1/res:abc', random);
+  const back = open(key, envelope, 'genesis/1/res:abc') as typeof payload;
+  const ms = Date.now() - started;
+  assert.equal(back.data, data);
+  assert.equal(back.text, payload.text);
+  assert.equal(envelope.c, Buffer.from(b64urlDecode(envelope.c)).toString('base64url'), 'still canonical base64url');
+  assert.ok(ms < 2000, `seal + open of 9.6 MB took ${ms} ms`);
+});
+
+// Екранът за сдвояване делеше грешките на три: всичко, което не е 'network'
+// или 'clock', беше „не прие ключа“, а 'network' — „Не стигам до … защитната
+// стена“. Стар код (след `genesis serve --reset`), сканиран пак и пак: след 30
+// отказа за минута сървърът връща 429 — компютърът е тук, а екранът пращаше
+// оператора да оправя Wi-Fi и защитната стена.
+test('the pair screen tells the brake, a server error and an unreachable computer apart', async () => {
+  const { info, stop } = await startServer();
+  try {
+    const pairing = parsePairingUrl(info.url)!;
+    const old = new GenesisClient({ ...pairing, key: b64urlEncode(new Uint8Array(32)) }, random);
+    const first = await old.status().catch((e: unknown) => e);
+    assert.match(pairErrorText(first, pairing.base), /не прие ключа/);
+    let last: unknown;
+    for (let i = 0; i < 31; i++) last = await old.status().catch((e: unknown) => e);
+    assert.ok(last instanceof ProtocolError && last.status === 429);
+    const braked = pairErrorText(last, pairing.base);
+    assert.match(braked, /изчакай минута/);
+    assert.doesNotMatch(braked, /Не стигам/);
+  } finally {
+    stop();
+  }
+  const away = await new GenesisClient({ base: 'http://127.0.0.1:9', key: b64urlEncode(new Uint8Array(32)), name: 'x' }, random)
+    .status().catch((e: unknown) => e);
+  assert.match(pairErrorText(away, 'http://127.0.0.1:9'), /Не стигам до http:\/\/127\.0\.0\.1:9/);
+  // Друго нещо на порта (не JSON) не е „ключът не се приема“.
+  assert.doesNotMatch(pairErrorText(new ProtocolError('unexpected reply (404)', 'server', 404), 'http://pc:1'), /ключа/);
+  assert.match(pairErrorText(new ProtocolError('clock', 'clock'), 'http://pc:1'), /Часовникът/);
+  // Не стигна до записа на сдвояването (SecureStore) — не е „не стигам до компютъра“.
+  assert.doesNotMatch(pairErrorText(new Error('keychain'), 'http://pc:1'), /Не стигам/);
+  const screen = readFileSync(new URL('../src/app/pair.tsx', import.meta.url), 'utf8');
+  assert.match(screen, /setError\(pairErrorText\(e, pairing\.base\)\)/);
 });

@@ -15,70 +15,140 @@ const RES_AAD = 'genesis/1/res:';
 
 // ── bytes ───────────────────────────────────────────────────────────────────
 
+// Одит 2026-10-27: тези четири минаваха знак по знак с `indexOf`, `number[]`
+// и `out +=` на всеки знак. Отговорът на `speak` няма таван като `events`
+// (20 000 знака реч ≈ 7 MB mp3 → 13.4 M знака плик), а четири снимки за
+// `send` са същия ред. Измерено под Node (V8 с JIT) върху 9.6 MB base64 в
+// JSON: кодиране + декодиране 3.6 s → 0.5 s; тестът в tests/interop.test.ts
+// (запечатване + отваряне) — 6.3 s → 0.9 s. Hermes без JIT е няколко пъти
+// по-бавен, и екранът стоеше. Таблица вместо indexOf, байтовете в Uint8Array,
+// низът — на парчета по 8192 знака от обикновен масив (String.fromCharCode
+// .apply с обикновен масив работи навсякъде, и в Hermes).
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+const B64_CODES = Array.from(B64, (ch) => ch.charCodeAt(0));
+const B64_VALUE = (() => {
+  const table = new Int16Array(128).fill(-1);
+  for (let i = 0; i < 64; i++) table[B64.charCodeAt(i)] = i;
+  table[43] = 62;   // '+' — приема се и обикновен base64
+  table[47] = 63;   // '/'
+  return table;
+})();
+const CHUNK = 8192;
+
+/** Събира UTF-16 кодове и ги прави на низ на парчета: един apply с милиони
+ *  аргумента гърми (RangeError), а `out +=` на всеки знак е бавно. */
+class CodeBuffer {
+  private codes: number[] = [];
+  private parts: string[] = [];
+
+  push(code: number): void {
+    this.codes.push(code);
+    if (this.codes.length >= CHUNK) this.flush();
+  }
+
+  text(): string {
+    this.flush();
+    return this.parts.join('');
+  }
+
+  private flush(): void {
+    if (!this.codes.length) return;
+    this.parts.push(String.fromCharCode.apply(null, this.codes));
+    this.codes = [];
+  }
+}
 
 export function b64urlEncode(bytes: Uint8Array): string {
-  let out = '';
-  for (let i = 0; i < bytes.length; i += 3) {
-    const n = (bytes[i] << 16) | ((bytes[i + 1] ?? 0) << 8) | (bytes[i + 2] ?? 0);
-    out += B64[(n >> 18) & 63] + B64[(n >> 12) & 63];
-    if (i + 1 < bytes.length) out += B64[(n >> 6) & 63];
-    if (i + 2 < bytes.length) out += B64[n & 63];
+  const len = bytes.length;
+  const out = new CodeBuffer();
+  for (let i = 0; i < len; i += 3) {
+    const n = (bytes[i] << 16) | ((i + 1 < len ? bytes[i + 1] : 0) << 8) | (i + 2 < len ? bytes[i + 2] : 0);
+    out.push(B64_CODES[(n >> 18) & 63]);
+    out.push(B64_CODES[(n >> 12) & 63]);
+    if (i + 1 < len) out.push(B64_CODES[(n >> 6) & 63]);
+    if (i + 2 < len) out.push(B64_CODES[n & 63]);
   }
-  return out;
+  return out.text();
 }
 
 export function b64urlDecode(text: string): Uint8Array {
-  const clean = text.replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
-  const out: number[] = [];
+  let end = text.length;
+  while (end > 0 && text.charCodeAt(end - 1) === 61) end--;   // '=' в края
+  const out = new Uint8Array(Math.floor((end * 6) / 8));
   let buffer = 0;
   let bits = 0;
-  for (const ch of clean) {
-    const v = B64.indexOf(ch);
+  let o = 0;
+  for (let i = 0; i < end; i++) {
+    const code = text.charCodeAt(i);
+    const v = code < 128 ? B64_VALUE[code] : -1;
     if (v < 0) throw new Error('bad base64');
-    buffer = (buffer << 6) | v;
+    buffer = ((buffer << 6) | v) & 0xffffff;
     bits += 6;
     if (bits >= 8) {
       bits -= 8;
-      out.push((buffer >> bits) & 255);
+      out[o++] = (buffer >> bits) & 255;
     }
   }
-  return new Uint8Array(out);
+  return out;
 }
 
 // Own UTF-8: TextDecoder is not guaranteed on every React Native runtime.
 export function utf8Encode(text: string): Uint8Array {
-  const out: number[] = [];
-  for (const ch of text) {
-    let c = ch.codePointAt(0) as number;
-    if (c < 0x80) out.push(c);
-    else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63));
-    else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
-    else {
-      c = Math.min(c, 0x10ffff);
-      out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+  // Най-много 3 байта на UTF-16 единица (двойката surrogates — 4 за 2).
+  const out = new Uint8Array(text.length * 3);
+  let o = 0;
+  for (let i = 0; i < text.length; i++) {
+    let c = text.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff && i + 1 < text.length) {
+      const low = text.charCodeAt(i + 1);
+      if (low >= 0xdc00 && low <= 0xdfff) {
+        c = 0x10000 + ((c - 0xd800) << 10) + (low - 0xdc00);
+        i++;
+      }
+    }
+    if (c < 0x80) out[o++] = c;
+    else if (c < 0x800) {
+      out[o++] = 0xc0 | (c >> 6);
+      out[o++] = 0x80 | (c & 63);
+    } else if (c < 0x10000) {
+      out[o++] = 0xe0 | (c >> 12);
+      out[o++] = 0x80 | ((c >> 6) & 63);
+      out[o++] = 0x80 | (c & 63);
+    } else {
+      out[o++] = 0xf0 | (c >> 18);
+      out[o++] = 0x80 | ((c >> 12) & 63);
+      out[o++] = 0x80 | ((c >> 6) & 63);
+      out[o++] = 0x80 | (c & 63);
     }
   }
-  return new Uint8Array(out);
+  return out.slice(0, o);
 }
 
 export function utf8Decode(bytes: Uint8Array): string {
-  let out = '';
+  const out = new CodeBuffer();
   for (let i = 0; i < bytes.length; ) {
     const b = bytes[i];
     let c: number;
     let extra: number;
-    if (b < 0x80) { c = b; extra = 0; }
+    if (b < 0x80) { out.push(b); i++; continue; }
     else if (b >= 0xf0) { c = b & 7; extra = 3; }
     else if (b >= 0xe0) { c = b & 15; extra = 2; }
     else if (b >= 0xc0) { c = b & 31; extra = 1; }
-    else { out += '\ufffd'; i++; continue; }
-    if (extra > 0 && i + extra >= bytes.length) { out += '\ufffd'; break; }
+    else { out.push(0xfffd); i++; continue; }
+    if (i + extra >= bytes.length) { out.push(0xfffd); break; }
     for (let k = 1; k <= extra; k++) c = (c << 6) | (bytes[i + k] & 63);
-    out += String.fromCodePoint(c);
+    // Като String.fromCodePoint преди: над U+10FFFF е грешка, не знак.
+    if (c > 0x10ffff) throw new RangeError(`Invalid code point ${c}`);
+    if (c > 0xffff) {
+      c -= 0x10000;
+      out.push(0xd800 + (c >> 10));
+      out.push(0xdc00 + (c & 0x3ff));
+    } else {
+      out.push(c);
+    }
     i += extra + 1;
   }
-  return out;
+  return out.text();
 }
 
 function hex(bytes: Uint8Array): string {
@@ -395,23 +465,32 @@ export class GenesisClient {
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : undefined;
     const timer = setTimeout(() => controller?.abort(), timeoutMs);
     let response: { status: number; json(): Promise<unknown> };
+    let data: unknown;
+    // Срокът важи и за тялото, не само до заглавките (одит 2026-10-27):
+    // fetch() се изпълнява със заглавките, и отговор, спрял насред тялото
+    // (Wi-Fi изчезва насред 512 KiB `events`), висеше завинаги — цикълът в
+    // useGenesis не опитваше пак. Измерено с Node fetch срещу сървър, който
+    // праща заглавките и 12 байта: преди — виси (> 3 s при срок 0.3 s), сега —
+    // 'network' след 0.3 s. abort() прекъсва и четенето на тялото.
     try {
-      response = await this.fetcher(`${this.base}/api/v1`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body,
-        signal: controller?.signal,
-      });
-    } catch {
-      throw new ProtocolError(`cannot reach ${this.base}`, 'network');
+      try {
+        response = await this.fetcher(`${this.base}/api/v1`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+          signal: controller?.signal,
+        });
+      } catch {
+        throw new ProtocolError(`cannot reach ${this.base}`, 'network');
+      }
+      try {
+        data = await response.json();
+      } catch {
+        if (controller?.signal.aborted) throw new ProtocolError(`no reply from ${this.base} in time`, 'network');
+        throw new ProtocolError(`unexpected reply (${response.status})`, 'server');
+      }
     } finally {
       clearTimeout(timer);
-    }
-    let data: unknown;
-    try {
-      data = await response.json();
-    } catch {
-      throw new ProtocolError(`unexpected reply (${response.status})`, 'server');
     }
     if (response.status === 401) {
       const detail = String((data as { detail?: string })?.detail ?? '');
