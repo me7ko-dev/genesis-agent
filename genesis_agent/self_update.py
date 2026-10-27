@@ -248,9 +248,11 @@ def report_pending() -> str | None:
         path.unlink(missing_ok=True)
         return None
     path.unlink(missing_ok=True)
+    # rich markup: `[/update]` в stderr на pip събаряше печата (одит 2026-10-27).
+    from rich.markup import escape
     if data.get("ok"):
-        return f"[green]✅ Обновено: {data.get('spec', '')}[/]"
-    return f"[red]❌ Последното /update не мина: {data.get('error', 'неизвестна грешка')}[/]"
+        return f"[green]✅ Обновено: {escape(str(data.get('spec', '')))}[/]"
+    return f"[red]❌ Последното /update не мина: {escape(str(data.get('error', 'неизвестна грешка')))}[/]"
 
 
 def _main(argv: list[str] | None = None) -> int:

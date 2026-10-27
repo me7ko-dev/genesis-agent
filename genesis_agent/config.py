@@ -131,9 +131,19 @@ def seed_user_skills(shipped: Path, user_dir: Path) -> int:
                 elif have != new_sha:
                     continue
                 # Същото съдържание без запис (копиран, но записът на индекса
-                # се провали) → долу влиза в индекса.
+                # се провали) → долу влиза в индекса. Същото съдържание СЪС
+                # запис → пак долу: записът на доставката (not_with, min_score,
+                # triggers) може да е нов, макар .md да е същият (одит
+                # 2026-10-27: `not_with` на web_site_2026 от dfa1b47 не
+                # стигаше до инсталация, засята преди него).
                 elif name in by_name:
-                    if mine.get("shipped_sha") != new_sha:
+                    if entry is not None and any(mine.get(k) != v for k, v in entry.items()):
+                        # Полетата на оператора извън доставката (signature) остават.
+                        fresh = {**mine, **entry, "shipped_sha": new_sha}
+                        entries[entries.index(by_name[name])] = fresh
+                        by_name[name] = fresh
+                        changed.append(name)
+                    elif mine.get("shipped_sha") != new_sha:
                         mine["shipped_sha"] = new_sha    # същото съдържание: запомни го
                         changed.append("")
                     continue

@@ -30,6 +30,7 @@ import requests
 from rich import box
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -2685,7 +2686,8 @@ def main():
                 if subjects:
                     console.print("[dim]  Какво носи:[/]")
                     for s in subjects:
-                        console.print(f"[dim]    • {s}[/]")
+                        # Заглавие с `[/x]` е MarkupError (одит 2026-10-27).
+                        console.print(f"[dim]    • {rich_escape(s)}[/]")
                 confirm = console.input("[bold yellow]Обнови сега? (да/не) > [/]").strip().lower()
                 if confirm not in ("да", "d", "y", "yes", "д"):
                     console.print("[dim]Пропуснато.[/]")

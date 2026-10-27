@@ -75,6 +75,12 @@ class TestRun:
     passed: bool
     output: str
     command: str = ""
+    # Счетоводството на pytest (одит 2026-10-27): кои тестове са паднали и
+    # колко са се изпълнили. Присъдата „Поправено“ се взима от него, не от
+    # диффа на редовете — преименуван, обвит в try или изтрит тест не пипа
+    # реда с assert и минаваше за поправка.
+    failed: frozenset[str] = frozenset()
+    count: int = 0
 
 
 @dataclass
@@ -267,8 +273,10 @@ def _fingerprint(root: Path) -> dict[str, tuple[int, int]]:
 
 
 def _changed_since(root: Path, before: dict[str, tuple[int, int]]) -> list[str]:
+    # Изтритият файл също е промяна (одит 2026-10-27): `rm tests/test_x.py`
+    # през RUN_CMD не се виждаше никъде — нито в диффа, нито в присъдата.
     now = _fingerprint(root)
-    return sorted(rel for rel, stamp in now.items() if before.get(rel) != stamp)
+    return sorted(rel for rel in set(now) | set(before) if before.get(rel) != now.get(rel))
 
 
 def _drop_stale_bytecode(root: Path, rels: list[str]) -> None:
@@ -453,14 +461,48 @@ def run_tests(root: Path, command: str) -> TestRun:
     if res.blocked:
         return TestRun(False, False, f"sandbox отказа командата: {res.stderr}", command)
     out = ((res.stdout or "") + "\n" + (res.stderr or "")).strip()
-    if res.returncode == 5 and "pytest" in command:
+    rc = res.returncode
+    pytest_cmd = "pytest" in command
+    if rc == 5 and pytest_cmd:
         # pytest: „не се събра нито един тест“ — няма тестове, не падащи тестове.
         return TestRun(False, False, "pytest не намери нито един тест", command)
+    # Runner-ът не е тръгнал (одит 2026-10-27): `.venv` без pytest (rc 1 „No
+    # module named pytest“), липсваща команда (127, Windows 9009), вътрешна
+    # грешка или грешна употреба на pytest (3/4; 2 е прекъсване или грешка при
+    # събиране — истинска червена сюита). Броеше се за падащи тестове, и „pip
+    # install pytest“ + козметична редакция ставаше „✅ Поправено“. Съобщение
+    # „command not found“ в доклада на паднал тест (със следа-равносметка на
+    # pytest) не е грешка на runner-а.
+    dead = rc in (126, 127, 9009) or (pytest_cmd and rc in (3, 4))
+    if not dead and rc not in (0, None) and _RUNNER_MISSING_RE.search(out[:2000]):
+        dead = not (pytest_cmd and _PYTEST_SUMMARY_LINE_RE.search(out))
+    if dead:
+        return TestRun(False, False, f"тестовата команда не тръгна (код {rc}): {out[:300]}", command)
+    failed, count = _pytest_bookkeeping(out) if pytest_cmd else (frozenset(), 0)
     if len(out) > _MAX_TEST_OUTPUT:
         # The tail carries the failure summary; the head carries collection
         # errors. Both matter, the middle rarely does.
         out = out[:_MAX_TEST_OUTPUT // 2] + "\n… [отрязано] …\n" + out[-_MAX_TEST_OUTPUT // 2:]
-    return TestRun(ran=True, passed=res.returncode == 0, output=out, command=command)
+    return TestRun(ran=True, passed=rc == 0, output=out, command=command,
+                   failed=failed, count=count)
+
+
+_RUNNER_MISSING_RE = re.compile(
+    r"No module named '?(?:pytest|_pytest|unittest|tox|nose2?)\b"
+    r"|(?:command |: )not found|not recognized as an internal or external command"
+    r"|cannot find the path specified")
+_PYTEST_FAILED_RE = re.compile(r"^(?:FAILED|ERROR) (\S+?::\S+?)(?: - .*)?$", re.MULTILINE)
+_PYTEST_SUMMARY_RE = re.compile(r"(\d+) (passed|failed|errors?|xfailed|xpassed)\b")
+_PYTEST_SUMMARY_LINE_RE = re.compile(r"^=* ?\d+ \w+(?:, \d+ \w+)* in [\d.]+s", re.MULTILINE)
+
+
+def _pytest_bookkeeping(out: str) -> tuple[frozenset[str], int]:
+    """Падналите идентификатори (`FAILED path::id`) и броят изпълнени тестове
+    от последния ред-равносметка на pytest; (∅, 0), ако изходът не е pytest."""
+    failed = frozenset(m.group(1) for m in _PYTEST_FAILED_RE.finditer(out))
+    lines = _PYTEST_SUMMARY_LINE_RE.findall(out)
+    count = sum(int(n) for n, _ in _PYTEST_SUMMARY_RE.findall(lines[-1])) if lines else 0
+    return failed, count
 
 
 # ── Diff ─────────────────────────────────────────────────────────────────────
@@ -732,6 +774,24 @@ def _weakened_tests(root: Path, before: dict[str, str], files: list[str]) -> lis
     return found
 
 
+def _lost_tests(before: TestRun, after: TestRun, files: list[str]) -> list[str]:
+    """Зеленото след червено доказва ли нещо по pytest-счетоводството (одит
+    2026-10-27)? Не — ако е пипнат (или изтрит) файлът на паднал тест, или
+    ако след поправката са се изпълнили по-малко тестове (collect_ignore,
+    --deselect, преименуване). Без счетоводство (не е pytest) — нищо."""
+    found: list[str] = []
+    for test_id in sorted(before.failed):
+        holder = test_id.split("::", 1)[0]
+        for rel in files:
+            if rel == holder or rel.endswith("/" + holder) or holder.endswith("/" + rel):
+                found.append(f"{rel}: пипнат е файлът на падащия тест {test_id}")
+                break
+    if before.count and after.count and after.count < before.count:
+        found.append(f"преди се изпълняваха {before.count} теста, сега {after.count} — "
+                     "изчезнали са тестове")
+    return found
+
+
 def _relative(root: Path, path_str: str) -> str:
     p = Path(path_str)
     if not p.is_absolute():
@@ -982,7 +1042,7 @@ def repair(project: str | Path, task: str, *, test_command: str | None = None,
         # „Промените са направени“ при празен дифф и код 0).
         ok, summary = False, "Не е направена нито една промяна — нищо не е поправено."
     elif after.ran and after.passed and not before.passed:
-        weakened = _weakened_tests(root, tests_src, files)
+        weakened = _weakened_tests(root, tests_src, files) or _lost_tests(before, after, files)
         if weakened:
             ok, summary = False, ("НЕ е поправено: тестовете минават, защото е пипнат самият тест — "
                                   + "; ".join(weakened[:5])
