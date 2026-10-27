@@ -13,7 +13,7 @@ import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:
 import { createServer } from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { checkImages, limitsFrom, VOICE_TIMEOUT_MS, type ImageAttachment } from '../shared/media';
+import { checkImages, limitsFrom, TRANSCRIBE_TIMEOUT_MS, VOICE_TIMEOUT_MS, type ImageAttachment } from '../shared/media';
 import type { BackendState, CommandResult, EventsBatch, GenesisEvent, SendResult, SpeakResult, TranscribeResult } from '../shared/types';
 import { guardedFolder } from '../shared/workspace';
 import { exeCandidates } from './exe';
@@ -343,7 +343,7 @@ export class Backend extends EventEmitter {
    *  оператора (GENESIS_VOICE_LANGUAGE, по подразбиране bg). */
   async transcribe(mime: string, data: string): Promise<TranscribeResult> {
     if (!this.state.voice) return { ok: false, error: 'unknown_op' };
-    return this.voiceOp<TranscribeResult>('transcribe', { mime, data });
+    return this.voiceOp<TranscribeResult>('transcribe', { mime, data }, TRANSCRIBE_TIMEOUT_MS);
   }
 
   /** Текст → mp3 (2026-10-15). */
@@ -352,10 +352,11 @@ export class Backend extends EventEmitter {
     return this.voiceOp<SpeakResult>('speak', { text });
   }
 
-  private async voiceOp<T extends SendResult>(op: string, args: Record<string, unknown>): Promise<T> {
+  private async voiceOp<T extends SendResult>(op: string, args: Record<string, unknown>,
+                                               timeoutMs = VOICE_TIMEOUT_MS): Promise<T> {
     if (!this.client) return { ok: false, error: 'not_ready' } as T;
     try {
-      return await this.client.call<T>(op, args, VOICE_TIMEOUT_MS);
+      return await this.client.call<T>(op, args, timeoutMs);
     } catch (e) {
       return { ok: false, error: (e as Error).message } as T;
     }

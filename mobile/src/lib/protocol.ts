@@ -411,6 +411,11 @@ export type SpeakReply = { ok: boolean; mime?: string; data?: string; text?: str
 /** Снимка, глас и изговаряне чакат повече от 15 s (2026-10-15): Whisper и
  *  edge-tts са секунди, а голям плик (до 19 MiB) по Wi-Fi — още толкова. */
 export const MEDIA_TIMEOUT_MS = 60000;
+/** Транскрипцията чака повече (одит 2026-10-27): сървърът чака Groq до
+ *  `stt_timeout_s` = 60 s (genesis_agent/voice.py) СЛЕД като е получил записа
+ *  (до 10 MB по Wi-Fi). При 60 s и тук телефонът винаги се отказваше пръв и
+ *  вместо „Говорът не стана текст: …“ от компютъра казваше „Няма връзка“. */
+export const TRANSCRIBE_TIMEOUT_MS = 90000;
 
 /** Езикът на диктовката — операторът говори български (2026-10-15). */
 export const SPEECH_LANGUAGE = 'bg';
@@ -438,6 +443,12 @@ export type FetchLike = (url: string, init: {
   body: string;
   signal?: AbortSignal;
 }) => Promise<{ status: number; json(): Promise<unknown> }>;
+
+/** Изтеклият срок е „network“ (компютърът може и да е там, но не отговори), с
+ *  code „timeout“ — екранът казва „не отговори навреме“, не „няма връзка“. */
+function timedOut(base: string): ProtocolError {
+  return new ProtocolError(`no reply from ${base} in time`, 'network', undefined, 'timeout');
+}
 
 export class GenesisClient {
   readonly base: string;
@@ -481,12 +492,16 @@ export class GenesisClient {
           signal: controller?.signal,
         });
       } catch {
+        if (controller?.signal.aborted) throw timedOut(this.base);
         throw new ProtocolError(`cannot reach ${this.base}`, 'network');
       }
       try {
         data = await response.json();
-      } catch {
-        if (controller?.signal.aborted) throw new ProtocolError(`no reply from ${this.base} in time`, 'network');
+      } catch (e) {
+        if (controller?.signal.aborted) throw timedOut(this.base);
+        // Скъсана връзка насред тялото е мрежата, не сървърът; „server“ е само
+        // тяло, което не е JSON (одит 2026-10-27).
+        if (!(e instanceof SyntaxError)) throw new ProtocolError(`connection to ${this.base} broke`, 'network');
         throw new ProtocolError(`unexpected reply (${response.status})`, 'server');
       }
     } finally {
@@ -533,7 +548,7 @@ export class GenesisClient {
   /** Говор → текст на компютъра (2026-10-15). Текстът НЕ се праща сам —
    *  отива в полето за писане. */
   transcribe(mime: string, data: string, language = SPEECH_LANGUAGE): Promise<TranscribeReply> {
-    return this.call('transcribe', transcribeArgs(mime, data, language), MEDIA_TIMEOUT_MS);
+    return this.call('transcribe', transcribeArgs(mime, data, language), TRANSCRIBE_TIMEOUT_MS);
   }
 
   /** Текст → mp3 на компютъра (2026-10-15). */

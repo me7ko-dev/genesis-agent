@@ -199,3 +199,52 @@ test('token counts read short, with Bulgarian decimals', async () => {
   assert.equal(niceMax(18_000), 20_000);
   assert.equal(niceMax(0), 1);
 });
+
+// Одит 2026-10-27: срок или скъсана връзка насред тялото бяха „server“ —
+// три подред слагаха трайна грешка, а `send` не опитваше пак със същия mid.
+async function brokenServer(handler: (res: import('node:http').ServerResponse, socket: import('node:net').Socket) => void) {
+  const { createServer } = await import('node:http');
+  const sockets = new Set<import('node:net').Socket>();
+  const srv = createServer((req, res) => handler(res, req.socket));
+  srv.on('connection', (s) => sockets.add(s));
+  srv.listen(0, '127.0.0.1');
+  await once(srv, 'listening');
+  const { port } = srv.address() as { port: number };
+  return { client: new GenesisClient(`http://127.0.0.1:${port}`, KEY),
+           close: () => { for (const s of sockets) s.destroy(); srv.close(); } };
+}
+
+test('a reply that stalls or is cut off mid-body is a network error', async () => {
+  const stall = await brokenServer((res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': '1000' });
+    res.write('{"v":1,');
+  });
+  const cut = await brokenServer((res, socket) => {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': '1000' });
+    res.write('{"v":1,', () => setTimeout(() => socket.destroy(), 50));
+  });
+  const junk = await brokenServer((res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end('<html>не е JSON</html>');
+  });
+  try {
+    for (const [what, s, ms, kind] of [['stall', stall, 300, 'network'], ['cut', cut, 5000, 'network'],
+                                       ['junk', junk, 5000, 'server']] as const) {
+      const e = await s.client.call('status', {}, ms).then(() => null, (x: unknown) => x);
+      assert.ok(e instanceof ProtocolError, what);
+      assert.equal(e.kind, kind, `${what}: ${e.message}`);
+    }
+  } finally {
+    stall.close(); cut.close(); junk.close();
+  }
+});
+
+test('transcription waits longer than the computer waits for Whisper', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { TRANSCRIBE_TIMEOUT_MS } = await import('../src/shared/media.ts');
+  const voice = readFileSync(new URL('../../genesis_agent/voice.py', import.meta.url), 'utf8');
+  const server = Number(/stt_timeout_s: float = ([\d.]+)/.exec(voice)?.[1]);
+  assert.ok(server > 0 && TRANSCRIBE_TIMEOUT_MS >= (server + 20) * 1000);
+  const backend = readFileSync(new URL('../src/main/backend.ts', import.meta.url), 'utf8');
+  assert.match(backend, /voiceOp<TranscribeResult>\('transcribe', \{ mime, data \}, TRANSCRIBE_TIMEOUT_MS\)/);
+});

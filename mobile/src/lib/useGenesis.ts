@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 
-import { BusyAfterSend } from './busy';
+import { BusyAfterSend, losesConnection } from './busy';
 import { mergeEvents, reuseItems, thinkingLabel, toChatItems, type ChatItem } from './chat';
 import { checkImages, hasFeature, limitsFrom } from './media';
 import { errorText, MAX_MESSAGE, messageLength, replyErrorText, sendErrorText, voiceErrorText } from './messages';
@@ -118,13 +118,15 @@ export function useGenesis(pairing: Pairing) {
 
   const act = useCallback(async <T,>(fn: () => Promise<T>): Promise<T | null> => {
     setError('');
+    const noPoll = busyGate.since();
     try {
       return await fn();
     } catch (e) {
       // Отговор на сървъра (413, 429 "busy" на голям плик, 500) значи, че
       // компютърът е тук — не „няма връзка“: точката ставаше червена и
       // „Изпрати“ стоеше изключено до следващото допитване (2026-10-15).
-      if (!(e instanceof ProtocolError && e.kind === 'server')) fail(e);
+      // Същото, ако допитване е минало, докато заявката чакаше (2026-10-27).
+      if (losesConnection(e, !noPoll())) fail(e);
       // На екрана — на български; суровото съобщение е за дневника (одит
       // 2026-10-11: „cannot reach http://…“ и „server error 413“ стигаха
       // до оператора дословно).
@@ -132,7 +134,7 @@ export function useGenesis(pairing: Pairing) {
       setError(errorText(e));
       return null;
     }
-  }, [fail]);
+  }, [fail, busyGate]);
 
   const features = useMemo(() => ({
     voice: hasFeature(status, 'voice'),

@@ -61,6 +61,11 @@ export function lengthHint(text: string): string | undefined {
 
 /** Транскрипцията и гласът са секунди до минута (Whisper, edge-tts). */
 export const VOICE_TIMEOUT_MS = 60_000;
+/** Транскрипцията — повече (одит 2026-10-27): сървърът чака Groq до
+ *  `stt_timeout_s` = 60 s (genesis_agent/voice.py) след качването на записа,
+ *  и при 60 s тук прозорецът се отказваше пръв с „мрежа“ вместо истинската
+ *  причина от компютъра. */
+export const TRANSCRIBE_TIMEOUT_MS = 90_000;
 
 /** Картинка, готова за `send`: base64 без `data:` отпред. */
 export type ImageAttachment = { mime: string; data: string; name: string };

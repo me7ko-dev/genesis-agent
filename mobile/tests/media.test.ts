@@ -21,7 +21,7 @@ import {
 import { errorText, replyErrorText, sendErrorText, voiceErrorText } from '../src/lib/messages.ts';
 import { Outbox } from '../src/lib/outbox.ts';
 import {
-  GenesisClient, MEDIA_TIMEOUT_MS, open, parsePairingUrl, ProtocolError, seal, sendArgs, speakArgs, transcribeArgs,
+  GenesisClient, MEDIA_TIMEOUT_MS, TRANSCRIBE_TIMEOUT_MS, open, parsePairingUrl, ProtocolError, seal, sendArgs, speakArgs, transcribeArgs,
   type FetchLike, type GenesisEvent, type OutgoingImage,
 } from '../src/lib/protocol.ts';
 
@@ -229,7 +229,8 @@ test('429 "busy" on a large envelope is "try again shortly", not the brake or "o
   assert.ok(brake instanceof ProtocolError && brake.kind === 'network');
   assert.match(errorText(brake), /изчакай минута/);
   const hook = readFileSync(new URL('../src/lib/useGenesis.ts', import.meta.url), 'utf8');
-  assert.match(hook, /if \(!\(e instanceof ProtocolError && e\.kind === 'server'\)\) fail\(e\);/);
+  // Правилото „server не сваля връзката“ е в losesConnection (lib/busy.ts, 2026-10-27).
+  assert.match(hook, /if \(losesConnection\(e, !noPoll\(\)\)\) fail\(e\);/);
 });
 
 test('media requests wait 60 s, the rest 15 s', async () => {
@@ -255,7 +256,7 @@ test('media requests wait 60 s, the rest 15 s', async () => {
   } finally {
     globalThis.setTimeout = realSetTimeout;
   }
-  assert.deepEqual(waits, [15000, MEDIA_TIMEOUT_MS, MEDIA_TIMEOUT_MS, MEDIA_TIMEOUT_MS]);
+  assert.deepEqual(waits, [15000, MEDIA_TIMEOUT_MS, TRANSCRIBE_TIMEOUT_MS, MEDIA_TIMEOUT_MS]);
   assert.equal(MEDIA_TIMEOUT_MS, 60000);
 });
 

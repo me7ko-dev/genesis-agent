@@ -74,12 +74,13 @@ export class GenesisClient {
     const rid = randomBytes(8).toString('hex');
     const envelope = seal(this.key, { ts: Date.now(), rid, op, ...args }, REQ_AAD);
     let response: Response;
+    const signal = AbortSignal.timeout(timeoutMs);
     try {
       response = await fetch(`${this.base}/api/v1`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(envelope),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal,
       });
     } catch {
       throw new ProtocolError(`cannot reach ${this.base}`, 'network');
@@ -87,7 +88,15 @@ export class GenesisClient {
     let data: unknown;
     try {
       data = await response.json();
-    } catch {
+    } catch (e) {
+      // Срокът или скъсана връзка насред тялото са мрежата (одит 2026-10-27):
+      // като „server“ три такива подред (лаптопът заспива насред допитване)
+      // слагаха трайното „Връзката с агента се развали“, а `send` не опитваше
+      // пак със същия `mid` — точно случаят, за който `mid` съществува.
+      // „server“ е само тяло, което не е JSON.
+      if (signal.aborted || !(e instanceof SyntaxError)) {
+        throw new ProtocolError(`the reply from ${this.base} broke off`, 'network');
+      }
       throw new ProtocolError(`unexpected reply (${response.status})`, 'server');
     }
     // Голям плик (2026-10-15): 413 — над тавана или операция, на която голям

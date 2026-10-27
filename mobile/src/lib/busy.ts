@@ -13,6 +13,21 @@
  * Сега: busy от `send` само ако междувременно не е дошло допитване — то вече
  * казва истинското състояние след изпращането.
  */
+/**
+ * Сваля ли грешката на една заявка връзката на „без връзка“.
+ *
+ * Одит 2026-10-27: изтекла транскрипция или изговаряне (Groq/edge-tts бавни)
+ * правеше точката червена и „Изпрати“ изключено до следващото допитване (до
+ * 20 s), макар допитванията през същото време да минаваха. Щом допитване е
+ * дошло, докато заявката чакаше, компютърът е тук; отговор на сървъра (413,
+ * 429 „busy“, 500) — също. Наистина скъсаната връзка ще я каже следващото
+ * допитване.
+ */
+export function losesConnection(e: unknown, polledMeanwhile: boolean): boolean {
+  const kind = e instanceof Error ? (e as { kind?: unknown }).kind : undefined;
+  return kind !== 'server' && !polledMeanwhile;
+}
+
 export class BusyAfterSend {
   private polls = 0;
 
@@ -24,6 +39,11 @@ export class BusyAfterSend {
   /** Преди `send`: функцията казва, когато дойде отговорът, дали да се
    *  покаже busy (true — нито едно допитване не е дошло междувременно). */
   sending(): () => boolean {
+    return this.since();
+  }
+
+  /** Функция, която казва true, докато нито едно допитване не е дошло. */
+  since(): () => boolean {
     const at = this.polls;
     return () => this.polls === at;
   }

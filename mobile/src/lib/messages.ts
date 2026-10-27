@@ -78,6 +78,7 @@ export function errorText(e: unknown): string {
   if (!isProtocolError(e)) return 'Неочаквана грешка в приложението.';
   switch (e.kind) {
     case 'network':
+      if (e.code === 'timeout') return 'Компютърът не отговори навреме — опитай пак.';
       return e.status === 429
         ? 'Компютърът временно отказва заявки от този адрес след много неуспешни опити — изчакай минута.'
         : 'Няма връзка с компютъра. В една Wi-Fi мрежа ли сте? Опитай пак.';
