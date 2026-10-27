@@ -6,6 +6,8 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { pairErrorText } from '../lib/messages';
+import { ScanGate } from '../lib/scanGate';
 import { usePairing } from '../lib/pairing';
 import {
   GenesisClient, ProtocolError, onLink, pairingFrom, parsePairingUrl, takeLink, type Pairing,
@@ -21,6 +23,7 @@ export default function Pair() {
   const [error, setError] = useState('');
   const [checking, setChecking] = useState(false);
   const busy = useRef(false);
+  const scanGate = useRef(new ScanGate()).current;
   // A link that opened the app waits here for one tap: a web page can open
   // genesisremote:// links too, and must not re-pair the phone on its own.
   const [offered, setOffered] = useState<Pairing | null>(null);
@@ -35,12 +38,13 @@ export default function Pair() {
     return onLink(accept);
   }, []);
 
-  const tryPair = useCallback(async (raw: string | Pairing) => {
-    if (busy.current) return;
+  // false — неуспех (грешката е на екрана); null — не е опитано (друг опит върви).
+  const tryPair = useCallback(async (raw: string | Pairing): Promise<boolean | null> => {
+    if (busy.current) return null;
     const pairing = typeof raw === 'string' ? parsePairingUrl(raw) : raw;
     if (!pairing) {
       setError('Това не е код от „genesis serve".');
-      return;
+      return false;
     }
     busy.current = true;
     setChecking(true);
@@ -57,15 +61,12 @@ export default function Pair() {
       // dismissTo, не replace: отворен от връзка, /pair е върху чата, и replace
       // оставяше втори жив чат отдолу (одит 2026-10-09).
       router.dismissTo('/chat');
+      return true;
     } catch (e) {
-      const kind = e instanceof ProtocolError ? e.kind : 'network';
-      setError(
-        kind === 'network'
-          ? `Не стигам до ${pairing.base}. Телефонът и компютърът в една Wi-Fi мрежа ли са? На Windows защитната стена трябва да пуска „genesis".`
-          : kind === 'clock'
-            ? 'Часовникът на телефона или компютъра е разминат с повече от 5 минути.'
-            : 'Компютърът не прие ключа. Сканирай кода отново (или `genesis serve --reset` е сменил ключа).',
-      );
+      // 429 и грешка на сървъра не са „не стигам“/„не прие ключа“ (lib/messages, 2026-10-27).
+      console.warn('genesis: pair', e instanceof Error ? e.message : String(e));
+      setError(pairErrorText(e, pairing.base));
+      return false;
     } finally {
       busy.current = false;
       setChecking(false);
@@ -83,13 +84,20 @@ export default function Pair() {
   // всеки код в кадър би подменил сдвояването. Затова и сканираното минава
   // през „Сдвои?“, щом има текущо сдвояване (одит 2026-10-09).
   const scanned = (data: string) => {
+    if (!scanGate.allows(data, Date.now())) return;   // същият код след неуспех (lib/scanGate)
     if (!current) {
-      tryPair(data);
+      void tryPair(data).then((ok) => {
+        if (ok) scanGate.succeeded();
+        else if (ok === false) scanGate.failedWith(data, Date.now());
+      });
       return;
     }
     const p = parsePairingUrl(data);
     if (p) setOffered(p);
-    else setError('Това не е код от „genesis serve".');
+    else {
+      setError('Това не е код от „genesis serve".');
+      scanGate.failedWith(data, Date.now());
+    }
   };
 
   return (

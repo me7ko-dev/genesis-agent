@@ -102,6 +102,11 @@ def _c(pattern: str) -> re.Pattern[str]:
     return re.compile(pattern, re.IGNORECASE)
 
 
+# Блоковите устройства по име: Linux (sd/nvme/vd/hd/mmcblk, xvd в облака, dm-/
+# mapper/md за LVM/RAID, /dev/disk/by-id) и macOS (disk2, rdisk2). Одит
+# 2026-10-27: `dd of=/dev/xvda` и `> /dev/rdisk3` бяха SAFE.
+_BLOCK_DEVICE = r"(sd|nvme|vd|hd|xvd|mmcblk|r?disk\d|disk/|dm-\d|mapper/|md\d)"
+
 # Катастрофални — отказват се ВИНАГИ.
 #
 # `['\"]?` пред пътя (bug fix, намерен от tests/test_stress_invariants.py):
@@ -126,10 +131,19 @@ _BLOCK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
      "форматиране на файлова система (mkfs)"),
     (_c(r"\bwipefs\b"),
      "изтриване на FS сигнатури (wipefs)"),
-    (_c(r"\bdd\b[^\n]*\bof=/dev/(sd|nvme|vd|hd|mmcblk)"),
+    (_c(r"\bdd\b[^\n]*\bof=/dev/" + _BLOCK_DEVICE),
      "dd запис върху блоково устройство"),
-    (_c(r">\s*/dev/(sd|nvme|vd|hd|mmcblk)"),
+    (_c(r">\s*/dev/" + _BLOCK_DEVICE),
      "пренасочване върху блоково устройство"),
+    # Затриване на диск без mkfs (одит 2026-10-27): `blkdiscard /dev/nvme0n1`
+    # (TRIM на целия SSD — мигновено и без връщане), `sgdisk --zap-all`,
+    # `mke2fs`/`mkswap`, `diskutil eraseDisk` и `nvme format` бяха SAFE и се
+    # изпълняваха в режим „deny“.
+    (_c(r"\b(blkdiscard|mke2fs|mkswap|mkntfs|mkdosfs|mkexfatfs)\b"
+        r"|\bsgdisk\b[^\n]*\s(--zap|--zap-all|--clear|-[zZo])\b"
+        r"|\bdiskutil\b[^\n]*\b(erase\w*|zeroDisk|randomDisk|secureErase|partitionDisk|reformat)\b"
+        r"|\bnvme\s+(format|sanitize)\b|\bhdparm\b[^\n]*--security-erase"),
+     "затриване/форматиране на диск"),
     (_c(r"\bchmod\s+(-[a-z]*\s+)*-R\s+[0-7]{3,4}\s+/(\s|$)"),
      "рекурсивен chmod върху root"),
     (_c(r"\b(shutdown|reboot|halt|poweroff)\b"),
@@ -234,11 +248,17 @@ _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (_c(_GENESIS_CONTROL), _GENESIS_CONTROL_REASON),
     # Качване на локален файл навън — пътят, по който тайна напуска машината.
     # localhost е изключен: така агентът тества собственото си API.
+    # `--json @f` и `--data-urlencode [име]@f` също четат файла (одит 2026-10-27:
+    # бяха SAFE).
     (_c(r"\bcurl\b(?![^\n]*\b(?:localhost|127\.0\.0\.1)\b)[^\n]*\s(?:-T\s*\S|--upload-file\b"
-        r"|(?:-d|--data|--data-binary|--data-raw)\s*['\"]?@|(?:-F|--form)\s*['\"]?[^\s'\"=]+=[@<])"
+        r"|(?:-d|--data|--data-binary|--data-raw|--data-ascii|--json)\s*['\"]?@"
+        r"|--data-urlencode\s*['\"]?[^\s'\"=@]*@|(?:-F|--form)\s*['\"]?[^\s'\"=]+=[@<])"
         r"|\bwget\b[^\n]*--post-file\b|\bscp\b"),
      "качване на локален файл към друга машина"),
-    (_c(r"\b(eval|exec)\s"),
+    # `(?<!-)`: `find . -exec grep -l x {} +` е търсене, не exec на шела — питаше,
+    # а в режим „deny“ се отказваше (одит 2026-10-27). Триенето през -exec
+    # решава _assess_file_ops.
+    (_c(r"(?<!-)\b(eval|exec)\s"),
      "динамично изпълнение (eval/exec)"),
     (_c(r"/etc/(passwd|shadow|sudoers)"),
      "достъп до системни идентификационни файлове"),
@@ -387,6 +407,14 @@ _DESTRUCTIVE_WIPE_CMDS = {"shred", "truncate"}
 _PY_CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (_c(r"\bshutil\.rmtree\b"), "shutil.rmtree (рекурсивно триене)"),
     (_c(r"\bos\.(remove|unlink|rmdir)\b"), "триене на файл/директория"),
+    # Другите изписвания на същото триене (одит 2026-10-27): `from shutil import
+    # rmtree`, `import shutil as s; s.rmtree`, `from os import remove` и
+    # pathlib `p.unlink()`/`p.rmdir()` бяха SAFE и в `python -c` триеха целия дом
+    # в режим „deny“. За разлика от `.rename(`/`.replace(` отдолу, `.unlink(` и
+    # `.rmdir(` не се срещат у низове и таблици — фалшива тревога няма откъде.
+    (_c(r"\brmtree\b|\.(unlink|rmdir)\s*\("
+        r"|\bfrom\s+os\s+import\b[^\n]*\b(remove|unlink|rmdir|removedirs)\b"),
+     "триене на файл/директория"),
     # Python-еквивалентите на `mv` — същата дупка като при shell-а (виж
     # коментара при _DESTRUCTIVE_MOVE_CMDS). os.replace/rename презаписват
     # целта БЕЗ предупреждение, Path.rename също.
@@ -503,10 +531,12 @@ def assess_browser_click(label: str, is_submit_near_password: bool = False) -> R
     return RiskVerdict(RiskLevel.CONFIRM, ["клик върху браузър елемент"])
 
 
-def _split_segments(command: str) -> list[str]:
+def _split_segments(command: str, *, pipes: bool = True) -> list[str]:
     """Реже съставна команда на отделни сегменти (`&&`, `||`, `;`, `|`), за да
     се оцени всеки поотделно. Груб разрез — не пълен shell парсър; целта е да
-    не пропуснем `ls && mv *.jpg /другаде`, чиято опасна част е втора."""
+    не пропуснем `ls && mv *.jpg /другаде`, чиято опасна част е втора.
+    `pipes=False` оставя тръбата цяла — етапите ѝ трябват заедно, за да се знае
+    какво подава на какво (`echo / | xargs rm -rf`)."""
     # Нов ред и единичен `&` също делят команди (2026-10-07): `cd photos\nmv
     # *.jpg /другаде` минаваше като SAFE, защото вторият ред не беше сегмент.
     # Само ИЗВЪН кавички и без `\`: `mv *.jpg "/mnt/Tom & Jerry"` иначе се
@@ -572,6 +602,8 @@ def _split_segments(command: str) -> list[str]:
             heredocs = []
             skip = sum(len(line) + 1 for line in lines[:consumed])
             i += skip
+        elif ch == "|" and not pipes:
+            buf.append(ch)
         elif ch in ";|&\n":
             out.append("".join(buf))
             buf = []
@@ -656,6 +688,37 @@ def _argument_readings(seg: str) -> list[list[str]]:
     return readings
 
 
+_FIND_DELETERS = frozenset({"rm", "unlink", "rmdir", "shred"})
+
+
+def _find_runs_deletion(run: list[str]) -> bool:
+    """Трие ли командата след `-exec`: `rm`, `/bin/rm`, `sudo rm`, `unlink`,
+    `sh -c 'rm "$1"'`."""
+    run = _strip_wrappers(run)
+    if not run:
+        return False
+    name = os.path.basename(run[0])
+    if name in _FIND_DELETERS:
+        return True
+    return name in _SHELLS and any(re.search(r"\b(rm|unlink|rmdir|shred)\b", a) for a in run[1:3])
+
+
+def _find_roots(argv: list[str]) -> list[str]:
+    """Папките, в които търси find: думите след опциите -H/-L/-P/-D/-O и преди
+    първия израз (`find . ~ -delete` трие и из дома)."""
+    roots: list[str] = []
+    i = 1
+    while i < len(argv) and argv[i] in ("-H", "-L", "-P"):
+        i += 1
+    while i < len(argv) and (argv[i].startswith(("-D", "-O")) and len(argv[i]) == 2):
+        i += 2
+    for tok in argv[i:]:
+        if tok.startswith("-") or tok in ("(", "!", ")", ","):
+            break
+        roots.append(tok)
+    return roots
+
+
 def _assess_file_ops(command: str, cwd: Path | None = None) -> RiskVerdict:
     """Структурна оценка на файлови операции + РАЗГЪНАТ преглед кои файлове
     реално ще бъдат засегнати. Виж коментара при _DESTRUCTIVE_MOVE_CMDS."""
@@ -721,17 +784,24 @@ def _assess_file_ops(command: str, cwd: Path | None = None) -> RiskVerdict:
                          f"{verb} върху СЪЩЕСТВУВАЩ файл (ще го презапише): {dpath}")
 
         elif cmd == "find":
-            deletes = "-delete" in argv or ("-exec" in argv and "rm" in argv)
+            # Всички начини на find да пусне триене (одит 2026-10-27): `-execdir rm`,
+            # `-ok`/`-okdir rm` бяха SAFE, а `-exec /bin/rm`, `-exec unlink` и
+            # `find /home/ivan -delete` — само CONFIRM, докато `find ~ -delete` е BLOCKED.
+            deletes = "-delete" in argv or "rm" in argv or any(
+                _find_runs_deletion(argv[i + 1:]) for i, a in enumerate(argv)
+                if a in ("-exec", "-execdir", "-ok", "-okdir"))
             if deletes:
-                search_root = operands[0] if operands else "."
-                norm = os.path.expanduser(os.path.expandvars(search_root)).rstrip("/")
+                roots = _find_roots(argv) or ["."]
                 # find / -delete и find ~ -delete са масово унищожение, не "опасна
                 # команда за потвърждение" — трият из цялата машина.
-                if norm in ("", "/", str(Path.home())):
+                critical = next((r for r in roots if _critical_root_reason(r)
+                                 or os.path.expanduser(os.path.expandvars(r)).rstrip("/")
+                                 in ("", str(Path.home()))), None)
+                if critical:
                     bump(RiskLevel.BLOCKED,
-                         f"find с триене върху цялата файлова система/дома ({search_root})")
+                         f"find с триене върху цялата файлова система/дома ({critical})")
                 else:
-                    bump(RiskLevel.CONFIRM, f"find с триене под {search_root}")
+                    bump(RiskLevel.CONFIRM, f"find с триене под {' '.join(roots)}")
 
         elif cmd in _DESTRUCTIVE_WIPE_CMDS:
             paths, _ = _expand_targets(operands, cwd)
@@ -760,11 +830,20 @@ _CATASTROPHIC_ROOTS = frozenset({
     "/", "/*", "~", "~/*", "$home", "$home/*", "${home}", "${home}/*",
     "%userprofile%", "/home", "/home/*", "/root", "/root/*", "/users", "/users/*",
     "/etc", "/var", "/usr", "/bin", "/sbin", "/lib", "/boot", "/sys", "/proc",
+    # Одит 2026-10-27: бяха само CONFIRM. `/mnt` в WSL е целият диск на Windows
+    # (`/mnt/c`), `/Volumes` и `/media` — външните дискове, `/opt`, `/srv`,
+    # `/lib64`, `/dev`, `/run`, `/nix` — системата; на macOS — `/Applications`,
+    # `/System`, `/Library`, `/private` (там са `/etc` и `/var`).
+    "/mnt", "/media", "/volumes", "/opt", "/srv", "/lib64", "/lib32", "/dev", "/run",
+    "/snap", "/nix", "/applications", "/system", "/library", "/private",
 })
 
 # Домът на конкретен потребител: `/home/ivan` е катастрофа, `/home/ivan/proj`
 # не е. Затова се мери дълбочината, а не се изброяват имена.
 _HOME_PARENTS = ("/home/", "/users/", "/root/")
+# Цял монтиран диск — същата мярка: `/Volumes/Backup`, `/media/ivan` (там Ubuntu
+# слага всички дискове на потребителя), `/mnt/data` (2026-10-27).
+_MOUNT_PARENTS = ("/volumes/", "/media/", "/mnt/")
 
 # Нормализираните Windows корени (виж _normalise_target): `c:`, `c:/*`,
 # `c:/windows`, `c:/users`, `c:/program files (x86)`, `c:/users/<име>` и домът
@@ -794,7 +873,17 @@ _RECURSIVE_LONG = frozenset({"--recursive", "--force", "-R", "-r"})
 _WRAPPERS = frozenset({
     "sudo", "doas", "env", "nohup", "time", "exec", "command", "nice",
     "timeout", "setsid", "stdbuf", "ionice", "busybox",
+    # Одит 2026-10-27: `watch -n 1 rm -rf /home/ivan`, `flock /tmp/l rm -rf …`
+    # бяха само CONFIRM — rm зад тях не се виждаше.
+    "watch", "flock", "strace", "ltrace", "chrt", "taskset", "caffeinate", "unbuffer",
+    "eatmydata", "nocache", "torsocks", "proxychains", "proxychains4", "systemd-run",
+    "firejail",
 })
+
+# Ключовите думи и групирането на шела стоят пред командата, без да са команда
+# (одит 2026-10-27): `if …; then rm -rf /home/ivan; fi` и `for …; do rm -rf …`
+# бяха само CONFIRM — сегментът започваше с `then`/`do`, не с rm.
+_SHELL_KEYWORDS = frozenset({"then", "do", "else", "elif", "if", "while", "until", "!", "{"})
 
 # Разгъвания, чиято стойност шелът решава при изпълнение: заместване на
 # команда, променлива, позиционен параметър. Нужни са като РЕГЕКС, а не като
@@ -871,6 +960,9 @@ def _normalise_target(token: str) -> str:
     # и изискваше `/` отпред, затова `rm -rf C:\Users\<име>\Projects\..` (целият
     # дом) и `rm -rf ~/..` бяха само CONFIRM. posixpath, не os.path: на Windows
     # ntpath.normpath връща `\home\user` и сравнението с `/home/` пропада.
+    # `/home//ivan` и `///etc` са същото като `/home/ivan` и `/etc`, но мерено
+    # по брой `/` излизаха по-дълбоки — само CONFIRM (одит 2026-10-27).
+    t = re.sub(r"(?<=.)/{2,}", "/", re.sub(r"^/{2,}", "/", t))
     if ".." in t or "/." in t:
         if t.startswith("/"):
             t = posixpath.normpath(t)
@@ -912,7 +1004,20 @@ _WRAPPER_FLAGS_WITH_ARG: dict[str, frozenset[str]] = {
     "timeout": frozenset({"-k", "-s", "--kill-after", "--signal"}),
     "stdbuf": frozenset({"-i", "-o", "-e"}),
     "setsid": frozenset(),
+    "watch": frozenset({"-n", "--interval", "-q", "--equexit"}),
+    "flock": frozenset({"-w", "--timeout", "-E", "--conflict-exit-code"}),
+    "strace": frozenset({"-o", "-e", "-p", "-s", "-u", "-E", "-a", "-P", "-I"}),
+    "ltrace": frozenset({"-o", "-e", "-p", "-s", "-u", "-E", "-a", "-n"}),
+    "chrt": frozenset({"-p", "--pid"}),
+    "taskset": frozenset({"-c", "--cpu-list", "-p", "--pid"}),
+    "caffeinate": frozenset({"-t", "-w"}),
+    "proxychains": frozenset({"-f"}),
+    "proxychains4": frozenset({"-f"}),
+    "systemd-run": frozenset({"-p", "--property", "-u", "--unit", "-E", "--setenv",
+                              "--uid", "--gid", "-M", "--machine"}),
 }
+# Обвивки, чийто първи позиционен аргумент не е командата: `flock ФАЙЛ cmd`.
+_WRAPPER_POSITIONAL = frozenset({"flock"})
 
 
 def _strip_wrappers(tokens: list[str]) -> list[str]:
@@ -925,11 +1030,21 @@ def _strip_wrappers(tokens: list[str]) -> list[str]:
     чете като rm). Иначе всяко търсене на текста „rm“ ставаше фалшива тревога.
     """
     last_wrapper = ""
+    positional = False
     while tokens:
         head = tokens[0]
-        if head in _WRAPPERS:
-            last_wrapper = head
+        if head.startswith("(") and not head.startswith("(("):
+            # `(rm -rf …)` — подчерупка; `((i++))` е аритметика.
+            tokens = ([head.lstrip("(")] if head.lstrip("(") else []) + tokens[1:]
+        elif head in _SHELL_KEYWORDS:
             tokens = tokens[1:]
+        elif head in _WRAPPERS:
+            last_wrapper = head
+            positional = head in _WRAPPER_POSITIONAL
+            tokens = tokens[1:]
+        elif positional and not head.startswith("-"):
+            positional = False
+            tokens = tokens[1:]          # `flock /tmp/lock`
         elif last_wrapper and "=" in head and not head.startswith("-"):
             tokens = tokens[1:]          # `env FOO=1`
         elif not last_wrapper and "=" in head and not head.startswith("-"):
@@ -940,8 +1055,9 @@ def _strip_wrappers(tokens: list[str]) -> list[str]:
             tokens = tokens[1:]
             if takes_arg and tokens:
                 tokens = tokens[1:]
-        elif last_wrapper and head.rstrip("smhd").isdigit():
-            tokens = tokens[1:]          # `timeout 5`, `timeout 5s`, `nice 10`
+        elif last_wrapper and (head.rstrip("smhd").isdigit()
+                               or re.fullmatch(r"0x[0-9a-f]+", head, re.IGNORECASE)):
+            tokens = tokens[1:]          # `timeout 5`, `timeout 5s`, `nice 10`, `taskset 0x3`
         else:
             break
     return tokens
@@ -1019,6 +1135,9 @@ def _critical_root_reason(target: str) -> str | None:
     for parent in _HOME_PARENTS:
         if norm.startswith(parent) and norm.count("/") == parent.count("/"):
             return f"цяла home директория ({target})"
+    for parent in _MOUNT_PARENTS:
+        if norm.startswith(parent) and norm.count("/") == parent.count("/"):
+            return f"цял монтиран диск ({target})"
     if _WIN_CRITICAL.match(norm):
         return f"критичен корен на Windows ({target})"
     return None
@@ -1046,7 +1165,45 @@ def _upstream_critical_root(stages: list[str]) -> str | None:
     return None
 
 
-def _catastrophic_rm_reason(command: str) -> str | None:
+def _is_relative_target(target: str) -> bool:
+    t = target.strip().strip("'\"")
+    return bool(t) and not (t.startswith(("/", "~", "$", "%", "\\", "`"))
+                            or re.match(r"^[A-Za-z]:", t))
+
+
+def _next_dir(here: str | None, tokens: list[str]) -> str | None:
+    """Папката след `cd …`, ако се знае: `cd` и `cd ~` → дома, абсолютен път →
+    той, относителен → спрямо досегашната. `cd -`, `cd $X` → не се знае."""
+    arg = next((t for t in tokens[1:] if not t.startswith("-") or t == "-"), "~")
+    other_home = arg.startswith("~") and arg != "~" and not arg.startswith("~/")
+    if arg == "-" or other_home or _EXPANSION.search(arg):
+        return None
+    if not _is_relative_target(arg):
+        return arg
+    return f"{here.rstrip('/')}/{arg}" if here else None
+
+
+def _relative_root_reason(here: str, target: str) -> str | None:
+    """Критичен корен, до който стига относителна цел от папката `here`.
+
+    Windows CI 2026-10-27: временната папка там е под `AppData\\Local\\Temp`, а
+    _WIN_CRITICAL брои за критично ВСИЧКО под AppData (за изрично изписан път —
+    там няма проекти). Така `rm -rf build` в проект във временната папка
+    ставаше BLOCKED. Цел под самата папка, когато тя вече е в такава зона,
+    само пита; излизането над нея (`..`) и истинските корени (`cd / && rm -rf
+    home`) остават BLOCKED."""
+    joined = f"{here.rstrip('/')}/{target.strip(chr(39) + chr(34))}"
+    reason = _critical_root_reason(joined)
+    if not reason:
+        return None
+    base = _normalise_target(here)
+    inside = _normalise_target(joined).startswith(base.rstrip("/") + "/")
+    if inside and _WIN_CRITICAL.match(base):
+        return None
+    return reason
+
+
+def _catastrophic_rm_reason(command: str, cwd: Path | None = None) -> str | None:
     """Описание, ако командата рекурсивно трие критичен корен; иначе None.
 
     Разлага на токени вместо да изброява форми, затова редът на флаговете,
@@ -1057,12 +1214,21 @@ def _catastrophic_rm_reason(command: str) -> str | None:
     # слепим, разделянето по `\n` я накъсва и нито една част не изглежда като
     # rm с критична цел.
     command = re.sub(r"\\\s*\n", " ", command)
+    # Относителната цел се мери спрямо папката, в която ще се изпълни (одит
+    # 2026-10-27): `rm -rf ..` от `~/proj` и `cd ~ && rm -rf *` бяха само
+    # CONFIRM, а трият целия дом. `cd` нататък по командата мести папката.
+    here = str(cwd).replace("\\", "/") if cwd else None
     # Първо на отделни команди, после на етапи на тръбата: етапите трябва да
-    # останат групирани, за да се знае какво подава на какво.
-    for statement in re.split(r"[;&\n]+", command):
-        stages = statement.split("|")
+    # останат групирани, за да се знае какво подава на какво. Разрязва се с
+    # кавичките (2026-10-27): `rm -rf "a;b" /home/ivan` се режеше по `;` в
+    # кавичките и нито едната половина не беше rm с критична цел.
+    for statement in _split_segments(command, pipes=False):
+        stages = _split_segments(statement) or [statement]
         for index, stage in enumerate(stages):
             tokens, from_stdin, placeholder = _stage_command(stage)
+            if tokens and tokens[0] in ("cd", "pushd") and len(stages) == 1:
+                here = _next_dir(here, tokens)
+                continue
             if not tokens or Path(tokens[0]).name != "rm":
                 continue
 
@@ -1073,10 +1239,14 @@ def _catastrophic_rm_reason(command: str) -> str | None:
             literal = [t for t in targets
                        if not (placeholder and placeholder in t)]
             for target in literal:
+                if target.count(")") > target.count("("):
+                    target = target.rstrip(")")      # `(rm -rf /home/ivan)`
                 if _target_is_unresolvable(target):
                     return (f"рекурсивно триене с цел, чиято стойност се решава при "
                             f"изпълнение ({target}) — не може да бъде доказана за безопасна")
                 reason = _critical_root_reason(target)
+                if not reason and here and _is_relative_target(target):
+                    reason = _relative_root_reason(here, target)
                 if reason:
                     return f"рекурсивно триене на {reason}"
 
@@ -1305,9 +1475,12 @@ _PY_SHORT_C = re.compile(r"^-[bBdEhiIOPqRsSuvx]*c(.*)$", re.DOTALL)
 # perl/ruby/node: `-e`, слепен с други флагове (`perl -le`, `perl -ne`).
 _OTHER_SHORT_E = re.compile(r"^-[a-zA-Z]*[eE]$")
 # perl/ruby/node: триене и пускане на процеси с техните имена.
+# `fs.rm(`, `require('fs').rm(`, `fs.promises.rm(` — асинхронното триене на node
+# (одит 2026-10-27: SAFE).
 _OTHER_LANG_RISK = re.compile(
     r"\b(unlink|rmtree|rm_rf|rm_r|rmSync|rmdirSync|unlinkSync|File\.delete|FileUtils\.rm\w*"
-    r"|system|exec|execSync|spawnSync|child_process|`)", re.IGNORECASE)
+    r"|system|exec|execSync|spawnSync|child_process|`)"
+    r"|(?:\b(?:fs|promises|fsp)|\))\.(?:rm|rmdir)\s*\(", re.IGNORECASE)
 _RF_FLAG = re.compile(r"^(-[a-zA-Z]*[rRfF][a-zA-Z]*|--recursive|--force)$")
 
 
@@ -1439,6 +1612,18 @@ def control_path_reason(path: str | os.PathLike[str]) -> str | None:
     return _GENESIS_CONTROL_REASON if _CONTROL_ARG_RX.search(real) else None
 
 
+def _named_secret(path: str) -> str | None:
+    """Файл с тайни по име, който образецът на шела не знае (`config/master.key`,
+    `*.tfvars`, `secrets.toml`, `.envrc`) — същото правило като за @път и
+    `genesis export`. Одит 2026-10-27: `cat config/master.key` беше SAFE, а
+    @config/master.key в чата се спираше — по-слабият път решаваше. Само за
+    съществуващ файл: `jq .key data.json` не е достъп до тайна."""
+    if not os.path.isfile(path):
+        return None
+    from genesis_agent.mentions import secret_reason
+    return secret_reason(path)
+
+
 def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:
     """Тайна, до която стигат АРГУМЕНТИТЕ на командата, а не само текстът ѝ.
 
@@ -1476,12 +1661,72 @@ def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:
                 paths = [expanded] if os.path.lexists(expanded) else []
             for path in paths:
                 seen += 1
-                reason = sensitive_path_reason(path)
+                reason = sensitive_path_reason(path) or _named_secret(path)
                 if reason:
                     return reason
             if seen >= _MAX_SECRET_GLOB:
                 return None
     return None
+
+
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "ash", "fish"})
+_ANSI_C = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.DOTALL)
+_ANSI_C_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "f": "\f",
+                   "v": "\v", "e": "\x1b", "E": "\x1b", "\\": "\\", "'": "'", '"': '"', "?": "?"}
+
+
+def _decode_ansi_c(command: str) -> str:
+    """`$'…'` на bash → обикновен низ в апострофи със същата стойност.
+
+    Одит 2026-10-27: `rm -rf $'/home/ivan'` и `rm -rf $'\\x2fhome\\x2fivan'`
+    бяха само CONFIRM (shlex чете `$/home/ivan`), а `cat ~/$'.s\\x73h'/$'id_\\x72sa'`
+    — SAFE: нито образецът, нито проверката по аргументи виждаха `.ssh/id_rsa`.
+    Разкодира се само за оценката; изпълнява се оригиналът."""
+    if "$'" not in command:
+        return command
+
+    def one(m: re.Match[str]) -> str:
+        body = re.sub(
+            r"\\(x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|[0-7]{1,3}|c.|.)",
+            lambda e: _ansi_escape(e.group(1)), m.group(1))
+        return "'" + body.replace("'", "'\\''") + "'"
+
+    return _ANSI_C.sub(one, command)
+
+
+def _ansi_escape(seq: str) -> str:
+    try:
+        if seq[0] in "xuU":
+            return chr(int(seq[1:], 16))
+        if seq[0] in "01234567":
+            return chr(int(seq, 8))
+    except (ValueError, OverflowError):
+        return seq
+    if seq[0] == "c" and len(seq) == 2:
+        return chr(ord(seq[1]) & 0x1F)
+    return _ANSI_C_ESCAPES.get(seq, "\\" + seq)
+
+
+def _shell_scripts(command: str) -> list[str]:
+    """Скриптовете, които командата подава на друг шел: `bash -c '…'`,
+    `sudo sh -lc '…'`, `eval '…'`."""
+    out: list[str] = []
+    for seg in _split_segments(command):
+        try:
+            argv = _strip_wrappers(shlex.split(seg))
+        except ValueError:
+            continue
+        if not argv:
+            continue
+        head = os.path.basename(argv[0]).lower().removesuffix(".exe")
+        if head == "eval" and len(argv) > 1:
+            out.append(" ".join(argv[1:]))
+        elif head in _SHELLS:
+            for i, arg in enumerate(argv[1:-1], start=1):
+                if re.fullmatch(r"-[a-z]*c[a-z]*", arg, re.IGNORECASE):
+                    out.append(argv[i + 1])
+                    break
+    return [s for s in out if s.strip() and len(s) < len(command)]
 
 
 def assess_command(command: str, cwd: Path | None = None, *, arguments: bool = True) -> RiskVerdict:
@@ -1493,6 +1738,7 @@ def assess_command(command: str, cwd: Path | None = None, *, arguments: bool = T
     не са аргументи на шел, а там тайните пази py_guard при изпълнение."""
     reasons: list[str] = []
     level = RiskLevel.SAFE
+    command = _decode_ansi_c(command)
 
     # Структурната проверка върви ПРЕДИ образците. Регексите отдолу са
     # изброяване на форми, а формите на едно и също опасно нещо са
@@ -1503,9 +1749,20 @@ def assess_command(command: str, cwd: Path | None = None, *, arguments: bool = T
     # Тоест единствената форма, която реално работи, беше тази, която гейтът
     # пропускаше като безобидна. Тук командата се разлага на флагове и пътища
     # и се решава по смисъл, а образците остават като втори слой.
-    structural = _catastrophic_rm_reason(command)
+    structural = _catastrophic_rm_reason(command, cwd)
     if structural:
         return RiskVerdict(RiskLevel.BLOCKED, [structural])
+    # Скриптът на `sh -c '…'`/`eval '…'` е команда като всяка друга (одит
+    # 2026-10-27): `bash -c 'rm -rf /home/ivan'` и `sh -c 'find ~ -delete'` бяха
+    # само CONFIRM — образците гледат текста, а структурните проверки виждаха
+    # `bash`, не rm/find. По-късият скрипт гарантира, че рекурсията свършва.
+    for script in _shell_scripts(command):
+        inner = assess_command(script, cwd, arguments=arguments)
+        if inner.level == RiskLevel.BLOCKED:
+            return inner
+        if inner.level == RiskLevel.CONFIRM:
+            reasons.extend(r for r in inner.reasons if r not in reasons)
+            level = RiskLevel.CONFIRM
     windows_delete = _windows_delete_verdict(command)
     if windows_delete.level == RiskLevel.BLOCKED:
         return windows_delete
@@ -1772,7 +2029,11 @@ class SandboxPolicy:
     # Изключен по подразбиране (0). Истинска process-изолация иска cgroups/контейнер.
     # Fork bomb-овете се овладяват от regex BLOCK + RLIMIT_CPU + timeout + killpg.
     max_processes: int = 0
-    max_file_mb: int = 512
+    # 4 GB, не 512 MB (решение на оператора, 2026-10-27): 512 MB рязаха `dd` от
+    # 600 MB („File size limit exceeded“), CUDA wheel-а на torch (~2.5 GB), големи
+    # git пакети и набори данни. Таванът остава — безкраен цикъл, който пише
+    # във файл, пак спира, преди да напълни диска.
+    max_file_mb: int = 4096
 
     def resolve_mode(self) -> str:
         if self.mode != "auto":
@@ -1938,9 +2199,18 @@ def _preexec(policy: SandboxPolicy, nproc_cap: int):  # изпълнява се 
     if resource is None:
         return
     mb = 1024 * 1024
+    # Паметта на Linux — RLIMIT_DATA, не RLIMIT_AS (2026-10-27). AS брои и
+    # резервираното, но неизползвано адресно пространство: при 2048 MB
+    # `java -version` и `javac` не тръгваха („Could not allocate compressed
+    # class space“), `fetch()` в Node 22 падаше (llhttp е WebAssembly — „Cannot
+    # allocate Wasm memory“), а ThreadPoolExecutor(64) в Python — „can't start
+    # new thread“. DATA (Linux ≥ 4.7) брои само записваемата частна памет:
+    # трите минават, а 3 GB bytearray, 3.2 GB numpy и 4 GB Buffer в Node пак
+    # спират при същия таван. Извън Linux DATA не брои mmap — там остава AS.
+    mem_limit = resource.RLIMIT_DATA if sys.platform.startswith("linux") else resource.RLIMIT_AS
     limits = [
         (resource.RLIMIT_CPU, (policy.cpu_seconds, policy.cpu_seconds + 5)),
-        (resource.RLIMIT_AS, (policy.max_memory_mb * mb, policy.max_memory_mb * mb)),
+        (mem_limit, (policy.max_memory_mb * mb, policy.max_memory_mb * mb)),
         (resource.RLIMIT_FSIZE, (policy.max_file_mb * mb, policy.max_file_mb * mb)),
     ]
     # NPROC се прилага само ако е изрично поискан (nproc_cap > 0) — виж коментара
@@ -1987,6 +2257,115 @@ def _stopped_before_start() -> SandboxResult:
                          returncode=None)
 
 
+# Таван на изхода, който се пази от всеки поток (2026-10-27): началото и краят
+# по половин, средата се брои и пропуска. Измерено: `yes` с таймаут 3 s през
+# run_shell — самият Genesis убит от OOM killer-а: communicate() трупаше всичко
+# в паметта, а RLIMIT-ите са на детето, не на нас; 300 MB изход → 1067 MB RSS
+# и 9.6 s. RUN_CMD показва 6000 знака, тестовете — началото и края.
+_OUTPUT_KEEP = 4 * 1024 * 1024
+# Колко се чака изходът, след като командата е излязла, а pipe-ът е още
+# отворен — държи го фоново дете (`python app.py & sleep 1; curl …`). Измерено
+# 2026-10-27: `sleep 30 & echo hi` чакаше целия таймаут (120 s в RUN_CMD) и
+# връщаше „Timeout“ без код, макар командата да беше свършила с 0. След това
+# останалите в групата/job-а се спират — таймаутът ги спираше и досега.
+_LEFTOVER_GRACE_S = 2.0
+
+
+class _Capture:
+    """Чете един pipe в своя нишка, с таван _OUTPUT_KEEP (вместо communicate())."""
+
+    def __init__(self, stream: Any) -> None:
+        self.stream = stream
+        self._half = _OUTPUT_KEEP // 2
+        self._head = bytearray()
+        self._tail = bytearray()
+        self._dropped = 0
+        self._lock = threading.Lock()
+        self.done = threading.Event()
+        if stream is None:
+            self.done.set()
+            return
+        threading.Thread(target=self._pump, name="sandbox-output", daemon=True).start()
+
+    def _pump(self) -> None:
+        try:
+            while True:
+                chunk = self.stream.read1(65536)
+                if not chunk:
+                    break
+                with self._lock:
+                    room = self._half - len(self._head)
+                    if room > 0:
+                        self._head += chunk[:room]
+                        chunk = chunk[room:]
+                    self._tail += chunk
+                    extra = len(self._tail) - self._half
+                    if extra > 0:
+                        del self._tail[:extra]
+                        self._dropped += extra
+        except (OSError, ValueError):
+            log.debug("изходът на процеса не се дочете", exc_info=True)
+        finally:
+            self.done.set()
+
+    def data(self) -> bytes:
+        with self._lock:
+            head, tail, dropped = bytes(self._head), bytes(self._tail), self._dropped
+        if not dropped:
+            return head + tail
+        # Срязано по край на ред: половин ред (и половин UTF-8 буква) около
+        # пропуснатото не излиза като боклук.
+        cut = head.rfind(b"\n") + 1
+        if cut:
+            dropped += len(head) - cut
+            head = head[:cut]
+        nl = tail.find(b"\n")
+        if nl >= 0:
+            dropped += nl + 1
+            tail = tail[nl + 1:]
+        lead = "" if head.endswith(b"\n") or not head else "\n"
+        return head + f"{lead}… [sandbox: пропуснати {dropped} байта изход] …\n".encode() + tail
+
+
+def _drained(caps: tuple[_Capture, ...], until: float, *, watch_stop: bool = False) -> bool | None:
+    """True — всички pipe-ове са затворени; False — времето изтече;
+    None — операторът натисна Стоп (само с watch_stop)."""
+    while not all(c.done.is_set() for c in caps):
+        left = until - time.monotonic()
+        if left <= 0:
+            return False
+        if watch_stop and _stop_requested():
+            return None
+        for c in caps:
+            if not c.done.wait(min(0.05, left)):
+                break
+    return True
+
+
+def _kill_tree(proc: subprocess.Popen, job: _WinJob) -> None:
+    """Убива командата и всичко в групата/job-а ѝ — и когато тя самата е излязла."""
+    try:
+        if sys.platform != "win32":
+            # proc.pid, не os.getpgid(proc.pid): _preexec прави setsid, групата
+            # е pid-ът, а след proc.wait() водачът е прибран и getpgid хвърля
+            # ProcessLookupError — фоновите му деца оставаха живи.
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            # taskkill — само ако job-ът не е станал (2026-10-15, Windows CI
+            # на main 68b217f: ходът свърши 4.9–5.4 s след Стоп). След
+            # TerminateJobObject в дървото няма жив процес, а `taskkill /T /F`
+            # е отделен процес, пускан и чакан последователно точно на пътя
+            # на Стоп — единствената стъпка там, която Linux няма.
+            if not job.terminate():
+                _kill_tree_win32(proc.pid)
+            proc.kill()
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
 def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
          env_extra: dict[str, str] | None = None) -> SandboxResult:
     # Стоп, дошъл преди процеса (докато се питаше, избираше обвивка или
@@ -2010,6 +2389,11 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
         proc, job = _popen_in_job(
             argv,
             cwd=str(cwd),
+            # Не терминала на оператора (2026-10-27, както start_shell): с
+            # наследен stdin `input()` в командата четеше какво пише
+            # операторът (измерено през pty: детето върна 'typed-by-operator'),
+            # а npm init/pip uninstall/createsuperuser висяха до таймаута.
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             # Байтове, декодирани от decode_output, а не text=True (bug fix,
@@ -2028,63 +2412,70 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
         log.debug("процесът не тръгна", exc_info=True)
         return SandboxResult(ok=False, stdout="", stderr=f"[sandbox] стартът се провали: {e}",
                              returncode=None)
+    caps = (_Capture(proc.stdout), _Capture(proc.stderr))
     deadline = time.monotonic() + timeout
-    stopped = False
+    stopped = timed_out = leftovers = False
+    drained: bool | None = True
     try:
-        # На парчета по 0.5 s, за да се види „Стоп“; повторният communicate()
-        # не губи изход (документирано за TimeoutExpired).
+        # На парчета по 0.5 s, за да се види „Стоп“.
         while True:
             try:
-                out, err = proc.communicate(
-                    timeout=max(0.01, min(_CANCEL_POLL_S, deadline - time.monotonic())))
+                proc.wait(timeout=max(0.01, min(_CANCEL_POLL_S, deadline - time.monotonic())))
                 break
             except subprocess.TimeoutExpired:
                 if _stop_requested():
                     stopped = True
-                    raise
+                    break
                 if time.monotonic() >= deadline:
-                    raise
-        return SandboxResult(ok=proc.returncode == 0, stdout=decode_output(out),
-                             stderr=decode_output(err), returncode=proc.returncode)
-    except subprocess.TimeoutExpired:
-        # Убиваме цялата process group — само на POSIX (os.killpg/getpgid не
-        # съществуват на Windows и AttributeError не се хваща по-долу, значи
-        # преди тази проверка timeout на native Windows гърмеше необработено
-        # вместо да падне грациозно на proc.kill(), design note 2026-08-11).
-        try:
-            if sys.platform != "win32":
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            else:
-                # taskkill — само ако job-ът не е станал (2026-10-15, Windows CI
-                # на main 68b217f: ходът свърши 4.9–5.4 s след Стоп). След
-                # TerminateJobObject в дървото няма жив процес, а `taskkill /T /F`
-                # е отделен процес, пускан и чакан последователно точно на пътя
-                # на Стоп — единствената стъпка там, която Linux няма.
-                if not job.terminate():
-                    _kill_tree_win32(proc.pid)
-                proc.kill()
-        except (ProcessLookupError, PermissionError, OSError):
+                    timed_out = True
+                    break
+        if not (stopped or timed_out):
+            drained = _drained(caps, min(deadline, time.monotonic() + _LEFTOVER_GRACE_S),
+                               watch_stop=True)
+            stopped, leftovers = drained is None, drained is False
+        if stopped or timed_out or leftovers:
+            # Убиваме цялата process group / job-а. С таймаут и чакането на
+            # изхода (bug fix, 2026-09-24, bench_fix.py): на Windows proc.kill()
+            # убиваше само bash.exe, а внукът държеше pipe-овете — и
+            # `communicate()` без таймаут чака 11 246 секунди при таймаут от
+            # 120. Ако нещо ги държи и след убиването на дървото (внук в своя
+            # сесия), изоставяме остатъка, не чакаме завинаги.
+            _kill_tree(proc, job)
+            drained = _drained(caps, time.monotonic() + (10 if timed_out else _STOP_DRAIN_S))
             try:
-                proc.kill()
-            except OSError:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
                 pass
-        # С таймаут и тук (bug fix, 2026-09-24, bench_fix.py): на Windows
-        # proc.kill() убиваше само bash.exe, а внукът (заглушката на python от
-        # WindowsApps) държеше pipe-овете — и `communicate()` без таймаут чака
-        # 11 246 секунди при таймаут от 120. Ако нещо ги държи и след убиването
-        # на дървото, изоставяме изхода, не чакаме завинаги.
-        try:
-            raw_out, raw_err = proc.communicate(timeout=_STOP_DRAIN_S if stopped else 10)
-            text_out, text_err = decode_output(raw_out), decode_output(raw_err)
-        except subprocess.TimeoutExpired:
-            _abandon_pipes(proc)
-            text_out, text_err = "", "[sandbox] процесът не пусна изхода си и след убиване"
-        note = "⏹ Спряно от оператора" if stopped else f"Timeout след {timeout}s"
-        return SandboxResult(ok=False, stdout=text_out,
-                             stderr=text_err + f"\n[sandbox] {note}",
-                             returncode=None)
+    except BaseException:
+        # Ctrl-C (KeyboardInterrupt) по време на командата (2026-10-27): детето
+        # е в своя сесия и SIGINT от терминала не го стига, а дотук нищо не го
+        # убиваше — измерено: Ctrl-C на 0.5 s и детето пак записа файла си на
+        # 1.5 s, след като чатът вече беше продължил.
+        _kill_tree(proc, job)
+        raise
     finally:
+        # Затварят се само дочетените: close() на поток, който нишка още чете,
+        # чака самото четене — т.е. оцелелия (измерено 2026-10-15 на Windows:
+        # 2.8 s при `sleep 3`). Нишките са daemon и пускат потока, щом той излезе.
+        for cap in caps:
+            if cap.stream is not None and cap.done.is_set():
+                try:
+                    cap.stream.close()
+                except OSError:
+                    pass
         job.close()
+    text_out, text_err = decode_output(caps[0].data()), decode_output(caps[1].data())
+    if not drained:
+        text_err += "\n[sandbox] процесът не пусна изхода си и след убиване"
+    if stopped or timed_out:
+        note = "⏹ Спряно от оператора" if stopped else f"Timeout след {timeout}s"
+        return SandboxResult(ok=False, stdout=text_out, stderr=text_err + f"\n[sandbox] {note}",
+                             returncode=None)
+    if leftovers:
+        text_err += ("\n[sandbox] командата свърши, но фонов процес държеше изхода ѝ отворен — "
+                     "спрян. За сървър или наблюдение ползвай RUN_BG.")
+    return SandboxResult(ok=proc.returncode == 0, stdout=text_out, stderr=text_err,
+                         returncode=proc.returncode)
 
 
 # ── Изход на детето: UTF-8, а на Windows и кодовата страница (2026-10-11) ────
@@ -2149,7 +2540,17 @@ def decode_output(raw: bytes | str | None) -> str:
     if isinstance(raw, str):
         return raw
     codepages = _legacy_codepages()
-    text = "".join(_decode_line(line, codepages) for line in raw.splitlines(keepends=True))
+    # Цял валиден UTF-8 (или без кодови страници) — без разделяне на редове:
+    # резултатът е същият, а 4 MB `yes` иначе ставаха 2 милиона обекта-реда —
+    # 254 MB пик срещу 45 MB (измерено 2026-10-27 с тавана _OUTPUT_KEEP).
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        if codepages:
+            text = "".join(_decode_line(line, codepages)
+                           for line in raw.splitlines(keepends=True))
+        else:
+            text = raw.decode("utf-8", errors="replace")
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
@@ -2288,23 +2689,6 @@ def _discard_suspended(proc: subprocess.Popen) -> None:
                 stream.close()
             except OSError:
                 pass
-
-
-def _abandon_pipes(proc: subprocess.Popen) -> None:
-    """Изоставя pipe-овете, които оцелял процес още държи.
-
-    На Windows communicate() чете в нишки, а close() на поток, който нишка
-    чете, чака самото четене — т.е. оцелелия (измерено 2026-10-15: close()
-    при четяща нишка върху `sleep 3` отне 2.8 s). Тогава не се затваря: нишките
-    са daemon и пускат потока, щом оцелелият излезе."""
-    for stream, reader in ((proc.stdout, "stdout_thread"), (proc.stderr, "stderr_thread")):
-        thread = getattr(proc, reader, None)
-        if stream is None or (thread is not None and thread.is_alive()):
-            continue
-        try:
-            stream.close()
-        except OSError:
-            pass
 
 
 def _kill_tree_win32(pid: int) -> None:
@@ -2524,22 +2908,82 @@ def start_shell(command: str, *, cwd: Path | None = None, log: Path,
     return proc, ""
 
 
-def stop_process(proc: subprocess.Popen) -> None:
-    """Спира процес, пуснат с start_shell, заедно с децата му."""
-    if proc.poll() is not None:
+def _group_alive(pgid: int) -> bool:
+    """Има ли в групата жив (не зомби) процес. Зомби на внук, чийто родител е
+    умрял, стои в групата, докато init го прибере — в контейнер без истински
+    init това е никога, и чакането би въртяло до тавана си."""
+    if sys.platform == "win32":     # само POSIX; проверката е за mypy на Windows CI
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    if not sys.platform.startswith("linux"):
+        return True
+    try:
+        pids = [p for p in os.listdir("/proc") if p.isdigit()]
+    except OSError:
+        return True
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/stat", "rb") as fh:
+                fields = fh.read().rsplit(b")", 1)[1].split()
+        except (OSError, IndexError):
+            continue
+        if len(fields) > 2 and int(fields[2]) == pgid and fields[0] not in (b"Z", b"X"):
+            return True
+    return False
+
+
+# Колко се чака групата след SIGTERM, преди SIGKILL — колкото чакаше водачът и досега.
+_STOP_GRACE_S = 5.0
+
+
+def _stop_group_posix(proc: subprocess.Popen) -> None:
+    """SIGTERM на групата, до 5 s за ВСИЧКИ в нея, после SIGKILL на останалите.
+
+    Одит 2026-10-27, измерено със start_shell + stop_process: при излязъл
+    водач (`sleep 33 &`) функцията се връщаше веднага — `sleep` си оставаше,
+    а BG_KILL казваше „спряна“; при дете, което не спира от SIGTERM
+    (`python3 server.py` под dash, който форква), dash умираше, wait() на
+    водача свършваше и детето живееше. Групата е pid-ът: start_shell прави
+    setsid в _preexec, hooks и MCP — start_new_session; живият водач се
+    проверява, за да не се прати сигнал на чужда група."""
+    if sys.platform == "win32":     # само POSIX; проверката е за mypy на Windows CI
         return
+    if proc.poll() is None:
+        try:
+            if os.getpgid(proc.pid) != proc.pid:
+                proc.kill()
+                return
+        except ProcessLookupError:
+            pass
+    for sig, wait in ((signal.SIGTERM, _STOP_GRACE_S), (signal.SIGKILL, 1.0)):
+        proc.poll()
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            return
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            proc.poll()     # прибира водача — зомбито му иначе се брои за жив
+            if not _group_alive(proc.pid):
+                return
+            time.sleep(0.05)
+
+
+def stop_process(proc: subprocess.Popen) -> None:
+    """Спира процес, пуснат с start_shell (или друг в своя сесия), заедно с
+    децата му — и когато самият той вече е излязъл."""
     try:
         if sys.platform != "win32":
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            try:
-                proc.wait(timeout=5)
-                return
-            except subprocess.TimeoutExpired:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        else:
+            _stop_group_posix(proc)
+        elif proc.poll() is None:
             _kill_tree_win32(proc.pid)
             proc.kill()
-    except (ProcessLookupError, PermissionError, OSError):
+        else:
+            return
+    except OSError:
         try:
             proc.kill()
         except OSError:

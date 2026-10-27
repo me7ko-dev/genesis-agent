@@ -78,6 +78,7 @@ export function errorText(e: unknown): string {
   if (!isProtocolError(e)) return 'Неочаквана грешка в приложението.';
   switch (e.kind) {
     case 'network':
+      if (e.code === 'timeout') return 'Компютърът не отговори навреме — опитай пак.';
       return e.status === 429
         ? 'Компютърът временно отказва заявки от този адрес след много неуспешни опити — изчакай минута.'
         : 'Няма връзка с компютъра. В една Wi-Fi мрежа ли сте? Опитай пак.';
@@ -94,6 +95,30 @@ export function errorText(e: unknown): string {
         : e.status ? `Грешка на компютъра (${e.status}).` : 'Компютърът върна неочакван отговор.';
     default:
       return 'Неочаквана грешка.';
+  }
+}
+
+/** Неуспешно сдвояване → текст за екрана „Сдвои“.
+ *
+ *  Одит 2026-10-27: екранът делеше грешките на три — всяка не-ProtocolError
+ *  (записът в SecureStore) и 429 бяха „Не стигам до … защитната стена“, а
+ *  'server' (друго нещо на порта, 500) — „не прие ключа“. Измерено срещу
+ *  истинския remote_server: стар код след `genesis serve --reset`, пробван
+ *  31 пъти за минута, получава 429 — компютърът отговаря, а екранът пращаше
+ *  оператора да оправя Wi-Fi и защитната стена. */
+export function pairErrorText(e: unknown, base: string): string {
+  if (!isProtocolError(e)) return errorText(e);
+  switch (e.kind) {
+    case 'network':
+      // 429 — спирачката след много откази: компютърът е тук.
+      return e.status === 429 ? errorText(e)
+        : `Не стигам до ${base}. Телефонът и компютърът в една Wi-Fi мрежа ли са? На Windows защитната стена трябва да пуска „genesis“.`;
+    case 'clock':
+      return 'Часовникът на телефона или компютъра е разминат с повече от 5 минути.';
+    case 'server':
+      return errorText(e);
+    default:
+      return 'Компютърът не прие ключа. Сканирай кода отново (или `genesis serve --reset` е сменил ключа).';
   }
 }
 

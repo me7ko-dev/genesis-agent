@@ -1591,7 +1591,16 @@ class Brain:
         """Поточна заявка, върнат е само крайният отговор (виж
         ANTHROPIC_STREAM_MAX_TOKENS) — за веригата същото като create()."""
         with api.stream(**extra, **params) as stream:
-            return stream.get_final_message()
+            try:
+                return stream.get_final_message()
+            except BaseException:
+                # Скъсан поток след message_start (одит 2026-10-27): входът вече
+                # е платен — Ctrl-C посред мисленето или скъсана връзка
+                # прескачаха записа и таванът броеше по-малко от сметката.
+                # Снимката носи входа и кеша; изходът дотук идва чак с
+                # message_delta, затова той остава непреброен.
+                anthropic_spend.charge_interrupted(params.get("model", ""), stream)
+                raise
 
     @staticmethod
     def _no_trailing_assistant(msgs: list[dict]) -> list[dict]:

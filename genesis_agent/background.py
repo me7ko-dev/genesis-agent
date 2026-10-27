@@ -126,7 +126,10 @@ def summary() -> str:
 @atexit.register
 def stop_all() -> None:
     from genesis_agent import sandbox
-    for job in _running():
+    # Всички, не само тези с жив водач (одит 2026-10-27): `sleep 30 &` в RUN_BG —
+    # обвивката излиза веднага, а sleep преживяваше Genesis. stop_process спира
+    # и групата на излязъл водач; празна група — един сигнал, без чакане.
+    for job in list(_jobs.values()):
         sandbox.stop_process(job.proc)
     # Логовете са за BG_OUTPUT в тази сесия — след изхода папката оставаше в
     # /tmp завинаги, по една на всяка сесия с фонова команда (2026-10-09).

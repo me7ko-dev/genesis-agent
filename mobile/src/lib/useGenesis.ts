@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 
+import { BusyAfterSend, losesConnection } from './busy';
 import { mergeEvents, reuseItems, thinkingLabel, toChatItems, type ChatItem } from './chat';
 import { checkImages, hasFeature, limitsFrom } from './media';
 import { errorText, MAX_MESSAGE, messageLength, replyErrorText, sendErrorText, voiceErrorText } from './messages';
@@ -26,6 +27,8 @@ export function useGenesis(pairing: Pairing) {
   const client = useMemo(() => new GenesisClient(pairing, random), [pairing]);
   // Едно изпращане наведнъж, `mid` за повторния опит (lib/outbox.ts).
   const outbox = useMemo(() => new Outbox(() => b64urlEncode(random(12))), [client]);
+  // busy от `send` само без допитване междувременно (lib/busy.ts, 2026-10-27).
+  const busyGate = useMemo(() => new BusyAfterSend(), [client]);
   const [connection, setConnection] = useState<Connection>('connecting');
   const [status, setStatus] = useState<StatusReply | null>(null);
   const [events, setEvents] = useState<GenesisEvent[]>([]);
@@ -93,6 +96,7 @@ export function useGenesis(pairing: Pairing) {
           // Своето балонче дойде → изпращането е прието, следващото със
           // същия текст е нов ход, не повторен опит (преглед 2026-10-11).
           outbox.seen(reply.events, reply.mids);
+          busyGate.polled();
           setBusy(reply.busy);
           if (reply.state) setPhone(reply.state);
           setConnection('online');
@@ -110,17 +114,19 @@ export function useGenesis(pairing: Pairing) {
     return () => {
       stopped = true;
     };
-  }, [client, outbox, active, fail]);
+  }, [client, outbox, busyGate, active, fail]);
 
   const act = useCallback(async <T,>(fn: () => Promise<T>): Promise<T | null> => {
     setError('');
+    const noPoll = busyGate.since();
     try {
       return await fn();
     } catch (e) {
       // Отговор на сървъра (413, 429 "busy" на голям плик, 500) значи, че
       // компютърът е тук — не „няма връзка“: точката ставаше червена и
       // „Изпрати“ стоеше изключено до следващото допитване (2026-10-15).
-      if (!(e instanceof ProtocolError && e.kind === 'server')) fail(e);
+      // Същото, ако допитване е минало, докато заявката чакаше (2026-10-27).
+      if (losesConnection(e, !noPoll())) fail(e);
       // На екрана — на български; суровото съобщение е за дневника (одит
       // 2026-10-11: „cannot reach http://…“ и „server error 413“ стигаха
       // до оператора дословно).
@@ -128,7 +134,7 @@ export function useGenesis(pairing: Pairing) {
       setError(errorText(e));
       return null;
     }
-  }, [fail]);
+  }, [fail, busyGate]);
 
   const features = useMemo(() => ({
     voice: hasFeature(status, 'voice'),
@@ -153,6 +159,7 @@ export function useGenesis(pairing: Pairing) {
       }
     }
     setSending(true);
+    const allowBusy = busyGate.sending();
     try {
       const reply = await act(() => outbox.send(text, (t, mid) => client.send(t, mid, images),
                                                 images.map((i) => i.id).join(',')));
@@ -160,12 +167,14 @@ export function useGenesis(pairing: Pairing) {
         setError(sendErrorText(reply));
         return false;
       }
-      if (reply) setBusy(true);
+      // Бърз ход (/todos, /plan) може да е свършил преди този отговор — тогава
+      // допитването вече е казало busy = false и то важи (одит 2026-10-27).
+      if (reply && allowBusy()) setBusy(true);
       return !!reply;
     } finally {
       setSending(false);
     }
-  }, [act, client, outbox, features.images, limits]);
+  }, [act, client, outbox, busyGate, features.images, limits]);
 
   // Гласът (2026-10-15): говор → текст за полето (НЕ се праща сам) и
   // отговор → mp3. null — грешката вече е на екрана.

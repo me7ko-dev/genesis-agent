@@ -7,6 +7,7 @@ import {
 } from '../src/lib/chat.ts';
 import { splitBlocks, splitInline } from '../src/lib/markdown.ts';
 import { errorText, MAX_MESSAGE, messageLength, replyErrorText, trimDraft } from '../src/lib/messages.ts';
+import { BusyAfterSend } from '../src/lib/busy.ts';
 import { Outbox, RETRY_WINDOW_MS } from '../src/lib/outbox.ts';
 import { ProtocolError, type GenesisEvent } from '../src/lib/protocol.ts';
 
@@ -340,4 +341,40 @@ test('a deliberate repeat after the server took the send is never swallowed by a
 
   const hook = readFileSync(new URL('../src/lib/useGenesis.ts', import.meta.url), 'utf8');
   assert.match(hook, /outbox\.seen\(reply\.events, reply\.mids\)/);
+});
+
+// Одит 2026-10-27: редът, измерен срещу истинския remote_server за /todos —
+// допитване busy=true ("user"), допитване busy=false (ходът свърши), чак
+// после отговорът {ok:true} на `send`. Отговорът на `send` връщаше busy=true
+// и то стоеше до 20 s.
+test('a fast turn that ended before the send reply does not stay "busy"', () => {
+  // Какво прави useGenesis: допитванията слагат busy, приетото `send` — само
+  // ако gate-ът позволи.
+  const gate = new BusyAfterSend();
+  let busy = false;
+  const poll = (b: boolean) => { gate.polled(); busy = b; };
+  const accepted = (allowed: () => boolean) => { if (allowed()) busy = true; };
+
+  const fast = gate.sending();
+  poll(true);
+  poll(false);
+  accepted(fast);
+  assert.equal(busy, false, 'the turn is over — the server said so after the send');
+
+  // Бавен ход: отговорът на `send` идва преди първото допитване — busy веднага.
+  const slow = gate.sending();
+  accepted(slow);
+  assert.equal(busy, true);
+  poll(false);
+  assert.equal(busy, false);
+
+  const hook = readFileSync(new URL('../src/lib/useGenesis.ts', import.meta.url), 'utf8');
+  assert.match(hook, /const allowBusy = busyGate\.sending\(\);/);
+  assert.match(hook, /if \(reply && allowBusy\(\)\) setBusy\(true\);/);
+  assert.match(hook, /busyGate\.polled\(\);\s*setBusy\(reply\.busy\);/);
+  assert.doesNotMatch(hook, /if \(reply\) setBusy\(true\);/);
+  // Четенето на глас разчиташе на това busy = true, за да знае, че ход е
+  // пратен оттук — сега и самото изпращане го казва.
+  const chat = readFileSync(new URL('../src/app/chat.tsx', import.meta.url), 'utf8');
+  assert.match(chat, /if \(g\.busy \|\| g\.sending\) \{\s*sawBusy\.current = true;/);
 });
