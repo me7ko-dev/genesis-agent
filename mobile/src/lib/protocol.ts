@@ -15,51 +15,65 @@ const RES_AAD = 'genesis/1/res:';
 
 // ── bytes ───────────────────────────────────────────────────────────────────
 
-// \u041e\u0434\u0438\u0442 2026-10-27: \u0442\u0435\u0437\u0438 \u0447\u0435\u0442\u0438\u0440\u0438 \u043c\u0438\u043d\u0430\u0432\u0430\u0445\u0430 \u0431\u0430\u0439\u0442 \u043f\u043e \u0431\u0430\u0439\u0442 \u0441 `indexOf`, `number[]`
-// \u0438 `out +=` \u043d\u0430 \u0432\u0441\u0435\u043a\u0438 \u0437\u043d\u0430\u043a. \u041e\u0442\u0433\u043e\u0432\u043e\u0440\u044a\u0442 \u043d\u0430 `speak` \u043d\u044f\u043c\u0430 \u0442\u0430\u0432\u0430\u043d \u043a\u0430\u0442\u043e `events`
-// (20 000 \u0437\u043d\u0430\u043a\u0430 \u0440\u0435\u0447 \u2248 7 MB mp3 \u2192 13.4 M \u0437\u043d\u0430\u043a\u0430 \u043f\u043b\u0438\u043a): open() \u043c\u0443 \u0441\u0442\u0440\u0443\u0432\u0430\u0448\u0435
-// 2.6 s \u043d\u0430 JS \u043d\u0438\u0448\u043a\u0430\u0442\u0430 \u043f\u043e\u0434 V8 \u0441 JIT (Hermes \u0435 \u043d\u044f\u043a\u043e\u043b\u043a\u043e \u043f\u044a\u0442\u0438 \u043f\u043e-\u0431\u0430\u0432\u0435\u043d \u2014 UI \u0441\u0442\u043e\u0438),
-// \u0430 \u0447\u0435\u0442\u0438\u0440\u0438 \u0441\u043d\u0438\u043c\u043a\u0438 \u0437\u0430 `send` \u2014 \u043e\u0449\u0435 \u0442\u043e\u043b\u043a\u043e\u0432\u0430 \u043f\u0440\u0438 \u0437\u0430\u043f\u0435\u0447\u0430\u0442\u0432\u0430\u043d\u0435\u0442\u043e. \u0418\u0437\u043c\u0435\u0440\u0435\u043d\u043e \u0432
-// tests/interop.test.ts \u0432\u044a\u0440\u0445\u0443 9.6 MB base64 \u0432 JSON: \u043a\u043e\u0434\u0438\u0440\u0430\u043d\u0435 + \u0434\u0435\u043a\u043e\u0434\u0438\u0440\u0430\u043d\u0435
-// 3.6 s \u2192 \u043f\u043e\u0434 0.4 s. \u0422\u0430\u0431\u043b\u0438\u0446\u0430 \u0432\u043c\u0435\u0441\u0442\u043e indexOf, \u0431\u0430\u0439\u0442\u043e\u0432\u0435\u0442\u0435 \u0432 Uint8Array, \u043d\u0438\u0437\u044a\u0442 \u2014
-// \u043d\u0430 \u043f\u0430\u0440\u0447\u0435\u0442\u0430 \u043f\u043e 8192 \u0437\u043d\u0430\u043a\u0430 (String.fromCharCode.apply).
+// Одит 2026-10-27: тези четири минаваха знак по знак с `indexOf`, `number[]`
+// и `out +=` на всеки знак. Отговорът на `speak` няма таван като `events`
+// (20 000 знака реч ≈ 7 MB mp3 → 13.4 M знака плик), а четири снимки за
+// `send` са същия ред. Измерено под Node (V8 с JIT) върху 9.6 MB base64 в
+// JSON: кодиране + декодиране 3.6 s → 0.5 s; тестът в tests/interop.test.ts
+// (запечатване + отваряне) — 6.3 s → 0.9 s. Hermes без JIT е няколко пъти
+// по-бавен, и екранът стоеше. Таблица вместо indexOf, байтовете в Uint8Array,
+// низът — на парчета по 8192 знака от обикновен масив (String.fromCharCode
+// .apply с обикновен масив работи навсякъде, и в Hermes).
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
 const B64_CODES = Array.from(B64, (ch) => ch.charCodeAt(0));
 const B64_VALUE = (() => {
   const table = new Int16Array(128).fill(-1);
   for (let i = 0; i < 64; i++) table[B64.charCodeAt(i)] = i;
-  table[43] = 62;   // '+' \u2014 \u0438 \u043e\u0431\u0438\u043a\u043d\u043e\u0432\u0435\u043d base64
+  table[43] = 62;   // '+' — приема се и обикновен base64
   table[47] = 63;   // '/'
   return table;
 })();
 const CHUNK = 8192;
 
-/** \u041a\u043e\u0434\u043e\u0432\u0435\u0442\u0435 (\u0434\u043e 0xFFFF) \u2192 \u043d\u0438\u0437, \u043d\u0430 \u043f\u0430\u0440\u0447\u0435\u0442\u0430: \u0435\u0434\u0438\u043d \u043e\u0433\u0440\u043e\u043c\u0435\u043d apply \u0433\u044a\u0440\u043c\u0438. */
-function fromCodes(codes: Uint16Array, length: number, parts: string[]): void {
-  for (let i = 0; i < length; i += CHUNK) {
-    parts.push(String.fromCharCode.apply(null, codes.subarray(i, Math.min(i + CHUNK, length)) as unknown as number[]));
+/** Събира UTF-16 кодове и ги прави на низ на парчета: един apply с милиони
+ *  аргумента гърми (RangeError), а `out +=` на всеки знак е бавно. */
+class CodeBuffer {
+  private codes: number[] = [];
+  private parts: string[] = [];
+
+  push(code: number): void {
+    this.codes.push(code);
+    if (this.codes.length >= CHUNK) this.flush();
+  }
+
+  text(): string {
+    this.flush();
+    return this.parts.join('');
+  }
+
+  private flush(): void {
+    if (!this.codes.length) return;
+    this.parts.push(String.fromCharCode.apply(null, this.codes));
+    this.codes = [];
   }
 }
 
 export function b64urlEncode(bytes: Uint8Array): string {
   const len = bytes.length;
-  const codes = new Uint16Array(Math.ceil((len * 4) / 3));
-  let o = 0;
+  const out = new CodeBuffer();
   for (let i = 0; i < len; i += 3) {
     const n = (bytes[i] << 16) | ((i + 1 < len ? bytes[i + 1] : 0) << 8) | (i + 2 < len ? bytes[i + 2] : 0);
-    codes[o++] = B64_CODES[(n >> 18) & 63];
-    codes[o++] = B64_CODES[(n >> 12) & 63];
-    if (i + 1 < len) codes[o++] = B64_CODES[(n >> 6) & 63];
-    if (i + 2 < len) codes[o++] = B64_CODES[n & 63];
+    out.push(B64_CODES[(n >> 18) & 63]);
+    out.push(B64_CODES[(n >> 12) & 63]);
+    if (i + 1 < len) out.push(B64_CODES[(n >> 6) & 63]);
+    if (i + 2 < len) out.push(B64_CODES[n & 63]);
   }
-  const parts: string[] = [];
-  fromCodes(codes, o, parts);
-  return parts.join('');
+  return out.text();
 }
 
 export function b64urlDecode(text: string): Uint8Array {
   let end = text.length;
-  while (end > 0 && text.charCodeAt(end - 1) === 61) end--;   // '=' \u0432 \u043a\u0440\u0430\u044f
+  while (end > 0 && text.charCodeAt(end - 1) === 61) end--;   // '=' в края
   const out = new Uint8Array(Math.floor((end * 6) / 8));
   let buffer = 0;
   let bits = 0;
@@ -80,7 +94,7 @@ export function b64urlDecode(text: string): Uint8Array {
 
 // Own UTF-8: TextDecoder is not guaranteed on every React Native runtime.
 export function utf8Encode(text: string): Uint8Array {
-  // \u041d\u0430\u0439-\u043c\u043d\u043e\u0433\u043e 3 \u0431\u0430\u0439\u0442\u0430 \u043d\u0430 UTF-16 \u0435\u0434\u0438\u043d\u0438\u0446\u0430 (\u0434\u0432\u043e\u0439\u043a\u0430\u0442\u0430 surrogates \u2014 4 \u0437\u0430 2).
+  // Най-много 3 байта на UTF-16 единица (двойката surrogates — 4 за 2).
   const out = new Uint8Array(text.length * 3);
   let o = 0;
   for (let i = 0; i < text.length; i++) {
@@ -111,37 +125,30 @@ export function utf8Encode(text: string): Uint8Array {
 }
 
 export function utf8Decode(bytes: Uint8Array): string {
-  const parts: string[] = [];
-  const codes = new Uint16Array(CHUNK + 2);
-  let n = 0;
-  const flush = () => {
-    fromCodes(codes, n, parts);
-    n = 0;
-  };
+  const out = new CodeBuffer();
   for (let i = 0; i < bytes.length; ) {
-    if (n >= CHUNK) flush();
     const b = bytes[i];
     let c: number;
     let extra: number;
-    if (b < 0x80) { codes[n++] = b; i++; continue; }
+    if (b < 0x80) { out.push(b); i++; continue; }
     else if (b >= 0xf0) { c = b & 7; extra = 3; }
     else if (b >= 0xe0) { c = b & 15; extra = 2; }
     else if (b >= 0xc0) { c = b & 31; extra = 1; }
-    else { codes[n++] = 0xfffd; i++; continue; }
-    if (i + extra >= bytes.length) { codes[n++] = 0xfffd; break; }
+    else { out.push(0xfffd); i++; continue; }
+    if (i + extra >= bytes.length) { out.push(0xfffd); break; }
     for (let k = 1; k <= extra; k++) c = (c << 6) | (bytes[i + k] & 63);
+    // Като String.fromCodePoint преди: над U+10FFFF е грешка, не знак.
     if (c > 0x10ffff) throw new RangeError(`Invalid code point ${c}`);
     if (c > 0xffff) {
       c -= 0x10000;
-      codes[n++] = 0xd800 + (c >> 10);
-      codes[n++] = 0xdc00 + (c & 0x3ff);
+      out.push(0xd800 + (c >> 10));
+      out.push(0xdc00 + (c & 0x3ff));
     } else {
-      codes[n++] = c;
+      out.push(c);
     }
     i += extra + 1;
   }
-  flush();
-  return parts.join('');
+  return out.text();
 }
 
 function hex(bytes: Uint8Array): string {
