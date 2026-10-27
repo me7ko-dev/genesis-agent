@@ -17,7 +17,7 @@
 ~/.genesis). Прочети CLAUDE.md и раздела „На лаптопа — един промпт“ в NEXT_STEPS.md.
 
 А. Пусни сам, по ред, и запиши числата:
-1. git fetch origin; git checkout main; git pull (#98 и #100 са слети);
+1. git fetch origin; git checkout main; git pull (#98–#103 са слети);
    pipx runpip genesis-agent install --force-reinstall --no-deps
    "git+https://github.com/me7ko-dev/genesis-agent@main";
    genesis --version = последният комит на main. Телефонът — от mobile/ на main.
@@ -37,6 +37,9 @@
    `find . -name "*.tmp" -execdir rm {} +` → пита; `find . -exec grep -l x {} +` → не пита.
    В PowerShell: `ri -r -fo $env:USERPROFILE\x` → BLOCKED; `rd /s /q
    C:\Users\<аз>\Projects\x\build` → само пита.
+   Job object (#102): RUN_BG с команда, която пуска дете и излиза
+   (`start /b python -c "import time; time.sleep(120)"`), после BG_KILL →
+   в Task Manager не остава python; същото след изход от genesis.
 7. /doctor; /permissions add npm test; /rewind 2 след ход с RUN_CMD;
    genesis -p "кажи здравей" --output-format json | jq .; genesis api с играта.
 8. Кои доставчици във веригата приемат картинка (по една заявка) и колко токена
@@ -61,7 +64,8 @@
   и после /update (Smart App Control може да спре неподписания exe — кажи ми).
 
 Накрая: обнови NEXT_STEPS.md накратко — задраскай минатото, запиши числата; commit
-и push в същия клон; issue за всяка регресия. Не пипай код без тест, който пада без поправката.
+в нов клон claude/laptop-<дата>, push и PR към main; issue за всяка регресия.
+Не пипай код без тест, който пада без поправката.
 ```
 
 ## 2026-10-27 — sandbox.py (отложеното от 22.10)
