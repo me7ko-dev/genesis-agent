@@ -270,36 +270,38 @@ _MARKER = "__GENESIS_CHECKS__"
 _MARKER_RE = re.compile(rf"^{_MARKER}=(\d+),(\d+)$", re.MULTILINE)
 _HARNESS_FAIL_RE = re.compile(
     r"^FAILED \((?:failures|errors)=\d+|^=* ?\d+ (?:failed|errors?)\b.* in [\d.]+s", re.MULTILINE)
-_PRELUDE = f"""import atexit as __genesis_atexit, sys as __genesis_sys
-__genesis_checks = [0, 0]
-def __genesis_check(ok):
-    __genesis_checks[0] += 1
+_PRELUDE = f"""import atexit as _genesis_atexit, sys as _genesis_sys
+_genesis_checks = [0, 0]
+def _genesis_check(ok):
+    _genesis_checks[0] += 1
     if not ok:
-        __genesis_checks[1] += 1
+        _genesis_checks[1] += 1
     return ok
-def __genesis_guard(cond):
-    __genesis_checks[0] += 1
+def _genesis_guard(cond):
+    _genesis_checks[0] += 1
     return cond
-__genesis_atexit.register(lambda: __genesis_sys.stderr.write(
-    "\\n{_MARKER}=%d,%d\\n" % tuple(__genesis_checks)))
+_genesis_atexit.register(lambda: _genesis_sys.stderr.write(
+    "\\n{_MARKER}=%d,%d\\n" % tuple(_genesis_checks)))
 """
 
 
 class _Count(ast.NodeTransformer):
-    """`assert X` → `assert __genesis_check(X)`; `if C: raise …` →
-    `if __genesis_guard(C): raise …`. Броят се изпълнените и провалените
+    """`assert X` → `assert _genesis_check(X)`; `if C: raise …` →
+    `if _genesis_guard(C): raise …`. Броят се изпълнените и провалените
     assert-и; при условния raise — само изпълнените (вдигнатото изключение
-    може да е очаквано от самия тест, напр. `parse("x")` → ValueError)."""
+    може да е очаквано от самия тест, напр. `parse("x")` → ValueError).
+    Имената са с една долна черта: с две вътре в клас се name-mangle-ват
+    (`_T__genesis_check` → NameError)."""
 
     def visit_Assert(self, node: ast.Assert) -> ast.AST:
         self.generic_visit(node)
-        node.test = ast.Call(ast.Name("__genesis_check", ast.Load()), [node.test], [])
+        node.test = ast.Call(ast.Name("_genesis_check", ast.Load()), [node.test], [])
         return node
 
     def visit_If(self, node: ast.If) -> ast.AST:
         self.generic_visit(node)
         if any(isinstance(b, ast.Raise) for b in node.body):
-            node.test = ast.Call(ast.Name("__genesis_guard", ast.Load()), [node.test], [])
+            node.test = ast.Call(ast.Name("_genesis_guard", ast.Load()), [node.test], [])
         return node
 
 

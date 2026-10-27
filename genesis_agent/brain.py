@@ -38,6 +38,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import requests
@@ -304,16 +305,22 @@ def _openai_usage(usage: Any) -> Any:
     четеше и `genesis budget` показваше кеш 0 при всички освен Anthropic.
     NVIDIA nemotron-3-super го връща също (2026-10-11: 6 864 от 8 343), ultra —
     понякога; безплатният Groq — не. DeepSeek брои в `prompt_cache_hit_tokens`.
-    Без поле usage остава както е.
+    Без поле usage остава както е; usage, който не е речник („lots“, [1] —
+    одит 2026-10-27), е None: budget.py чете полетата му с `.get`.
     """
     if not isinstance(usage, dict):
-        return usage
+        return None
     details = usage.get("prompt_tokens_details")
     cached = details.get("cached_tokens") if isinstance(details, dict) else None
     cached = cached or usage.get("prompt_cache_hit_tokens")
     if not cached:
         return usage
-    return {**usage, "cached_read_tokens": int(cached)}
+    try:
+        return {**usage, "cached_read_tokens": int(cached)}
+    except (TypeError, ValueError):
+        # "12.0", "abc", [1] в полето за кеша (одит 2026-10-27): боклук е
+        # полето, не отговорът — той се връща без кеш, вместо да се губи.
+        return usage
 
 
 def provider_base_url(provider: str) -> str:
@@ -419,6 +426,22 @@ _KEY_429_MODELS: dict[str, dict[str, float]] = {}
 # При въртене на няколко ключа/проекта 429 праща към СЛЕДВАЩИЯ ключ веднага —
 # там цената е само един опит с друг ключ, не загубен здрав модел.
 _ROTATE_CODES = _KEY_DEAD_CODES | {429}
+# OpenRouter връща 403 „Your chosen model requires moderation and your input
+# was flagged“ — отказ на ЕДИН модел за ЕДНА заявка, не негоден ключ (одит
+# 2026-10-27, възпроизведено с фалшив 403 на gemma: OPENROUTER_API_KEY спираше
+# за 300 s и двата nemotron под същия ключ не бяха питани изобщо). Такъв 403 е
+# cooldown само за модела, като 503; всеки друг 401/402/403 остава за ключа.
+_MODERATED_403_RE = re.compile(r"moderation|flagged", re.IGNORECASE)
+
+
+def _moderated_403(error: str) -> bool:
+    return "HTTP_403" in error and bool(_MODERATED_403_RE.search(error))
+
+
+def _key_dead(error: str) -> bool:
+    """True ако грешката значи негоден КЛЮЧ (401/402/403, без модерация)."""
+    return (any(f"HTTP_{c}" in error for c in _KEY_DEAD_CODES)
+            and not _moderated_403(error))
 
 
 def _note_key_429(key_id: str, model: str) -> bool:
@@ -439,8 +462,9 @@ def _rotation_cooldown(kid: str, model: str, error: str) -> bool:
     модел A изгаряше и трите ключа, и здравият groq/B (лекият модел) отпадаше
     за 5 минути без нито една заявка. 429 вече спира само двойката
     (ключ, модел); ключът спира при 401/402/403 или когато ВТОРИ модел под
-    него върне 429 — същото правило като в _call (_note_key_429)."""
-    if any(f"HTTP_{c}" in error for c in _KEY_DEAD_CODES):
+    него върне 429 — същото правило като в _call (_note_key_429). 403 от
+    модерация (2026-10-27) не е за ключа — False, complete() спира модела."""
+    if _key_dead(error):
         _mark_exhausted(kid)
         return True
     if "HTTP_429" in error:
@@ -1429,7 +1453,12 @@ class Brain:
                                   if isinstance(part, dict))
             elif content is not None and not isinstance(content, str):
                 raise TypeError(f"content е {type(content).__name__}")
-            tool_calls = message.get("tool_calls") or None
+            # tool_calls, който не е списък от речници — 5, "abc", ["abc"]
+            # (одит 2026-10-27): `for tc in 5` в _has_cut_tool_arguments и
+            # `.get` по-нататък гърмяха извън веригата. Чуждите записи отпадат.
+            tool_calls = message.get("tool_calls")
+            tool_calls = ([tc for tc in tool_calls if isinstance(tc, dict)]
+                          if isinstance(tool_calls, list) else []) or None
             finish_reason = choice.get("finish_reason") or ""
         # AttributeError: `"message": null` (OpenRouter при upstream грешка,
         # одит 2026-10-11) — без него следващият модел не се пробваше изобщо.
@@ -1441,7 +1470,12 @@ class Brain:
         if not (content or "").strip() and not tool_calls:
             # Причината в лога (2026-09-30): ollama връщаше празно след 0.3 s в 13
             # от 210 bench разговора, до края им — а редът не казваше защо.
-            usage = data.get("usage") or {}
+            # usage „lots“ / [1] и reasoning 5 (одит 2026-10-27): `.get` и
+            # `len` върху тях излизаха от complete() като AttributeError/
+            # TypeError — ходът падаше, без да е питан следващият модел.
+            usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+            reasoning = message.get("reasoning")
+            reasoning_len = len(reasoning) if isinstance(reasoning, (str, list)) else 0
             # Празният отговор също е платен (одит 2026-10-11: gpt-oss изяжда
             # тавана в размисъл — out=4096, content="" — а редът не стигаше до
             # budget_log, защото usage се записваше чак след тази проверка).
@@ -1450,7 +1484,7 @@ class Brain:
             raise RuntimeError(f"празен отговор (finish_reason={finish_reason or '—'}, "
                                f"prompt={usage.get('prompt_tokens', '?')}, "
                                f"out={usage.get('completion_tokens', '?')}, "
-                               f"reasoning={len(message.get('reasoning') or '')} знака)")
+                               f"reasoning={reasoning_len} знака)")
         # Ударен таван на изходните токени (design note, 2026-08-12): досега
         # `finish_reason` не се четеше НИКЪДЕ и отрязан отговор се връщаше като
         # нормален. Ако при това код-оградата е останала незатворена, счупен
@@ -1586,8 +1620,7 @@ class Brain:
             })
         return out
 
-    @staticmethod
-    def _anthropic_final(api: Any, params: dict[str, Any], **extra: Any) -> Any:
+    def _anthropic_final(self, api: Any, params: dict[str, Any], **extra: Any) -> Any:
         """Поточна заявка, върнат е само крайният отговор (виж
         ANTHROPIC_STREAM_MAX_TOKENS) — за веригата същото като create()."""
         with api.stream(**extra, **params) as stream:
@@ -1599,8 +1632,54 @@ class Brain:
                 # прескачаха записа и таванът броеше по-малко от сметката.
                 # Снимката носи входа и кеша; изходът дотук идва чак с
                 # message_delta, затова той остава непреброен.
-                anthropic_spend.charge_interrupted(params.get("model", ""), stream)
+                model = str(params.get("model", ""))
+                cost = anthropic_spend.charge_interrupted(model, stream)
+                # Същото плащане и в budget_log (одит 2026-10-27, фалшив SDK
+                # със снимка от 100 000 входни токена): таванът го броеше, а
+                # `genesis budget` — не, защото _last_usage оставаше празен и
+                # complete() нямаше какво да запише. Направо тук, не през
+                # _usage_attempt: повторът след 500 плаща два пъти и трябва
+                # да даде два реда, не един презаписан.
+                self._log_interrupted(model, stream, cost)
                 raise
+
+    @staticmethod
+    def _anthropic_usage(usage: Any) -> dict | None:
+        """usage на Anthropic в смисъла на OpenAI (prompt_tokens С кеша)."""
+        if not usage:
+            return None
+        cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+        cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        # input_tokens на Anthropic е БЕЗ кеша, prompt_tokens на OpenAI — с него.
+        # Тук се привежда към OpenAI смисъла, иначе отчетът казваше „кеш 7500%
+        # от prompt“ (одит 2026-10-07).
+        return {
+            "prompt_tokens": (getattr(usage, "input_tokens", 0) or 0) + cache_read + cache_write,
+            "completion_tokens": getattr(usage, "output_tokens", 0) or 0,
+            "cached_read_tokens": cache_read,
+            "cached_write_tokens": cache_write,
+        }
+
+    def _log_interrupted(self, model: str, stream: Any, cost: float | None) -> None:
+        """Записва в budget_log платеното от скъсан поток; никога не хвърля —
+        вика се, докато друго изключение вече излиза. Поток без снимка
+        (скъсан преди message_start) не е платен — нищо."""
+        try:
+            usage = self._anthropic_usage(stream.current_message_snapshot.usage)
+        except Exception:
+            log.debug("прекъснатият поток няма снимка с usage", exc_info=True)
+            return
+        if usage is None:
+            return
+        if cost is not None:
+            usage["cost_usd"] = round(cost, 6)
+        attempt = getattr(self, "_attempt_id", None) or ("anthropic", model)
+        previous = (self._last_usage, self.current)
+        self._last_usage, self.current = usage, {"provider": attempt[0], "model": model}
+        try:
+            self._log_usage()
+        finally:
+            self._last_usage, self.current = previous
 
     @staticmethod
     def _no_trailing_assistant(msgs: list[dict]) -> list[dict]:
@@ -1690,7 +1769,14 @@ class Brain:
             except anthropic.PermissionDeniedError as e:
                 raise RuntimeError(f"HTTP_403: {e}") from e
             except anthropic.RateLimitError as e:
-                raise RuntimeError(f"HTTP_429: {e}") from e
+                # Подсказката кога да опитаме пак (одит 2026-10-27): SDK-то не
+                # минава през _http и 429 излизаше без `[retry=N]` — платеният
+                # модел спираше за 300 s при `retry-after: 3`. Същото четене
+                # като в _http: заглавието, иначе „try again in“ в текста.
+                headers = getattr(getattr(e, "response", None), "headers", None)
+                hint = _retry_after_s(SimpleNamespace(headers=headers, text=str(e)))
+                tag = f"[retry={math.ceil(hint)}]" if hint is not None else ""
+                raise RuntimeError(f"HTTP_429{tag}: {e}") from e
             except anthropic.APIStatusError as e:
                 raise RuntimeError(f"HTTP_{e.status_code}: {e}") from e
             except anthropic.APIConnectionError as e:
@@ -1732,17 +1818,7 @@ class Brain:
         # системен промпт, различен набор инструменти) — и това се вижда в
         # `genesis budget`, вместо да се приема на доверие. Записва се ПРЕДИ
         # проверката за отказ: отказаният отговор също е платен.
-        cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
-        cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
-        # input_tokens на Anthropic е БЕЗ кеша, prompt_tokens на OpenAI — с него.
-        # Тук се привежда към OpenAI смисъла, иначе отчетът казваше „кеш 7500%
-        # от prompt“ (одит 2026-10-07).
-        self._last_usage = {
-            "prompt_tokens": (getattr(usage, "input_tokens", 0) or 0) + cache_read + cache_write,
-            "completion_tokens": getattr(usage, "output_tokens", 0) or 0,
-            "cached_read_tokens": cache_read,
-            "cached_write_tokens": cache_write,
-        } if usage else None
+        self._last_usage = self._anthropic_usage(usage)
         # Цената в долари (2026-10-22): Anthropic API не я казва, затова се
         # смята по таблицата в anthropic_spend и влиза в budget (cost_usd) и в
         # сбора през сесиите, по който работи GENESIS_ANTHROPIC_MAX_USD. Тук,
@@ -1920,8 +1996,9 @@ class Brain:
             # 429/402 (quota gone) or 401/403 (bad or forbidden key): this
             # provider is unusable for a while. Mark it and let the chain move
             # on to the next provider rather than hammering a dead endpoint.
-            if any(f"HTTP_{c}" in last for c in _KEY_DEAD_CODES) or (
-                    "HTTP_429" in last and _note_key_429(kid, model)):
+            # 403 от модерация (2026-10-27) не е тук: complete() спира само
+            # модела (виж _moderated_403).
+            if _key_dead(last) or ("HTTP_429" in last and _note_key_429(kid, model)):
                 _mark_exhausted(kid, _cooldown_for(last))
                 print(f"  [Brain] 🔑 {key_env} unavailable ({last[:60]}) → next provider")
             raise
@@ -1983,7 +2060,7 @@ class Brain:
             last = str(e)
             # Лимитът на абонамента е за целия акаунт, не за модел: друг модел
             # през същия вход пак ще удари стената. 401 — входът липсва.
-            if "HTTP_429" in last or any(f"HTTP_{c}" in last for c in _KEY_DEAD_CODES):
+            if "HTTP_429" in last or _key_dead(last):
                 _mark_exhausted(kid, _cooldown_for(last))
                 print(f"  [Brain] 🔑 claude абонамент недостъпен ({last[:80]}) → следващ")
             raise
@@ -2204,10 +2281,18 @@ class Brain:
             if role == "tool":
                 out.append({"role": "user", "content": f"[Резултат от tool]: {m.get('content', '')}"})
             elif role == "assistant" and m.get("tool_calls"):
-                calls_desc = "; ".join(
-                    f"{tc.get('function', {}).get('name')}({tc.get('function', {}).get('arguments', '')})"
-                    for tc in m["tool_calls"]
-                )
+                # function: null или запис-низ в историята (одит 2026-10-27):
+                # `.get` върху None/str гърмеше извън веригата на следващия ход.
+                calls = m["tool_calls"] if isinstance(m["tool_calls"], list) else []
+                described: list[str] = []
+                for tc in calls:
+                    if not isinstance(tc, dict):
+                        continue
+                    fn = tc.get("function")
+                    if not isinstance(fn, dict):
+                        fn = {}
+                    described.append(f"{fn.get('name')}({fn.get('arguments', '')})")
+                calls_desc = "; ".join(described)
                 content = (m.get("content") or "").strip()
                 out.append({"role": "assistant",
                             "content": (content + f"\n[извикани tool-ове: {calls_desc}]").strip()})
@@ -2518,8 +2603,11 @@ class Brain:
                         # подсказка (300 s) → 8 s пауза и кръг без нито една
                         # заявка; 429 на A + отрязан WRITE_FILE на C → C се
                         # питаше (и плащаше) втори път за същия сигурен провал.
-                        cools = not synthetic and any(f"HTTP_{c}" in last_error
-                                                      for c in (*_EXHAUST_CODES, 410))
+                        # 403 от модерация (2026-10-27) спира само модела, като
+                        # 503 — ключът остава за другите модели под него.
+                        model_cools = (_moderated_403(last_error)
+                                       or any(f"HTTP_{c}" in last_error for c in _EXHAUST_CODES))
+                        cools = not synthetic and (model_cools or "HTTP_410" in last_error)
                         if cools:
                             cooled.append((prov, model))
                         if not synthetic:
@@ -2553,10 +2641,8 @@ class Brain:
                         # до 5 мин след като ключът се възстанови (одит
                         # 2026-10-11: ключ с 1 s оставащ cooldown → groq/A и
                         # groq/B с по 300 s). Cooldown-ът на ключа покрива това.
-                        for c in () if synthetic else _EXHAUST_CODES:
-                            if f"HTTP_{c}" in last_error:
-                                _mark_exhausted(key, _cooldown_for(last_error))
-                                break
+                        if not synthetic and model_cools:
+                            _mark_exhausted(key, _cooldown_for(last_error))
                         if "HTTP_410" in last_error:
                             _EXHAUSTED[key] = time.time() + _GONE_COOLDOWN
                             print(f"  [Brain] ⛔ {prov}/{model} е спрян от доставчика (410) — "

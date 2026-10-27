@@ -195,6 +195,8 @@ def test_a_good_self_test_still_passes_and_a_conditional_raise_counts() -> None:
     assert verify_skill(good + "assert add(2, 3) == 5\nprint('OK')\n").method == "self_test_passed"
     assert verify_skill(good + "if add(2, 3) != 5:\n    raise ValueError('bad')\nprint('OK')\n"
                         ).method == "self_test_passed"
+    assert verify_skill(good + "class T:\n    def run(self):\n        assert add(2, 3) == 5\n"
+                        "T().run()\nprint('OK')\n").method == "self_test_passed"
     # Грешка при изпълнение — съобщението ѝ остава в detail и след инструментирането.
     r = verify_skill(good + "assert add(2, 3) == 5\nimport nonexistent_pkg_xyz\nprint('OK')\n")
     assert r.method == "runtime_err" and "nonexistent_pkg_xyz" in r.detail
