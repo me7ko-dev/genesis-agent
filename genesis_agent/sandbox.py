@@ -2175,9 +2175,18 @@ def _preexec(policy: SandboxPolicy, nproc_cap: int):  # изпълнява се 
     if resource is None:
         return
     mb = 1024 * 1024
+    # Паметта на Linux — RLIMIT_DATA, не RLIMIT_AS (2026-10-27). AS брои и
+    # резервираното, но неизползвано адресно пространство: при 2048 MB
+    # `java -version` и `javac` не тръгваха („Could not allocate compressed
+    # class space“), `fetch()` в Node 22 падаше (llhttp е WebAssembly — „Cannot
+    # allocate Wasm memory“), а ThreadPoolExecutor(64) в Python — „can't start
+    # new thread“. DATA (Linux ≥ 4.7) брои само записваемата частна памет:
+    # трите минават, а 3 GB bytearray, 3.2 GB numpy и 4 GB Buffer в Node пак
+    # спират при същия таван. Извън Linux DATA не брои mmap — там остава AS.
+    mem_limit = resource.RLIMIT_DATA if sys.platform.startswith("linux") else resource.RLIMIT_AS
     limits = [
         (resource.RLIMIT_CPU, (policy.cpu_seconds, policy.cpu_seconds + 5)),
-        (resource.RLIMIT_AS, (policy.max_memory_mb * mb, policy.max_memory_mb * mb)),
+        (mem_limit, (policy.max_memory_mb * mb, policy.max_memory_mb * mb)),
         (resource.RLIMIT_FSIZE, (policy.max_file_mb * mb, policy.max_file_mb * mb)),
     ]
     # NPROC се прилага само ако е изрично поискан (nproc_cap > 0) — виж коментара
@@ -2224,6 +2233,115 @@ def _stopped_before_start() -> SandboxResult:
                          returncode=None)
 
 
+# Таван на изхода, който се пази от всеки поток (2026-10-27): началото и краят
+# по половин, средата се брои и пропуска. Измерено: `yes` с таймаут 3 s през
+# run_shell — самият Genesis убит от OOM killer-а: communicate() трупаше всичко
+# в паметта, а RLIMIT-ите са на детето, не на нас; 300 MB изход → 1067 MB RSS
+# и 9.6 s. RUN_CMD показва 6000 знака, тестовете — началото и края.
+_OUTPUT_KEEP = 4 * 1024 * 1024
+# Колко се чака изходът, след като командата е излязла, а pipe-ът е още
+# отворен — държи го фоново дете (`python app.py & sleep 1; curl …`). Измерено
+# 2026-10-27: `sleep 30 & echo hi` чакаше целия таймаут (120 s в RUN_CMD) и
+# връщаше „Timeout“ без код, макар командата да беше свършила с 0. След това
+# останалите в групата/job-а се спират — таймаутът ги спираше и досега.
+_LEFTOVER_GRACE_S = 2.0
+
+
+class _Capture:
+    """Чете един pipe в своя нишка, с таван _OUTPUT_KEEP (вместо communicate())."""
+
+    def __init__(self, stream: Any) -> None:
+        self.stream = stream
+        self._half = _OUTPUT_KEEP // 2
+        self._head = bytearray()
+        self._tail = bytearray()
+        self._dropped = 0
+        self._lock = threading.Lock()
+        self.done = threading.Event()
+        if stream is None:
+            self.done.set()
+            return
+        threading.Thread(target=self._pump, name="sandbox-output", daemon=True).start()
+
+    def _pump(self) -> None:
+        try:
+            while True:
+                chunk = self.stream.read1(65536)
+                if not chunk:
+                    break
+                with self._lock:
+                    room = self._half - len(self._head)
+                    if room > 0:
+                        self._head += chunk[:room]
+                        chunk = chunk[room:]
+                    self._tail += chunk
+                    extra = len(self._tail) - self._half
+                    if extra > 0:
+                        del self._tail[:extra]
+                        self._dropped += extra
+        except (OSError, ValueError):
+            log.debug("изходът на процеса не се дочете", exc_info=True)
+        finally:
+            self.done.set()
+
+    def data(self) -> bytes:
+        with self._lock:
+            head, tail, dropped = bytes(self._head), bytes(self._tail), self._dropped
+        if not dropped:
+            return head + tail
+        # Срязано по край на ред: половин ред (и половин UTF-8 буква) около
+        # пропуснатото не излиза като боклук.
+        cut = head.rfind(b"\n") + 1
+        if cut:
+            dropped += len(head) - cut
+            head = head[:cut]
+        nl = tail.find(b"\n")
+        if nl >= 0:
+            dropped += nl + 1
+            tail = tail[nl + 1:]
+        lead = "" if head.endswith(b"\n") or not head else "\n"
+        return head + f"{lead}… [sandbox: пропуснати {dropped} байта изход] …\n".encode() + tail
+
+
+def _drained(caps: tuple[_Capture, ...], until: float, *, watch_stop: bool = False) -> bool | None:
+    """True — всички pipe-ове са затворени; False — времето изтече;
+    None — операторът натисна Стоп (само с watch_stop)."""
+    while not all(c.done.is_set() for c in caps):
+        left = until - time.monotonic()
+        if left <= 0:
+            return False
+        if watch_stop and _stop_requested():
+            return None
+        for c in caps:
+            if not c.done.wait(min(0.05, left)):
+                break
+    return True
+
+
+def _kill_tree(proc: subprocess.Popen, job: _WinJob) -> None:
+    """Убива командата и всичко в групата/job-а ѝ — и когато тя самата е излязла."""
+    try:
+        if sys.platform != "win32":
+            # proc.pid, не os.getpgid(proc.pid): _preexec прави setsid, групата
+            # е pid-ът, а след proc.wait() водачът е прибран и getpgid хвърля
+            # ProcessLookupError — фоновите му деца оставаха живи.
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            # taskkill — само ако job-ът не е станал (2026-10-15, Windows CI
+            # на main 68b217f: ходът свърши 4.9–5.4 s след Стоп). След
+            # TerminateJobObject в дървото няма жив процес, а `taskkill /T /F`
+            # е отделен процес, пускан и чакан последователно точно на пътя
+            # на Стоп — единствената стъпка там, която Linux няма.
+            if not job.terminate():
+                _kill_tree_win32(proc.pid)
+            proc.kill()
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
 def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
          env_extra: dict[str, str] | None = None) -> SandboxResult:
     # Стоп, дошъл преди процеса (докато се питаше, избираше обвивка или
@@ -2247,6 +2365,11 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
         proc, job = _popen_in_job(
             argv,
             cwd=str(cwd),
+            # Не терминала на оператора (2026-10-27, както start_shell): с
+            # наследен stdin `input()` в командата четеше какво пише
+            # операторът (измерено през pty: детето върна 'typed-by-operator'),
+            # а npm init/pip uninstall/createsuperuser висяха до таймаута.
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             # Байтове, декодирани от decode_output, а не text=True (bug fix,
@@ -2265,63 +2388,70 @@ def _run(argv: list[str], *, cwd: Path, policy: SandboxPolicy, timeout: int,
         log.debug("процесът не тръгна", exc_info=True)
         return SandboxResult(ok=False, stdout="", stderr=f"[sandbox] стартът се провали: {e}",
                              returncode=None)
+    caps = (_Capture(proc.stdout), _Capture(proc.stderr))
     deadline = time.monotonic() + timeout
-    stopped = False
+    stopped = timed_out = leftovers = False
+    drained: bool | None = True
     try:
-        # На парчета по 0.5 s, за да се види „Стоп“; повторният communicate()
-        # не губи изход (документирано за TimeoutExpired).
+        # На парчета по 0.5 s, за да се види „Стоп“.
         while True:
             try:
-                out, err = proc.communicate(
-                    timeout=max(0.01, min(_CANCEL_POLL_S, deadline - time.monotonic())))
+                proc.wait(timeout=max(0.01, min(_CANCEL_POLL_S, deadline - time.monotonic())))
                 break
             except subprocess.TimeoutExpired:
                 if _stop_requested():
                     stopped = True
-                    raise
+                    break
                 if time.monotonic() >= deadline:
-                    raise
-        return SandboxResult(ok=proc.returncode == 0, stdout=decode_output(out),
-                             stderr=decode_output(err), returncode=proc.returncode)
-    except subprocess.TimeoutExpired:
-        # Убиваме цялата process group — само на POSIX (os.killpg/getpgid не
-        # съществуват на Windows и AttributeError не се хваща по-долу, значи
-        # преди тази проверка timeout на native Windows гърмеше необработено
-        # вместо да падне грациозно на proc.kill(), design note 2026-08-11).
-        try:
-            if sys.platform != "win32":
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            else:
-                # taskkill — само ако job-ът не е станал (2026-10-15, Windows CI
-                # на main 68b217f: ходът свърши 4.9–5.4 s след Стоп). След
-                # TerminateJobObject в дървото няма жив процес, а `taskkill /T /F`
-                # е отделен процес, пускан и чакан последователно точно на пътя
-                # на Стоп — единствената стъпка там, която Linux няма.
-                if not job.terminate():
-                    _kill_tree_win32(proc.pid)
-                proc.kill()
-        except (ProcessLookupError, PermissionError, OSError):
+                    timed_out = True
+                    break
+        if not (stopped or timed_out):
+            drained = _drained(caps, min(deadline, time.monotonic() + _LEFTOVER_GRACE_S),
+                               watch_stop=True)
+            stopped, leftovers = drained is None, drained is False
+        if stopped or timed_out or leftovers:
+            # Убиваме цялата process group / job-а. С таймаут и чакането на
+            # изхода (bug fix, 2026-09-24, bench_fix.py): на Windows proc.kill()
+            # убиваше само bash.exe, а внукът държеше pipe-овете — и
+            # `communicate()` без таймаут чака 11 246 секунди при таймаут от
+            # 120. Ако нещо ги държи и след убиването на дървото (внук в своя
+            # сесия), изоставяме остатъка, не чакаме завинаги.
+            _kill_tree(proc, job)
+            drained = _drained(caps, time.monotonic() + (10 if timed_out else _STOP_DRAIN_S))
             try:
-                proc.kill()
-            except OSError:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
                 pass
-        # С таймаут и тук (bug fix, 2026-09-24, bench_fix.py): на Windows
-        # proc.kill() убиваше само bash.exe, а внукът (заглушката на python от
-        # WindowsApps) държеше pipe-овете — и `communicate()` без таймаут чака
-        # 11 246 секунди при таймаут от 120. Ако нещо ги държи и след убиването
-        # на дървото, изоставяме изхода, не чакаме завинаги.
-        try:
-            raw_out, raw_err = proc.communicate(timeout=_STOP_DRAIN_S if stopped else 10)
-            text_out, text_err = decode_output(raw_out), decode_output(raw_err)
-        except subprocess.TimeoutExpired:
-            _abandon_pipes(proc)
-            text_out, text_err = "", "[sandbox] процесът не пусна изхода си и след убиване"
-        note = "⏹ Спряно от оператора" if stopped else f"Timeout след {timeout}s"
-        return SandboxResult(ok=False, stdout=text_out,
-                             stderr=text_err + f"\n[sandbox] {note}",
-                             returncode=None)
+    except BaseException:
+        # Ctrl-C (KeyboardInterrupt) по време на командата (2026-10-27): детето
+        # е в своя сесия и SIGINT от терминала не го стига, а дотук нищо не го
+        # убиваше — измерено: Ctrl-C на 0.5 s и детето пак записа файла си на
+        # 1.5 s, след като чатът вече беше продължил.
+        _kill_tree(proc, job)
+        raise
     finally:
+        # Затварят се само дочетените: close() на поток, който нишка още чете,
+        # чака самото четене — т.е. оцелелия (измерено 2026-10-15 на Windows:
+        # 2.8 s при `sleep 3`). Нишките са daemon и пускат потока, щом той излезе.
+        for cap in caps:
+            if cap.stream is not None and cap.done.is_set():
+                try:
+                    cap.stream.close()
+                except OSError:
+                    pass
         job.close()
+    text_out, text_err = decode_output(caps[0].data()), decode_output(caps[1].data())
+    if not drained:
+        text_err += "\n[sandbox] процесът не пусна изхода си и след убиване"
+    if stopped or timed_out:
+        note = "⏹ Спряно от оператора" if stopped else f"Timeout след {timeout}s"
+        return SandboxResult(ok=False, stdout=text_out, stderr=text_err + f"\n[sandbox] {note}",
+                             returncode=None)
+    if leftovers:
+        text_err += ("\n[sandbox] командата свърши, но фонов процес държеше изхода ѝ отворен — "
+                     "спрян. За сървър или наблюдение ползвай RUN_BG.")
+    return SandboxResult(ok=proc.returncode == 0, stdout=text_out, stderr=text_err,
+                         returncode=proc.returncode)
 
 
 # ── Изход на детето: UTF-8, а на Windows и кодовата страница (2026-10-11) ────
@@ -2386,7 +2516,17 @@ def decode_output(raw: bytes | str | None) -> str:
     if isinstance(raw, str):
         return raw
     codepages = _legacy_codepages()
-    text = "".join(_decode_line(line, codepages) for line in raw.splitlines(keepends=True))
+    # Цял валиден UTF-8 (или без кодови страници) — без разделяне на редове:
+    # резултатът е същият, а 4 MB `yes` иначе ставаха 2 милиона обекта-реда —
+    # 254 MB пик срещу 45 MB (измерено 2026-10-27 с тавана _OUTPUT_KEEP).
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        if codepages:
+            text = "".join(_decode_line(line, codepages)
+                           for line in raw.splitlines(keepends=True))
+        else:
+            text = raw.decode("utf-8", errors="replace")
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
@@ -2525,23 +2665,6 @@ def _discard_suspended(proc: subprocess.Popen) -> None:
                 stream.close()
             except OSError:
                 pass
-
-
-def _abandon_pipes(proc: subprocess.Popen) -> None:
-    """Изоставя pipe-овете, които оцелял процес още държи.
-
-    На Windows communicate() чете в нишки, а close() на поток, който нишка
-    чете, чака самото четене — т.е. оцелелия (измерено 2026-10-15: close()
-    при четяща нишка върху `sleep 3` отне 2.8 s). Тогава не се затваря: нишките
-    са daemon и пускат потока, щом оцелелият излезе."""
-    for stream, reader in ((proc.stdout, "stdout_thread"), (proc.stderr, "stderr_thread")):
-        thread = getattr(proc, reader, None)
-        if stream is None or (thread is not None and thread.is_alive()):
-            continue
-        try:
-            stream.close()
-        except OSError:
-            pass
 
 
 def _kill_tree_win32(pid: int) -> None:
@@ -2761,22 +2884,82 @@ def start_shell(command: str, *, cwd: Path | None = None, log: Path,
     return proc, ""
 
 
-def stop_process(proc: subprocess.Popen) -> None:
-    """Спира процес, пуснат с start_shell, заедно с децата му."""
-    if proc.poll() is not None:
+def _group_alive(pgid: int) -> bool:
+    """Има ли в групата жив (не зомби) процес. Зомби на внук, чийто родител е
+    умрял, стои в групата, докато init го прибере — в контейнер без истински
+    init това е никога, и чакането би въртяло до тавана си."""
+    if sys.platform == "win32":     # само POSIX; проверката е за mypy на Windows CI
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    if not sys.platform.startswith("linux"):
+        return True
+    try:
+        pids = [p for p in os.listdir("/proc") if p.isdigit()]
+    except OSError:
+        return True
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/stat", "rb") as fh:
+                fields = fh.read().rsplit(b")", 1)[1].split()
+        except (OSError, IndexError):
+            continue
+        if len(fields) > 2 and int(fields[2]) == pgid and fields[0] not in (b"Z", b"X"):
+            return True
+    return False
+
+
+# Колко се чака групата след SIGTERM, преди SIGKILL — колкото чакаше водачът и досега.
+_STOP_GRACE_S = 5.0
+
+
+def _stop_group_posix(proc: subprocess.Popen) -> None:
+    """SIGTERM на групата, до 5 s за ВСИЧКИ в нея, после SIGKILL на останалите.
+
+    Одит 2026-10-27, измерено със start_shell + stop_process: при излязъл
+    водач (`sleep 33 &`) функцията се връщаше веднага — `sleep` си оставаше,
+    а BG_KILL казваше „спряна“; при дете, което не спира от SIGTERM
+    (`python3 server.py` под dash, който форква), dash умираше, wait() на
+    водача свършваше и детето живееше. Групата е pid-ът: start_shell прави
+    setsid в _preexec, hooks и MCP — start_new_session; живият водач се
+    проверява, за да не се прати сигнал на чужда група."""
+    if sys.platform == "win32":     # само POSIX; проверката е за mypy на Windows CI
         return
+    if proc.poll() is None:
+        try:
+            if os.getpgid(proc.pid) != proc.pid:
+                proc.kill()
+                return
+        except ProcessLookupError:
+            pass
+    for sig, wait in ((signal.SIGTERM, _STOP_GRACE_S), (signal.SIGKILL, 1.0)):
+        proc.poll()
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            return
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            proc.poll()     # прибира водача — зомбито му иначе се брои за жив
+            if not _group_alive(proc.pid):
+                return
+            time.sleep(0.05)
+
+
+def stop_process(proc: subprocess.Popen) -> None:
+    """Спира процес, пуснат с start_shell (или друг в своя сесия), заедно с
+    децата му — и когато самият той вече е излязъл."""
     try:
         if sys.platform != "win32":
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            try:
-                proc.wait(timeout=5)
-                return
-            except subprocess.TimeoutExpired:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        else:
+            _stop_group_posix(proc)
+        elif proc.poll() is None:
             _kill_tree_win32(proc.pid)
             proc.kill()
-    except (ProcessLookupError, PermissionError, OSError):
+        else:
+            return
+    except OSError:
         try:
             proc.kill()
         except OSError:
