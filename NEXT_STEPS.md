@@ -1,4 +1,4 @@
-# Следващи стъпки (обновено 2026-10-23)
+# Следващи стъпки (обновено 2026-10-27)
 
 > **Тази бележка е, за да се пестят токени, не за да се харчат повече.**
 > Тук вече е записано какво е проверено и решено. Вярвай ѝ и започни директно
@@ -6,6 +6,68 @@
 > Провери с grep само файловете, които ще пипаш. Отговаряй кратко. Когато
 > нещо се свърши, обнови бележката накратко: зачеркни или изтрий готовото,
 > не трупай нов текст.
+
+## На лаптопа — един промпт (2026-10-27)
+
+Всичко, което чака ключове, Windows, микрофон или телефон. Постави го в Claude Code
+(или `genesis`) в checkout-а на лаптопа; агентът пуска частта А сам, а за Б води човека:
+
+```text
+Работиш в checkout-а на genesis-agent на лаптопа (Windows, истинските ключове са в
+~/.genesis). Прочети CLAUDE.md и раздела „На лаптопа — един промпт“ в NEXT_STEPS.md.
+
+А. Пусни сам, по ред, и запиши числата:
+1. git pull; pipx runpip genesis-agent install --force-reinstall --no-deps
+   "git+https://github.com/me7ko-dev/genesis-agent@main"; genesis --version = новият комит.
+2. python scripts/bench_all.py (Python-а на pipx venv-а). Сравни
+   ~/.genesis/bench/all-<днес>/report.md с последния all-* отчет. Регресия → спри и
+   ми покажи кой проект/задача и защо, преди всичко друго.
+3. Claude с кредита: genesis budget — сумата за последния ден; сравни с
+   console.anthropic.com → Usage (ще ти я кажа аз). Разлика над 5% → провери
+   цените в genesis_agent/anthropic_spend.py.
+4. Sonnet 5.5 на effort medium срещу high: scripts/bench_projects.py --runs 2 с
+   всяко от двете (`effort:` на claude-sonnet-5-5 в models.premium_models на
+   ~/.genesis/config.yaml; върни го после); брой минали, токени и $. Препоръчай едното.
+5. python -m pytest tests/test_cloud*.py -q -rf 20 пъти подред;
+   ако падне, името и грешката.
+6. Gate-ът наживо (одит 2026-10-27): в genesis чат в проект под дома поискай
+   RUN_CMD `rm -rf ..` и `cd ~ && rm -rf *` → трябва [SANDBOX BLOCKED];
+   `find . -name "*.tmp" -execdir rm {} +` → пита; `find . -exec grep -l x {} +` → не пита.
+   В PowerShell: `ri -r -fo $env:USERPROFILE\x` → BLOCKED; `rd /s /q
+   C:\Users\<аз>\Projects\x\build` → само пита.
+7. /doctor; /permissions add npm test; /rewind 2 след ход с RUN_CMD;
+   genesis -p "кажи здравей" --output-format json | jq .; genesis api с играта.
+8. Кои доставчици във веригата приемат картинка (по една заявка) и колко токена
+   струва снимка 1568 px; claude -p с картинка.
+9. Един истински OAuth MCP сървър (Linear или Sentry) през /mcp login; /undo след
+   npm run build в JS проект.
+
+Б. Води ме стъпка по стъпка и записвай какво казвам (не ги пускай вместо мен):
+- /listen с микрофона; Groq whisper large-v3 срещу turbo на български — кое разбира
+  по-добре; гласовете Kalina и Borislav; /voice on без ffplay; същото от genesis.exe.
+- Телефонът (genesis serve): истински разговор; снимка — изправена ли е и колко е
+  голяма; говорителят на iOS след запис; Android — убито приложение, докато е в
+  камерата; APK на Android и iPhone през Expo Go/Xcode; бутонът „За тази сесия“.
+- Desktop: подканата за микрофон на Windows; поставяне на снимка от Win+Shift+S.
+- irm https://raw.githubusercontent.com/me7ko-dev/genesis-agent/main/scripts/install.ps1 | iex
+  и после /update (Smart App Control може да спре неподписания exe — кажи ми).
+
+Накрая: обнови NEXT_STEPS.md накратко — задраскай минатото, запиши числата, отвори
+issue за всяка регресия. Не пипай код без тест, който пада без поправката.
+```
+
+## 2026-10-27 — sandbox.py (отложеното от 22.10)
+
+Клон `claude/sandbox-audit-oct27`, `tests/test_audit_2026_10_27_sandbox.py`.
+SAFE, т.е. и в „deny“ без въпрос: find `-execdir`/`-ok rm`; `python -c` с
+`Path.unlink()`/`from shutil import rmtree`, node `fs.rm()`; затриване на диск без mkfs
+(blkdiscard, sgdisk --zap-all, mke2fs, mkswap, diskutil eraseDisk, nvme format, dd към
+xvd/disk2/rdisk); `cat config/master.key` (вече правилото на @път); `curl --json @f`.
+CONFIRM вместо BLOCKED: rm -rf на корен зад `then`/`do`/`!`, `;` в кавички, `$'…'`,
+`//`, `sh -c`/`eval`, watch/flock; `/mnt`, `/Volumes/X`, `/media/<u>`, `/opt` и др.;
+относителната цел спрямо папката (`rm -rf ..` от `~/proj`, `cd ~ && rm -rf *`).
+Фалшива тревога махната: `find -exec grep` не е „exec“.
+Съзнателна граница: `cd "$DIR" && rm -rf *` (непозната папка) само пита.
 
 ## 2026-10-23 — четвърти кръг (облак, цикълът на хода, проверките, Desktop)
 
@@ -28,7 +90,7 @@ cloud_web,agent_core,code_checks,desktop}.py` и `desktop/tests/safeurl.test.ts`
 - Desktop: `//host`/`\\host` от отговора на модела не се теглят (на Windows — SMB към
   чужд хост без клик); CSP без 'self' за картинки/звук; над 20 000 знака — таванът на
   български и брояч.
-Не е пипано: sandbox.py (8 находки от 22.10 — отделна сесия), mobile/.
+~~Не е пипано: sandbox.py, mobile/~~ — 2026-10-27 (горе).
 
 ## 2026-10-22 — трети кръг одити (16 подсистеми) + предплатен кредит за Claude
 
@@ -78,13 +140,10 @@ cloud_web,agent_core,code_checks,desktop}.py` и `desktop/tests/safeurl.test.ts`
 `GENESIS_ANTHROPIC_MAX_USD` спира платения път с един ред; 402 / „credit balance is too
 low“ → безплатната верига до края на сесията; ред в `/doctor`, $ в `genesis budget`;
 README „Claude с API ключ (предплатен кредит)“.
-**Не е направено:** sandbox.py — одитът намери 8 пропуска в класификацията, поправката
-спря (сесията); да се пусне отделен одит само на sandbox.py. ~~Парсерът на блоковете: `[END_WRITE]` в ``` след истинския край, таг в ограда като
+~~**Не е направено:** sandbox.py — 8 пропуска в класификацията~~ — 2026-10-27. ~~Парсерът на блоковете: `[END_WRITE]` в ``` след истинския край, таг в ограда като
 „инструмент между два края“, нечетен брой ``` в затворен запис на тавана~~ — 2026-10-23.
 Над 200 отварящи тага от вид — един проход без припокриване.
-**Наживо на лаптопа:** след първия ден с ключа — `genesis budget` срещу
-console.anthropic.com → Usage (цените не са сверени с истински ключ); Sonnet 5.5 high
-срещу medium на bench (документацията препоръчва medium за агентен кодинг).
+**Наживо на лаптопа:** `genesis budget` срещу Usage и Sonnet high/medium — в промпта горе.
 
 ## 2026-10-21 — втори кръг одити (permissions/hooks, undo/rewind/headless, MCP/doctor)
 
