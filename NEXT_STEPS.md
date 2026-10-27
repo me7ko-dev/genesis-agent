@@ -68,6 +68,15 @@
 Не пипай код без тест, който пада без поправката.
 ```
 
+## Шести кръг — кандидати без лаптопа (записано 2026-10-27)
+
+Модули без одит с пускане (имат само обикновени тестове): `knowledge_graph.py`,
+`conversation_memory.py`, `embeddings.py` (кръгът от 22.10 гледа само workspace_memory);
+`llm_api.py` (`genesis api`); `delegate.py`; `mcp_oauth.py` (`/mcp login` — кръгът за MCP
+покри клиента, не OAuth); `context_usage.py`. ~2000 реда, всичко с фалшиви HTTP/модели.
+Плюс дреболиите от петия кръг: слепено `-phunter2` в notifier.redact; `BYPASS:` с главни.
+Същият ред: три одита с репродукция → поправка с тест, който пада преди → PR → сливане.
+
 ## 2026-10-27 — пети кръг (brain, умения/fix/verifier, мисия, web, облак)
 
 Клон `claude/audit-round5-oct27`; `tests/test_audit_2026_10_27_skills_fix.py`,
