@@ -51,7 +51,11 @@ from genesis_agent.paths import (
     env_value,
     load_config,
 )
-from genesis_agent.tool_schemas import load_tool_arguments, normalize_block_closers, open_block_tag
+from genesis_agent.tool_schemas import (
+    load_tool_arguments,
+    normalize_block_closers,
+    open_block_tag,
+)
 
 # Веригите четат само `models:` от config.yaml — load_config проверява формата
 # само там (одит 2026-10-22: `models: [1, 2]` гърмеше с AttributeError в

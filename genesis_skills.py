@@ -49,7 +49,11 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from genesis_agent import sandbox
 from genesis_agent.code_edit import decode_text, displayable, encode_text, has_raw_bytes
-from genesis_agent.tool_schemas import load_tool_arguments, normalize_block_closers, open_block_tag
+from genesis_agent.tool_schemas import (
+    load_tool_arguments,
+    normalize_block_closers,
+    open_block_tag,
+)
 
 log = logging.getLogger("genesis.skills")
 
