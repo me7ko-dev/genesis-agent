@@ -49,7 +49,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from genesis_agent import sandbox
 from genesis_agent.code_edit import decode_text, displayable, encode_text, has_raw_bytes
-from genesis_agent.tool_schemas import load_tool_arguments, open_block_tag
+from genesis_agent.tool_schemas import load_tool_arguments, normalize_block_closers, open_block_tag
 
 log = logging.getLogger("genesis.skills")
 
@@ -2213,6 +2213,7 @@ def _normalize_xml_tool_calls(text: str, slots: list[str] | None = None) -> str:
 
     С `slots` (само от parse_and_execute_tools) стойност, която скобите не
     биха върнали цяла, се пази там — виж _xml_tag."""
+    text = normalize_block_closers(text)
     if _END_CMD in text and ("[RUN_CMD:" in text or "[RUN_BG:" in text):
         text = text.replace(_END_CMD, "]")
     if not any(mark in text for mark in ("<invoke", "</parameter>", "</invoke>", "<tool_call>")):

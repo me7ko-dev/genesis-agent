@@ -300,6 +300,14 @@ def test_write_file_tag_round_trips_through_tag_parsing(_workspace) -> None:
     assert (_workspace / "out.txt").read_text(encoding="utf-8") == "hello from a tag"
 
 
+def test_write_file_long_closer_from_sonnet(_workspace) -> None:
+    """Sonnet 5.5 затваря с `[END_WRITE_FILE]` (bench 2026-10-28) — пак запис."""
+    gs.parse_and_execute_tools("[WRITE_FILE: a.py]\nx = 1\n[END_WRITE_FILE]\n"
+                               "[WRITE_FILE: b.txt]\nok\n[END_WRITE_FILE]")
+    assert (_workspace / "a.py").read_text(encoding="utf-8").strip() == "x = 1"
+    assert (_workspace / "b.txt").read_text(encoding="utf-8").strip() == "ok"
+
+
 def test_tool_tags_inside_a_write_file_body_are_not_separately_executed(_workspace) -> None:
     """A WRITE_FILE body that happens to *contain* another tag (e.g. the model
     is writing documentation about the tool syntax) must not also fire that

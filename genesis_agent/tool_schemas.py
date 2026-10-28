@@ -494,11 +494,23 @@ REPAIR_TOOLS: list[dict] = [
 _BLOCK_OPEN_RE = re.compile(r"\[(WRITE_FILE|EDIT_FILE):")
 _BLOCK_END = {"WRITE_FILE": "[END_WRITE]", "EDIT_FILE": "[END_EDIT]"}
 
+# Дългият край по името на отварящия таг (bench 2026-10-28, Sonnet 5.5 през
+# абонамента): `[WRITE_FILE: p]…[END_WRITE_FILE]` — 13 от 13 провала на
+# projects, всеки с празна папка: парсерът не намираше края, нищо не се
+# записваше, а моделът обявяваше файловете за готови. Приема се като нашия.
+_LONG_CLOSER_RE = re.compile(r"\[END_(WRITE|EDIT)_FILE\]")
+
+
+def normalize_block_closers(text: str) -> str:
+    """`[END_WRITE_FILE]`/`[END_EDIT_FILE]` → `[END_WRITE]`/`[END_EDIT]`."""
+    return _LONG_CLOSER_RE.sub(r"[END_\1]", text) if text and "_FILE]" in text else text
+
 
 def open_block_tag(text: str) -> str:
     """Името на WRITE_FILE/EDIT_FILE блок, който е отворен и не е затворен до
     края на `text`; иначе "". Отляво надясно като парсера: таг в тялото на вече
     затворен блок е съдържание (README с пример за EDIT_FILE)."""
+    text = normalize_block_closers(text)
     pos = 0
     while True:
         m = _BLOCK_OPEN_RE.search(text or "", pos)
