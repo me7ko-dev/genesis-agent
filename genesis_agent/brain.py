@@ -51,7 +51,11 @@ from genesis_agent.paths import (
     env_value,
     load_config,
 )
-from genesis_agent.tool_schemas import load_tool_arguments, open_block_tag
+from genesis_agent.tool_schemas import (
+    load_tool_arguments,
+    normalize_block_closers,
+    open_block_tag,
+)
 
 # Веригите четат само `models:` от config.yaml — load_config проверява формата
 # само там (одит 2026-10-22: `models: [1, 2]` гърмеше с AttributeError в
@@ -570,7 +574,7 @@ def _is_truncated(text: str) -> bool:
     (call_openai_compatible, без верига) щеше да го превърне в грешка, а цикълът
     вече казва на модела „записът е отрязан, раздели го“ (сливане 2026-10-22).
     """
-    return _CLOSED_BLOCK_RE.sub("", text).count("```") % 2 == 1
+    return _CLOSED_BLOCK_RE.sub("", normalize_block_closers(text)).count("```") % 2 == 1
 
 
 # Затворен WRITE_FILE/EDIT_FILE: оградите в тялото му са съдържание (`FENCE = "```"`
@@ -594,6 +598,7 @@ def _has_open_file_tag(text: str) -> bool:
     complete() го връща на цикъла като отрязания tool_call, а не „Error“
     (ревю 2026-10-22). Отделно от _is_truncated: старият път на терминала
     (call_openai_compatible, без верига) го ползва и не бива да хвърля тук."""
+    text = normalize_block_closers(text)
     return any(text.count(opener) > text.count(closer) for opener, closer in _FILE_TAGS)
 
 
