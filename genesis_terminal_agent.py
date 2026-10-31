@@ -80,6 +80,26 @@ def _remember(role: str, content: str) -> None:
 
 console = Console()
 
+
+def _command_out(text: str) -> None:
+    """Изходът на чат командите: без Rich разметка (`[a;touch PWNED;:]` в
+    hooks.json изчезваше от прегледа преди /hooks trust — одит 2026-10-08).
+
+    Ред с дума, по-широка от терминала (адресът за вход от /mcp login е ~300
+    знака), не се пренася от Rich — пренася го терминалът и той остава ЕДИН
+    ред: Ctrl/Cmd-клик и копирането взимат целия адрес. Rich го режеше с
+    истински нови редове (303 знака → 4 реда) и кликът отваряше адрес без
+    code_challenge и state (одит 2026-10-31, възпроизведено)."""
+    from rich.cells import cell_len
+    width = console.width
+    if not any(cell_len(word) > width for word in text.split()):
+        console.print(text, markup=False, highlight=False)
+        return
+    for line in text.split("\n"):
+        console.print(line, markup=False, highlight=False,
+                      soft_wrap=any(cell_len(word) > width for word in line.split()))
+
+
 # Терминалът е интерактивен → sandbox-ът пита оператора преди опасни операции,
 # вместо да ги отказва тихо. Потвърждението се рендира през rich console.
 try:
@@ -2362,7 +2382,7 @@ def _resume_at_start(messages: "deque", argv: list[str]) -> "deque":
     pick = argv[flag + 1] if flag + 1 < len(argv) and argv[flag + 1].isdigit() else ""
     res = chat_commands.handle(
         f"/resume {pick}".strip(), messages=messages, workspace=Path(WORKSPACE),
-        out=lambda text: console.print(text, markup=False, highlight=False),
+        out=_command_out,
         ask=console.input, conversations=_conversations(), choose=console.input)
     return res.messages if res is not None and res.messages is not None else messages
 
@@ -2937,9 +2957,7 @@ def main():
             # собствените на оператора от .genesis/commands/*.md.
             _res = _chat_commands.handle(
                 user_input, messages=messages, workspace=Path(WORKSPACE),
-                # Без Rich разметка: `[a;touch PWNED;:]` в hooks.json изчезваше от
-                # прегледа преди /hooks trust (одит 2026-10-08).
-                out=lambda text: console.print(text, markup=False, highlight=False),
+                out=_command_out,   # без Rich разметка, дълъг адрес — цял ред
                 ask=console.input, compact=_force_compact, context=context_info,
                 conversations=_conversations(), choose=console.input)
             _images: list[dict] = []

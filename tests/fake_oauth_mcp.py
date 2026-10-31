@@ -10,13 +10,18 @@ import json
 import secrets
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 
 
 def serve(*, insecure_authorize: bool = False, registration: bool = True,
-          root_resource: bool = False):
+          root_resource: bool = False, legacy: bool = False, confidential: str = ""):
+    """`legacy` — a 2025-03-26 server: no protected-resource metadata, the MCP
+    server is its own authorization server. `confidential` — registration
+    overrides the requested `none` (RFC 7591 §3.2.1) with this
+    token_endpoint_auth_method and /token demands the client's secret."""
     state: dict = {"clients": {}, "codes": {}, "tokens": set(), "refresh": {},
-                   "resource_seen": [], "refused": 0, "expires_in": 3600}
+                   "resource_seen": [], "refused": 0, "expires_in": 3600,
+                   "client_auth": []}
 
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):
@@ -38,6 +43,8 @@ def serve(*, insecure_authorize: bool = False, registration: bool = True,
 
         def do_GET(self):
             parts = urlsplit(self.path)
+            if legacy and parts.path.startswith("/.well-known/oauth-protected-resource"):
+                return self._json(404, {})
             if parts.path == "/.well-known/oauth-protected-resource/mcp" and not root_resource:
                 return self._json(200, {"resource": self.base + "/mcp",
                                         "authorization_servers": [self.base]})
@@ -77,6 +84,23 @@ def serve(*, insecure_authorize: bool = False, registration: bool = True,
             return {"access_token": token, "token_type": "Bearer",
                     "expires_in": state["expires_in"], "refresh_token": refresh}
 
+        def _client_ok(self, form) -> bool:
+            """Public clients pass; a confidential one proves its secret the
+            way registration told it to."""
+            auth = self.headers.get("Authorization", "")
+            if auth.startswith("Basic "):
+                cid, _, secret = base64.b64decode(auth[6:]).decode().partition(":")
+                cid, secret, how = unquote(cid), unquote(secret), "client_secret_basic"
+                form.setdefault("client_id", cid)
+            else:
+                cid, secret = form.get("client_id", ""), form.get("client_secret", "")
+                how = "client_secret_post" if secret else "none"
+            state["client_auth"].append(how)
+            client = state["clients"].get(cid) or {}
+            if not client.get("secret"):
+                return True
+            return how == client["method"] and secret == client["secret"]
+
         def do_POST(self):
             length = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(length)
@@ -85,9 +109,19 @@ def serve(*, insecure_authorize: bool = False, registration: bool = True,
                 data = json.loads(raw)
                 cid = "client-" + secrets.token_hex(4)
                 state["clients"][cid] = {"redirect_uris": data["redirect_uris"]}
-                return self._json(201, {"client_id": cid, **data})
+                reply = {"client_id": cid, **data}
+                if confidential:
+                    secret = secrets.token_urlsafe(16)
+                    state["clients"][cid].update(secret=secret, method=confidential)
+                    reply["token_endpoint_auth_method"] = confidential
+                    if confidential.startswith("client_secret"):
+                        reply["client_secret"] = secret
+                return self._json(201, reply)
             if path == "/token":
                 form = {k: v[0] for k, v in parse_qs(raw.decode()).items()}
+                if not self._client_ok(form):
+                    return self._json(401, {"error": "invalid_client",
+                                            "error_description": "client authentication failed"})
                 if form.get("grant_type") == "authorization_code":
                     found = state["codes"].pop(form.get("code"), None)
                     if not found:
