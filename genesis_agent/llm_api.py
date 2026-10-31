@@ -27,8 +27,10 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
+import socket
 import threading
 import time
 import uuid
@@ -46,8 +48,22 @@ MAX_PARALLEL = 2
 REQUEST_TIMEOUT_S = 18.0      # клиентът на играта чака 20 s
 MODEL_TIMEOUT_S = 8           # на модел; бавният се прескача към следващия
 MAX_MODELS = 6                # най-много толкова модела от веригата на заявка
+# Ново обръщение към модел тръгва само ако до срока остава поне толкова:
+# стартовият модел отговаря за 0.5–1.4 s (наживо 2026-10-06), с по-малко
+# отговорът почти сигурно се изхвърля, а мястото и квотата се хабят. Одит
+# 2026-10-31: заявка, взела мястото с 0.5 s оставащи, пускаше цяло обръщение и
+# пак връщаше 504; при натоварване следващите получаваха 503.
+MIN_CALL_S = 1.0
 _ROLES = ("system", "user", "assistant")
 _LOCAL_ORIGIN = re.compile(r"http://(127\.0\.0\.1|localhost)(:\d{1,5})?")
+# Имена на заглавки (token по RFC 9110), разделени със запетаи — за CORS.
+_HEADER_NAME = r"[!#$%&'*+.^_`|~0-9A-Za-z-]+"
+_HEADER_LIST = re.compile(rf"{_HEADER_NAME}(?:[ \t]*,[ \t]*{_HEADER_NAME})*")
+_ALLOW_HEADERS = ("Content-Type", "Authorization")
+# Отказ с непрочетено тяло: колко най-много да се изхвърля остатъкът, за да
+# стигне отговорът вместо RST — като remote_server._linger_close.
+_LINGER_S = 0.5
+_DRAIN_CHUNK = 64 * 1024
 JSON_INSTRUCTION = ("Return exactly one valid JSON object and nothing else: "
                     "no markdown, no code fences, no text before or after it.")
 
@@ -93,6 +109,10 @@ def _make_brain() -> Any:
     brain.chain = [c for c in chain if _has_key(brain, c["provider"])][:MAX_MODELS]
     brain.current = brain.chain[0] if brain.chain else None
     brain.timeout = MODEL_TIMEOUT_S
+    # timeout на requests е между два пакета, а общият срок в Brain е ×4: модел,
+    # който капе празни редове на <8 s, държеше веригата 32 s и всяка заявка
+    # ставаше 504 на 18 s (одит 2026-10-31). 8 s тук са 8 s от начало до край.
+    brain.total_deadline = MODEL_TIMEOUT_S
     return brain
 
 
@@ -111,17 +131,48 @@ def health() -> dict:
     return info
 
 
+def _no_constant(name: str) -> Any:
+    raise ValueError(f"{name} не е JSON (RFC 8259)")
+
+
 def extract_json_object(text: str) -> str | None:
-    """Първият JSON обект в текста (и в ```json ограда или с проза около него)."""
-    decoder = json.JSONDecoder()
-    starts = [i for i, ch in enumerate(text) if ch == "{"][:50]
-    for i in starts:
-        try:
-            obj, _ = decoder.raw_decode(text, i)
-        except ValueError:
-            continue
-        if isinstance(obj, dict):
-            return json.dumps(obj, ensure_ascii=False)
+    """Първият JSON обект НА НАЙ-ГОРНО НИВО в текста (и в ```json ограда или с
+    проза около него) — само по RFC 8259; иначе None.
+
+    Одит 2026-10-31: raw_decode се пробваше на всяка `{` и при счупен външен
+    обект (запетая накрая, единични кавички, отрязан отговор) връщаше вложения
+    `{"ниво": 3}` с 200 — и повторният опит на друг модел не тръгваше. Масив
+    отгоре даваше само първия си елемент. Затова един проход брои дълбочината
+    на {} и [] (низовете в тях — с кавичките и екраните с `\\`) и пробва само
+    `{` на дълбочина 0. Кавичките в прозата отвън не се броят: там често са
+    несдвоени. NaN/Infinity (и 1e400 → inf) JSON.parse в играта отхвърля, затова
+    такъв кандидат отпада, вместо да излезе като „валиден“ отговор."""
+    decoder = json.JSONDecoder(parse_constant=_no_constant)
+    depth, tries = 0, 0
+    in_str = escaped = False
+    for i, ch in enumerate(text):
+        if in_str:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = depth > 0
+        elif ch in "{[":
+            if ch == "{" and depth == 0:
+                tries += 1
+                if tries > 50:
+                    return None
+                try:
+                    obj, _ = decoder.raw_decode(text, i)
+                    return json.dumps(obj, ensure_ascii=False, allow_nan=False)
+                except ValueError:
+                    pass  # счупен: броенето по-долу го прескача целия
+            depth += 1
+        elif ch in "}]" and depth:
+            depth -= 1
     return None
 
 
@@ -137,7 +188,10 @@ def with_json_instruction(messages: list[dict]) -> list[dict]:
 def parse_request(body: bytes) -> tuple[list[dict], bool]:
     """(messages, json_mode) от тялото на заявката, или ApiError(400)."""
     try:
-        data = json.loads(body.decode("utf-8"))
+        # utf-8-sig: C# StreamWriter(…, Encoding.UTF8) и файл от PowerShell 5.1
+        # (-InFile, curl --data-binary @файл) започват с BOM — беше 400 „не е
+        # валиден JSON“ (одит 2026-10-31; същият BOM в .env — brain._load_keys).
+        data = json.loads(body.decode("utf-8-sig"))
     except (UnicodeDecodeError, ValueError):
         raise ApiError(400, "Тялото не е валиден JSON.") from None
     if not isinstance(data, dict):
@@ -165,17 +219,31 @@ def parse_request(body: bytes) -> tuple[list[dict], bool]:
     return messages, json_mode
 
 
-def generate(messages: list[dict], json_mode: bool) -> tuple[str, str, dict | None]:
-    """(текст, provider/model, usage). Само текст: `tools` НИКОГА не се подава."""
+def _late(start_by: float | None) -> bool:
+    return start_by is not None and time.monotonic() >= start_by
+
+
+def generate(messages: list[dict], json_mode: bool,
+             start_by: float | None = None) -> tuple[str, str, dict | None]:
+    """(текст, provider/model, usage). Само текст: `tools` НИКОГА не се подава.
+
+    `start_by` (time.monotonic()): след него не тръгва ново обръщение към модел
+    — нито следващ модел от веригата, нито повторният опит за JSON (одит
+    2026-10-31: тръгваха след срока, изхвърляха се и държаха мястото)."""
     brain = _make_brain()
     if not brain.chain:
         raise ApiError(503, "Няма облачен модел с ключ — пусни `genesis setup`.")
+    brain.stop_at = start_by
     msgs = with_json_instruction(messages) if json_mode else messages
     avoid: tuple[str, str] | None = None
-    for _ in range(2 if json_mode else 1):
+    for attempt in range(2 if json_mode else 1):
+        if attempt and _late(start_by):
+            break  # няма време за друг модел — 502 по-долу, веднага
         reply = brain.complete(msgs, tools=None, avoid=avoid)
         text = str(reply.raw_text or "").strip()
         if text.startswith("Error:"):
+            if _late(start_by):
+                raise ApiError(504, "Моделите не отговориха навреме.")
             raise ApiError(502, f"Моделите не отговориха: {text[6:].strip()[:200]}")
         cur = brain.current or {}
         used = f"{cur.get('provider', '?')}/{cur.get('model', '?')}"
@@ -189,6 +257,26 @@ def generate(messages: list[dict], json_mode: bool) -> tuple[str, str, dict | No
     raise ApiError(502, "Моделът не върна валиден JSON обект.")
 
 
+def _tokens(value: Any) -> int | None:
+    """Брой токени от usage на доставчика, или None за поле, което не е брой.
+
+    Brain подава usage както е дошъл: "n/a", {…}, [1], NaN, 1e999 в него
+    гърмяха в int() и отговорът на модела се губеше зад 500 „Вътрешна грешка“
+    (одит 2026-10-31) — боклук е полето, не отговорът."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str):
+        try:
+            value = float(value.strip())
+        except ValueError:
+            return None
+    if isinstance(value, float) and math.isfinite(value) and value >= 0:
+        return int(value)
+    return None
+
+
 def completion(text: str, model: str, usage: dict | None) -> dict:
     out: dict[str, Any] = {
         "id": f"chatcmpl-{uuid.uuid4().hex[:24]}", "object": "chat.completion",
@@ -196,8 +284,10 @@ def completion(text: str, model: str, usage: dict | None) -> dict:
         "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
                      "finish_reason": "stop"}]}
     if usage:
-        p, c = int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0)
-        out["usage"] = {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c}
+        p, c = _tokens(usage.get("prompt_tokens")), _tokens(usage.get("completion_tokens"))
+        if p is not None or c is not None:
+            p, c = p or 0, c or 0
+            out["usage"] = {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c}
     return out
 
 
@@ -217,6 +307,8 @@ class ApiServer(ThreadingHTTPServer):
                  parallel: int = MAX_PARALLEL) -> None:
         super().__init__(("127.0.0.1", port), _Handler)
         self.request_timeout = request_timeout
+        # Половината срок при малък request_timeout (тестовете), иначе MIN_CALL_S.
+        self.min_call_s = min(MIN_CALL_S, request_timeout / 2)
         self.slots = threading.BoundedSemaphore(parallel)
 
     def handle_error(self, request: Any, client_address: Any) -> None:
@@ -225,17 +317,24 @@ class ApiServer(ThreadingHTTPServer):
             return  # клиентът се е отказал — не е грешка за терминала
         super().handle_error(request, client_address)
 
-    def run_limited(self, fn: Callable[[], Any]) -> Any:
-        """fn() в отделна нишка: до `parallel` наведнъж, с краен срок на заявката.
-        Нишка след срока довършва сама и чак тогава освобождава мястото."""
+    def run_limited(self, fn: Callable[[float], Any]) -> Any:
+        """fn(start_by) в отделна нишка: до `parallel` наведнъж, с краен срок на
+        заявката. Нишка след срока довършва сама и чак тогава освобождава
+        мястото. `start_by` е последният миг, в който има смисъл да тръгне
+        обръщение към модел (срокът минус min_call_s): място, освободено след
+        него, не пуска нищо — 503 веднага (одит 2026-10-31)."""
         t0 = time.monotonic()
-        if not self.slots.acquire(timeout=self.request_timeout):
+        start_by = t0 + self.request_timeout - self.min_call_s
+        if not self.slots.acquire(timeout=max(0.0, start_by - t0)):
+            raise ApiError(503, "Genesis е зает с други заявки — опитай след малко.")
+        if time.monotonic() >= start_by:
+            self.slots.release()
             raise ApiError(503, "Genesis е зает с други заявки — опитай след малко.")
         box: dict[str, Any] = {}
 
         def work() -> None:
             try:
-                box["ok"] = fn()
+                box["ok"] = fn(start_by)
             except BaseException as e:  # noqa: BLE001 — пренася се в нишката на заявката
                 box["err"] = e
             finally:
@@ -255,6 +354,7 @@ class _Handler(BaseHTTPRequestHandler):
     server_version = "genesis"
     sys_version = ""
     timeout = 10  # бавен/недовършен клиент не държи нишка завинаги
+    _body_read = False  # прочетено ли е тялото (виж _close_after_unread_body)
 
     def log_message(self, format: str, *args: Any) -> None:
         return  # свой ред в _handle, без съдържание
@@ -280,10 +380,28 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+            self.send_header("Access-Control-Allow-Headers", self._allow_headers())
             self.send_header("Access-Control-Max-Age", "600")
         self.end_headers()
         self.wfile.write(body)
+
+    def _allow_headers(self) -> str:
+        """Content-Type, Authorization + заглавките, поискани в preflight-а.
+
+        Официалният openai JS SDK (dangerouslyAllowBrowser) праща X-Stainless-*;
+        заглавка извън Access-Control-Allow-Headers проваля preflight-а и
+        браузърът не праща POST-а (одит 2026-10-31). Origin вече е само
+        localhost/127.0.0.1, затова отразяването не отваря нищо ново; отразява
+        се само списък от имена на заглавки (token), иначе — само двете."""
+        allow = list(_ALLOW_HEADERS)
+        asked = (self.headers.get("Access-Control-Request-Headers") or "").strip()
+        if len(asked) <= 2048 and _HEADER_LIST.fullmatch(asked):
+            have = {h.lower() for h in allow}
+            for name in (n.strip() for n in asked.split(",")):
+                if name.lower() not in have:
+                    have.add(name.lower())
+                    allow.append(name)
+        return ", ".join(allow)
 
     def _check_caller(self) -> str | None:
         """Allowed Origin (или None без Origin); иначе ApiError(403)."""
@@ -303,13 +421,48 @@ class _Handler(BaseHTTPRequestHandler):
             raise ApiError(411, "Липсва Content-Length.") from None
         if length > MAX_BODY:
             raise ApiError(413, f"Тялото е над {MAX_BODY // 1024} KB.")
+        self._body_read = True
         return self.rfile.read(max(0, length))
+
+    def _close_after_unread_body(self) -> None:
+        """Отказ, изпратен преди тялото да е прочетено (413, 403, 404, 405):
+        първо FIN, после до _LINGER_S остатъкът се изхвърля на парчета.
+
+        Затворен сокет с непрочетени данни праща RST и клиентът, който още
+        праща тялото, вижда BrokenPipe/ConnectionReset вместо 413 (одит
+        2026-10-31: 4 MB → 20 от 20 без отговор на Linux; на Windows — при
+        всеки размер). Същото като remote_server._linger_close (2026-10-11)."""
+        if self._body_read:
+            return
+        try:
+            left = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return
+        if left <= 0:
+            return
+        self.close_connection = True
+        try:
+            self.wfile.flush()
+            self.connection.shutdown(socket.SHUT_WR)
+            deadline = time.monotonic() + _LINGER_S
+            while left > 0:
+                wait = deadline - time.monotonic()
+                if wait <= 0:
+                    break
+                self.connection.settimeout(wait)
+                got = len(self.rfile.read1(min(left, _DRAIN_CHUNK)))
+                if not got:
+                    break
+                left -= got
+        except OSError:
+            pass
 
     def _handle(self, method: str) -> None:
         srv = cast(ApiServer, self.server)
         t0 = time.monotonic()
         path = self.path.split("?", 1)[0].rstrip("/")
         status, model, origin = 500, "-", None
+        self._body_read = False
         try:
             origin = self._check_caller()
             if method == "OPTIONS":
@@ -320,7 +473,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(200, health(), origin)
             elif path == "/v1/chat/completions" and method == "POST":
                 messages, json_mode = parse_request(self._read_body())
-                text, model, usage = srv.run_limited(lambda: generate(messages, json_mode))
+                text, model, usage = srv.run_limited(
+                    lambda start_by: generate(messages, json_mode, start_by))
                 status = 200
                 self._send(200, completion(text, model, usage), origin)
             elif path in ("/v1/health", "/v1/chat/completions"):
@@ -330,10 +484,12 @@ class _Handler(BaseHTTPRequestHandler):
         except ApiError as e:
             status = e.status
             self._send(status, {"error": {"message": e.message}}, origin)
+            self._close_after_unread_body()
         except Exception as e:
             log.debug("вътрешна грешка в genesis api", exc_info=True)
             status = 500
             self._send(500, {"error": {"message": f"Вътрешна грешка: {type(e).__name__}"}}, origin)
+            self._close_after_unread_body()
         finally:
             ms = int((time.monotonic() - t0) * 1000)
             print(f"[api] {time.strftime('%H:%M:%S')} {method} {path[:60]} → {status} "

@@ -82,10 +82,13 @@ _ROUND_PAUSE_S = 8  # пауза между два кръга по верига�
 _TOTAL_DEADLINE_FACTOR = 4
 
 
-def _post_with_deadline(url: str, *, headers: dict, json: dict, timeout: int) -> Any:
+def _post_with_deadline(url: str, *, headers: dict, json: dict, timeout: int,
+                        deadline: float | None = None) -> Any:
     """requests.post с общ краен срок: след него → requests Timeout (→ следващ
     модел във веригата). Нишката се изоставя (daemon) — сокетът се затваря,
-    когато сървърът приключи; процесът не я чака при изход."""
+    когато сървърът приключи; процесът не я чака при изход.
+
+    `deadline` (s) заменя timeout × _TOTAL_DEADLINE_FACTOR — виж Brain.total_deadline."""
     box: dict[str, Any] = {}
 
     def _run() -> None:
@@ -96,7 +99,8 @@ def _post_with_deadline(url: str, *, headers: dict, json: dict, timeout: int) ->
 
     worker = threading.Thread(target=_run, daemon=True, name="genesis-http")
     worker.start()
-    deadline = timeout * _TOTAL_DEADLINE_FACTOR
+    if deadline is None:
+        deadline = timeout * _TOTAL_DEADLINE_FACTOR
     worker.join(deadline)
     if worker.is_alive():
         raise requests.exceptions.Timeout(f"няма отговор за {deadline} s (общ краен срок)")
@@ -857,6 +861,16 @@ def any_model_reachable() -> bool:
 class Brain:
     # Кеш за config.yaml tool_tag_prompt (виж _tool_tag_prompt).
     _TAG_PROMPT_CACHE: str | None = None
+    # Общ срок (s) на едно HTTP обръщение към модел; None → timeout ×
+    # _TOTAL_DEADLINE_FACTOR. `genesis api` обещава 8 s на модел, а ×4 даваше
+    # 32 s: модел, който праща празни редове на <8 s, държеше веригата и всяка
+    # заявка на играта ставаше 504 на 18 s (одит 2026-10-31, измерено с
+    # истинския Brain и фалшив доставчик: вторият модел се питаше чак на +32 s).
+    total_deadline: float | None = None
+    # time.monotonic(), след който complete() не започва ново обръщение: на
+    # `genesis api` след 504 работникът вървеше по цялата верига (+16, +24,
+    # +32, +40 s), харчеше квота и държеше мястото до 48 s (одит 2026-10-31).
+    stop_at: float | None = None
 
     def __init__(self, prefer_provider: str | None = None, use_local: bool = True,
                  min_size_b: float = 0, pin_model: tuple[str, str] | None = None,
@@ -1430,8 +1444,14 @@ class Brain:
             payload["tool_choice"] = "auto"
         if extra:
             payload.update(extra)
-        r = _post_with_deadline(f"{base_url}/chat/completions", headers=headers,
-                                json=payload, timeout=timeout)
+        url = f"{base_url}/chat/completions"
+        # deadline само когато е зададен: заместителите на _post_with_deadline
+        # в тестовете приемат точно (url, headers, json, timeout).
+        if self.total_deadline is None:
+            r = _post_with_deadline(url, headers=headers, json=payload, timeout=timeout)
+        else:
+            r = _post_with_deadline(url, headers=headers, json=payload, timeout=timeout,
+                                    deadline=self.total_deadline)
         if r.status_code == 429:
             hint = _retry_after_s(r)
             tag = f"[retry={math.ceil(hint)}]" if hint is not None else ""
@@ -2489,6 +2509,7 @@ class Brain:
 
         n = len(ordered_chain)
         cut_hit: tuple | None = None  # (отговор, usage, запис) на първия отрязан tool_call
+        out_of_time = False  # стигнат self.stop_at — ново обръщение не тръгва
         if n > 0:
             # ВИНАГИ отгоре надолу, прескачайки временно изчерпаните.
             #
@@ -2522,6 +2543,9 @@ class Brain:
                 retry_useful = False
                 cooled: list[tuple[str, str]] = []  # пропуснати заради cooldown
                 for step in range(n):
+                    if self.stop_at is not None and time.monotonic() >= self.stop_at:
+                        out_of_time = True
+                        break
                     attempt = ordered_chain[step]
                     prov, model = attempt["provider"], attempt["model"]
                     key = f"{prov}::{model}"
@@ -2653,6 +2677,9 @@ class Brain:
                             print(f"  [Brain] ⛔ {prov}/{model} е спрян от доставчика (410) — "
                                   "пропускам го; махни го от config.yaml")
                         continue
+                if out_of_time:
+                    last_error = "срокът на заявката изтече"
+                    break
                 if only_unconfigured:
                     last_error = "нито един модел няма API ключ — пусни `genesis setup`"
                     break
@@ -2698,7 +2725,7 @@ class Brain:
         # отказа (или изобщо няма конфигурирани облачни модели).
         local_avoided = bool(avoid and self.local
                              and (self.local["provider"], self.local["model"]) == avoid)
-        if self.local and not local_avoided:
+        if self.local and not local_avoided and not out_of_time:
             print("  [Brain] ☁️ Облакът е изчерпан/недостъпен → 🏠 локален мозък като резерва...")
             hit = self._call_local(vision.without_images(messages_notools, image_note),
                                    attempts=1)
