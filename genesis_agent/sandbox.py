@@ -2104,7 +2104,11 @@ def _decide(operation: str, verdict: RiskVerdict, policy: SandboxPolicy, *,
         # сесията от предишния въпрос (паралелни команди) — не пита пак.
         if shell and offer and _shell_rule(operation, verdict):
             return True, ""
-        allowed = policy.confirm_fn(operation, asked)
+        ask = getattr(_THREAD, "ask", None)   # нишка на под-агент — виж bind_thread
+        if ask is not None:
+            allowed = ask(lambda: policy.confirm_fn(operation, asked))
+        else:
+            allowed = policy.confirm_fn(operation, asked)
     if allowed == ALLOW_SESSION and offer:
         try:
             from genesis_agent import permissions
@@ -2243,13 +2247,31 @@ _CANCEL_POLL_S = 0.5
 _STOP_DRAIN_S = 1.0
 
 
+# Нишката на делегирана задача (delegate.py) носи свой Стоп и свой път за
+# въпроса към оператора. Одит 2026-10-31: cancel_check горе е на целия процес и
+# finally на run_turn го маха — под-агентът, оцелял след Ctrl-C, довършваше
+# кода си (измерено: файлът се появи след Ctrl-C, когато чатът вече беше
+# продължил), а въпросът му чакаше в input() на своята нишка, която Ctrl-C не
+# стига, и изяждаше следващия ред на чата.
+_THREAD = threading.local()
+
+
+def bind_thread(stop: Callable[[], bool] | None,
+                ask: Callable[[Callable[[], bool | str]], bool | str] | None) -> None:
+    """За ТЕКУЩАТА нишка: `stop` спира командите ѝ като Стоп; `ask(въпрос)`
+    задава въпроса за потвърждение в друга нишка (тази, която чака задачата)."""
+    _THREAD.stop = stop
+    _THREAD.ask = ask
+
+
 def _stop_requested() -> bool:
-    check = cancel_check
-    try:
-        return bool(check and check())
-    except Exception:
-        log.debug("проверката за спиране се провали", exc_info=True)
-        return False
+    for check in (cancel_check, getattr(_THREAD, "stop", None)):
+        try:
+            if check is not None and check():
+                return True
+        except Exception:
+            log.debug("проверката за спиране се провали", exc_info=True)
+    return False
 
 
 def _stopped_before_start() -> SandboxResult:

@@ -1544,14 +1544,21 @@ def _tool_task_list(arg: str = "") -> str:
     return "\n".join(lines)
 
 
-def _tool_delegate(arg: str) -> str:
-    goal = arg.strip()
+def _tool_delegate(arg: object) -> str:
+    # Празна или нетекстова цел не пуска мисия (одит 2026-10-31): {}, „   “ и
+    # `[DELEGATE: ]` пускаха 8 платени рунда с цел „“, а {"goal": null} връщаше
+    # „'NoneType' object has no attribute 'strip'“.
+    goal = arg.strip() if isinstance(arg, str) else ""
+    if not goal:
+        return "[DELEGATE] Празна цел — опиши задачата, която да изпълни под-агентът."
     try:
         from genesis_agent.delegate import delegate_task, wait_all
     except Exception as e:
         log.debug("delegate не се зареди", exc_info=True)
         return f"[DELEGATE: {goal}] delegate модулът не е наличен: {e}"
-    task = delegate_task(goal, agent="autonomous", timeout=600)
+    # Стопът на ТОЗИ ход (не _cancelled — finally на run_turn го маха) спира и
+    # под-агента; wait_all го спира и при Ctrl-C (одит 2026-10-31).
+    task = delegate_task(goal, agent="autonomous", timeout=600, should_stop=_CANCEL)
     wait_all([task], timeout=600)
     _log_episode(f"DELEGATE {goal}", task.status.value, ["tool", "delegate"])
     detail = task.result or task.error or "(без резултат)"
