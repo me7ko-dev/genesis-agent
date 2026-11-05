@@ -1985,10 +1985,12 @@ def _default_confirm(prompt: str, verdict: RiskVerdict) -> bool | str:
         print(f"\n⛔ Операция от {len(prompt)} знака — твърде дълга, за да се одобри "
               "наведнъж; отказана.", file=sys.stderr)
         return False
+    from genesis_agent.terminal_text import safe
     print("\n⚠️  GENESIS SANDBOX — изисква потвърждение", file=sys.stderr)
     for r in verdict.reasons:
-        print(f"    • {r}", file=sys.stderr)
-    print(f"    Операция ({len(prompt)} знака):\n{prompt}", file=sys.stderr)
+        print(f"    • {safe(r)}", file=sys.stderr)
+    # Видимо всеки управляващ/невидим знак — иначе `ESC[2K` скрива командата (2026-11-05).
+    print(f"    Операция ({len(prompt)} знака):\n{safe(prompt, strict=True)}", file=sys.stderr)
     try:
         ans = input(confirm_question(verdict))
     except (EOFError, KeyboardInterrupt):

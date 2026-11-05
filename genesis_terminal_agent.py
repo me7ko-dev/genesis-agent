@@ -84,6 +84,7 @@ console = Console()
 # вместо да ги отказва тихо. Потвърждението се рендира през rich console.
 try:
     from genesis_agent import sandbox as _sandbox
+    from genesis_agent.terminal_text import safe as _shown
 
     def _terminal_confirm(operation: str, verdict) -> bool | str:
         # Цялата операция, като текст (без Rich разметка: `[bold]` в командата
@@ -94,9 +95,11 @@ try:
             return False
         console.print("\n[bold yellow]⚠️  GENESIS SANDBOX — изисква потвърждение[/]")
         for r in verdict.reasons:
-            console.print(Text(f"    • {r}", style="yellow"))
+            console.print(Text(f"    • {_shown(r)}", style="yellow"))
         console.print(Text(f"    Операция ({len(operation)} знака):", style="dim"))
-        console.print(Text(operation), soft_wrap=True)
+        # Видимо всеки управляващ/невидим знак (2026-11-05): `ESC[2K ESC[1G` показваше
+        # `rm -rf ~/projects…ls -la` като `ls -la` — одобрява се друга команда.
+        console.print(Text(_shown(operation, strict=True)), soft_wrap=True)
         # „s“ = да, за тази сесия: само за проста команда (permissions.py);
         # после същата команда не се пита до /clear (2026-10-15).
         try:
@@ -134,6 +137,7 @@ from genesis_agent.paths import (
     workspace_dir,
 )
 from genesis_agent.repeat_guard import RepeatGuard as _RepeatGuard
+from genesis_agent.terminal_text import safe as _terminal_safe
 from genesis_agent.tool_schemas import load_tool_arguments
 
 # load_config проверява и формата (одит 2026-10-22): `workspace: ~/proj` вместо
@@ -1477,36 +1481,40 @@ class RichTurnUI(TurnUI):
     def thinking(self, label: str, spinner: str = "dots"):
         return console.status(f"[dim]{label}[/]", spinner=spinner)
 
+    # Всичко тук е чужд текст (модел, файл, команда, MCP) — без ESC
+    # последователности към терминала (genesis_agent.terminal_text, 2026-11-05).
     def assistant(self, text: str) -> None:
         self.last_text = text
         console.print()
         if text.strip():
+            shown = _terminal_safe(text)
             content: Markdown | Text
             try:
-                content = Markdown(text)
+                content = Markdown(shown)
             except Exception:
                 log.debug("отговорът не се показа като Markdown", exc_info=True)
-                content = Text(text)
+                content = Text(shown)
             console.print(Panel(content, border_style="cyan", padding=(1, 2)))
 
     def tool(self, name: str, result: str) -> None:
-        console.print(Panel(Text(result[:2000]), title=f"🔧 {name}", border_style="green"))
+        console.print(Panel(Text(_terminal_safe(result[:2000])), title=f"🔧 {_terminal_safe(name)}",
+                            border_style="green"))
 
     def asked(self, question: str) -> None:
-        console.print(Panel(Text(question), title="❓ Genesis пита",
+        console.print(Panel(Text(_terminal_safe(question)), title="❓ Genesis пита",
                             border_style="yellow", padding=(1, 2)))
 
     def spinning(self, note: str) -> None:
-        console.print(Panel(Text(note), title="🔁 Въртене на място",
+        console.print(Panel(Text(_terminal_safe(note)), title="🔁 Въртене на място",
                             border_style="yellow", padding=(1, 2)))
 
     # Text, не разметка: съобщение от hook или инструмент с `[` хвърляше
     # MarkupError насред хода (одит 2026-10-08).
     def warn(self, text: str) -> None:
-        console.print(Text(f"⚠ {text}", style="yellow"))
+        console.print(Text(f"⚠ {_terminal_safe(text)}", style="yellow"))
 
     def info(self, text: str) -> None:
-        console.print(Text(text, style="dim"))
+        console.print(Text(_terminal_safe(text), style="dim"))
 
 
 RICH_UI = RichTurnUI()
