@@ -25,12 +25,18 @@ import json
 import logging
 import sqlite3
 import struct
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from typing import TypeVar
 
 import requests
 
+from genesis_agent import sqlite_store
 from genesis_agent.config import DATA_DIR, SKILLS_DIR
 
 log = logging.getLogger("genesis.embeddings")
+
+_T = TypeVar("_T")
 
 DB_PATH = DATA_DIR / "embeddings.db"
 SKILLS_INDEX = SKILLS_DIR / "skills.json"
@@ -55,17 +61,83 @@ CREATE TABLE IF NOT EXISTS embeddings (
 
 
 def _conn() -> sqlite3.Connection:
-    c = sqlite3.connect(DB_PATH)
-    c.execute("PRAGMA journal_mode=WAL;")
-    c.executescript(_SCHEMA)
-    # С кой модел и от какъв текст е векторът (одит 2026-10-07): bge-m3 →
-    # mxbai-embed-large са 1024 измерения и двата, верното умение падна от
-    # 0.94 на 0.01 без предупреждение; сменено описание не се преизчисляваше.
-    cols = {row[1] for row in c.execute("PRAGMA table_info(embeddings)")}
-    for col in ("model", "text_hash"):
-        if col not in cols:
-            c.execute(f"ALTER TABLE embeddings ADD COLUMN {col} TEXT")
+    # Нечетим файл отива настрани като .corrupt и базата се създава наново
+    # (одит 2026-10-31, възпроизведено): с голо sqlite3.connect чужд или
+    # наполовина копиран embeddings.db даваше „file is not a database“ /
+    # „database disk image is malformed“ на всяко търсене и всеки запис на
+    # умение, гълтано на debug — търсенето по смисъл спираше завинаги, без
+    # дума към оператора. Тук е само кеш, който _index_missing пълни наново.
+    c = sqlite_store.connect(DB_PATH, _SCHEMA, wal=True)
+    try:
+        # С кой модел и от какъв текст е векторът (одит 2026-10-07): bge-m3 →
+        # mxbai-embed-large са 1024 измерения и двата, верното умение падна от
+        # 0.94 на 0.01 без предупреждение; сменено описание не се преизчисляваше.
+        cols = {row[1] for row in c.execute("PRAGMA table_info(embeddings)")}
+        for col in ("model", "text_hash"):
+            if col not in cols:
+                c.execute(f"ALTER TABLE embeddings ADD COLUMN {col} TEXT")
+    except BaseException:
+        c.close()
+        raise
     return c
+
+
+@contextmanager
+def _db() -> Iterator[sqlite3.Connection]:
+    """Транзакция върху кеша, която и ЗАТВАРЯ връзката. `with sqlite3.connect()`
+    само комитва: отворена връзка на Windows не дава повредената база да се
+    премести настрани (одит 2026-10-31)."""
+    c = _conn()
+    try:
+        with c:
+            yield c
+    finally:
+        c.close()
+
+
+def _damaged_on_disk() -> bool:
+    """Нова проба на файла, който е на диска СЕГА. Сурова връзка, не _conn():
+    при повреда sqlite_store.connect взима същото заключване, което викащият
+    вече държи, а flock не е реентрантен — процесът би чакал сам себе си."""
+    try:
+        c = sqlite3.connect(DB_PATH, timeout=5)
+        try:
+            rows = c.execute("PRAGMA integrity_check").fetchall()
+        finally:
+            c.close()
+    except sqlite3.DatabaseError as e:
+        return sqlite_store._unreadable(e)
+    return rows != [("ok",)]
+
+
+def _recovering(op: Callable[[], _T]) -> _T:
+    """op() върху кеша; повреда, която личи чак при четене, слага файла
+    настрани и op() минава още веднъж върху нова база.
+
+    sqlite_store.connect хваща повреда, видима при отваряне (чужд или отрязан
+    файл). Повредена страница във файл с верен размер отваря и минава схемата,
+    а гърми чак SELECT-ът (одит 2026-10-31, мерено: страницата на таблицата с
+    0xff → „database disk image is malformed“ на всяко търсене, завинаги)."""
+    try:
+        return op()
+    except sqlite3.DatabaseError as e:
+        if not sqlite_store._unreadable(e):
+            raise
+        first = e
+    from genesis_agent.file_lock import locked
+    with locked(DB_PATH):
+        # Под заключване и с нова проба: друг процес, чел същия стар файл,
+        # може вече да го е сложил настрани и да е напълнил нов — него не местим.
+        if _damaged_on_disk():
+            try:
+                kept = sqlite_store.set_aside(DB_PATH)
+            except OSError:
+                log.warning("%s е нечетима (%s) и не можа да се премести — търсенето "
+                            "по смисъл не работи", DB_PATH.name, first)
+                raise first from None
+            log.warning("%s беше нечетима (%s) — запазена като %s, индексът се "
+                        "изгражда наново", DB_PATH.name, first, kept.name)
+    return op()
 
 
 def _hash(text: str) -> str:
@@ -103,6 +175,11 @@ def embed(text: str, timeout: int = 60) -> list[float] | None:
     try:
         r = requests.post(_OLLAMA_URL, json={"model": MODEL, "prompt": text[:4000]}, timeout=timeout)
         if r.status_code != 200:
+            # Одит 2026-10-31, възпроизведено: 404 „model "bge-m3" not found“
+            # (моделът не е изтеглен, напр. останал nomic отпреди 2026-09-24)
+            # и 500 връщаха None без нито ред и с GENESIS_DEBUG=1 — а грешка
+            # при свързване се записваше. Тялото минава през redact в debug_log.
+            log.debug("Ollama върна HTTP %s за embeddings: %s", r.status_code, r.text[:200])
             return None
         return r.json().get("embedding")
     except Exception:
@@ -140,26 +217,29 @@ def index_skill(name: str, text: str) -> bool:
     if not vec:
         return False
     import datetime
-    with _conn() as c:
-        c.execute(
-            "INSERT INTO embeddings (name, vector, dim, updated_at, model, text_hash) VALUES (?,?,?,?,?,?) "
-            "ON CONFLICT(name) DO UPDATE SET vector=excluded.vector, dim=excluded.dim, "
-            "updated_at=excluded.updated_at, model=excluded.model, text_hash=excluded.text_hash",
-            (name, _pack(vec), len(vec), datetime.datetime.now(datetime.timezone.utc).isoformat(),
-             MODEL, _hash(text)),
-        )
+
+    def store() -> None:
+        with _db() as c:
+            c.execute(
+                "INSERT INTO embeddings (name, vector, dim, updated_at, model, text_hash) VALUES (?,?,?,?,?,?) "
+                "ON CONFLICT(name) DO UPDATE SET vector=excluded.vector, dim=excluded.dim, "
+                "updated_at=excluded.updated_at, model=excluded.model, text_hash=excluded.text_hash",
+                (name, _pack(vec), len(vec), datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                 MODEL, _hash(text)),
+            )
+    _recovering(store)
     return True
 
 
 def _count_vectors() -> int:
-    with _conn() as c:
+    with _db() as c:
         return int(c.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0])
 
 
 def _all_vectors(model: str | None = None) -> list[tuple[str, list[float]]]:
     """Векторите; с `model` — само от него (записите без модел са отпреди
     колоната и не се знае от кой са — те се преизчисляват от _index_missing)."""
-    with _conn() as c:
+    with _db() as c:
         if model is None:
             rows = c.execute("SELECT name, vector, dim FROM embeddings").fetchall()
         else:
@@ -176,9 +256,12 @@ def semantic_search(query: str, top_k: int = 5) -> list[tuple[str, float]]:
     # Записи с друга размерност са от друг модел — несравними, не "далечни".
     # Изключват се от класирането, вместо да висят с нула: така броят им е
     # видим и наличието на стар индекс не изглежда като "няма съвпадения".
-    _index_missing(len(qvec))
-    usable = [(name, vec) for name, vec in _all_vectors(MODEL) if len(vec) == len(qvec)]
-    skipped = _count_vectors() - len(usable)
+    def usable_and_total() -> tuple[list[tuple[str, list[float]]], int]:
+        _index_missing(len(qvec))
+        usable = [(name, vec) for name, vec in _all_vectors(MODEL) if len(vec) == len(qvec)]
+        return usable, _count_vectors()
+    usable, total = _recovering(usable_and_total)
+    skipped = total - len(usable)
     if skipped > 0:
         log.warning(
             "%d записа в индекса са с друга размерност от текущия модел (%s) и се "
@@ -222,7 +305,7 @@ def _index_missing(dim: int) -> int:
     """
     texts = _skill_texts()
     _drop_ghosts(texts)
-    with _conn() as c:
+    with _db() as c:
         have = {name: (model, h, d) for name, model, h, d in
                 c.execute("SELECT name, model, text_hash, dim FROM embeddings")}
     count = 0
@@ -238,7 +321,7 @@ def _drop_ghosts(texts: dict[str, str]) -> None:
     (одит 2026-10-07). Нечетим/празен индекс → нищо не се трие."""
     if not texts:
         return
-    with _conn() as c:
+    with _db() as c:
         names = [n for (n,) in c.execute("SELECT name FROM embeddings")]
         gone = [n for n in names if n not in texts]
         c.executemany("DELETE FROM embeddings WHERE name = ?", [(n,) for n in gone])
@@ -247,7 +330,7 @@ def _drop_ghosts(texts: dict[str, str]) -> None:
 def reindex_all(progress_every: int = 100) -> int:
     """Преиндексира всички умения от skills.json. Връща брой индексирани."""
     texts = _skill_texts()
-    _drop_ghosts(texts)
+    _recovering(lambda: _drop_ghosts(texts))
     count = 0
     for i, (name, text) in enumerate(texts.items()):
         if index_skill(name, text):
