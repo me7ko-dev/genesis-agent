@@ -335,6 +335,11 @@ def run(argv: list[str]) -> int:
     if fmt == "text":
         if error:
             print(f"❌ {error}", file=sys.stderr)
+        # В терминал — без ESC последователности от отговора (terminal_text,
+        # 2026-11-05); в pipe/файл текстът остава какъвто е, за скриптовете.
+        if getattr(out, "isatty", lambda: False)():
+            from genesis_agent.terminal_text import safe
+            answer = safe(answer)
         print(answer, file=out)
         return code
 

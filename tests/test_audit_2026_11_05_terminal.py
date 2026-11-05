@@ -78,3 +78,30 @@ def test_the_fallback_sandbox_question_too(monkeypatch, capsys) -> None:
 def test_ordinary_text_is_unchanged(text) -> None:
     assert safe(text) == text
     assert safe(text, strict=True) == text
+
+
+class _Out(io.StringIO):
+    def __init__(self, tty: bool) -> None:
+        super().__init__()
+        self._tty = tty
+
+    def isatty(self) -> bool:
+        return self._tty
+
+
+@pytest.mark.parametrize("tty", [True, False])
+def test_headless_text_answer_is_safe_on_a_terminal_and_raw_in_a_pipe(tmp_path, monkeypatch, tty) -> None:
+    import genesis_skills as gs
+    from genesis_agent import headless
+    monkeypatch.setattr(gta, "console", gta.console)
+    monkeypatch.setattr(gta, "WORKSPACE", gta.WORKSPACE)
+    monkeypatch.setattr(gs, "_WORKSPACE", gs._WORKSPACE)
+    monkeypatch.setattr(sandbox, "_POLICY", sandbox._POLICY)
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    out = _Out(tty)
+    monkeypatch.setattr("sys.stdout", out)
+    monkeypatch.setattr(gta, "ask_genesis", lambda messages, tools=None: (f"Ето: {_OSC52}", None))
+    headless.run(["покажи", "--cwd", str(tmp_path)])
+    text = out.getvalue()
+    assert ("\x1b]52;" in text) is (not tty)
+    assert ("␛]52;" in text) is tty
