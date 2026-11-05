@@ -28,6 +28,7 @@ import struct
 
 import requests
 
+from genesis_agent import sqlite_store
 from genesis_agent.config import DATA_DIR, SKILLS_DIR
 
 log = logging.getLogger("genesis.embeddings")
@@ -55,16 +56,28 @@ CREATE TABLE IF NOT EXISTS embeddings (
 
 
 def _conn() -> sqlite3.Connection:
-    c = sqlite3.connect(DB_PATH)
-    c.execute("PRAGMA journal_mode=WAL;")
-    c.executescript(_SCHEMA)
+    # sqlite_store, както паметите от 2026-10-22 (одит 2026-11-04,
+    # възпроизведено): повредена embeddings.db гърмеше с „file is not a
+    # database“ на всяко търсене и всеки запис, завинаги — search_skills го
+    # гълта, тоест търсенето по смисъл просто спираше. Индексът е кеш на
+    # skills.json, затова настрани и наново е безопасно. wal=True чака заетата
+    # база вместо веднага „database is locked“: два процеса върху нова база
+    # губеха запис или търсене в 17 от 30 пускания, осем — в 18 от 20.
+    c = sqlite_store.connect(DB_PATH, _SCHEMA, wal=True)
     # С кой модел и от какъв текст е векторът (одит 2026-10-07): bge-m3 →
     # mxbai-embed-large са 1024 измерения и двата, верното умение падна от
     # 0.94 на 0.01 без предупреждение; сменено описание не се преизчисляваше.
     cols = {row[1] for row in c.execute("PRAGMA table_info(embeddings)")}
     for col in ("model", "text_hash"):
         if col not in cols:
-            c.execute(f"ALTER TABLE embeddings ADD COLUMN {col} TEXT")
+            # Друг процес може да я е добавил между проверката и ALTER-а —
+            # „duplicate column“ е точно това (същото като workspace_memory).
+            try:
+                c.execute(f"ALTER TABLE embeddings ADD COLUMN {col} TEXT")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e):
+                    c.close()
+                    raise
     return c
 
 
