@@ -843,6 +843,10 @@ def _tool_write_file(arg: str, content: str, exact: bool = False) -> str:
         elif not ok:
             lint_note = f"\n{detail}"
         lint_note = syntax_note + lint_note
+    else:
+        # JSON/YAML/TOML: редът на грешката още тук, не при `npm install` (2026-11-05).
+        from genesis_agent.code_validate import data_note
+        lint_note = data_note(path, content)
     # Съществуващ файл се записва в СВОЕТО кодиране (одит 2026-10-11): cp1251
     # файл, минал през READ→WRITE, излизаше с U+FFFD на мястото на всяка буква.
     encoding = "utf-8"
@@ -1032,6 +1036,12 @@ def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False
         try:
             from genesis_agent.code_validate import lint_note
             ruff_note = lint_note(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            pass
+    else:
+        try:
+            from genesis_agent.code_validate import data_note
+            ruff_note = data_note(path, path.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             pass
     from genesis_agent.web_check import web_note
@@ -1552,9 +1562,14 @@ def _tool_delegate(arg: str) -> str:
         log.debug("delegate не се зареди", exc_info=True)
         return f"[DELEGATE: {goal}] delegate модулът не е наличен: {e}"
     task = delegate_task(goal, agent="autonomous", timeout=600)
-    wait_all([task], timeout=600)
+    # „Стоп“ на телефона се гледа и докато мисията върви, не само преди нея
+    # (одит 2026-11-04: мисията изкарваше всичките си рундове, до 600 s).
+    wait_all([task], timeout=600, cancelled=_cancelled)
     _log_episode(f"DELEGATE {goal}", task.status.value, ["tool", "delegate"])
-    detail = task.result or task.error or "(без резултат)"
+    if task.status.value == "cancelled":
+        detail = "⏹ Спряно от оператора — мисията спира и нищо не записва."
+    else:
+        detail = task.result or task.error or "(без резултат)"
     return f"[DELEGATE: {goal}]  статус={task.status.value}\n{detail}"
 
 

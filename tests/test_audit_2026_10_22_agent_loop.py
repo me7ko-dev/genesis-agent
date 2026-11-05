@@ -374,7 +374,14 @@ def _fake_run_cmd(monkeypatch, outputs) -> None:
     """RUN_CMD и по двата пътя (native и таг) връща подадените резултати."""
     import genesis_skills as gs
     it = iter(outputs)
-    monkeypatch.setattr(gs, "_tool_run_cmd", lambda arg: next(it))
+
+    def fake(arg):
+        return next(it)
+    monkeypatch.setattr(gs, "_tool_run_cmd", fake)
+    # Таговете минават през таблицата, записана при внасянето (2026-11-05): без
+    # това таг-пътят пускаше истинския `python test_app.py` (rc=2, няма файл) и
+    # третият тест отдолу „минаваше“ с четири червени пускания вместо с зелено накрая.
+    monkeypatch.setitem(gs._SIMPLE_DISPATCH, "RUN_CMD", fake)
 
 
 @pytest.mark.parametrize(("cmd", "out"), [

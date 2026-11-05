@@ -340,6 +340,21 @@ def record(path: Path) -> None:
         return
 
 
+def turn_originals() -> dict[Path, bytes]:
+    """Съдържанието отпреди текущия ход на файловете, които WRITE/EDIT са
+    сменили в него и които са съществували преди него (code_check.TestEditCheck:
+    сменен тест на оператора срещу тест, написан в същия ход). Само чете.
+
+    Без файловете, които Genesis сам е създал в по-ранен ход на сесията
+    (преглед 2026-11-05): поправката на собствения му грешен тест получаваше
+    „върни теста както беше“ — той не е на оператора."""
+    if _current is None:
+        return {}
+    own = {p for t in _turns for p, b in t.before.items() if b is None}
+    own |= {p for t in _turns for p, c in t.commands.items() if not c.existed}
+    return {p: b for p, b in _current.before.items() if b is not None and p not in own}
+
+
 def forget_if_unchanged(path: Path) -> None:
     """After the tool: a refused or failed write changed nothing — it is not
     a change for /undo (an undo of such a turn did nothing and the operator

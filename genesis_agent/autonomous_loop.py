@@ -195,7 +195,18 @@ class LoopOutcome:
 _CTX = threading.local()
 
 
+def _cancelled() -> bool:
+    cancel = getattr(_CTX, "cancel", None)
+    return cancel is not None and cancel.is_set()
+
+
 def _past_deadline() -> bool:
+    # Спряна от оператора (Ctrl-C, „Стоп“ на телефона) е като изтекло време:
+    # нов рунд не започва и нищо не се записва. Одит 2026-11-04: след Ctrl-C в
+    # DELEGATE мисията във фоновата нишка продължаваше — измерено: 7 нови
+    # обръщения към модела за 2 s след „⏹ Прекъснато“.
+    if _cancelled():
+        return True
     deadline = getattr(_CTX, "deadline", None)
     return deadline is not None and time.time() > deadline
 
@@ -207,19 +218,23 @@ def run_autonomous_loop(
     skill_slug: str | None = None,
     operator_id: str | None = None,
     deadline: float | None = None,
+    cancel: threading.Event | None = None,
 ) -> LoopOutcome:
     """
     Публична обвивка: изпълнява мисията и известява резултата през notifier
     (ако са конфигурирани). Известията никога не чупят цикъла.
 
     `deadline` (time.time()): след него нов рунд не започва и нищо не се записва.
+    `cancel` (DELEGATE): вдигнат — същото, веднага.
     """
     _CTX.deadline = deadline
+    _CTX.cancel = cancel
     try:
         return _run_and_report(goal, max_rounds=max_rounds, skill_slug=skill_slug,
                                operator_id=operator_id)
     finally:
         _CTX.deadline = None
+        _CTX.cancel = None
 
 
 def _run_and_report(goal: str, *, max_rounds: int | None, skill_slug: str | None,
@@ -388,7 +403,9 @@ def _run_autonomous_loop_impl(
     last_exec_failed = False
     for round_i in range(max_rounds):
         if _past_deadline():
-            report_thought("⏰ Времето на делегираната задача изтече — спирам, нищо не записвам.")
+            report_thought("⏹ Делегираната задача е спряна от оператора — спирам, нищо не записвам."
+                           if _cancelled() else
+                           "⏰ Времето на делегираната задача изтече — спирам, нищо не записвам.")
             break
         try:
             from genesis_agent.config import stop_event

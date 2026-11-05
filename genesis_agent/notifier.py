@@ -113,23 +113,37 @@ API_TOKEN_RE = re.compile(
 # вътре в думи — `path:`, `pattern:`, `bypass:`, `compass:`, `passage:` ставаха
 # `path=***`. Сега ключът е цяла дума (`_`-токен; слепен отпред само с главни
 # букви — PGPASSWORD — или с api/auth/access/db — apikey).
+# Одит 2026-11-05 (отвореното от 27.10): слепена отпред с главни букви е само
+# силна дума — PGPASSWORD, VAULTTOKEN; `BYPASS:`, `COMPASS:`, `TURKEY:`,
+# `MONKEY:` ставаха `BYPASS=***`. `--- PASS: TestX` е изходът на `go test`.
 _SECRET_PATTERNS = [
     (re.compile(r"(://)[^/\s:@]+:[^/\s@]+@"), r"\1***@"),
     (re.compile(r"(?<![\w/@:])[\w.+-]+:[^\s@/:]+@(?=[\w.-]+)"), "***@"),
     (re.compile(r"(?i)(?<!\S)(--?pass(?:word|wd)?|--?pwd|(?-i:-p|-u))[ =]\S+"), r"\1 ***"),
     (re.compile(r"(?i)\b(bearer|token|basic)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 ***"),
-    (re.compile(r"(?i)\b((?:[A-Z0-9]+_)*(?:(?-i:[A-Z0-9]+)|api|auth|access|db)?"
+    (re.compile(r"(?i)(?<!--- )\b((?:[A-Z0-9]+_)*"
+                r"(?:(?-i:[A-Z0-9]+)(?=(?:PASSWORD|PASSWD|TOKEN|SECRET)(?![A-Za-z]))|api|auth|access|db)?"
                 r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|PASS|PAT|DSN)(?![A-Za-z])[A-Z0-9_]*)\s*[=:]\s*\S+"),
      r"\1=***"),
     (API_TOKEN_RE, "***"),
 ]
+# Одит 2026-11-05 (отвореното от 27.10): `mysql -uroot -phunter2` — паролата е
+# слепена за флага и минаваше. Само за mysql/mariadb/sshpass на същия ред:
+# другаде `-p…` слепено е `mkdir -pv`, `cp -pr`, `ssh -p2222` — не е тайна.
+_GLUED_P_CMD = re.compile(r"(?i)\b(?:mysql[\w-]*|mariadb[\w-]*|sshpass)\b")
+_GLUED_P = re.compile(r"(?<!\S)-p(?=[^\s-])\S+")
+
+
+def _mask_glued_p(line: re.Match) -> str:
+    text = line.group(0)
+    return _GLUED_P.sub("-p***", text) if _GLUED_P_CMD.search(text) else text
 
 
 def redact(text: str) -> str:
     """Текстът без ключове, токени и пароли в адреси."""
     for rx, repl in _SECRET_PATTERNS:
         text = rx.sub(repl, text)
-    return text
+    return re.sub(r"[^\n]+", _mask_glued_p, text)
 
 
 def send_message(

@@ -352,6 +352,27 @@ the tests fail.
 - **Work autonomously** — a mission loop (plan → code → test → review → verify)
   that only saves a skill once it has actually passed a sandbox test
 
+### It checks its own "done"
+
+Before a turn ends, what the reply claims is compared with what actually ran —
+in code, not in the prompt. Any one of these sends the model back once, with
+the exact sentence quoted:
+
+- "installed", "wrote/saved", "fixed/added/updated", "committed/pushed",
+  "tested/ran it", "it works", "tests pass", "checked in the browser" — with no
+  tool call of that kind, or after the last run of the code or tests failed;
+- a file named in the claim that does not exist on disk;
+- its own check printing a mismatch (`3 expected 4`, `Expected: …` / `Got: …`,
+  ❌, `4/5 passed`) while it says "all tests passed";
+- a test that existed before the turn, edited to pass (assert changed, skip
+  added) — unless you asked for the test to change.
+
+`genesis -p` exits with 1 if the reply still claims green tests or working code
+after a failed run. Honest partial reports ("fails on case 3") are left alone.
+`python scripts/bench_honesty.py --ref main` measures this on scripted scenarios
+(no keys needed): how many false "done" are caught, how many honest replies are
+flagged by mistake.
+
 ## Safety
 
 Every command, file operation and browser action is classified `SAFE` (runs),
@@ -379,8 +400,9 @@ anything that matters.
 ## Honest limitations
 
 - **Free-tier models sometimes fabricate instead of calling a tool.** Native
-  tool-calling makes it much rarer and usually self-correcting, but it still
-  happens. Check summaries against actual tool output when it matters.
+  tool-calling makes it much rarer, and the checks above catch the common shapes
+  of it, but a claim phrased some other way can still slip through. Check
+  summaries against actual tool output when it matters.
 - **Prompt injection is not solved.** A page or file the agent reads can
   contain instructions aimed at the agent.
 - **Local models are a fallback, not a peer.** A 3B model on a consumer GPU is

@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from genesis_agent.config import MEMORY_DIR
+from genesis_agent.workspace_memory import mask_secrets
 
 log = logging.getLogger("genesis.knowledge_graph")
 
@@ -33,6 +34,10 @@ _MAX_RELATIONS_STORED = 200
 _MAX_ENTITIES_STORED = 400
 _MAX_STATES_STORED = 100
 _MAX_LOG_CHARS = 6000
+# Таван на ВСЯКО поле, не само на броя редове (одит 2026-11-04): 12 връзки и
+# 12 състояния с по 2400 знака „status“ от модела дадоха брифинг от 57 887
+# знака (~15K токена) в системния промпт на всеки рунд, а файлът — 4 MB.
+_MAX_FIELD_CHARS = 160
 
 _EXTRACT_PROMPT = (
     "Извлечи от разговора структуриран граф на знанието. Само реални, "
@@ -106,17 +111,48 @@ def _save(graph: dict[str, Any]) -> None:
     """Atomic: a temp file, then os.replace — a reader never sees half a file."""
     GRAPH_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = GRAPH_PATH.with_name(f"{GRAPH_PATH.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(graph, ensure_ascii=False, indent=2), encoding="utf-8")
+    # "replace": половин сурогат от модела (`"\ud83d"` — отрязано емоджи) става „?“
+    # (2026-11-05, отвореното от одита на 04.11): UnicodeEncodeError е ValueError,
+    # не OSError — compact_and_graph_memory хвърляше и оставяше `.tmp` до графа.
+    tmp.write_bytes(json.dumps(graph, ensure_ascii=False, indent=2).encode("utf-8", "replace"))
     os.replace(tmp, GRAPH_PATH)
 
 
+_SECTIONS = ("entities", "relations", "states")
+
+
 def _parse_llm_json(raw: str) -> dict[str, Any]:
+    """Обектът с графа от отговора на модела, и когато е в проза или ограда.
+
+    Одит 2026-11-04: само „```json“ в самото начало се приемаше —
+    „Ето графа:\\n```json …```“, „```JSON“, ограда с изречение след нея и
+    „Ето JSON: {…}“ гърмяха с JSONDecodeError и графът тихо не растеше
+    (workspace_memory.auto_capture със същия лек модел търси `{` по същата
+    причина). Взима се първият обект с поне една от секциите на схемата —
+    не просто първият `{`, за да не се вземе вложен обект от проза."""
     text = raw.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        text = text.removeprefix("json")
-    result: dict[str, Any] = json.loads(text.strip())
+    decoder = json.JSONDecoder()
+    for start in [i for i, ch in enumerate(text) if ch == "{"][:200]:
+        try:
+            obj, _ = decoder.raw_decode(text, start)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and any(k in obj for k in _SECTIONS):
+            return obj
+    result: dict[str, Any] = json.loads(text)
     return result
+
+
+def _text(value: Any) -> str:
+    """Поле от модела, готово за файла и за промпта: без тайни и с таван.
+
+    Одит 2026-11-04, възпроизведено: „ключът за stripe е sk_live_…“ в
+    разговора ставаше състояние „Stripe ключ: зададен: sk_live_…“, а
+    graph_briefing го слагаше в системния промпт на всяка следваща сесия в
+    проекта — REMEMBER маскира от 2026-10-22, графът не. Първо маскиране,
+    после рязане: отрязан наполовина ключ вече не прилича на ключ."""
+    out = mask_secrets(str(value or "").strip())
+    return out if len(out) <= _MAX_FIELD_CHARS else out[:_MAX_FIELD_CHARS - 1] + "…"
 
 
 def _items(extracted: dict[str, Any], key: str) -> list[dict[str, Any]]:
@@ -192,31 +228,45 @@ def _merge(graph: dict[str, Any], extracted: dict[str, Any], workspace: str | No
     ws = {"ws": workspace} if workspace else {}
 
     for e in _items(extracted, "entities"):
-        name = str(e.get("name") or "").strip()
+        name = _text(e.get("name"))
         if not name:
             continue
         key = _dedup_key(name)
         existing = graph["entities"].get(key, {})
         graph["entities"][key] = {
             "name": name,
-            "type": str(e.get("type") or existing.get("type", "")),
+            "type": _text(e.get("type") or existing.get("type", "")),
             "first_seen": existing.get("first_seen", now),
             "last_seen": now,
         }
 
+    # Същата връзка, извлечена пак, замества старата (и става най-нова),
+    # вместо да се добави втори път. Одит 2026-11-04: компресията пази
+    # последните 10 реплики (agent_core.COMPACT_KEEP_RECENT) и следващата ги
+    # подава на модела пак, тоест същите факти — 2 факта × 6 компресии
+    # запълниха и 12-те реда на брифинга с повторения, а таванът от 200
+    # изтласкваше различните факти. Ключът е като на обектите (AuthToken =
+    # auth token) и е по проект; речникът пази реда, pop+запис мести в края.
+    relations: dict[tuple[str, ...], dict[str, Any]] = {}
+    for old in graph["relations"]:
+        if isinstance(old, dict):
+            rkey = _relation_key(old.get("source"), old.get("relation"), old.get("target"),
+                                 old.get("ws"))
+            relations.pop(rkey, None)
+            relations[rkey] = old
     for r in _items(extracted, "relations"):
-        source = str(r.get("source") or "").strip()
-        target = str(r.get("target") or "").strip()
-        relation = str(r.get("relation") or "").strip()
+        source, target = _text(r.get("source")), _text(r.get("target"))
+        relation = _text(r.get("relation"))
         if source and target and relation:
-            graph["relations"].append(
-                {"source": source, "relation": relation, "target": target, "at": now, **ws}
-            )
-    graph["relations"] = graph["relations"][-_MAX_RELATIONS_STORED:]
+            rkey = _relation_key(source, relation, target, workspace)
+            relations.pop(rkey, None)
+            relations[rkey] = {"source": source, "relation": relation, "target": target,
+                               "at": now, **ws}
+    graph["relations"] = list(relations.values())[-_MAX_RELATIONS_STORED:]
 
     for st in _items(extracted, "states"):
-        entity = str(st.get("entity") or "").strip()
-        status = str(st.get("status") or "").strip()
+        entity = _text(st.get("entity"))
+        status = _text(st.get("status"))
         if entity and status:
             key = _dedup_key(entity) + (f"@{workspace}" if workspace else "")
             graph["states"][key] = {"name": entity, "status": status, "updated_at": now, **ws}
@@ -225,6 +275,11 @@ def _merge(graph: dict[str, Any], extracted: dict[str, Any], workspace: str | No
     # компресии briefing-ът беше 27K знака в системния промпт.
     graph["entities"] = _newest(graph["entities"], "last_seen", _MAX_ENTITIES_STORED)
     graph["states"] = _newest(graph["states"], "updated_at", _MAX_STATES_STORED)
+
+
+def _relation_key(source: Any, relation: Any, target: Any, workspace: Any) -> tuple[str, ...]:
+    return (_dedup_key(str(source or "")), _dedup_key(str(relation or "")),
+            _dedup_key(str(target or "")), str(workspace or ""))
 
 
 def _newest(items: dict[str, Any], stamp: str, limit: int) -> dict[str, Any]:
@@ -248,13 +303,15 @@ def graph_briefing(max_relations: int = 12, max_states: int = 12,
     def here(item: dict[str, Any]) -> bool:
         return not workspace or item.get("ws") in (None, workspace)
 
+    # _text и при четене: записите отпреди 2026-11-04 са във файла дословно —
+    # с ключовете и с дължината, с която моделът ги е дал.
     relations = [r for r in graph["relations"] if isinstance(r, dict) and here(r)]
     lines = [
-        f"- {r.get('source')} {r.get('relation')} {r.get('target')}"
+        f"- {_text(r.get('source'))} {_text(r.get('relation'))} {_text(r.get('target'))}"
         for r in relations[-max_relations:]
     ]
     states = [st for st in graph["states"].values()
               if isinstance(st, dict) and st.get("status") and here(st)]
     states.sort(key=lambda st: str(st.get("updated_at", "")), reverse=True)
-    lines += [f"- {st.get('name')}: {st['status']}" for st in states[:max_states]]
+    lines += [f"- {_text(st.get('name'))}: {_text(st['status'])}" for st in states[:max_states]]
     return "\n".join(lines)

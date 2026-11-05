@@ -94,7 +94,8 @@ def test_undo_removes_the_conftest_the_test_scaffold_created(ws, monkeypatch):
               _call("WRITE_FILE", {"path": "egn/tests/test_egn.py",
                                    "content": "from egn import ok\n\n\ndef test_ok():\n    assert ok(1)\n"},
                     "w2")]),
-        ("Записах egn.py и теста му.", None), ("Пробвах.", None)])
+        # „Пробвах.“ без пускане вече се връща веднъж (claim_check, 2026-11-05).
+        ("Записах egn.py и теста му.", None), ("Пробвах.", None), ("Разбрах.", None)])
     gta.run_turn(_fresh(), "направи egn", _UI())
     assert (ws / "egn" / "conftest.py").is_file()
     label, done = edit_history.undo()
@@ -109,7 +110,7 @@ def test_undo_keeps_a_conftest_that_was_there_before(ws, monkeypatch):
     _script(monkeypatch, [
         ("", [_call("WRITE_FILE", {"path": "egn/tests/test_egn.py", "content": "def test_a():\n    pass\n"},
                     "w1")]),
-        ("Записах теста.", None), ("Пуснах го.", None)])
+        ("Записах теста.", None), ("Пуснах го.", None), ("Разбрах.", None)])
     gta.run_turn(_fresh(), "тест", _UI())
     edit_history.undo()
     assert (ws / "egn" / "conftest.py").read_text(encoding="utf-8") == "# моят\n"

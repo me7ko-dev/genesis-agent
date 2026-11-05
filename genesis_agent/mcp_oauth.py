@@ -29,6 +29,7 @@ import secrets
 import sys
 import threading
 import time
+import unicodedata
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -39,6 +40,13 @@ log = logging.getLogger("genesis.mcp_oauth")
 
 LOGIN_TIMEOUT = 300.0
 _HTTP_TIMEOUT = 15
+# Цялата заявка към сървъра за вход — в срок и с таван на тялото (одит
+# 2026-11-04). `timeout` на requests е за едно recv, не за цялото: /token,
+# който капе по байт на 0.5 s, държеше refresh() над 40 s (без край) — под
+# _FileLock, тоест и подновяването на ЗДРАВ сървър в процеса чакаше зад него;
+# 200 MB отговор → 431 MB RSS. Метаданните и токените са няколко KB.
+_HTTP_DEADLINE = 20.0
+_MAX_BODY = 1_000_000
 
 
 class OAuthError(RuntimeError):
@@ -203,9 +211,27 @@ def _covers(resource: str, server_url: str) -> bool:
     return sp == rp or sp.startswith(rp + "/")
 
 
+def _has_controls(text: str) -> bool:
+    """Управляващи и невидими знаци (ESC, CR, U+202E…) и интервали."""
+    return any(unicodedata.category(ch) in ("Cc", "Cf", "Zs", "Zl", "Zp") for ch in text)
+
+
+def _plain(text: object, limit: int = 300) -> str:
+    """Текст от сървъра за терминала: без управляващи знаци, кратък."""
+    raw = str(text or "")
+    return "".join(" " if unicodedata.category(ch) in ("Cc", "Cf") else ch for ch in raw)[:limit]
+
+
 def _safe_url(url: str, what: str) -> str:
     """HTTPS, или http само към този компютър: токенът и кодът не тръгват
     по мрежата открито."""
+    # Адресът се показва на оператора и се отваря в браузъра. Одит
+    # 2026-11-04: OSC 52 (запис в клипборда) и „изчисти екрана“ в
+    # authorization_endpoint стигаха до терминала непокътнати (Rich с
+    # markup=False пропуска ESC), а urlsplit проверяваше адрес без \t\r\n —
+    # не този, който се показва и отваря.
+    if _has_controls(str(url or "")):
+        raise OAuthError(f"{what}: {str(url)[:200]!r} съдържа управляващи знаци — отказано")
     parts = urlsplit(str(url or ""))
     host = (parts.hostname or "").lower()
     if parts.scheme == "https" and host:
@@ -215,20 +241,81 @@ def _safe_url(url: str, what: str) -> str:
     raise OAuthError(f"{what}: {url!r} не е https — отказано")
 
 
+def _shut(resp: Any) -> None:
+    """Затваря сокета изпод четящата нишка (както mcp_client._abort):
+    `resp.close()` чака края на капещото тяло, shutdown() — не."""
+    import socket as _socket
+    try:
+        sock = _socket.socket(fileno=resp.raw.fileno())
+    except (OSError, ValueError, AttributeError, TypeError):
+        return
+    try:
+        sock.shutdown(_socket.SHUT_RDWR)
+    except OSError:
+        pass
+    finally:
+        sock.detach()
+
+
+def _http_json(method: str, url: str, **kw: Any) -> tuple[int, Any]:
+    """(HTTP код, JSON-ът или None) — цялата заявка в _HTTP_DEADLINE, тялото
+    до _MAX_BODY. Заявката е в своя нишка: при изтекъл срок викащият
+    продължава (и пуска _FileLock), а връзката се затваря. Хвърля
+    requests.RequestException или OAuthError."""
+    import queue
+
+    import requests
+    box: queue.Queue = queue.Queue()
+    responses: list = []
+
+    def run() -> None:
+        try:
+            resp = requests.request(method, url, timeout=_HTTP_TIMEOUT, allow_redirects=False,
+                                    stream=True, **kw)
+            responses.append(resp)
+            body = bytearray()
+            for chunk in resp.iter_content(chunk_size=65536):
+                body += chunk
+                if len(body) > _MAX_BODY:
+                    raise OAuthError(f"отговорът на {urlsplit(url).netloc} е над "
+                                     f"{_MAX_BODY // 1000} KB — отказан")
+            box.put((resp.status_code, bytes(body)))
+        except Exception as e:  # noqa: BLE001 — предава се на викащия като е
+            box.put(e)
+        finally:
+            for r in responses:
+                r.close()
+
+    threading.Thread(target=run, daemon=True, name="mcp-oauth-http").start()
+    end = time.monotonic() + _HTTP_DEADLINE
+    while True:
+        try:
+            # На парчета: на Windows (до 3.14) едно дълго чакане не се буди от Ctrl-C.
+            item = box.get(timeout=max(0.0, min(0.25, end - time.monotonic())))
+            break
+        except queue.Empty:
+            if time.monotonic() >= end:
+                for r in responses:
+                    _shut(r)
+                raise OAuthError(f"{urlsplit(url).netloc} не отговори за "
+                                 f"{_HTTP_DEADLINE:g} s") from None
+    if isinstance(item, BaseException):
+        raise item
+    status, body = item
+    try:
+        data = json.loads(body.decode("utf-8-sig", errors="replace") or "null")
+    except ValueError:
+        data = None
+    return status, data
+
+
 def _get_json(url: str) -> dict | None:
     import requests
     try:
-        resp = requests.get(url, timeout=_HTTP_TIMEOUT, headers={"Accept": "application/json"},
-                            allow_redirects=False)
-    except requests.RequestException:
+        status, data = _http_json("GET", url, headers={"Accept": "application/json"})
+    except (requests.RequestException, OAuthError):
         return None
-    if resp.status_code != 200:
-        return None
-    try:
-        data = resp.json()
-    except ValueError:
-        return None
-    return data if isinstance(data, dict) else None
+    return data if status == 200 and isinstance(data, dict) else None
 
 
 _METADATA_HINT = re.compile(r'resource_metadata="([^"]+)"')
@@ -306,17 +393,15 @@ def _register(endpoint: str, redirect_uri: str) -> str:
     import requests
     _safe_url(endpoint, "регистрацията")
     try:
-        resp = requests.post(endpoint, json={
+        status, data = _http_json("POST", endpoint, json={
             "client_name": "Genesis", "redirect_uris": [redirect_uri],
             "grant_types": ["authorization_code", "refresh_token"],
-            "response_types": ["code"], "token_endpoint_auth_method": "none"},
-            timeout=_HTTP_TIMEOUT, allow_redirects=False)
-        data = resp.json() if resp.status_code in (200, 201) else {}
-    except (requests.RequestException, ValueError) as e:
+            "response_types": ["code"], "token_endpoint_auth_method": "none"})
+    except requests.RequestException as e:
         raise OAuthError(f"регистрацията не стана: {e}") from e
-    client_id = data.get("client_id") if isinstance(data, dict) else None
+    client_id = data.get("client_id") if status in (200, 201) and isinstance(data, dict) else None
     if not client_id:
-        raise OAuthError(f"регистрацията не стана (HTTP {resp.status_code})")
+        raise OAuthError(f"регистрацията не стана (HTTP {status})")
     return str(client_id)
 
 
@@ -368,14 +453,13 @@ def _callback_server() -> _Callback:
 def _token_request(endpoint: str, form: dict[str, str]) -> dict:
     import requests
     try:
-        resp = requests.post(endpoint, data=form, timeout=_HTTP_TIMEOUT, allow_redirects=False,
-                             headers={"Accept": "application/json"})
-        data = resp.json()
-    except (requests.RequestException, ValueError) as e:
+        status, data = _http_json("POST", endpoint, data=form, headers={"Accept": "application/json"})
+    except requests.RequestException as e:
         raise OAuthError(f"токенът не дойде: {e}") from e
-    if resp.status_code != 200 or not isinstance(data, dict) or not data.get("access_token"):
-        err = data.get("error_description") or data.get("error") if isinstance(data, dict) else ""
-        raise OAuthError(f"токенът не дойде (HTTP {resp.status_code}) {err or ''}".strip())
+    if status != 200 or not isinstance(data, dict) or not data.get("access_token"):
+        err = (data.get("error_description") or data.get("error")) if isinstance(data, dict) else ""
+        # Текстът е на сървъра, а отива в терминала (одит 2026-11-04: ESC).
+        raise OAuthError(f"токенът не дойде (HTTP {status}) {_plain(err)}".strip())
     return data
 
 
@@ -457,7 +541,8 @@ def login(server_url: str, *, www_authenticate: str = "",
     if not result:
         raise OAuthError("входът не завърши навреме")
     if "code" not in result:
-        raise OAuthError(f"входът е отказан: {result.get('error_description') or result.get('error') or '?'}")
+        why = result.get("error_description") or result.get("error") or "?"
+        raise OAuthError(f"входът е отказан: {_plain(why)}")
     tokens = _token_request(info["token_endpoint"], {
         "grant_type": "authorization_code", "code": result["code"], "redirect_uri": redirect_uri,
         "client_id": client_id, "code_verifier": verifier, "resource": info["resource"]})

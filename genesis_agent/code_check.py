@@ -10,6 +10,7 @@ not), and try a case per rule — harder input, the edges, input to reject.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from pathlib import Path
 
 _WRITTEN = re.compile(r"^\[(?:WRITE_FILE|EDIT_FILE): ([^\]\n]+)\] ✓", re.MULTILINE)
@@ -127,3 +128,280 @@ class RunCheck:
         return ("[проверка на кода] Преди „готово“: примерите от заявката не доказват правилата. "
                 f"Пусни кода с {_CASES}. {_MISMATCH} Ако вече си ги "
                 f"пробвал — кажи в един ред кои и приключи. {_ASSUMPTIONS}{words}")
+
+
+# ─── Разминаване в изхода на собствената проверка (2026-11-05) ───────────────
+# bench_fcc c365 (30.09, „hard“ — три пускания, три провала): собственият скрипт
+# печаташе „3 expected 4“ и накрая „All tests passed!“ — само print, rc=0.
+# Моделът четеше последния ред и казваше „готово“; claim_check мълчеше — rc=0,
+# а `python check.py` не е тестов пускач. Тук се чете самото разминаване:
+# „expected X, got Y“ (и обратно, и „Y expected X“, и на два реда „Expected: X“ /
+# „Got: Y“) с X ≠ Y, ред, който започва с ❌/✗/FAIL/MISMATCH/WRONG, „Failed: 2“,
+# „4/5 passed“. Нарочно тясно: стойностите са числа, низове в кавички, списъци,
+# True/False/None — „expected str, got int“ в съобщение за отхвърлен вход не е
+# разминаване, нито ред с Error/invalid.
+# Низ в кавички не започва веднага след буква (преглед 2026-11-05): в JSON/repr
+# `{"expected": 3, "got": 3}, {"expected": 4, …` затварящата кавичка на ключа
+# започваше „стойност“ `": 3, "` и еднаквите 3/3 излизаха разминаване.
+_VALUE = (r"""(?:-?\d+(?:[.,]\d+)?|(?<!\w)'[^'\n]*'|(?<!\w)"[^"\n]*"|\[[^\]\n]*\]|\([^)\n]*\)"""
+          r"""|\{[^}\n]*\}|<[^>\n]*>|True|False|None|true|false|null)""")
+_EXP = r"(?:expected|expecting|очаквано|очакван[ао]?|очаквах|очаква)"
+_GOT = (r"(?:but\s+(?:got|was|is|returned|received)|got|received|actual|returned|"
+        r"получено|получен[ао]?|получих|върна(?:то)?)")
+_SEP = r"\s*[:=]?\s*"
+_EXP_FIRST = re.compile(rf"\b{_EXP}{_SEP}(?P<exp>{_VALUE})\s*[,;]?\s*{_GOT}{_SEP}(?P<got>{_VALUE})",
+                        re.IGNORECASE)
+_GOT_FIRST = re.compile(rf"\b{_GOT}{_SEP}(?P<got>{_VALUE})\s*[,;(]?\s*(?:but\s+)?{_EXP}{_SEP}"
+                        rf"(?P<exp>{_VALUE})", re.IGNORECASE)
+# „3 expected 4“, „count=3 (expected 4)“, „case 2: 3 expected 4“ — стойността е в
+# началото на реда или след `=`/`:`, и само без дума за „получено“ на реда: в
+# „Test 3 expected 4, got 4“ и „Test 1 expected 4“ числото е номерът на теста.
+_BARE = re.compile(rf"(?:^\W*|[=:]\s*)(?P<got>{_VALUE})\s*[,;(]?\s*{_EXP}{_SEP}(?P<exp>{_VALUE})",
+                   re.IGNORECASE)
+_HAS_GOT = re.compile(rf"\b{_GOT}\b", re.IGNORECASE)
+_LABEL_EXP = re.compile(rf"^\W*{_EXP}(?:\s+(?:output|result|value|резултат))?\s*[:=]\s*(?P<v>\S.*?)\s*$",
+                        re.IGNORECASE)
+_LABEL_GOT = re.compile(r"^\W*(?:got|actual|received|returned|output|получено|получих|върнато)"
+                        r"(?:\s+(?:output|result|value|резултат))?\s*[:=]\s*(?P<v>\S.*?)\s*$",
+                        re.IGNORECASE)
+_FAIL_LINE = re.compile(r"^\s*(?:❌|✗|✘|(?-i:FAIL(?:ED)?)\b(?![:=]?\s*0\b)|(?-i:MISMATCH|WRONG)\b)")
+# Преглед 2026-11-05, зелени итози: „OK (expected failures=1)“ на unittest
+# (expectedFailure) не е паднал тест; в „passed=12 failed=0“ и „Passed: 12
+# Failed: 0“ числото пред „failed“ е на passed — след „failed“ идва собственото му.
+_FAIL_COUNT = re.compile(r"(?<!expected )\b(?:failed|failures?|wrong|грешни|паднали|неуспешни)\s*[:=]\s*[1-9]"
+                         r"|\b[1-9]\d*\s+(?:failed|failing|wrong|грешни|паднаха|паднали)\b"
+                         r"(?!\s*[:=]?\s*\d)",
+                         re.IGNORECASE)
+_RATIO = re.compile(r"\b(\d+)\s*/\s*(\d+)\s+(?:tests?\s+)?(?:passed|pass|ok|correct|верни|минаха|"
+                    r"минават|успешни)\b", re.IGNORECASE)
+# Ред на съобщение за грешка — там „expected 10, got 9“ е отказът, който проверката иска.
+_ERROR_LINE = re.compile(r"\b(?:\w*error|\w*exception|invalid|невалид\w*|грешка|rejected|отхвърл\w*|"
+                         r"raises?|raised|traceback)\b", re.IGNORECASE)
+# Отговор, който сам казва, че нещо не е наред — честен отчет, не „готово“.
+_ACKNOWLEDGED = re.compile(r"\b(?:пада|падат|падна|паднаха|не мина\w*|не минава\w*|червен\w*|"
+                           r"разминава\w*|разминаване|грешн\w*|бъг\w*|нарочно|отхвърл\w*|"
+                           r"fail(?:s|ed|ing|ures?)?|mismatch\w*|wrong|bug\w*|intentional\w*|"
+                           r"reject\w*)\b|❌", re.IGNORECASE)
+# Чете се само изходът на команда, която пуска код: `cat README.md` с „❌ не
+# прави така“ или `grep FAIL logs/` не е собствена проверка.
+_OTHER_CODE = re.compile(r"(?:^|[\s;&|(])(?:node|deno|bun|ruby|php|java|go\s+run|cargo\s+(?:run|test)|"
+                         r"dotnet\s+(?:run|test)|npm\s+(?:test|run|start)|npx|yarn|pnpm|bash|sh|"
+                         r"\.{1,2}/\S+)(?=\s|$)", re.IGNORECASE)
+_RUN_HEADER = re.compile(r"^\[RUN_CMD: (.*?)\]  \(rc=(-?\d+|None)\)$", re.DOTALL | re.MULTILINE)
+_EDITED = re.compile(r"^\[(?:WRITE_FILE|EDIT_FILE): [^\]\n]+\] ✓", re.MULTILINE)
+
+
+def runs_code(command: str) -> bool:
+    """Пуска ли `command` код (Python, node, скрипт), а не само чете файлове."""
+    return _runs_python(command) or bool(_OTHER_CODE.search(command))
+
+
+def _same_value(a: str, b: str) -> bool:
+    a, b = a.strip().rstrip(".,;"), b.strip().rstrip(".,;")
+    if a == b:
+        return True
+    try:
+        return float(a.replace(",", ".")) == float(b.replace(",", "."))
+    except ValueError:
+        return False
+
+
+# Слабите сигнали (✗/FAIL ред, „N failed“, „4/5“, „3 expected 4“, Expected/Actual на
+# два реда) — само в изход на проверка (преглед 2026-11-05: 11 от 28 нормални изхода
+# на програми, чиято тема са неуспехите — „Imported 118 rows, 2 failed validation“,
+# „Attempt 1 failed, retrying“, „✗ Обади се на мама“, „Score: 1/2 correct“, бюджет
+# „Expected: 1200 лв / Actual: 1150 лв“ — даваха бележка). Проверка е: тестов
+# пускач, скрипт с check/test/verify/valid/spec/assert в името, `python -c`/`node -e`,
+# или изход, който сам казва „All tests passed“ (точно c365). Силното —
+# „expected 4, got 3“ на един ред — важи за всеки пуснат код.
+_CHECK_SCRIPT = re.compile(r"[\w./\\-]*(?:check|test|verify|valid|spec|assert)[\w.-]*\.(?:py|[cm]?js|ts|sh)\b"
+                           r"|\b(?:python\d*(?:\.\d+)?|py|node)(?:\.exe)?\"?\s+-[ce]\b", re.IGNORECASE)
+_SELF_SUMMARY = re.compile(r"\ball (?:\d+ )?(?:tests?|checks?|cases?) (?:passed|pass|ok)\b|\ball passed\b"
+                           r"|\btests? passed\b|\bвсички (?:\d+ )?(?:тестове|теста|проверки|случаи) "
+                           r"(?:минаха|минават)", re.IGNORECASE)
+
+
+def is_self_check(command: str, output: str) -> bool:
+    """Изходът е на проверка (тестове, check.py, `python -c`), не на програмата."""
+    from genesis_agent.claim_check import is_test_run
+    return is_test_run(command) or bool(_CHECK_SCRIPT.search(command) or _SELF_SUMMARY.search(output))
+
+
+def mismatch_line(output: str, *, self_check: bool = True) -> str:
+    """Първият ред от изхода, който показва разминаване; "" ако няма.
+    Без `self_check` — само „expected X, got Y“ на един ред (виж горе)."""
+    lines = (output or "").splitlines()
+    for i, line in enumerate(lines):
+        text = line.strip()
+        if not text:
+            continue
+        if self_check and (_FAIL_LINE.match(text) or _FAIL_COUNT.search(text)):
+            return text[:200]
+        ratio = _RATIO.search(text) if self_check else None
+        if ratio and int(ratio.group(1)) < int(ratio.group(2)):
+            return text[:200]
+        if _ERROR_LINE.search(text):
+            continue
+        pair = _EXP_FIRST.search(text) or _GOT_FIRST.search(text)
+        if pair is None and self_check and not _HAS_GOT.search(text):
+            pair = _BARE.search(text)
+        if pair and not _same_value(pair.group("exp"), pair.group("got")):
+            return text[:200]
+        if not self_check:
+            continue
+        # „Expected: X“ и „Got: Y“ на съседни редове, в който и да е ред.
+        exp = _LABEL_EXP.match(text)
+        got = _LABEL_GOT.match(lines[i + 1].strip()) if exp and i + 1 < len(lines) else None
+        if exp is None:
+            got = _LABEL_GOT.match(text)
+            exp = _LABEL_EXP.match(lines[i + 1].strip()) if got and i + 1 < len(lines) else None
+        if exp and got and not _ERROR_LINE.search(lines[i + 1]) \
+                and not _same_value(exp.group("v"), got.group("v")):
+            return f"{text} / {lines[i + 1].strip()}"[:200]
+    return ""
+
+
+class MismatchCheck:
+    """Като RunCheck: `observe` за всеки резултат, `due(отговор)` когато
+    моделът спре да вика инструменти. Пази последното разминаване на всяка
+    команда с rc=0, докато същата команда не мине чисто — или кодът не се
+    смени и някое следващо пускане не мине чисто."""
+
+    def __init__(self) -> None:
+        self._pending: dict[str, tuple[str, bool]] = {}   # команда → (ред, сменен ли е кодът след него)
+        self._nudged = False
+
+    def observe(self, result: str) -> None:
+        result = result or ""
+        if _EDITED.search(result):
+            self._pending = {c: (line, True) for c, (line, _) in self._pending.items()}
+            return
+        head = _RUN_HEADER.match(result)
+        if head is None or head.group(2) != "0":
+            return   # не тръгна или е червена — това вече го вижда моделът и claim_check
+        command = head.group(1).strip()
+        if not runs_code(command):
+            return
+        output = result[head.end():]
+        line = mismatch_line(output, self_check=is_self_check(command, output))
+        if line:
+            self._pending[command] = (line, False)
+            return
+        self._pending.pop(command, None)
+        self._pending = {c: v for c, v in self._pending.items() if not v[1]}
+
+    def due(self, reply: str) -> bool:
+        if self._nudged or not self._pending:
+            return False
+        # Сменен код след разминаването и непуснат наново — винаги; иначе само
+        # ако отговорът не казва сам, че нещо не е наред.
+        return any(edited for _, edited in self._pending.values()) or not _ACKNOWLEDGED.search(reply or "")
+
+    def note(self) -> str:
+        self._nudged = True
+        command, (line, edited) = next(reversed(self._pending.items()))
+        rerun = (" След това разминаване кодът е сменен, а проверката не е пускана наново."
+                 if edited else "")
+        return (f"[проверка на изхода] `{command[:120]}` (rc=0) печата разминаване: «{line}».{rerun} "
+                "rc=0 и „All tests passed!“ не го отменят — print не е assert. "
+                f"{_MISMATCH} Ако разминаването е нарочно (напр. отказ на невалиден вход), "
+                "кажи го в един ред и приключи.")
+
+
+# ─── Сменена проверка в тест, който е бил преди хода (2026-11-05) ─────────────
+# `genesis fix` не дава „✅ Поправено“ от отслабен тест от 22.10
+# (repo_agent._weakened_tests); чатът — дава. Възпроизведено с фалшив модел и
+# истински pytest: „оправи бъга, test_calc пада“ → EDIT_FILE на теста
+# `assert add(2, 2) == 4` → `== 0`, pytest зелен, „Всички тестове минават.“ —
+# без дума към оператора, бъгът в calc.py остава. Тест, написан в същия ход, е
+# на модела и се поправя свободно (c125 в bench_fcc); тест отпреди хода е на
+# оператора. Шаблоните са общи с repo_agent.
+TEST_FILE_RE = re.compile(
+    r"(?:^|/)(?:tests?|__tests__|spec)/"
+    r"|(?:^|/)(?:test_[^/]*\.py|[^/]*_test\.(?:py|go)|conftest\.py)$"
+    r"|\.(?:test|spec)\.[cm]?[jt]sx?$")
+ASSERT_RE = re.compile(r"\bassert|\bexpect\s*\(|\.should\b|\bt\.(?:Error|Fatal)")
+SKIP_RE = re.compile(
+    r"\bmark\.(?:skip|skipif|xfail)\b|\bpytest\.(?:skip|xfail|importorskip)\s*\("
+    r"|\bunittest\.(?:skip\w*|expectedFailure)\b|@(?:skip\w*|expectedFailure)\b"
+    r"|\b(?:it|test|describe)\.(?:skip|todo)\b|\bx(?:it|test|describe)\s*\(|\bt\.Skip\w*\s*\(")
+# Заявка, която сама иска тестът да се смени — тогава няма какво да се пита.
+# „Оправи тестовете“ не е такава: обикновено значи „направи ги зелени“.
+_TEST_CHANGE_ASKED = re.compile(
+    r"\b(?:обнови|смени|промени|пренапиши|редактирай|коригирай|махни|изтрий|премахни|пропусни|"
+    r"update|change|rewrite|edit|adjust|correct|remove|delete|skip|modify)\w*\s+(?:\S+\s+){0,3}?"
+    r"(?:тест|test|assert|spec)"
+    r"|\b(?:тест\w*|tests?|test_\w+)\s+(?:\S+\s+){0,2}?(?:греш(?:ен|н)|остар(?:ял|ел)|wrong|outdated|"
+    r"incorrect|stale)"
+    # Преглед 2026-11-05: „параметризирай тестовете“, „refactor the tests to use
+    # parametrize“ — поисканото преработване маха старите assert редове.
+    r"|\bпараметриз|\bparametri[sz]"
+    r"|\b(?:рефакторирай|преработи|обедини|refactor)\w*\s+(?:\S+\s+){0,3}?(?:тест|test)",
+    re.IGNORECASE)
+
+
+def is_test_file(rel: str) -> bool:
+    return bool(TEST_FILE_RE.search(rel.replace("\\", "/")))
+
+
+def weakening(before: str, after: str) -> str:
+    """Защо `after` е по-слаб тест от `before`: добавено пропускане или
+    махнат/сменен ред с проверка; "" ако няма такова. Интервалите не се броят —
+    `assert add(2,2)==4` → `assert add(2, 2) == 4` е форматиране, не промяна."""
+    def lines(text: str) -> Counter[str]:
+        return Counter(re.sub(r"\s+", "", ln) for ln in text.splitlines() if ln.strip())
+    old, new = lines(before), lines(after)
+    if any(SKIP_RE.search(ln) for ln in new - old):
+        return "добавено пропускане (skip/xfail)"
+    gone = next((ln for ln in before.splitlines()
+                 if ASSERT_RE.search(ln) and (old - new)[re.sub(r"\s+", "", ln)]), "")
+    return f"сменена или махната проверка `{gone.strip()[:120]}`" if gone else ""
+
+
+class TestEditCheck:
+    """Тестове отпреди хода, отслабени от WRITE/EDIT в него. `due(originals)`
+    с `edit_history.turn_originals()`, когато моделът спре; веднъж на ход."""
+
+    __test__ = False   # не е pytest клас, въпреки името
+
+    def __init__(self, request: str = "", workspace: Path | None = None) -> None:
+        self._asked = bool(_TEST_CHANGE_ASKED.search(request or ""))
+        self._workspace = workspace
+        self._found: list[str] = []
+        self._nudged = False
+
+    def _rel(self, path: Path) -> str:
+        try:
+            return path.relative_to(self._workspace).as_posix() if self._workspace else path.name
+        except ValueError:
+            return path.as_posix()
+
+    def weakened(self, originals: dict[Path, bytes]) -> list[str]:
+        found = []
+        for path, old in originals.items():
+            rel = self._rel(path)
+            if not is_test_file(rel):
+                continue
+            try:
+                new = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            why = weakening(old.decode("utf-8", errors="replace"), new)
+            if why:
+                found.append(f"{rel}: {why}")
+        return found
+
+    def due(self, originals: dict[Path, bytes]) -> bool:
+        if self._nudged or self._asked:
+            return False
+        self._found = self.weakened(originals)
+        return bool(self._found)
+
+    def note(self) -> str:
+        self._nudged = True
+        listed = "; ".join(self._found[:5])
+        return (f"[проверка на тестовете] Смени тест, който съществуваше преди хода: {listed}. "
+                "Тестът е на оператора и описва искането: ако кодът не го изпълнява, поправя се "
+                "кодът, не тестът. Тест се сменя само ако заявката го иска или тестът противоречи "
+                "на условието — тогава го кажи изрично в отговора (кой ред и защо). Иначе върни "
+                "теста както беше и поправи кода.")

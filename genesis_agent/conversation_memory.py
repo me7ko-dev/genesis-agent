@@ -16,27 +16,29 @@
 
 import sqlite3
 
+from genesis_agent import sqlite_store
 from genesis_agent.config import MEMORY_DIR
 
 DB_PATH = str(MEMORY_DIR / "conversation_memory.db")
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS conversations (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    role      TEXT NOT NULL,
+    content   TEXT NOT NULL,
+    ts        DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+"""
 
 # --------------------------------------------------------------
 # Инициализация на базата
 # --------------------------------------------------------------
 def _init_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS conversations (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            role      TEXT NOT NULL,
-            content   TEXT NOT NULL,
-            ts        DATETIME DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-    )
-    conn.commit()
-    return conn
+    # През sqlite_store, както останалите памети от 2026-10-22 (одит
+    # 2026-11-04, възпроизведено): тази беше пропусната — повредена
+    # conversation_memory.db връщаше „file is not a database“ на ВСЯКА реплика,
+    # завинаги, а чатът го гълта в log.debug, тоест историята спираше тихо.
+    return sqlite_store.connect(DB_PATH, _SCHEMA)
 
 # --------------------------------------------------------------
 # Вътрешна помощна функция за сумиране (placeholder)

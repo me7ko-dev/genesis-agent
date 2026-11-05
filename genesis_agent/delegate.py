@@ -40,6 +40,7 @@ class TaskStatus(str, Enum):
     DONE     = "done"
     FAILED   = "failed"
     TIMEOUT  = "timeout"
+    CANCELLED = "cancelled"
 
 
 @dataclass
@@ -53,6 +54,8 @@ class DelegatedTask:
     started_at: float | None = None
     finished_at: float | None = None
     thread: threading.Thread | None = field(default=None, repr=False)
+    # Вдигнат — под-агентът спира при първа възможност (Ctrl-C, „Стоп“).
+    cancel: threading.Event = field(default_factory=threading.Event, repr=False)
 
     @property
     def elapsed(self) -> float | None:
@@ -62,7 +65,8 @@ class DelegatedTask:
         return round(end - self.started_at, 2)
 
     def summary(self) -> str:
-        icon = {"pending": "⏳", "running": "🔄", "done": "✅", "failed": "❌", "timeout": "⏰"}.get(self.status, "?")
+        icon = {"pending": "⏳", "running": "🔄", "done": "✅", "failed": "❌", "timeout": "⏰",
+                "cancelled": "⏹"}.get(self.status, "?")
         return f"{icon} [{self.id[:8]}] {self.agent}:{self.goal[:60]}  ({self.elapsed}s)"
 
 
@@ -102,12 +106,14 @@ def _run_skill(skill_name: str) -> str:
     return run_skill(skill_name)
 
 
-def _run_autonomous(goal: str, timeout: int | None = None) -> str:
-    """Изпълнява задача чрез Genesis autonomous_loop — до `timeout` секунди."""
+def _run_autonomous(goal: str, timeout: int | None = None,
+                    cancel: threading.Event | None = None) -> str:
+    """Изпълнява задача чрез Genesis autonomous_loop — до `timeout` секунди
+    или докато `cancel` не бъде вдигнат."""
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from genesis_agent.autonomous_loop import run_autonomous_loop
     deadline = time.time() + timeout if timeout else None
-    out = run_autonomous_loop(goal, operator_id="DELEGATE", deadline=deadline)
+    out = run_autonomous_loop(goal, operator_id="DELEGATE", deadline=deadline, cancel=cancel)
     if out.success:
         name = Path(out.skill_path).name if out.skill_path else "(без файл)"
         return f"✅ Готово за {out.rounds} рунда → {name}"
@@ -116,7 +122,8 @@ def _run_autonomous(goal: str, timeout: int | None = None) -> str:
 
 def _worker(task: DelegatedTask, timeout: int, on_done: Callable | None):
     """Вътрешен worker — изпълнява задачата в отделна нишка."""
-    task.status = TaskStatus.RUNNING
+    if task.status == TaskStatus.PENDING:   # спряна още преди старта остава спряна
+        task.status = TaskStatus.RUNNING
     task.started_at = time.time()
     log.info(f"[delegate] Стартиран task {task.id[:8]} ({task.agent}): {task.goal[:60]}")
 
@@ -126,19 +133,20 @@ def _worker(task: DelegatedTask, timeout: int, on_done: Callable | None):
         elif task.agent == "skill":
             result = _run_skill(task.goal)
         elif task.agent == "autonomous":
-            result = _run_autonomous(task.goal, timeout)
+            result = _run_autonomous(task.goal, timeout, task.cancel)
         else:
             raise ValueError(f"Непознат agent тип: '{task.agent}'. Използвай: shell, skill, autonomous")
 
         task.result = result
-        # Изтекла задача остава „timeout“: викащият вече е получил този отговор.
-        if task.status != TaskStatus.TIMEOUT:
+        # Изтекла или спряна задача остава „timeout“/„cancelled“: викащият вече
+        # е получил този отговор.
+        if task.status == TaskStatus.RUNNING:
             task.status = TaskStatus.DONE
         log.info(f"[delegate] ✅ Task {task.id[:8]} завършен ({task.elapsed}s)")
 
     except Exception as e:  # noqa: BLE001 — вече се записва с log.error по-долу
         task.error = str(e)
-        if task.status != TaskStatus.TIMEOUT:
+        if task.status == TaskStatus.RUNNING:
             task.status = TaskStatus.FAILED
         log.error(f"[delegate] ❌ Task {task.id[:8]} провален: {e}")
     finally:
@@ -188,21 +196,49 @@ def delegate_task(
     return task
 
 
-def wait_all(tasks: list[DelegatedTask], timeout: int = 300) -> list[DelegatedTask]:
+# На колко се поглежда за Ctrl-C и „Стоп“, докато се чака. Одит 2026-11-04:
+# едно join(600) не се буди от Ctrl-C на Windows (до 3.14) — измерено с
+# _thread.interrupt_main: чатът стоеше до края на мисията; „Стоп“ на телефона
+# не се гледаше изобщо (мисията изкарваше всичките си рундове).
+_WAIT_SLICE_S = 0.2
+
+
+def cancel_tasks(tasks: list[DelegatedTask]) -> None:
+    """Спира недовършените: статус „cancelled“ и сигнал към под-агента."""
+    for task in tasks:
+        if task.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
+            task.status = TaskStatus.CANCELLED
+            task.cancel.set()
+            log.warning(f"[delegate] ⏹ Task {task.id[:8]} е спрян от оператора")
+
+
+def wait_all(tasks: list[DelegatedTask], timeout: int = 300, *,
+             cancelled: Callable[[], bool] | None = None) -> list[DelegatedTask]:
     """
     Изчаква всички задачи да приключат (или да изтече timeout).
+    `cancelled()` вярно (или Ctrl-C) — недовършените се спират и не се чакат.
 
     Returns:
         Списъкът от задачи с попълнени status, result, error.
     """
     deadline = time.time() + timeout
-    for task in tasks:
-        remaining = max(0, deadline - time.time())
-        if task.thread and task.thread.is_alive():
-            task.thread.join(timeout=remaining)
-            if task.thread.is_alive():
-                task.status = TaskStatus.TIMEOUT
-                log.warning(f"[delegate] ⏰ Timeout за task {task.id[:8]}")
+    try:
+        for task in tasks:
+            while task.thread and task.thread.is_alive():
+                if cancelled is not None and cancelled():
+                    cancel_tasks(tasks)
+                    return tasks
+                left = deadline - time.time()
+                if left <= 0:
+                    task.status = TaskStatus.TIMEOUT
+                    log.warning(f"[delegate] ⏰ Timeout за task {task.id[:8]}")
+                    break
+                task.thread.join(timeout=min(_WAIT_SLICE_S, left))
+    except KeyboardInterrupt:
+        # Ctrl-C спира и под-агента, не само чакането: мисията във фоновата
+        # нишка иначе продължаваше да вика модела и да записва (одит 2026-11-04).
+        cancel_tasks(tasks)
+        raise
     return tasks
 
 

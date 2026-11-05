@@ -27,8 +27,10 @@ without ever executing anything").
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,11 @@ class Claim:
     needed: str
 
 
+_EDIT_KIND = "промяна на код"
+# Изречение за минал ход: „В предишния ход поправих…“ — обобщение, не твърдение
+# за този ход (отговор на „какво направи?“).
+_PAST_TURN_RE = re.compile(r"(?:по-рано|преди това|предишни\w*|вчера|миналия|earlier|previously|"
+                           r"last (?:turn|time)|before that|in the previous)", re.IGNORECASE)
 _TEST_WORDS = frozenset({"pytest", "test", "tests", "unittest", "tox", "nose", "make",
                          "npm", "cargo", "go", "python", "python3"})
 _PASS_KIND = "минаващи тестове"
@@ -65,6 +72,16 @@ _CATEGORIES: tuple[tuple[str, re.Pattern[str], frozenset[str], frozenset[str]], 
         frozenset({"WRITE_FILE", "EDIT_FILE", "RUN_CMD", "USE_SKILL", "DELEGATE"}),
         frozenset({"tee", "cp", "mv", "touch", "mkdir", "curl", "wget", "git",
                    "python", "python3", "sh", "bash"}),
+    ),
+    (
+        # 2026-11-05: „Направих commit“, „Къмитнах и пушнах“, „I committed and
+        # pushed“ без git команда — същото.
+        "git commit/push",
+        re.compile(
+            r"\b(направих (?:git )?(?:commit|къмит)|къмитнах|commit-нах|пушнах|push-нах|"
+            r"i(?:'ve| have)? (?:just )?(?:committed|pushed)|committed and pushed)\b", re.IGNORECASE),
+        frozenset({"RUN_CMD", "USE_SKILL", "DELEGATE"}),
+        frozenset({"commit", "push"}),
     ),
     (
         "преместване/триене",
@@ -144,6 +161,21 @@ _CATEGORIES: tuple[tuple[str, re.Pattern[str], frozenset[str], frozenset[str]], 
         frozenset({"git", "systemctl", "chmod", "chown", "export", "sed", "tee",
                    "python", "python3", "sh", "bash", "npm", "pip"}),
     ),
+    (
+        # 2026-11-05: „Поправих бъга в calc.py“, „Добавих валидация“, „I fixed the
+        # bug“, „I've updated the config“ след само READ_FILE/SEARCH_CODE минаваха
+        # без подкана — 13 от 13 проби. Най-честата измислица на слаб модел.
+        # Само в ход с поне един инструмент и не за минал ход (_EDIT_KIND долу).
+        _EDIT_KIND,
+        re.compile(
+            r"\b(поправих|оправих|добавих|промених|обнових|написах|редактирах|коригирах|"
+            r"имплементирах|реализирах|преработих|рефакторирах|замених|"
+            r"i(?:'ve| have)? (?:just |now )?(?:fixed|added|updated|changed|modified|implemented|"
+            r"rewrote|rewritten|refactored|replaced|edited))\b", re.IGNORECASE),
+        frozenset({"WRITE_FILE", "EDIT_FILE", "RUN_CMD", "USE_SKILL", "DELEGATE"}),
+        frozenset({"sed", "perl", "awk", "patch", "tee", "cp", "mv", "git", "python", "python3",
+                   "sh", "bash", "node", "npm", "npx", "ruff", "black", "prettier", "cargo", "dotnet"}),
+    ),
 )
 
 # Достатъчно контекст, за да се вижда кое изречение е проблемното, без да се
@@ -212,16 +244,84 @@ _NEGATED_RE = re.compile(r"\b(?:не|not|no)\s+$", re.IGNORECASE)
 _CLAIM, _REPORT, _NOT_A_CLAIM = "claim", "report", "none"
 
 
+# Изречението се търси в прозорец около съвпадението (преглед 2026-11-05):
+# от началото на текста всяко съвпадение правеше проверката квадратична —
+# 50 KB „Не тествах.“ отнемаше 3.7 s, 100 KB „Не промених нищо.“ — 7 s.
+_SENTENCE_WINDOW = 2000
+
+
+def _bounds(text: str, match: re.Match[str]) -> tuple[int, int]:
+    lo = max(0, match.start() - _SENTENCE_WINDOW)
+    start = max((m.end() for m in _SENTENCE_END_RE.finditer(text, lo, match.start())), default=lo)
+    hi = min(len(text), match.end() + _SENTENCE_WINDOW)
+    end_match = _SENTENCE_END_RE.search(text, match.end(), hi)
+    return start, end_match.end() if end_match else hi
+
+
+# Без `text[match.end():]` — копие на остатъка при всяко съвпадение.
+_LI_RE = re.compile(r"\s+ли\b")
+
+
+def _sentence(text: str, match: re.Match[str]) -> str:
+    start, end = _bounds(text, match)
+    return text[start:end]
+
+
+# Цитат (преглед 2026-11-05): „Ти написа: „Добавих нов endpoint““, „В
+# CHANGELOG пише „Поправих бъга““, „You wrote “I fixed the login bug”“ —
+# чуждите думи не са твърдение на модела за този ход. Само двойни кавички с
+# двойка на същия ред: „…“, “…”, «…», "…".
+_QUOTE_PAIRS = {"„": "“", "“": "”", "«": "»", '"': '"'}
+
+
+def _quoted(text: str, match: re.Match[str]) -> bool:
+    line_start = max(text.rfind("\n", 0, match.start()) + 1, match.start() - _SENTENCE_WINDOW)
+    closer = ""
+    for ch in text[line_start:match.start()]:
+        if not closer and ch in _QUOTE_PAIRS:
+            closer = _QUOTE_PAIRS[ch]
+        elif closer and ch == closer:
+            closer = ""
+    hi = min(len(text), match.end() + _SENTENCE_WINDOW)
+    line_end = text.find("\n", match.end(), hi)
+    return bool(closer) and closer in text[match.end():line_end if line_end >= 0 else hi]
+
+
+# За самия отговор, не за файловете (преглед 2026-11-05: 11 от 15 проби след само
+# READ_FILE): „Написах ти пример“, „Коригирах се“ (се/си/ти/ви след глагола),
+# „Промених подхода“, „Обнових плана“, „I've updated my answer“ (обектът е отговорът),
+# „I committed nothing“, и „Добавих коментари към редовете по-долу:“ с код в самия
+# отговор. Поправката („Поправих го — диффът е по-долу“) пак е твърдение.
+_REPLY_ITSELF_RE = re.compile(
+    r"\s+(?:се|си|ти|ви|you|nothing|anything|нищо)\b"
+    r"|\s+(?:\S+\s+){0,2}?(?:подход\w*|план\w*|отговор\w*|обяснени\w*|answer|plan|approach|"
+    r"response|explanation|reply|message)\b", re.IGNORECASE)
+_BELOW_RE = re.compile(r"\b(?:по-долу|долу|отдолу|следни\w*|below|following)\b", re.IGNORECASE)
+_FIX_VERB_RE = re.compile(r"поправих|оправих|коригирах|fixed", re.IGNORECASE)
+
+
+def _about_the_reply(text: str, match: re.Match[str]) -> bool:
+    if _REPLY_ITSELF_RE.match(text, match.end()):
+        return True
+    return ("```" in text and not _FIX_VERB_RE.search(match.group(0))
+            and bool(_BELOW_RE.search(_sentence(text, match))))
+
+
+def _not_this_turn(text: str, match: re.Match[str]) -> bool:
+    """Отрицание/въпрос/условие, минал ход, цитат или за самия отговор — не
+    твърдение за хода."""
+    return (_pass_sentence(text, match) == _NOT_A_CLAIM
+            or bool(_PAST_TURN_RE.search(_sentence(text, match))) or _quoted(text, match)
+            or _about_the_reply(text, match))
+
+
 def _pass_sentence(text: str, match: re.Match[str]) -> str:
     """Съвпадение за „тестовете минават“: зелено твърдение, смесен отчет
     (червена дума в изречението) или въпрос/условие/отрицание точно преди."""
-    start = max((m.end() for m in _SENTENCE_END_RE.finditer(text, 0, match.start())),
-                default=0)
-    end_match = _SENTENCE_END_RE.search(text, match.end())
-    end = end_match.end() if end_match else len(text)
+    start, end = _bounds(text, match)
     sentence = text[start:end]
     before = text[start:match.start()]
-    if (sentence.rstrip().endswith("?") or re.match(r"\s+ли\b", text[match.end():])
+    if (sentence.rstrip().endswith("?") or _LI_RE.match(text, match.end())
             or _NOT_A_CLAIM_RE.search(before) or _NEGATED_RE.search(before)
             or _HEDGED_RE.search(before)):
         return _NOT_A_CLAIM
@@ -236,6 +336,12 @@ def _find_claim(kind: str, pattern: re.Pattern[str],
     „пуснах тестовете“: иска пускане, но не и зелено последно пускане."""
     report = None
     for match in pattern.finditer(text):
+        if kind == _EDIT_KIND or kind == "git commit/push":
+            # „Не промених нищо“, „Ако добавих…?“ — не са твърдения; смесеният
+            # отчет („поправих го, но тестът пада“) пак твърди редакцията.
+            if _not_this_turn(text, match):
+                continue
+            return kind, match
         verdict = _pass_sentence(text, match) if kind == _PASS_KIND else _CLAIM
         if verdict == _CLAIM:
             return kind, match
@@ -558,7 +664,162 @@ def executed_from_text_results(results: list[str]) -> list[tuple[str, str]]:
     return out
 
 
-def unsupported_claims(text: str, executed: list[tuple[str, str]]) -> list[Claim]:
+# „Работи“ (2026-11-05): „Готово — скриптът вече работи правилно.“ след
+# `python app.py` с Traceback и rc=1 минаваше без подкана — никоя категория горе
+# не го покрива; същото без нито едно пускане (само READ/WRITE). Само силните
+# форми: „работи с CSV“, „ето как работи“ не твърдят нищо; „не работи“, въпрос,
+# условие и смесен отчет („работи, освен за празен вход“) — също не.
+_WORKS_KIND = "работещ код"
+_WORKS_RE = re.compile(
+    r"\b(?:(?:вече|сега|всичко|отново) (?:си )?работи|"
+    r"работи (?:вече |сега )?(?:правилно|коректно|успешно|без грешки|както трябва|както се очаква)|"
+    r"(?<!\bhow )(?<!\bwhat )(?:it|everything|this|that) (?:now )?works|works (?:correctly|as expected|fine|perfectly|now)|"
+    r"now works|is (?:now )?working (?:now|correctly|fine|as expected)|"
+    r"runs (?:successfully|without (?:any )?errors|cleanly))\b", re.IGNORECASE)
+# „Готово“/„Done“ в началото на отговора — също твърдение, че е свършено, но само
+# срещу паднало последно пускане: без пускане голото „Готово.“ след запис е
+# обичайният край на хода (RunCheck вече казва „пусни го“). Отказ на лош вход с
+# rc≠0 („Готово — невалидният вход се отхвърля с код 1“) е нарочен (_DELIBERATE).
+_DONE_RE = re.compile(r"^\W*(?:готово|свърших|завърших|done|finished|all set)\b", re.IGNORECASE)
+_DELIBERATE_RE = re.compile(r"\b(?:отхвърл\w*|невалид\w*|reject\w*|invalid|нарочно|intentional\w*|"
+                            r"(?:код|code|rc)\s*=?\s*[1-9]\d*)", re.IGNORECASE)
+# Какво доказва „работи“: пускане на кода/тестовете, проверка с curl/wget, браузър.
+_WORKS_TOOLS = frozenset({"BROWSE", "BROWSER_READ", "USE_SKILL", "DELEGATE"})
+_HTTP_CHECK_RE = re.compile(r"(?:^|[\s;&|(])(?:curl|wget|http|iwr|Invoke-WebRequest)(?=\s|$)",
+                            re.IGNORECASE)
+
+
+# „Тествах/пробвах/изпълних скрипта“ (2026-11-05): след само WRITE_FILE 7 от 7
+# проби минаваха — вкл. „Изпълних скрипта и резултатът е 42.“ (измислен изход).
+# Подкрепя го всяко пускане, и червено („пуснах го — гърми“ е честно). „Пробвах
+# да…“ е опит, не пускане; минал ход и ход без инструменти — както _EDIT_KIND.
+_TRIED_KIND = "пускане на код"
+_TRIED_RE = re.compile(
+    r"\b(?:тествах|изпробвах|пробвах(?! да\b)|"
+    r"изпълних (?:го|я|ги|скрипта|кода|програмата|файла|командата|функцията)|"
+    r"стартирах (?:го|я|скрипта|кода|програмата|приложението|сървъра)|"
+    r"пуснах (?:го|я|ги|скрипта|кода|програмата|файла|командата|приложението|сървъра)|"
+    r"i(?:'ve| have)? (?:just )?(?:tested|executed|ran (?:it|the|this|that|your|my|a|several)\b|"
+    r"tried (?:it|running)))", re.IGNORECASE)
+_TRIED_TOOLS = frozenset({"RUN_CMD", "RUN_BG", "BROWSE", "BROWSER_READ", "USE_SKILL", "DELEGATE"})
+
+
+def _tried_claim(text: str, executed: list[tuple[str, str]]) -> Claim | None:
+    if not executed or any(name.upper() in _TRIED_TOOLS for name, _ in executed):
+        return None
+    for match in _TRIED_RE.finditer(text):
+        if _not_this_turn(text, match):
+            continue
+        return Claim(kind=_TRIED_KIND, quote=_quote(text, match),
+                     needed="RUN_CMD (или RUN_BG/BROWSE), който го пуска")
+    return None
+
+
+def _is_run_entry(entry: tuple[str, str]) -> bool:
+    name = entry[0].upper()
+    if name == "RUN_BG":
+        return True
+    if name != "RUN_CMD":
+        return False
+    from genesis_agent.code_check import runs_code
+    command = _failed_rc(entry)[0]
+    return is_test_run(command) or runs_code(command) or bool(_HTTP_CHECK_RE.search(command))
+
+
+def _works_claim(text: str, executed: list[tuple[str, str]]) -> Claim | None:
+    """„Работи“ без пускане или след червено последно пускане на кода."""
+    match = next((m for m in _WORKS_RE.finditer(text) if _pass_sentence(text, m) == _CLAIM), None)
+    done = None if match else _DONE_RE.match(text)
+    if done and (_pass_sentence(text, done) != _CLAIM or _DELIBERATE_RE.search(text)):
+        done = None
+    match = match or done
+    if match is None or any(name.upper() in _WORKS_TOOLS for name, _ in executed):
+        return None
+    runs = [e for e in executed if _is_run_entry(e)]
+    if done and not runs:
+        return None
+    # Без нищо пуснато — само ако ходът е писал: в чист разговор („от 3.12 вече
+    # работи с вложени кавички“) „работи“ е обяснение, не отчет за свършено.
+    if not runs and not any(name.upper() in ("WRITE_FILE", "EDIT_FILE") for name, _ in executed):
+        return None
+    if not runs:
+        return Claim(kind=_WORKS_KIND, quote=_quote(text, match),
+                     needed="пускане на кода (RUN_CMD), което го показва")
+    command, rc = _failed_rc(runs[-1])
+    if not rc:
+        return None
+    return Claim(kind=_WORKS_KIND, quote=_quote(text, match),
+                 needed=f"пускане с rc=0 (последното — `{command[:80]}` — е с rc={rc}; ако "
+                        f"неуспехът е нарочен, напр. отказ на лош вход, кажи го)")
+
+
+# Назован файл, който го няма (2026-11-05): WRITE_FILE на app.py и „Записах
+# отчета в report.csv.“ минаваше — запис има, но не този; 3 от 3 проби, вкл.
+# „I've saved the results to out/summary.json.“. Първото име на файл след глагола
+# за запис се търси на диска (в проекта до 4 нива — команда може да го е сложила
+# в подпапка) и в аргументите на изпълнените инструменти.
+_FILE_NAME_RE = re.compile(
+    r"(?<![\w/.~\\-])((?:~[/\\]|/|[A-Za-z]:[/\\])?(?:[\w.-]+[/\\])*[\w-][\w.-]*\."
+    r"(?:py|csv|json|md|txt|html?|css|js|ts|tsx|jsx|ya?ml|toml|xlsx|xls|docx|pdf|sql|sh|ps1|"
+    r"bat|ini|cfg|log|xml|png|jpe?g|svg))\b", re.IGNORECASE)
+_INPUT_WORDS_RE = re.compile(r"\b(?:кой|коя|кое|кои|който|която|което|които|чете|зарежда|обработва|"
+                             r"ползва|от|that|which|reads?|loads?|process\w*|uses?|from)\b",
+                             re.IGNORECASE)
+_SKIP_DIRS = frozenset({".git", "node_modules", ".venv", "venv", "__pycache__", ".tox", "dist",
+                        "build", ".mypy_cache", ".pytest_cache"})
+
+
+def _exists_somewhere(name: str, workspace: Path) -> bool:
+    candidate = Path(name).expanduser()
+    if not candidate.is_absolute():
+        candidate = workspace / candidate
+    try:
+        if candidate.exists():
+            return True
+    except OSError:
+        return True                       # не може да се провери — не тревожим
+    base = Path(name.replace("\\", "/")).name
+    root_depth = len(workspace.parts)
+    try:
+        for folder, dirs, files in os.walk(workspace):
+            if base in files:
+                return True
+            dirs[:] = [d for d in dirs if d not in _SKIP_DIRS] \
+                if len(Path(folder).parts) - root_depth < 4 else []
+    except OSError:
+        return True
+    return False
+
+
+def _missing_file_claim(text: str, executed: list[tuple[str, str]],
+                        workspace: Path) -> Claim | None:
+    args = " ".join(a for _, a in executed).replace("\\", "/")
+    for kind, pattern, *_ in _CATEGORIES:
+        if kind not in ("запис на файл", _EDIT_KIND):
+            continue
+        for match in pattern.finditer(text):
+            if _not_this_turn(text, match):
+                continue
+            rest = text[match.end():match.end() + _SENTENCE_WINDOW]
+            end = _SENTENCE_END_RE.search(rest)
+            named = _FILE_NAME_RE.search(rest[:end.start()] if end else rest)
+            # Името е обектът на глагола: до 3 думи след него и без „който чете“,
+            # „от“, „reads“ между тях — „Създадох скрипт, който чете sales.xlsx“
+            # назовава входа, не записаното.
+            between = rest[:named.start()] if named else ""
+            if not named or len(between.split()) > 3 or _INPUT_WORDS_RE.search(between):
+                continue
+            name = named.group(1)
+            if Path(name.replace("\\", "/")).name in args or _exists_somewhere(name, workspace):
+                continue
+            return Claim(kind="запис на файл", quote=_quote(text, match),
+                         needed=f"файл {name} — такъв няма нито на диска, нито в изпълнените "
+                                "инструменти")
+    return None
+
+
+def unsupported_claims(text: str, executed: list[tuple[str, str]],
+                       workspace: Path | None = None) -> list[Claim]:
     """Твърденията в `text`, които изпълненото не подкрепя.
 
     `executed` е [(име_на_tool, аргументите като текст), ...] за ТОЗИ разговор
@@ -571,6 +832,13 @@ def unsupported_claims(text: str, executed: list[tuple[str, str]]) -> list[Claim
         return []
     found: list[Claim] = []
     for category, pattern, ok_tools, ok_words in _CATEGORIES:
+        # Ход без нито един инструмент: „Поправих бъга, добавих тест“ е отговор на
+        # „какво направи?“ за предишния ход, не твърдение за този.
+        # Твърдение за тестовете или за запис вече носи бележката — „I fixed the bug
+        # and the tests pass“ след червено е едно твърдение, не две.
+        if category == _EDIT_KIND and (not executed or any(
+                c.kind in ("запис на файл", _PASS_KIND, _RAN_KIND) for c in found)):
+            continue
         hit = _find_claim(category, pattern, text)
         if not hit:
             continue
@@ -590,6 +858,23 @@ def unsupported_claims(text: str, executed: list[tuple[str, str]]) -> list[Claim
             continue
         needed = " / ".join(sorted(ok_tools - {"USE_SKILL", "DELEGATE"}))
         found.append(Claim(kind=kind, quote=_quote(text, match), needed=needed))
+    # „Done — the tests pass.“ след червено е едно твърдение, не две: за тестовете
+    # вече има бележка (и тя носи rc-то), „работи/готово“ не се добавя отгоре.
+    works = None if any(c.kind in (_PASS_KIND, _RAN_KIND) for c in found) else \
+        _works_claim(text, executed)
+    if works:
+        found.append(works)
+    # Записът е доказан, но на друг файл: с `workspace` назованото име се търси.
+    if workspace is not None and not any(c.kind in ("запис на файл", _EDIT_KIND) for c in found):
+        missing = _missing_file_claim(text, executed, workspace)
+        if missing:
+            found.append(missing)
+    # Едно твърдение на изпълнение стига: „пуснах тестовете“/„работи“ вече са го казали.
+    tried = None if any(c.kind in (_PASS_KIND, _RAN_KIND, _WORKS_KIND, "проверка в браузър")
+                        for c in found) else \
+        _tried_claim(text, executed)
+    if tried:
+        found.append(tried)
     return found
 
 
@@ -605,6 +890,20 @@ def green_claim_after_red(claims: list[Claim], executed: list[tuple[str, str]]) 
     if any(c.kind == _PASS_KIND for c in claims):
         return _last_test_rc(executed)
     return 0
+
+
+# Същото за „работи“ срещу паднало последно пускане на кода (2026-11-05):
+# `genesis -p` го брои за неуспех като червените тестове.
+RED_RUN_WARNING = "⚠ Отговорът твърди, че кодът работи, а последното му пускане е паднало"
+
+
+def works_claim_after_red(claims: list[Claim], executed: list[tuple[str, str]]) -> int:
+    """rc на последното пускане на кода, ако сред `claims` има „работи“, а то
+    е паднало; иначе 0 (и когато нищо не е пускано — там няма червено)."""
+    if not any(c.kind == _WORKS_KIND for c in claims):
+        return 0
+    runs = [e for e in executed if _is_run_entry(e)]
+    return _failed_rc(runs[-1])[1] if runs else 0
 
 
 def nudge_text(claims: list[Claim]) -> str:
