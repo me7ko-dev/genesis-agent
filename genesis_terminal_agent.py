@@ -247,6 +247,12 @@ total_output_tokens = 0
 # Сборът за сесията (total_*) е разход, не контекст: статус редът показваше
 # „ctx 135K/131K (100%)“ в сесия, чиито заявки бяха по ~15K.
 last_context_tokens = 0
+# Същото, но само когато доставчикът е върнал usage — за „Последната заявка по
+# доставчика“ в /context. Одит 2026-10-31: без usage (локален Ollama /v1,
+# провален стар път) там стоеше собствената оценка на count_usage — само
+# съдържанието, без схемите и аргументите на tool_calls — 1.8K до „~8.8K“ на
+# самия /context, под етикет, че го е броил доставчикът.
+last_provider_tokens = 0
 
 def estimate_tokens(text: str) -> int:
     """Rough estimate: ~4 chars per token for mixed Bulgarian/English."""
@@ -264,7 +270,7 @@ def get_elapsed_time() -> str:
 def count_usage(usage: dict | None, messages, reply_text: str) -> None:
     """Добавя едно обръщение към разхода за сесията и запомня размера му като
     заетия контекст. Без usage от доставчика — оценка по целия prompt."""
-    global total_input_tokens, total_output_tokens, last_context_tokens
+    global total_input_tokens, total_output_tokens, last_context_tokens, last_provider_tokens
     if usage:
         prompt = usage.get("prompt_tokens", 0) or 0
         completion = usage.get("completion_tokens", 0) or 0
@@ -275,11 +281,22 @@ def count_usage(usage: dict | None, messages, reply_text: str) -> None:
     total_input_tokens += prompt
     total_output_tokens += completion
     last_context_tokens = prompt + completion
+    last_provider_tokens = last_context_tokens if usage else 0
 
 
 def reset_usage() -> None:
-    global total_input_tokens, total_output_tokens, last_context_tokens
-    total_input_tokens = total_output_tokens = last_context_tokens = 0
+    global total_input_tokens, total_output_tokens, last_context_tokens, last_provider_tokens
+    total_input_tokens = total_output_tokens = last_context_tokens = last_provider_tokens = 0
+
+
+def forget_last_request() -> None:
+    """Историята е сменена (/compact, /resume, /rewind, /history, телефонът):
+    размерът на последната заявка е на разговор, който го няма. Σ остава — тези
+    токени са похарчени. Одит 2026-10-31: след /compact (21 → 6 съобщения)
+    /context показваше новите ~7.9K до „по доставчика: 31.1K“, а статус редът —
+    „ctx 31K/131K (23%)“ до следващата заявка."""
+    global last_context_tokens, last_provider_tokens
+    last_context_tokens = last_provider_tokens = 0
 
 
 def _fmt_k(n: int) -> str:
@@ -827,6 +844,10 @@ def _brain_handles(provider: str) -> bool:
     return provider in _PROVIDERS
 
 
+# Началата на грешките, които call_ollama и call_gemini връщат като отговор.
+_LEGACY_ERRORS = ("[Ollama не отговаря", "[Ollama грешка", "[Грешка")
+
+
 def _ask_via_legacy(messages, tools, prov, model):
     """Стария директен път — само за ръчно избран доставчик извън brain.py."""
     global _last_usage
@@ -850,7 +871,12 @@ def _ask_via_legacy(messages, tools, prov, model):
     except Exception as e:
         log.debug("доставчикът %s/%s се провали", prov, model, exc_info=True)
         return f"[Грешка: {e}]", None
-    count_usage(_last_usage, msgs, response)
+    # call_ollama/call_gemini връщат грешката като низ, не като изключение.
+    # Само при истински отговор, както в ask_genesis (одит 2026-10-31: Ollama
+    # не слуша → „[Ollama не отговаря: …]“, а Σ растеше с ~2K и /context
+    # показваше заявка „по доставчика“, която не е тръгнала).
+    if _last_usage or not str(response or "").startswith(_LEGACY_ERRORS):
+        count_usage(_last_usage, msgs, response)
     if _last_usage:
         try:
             from genesis_agent.budget import record_usage
@@ -1675,8 +1701,11 @@ def _attach_viewed(messages: "deque") -> None:
 
 
 def context_info() -> dict:
-    """За /context: схемите на този ход, прозорецът и последната заявка."""
-    return {"tools": _turn_tools(), "window": DEFAULT_CONTEXT_WINDOW, "last": last_context_tokens}
+    """За /context: схемите на този ход, прозорецът, последната заявка по
+    доставчика и на кого отива следващата — от това зависи копието на
+    историята, което Brain праща (brain.sent_history, одит 2026-10-31)."""
+    return {"tools": _turn_tools(), "window": DEFAULT_CONTEXT_WINDOW, "last": last_provider_tokens,
+            "provider": current_provider, "model": current_model_id}
 
 
 _STOP_HOOK_ROUNDS = 2
@@ -2917,6 +2946,7 @@ def main():
                         with open(shown[hsel - 1], "r", encoding="utf-8") as f:
                             loaded = json.load(f)
                         messages = _restore_session(loaded, SYSTEM_PROMPT)
+                        forget_last_request()   # като /resume (одит 2026-10-31)
                         _new_session()   # продължението — в нов файл, старият остава
                         # Както /clear и /resume: /undo връщаше хода от разговора
                         # отпреди /history (одит 2026-10-22).
@@ -2950,6 +2980,7 @@ def main():
             if _res is not None:
                 if _res.messages is not None:
                     messages = _res.messages
+                    forget_last_request()   # /compact, /resume, /rewind (одит 2026-10-31)
                 if not _res.prompt:
                     continue
                 user_input = _res.prompt
