@@ -2172,6 +2172,9 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                 _red_rc = claim_check.green_claim_after_red(_unsupported, _executed)
                 if _red_rc:
                     ui.warn(f"{claim_check.RED_TESTS_WARNING} (rc={_red_rc}).")
+                _crash_rc = claim_check.works_claim_after_red(_unsupported, _executed)
+                if _crash_rc:
+                    ui.warn(f"{claim_check.RED_RUN_WARNING} (rc={_crash_rc}).")
                 break
             _text_note = ""
             for _r in tool_results:

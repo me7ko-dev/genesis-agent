@@ -324,9 +324,11 @@ def run(argv: list[str]) -> int:
         error = next(iter(chain_errors), "")
     # Зелено, казано срещу червено пускане на тестовете — неуспех, не ok:true
     # (2026-10-11: CI скрипт приемаше „Всички тестове минават“ след pytest rc=1).
-    from genesis_agent.claim_check import RED_TESTS_WARNING
+    from genesis_agent.claim_check import RED_RUN_WARNING, RED_TESTS_WARNING
     red = next((w for w in ui.warnings if w.startswith(RED_TESTS_WARNING)), "")
-    failed = bool(error or cut or red) or not answer.strip() or \
+    # „Работи“ срещу паднало пускане на кода (2026-11-05) — същото: неуспех.
+    crashed = next((w for w in ui.warnings if w.startswith(RED_RUN_WARNING)), "")
+    failed = bool(error or cut or red or crashed) or not answer.strip() or \
         answer.lstrip().startswith(("[Грешка", "Error:"))
     code = 130 if error.startswith("прекъснато") else (3 if ui.question and not failed else
                                                         1 if failed else 0)
@@ -336,7 +338,7 @@ def run(argv: list[str]) -> int:
         print(answer, file=out)
         return code
 
-    errors = list(dict.fromkeys(x for x in (error, cut, red, *chain_errors) if x))
+    errors = list(dict.fromkeys(x for x in (error, cut, red, crashed, *chain_errors) if x))
     if failed and not errors:
         errors = ["няма отговор" if not answer.strip() else answer.strip().splitlines()[0][:300]]
     models, usage, cost = _models_and_usage(
@@ -347,7 +349,7 @@ def run(argv: list[str]) -> int:
     seconds = time.monotonic() - started
     result = {"type": "result", "ok": code == 0, "is_error": code in (1, 130), "exit_code": code,
               "result": answer, "question": ui.question or None,
-              "error": error or cut or red or None, "errors": errors, "tests_red": bool(red),
+              "error": error or cut or red or crashed or None, "errors": errors, "tests_red": bool(red),
               "tools": [t["name"] for t in ui.tools], "warnings": ui.warnings,
               "models": models, "usage": usage, "cost_usd": cost, "rounds": rounds,
               "files": {k: [_shown(p, cwd) for p in v] for k, v in changes.items()},

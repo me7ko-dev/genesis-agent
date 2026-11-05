@@ -660,6 +660,20 @@ def green_claim_after_red(claims: list[Claim], executed: list[tuple[str, str]]) 
     return 0
 
 
+# Същото за „работи“ срещу паднало последно пускане на кода (2026-11-05):
+# `genesis -p` го брои за неуспех като червените тестове.
+RED_RUN_WARNING = "⚠ Отговорът твърди, че кодът работи, а последното му пускане е паднало"
+
+
+def works_claim_after_red(claims: list[Claim], executed: list[tuple[str, str]]) -> int:
+    """rc на последното пускане на кода, ако сред `claims` има „работи“, а то
+    е паднало; иначе 0 (и когато нищо не е пускано — там няма червено)."""
+    if not any(c.kind == _WORKS_KIND for c in claims):
+        return 0
+    runs = [e for e in executed if _is_run_entry(e)]
+    return _failed_rc(runs[-1])[1] if runs else 0
+
+
 def nudge_text(claims: list[Claim]) -> str:
     """Бележката обратно към модела. Назовава КОНКРЕТНОТО твърдение — обща
     забележка ("не си го доказал") кара слаб модел да префразира вместо да

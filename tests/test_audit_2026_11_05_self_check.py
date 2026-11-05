@@ -396,3 +396,26 @@ def test_a_crash_then_works_through_the_real_loop_gets_the_nudge(ws, monkeypatch
                  "пусни app.py", _UI())
     notes = [m["content"] for m in seen[-1] if m["role"] == "system"]
     assert any("работещ код" in n and "rc=1" in n for n in notes), notes
+
+
+def test_headless_counts_works_after_a_crash_as_a_failure(tmp_path, monkeypatch, capsys) -> None:
+    import io
+
+    from genesis_agent import headless, sandbox
+    monkeypatch.setattr(gta, "console", gta.console)
+    monkeypatch.setattr(gta, "WORKSPACE", gta.WORKSPACE)
+    monkeypatch.setattr(gs, "_WORKSPACE", gs._WORKSPACE)
+    monkeypatch.setattr(sandbox, "_POLICY", sandbox._POLICY)
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    real = gs.dispatch_tool_call
+    monkeypatch.setattr(gs, "dispatch_tool_call",
+                        lambda name, args: _CRASH if name == "RUN_CMD" else real(name, args))
+    claim = "Готово — скриптът вече работи правилно."
+    replies = iter([("", [_call("RUN_CMD", {"command": "python app.py"}, "r1")]),
+                    (claim, None), (claim, None), (claim, None)])
+    monkeypatch.setattr(gta, "ask_genesis", lambda messages, tools=None: next(replies))
+    code = headless.run(["пусни app.py", "--output-format", "json", "--cwd", str(tmp_path)])
+    data = json.loads(capsys.readouterr().out)
+    assert code == 1 and data["is_error"] is True
+    assert any(e.startswith(claim_check.RED_RUN_WARNING) for e in data["errors"]), data["errors"]
+    assert data["tests_red"] is False                      # не са тестове — отделен белег
