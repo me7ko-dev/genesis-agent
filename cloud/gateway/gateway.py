@@ -525,25 +525,39 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send(404, _err("само POST /<доставчик>/chat/completions"))
 
+    def _refuse(self, status: int, body: bytes, length: int) -> None:
+        # Отказ с непрочетено тяло и затворена връзка праща RST (лаптопът
+        # 2026-11-05): клиентът с 200 KB разговор губеше 401/429 в 47 от 50 проби
+        # (WinError 10053) — „мрежова грешка“ вместо „бюджетът е изчерпан“. Тялото
+        # се изхвърля на парчета (до MAX_BODY), без да се държи в паметта.
+        left = min(length, MAX_BODY)
+        while left > 0:
+            chunk = self.rfile.read(min(left, 65536))
+            if not chunk:
+                break
+            left -= len(chunk)
+        self._send(status, body)
+
     def do_POST(self) -> None:
-        parts = self.path.split("?")[0].strip("/").split("/")
-        if len(parts) != 3 or parts[1:] != ["chat", "completions"] or parts[0] not in UPSTREAMS:
-            self._send(404, _err("само POST /<доставчик>/chat/completions"))
-            return
-        auth = self.headers.get("Authorization", "")
-        grant = check_token(self.gw.secret, auth.removeprefix("Bearer ").strip())
-        if grant is None:
-            self._send(401, _err("невалиден или изтекъл жетон"))
-            return
-        if self.gw.ledger.used(grant.job) >= grant.budget:
-            self._send(429, _err(f"бюджетът на задачата ({grant.budget} токена) е изчерпан"))
-            return
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             length = -1
+        parts = self.path.split("?")[0].strip("/").split("/")
+        if len(parts) != 3 or parts[1:] != ["chat", "completions"] or parts[0] not in UPSTREAMS:
+            self._refuse(404, _err("само POST /<доставчик>/chat/completions"), length)
+            return
+        auth = self.headers.get("Authorization", "")
+        grant = check_token(self.gw.secret, auth.removeprefix("Bearer ").strip())
+        if grant is None:
+            self._refuse(401, _err("невалиден или изтекъл жетон"), length)
+            return
+        if self.gw.ledger.used(grant.job) >= grant.budget:
+            self._refuse(429, _err(f"бюджетът на задачата ({grant.budget} токена) е изчерпан"),
+                         length)
+            return
         if length <= 0 or length > MAX_BODY:
-            self._send(413, _err("тялото липсва или е твърде голямо"))
+            self._refuse(413, _err("тялото липсва или е твърде голямо"), length)
             return
         status, data = self.gw.forward(parts[0], self.rfile.read(length), grant)
         self._send(status, data)

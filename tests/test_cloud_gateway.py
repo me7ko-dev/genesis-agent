@@ -203,6 +203,21 @@ def test_http_stops_at_the_budget(served) -> None:
     assert code == 429 and "бюджетът" in data["error"]["message"]
 
 
+def test_a_refusal_reaches_a_client_with_a_long_conversation(served) -> None:
+    """Лаптопът 2026-11-05: test_http_refuses_what_it_should падна 1 от 20 пъти с
+    WinError 10053. Отказът (404/401/429) затваряше връзката с непрочетено тяло →
+    RST, и клиентът с 200 KB разговор губеше отговора в 47 от 50 проби — задача на
+    края на бюджета виждаше мрежова грешка вместо „бюджетът е изчерпан“."""
+    g, _, post = served
+    big = b'{"model": "m", "messages": "' + b"a" * 200_000 + b'"}'
+    spent = gw.make_token(SECRET, "job2", budget=100, ttl=60)
+    g.ledger.add("job2", "groq", "m", {"total_tokens": 100})
+    for _ in range(5):
+        assert post("/groq/chat/completions", "gsk_stolen_real_key", body=big)[0] == 401
+        assert post("/evil/chat/completions", spent, body=big)[0] == 404
+        assert post("/groq/chat/completions", spent, body=big)[0] == 429
+
+
 # ── агентът вика шлюза ────────────────────────────────────────────────────────
 
 def test_the_agent_goes_through_the_gateway_when_asked(monkeypatch) -> None:
