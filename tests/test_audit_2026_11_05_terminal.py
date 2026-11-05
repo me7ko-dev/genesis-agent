@@ -25,8 +25,10 @@ _PAYLOAD = (f"README ред 1\n{_OSC52}\x1b]0;hacked\x1b\\\x1b[2J\x1b[H"
 @pytest.fixture
 def screen(monkeypatch) -> io.StringIO:
     buf = io.StringIO()
+    # legacy_windows=False: на Windows CI Rich иначе може да рисува през win32 API,
+    # без ANSI — тестът е за текста, който стига до терминала, еднакво навсякъде.
     monkeypatch.setattr(gta, "console", Console(file=buf, force_terminal=True, width=120,
-                                                color_system="truecolor"))
+                                                color_system="truecolor", legacy_windows=False))
     return buf
 
 
