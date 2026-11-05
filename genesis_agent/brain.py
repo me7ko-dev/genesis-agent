@@ -304,6 +304,35 @@ def _request_size(messages: list[dict], tools: list[dict] | None) -> int:
     return len(json.dumps([messages, tools], ensure_ascii=False, default=str))
 
 
+def sent_history(provider: str, messages: Any, *, model: str = "",
+                 tools: bool = True) -> list[dict]:
+    """Историята, каквато Brain.complete я праща на `provider` — за /context.
+
+    Одит 2026-10-31: /context броеше пълната история, а заявката е свитото
+    копие. Обичаен ход с groq (10 READ_FILE по ~7.9K и един RUN_CMD) показваше
+    74% от 32K и „/compact“, а към groq тръгваха 35%: budget_history оставя
+    цели само двата най-нови изхода. Същите стъпки и в същия ред като в
+    complete (без превода за текстов режим и за модел, който не вижда
+    картинки); сверява ги test_the_counted_conversation_is_the_one_brain_complete_sends.
+    """
+    from genesis_agent import vision
+    from genesis_agent.budget import budget_history, cache_history, cache_stable_history
+    from genesis_agent.config import (
+        CACHE_HISTORY_MAX_CHARS,
+        CACHE_HISTORY_MAX_CHARS_FREE,
+        CACHE_PROVIDERS,
+    )
+    msgs = vision.elide_old_images(list(messages))
+    if provider == "claude_cli":
+        stable = cache_stable_history(msgs)
+        return stable if stable is not None else budget_history(msgs)
+    if tools and (provider in _NATIVE_PROVIDERS or provider in CACHE_PROVIDERS
+                  or f"{provider}::{model}" in CACHE_PROVIDERS):
+        return cache_history(msgs, max_chars=(CACHE_HISTORY_MAX_CHARS if provider in _NATIVE_PROVIDERS
+                                              else CACHE_HISTORY_MAX_CHARS_FREE))
+    return budget_history(msgs)
+
+
 def _openai_usage(usage: Any) -> Any:
     """usage от OpenAI-съвместим отговор + `cached_read_tokens` за budget.py.
 

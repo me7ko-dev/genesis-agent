@@ -385,6 +385,7 @@ def cmd_load_history(arg: dict, ctx: CommandContext) -> dict:
     system = ctx.get_messages()[0]["content"]
     messages = gta._restore_session(loaded, system)
     ctx.set_messages(messages)
+    gta.forget_last_request()   # размерът на заявката е на стария разговор (одит 2026-10-31)
     # Следващите ходове се пишат в нов файл: старата сесия остава непокътната.
     # _new_session(), не само session_start_time (одит 2026-10-22): файлът на
     # разговора се помни в _SESSION_FILE и следващият ход презаписваше
