@@ -295,8 +295,7 @@ def count_usage(usage: dict | None, messages, reply_text: str) -> None:
         prompt = usage.get("prompt_tokens", 0) or 0
         completion = usage.get("completion_tokens", 0) or 0
     else:
-        from genesis_agent.vision import content_chars  # картинка ≈ 1.5K, не base64
-        prompt = sum(content_chars(m.get("content")) // 4 for m in messages)
+        prompt = _history_tokens(messages)
         completion = estimate_tokens(reply_text or "")
     total_input_tokens += prompt
     total_output_tokens += completion
@@ -309,14 +308,23 @@ def reset_usage() -> None:
     total_input_tokens = total_output_tokens = last_context_tokens = last_provider_tokens = 0
 
 
-def forget_last_request() -> None:
-    """Историята е сменена (/compact, /resume, /rewind, /history, телефонът):
-    размерът на последната заявка е на разговор, който го няма. Σ остава — тези
-    токени са похарчени. Одит 2026-10-31: след /compact (21 → 6 съобщения)
-    /context показваше новите ~7.9K до „по доставчика: 31.1K“, а статус редът —
-    „ctx 31K/131K (23%)“ до следващата заявка."""
+def _history_tokens(messages) -> int:
+    """Оценка на историята: ~4 знака на токен, картинка ≈ 1.5K, не base64."""
+    from genesis_agent.vision import content_chars
+    return sum(content_chars(m.get("content")) // 4 for m in messages)
+
+
+def forget_last_request(messages=None) -> None:
+    """Историята е сменена (/compact, /resume, /rewind, /history, /undo,
+    компресията след хода, телефонът): размерът на последната заявка е на
+    разговор, който го няма. Σ остава — тези токени са похарчени. Одит
+    2026-10-31: след /compact (21 → 6 съобщения) /context показваше новите
+    ~7.9K до „по доставчика: 31.1K“, а статус редът — „ctx 31K/131K (23%)“.
+    Статус редът взема оценката на новата история, не 0 (прегледът,
+    2026-11-05: след /undo — същият разговор с бележка — показваше „ctx 0“)."""
     global last_context_tokens, last_provider_tokens
-    last_context_tokens = last_provider_tokens = 0
+    last_provider_tokens = 0
+    last_context_tokens = _history_tokens(messages) if messages is not None else 0
 
 
 def _fmt_k(n: int) -> str:
@@ -2272,6 +2280,9 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
     try:
         messages = _compact_messages(messages)
         if len(messages) < before_len:
+            # Както /compact: „по доставчика“ оставаше на заявката отпреди
+            # компресията (прегледът на одита, 2026-11-05).
+            forget_last_request(messages)
             ui.info(f"🗜 История компресирана ({before_len} → {len(messages)} съобщения)")
             # Компресията е моментът, в който старото съдържание се изхвърля —
             # записваме трайното от НЕкомпресираната история, докато я имаме.
@@ -2966,7 +2977,7 @@ def main():
                         with open(shown[hsel - 1], "r", encoding="utf-8") as f:
                             loaded = json.load(f)
                         messages = _restore_session(loaded, SYSTEM_PROMPT)
-                        forget_last_request()   # като /resume (одит 2026-10-31)
+                        forget_last_request(messages)   # като /resume (одит 2026-10-31)
                         _new_session()   # продължението — в нов файл, старият остава
                         # Както /clear и /resume: /undo връщаше хода от разговора
                         # отпреди /history (одит 2026-10-22).
@@ -2998,7 +3009,7 @@ def main():
             if _res is not None:
                 if _res.messages is not None:
                     messages = _res.messages
-                    forget_last_request()   # /compact, /resume, /rewind (одит 2026-10-31)
+                    forget_last_request(messages)   # /compact, /resume, /rewind, /undo (одит 2026-10-31)
                 if not _res.prompt:
                     continue
                 user_input = _res.prompt

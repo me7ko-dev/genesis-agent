@@ -237,7 +237,8 @@ def test_replacing_the_history_forgets_the_old_request_size(chat, command):
     shown = [ln for ln in printed.splitlines() if "по доставчика" in ln]
     assert shown == ["Последната заявка по доставчика: 31.0K токена (с отговора)"], printed
     assert "по доставчика" not in printed.rsplit("Контекст:", 1)[1], printed
-    assert gta.get_context_stats()[0] == 0
+    # Статус редът — оценката на новата история, не 0 (прегледът, 2026-11-05).
+    assert 0 < gta.get_context_stats()[0] < 1000
     assert gta.total_input_tokens + gta.total_output_tokens == 31000
 
 
@@ -335,7 +336,8 @@ def test_compact_from_the_phone_forgets_the_old_request_size(chat, monkeypatch):
     monkeypatch.setattr(rs.RemoteServer, "__init__", init)
     monkeypatch.setattr(rs.RemoteServer, "make_http", lambda self, h, p: FakeHTTP())
     assert rs.serve(["--port", "0"]) == 0
-    assert seen == {"before": 31000, "after": (0, 0)}
+    assert seen["before"] == 31000
+    assert seen["after"][0] == 0 and 0 < seen["after"][1] < 1000, seen
 
 
 def test_loading_a_conversation_on_the_desktop_forgets_the_old_request_size(monkeypatch):
@@ -351,5 +353,62 @@ def test_loading_a_conversation_on_the_desktop_forgets_the_old_request_size(monk
     ctx = dc.CommandContext(get_messages=lambda: state["m"], set_messages=lambda m: state.update(m=m),
                             busy=lambda: False, emit=lambda k, **d: None)
     assert dc.run("load_history", {"file": old.name}, ctx)["ok"]
-    assert (gta.context_info()["last"], gta.get_context_stats()[0]) == (0, 0)
+    assert gta.context_info()["last"] == 0
+    assert gta.get_context_stats()[0] == gta._history_tokens(state["m"])
+    assert gta.total_input_tokens == 30600
+
+
+# ── Прегледът (2026-11-05): автоматичната компресия и /undo ──
+
+
+def test_undo_keeps_the_status_bar_on_the_same_conversation(chat, monkeypatch):
+    """/undo само добавя бележка към същия разговор, а статус редът ставаше
+    „ctx 0/131K (0%)“ до следващата заявка — забравянето го нулираше."""
+    from genesis_agent import edit_history
+    monkeypatch.setattr(edit_history, "pending", lambda: ["app.py"])
+    monkeypatch.setattr(edit_history, "undo", lambda: ("направи нещо", ["app.py"]))
+    printed = chat.drive("направи нещо", "/undo", "")
+    assert "Върнат ходът" in printed, printed
+    assert gta.context_info()["last"] == 0
+    assert gta.get_context_stats()[0] > 5000
+
+
+def test_the_automatic_compaction_after_a_turn_forgets_the_old_request(tmp_path, monkeypatch):
+    """Компресията в края на хода (над 16 съобщения) сменя историята като
+    /compact, но „по доставчика“ оставаше на заявката отпреди нея."""
+    root = tmp_path / "proj"
+    (root / ".git").mkdir(parents=True)
+    import genesis_skills as gs
+    from genesis_agent import hooks
+    monkeypatch.setattr(gs, "_WORKSPACE", root)
+    monkeypatch.setattr(gta, "WORKSPACE", root)
+    monkeypatch.setattr(gta, "_remember", lambda *a: None)
+    monkeypatch.setattr(hooks, "fire", lambda *a, **k: hooks.Outcome())
+    for name in ("total_input_tokens", "total_output_tokens", "last_context_tokens"):
+        monkeypatch.setattr(gta, name, 0)
+    monkeypatch.setattr(gta, "last_provider_tokens", 0, raising=False)
+
+    def ask(messages, tools=None):
+        gta.count_usage({"prompt_tokens": 30600, "completion_tokens": 400}, messages, "ок")
+        return "ок", None
+    monkeypatch.setattr(gta, "ask_genesis", ask)
+    short = deque([{"role": "system", "content": "SYS"},
+                   {"role": "system", "content": "## Резюме на по-ранния разговор:\nок"}],
+                  maxlen=gta._HISTORY_MAXLEN)
+    monkeypatch.setattr(gta, "_compact_messages", lambda messages: short)
+
+    class UI(gta.TurnUI):
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    try:
+        out = gta.run_turn(deque([{"role": "system", "content": "SYS"}],
+                                 maxlen=gta._HISTORY_MAXLEN), "здрасти", UI())
+    finally:
+        gs._set_agent_scope(None)
+        gs._set_cancel(None)
+        hooks.workspace = None
+    assert any("Резюме" in str(m.get("content")) for m in out), list(out)
+    assert gta.context_info()["last"] == 0
+    assert gta.get_context_stats()[0] == gta._history_tokens(short)
     assert gta.total_input_tokens == 30600

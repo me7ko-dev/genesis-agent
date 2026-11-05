@@ -1569,7 +1569,7 @@ def serve(args: list[str]) -> int:
         if messages is not state["messages"]:
             # /compact, /resume, /rewind от телефона: размерът на последната
             # заявка е на стария разговор (одит 2026-10-31), както в терминала.
-            gta.forget_last_request()
+            gta.forget_last_request(messages)
         state["messages"] = messages
         if prompt is not None:
             try:
