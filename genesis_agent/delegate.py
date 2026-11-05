@@ -56,6 +56,9 @@ CANCELLED_NOTE = ("⏹ Спряно от оператора — под-аген�
 # (така стига Ctrl-C на Windows до 3.14 — не буди дълго чакане) — чак когато
 # мисията свърши, след като тя записа умението.
 _POLL_S = 0.1
+# Колко въпросът на задачата чака да се появи wait_all, преди да се зададе в
+# нишката ѝ (задача, която никой не чака).
+_WAITER_GRACE_S = 1.0
 
 
 @dataclass
@@ -103,7 +106,10 @@ class DelegatedTask:
         направо, както досега. След спиране — отказ без въпрос."""
         if self.stopped():
             return False
-        if not self._waited.is_set():
+        # wait_all идва веднага след delegate_task, но нишката е пусната преди
+        # него и може да стигне до въпроса първа (ревю 2026-11-05: под товар 7
+        # от 30 пускания питаха в нишката на задачата) — затова кратко чакане.
+        if not self._waited.wait(_WAITER_GRACE_S):
             return question()
         ask = _Ask(question)
         self._asks.put(ask)
@@ -181,13 +187,13 @@ def _run_autonomous(goal: str, timeout: int | None = None,
     """Изпълнява задача чрез Genesis autonomous_loop — до `timeout` секунди
     или докато `should_stop()` не каже да спре."""
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from genesis_agent.autonomous_loop import run_autonomous_loop
+    from genesis_agent.autonomous_loop import rounds_text, run_autonomous_loop
     deadline = time.time() + timeout if timeout else None
     out = run_autonomous_loop(goal, operator_id="DELEGATE", deadline=deadline,
                               should_stop=should_stop)
     if out.success:
         name = Path(out.skill_path).name if out.skill_path else "(без файл)"
-        return f"✅ Готово за {out.rounds} рунда → {name}"
+        return f"✅ Готово за {rounds_text(out.rounds)} → {name}"
     # Причината, не само броят (одит 2026-10-31): „неуспешен след 8 опита.“
     # беше и при веригата без ключове след 1 извикване, и при отказ на
     # GENE-ETHICS/GENE-AUTHORITY след 0 — моделът нямаше какво да поправи и
@@ -196,7 +202,7 @@ def _run_autonomous(goal: str, timeout: int | None = None,
     cause = (out.reason or out.last_stderr or "").strip()
     if len(cause) > 800:
         cause = "…" + cause[-800:]
-    raise RuntimeError(f"Под-агентът не успя след {out.rounds} рунда. "
+    raise RuntimeError(f"Под-агентът не успя след {rounds_text(out.rounds)}. "
                        f"Причина: {cause or 'без подробности'}")
 
 
@@ -235,6 +241,9 @@ def _worker(task: DelegatedTask, timeout: int, on_done: Callable | None):
         log.error(f"[delegate] ❌ Task {task.id[:8]} провален: {e}")
     finally:
         sandbox.bind_thread(None, None)
+        # `_TASKS` не се чисти, а проверката държи UI-я на хода (на телефона —
+        # RemoteSession) до края на процеса (прегледът, 2026-11-05).
+        task.should_stop = None
         task.finished_at = time.time()
         if on_done:
             try:
@@ -330,8 +339,11 @@ def wait_all(tasks: list[DelegatedTask], timeout: int = 300) -> list[DelegatedTa
                 if task.thread is not None:
                     task.thread.join(min(_POLL_S, remaining))
     except BaseException:
-        # Ctrl-C: под-агентът спира с хода, а не продължава в нишката си.
-        for task in running():
+        # Ctrl-C: под-агентът спира с хода, а не продължава в нишката си. Всички,
+        # не running(): до 3.13 join(), прекъснат от Ctrl-C, маркира живата нишка
+        # като свършила (bpo-45274) и is_alive() връща False — ревю 2026-11-05,
+        # измерено на 3.10 и 3.12: мисията вика модела още 2 пъти и записва умението.
+        for task in tasks:
             _halt(task, TaskStatus.CANCELLED)
         raise
     finally:

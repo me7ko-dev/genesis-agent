@@ -205,6 +205,12 @@ def _past_deadline() -> bool:
     return deadline is not None and time.time() > deadline
 
 
+def rounds_text(n: int) -> str:
+    """„1 рунд“, „2 рунда“ — DELEGATE и известията казваха „след 1 рунда“
+    (прегледът на одита, 2026-11-05)."""
+    return f"{n} рунд" if n == 1 else f"{n} рунда"
+
+
 def _halt_reason() -> str:
     """Защо мисията трябва да спре СЕГА („“ — не трябва): Стоп/Ctrl-C на
     оператора (`should_stop`) или изтекъл краен срок. Одит 2026-10-31: срокът
@@ -212,14 +218,16 @@ def _halt_reason() -> str:
     преди него и дошъл след него, пак се изпълняваше (кодът, verify_skill,
     критикът, инструментите), след като DELEGATE беше казал „timeout“; а Стоп
     не стигаше до мисията изобщо."""
+    # Срокът пръв: при таймаут wait_all вдига и `cancel`, а с него `should_stop`
+    # казва „да“ — причината излизаше „спряно от оператора“ (прегледът, 2026-11-05).
+    if _past_deadline():
+        return "времето на делегираната задача изтече"
     check = getattr(_CTX, "should_stop", None)
     try:
         if check is not None and check():
             return "спряно от оператора"
     except Exception:
         log.debug("проверката за спиране се провали", exc_info=True)
-    if _past_deadline():
-        return "времето на делегираната задача изтече"
     return ""
 
 
@@ -272,10 +280,10 @@ def _run_and_report(goal: str, *, max_rounds: int | None, skill_slug: str | None
         # `@` оставяше адрес, който notify() вече не познава като тайна.
         shown = redact(goal)[:200]
         if outcome.success:
-            notify(f"✅ **Genesis** изпълни мисия за {outcome.rounds} рунда\n"
+            notify(f"✅ **Genesis** изпълни мисия за {rounds_text(outcome.rounds)}\n"
                    f"🎯 {shown}\n📦 {outcome.skill_path}")
         else:
-            notify(f"❌ **Genesis** не успя с мисия след {outcome.rounds} рунда\n"
+            notify(f"❌ **Genesis** не успя с мисия след {rounds_text(outcome.rounds)}\n"
                    f"🎯 {shown}")
     except Exception:
         log.debug("известието за мисията не замина", exc_info=True)

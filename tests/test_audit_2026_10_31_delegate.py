@@ -81,9 +81,13 @@ def _after(moment: float, times: list[float]) -> list[float]:
 
 
 def _join_missions(limit: float = 15.0) -> None:
+    # По finished_at, не с thread.join (ревю 2026-11-05): до 3.13 join, прекъснат
+    # от Ctrl-C, вижда живата нишка като свършила и връща веднага — тестовете
+    # минаваха на 3.10/3.12, докато мисията още викаше модела и пускаше код.
+    end = time.monotonic() + limit
     for task in dm.list_tasks():
-        if task.thread is not None:
-            task.thread.join(limit)
+        while task.finished_at is None and time.monotonic() < end:
+            time.sleep(0.02)
 
 
 @pytest.fixture
@@ -241,6 +245,35 @@ def test_a_question_from_the_mission_is_asked_in_the_waiting_thread(rec, monkeyp
     assert asked_in == [threading.current_thread().name], (asked_in, out)
 
 
+def test_a_question_asked_before_wait_all_starts_still_goes_to_the_waiter(
+        rec, monkeypatch, tmp_path) -> None:
+    """Нишката на мисията е пусната преди wait_all и може да стигне до въпроса
+    първа (ревю 2026-11-05: под товар 7 от 30 пускания питаха в нишката ѝ)."""
+    sbx = tmp_path / "sbx"
+    monkeypatch.setattr("genesis_agent.config.SANDBOX_DIR", sbx)
+    monkeypatch.setattr(executor, "SANDBOX_DIR", sbx)
+    monkeypatch.setattr(al, "run_python_subprocess", executor.run_python_subprocess)
+    asked_in: list[str] = []
+
+    def confirm(operation: str, verdict) -> bool:
+        asked_in.append(threading.current_thread().name)
+        return False
+
+    monkeypatch.setattr(sandbox, "_POLICY",
+                        sandbox.SandboxPolicy(mode="interactive", confirm_fn=confirm))
+    needs_ok = "import subprocess\nsubprocess.run(['git', '--version'])\nprint('OK')\n"
+    _Brain.script = lambda n: _code(needs_ok) if n == 0 else _text("няма код")
+    real_wait = dm.wait_all
+
+    def late_wait(tasks, timeout=300):
+        time.sleep(0.3)   # главната нишка закъснява (товар)
+        return real_wait(tasks, timeout)
+
+    monkeypatch.setattr(dm, "wait_all", late_wait)
+    out = genesis_skills.dispatch_tool_call("DELEGATE", {"goal": "напиши скрипт"})
+    assert asked_in == [threading.current_thread().name], (asked_in, out)
+
+
 # ── a2. След „timeout“ отговорът от рунда не се изпълнява ────────────────────
 
 def test_a_reply_that_arrives_after_the_deadline_is_not_executed(rec) -> None:
@@ -329,3 +362,36 @@ def test_an_empty_text_tag_is_refused_too(rec) -> None:
     out = genesis_skills.parse_and_execute_tools("[DELEGATE: ]")
     assert any("Празна цел" in r for r in out), out
     assert _Brain.started == [] and dm.list_tasks() == []
+
+
+# ── Прегледът (2026-11-05): дреболиите ──
+
+
+def test_one_round_is_said_in_the_singular(rec) -> None:
+    """„след 1 рунда“ → „след 1 рунд“ (2 рунда, 5 рунда остават)."""
+    _Brain.script = lambda n: _text("Error: цялата верига е изчерпана (няма ключове)")
+    out = genesis_skills.dispatch_tool_call("DELEGATE", {"goal": "напиши fizzbuzz скрипт"})
+    assert "след 1 рунд." in out, out
+    assert [al.rounds_text(n) for n in (1, 2, 8)] == ["1 рунд", "2 рунда", "8 рунда"]
+
+
+def test_a_finished_task_lets_go_of_the_turn_that_started_it(rec) -> None:
+    """`_TASKS` не се чисти, а всяка задача държеше `should_stop` — с него UI-я на
+    хода и на телефона RemoteSession — до края на процеса."""
+    _Brain.script = lambda n: _code(_PASS) if n == 0 else _text("YES")
+    task = dm.delegate_task("напиши скрипт", agent="autonomous", timeout=30,
+                            should_stop=lambda: False)
+    dm.wait_all([task], timeout=30)
+    _join_missions()
+    assert task.status == dm.TaskStatus.DONE
+    assert task.should_stop is None
+
+
+def test_a_timeout_is_not_reported_as_the_operators_stop(monkeypatch) -> None:
+    """wait_all при таймаут вдига `cancel` и `should_stop` казва „да“ —
+    причината в task.error и в дневника беше „спряно от оператора“."""
+    monkeypatch.setattr(al._CTX, "should_stop", lambda: True, raising=False)
+    monkeypatch.setattr(al._CTX, "deadline", time.time() - 1, raising=False)
+    assert al._halt_reason() == "времето на делегираната задача изтече"
+    monkeypatch.setattr(al._CTX, "deadline", None, raising=False)
+    assert al._halt_reason() == "спряно от оператора"
