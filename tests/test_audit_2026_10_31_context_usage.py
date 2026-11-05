@@ -155,7 +155,9 @@ def test_view_image_and_page_check_attachments_are_tool_output():
     # Трите реплики са 43 знака; снимките (3 прикачвания) — изходи на инструменти.
     assert "твоите съобщения 3 ~10," in text, text
     assert "изходи на инструменти 5 " in text, text
-    assert "най-голям: VIEW_IMAGE ~12.0K" in text, text
+    # ~10.6K, не ~12.0K: най-старата снимка Brain маха за всеки доставчик и
+    # без доставчик не се брои (сливането с #108, 2026-11-05).
+    assert "най-голям: VIEW_IMAGE ~10.6K" in text, text
     only_page = context_usage.report(list(msgs)[:1] + list(msgs)[-1:], [])
     assert "най-голям: снимки на страницата от проверката в…" in only_page, only_page
 

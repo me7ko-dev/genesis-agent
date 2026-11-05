@@ -146,8 +146,8 @@ API_TOKEN_RE = re.compile(
 #     познаваше, а debug.log пазеше InvalidURL с него. Върви първи: `token
 #     <id>:AA…` иначе ставаше `token ***:AA…` — правилото за bearer спира на `:`;
 #   • `BYPASS:`/`COMPASS:` в главни и `--- PASS: TestX` (go test) ставаха
-#     `X=***`. Слепен отпред с главни букви вече е само дългият ключ
-#     (PGPASSWORD, APIKEY), а голото `PASS:`/`PAT:` в главни е изход, не тайна.
+#     `X=***`. Слепени отпред с главни букви са само силните думи (PGPASSWORD,
+#     PGPassword, JWTSecret, VAULTtoken), а `--- PASS:` е изход, не тайна.
 #
 # Стойността е цялата shell дума: части в кавички и слепените за тях (след
 # прегледа, 2026-11-05). С `"…"|'…'|\S+` маскирането спираше на първата
@@ -167,7 +167,10 @@ def _tool_flag(tools: str, flag: str) -> re.Pattern[str]:
 
     До 300 знака между програмата и флага: без таван ред от 30 000 знака
     `mysql mysql …` (debug.log) отнемаше 1.2 s, с него — 0.03 s (2026-10-31)."""
-    return re.compile(rf"(?<![\w.-])((?:{tools})(?:\.exe)?\b[^\n|;&]{{0,300}}?\s{flag})"
+    # Името — без значение на регистъра (сливането с #108, 2026-11-05):
+    # `MySQL.exe -uroot -phunter2` на Windows минаваше; флагът остава точен
+    # (`mysql -P 3306` е порт).
+    return re.compile(rf"(?<![\w.-])((?i:{tools})(?i:\.exe)?\b[^\n|;&]{{0,300}}?\s{flag})"
                       rf"(?=[^\s-]){_VALUE}")
 
 
@@ -233,7 +236,7 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str] | Callable[[str], str]] = [
     # `go test` остава. Слепено отпред — само пред силна дума: `TURKEY:`,
     # `MONKEY:` не са ключове.
     (re.compile(r"(?i)(?<!--- )\b((?:[A-Z0-9]+_)*"
-                r"(?:(?-i:[A-Z0-9]+)(?=(?-i:PASSWORD|PASSWD|TOKEN|SECRET)(?![A-Za-z]))|api|auth|access|db)?"
+                r"(?:(?-i:[A-Z0-9]+)(?=(?:PASSWORD|PASSWD|TOKEN|SECRET)(?![A-Za-z]))|api|auth|access|db)?"
                 r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|PASS|PAT|DSN)(?![A-Za-z])[A-Z0-9_]*)"
                 rf"\s*[=:]\s*{_VALUE}"),
      r"\1=***"),

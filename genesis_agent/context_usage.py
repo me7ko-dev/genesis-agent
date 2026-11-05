@@ -108,6 +108,7 @@ def report(messages: Any, tools: list | None = None, window: int = 0,
            last_tokens: int = 0, provider: str | None = None, model: str = "") -> str:
     """`provider` (и `model`) — броим копието, което Brain.complete праща на
     него (brain.sent_history); None — историята, както е подадена."""
+    from genesis_agent import vision
     msgs = [m for m in list(messages or []) if isinstance(m, dict)]
     stored = msgs
     if provider is not None:
@@ -122,11 +123,9 @@ def report(messages: Any, tools: list | None = None, window: int = 0,
         # Без доставчик — поне картинките от по-стари ходове, които Brain.complete
         # маха за ВСЕКИ доставчик преди всичко друго (vision.elide_old_images).
         # Одит 2026-11-04: 20 хода със снимка → „Разговор ~30.1K“, а отиват 3 (~4.5K).
-        from genesis_agent import vision as _vision
-        msgs = _vision.elide_old_images(msgs)
+        msgs = vision.elide_old_images(msgs)
     system, rest = _without_system(msgs)
 
-    from genesis_agent import vision
     names: dict[str, str] = {}
     user = assistant = results = notes = 0
     n_user = n_assistant = n_results = n_notes = 0

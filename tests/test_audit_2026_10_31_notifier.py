@@ -400,3 +400,24 @@ def test_user_pass_at_rule_masks_exactly_what_the_old_regex_masked() -> None:
     for s in ["me:pw@host", "x.user:pass@h.com", "/a-user:pw@host", "@a.b:c@d",
               "git@github.com:org/r", "a:b@", "a:b@-x", "ftp://u:p@h"]:
         assert notifier._mask_user_pass_at(s) == _OLD_USERPASS.sub("***@", s), s
+
+
+# ── 11. Сливането с #108 (2026-11-05): регистърът ──
+
+
+@pytest.mark.parametrize("text", [
+    "PGPassword=hunter2 psql",
+    "SMTPPassword: hunter2",
+    "JWTSecret=hunter2",
+    "VAULTtoken=hunter2",
+    r"C:\MySQL\bin\MySQL.exe -uroot -phunter2 shop",
+    "MYSQL -uroot -phunter2",
+    "Sshpass -phunter2 ssh h",
+])
+def test_mixed_case_keys_and_program_names_are_still_masked(text) -> None:
+    assert "hunter2" not in redact(text), redact(text)
+
+
+@pytest.mark.parametrize("text", ["TURKEY: Istanbul", "HOTKEY: F5", "mysql -P 3306 -h db"])
+def test_mixed_case_rules_leave_ordinary_text_alone(text) -> None:
+    assert redact(text) == text

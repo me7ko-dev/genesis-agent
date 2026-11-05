@@ -258,17 +258,41 @@ def _parse_llm_json(raw: str) -> dict[str, Any]:
     if text.startswith("```"):
         text = text.strip("`")
         text = text.removeprefix("json")
-    result: dict[str, Any]
+    result: Any
     try:
         result = json.loads(text.strip())
     except ValueError:
         from genesis_agent.llm_api import extract_json_object
 
         found = extract_json_object(text)
-        if found is None:
-            raise  # няма обект — fail-open горе, както досега
-        result = json.loads(found)
+        result = json.loads(found) if found is not None else None
+    # Първият обект със секция от схемата (сливането с #108, 2026-11-05):
+    # „Пример: {"a": 1}. Графът: {…}“, `[{…}]` на върха и `{` без двойка в
+    # прозата даваха {"a": 1}, TypeError или JSONDecodeError — графът не растеше.
+    if not _has_section(result):
+        result = _first_graph_object(text) or result
+    if result is None:
+        raise ValueError("няма JSON обект")  # fail-open горе, както досега
     return result
+
+
+_SECTIONS = ("entities", "relations", "states")
+
+
+def _has_section(obj: Any) -> bool:
+    return isinstance(obj, dict) and any(k in obj for k in _SECTIONS)
+
+
+def _first_graph_object(text: str) -> dict[str, Any] | None:
+    decoder = json.JSONDecoder()
+    for start in [i for i, ch in enumerate(text) if ch == "{"][:200]:
+        try:
+            obj, _ = decoder.raw_decode(text, start)
+        except (ValueError, RecursionError):
+            continue
+        if _has_section(obj):
+            return obj
+    return None
 
 
 def _items(extracted: dict[str, Any], key: str) -> list[dict[str, Any]]:

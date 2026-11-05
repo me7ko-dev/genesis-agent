@@ -558,3 +558,17 @@ def test_old_facts_carry_their_age_in_the_briefing(graph_path) -> None:
     assert "- Деплой: блокиран до ревю (преди 244 дни)" in lines
     assert "- Миграцията BLOCKS Деплоя (преди 244 дни)" in lines
     assert "- БД: оправена" in lines
+
+
+# ── Сливането с #108 (2026-11-05): първият обект със секция от схемата ──
+
+
+@pytest.mark.parametrize("raw", [
+    'Пример: {"a": 1}. Графът: {"entities": [{"name": "Redis", "type": "db"}]}',
+    '{"note": "x"} {"entities": [{"name": "Redis", "type": "db"}]}',
+    'Ето {непълно. {"entities": [{"name": "Redis", "type": "db"}]}',
+    '[{"entities": [{"name": "Redis", "type": "db"}]}]',
+])
+def test_the_graph_object_is_found_after_other_json_in_the_reply(raw) -> None:
+    got = kg._parse_llm_json(raw)
+    assert got["entities"][0]["name"] == "Redis", got

@@ -200,18 +200,7 @@ class LoopOutcome:
 _CTX = threading.local()
 
 
-def _cancelled() -> bool:
-    cancel = getattr(_CTX, "cancel", None)
-    return cancel is not None and cancel.is_set()
-
-
 def _past_deadline() -> bool:
-    # Спряна от оператора (Ctrl-C, „Стоп“ на телефона) е като изтекло време:
-    # нов рунд не започва и нищо не се записва. Одит 2026-11-04: след Ctrl-C в
-    # DELEGATE мисията във фоновата нишка продължаваше — измерено: 7 нови
-    # обръщения към модела за 2 s след „⏹ Прекъснато“.
-    if _cancelled():
-        return True
     deadline = getattr(_CTX, "deadline", None)
     return deadline is not None and time.time() > deadline
 
@@ -229,8 +218,6 @@ def _halt_reason() -> str:
     преди него и дошъл след него, пак се изпълняваше (кодът, verify_skill,
     критикът, инструментите), след като DELEGATE беше казал „timeout“; а Стоп
     не стигаше до мисията изобщо."""
-    if _cancelled():   # `cancel` на викащия (одит 2026-11-04) — _past_deadline също е „да“
-        return "спряно от оператора"
     # Срокът пръв: при таймаут wait_all вдига и `cancel`, а с него `should_stop`
     # казва „да“ — причината излизаше „спряно от оператора“ (прегледът, 2026-11-05).
     if _past_deadline():
@@ -252,26 +239,24 @@ def run_autonomous_loop(
     operator_id: str | None = None,
     deadline: float | None = None,
     should_stop: Callable[[], bool] | None = None,
-    cancel: threading.Event | None = None,
 ) -> LoopOutcome:
     """
     Публична обвивка: изпълнява мисията и известява резултата през notifier
     (ако са конфигурирани). Известията никога не чупят цикъла.
 
     `deadline` (time.time()) и `should_stop()` (Стоп на оператора): след тях
-    нищо не се пуска, не се вика моделът и нищо не се записва. `cancel`
-    (DELEGATE): вдигнат — същото, веднага.
+    нищо не се пуска, не се вика моделът и нищо не се записва. Ctrl-C и
+    „Стоп“ на телефона стигат дотук през should_stop (одит 2026-11-04: след
+    Ctrl-C в DELEGATE мисията правеше още 7 обръщения към модела за 2 s).
     """
     _CTX.deadline = deadline
     _CTX.should_stop = should_stop
-    _CTX.cancel = cancel
     try:
         return _run_and_report(goal, max_rounds=max_rounds, skill_slug=skill_slug,
                                operator_id=operator_id)
     finally:
         _CTX.deadline = None
         _CTX.should_stop = None
-        _CTX.cancel = None
 
 
 def _run_and_report(goal: str, *, max_rounds: int | None, skill_slug: str | None,
