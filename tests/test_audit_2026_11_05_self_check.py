@@ -17,8 +17,13 @@ import pytest
 
 import genesis_skills as gs
 import genesis_terminal_agent as gta
-from genesis_agent import agent_core, hooks
-from genesis_agent.code_check import MismatchCheck, mismatch_line
+from genesis_agent import agent_core, claim_check, hooks
+from genesis_agent.code_check import (
+    MismatchCheck,
+    TestEditCheck,
+    mismatch_line,
+    weakening,
+)
 
 # ── 1. Кой ред е разминаване ─────────────────────────────────────────────────
 
@@ -237,8 +242,6 @@ def test_the_core_loop_reads_the_mismatch_too(tmp_path) -> None:
 
 # ── 4. Тест отпреди хода, отслабен в него (code_check.TestEditCheck) ────────
 
-from genesis_agent.code_check import TestEditCheck, weakening  # noqa: E402
-
 
 @pytest.mark.parametrize("before, after", [
     ("def test_a():\n    assert add(2, 2) == 4\n", "def test_a():\n    assert add(2, 2) == 0\n"),
@@ -330,8 +333,6 @@ def test_weakening_the_operators_test_does_not_end_the_turn_as_green(ws, monkeyp
 
 # ── 5. „Работи“ след паднало пускане или без пускане (claim_check) ───────────
 
-from genesis_agent import claim_check  # noqa: E402
-
 _CRASH = ("[RUN_CMD: python app.py]  (rc=1)\nTraceback (most recent call last):\n"
           "  File \"app.py\", line 3, in <module>\nNameError: name 'rows' is not defined")
 _OK = "[RUN_CMD: python app.py]  (rc=0)\n3 реда записани"
@@ -419,3 +420,27 @@ def test_headless_counts_works_after_a_crash_as_a_failure(tmp_path, monkeypatch,
     assert code == 1 and data["is_error"] is True
     assert any(e.startswith(claim_check.RED_RUN_WARNING) for e in data["errors"]), data["errors"]
     assert data["tests_red"] is False                      # не са тестове — отделен белег
+
+
+@pytest.mark.parametrize("reply", ["Готово.", "Готово — добавих колоната.", "Done! The report is in out.csv."])
+def test_a_bare_done_after_a_crash_is_unsupported(reply) -> None:
+    assert [c.kind for c in claim_check.unsupported_claims(reply, _ran(_CRASH))] == ["работещ код"]
+
+
+@pytest.mark.parametrize("reply, executed", [
+    ("Готово.", [("WRITE_FILE", "app.py")]),                          # нищо пуснато — RunCheck
+    ("Готово.", None),                                                 # зелено след срива
+    ("Готово — невалидният вход се отхвърля с код 1.", []),
+    ("Готово, но тестът пада на празен вход.", []),
+    ("Готово ли е?", []),
+])
+def test_a_bare_done_is_left_alone_when_nothing_crashed_or_it_says_why(reply, executed) -> None:
+    ran = _ran(_CRASH, _OK) if executed is None else (executed or _ran(_CRASH))
+    assert claim_check.unsupported_claims(reply, ran) == []
+
+
+def test_done_with_red_tests_is_one_claim_not_two() -> None:
+    red = [claim_check.counts_as_executed("RUN_CMD", "python -m pytest -q",
+                                          "[RUN_CMD: python -m pytest -q]  (rc=1)\n1 failed in 0.1s")]
+    assert [c.kind for c in claim_check.unsupported_claims("Done — the tests pass.", red)] == \
+        ["минаващи тестове"]

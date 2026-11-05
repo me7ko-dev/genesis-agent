@@ -570,6 +570,13 @@ _WORKS_RE = re.compile(
     r"(?<!\bhow )(?<!\bwhat )(?:it|everything|this|that) (?:now )?works|works (?:correctly|as expected|fine|perfectly|now)|"
     r"now works|is (?:now )?working (?:now|correctly|fine|as expected)|"
     r"runs (?:successfully|without (?:any )?errors|cleanly))\b", re.IGNORECASE)
+# „Готово“/„Done“ в началото на отговора — също твърдение, че е свършено, но само
+# срещу паднало последно пускане: без пускане голото „Готово.“ след запис е
+# обичайният край на хода (RunCheck вече казва „пусни го“). Отказ на лош вход с
+# rc≠0 („Готово — невалидният вход се отхвърля с код 1“) е нарочен (_DELIBERATE).
+_DONE_RE = re.compile(r"^\W*(?:готово|свърших|завърших|done|finished|all set)\b", re.IGNORECASE)
+_DELIBERATE_RE = re.compile(r"\b(?:отхвърл\w*|невалид\w*|reject\w*|invalid|нарочно|intentional\w*|"
+                            r"(?:код|code|rc)\s*=?\s*[1-9]\d*)", re.IGNORECASE)
 # Какво доказва „работи“: пускане на кода/тестовете, проверка с curl/wget, браузър.
 _WORKS_TOOLS = frozenset({"BROWSE", "BROWSER_READ", "USE_SKILL", "DELEGATE"})
 _HTTP_CHECK_RE = re.compile(r"(?:^|[\s;&|(])(?:curl|wget|http|iwr|Invoke-WebRequest)(?=\s|$)",
@@ -590,9 +597,15 @@ def _is_run_entry(entry: tuple[str, str]) -> bool:
 def _works_claim(text: str, executed: list[tuple[str, str]]) -> Claim | None:
     """„Работи“ без пускане или след червено последно пускане на кода."""
     match = next((m for m in _WORKS_RE.finditer(text) if _pass_sentence(text, m) == _CLAIM), None)
+    done = None if match else _DONE_RE.match(text)
+    if done and (_pass_sentence(text, done) != _CLAIM or _DELIBERATE_RE.search(text)):
+        done = None
+    match = match or done
     if match is None or any(name.upper() in _WORKS_TOOLS for name, _ in executed):
         return None
     runs = [e for e in executed if _is_run_entry(e)]
+    if done and not runs:
+        return None
     # Без нищо пуснато — само ако ходът е писал: в чист разговор („от 3.12 вече
     # работи с вложени кавички“) „работи“ е обяснение, не отчет за свършено.
     if not runs and not any(name.upper() in ("WRITE_FILE", "EDIT_FILE") for name, _ in executed):
@@ -640,7 +653,10 @@ def unsupported_claims(text: str, executed: list[tuple[str, str]]) -> list[Claim
             continue
         needed = " / ".join(sorted(ok_tools - {"USE_SKILL", "DELEGATE"}))
         found.append(Claim(kind=kind, quote=_quote(text, match), needed=needed))
-    works = _works_claim(text, executed)
+    # „Done — the tests pass.“ след червено е едно твърдение, не две: за тестовете
+    # вече има бележка (и тя носи rc-то), „работи/готово“ не се добавя отгоре.
+    works = None if any(c.kind in (_PASS_KIND, _RAN_KIND) for c in found) else \
+        _works_claim(text, executed)
     if works:
         found.append(works)
     return found
