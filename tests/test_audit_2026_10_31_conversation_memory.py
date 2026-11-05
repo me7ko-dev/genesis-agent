@@ -1,8 +1,8 @@
 """Одит 2026-10-31 (шести кръг): паметта на разговора
 (genesis_agent/conversation_memory.py) — какво остава в резюмето при
-компресия и какво става, когато базата ѝ е повредена. Всеки тест падаше
-срещу кода преди поправката (възпроизведено със скриптовете на одита,
-audit6/convmem-a/)."""
+компресия (и при всяка следваща) и какво става, когато базата ѝ е повредена.
+Всеки тест падаше срещу кода преди поправката (възпроизведено със скриптовете
+на одита, audit6/convmem-a/)."""
 from __future__ import annotations
 
 import logging
@@ -90,3 +90,89 @@ def test_a_corrupt_database_is_set_aside_and_recording_continues(caplog) -> None
     assert Path(str(db) + ".corrupt").read_bytes() == junk
     assert any("conversation_memory.db" in r.getMessage() and r.levelno >= logging.WARNING
                for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+
+# ── 3. всяка следваща компресия изхвърляше предишното резюме ────────────────────
+
+
+def _summary_rows() -> list[str]:
+    return [m["content"] for m in cm.get_history(last_n=1000)
+            if m["role"] == "system" and m["content"].startswith("[Context summary]")]
+
+
+def test_a_second_compression_carries_the_first_request_forward() -> None:
+    """71 реплики → две компресии. Преди: резюмето започваше от „искане №22“,
+    заглавието казваше „21 messages from roles: assistant, system, user“, а
+    първото резюме (role=system, най-старият ред) падаше в изрязаната среда —
+    паметта покриваше само последните ~50 реплики."""
+    _chat(71)
+    summaries = _summary_rows()
+    assert len(summaries) == 1, summaries
+    summary = summaries[0]
+    assert "искане №0:" in summary, summary
+    assert "искане №40:" in summary, summary
+    # Резюмето стои за 21 + 20 реплики; самото то не е „system“ реплика.
+    assert summary.startswith("[Context summary] 41 messages from roles: assistant, user | "), summary
+
+
+def test_the_header_plus_the_kept_rows_always_account_for_every_message() -> None:
+    """Истинският ход в терминала: една реплика на човека и 2-3 на модела
+    (инструменти). Преди: първата компресия пазеше „искане №0“, втората и
+    третата го губеха, а бройката в заглавието падаше обратно на ~21."""
+    added = 0
+    for turn in range(40):
+        cm.add_message("user", f"искане №{turn}: оправи модул {turn}")
+        added += 1
+        for k in range(2 + turn % 2):
+            cm.add_message("assistant", f"ход {turn}.{k}: пускам тестовете ...")
+            added += 1
+    history = cm.get_history(last_n=1000)
+    summary = history[0]["content"]
+    assert history[0]["role"] == "system" and len(_summary_rows()) == 1, summary
+    count = int(summary.split()[2])
+    assert count + len(history) - 1 == added, (count, len(history), added)
+    assert "искане №0:" in summary, summary
+
+
+def test_a_carried_line_with_a_pipe_in_it_stays_whole() -> None:
+    """Реплика с „ | “ в текста си не бива да се разпада на две при пренасяне
+    в следващото резюме."""
+    first = cm._simple_summarize([
+        {"role": "user", "content": "мигрирай billing | после auth"},
+        {"role": "assistant", "content": "ок"},
+    ])
+    out = cm._simple_summarize(
+        [{"role": "system", "content": first}]
+        + [{"role": "user", "content": f"искане {i}"} for i in range(10)]
+    )
+    assert out.startswith("[Context summary] 12 messages from roles: assistant, user | "
+                          "user: мигрирай billing | после auth | … | "), out
+    assert out.endswith("user: искане 9"), out
+
+
+def test_the_gap_marker_survives_when_nothing_new_pushes_it_out() -> None:
+    """Предишното резюме е „първата | … | последните“. Ако новият блок няма
+    реплики на човека, пренесените пак се събират — но „…“ трябва да остане,
+    иначе „стъпка 0 | стъпка 13“ изглежда като два поредни хода."""
+    first = cm._simple_summarize([{"role": "user", "content": f"стъпка {i}"} for i in range(20)])
+    assert "user: стъпка 0 | … | user: стъпка 13" in first, first
+    out = cm._simple_summarize(
+        [{"role": "system", "content": first}]
+        + [{"role": "assistant", "content": f"отговор {i}"} for i in range(3)]
+    )
+    assert out.startswith("[Context summary] 23 messages from roles: assistant, user | "
+                          "user: стъпка 0 | … | user: стъпка 13"), out
+    assert "стъпка 19" in out, out
+    entries = out.split(" | ")[1:]
+    assert len([e for e in entries if e != "…"]) <= cm._SUMMARY_MAX_ITEMS, out
+
+
+def test_a_real_system_message_is_still_counted_and_summarised() -> None:
+    """Само ред, който Е резюме, се разгъва; обикновена system реплика остава
+    реплика — с ролята си в заглавието."""
+    out = cm._simple_summarize([
+        {"role": "system", "content": "ти си асистент за миграции"},
+        {"role": "user", "content": "почни"},
+    ])
+    assert out.startswith("[Context summary] 2 messages from roles: system, user | "), out
+    assert "system: ти си асистент за миграции" in out, out
