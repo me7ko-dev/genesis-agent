@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import urllib.request
+from collections.abc import Callable
 
 from genesis_agent.paths import CONFIG_PATH as _CONFIG_YAML
 
@@ -170,10 +171,44 @@ def _tool_flag(tools: str, flag: str) -> re.Pattern[str]:
                       rf"(?=[^\s-]){_VALUE}")
 
 
-_SECRET_PATTERNS = [
+_RUN_RE = re.compile(r"[\w.+-]+")
+_USERPASS_TAIL_RE = re.compile(r"[^\s@/:]+@(?=[\w.-])")
+
+
+def _mask_user_pass_at(text: str) -> str:
+    """`user:pass@host` без `://` → `***@host`.
+
+    Същото като `(?<![\\w/@:])[\\w.+-]+:[^\\s@/:]+@(?=[\\w.-]+)`, но с един
+    проход: изразът опитваше от всяка позиция след `.`/`-`/`+` и всеки път
+    стигаше до края на поредицата — ред от 50 000 точки отнемаше 8 s, от
+    тирета 7 s, а debug.log минава всеки запис през redact (2026-11-05; сега
+    под 0.05 s). Съвпадение може да има само ако поредицата от `[\\w.+-]`
+    свършва с `:`; началото е най-лявото, което lookbehind-ът пуска."""
+    if ":" not in text or "@" not in text:
+        return text
+    out: list[str] = []
+    last = 0
+    for m in _RUN_RE.finditer(text):
+        start, end = m.span()
+        if start < last or text[end:end + 1] != ":":
+            continue
+        p = start
+        if start and text[start - 1] in "/@:":
+            p = next((i for i in range(start + 1, end) if text[i - 1] in ".+-"), -1)
+            if p < 0:
+                continue
+        tail = _USERPASS_TAIL_RE.match(text, end + 1)
+        if tail:
+            out += [text[last:p], "***@"]
+            last = tail.end()
+    out.append(text[last:])
+    return "".join(out)
+
+
+_SECRET_PATTERNS: list[tuple[re.Pattern[str], str] | Callable[[str], str]] = [
     (re.compile(r"\b((?:bot)?)\d{6,12}:AA[A-Za-z0-9_-]{30,}"), r"\1***"),
     (re.compile(r"(://)[^/\s:@]*:[^/\s@]+@"), r"\1***@"),
-    (re.compile(r"(?<![\w/@:])[\w.+-]+:[^\s@/:]+@(?=[\w.-]+)"), "***@"),
+    _mask_user_pass_at,
     (re.compile(r"""(["'](?:[\w-]*[_-]|[A-Za-z0-9]*[a-z0-9](?=[A-Z]))?"""
                 r"(?:[Kk]ey|KEY|[Tt]oken|TOKEN|[Ss]ecret|SECRET|[Pp]ass(?:word|wd)?|PASS(?:WORD|WD)?"
                 r"""|[Pp]wd|PWD|[Pp]at|PAT|[Dd]sn|DSN)\\?["']\s*(?::|=>?)\s*)"""
@@ -204,8 +239,12 @@ _SECRET_PATTERNS = [
 
 def redact(text: str) -> str:
     """Текстът без ключове, токени и пароли в адреси."""
-    for rx, repl in _SECRET_PATTERNS:
-        text = rx.sub(repl, text)
+    for rule in _SECRET_PATTERNS:
+        if callable(rule):
+            text = rule(text)
+        else:
+            rx, repl = rule
+            text = rx.sub(repl, text)
     return text
 
 

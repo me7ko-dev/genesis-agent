@@ -10,7 +10,10 @@ from __future__ import annotations
 import http.client
 import json
 import logging
+import random
+import re
 import shlex
+import time
 
 import pytest
 
@@ -363,3 +366,35 @@ def test_quoted_parts_glued_into_one_word_are_masked_together(text, expected) ->
 def test_flags_that_only_start_like_a_password_flag_stay_readable(text) -> None:
     """`--user-data-dir`, `--user-agent`, `mysql_config` не носят парола."""
     assert redact(text) == text
+
+
+# ── 10. `user:pass@` без `://` назад-напред по дълъг ред (2026-11-05) ──
+# Правилото опитваше от всяка позиция след `.`/`-`/`+` и сканираше реда до
+# края: 50 000 точки — 8 s, 50 000 тирета — 7 s (debug.log минава всеки запис
+# през redact, чатът стоеше). Сега един проход.
+
+_OLD_USERPASS = re.compile(r"(?<![\w/@:])[\w.+-]+:[^\s@/:]+@(?=[\w.-]+)")
+
+
+@pytest.mark.parametrize("line", [
+    "." * 60000 + " a:b@c",
+    "-" * 60000 + " a:b@c",
+    "a." * 30000 + ":x y@z",
+    "/" + "ab-" * 20000 + ":pw@host",
+])
+def test_long_runs_of_dots_or_dashes_are_redacted_in_linear_time(line) -> None:
+    t0 = time.perf_counter()
+    redact(line)
+    assert time.perf_counter() - t0 < 1.5
+
+
+def test_user_pass_at_rule_masks_exactly_what_the_old_regex_masked() -> None:
+    """Същите съвпадения като стария израз — само без квадратичното време."""
+    rnd = random.Random(20261105)
+    alphabet = "ab.-+/@: é"
+    for _ in range(4000):
+        s = "".join(rnd.choice(alphabet) for _ in range(rnd.randint(1, 14)))
+        assert notifier._mask_user_pass_at(s) == _OLD_USERPASS.sub("***@", s), repr(s)
+    for s in ["me:pw@host", "x.user:pass@h.com", "/a-user:pw@host", "@a.b:c@d",
+              "git@github.com:org/r", "a:b@", "a:b@-x", "ftp://u:p@h"]:
+        assert notifier._mask_user_pass_at(s) == _OLD_USERPASS.sub("***@", s), s
