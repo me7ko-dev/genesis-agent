@@ -247,3 +247,25 @@ def test_an_ollama_http_error_is_recorded_at_debug_level(monkeypatch, caplog, st
     records = [r.getMessage() for r in caplog.records if r.name == "genesis.embeddings"]
     assert len(records) == 1, records
     assert str(status) in records[0] and body[:20] in records[0]
+
+
+# ── embeddings-b2 (2026-11-05): провал посред наваксването не се повтаря за всяко умение ──
+
+
+def test_a_failing_ollama_stops_the_backfill_after_one_try(tmp_path, monkeypatch) -> None:
+    """Ollama отговаря на заявката и увисва: наваксването викаше embed (срок 60 s)
+    за всяко липсващо умение поред — с 37-те доставени умения USE_SKILL стоеше
+    ~37 минути. Сега спира на първия провал; следващото търсене пробва пак."""
+    names = [f"s{i}" for i in range(5)]
+    _skills(tmp_path, monkeypatch, names)
+    calls: list[str] = []
+
+    def flaky(text, timeout=60):
+        calls.append(text)
+        return [1.0] * 8 if len(calls) == 1 else None
+    monkeypatch.setattr(emb, "embed", flaky)
+    assert emb.semantic_search("q", top_k=10) == []
+    assert len(calls) == 2, calls
+
+    _fake_embed(monkeypatch)
+    assert _names(emb.semantic_search("q", top_k=10)) == names

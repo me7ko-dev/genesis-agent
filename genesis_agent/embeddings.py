@@ -323,9 +323,14 @@ def _index_missing(dim: int) -> int:
         # първото търсене връщаше само новото умение. Тук грешката стига до
         # _recovering на semantic_search, който пуска целия обход наново.
         vec = embed(text)
-        if vec:
-            _store(name, text, vec)
-            count += 1
+        if not vec:
+            # Ollama отговори на заявката и после увисна/падна: без това всяко
+            # следващо липсващо умение чакаше своите 60 s — 5 умения → 6 заявки,
+            # с 37-те доставени USE_SKILL стоеше ~37 мин. (одит 2026-10-31,
+            # embeddings-b2; поправено 2026-11-05). Следващото търсене пробва пак.
+            break
+        _store(name, text, vec)
+        count += 1
     return count
 
 
