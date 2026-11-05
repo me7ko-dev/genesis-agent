@@ -699,12 +699,13 @@ def run_tool_loop(
         try:
             from genesis_agent import knowledge_graph as kgraph
 
-            transcript = "\n".join(
-                f"{m.get('role')}: {m.get('content')}" for m in pre_compact
-                if isinstance(m.get("content"), str)
-            )
+            # Преглед 2026-11-05: преписът е kgraph.transcript, не "\n".join на
+            # всичко — с отговори от ~2-4K знака извличането виждаше само
+            # първите и последните едно-две съобщения и 12-21 от 29 факта от
+            # средата не стигаха до графа (измерено през този цикъл).
             kgraph.compact_and_graph_memory(
-                transcript, workspace=str(getattr(core, "workspace", "") or "") or None)
+                kgraph.transcript(pre_compact),
+                workspace=str(getattr(core, "workspace", "") or "") or None)
         except Exception:
             log.debug("знаниевият граф след компресията се провали", exc_info=True)
         _status(f"история компресирана ({before_len} → {len(messages)})")

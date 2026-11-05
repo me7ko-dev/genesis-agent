@@ -62,7 +62,7 @@ class TestWaitAllTimeout:
     def test_an_autonomous_task_gets_a_deadline(self, monkeypatch) -> None:
         seen = {}
 
-        def fake(goal, *, operator_id=None, deadline=None, cancel=None):
+        def fake(goal, *, operator_id=None, deadline=None, should_stop=None):
             seen["deadline"] = deadline
             raise RuntimeError("x")
         monkeypatch.setattr("genesis_agent.autonomous_loop.run_autonomous_loop", fake)

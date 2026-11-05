@@ -14,12 +14,13 @@ genesis_agent/notifier.py — Multi-channel delivery за Genesis Agent.
 from __future__ import annotations
 
 import html
+import http.client
 import json
 import logging
 import os
 import re
-import urllib.error
 import urllib.request
+from collections.abc import Callable
 
 from genesis_agent.paths import CONFIG_PATH as _CONFIG_YAML
 
@@ -64,7 +65,12 @@ def _from_config_yaml(section: str, field: str) -> str:
 
 def resolve_setting(env_key: str, *, yaml_section: str = "", yaml_field: str = "") -> str:
     """Намира настройка от os.environ, после .env файловете, после config.yaml."""
-    val = os.environ.get(env_key, "")
+    # strip (одит 2026-10-31): Windows `set GENESIS_TELEGRAM_TOKEN=123:abc `
+    # пази интервала, `export X=$(cat token.txt)` от CRLF файл — \r. С тях
+    # http.client хвърляше InvalidURL с целия токен в съобщението, известията
+    # мълчаливо спираха, а следата отиваше в debug.log. .env стойностите
+    # read_env_files ги чисти отдавна — средата не.
+    val = os.environ.get(env_key, "").strip()
     if not val:
         val = _from_env_files(env_key)
     if not val and yaml_section and yaml_field:
@@ -91,8 +97,16 @@ def _send_telegram(text: str, token: str, chat_id: str) -> bool:
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             return resp.status == 200
-    except urllib.error.URLError as e:
-        print(f"[notifier] Telegram грешка: {e}")
+    except (OSError, ValueError, http.client.HTTPException) as e:
+        # Не само URLError (одит 2026-10-31): токен с интервал/контролен знак
+        # дава http.client.InvalidURL — HTTPException, — която минаваше покрай
+        # except-а, а notify() я пишеше в debug.log със следата и адреса
+        # `/bot<токен>/sendMessage`. Съобщението тук носи адреса — токенът се
+        # маха изрично, и по формата си (redact), и дословно.
+        msg = redact(f"{type(e).__name__}: {e}")
+        if token:
+            msg = msg.replace(token, "***")
+        print(f"[notifier] Telegram грешка: {msg}")
         return False
 
 
@@ -113,37 +127,148 @@ API_TOKEN_RE = re.compile(
 # вътре в думи — `path:`, `pattern:`, `bypass:`, `compass:`, `passage:` ставаха
 # `path=***`. Сега ключът е цяла дума (`_`-токен; слепен отпред само с главни
 # букви — PGPASSWORD — или с api/auth/access/db — apikey).
-# Одит 2026-11-05 (отвореното от 27.10): слепена отпред с главни букви е само
-# силна дума — PGPASSWORD, VAULTTOKEN; `BYPASS:`, `COMPASS:`, `TURKEY:`,
-# `MONKEY:` ставаха `BYPASS=***`. `--- PASS: TestX` е изходът на `go test`.
-_SECRET_PATTERNS = [
-    (re.compile(r"(://)[^/\s:@]+:[^/\s@]+@"), r"\1***@"),
-    (re.compile(r"(?<![\w/@:])[\w.+-]+:[^\s@/:]+@(?=[\w.-]+)"), "***@"),
-    (re.compile(r"(?i)(?<!\S)(--?pass(?:word|wd)?|--?pwd|(?-i:-p|-u))[ =]\S+"), r"\1 ***"),
+#
+# Одит 2026-10-31 (шести кръг), всичко възпроизведено през _tool_run_cmd до
+# записан Telegram payload:
+#   • стойността беше `\S+` — от `DB_PASSWORD="correct horse battery staple"`
+#     се маскираше само първата дума; сега стойност в кавички се взима цяла;
+#   • `redis://:парола@host` (Redis/Celery нямат потребител) — изискваше се
+#     поне един знак преди `:`;
+#   • ключ в кавички — `{"password": "x"}`, `{'api_key': 'x'}`, AWS
+#     `"SecretAccessKey": "x"` — кавичката между ключа и `:` чупеше общото
+#     правило. Преди ключовата дума се иска `_`/`-` или camelCase граница, за
+#     да остане `"monkey"`/`"compass"`;
+#   • флагове: слепено `-phunter2` (mysql, sshpass, 7z — само след тях, иначе
+#     `-print`/`-pthread`), `-P` на sqlcmd/zip (не глобално: `scp -P 2222`),
+#     `redis-cli -a`, `--user u:p`/`-uu:p` (само с `:` — `pip install --user
+#     requests` остава), `--api-key`/`--secret`/`--*-password`;
+#   • токенът на САМИЯ Telegram бот (`<id>:AA…`, и в `/bot<id>:AA…/`) не се
+#     познаваше, а debug.log пазеше InvalidURL с него. Върви първи: `token
+#     <id>:AA…` иначе ставаше `token ***:AA…` — правилото за bearer спира на `:`;
+#   • `BYPASS:`/`COMPASS:` в главни и `--- PASS: TestX` (go test) ставаха
+#     `X=***`. Слепени отпред с главни букви са само силните думи (PGPASSWORD,
+#     PGPassword, JWTSecret, VAULTtoken), а `--- PASS:` е изход, не тайна.
+#
+# Стойността е цялата shell дума: части в кавички и слепените за тях (след
+# прегледа, 2026-11-05). С `"…"|'…'|\S+` маскирането спираше на първата
+# затваряща кавичка — `shlex.quote("Xy7'q9!secret")` дава `'Xy7'"'"'q9!secret'`
+# и от `DB_PASSWORD=`, `--password `, `mysql -p`, `sshpass -p` оставаше видимо
+# `q9!secret`; също `PASSWORD="abc"def` → `***def`. Мерено на 2160 генерирани
+# входа (27 ключа/флага × 10 стойности × 8 обкръжения): с `…|\S+` изтичаха
+# 1248, от тях 448, които `\S+` на a4fd75c маскираше; сега 0. Стойността е
+# последна във всяко правило, затова назад не се връща: 50 KB вход — 0.01–0.1 s,
+# колкото и преди.
+_VALUE = r"""(?:"[^"\n]*"|'[^'\n]*'|\S)+"""
+
+
+def _tool_flag(tools: str, flag: str) -> re.Pattern[str]:
+    """Флаг с парола, но само след изброените програми: `-p`/`-P` на друго
+    място е `-print`, `-pthread`, `scp -P 2222`.
+
+    До 300 знака между програмата и флага: без таван ред от 30 000 знака
+    `mysql mysql …` (debug.log) отнемаше 1.2 s, с него — 0.03 s (2026-10-31)."""
+    # Името — без значение на регистъра (сливането с #108, 2026-11-05):
+    # `MySQL.exe -uroot -phunter2` на Windows минаваше; флагът остава точен
+    # (`mysql -P 3306` е порт).
+    return re.compile(rf"(?<![\w.-])((?i:{tools})(?i:\.exe)?\b[^\n|;&]{{0,300}}?\s{flag})"
+                      rf"(?=[^\s-]){_VALUE}")
+
+
+_RUN_RE = re.compile(r"[\w.+-]+")
+_USERPASS_TAIL_RE = re.compile(r"[^\s@/:]+@(?=[\w.-])")
+
+
+def _mask_user_pass_at(text: str) -> str:
+    """`user:pass@host` без `://` → `***@host`.
+
+    Същото като `(?<![\\w/@:])[\\w.+-]+:[^\\s@/:]+@(?=[\\w.-]+)`, но с един
+    проход: изразът опитваше от всяка позиция след `.`/`-`/`+` и всеки път
+    стигаше до края на поредицата — ред от 50 000 точки отнемаше 8 s, от
+    тирета 7 s, а debug.log минава всеки запис през redact (2026-11-05; сега
+    под 0.05 s). Съвпадение може да има само ако поредицата от `[\\w.+-]`
+    свършва с `:`; началото е най-лявото, което lookbehind-ът пуска."""
+    if ":" not in text or "@" not in text:
+        return text
+    out: list[str] = []
+    last = 0
+    for m in _RUN_RE.finditer(text):
+        start, end = m.span()
+        if start < last or text[end:end + 1] != ":":
+            continue
+        p = start
+        if start and text[start - 1] in "/@:":
+            p = next((i for i in range(start + 1, end) if text[i - 1] in ".+-"), -1)
+            if p < 0:
+                continue
+        tail = _USERPASS_TAIL_RE.match(text, end + 1)
+        if tail:
+            out += [text[last:p], "***@"]
+            last = tail.end()
+    out.append(text[last:])
+    return "".join(out)
+
+
+_SECRET_PATTERNS: list[tuple[re.Pattern[str], str] | Callable[[str], str]] = [
+    (re.compile(r"\b((?:bot)?)\d{6,12}:AA[A-Za-z0-9_-]{30,}"), r"\1***"),
+    (re.compile(r"(://)[^/\s:@]*:[^/\s@]+@"), r"\1***@"),
+    _mask_user_pass_at,
+    (re.compile(r"""(["'](?:[\w-]*[_-]|[A-Za-z0-9]*[a-z0-9](?=[A-Z]))?"""
+                r"(?:[Kk]ey|KEY|[Tt]oken|TOKEN|[Ss]ecret|SECRET|[Pp]ass(?:word|wd)?|PASS(?:WORD|WD)?"
+                r"""|[Pp]wd|PWD|[Pp]at|PAT|[Dd]sn|DSN)\\?["']\s*(?::|=>?)\s*)"""
+                r"""(?:"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|[^\s,}]+)"""),
+     r'\1"***"'),
+    # `mysql_config`/`mariadb_config` не са клиенти: `gcc $(mysql_config
+    # --cflags) -pthread` ставаше `-p***` (прегледът, 2026-11-05).
+    (_tool_flag(r"(?:mysql|mariadb)(?!_config\b)\w*|sshpass|7z[ar]?|(?:un)?rar", "-p"),
+     r"\1***"),
+    (_tool_flag(r"sqlcmd|osql|isql|bcp|zip|unzip|zipcloak", "-P ?"), r"\1***"),
+    (_tool_flag(r"redis-cli", "-a ?"), r"\1***"),
+    # `--user` е цял флаг: `chrome --user-data-dir=C:\Users\x` и
+    # `--user-agent=a:b` ставаха `--user ***` (прегледът, 2026-11-05).
+    (re.compile(rf"(?<!\S)(--(?:proxy-)?user(?![\w-])|-u)[ =]?(?=[\"']?[^\s\"':]*:){_VALUE}"),
+     r"\1 ***"),
+    (re.compile(r"(?i)(?<!\S)(--?pass(?:word|wd)?|--?pwd|(?-i:-p|-u)"
+                r"|--(?!no-)(?:[a-z0-9]+-)*(?:password|passwd|api-?key|secret(?:-access)?-key|private-key|secret))"
+                rf"[ =]{_VALUE}"), r"\1 ***"),
     (re.compile(r"(?i)\b(bearer|token|basic)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 ***"),
+    # Сливане с одита 2026-11-05 от main: голото `PASS: x`/`PAT: x` се маскира
+    # (изтекла тайна е по-лошо от маскиран ред на тест); само `--- PASS:` на
+    # `go test` остава. Слепено отпред — само пред силна дума: `TURKEY:`,
+    # `MONKEY:` не са ключове.
     (re.compile(r"(?i)(?<!--- )\b((?:[A-Z0-9]+_)*"
                 r"(?:(?-i:[A-Z0-9]+)(?=(?:PASSWORD|PASSWD|TOKEN|SECRET)(?![A-Za-z]))|api|auth|access|db)?"
-                r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|PASS|PAT|DSN)(?![A-Za-z])[A-Z0-9_]*)\s*[=:]\s*\S+"),
+                r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|PASS|PAT|DSN)(?![A-Za-z])[A-Z0-9_]*)"
+                rf"\s*[=:]\s*{_VALUE}"),
      r"\1=***"),
     (API_TOKEN_RE, "***"),
 ]
-# Одит 2026-11-05 (отвореното от 27.10): `mysql -uroot -phunter2` — паролата е
-# слепена за флага и минаваше. Само за mysql/mariadb/sshpass на същия ред:
-# другаде `-p…` слепено е `mkdir -pv`, `cp -pr`, `ssh -p2222` — не е тайна.
-_GLUED_P_CMD = re.compile(r"(?i)\b(?:mysql[\w-]*|mariadb[\w-]*|sshpass)\b")
-_GLUED_P = re.compile(r"(?<!\S)-p(?=[^\s-])\S+")
-
-
-def _mask_glued_p(line: re.Match) -> str:
-    text = line.group(0)
-    return _GLUED_P.sub("-p***", text) if _GLUED_P_CMD.search(text) else text
 
 
 def redact(text: str) -> str:
     """Текстът без ключове, токени и пароли в адреси."""
-    for rx, repl in _SECRET_PATTERNS:
-        text = rx.sub(repl, text)
-    return re.sub(r"[^\n]+", _mask_glued_p, text)
+    for rule in _SECRET_PATTERNS:
+        if callable(rule):
+            text = rule(text)
+        else:
+            rx, repl = rule
+            text = rx.sub(repl, text)
+    return text
+
+
+# Викащите пишат Markdown (`**Genesis Sandbox**`, командата в `…`), а заявката
+# е с parse_mode=HTML — всяко известие пристигаше с буквални ** и ` (одит
+# 2026-10-31, записан payload). Превръща се СЛЕД html.escape, така че текстът
+# не може да вмъкне свой таг. Кодът се отделя пръв и вътре в него нищо не се
+# пипа: Telegram отхвърля `<code>` с вложен таг (400 — известието не тръгва).
+# `***` от redact не е маркер за удебеляване — затова (?<!\*)…(?!\*).
+_CODE_SPAN_RE = re.compile(r"(`[^`]+`)")
+_BOLD_RE = re.compile(r"(?<!\*)\*\*([^*\n]+)\*\*(?!\*)")
+
+
+def _markdown_to_html(escaped: str) -> str:
+    parts = _CODE_SPAN_RE.split(escaped)
+    return "".join(f"<code>{p[1:-1]}</code>" if i % 2 else _BOLD_RE.sub(r"<b>\1</b>", p)
+                   for i, p in enumerate(parts))
 
 
 def send_message(
@@ -163,7 +288,7 @@ def send_message(
         dict с резултат за всеки канал: {'telegram': True}
     """
     results: dict[str, bool] = {}
-    text = html.escape(redact(text), quote=False)
+    text = _markdown_to_html(html.escape(redact(text), quote=False))
 
     if channels is None:
         channels = ["telegram"]

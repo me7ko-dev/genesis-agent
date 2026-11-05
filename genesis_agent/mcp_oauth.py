@@ -20,10 +20,12 @@ Genesis казваше само „провери headers в mcp.json“. Тук
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import json
 import logging
 import os
+import queue
 import re
 import secrets
 import sys
@@ -34,19 +36,22 @@ from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qs, quote, urlencode, urlsplit, urlunsplit
 
 log = logging.getLogger("genesis.mcp_oauth")
 
 LOGIN_TIMEOUT = 300.0
 _HTTP_TIMEOUT = 15
-# Цялата заявка към сървъра за вход — в срок и с таван на тялото (одит
-# 2026-11-04). `timeout` на requests е за едно recv, не за цялото: /token,
-# който капе по байт на 0.5 s, държеше refresh() над 40 s (без край) — под
-# _FileLock, тоест и подновяването на ЗДРАВ сървър в процеса чакаше зад него;
-# 200 MB отговор → 431 MB RSS. Метаданните и токените са няколко KB.
+# Колко чака ключалката на файла с токените друг процес (одит 2026-10-31).
+_LOCK_WAIT = 60.0
+# Метаданните и отговорите с токени са няколко KB. Без таван 100 MB тяло от
+# сървъра за токени влизаше цялото в паметта (RSS от 29 на 329 MB) и в
+# mcp_tokens.json (одит 2026-10-31, възпроизведено).
+_MAX_BODY = 256 * 1024
+# Общият срок на една размяна със сървъра за вход (одит 2026-11-04 — същото
+# като горе: /token, който капе по байт на 0.5 s, държеше refresh() над 40 s).
+# Подразбиращият се общ срок е по-малкото от него и _HTTP_TIMEOUT — тоест 15 s.
 _HTTP_DEADLINE = 20.0
-_MAX_BODY = 1_000_000
 
 
 class OAuthError(RuntimeError):
@@ -106,10 +111,20 @@ class _FileLock:
     и единият процес искаше нов вход (одит 2026-10-09: 5 от 10).
 
     flock / msvcrt: ключалката е на отворения файл и пада сама, ако процесът
-    умре — без „кражба“ по възраст, която пускаше двама вътре (втори одит)."""
+    умре — без „кражба“ по възраст, която пускаше двама вътре (втори одит).
+
+    `timeout` (2026-10-31): колко най-много да се чака — и в процеса, и между
+    процесите; None — в процеса докогато трябва, другия процес _LOCK_WAIT."""
+
+    def __init__(self, timeout: float | None = None) -> None:
+        self.timeout = timeout
 
     def __enter__(self) -> None:
-        _lock.acquire()
+        start = time.monotonic()
+        if self.timeout is None:
+            _lock.acquire()
+        elif not _lock.acquire(timeout=max(0.0, self.timeout)):
+            raise OAuthError("файлът с токените е зает (подновява се)")
         self.fh = None
         try:
             path = _store_path().with_suffix(".lock")
@@ -120,13 +135,22 @@ class _FileLock:
                 # ~/.genesis само за четене: поне в процеса е заключено, а
                 # токенът остава в _memory (както преди — трети одит).
                 return
-            deadline = time.monotonic() + 60
+            deadline = start + (_LOCK_WAIT if self.timeout is None else self.timeout)
             while True:
                 try:
                     _lock_file(fh)
                     self.fh = fh
                     return
-                except OSError:
+                except OSError as e:
+                    if e.errno not in _BUSY:
+                        # flock не работи на тази файлова система (ENOLCK на
+                        # NFS без lockd): друг процес няма, чакането беше 60 s,
+                        # „зает от друг процес“ и изхвърлен токен след входа
+                        # (одит 2026-10-31, възпроизведено). Както при
+                        # read-only: заключено само в процеса.
+                        log.debug("ключалката на файла с токените не работи: %s", e)
+                        fh.close()
+                        return
                     if time.monotonic() > deadline:
                         fh.close()
                         raise OAuthError("файлът с токените е зает от друг процес") from None
@@ -143,6 +167,12 @@ class _FileLock:
                 self.fh.close()
         finally:
             _lock.release()
+
+
+# „Зает“ — ключалката е у друг (одит 2026-10-31): flock (EWOULDBLOCK/EAGAIN, EACCES при някои
+# системи), msvcrt.locking на Windows (EACCES; EDEADLOCK при LK_LOCK).
+_BUSY = frozenset({errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES,
+                   getattr(errno, "EDEADLOCK", errno.EAGAIN)})
 
 
 def _lock_file(fh: Any) -> None:
@@ -189,12 +219,16 @@ def _save(url: str, entry: dict) -> None:
 
 
 def forget(url: str) -> bool:
+    key = _key(url)
     with _FileLock():
-        _memory.pop(_key(url), None)
+        # Вход само в паметта (read-only ~/.genesis, пълен диск) също е вход:
+        # /mcp logout казваше „Няма вход“ точно след успешен вход, а махаше
+        # ползвания токен (одит 2026-10-31, възпроизведено).
+        gone = _memory.pop(key, None) is not None
         data = _load_all()
-        gone = data.pop(_key(url), None) is not None
-        if gone:
+        if data.pop(key, None) is not None:
             _save_all(data)
+            gone = True
     return gone
 
 
@@ -211,15 +245,31 @@ def _covers(resource: str, server_url: str) -> bool:
     return sp == rp or sp.startswith(rp + "/")
 
 
+def _shown(url: str) -> str:
+    """Схемата и хостът (с порта) — за съобщенията. `/mcp login` подава
+    разгърнатия адрес (`${VAR}` вече заместени) и ключ в заявката или в пътя
+    (Zapier, Smithery) излизаше на екрана в „❌ Входът … не стана“ (прегледът
+    на одита, 2026-11-05); mcp_client пази същото с `_netloc()`."""
+    try:
+        parts = urlsplit(str(url or ""))
+        host, port = parts.hostname or "", parts.port
+    except ValueError:
+        return "<адрес>"
+    if not host:
+        return "<адрес>"
+    host = f"[{host}]" if ":" in host else host
+    return f"{parts.scheme}://{host}" + (f":{port}" if port else "")
+
+
 def _has_controls(text: str) -> bool:
     """Управляващи и невидими знаци (ESC, CR, U+202E…) и интервали."""
     return any(unicodedata.category(ch) in ("Cc", "Cf", "Zs", "Zl", "Zp") for ch in text)
 
 
 def _plain(text: object, limit: int = 300) -> str:
-    """Текст от сървъра за терминала: без управляващи знаци, кратък."""
-    raw = str(text or "")
-    return "".join(" " if unicodedata.category(ch) in ("Cc", "Cf") else ch for ch in raw)[:limit]
+    """Текст от сървъра за терминала: без управляващи знаци, на един ред, кратък."""
+    raw = "".join(" " if unicodedata.category(ch) in ("Cc", "Cf") else ch for ch in str(text or ""))
+    return " ".join(raw.split())[:limit]
 
 
 def _safe_url(url: str, what: str) -> str:
@@ -231,91 +281,103 @@ def _safe_url(url: str, what: str) -> str:
     # markup=False пропуска ESC), а urlsplit проверяваше адрес без \t\r\n —
     # не този, който се показва и отваря.
     if _has_controls(str(url or "")):
-        raise OAuthError(f"{what}: {str(url)[:200]!r} съдържа управляващи знаци — отказано")
+        raise OAuthError(f"{what}: {_shown(_plain(url, 200))!r} съдържа управляващи знаци — отказано")
     parts = urlsplit(str(url or ""))
     host = (parts.hostname or "").lower()
     if parts.scheme == "https" and host:
         return url
     if parts.scheme == "http" and host in ("127.0.0.1", "localhost", "::1"):
         return url
-    raise OAuthError(f"{what}: {url!r} не е https — отказано")
+    raise OAuthError(f"{what}: {_shown(url)!r} не е https — отказано")
 
 
-def _shut(resp: Any) -> None:
-    """Затваря сокета изпод четящата нишка (както mcp_client._abort):
-    `resp.close()` чака края на капещото тяло, shutdown() — не."""
-    import socket as _socket
+def _shutdown(resp: Any) -> None:
+    """Прекъсва връзката изпод четящата нишка (както mcp_client._abort):
+    shutdown() на сокета връща recv веднага; detach() — затваря го нишката."""
+    import socket
     try:
-        sock = _socket.socket(fileno=resp.raw.fileno())
+        sock = socket.socket(fileno=resp.raw.fileno())
     except (OSError, ValueError, AttributeError, TypeError):
         return
     try:
-        sock.shutdown(_socket.SHUT_RDWR)
+        sock.shutdown(socket.SHUT_RDWR)
     except OSError:
         pass
     finally:
         sock.detach()
 
 
-def _http_json(method: str, url: str, **kw: Any) -> tuple[int, Any]:
-    """(HTTP код, JSON-ът или None) — цялата заявка в _HTTP_DEADLINE, тялото
-    до _MAX_BODY. Заявката е в своя нишка: при изтекъл срок викащият
-    продължава (и пуска _FileLock), а връзката се затваря. Хвърля
-    requests.RequestException или OAuthError."""
-    import queue
+def _http(method: str, url: str, timeout: float | None = None, **kw: Any) -> tuple[int, bytes]:
+    """Една HTTP размяна със сървъра за вход: (статус, тяло), с ОБЩ срок и
+    таван _MAX_BODY; OAuthError — не стана.
 
+    Срокът на requests е за едно recv, не за цялата размяна: сървър за токени,
+    който капе по байт, държеше refresh() — и _lock с него — над 45 s; после
+    /mcp logout чакаше завинаги, а `genesis` не излизаше, защото stop_all()
+    при atexit подновяваше (одит 2026-10-31, възпроизведено). Размяната е в
+    нишка: извикващият продължава в срока, а връзката се прекъсва."""
     import requests
-    box: queue.Queue = queue.Queue()
-    responses: list = []
+    limit = min(_HTTP_TIMEOUT, _HTTP_DEADLINE) if timeout is None else max(0.0, timeout)
+    done: queue.Queue = queue.Queue()
+    guard = threading.Lock()
+    cancelled = threading.Event()
+    live: list[Any] = []   # отговорът, докато нишката го чете
 
-    def run() -> None:
+    def work() -> None:
+        resp = None
         try:
-            resp = requests.request(method, url, timeout=_HTTP_TIMEOUT, allow_redirects=False,
-                                    stream=True, **kw)
-            responses.append(resp)
+            resp = requests.request(method, url, timeout=max(limit, 0.1), stream=True,
+                                    allow_redirects=False, **kw)
+            with guard:
+                if cancelled.is_set():
+                    return
+                live.append(resp)
             body = bytearray()
-            for chunk in resp.iter_content(chunk_size=65536):
+            for chunk in resp.iter_content(chunk_size=16384):
                 body += chunk
                 if len(body) > _MAX_BODY:
-                    raise OAuthError(f"отговорът на {urlsplit(url).netloc} е над "
-                                     f"{_MAX_BODY // 1000} KB — отказан")
-            box.put((resp.status_code, bytes(body)))
-        except Exception as e:  # noqa: BLE001 — предава се на викащия като е
-            box.put(e)
+                    raise OAuthError(f"отговорът е над {_MAX_BODY // 1024} KB — отказан")
+            done.put((resp.status_code, bytes(body)))
+        except Exception as e:  # noqa: BLE001 — предава се на викащия, който я хвърля като OAuthError
+            done.put(e)
         finally:
-            for r in responses:
-                r.close()
+            # Под guard: сокетът не се затваря, докато основната нишка го
+            # прекъсва — иначе номерът му можеше да е вече на друга връзка.
+            with guard:
+                live.clear()
+                if resp is not None:
+                    resp.close()
 
-    threading.Thread(target=run, daemon=True, name="mcp-oauth-http").start()
-    end = time.monotonic() + _HTTP_DEADLINE
+    threading.Thread(target=work, name="genesis-oauth-http", daemon=True).start()
+    end = time.monotonic() + limit
     while True:
         try:
-            # На парчета: на Windows (до 3.14) едно дълго чакане не се буди от Ctrl-C.
-            item = box.get(timeout=max(0.0, min(0.25, end - time.monotonic())))
+            # На парчета: на Windows (до 3.14) едно дълго чакане не се буди от
+            # Ctrl-C (одит 2026-11-04).
+            item = done.get(timeout=max(0.0, min(0.25, end - time.monotonic())))
             break
         except queue.Empty:
             if time.monotonic() >= end:
-                for r in responses:
-                    _shut(r)
-                raise OAuthError(f"{urlsplit(url).netloc} не отговори за "
-                                 f"{_HTTP_DEADLINE:g} s") from None
-    if isinstance(item, BaseException):
+                with guard:
+                    cancelled.set()
+                    for resp in live:
+                        _shutdown(resp)
+                raise OAuthError(f"няма отговор за {limit:g} s") from None
+    if isinstance(item, OAuthError):
         raise item
+    if isinstance(item, Exception):
+        raise OAuthError(str(item) or type(item).__name__) from item
     status, body = item
-    try:
-        data = json.loads(body.decode("utf-8-sig", errors="replace") or "null")
-    except ValueError:
-        data = None
-    return status, data
+    return status, body
 
 
 def _get_json(url: str) -> dict | None:
-    import requests
     try:
-        status, data = _http_json("GET", url, headers={"Accept": "application/json"})
-    except (requests.RequestException, OAuthError):
+        status, body = _http("GET", url, headers={"Accept": "application/json"})
+        data = json.loads(body) if status == 200 else None
+    except (OAuthError, ValueError):
         return None
-    return data if status == 200 and isinstance(data, dict) else None
+    return data if isinstance(data, dict) else None
 
 
 _METADATA_HINT = re.compile(r'resource_metadata="([^"]+)"')
@@ -356,28 +418,47 @@ def discover(server_url: str, www_authenticate: str = "") -> dict:
     meta = None
     # RFC 8414 (пътят след .well-known), после OpenID Discovery и в двата вида —
     # Keycloak и др. са `…/realms/x/.well-known/openid-configuration` (одит).
-    tries = [*_well_known(issuer, "oauth-authorization-server"),
-             *_well_known(issuer, "openid-configuration"),
-             issuer.rstrip("/") + "/.well-known/openid-configuration"]
+    # Формите в корена на хоста са последни (редът от спецификацията на MCP
+    # за издател с път): там е друг издател — при Okta `…/oauth2/default` е
+    # свой сървър за вход, а коренът описва този на организацията.
+    oauth_forms, oidc_forms = (_well_known(issuer, "oauth-authorization-server"),
+                               _well_known(issuer, "openid-configuration"))
+    tries = [*oauth_forms[:-1], *oidc_forms[:-1]]
+    if urlsplit(issuer).path.rstrip("/"):
+        tries.append(issuer.rstrip("/") + "/.well-known/openid-configuration")
+    tries += [oauth_forms[-1], oidc_forms[-1]]
+    foreign = None
     for url in dict.fromkeys(tries):
         meta = _get_json(url)
         if meta and meta.get("authorization_endpoint") and meta.get("token_endpoint"):
-            break
+            # RFC 8414 §3.3: метаданните са за същия сървър за вход, не за
+            # чужд. Чуждите се прескачат, не спират търсенето: при Okta
+            # коренът (друг издател) спираше откриването и верният адрес не
+            # се питаше (одит 2026-10-31, възпроизведено).
+            if str(meta.get("issuer") or issuer).rstrip("/") == issuer.rstrip("/"):
+                break
+            foreign = foreign or meta.get("issuer")
         meta = None
+    if meta is None and foreign:
+        raise OAuthError(f"метаданните са за {foreign!r}, а не за {issuer!r} — отказано")
     if meta is None:
         raise OAuthError(f"{issuer} не казва как се влиза (няма метаданни за OAuth)")
-    # RFC 8414 §3.3: метаданните са за същия сървър за вход, не за чужд.
-    if str(meta.get("issuer") or issuer).rstrip("/") != issuer.rstrip("/"):
-        raise OAuthError(f"метаданните са за {meta.get('issuer')!r}, а не за {issuer!r} — отказано")
     if "S256" not in (meta.get("code_challenge_methods_supported") or ["S256"]):
         raise OAuthError("сървърът за вход не поддържа PKCE S256 — отказано")
-    resource = str((resource_meta or {}).get("resource") or server_url)
+    # Без `resource` от сървъра — каноничният адрес (RFC 8707: без заявка и
+    # фрагмент), както _key. С `server_url` като е, `…/mcp?tenant=acme` никога
+    # не влизаше: отказът по-долу хващаше собствения ни адрес (одит
+    # 2026-10-31, възпроизведено). Отказът остава за `resource` от сървъра.
+    resource = str((resource_meta or {}).get("resource") or _key(server_url))
     # RFC 9728 §3.3: метаданните трябва да са за ТОЗИ сървър. Иначе зъл сървър
     # сочи чужд (`resource` = жертвата) и получава нейния токен: операторът
     # вижда истинската страница за вход, а токенът отива при злия (одит
     # 2026-10-09, възпроизведено).
     if not _covers(resource, server_url) or urlsplit(resource).query or urlsplit(resource).fragment:
-        raise OAuthError(f"сървърът иска токен за {resource!r}, а е {server_url!r} — отказано")
+        theirs, ours = _shown(resource), _shown(server_url)
+        if theirs == ours:
+            theirs += " (друг път или заявка)"
+        raise OAuthError(f"сървърът иска токен за {theirs!r}, а е {ours!r} — отказано")
     resource = _key(resource).rstrip("/") if urlsplit(resource).path in ("", "/") else _key(resource)
     return {
         "issuer": issuer,
@@ -389,20 +470,41 @@ def discover(server_url: str, www_authenticate: str = "") -> dict:
     }
 
 
-def _register(endpoint: str, redirect_uri: str) -> str:
-    import requests
+_CLIENT_AUTH = ("none", "client_secret_post", "client_secret_basic")
+
+
+def _register(endpoint: str, redirect_uri: str) -> tuple[str, str, str]:
+    """(client_id, client_secret, token_endpoint_auth_method).
+
+    Искаме публичен клиент (`none`), но RFC 7591 §3.2.1 позволява на сървъра
+    да го смени: сървър без публични клиенти връща client_secret и
+    client_secret_post/basic. Тайната се губеше и размяната на кода падаше с
+    401 СЛЕД входа в браузъра (одит 2026-10-31, възпроизведено) — сега се
+    ползва, а метод, който не можем, се отказва преди браузъра."""
     _safe_url(endpoint, "регистрацията")
     try:
-        status, data = _http_json("POST", endpoint, json={
+        status, body = _http("POST", endpoint, json={
             "client_name": "Genesis", "redirect_uris": [redirect_uri],
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"], "token_endpoint_auth_method": "none"})
-    except requests.RequestException as e:
+        data = json.loads(body) if status in (200, 201) else {}
+    except (OAuthError, ValueError) as e:
         raise OAuthError(f"регистрацията не стана: {e}") from e
-    client_id = data.get("client_id") if status in (200, 201) and isinstance(data, dict) else None
+    client_id = data.get("client_id") if isinstance(data, dict) else None
     if not client_id:
         raise OAuthError(f"регистрацията не стана (HTTP {status})")
-    return str(client_id)
+    secret = data.get("client_secret")
+    secret = secret if isinstance(secret, str) else ""
+    # Без метод в отговора: с тайна — client_secret_basic (по подразбиране в
+    # RFC 7591 §2), без — публичен.
+    method = str(data.get("token_endpoint_auth_method")
+                 or ("client_secret_basic" if secret else "none"))
+    if method not in _CLIENT_AUTH:
+        raise OAuthError(f"сървърът за вход иска удостоверяване на клиента „{method}“, "
+                         "което Genesis не поддържа — сложи токен в headers на mcp.json")
+    if method != "none" and not secret:
+        raise OAuthError(f"регистрацията иска {method}, но не даде client_secret")
+    return str(client_id), (secret if method != "none" else ""), method
 
 
 # ── вход ───────────────────────────────────────────────────────────────────
@@ -450,25 +552,45 @@ def _callback_server() -> _Callback:
     return srv
 
 
-def _token_request(endpoint: str, form: dict[str, str]) -> dict:
-    import requests
+def _token_request(endpoint: str, form: dict[str, str], *, secret: str = "",
+                   auth_method: str = "", timeout: float | None = None) -> dict:
+    headers = {"Accept": "application/json"}
+    form = dict(form)
+    if secret and auth_method == "client_secret_post":
+        form["client_secret"] = secret
+    elif secret:
+        # client_secret_basic (RFC 6749 §2.3.1): id и тайна, кодирани като във
+        # форма, в Authorization; client_id не се дублира в тялото (MCP SDK).
+        pair = f"{quote(form.pop('client_id', ''), safe='')}:{quote(secret, safe='')}"
+        headers["Authorization"] = "Basic " + base64.b64encode(pair.encode()).decode()
     try:
-        status, data = _http_json("POST", endpoint, data=form, headers={"Accept": "application/json"})
-    except requests.RequestException as e:
+        status, body = _http("POST", endpoint, data=form, headers=headers, timeout=timeout)
+    except OAuthError as e:
         raise OAuthError(f"токенът не дойде: {e}") from e
+    # Статусът е най-важното: HTML страница 502 от прокси даваше само
+    # „Expecting value: line 1 column 1“, а 2 MB error_description отиваше
+    # цяло в терминала (одит 2026-10-31, възпроизведено).
+    try:
+        data = json.loads(body)
+    except ValueError:
+        data = None
     if status != 200 or not isinstance(data, dict) or not data.get("access_token"):
-        err = (data.get("error_description") or data.get("error")) if isinstance(data, dict) else ""
+        if data is None:
+            raise OAuthError(f"токенът не дойде (HTTP {status}, отговорът не е JSON)")
+        said = [data.get("error_description"), data.get("error")] if isinstance(data, dict) else []
         # Текстът е на сървъра, а отива в терминала (одит 2026-11-04: ESC).
-        raise OAuthError(f"токенът не дойде (HTTP {status}) {_plain(err)}".strip())
+        err = next((_plain(s) for s in said if isinstance(s, str) and s.strip()), "")
+        raise OAuthError(f"токенът не дойде (HTTP {status}) {err}".strip())
     return data
 
 
-def _entry(info: dict, client_id: str, tokens: dict, old: dict | None = None) -> dict:
+def _entry(info: dict, client_id: str, tokens: dict, old: dict | None = None, *,
+           secret: str = "", auth_method: str = "") -> dict:
     try:
         lifetime = float(tokens.get("expires_in") or 0)   # и "3600" като низ
     except (TypeError, ValueError):
         lifetime = 0.0
-    return {
+    entry = {
         "access_token": str(tokens["access_token"]),
         "refresh_token": str(tokens.get("refresh_token") or (old or {}).get("refresh_token") or ""),
         "expires_at": time.time() + lifetime if lifetime > 0 else 0,
@@ -476,6 +598,10 @@ def _entry(info: dict, client_id: str, tokens: dict, old: dict | None = None) ->
         "client_id": client_id, "token_endpoint": info["token_endpoint"],
         "resource": info["resource"], "issuer": info["issuer"],
     }
+    if secret:   # поверителен клиент (виж _register) — нужна е и за refresh
+        entry["client_secret"] = secret
+        entry["token_endpoint_auth_method"] = auth_method
+    return entry
 
 
 def no_browser() -> bool:
@@ -507,8 +633,8 @@ def login(server_url: str, *, www_authenticate: str = "",
     srv = _callback_server()
     redirect_uri = f"http://127.0.0.1:{srv.server_address[1]}/callback"
     try:
-        client_id = _register(info["registration_endpoint"], redirect_uri) \
-            if info["registration_endpoint"] else ""
+        client_id, secret, auth_method = _register(info["registration_endpoint"], redirect_uri) \
+            if info["registration_endpoint"] else ("", "", "")
         if not client_id:
             raise OAuthError("сървърът за вход не позволява регистрация на клиент — "
                              "сложи токен в headers на mcp.json")
@@ -545,10 +671,19 @@ def login(server_url: str, *, www_authenticate: str = "",
         raise OAuthError(f"входът е отказан: {_plain(why)}")
     tokens = _token_request(info["token_endpoint"], {
         "grant_type": "authorization_code", "code": result["code"], "redirect_uri": redirect_uri,
-        "client_id": client_id, "code_verifier": verifier, "resource": info["resource"]})
-    entry = _entry(info, client_id, tokens)
-    with _FileLock():
-        _save(server_url, entry)
+        "client_id": client_id, "code_verifier": verifier, "resource": info["resource"]},
+        secret=secret, auth_method=auth_method)
+    entry = _entry(info, client_id, tokens, secret=secret, auth_method=auth_method)
+    try:
+        with _FileLock():
+            _save(server_url, entry)
+    except OAuthError:
+        # Файлът е зает над _LOCK_WAIT: токенът е издаден (кодът е похарчен) —
+        # поне този процес го пази, вместо входът да се изхвърли (одит
+        # 2026-10-31: изгубен токен след 60 s чакане).
+        log.warning("токенът за %s остава само в паметта: файлът е зает", _key(server_url))
+        with _lock:
+            _memory[_key(server_url)] = dict(entry)
     return entry
 
 
@@ -573,21 +708,31 @@ def _for_this_server(entry: dict, server_url: str) -> bool:
     return not entry.get("resource") or _covers(str(entry["resource"]), server_url)
 
 
-def access_token(server_url: str) -> str:
-    """Валиден токен за сървъра, подновен при нужда; "" — няма (нужен е вход)."""
+def access_token(server_url: str, timeout: float | None = None) -> str:
+    """Валиден токен за сървъра, подновен при нужда; "" — няма (нужен е вход).
+
+    `timeout` (2026-10-31) — колко най-много да чака подновяването: срокът на
+    извикващия (mcp_client._post). 0 — без подновяване, изтекъл токен се
+    връща какъвто е: stop() затваря сесията с него, DELETE не чака сървъра за
+    вход (stop_all() при atexit подновяваше по 15 s на сървър — измерено)."""
     entry = saved(server_url)
     if not entry or not entry.get("access_token") or not _for_this_server(entry, server_url):
         return ""
     if _expired(entry):
-        return refresh(server_url, stale=str(entry["access_token"])) or ""
+        if timeout is not None and timeout <= 0:
+            return str(entry["access_token"])
+        return refresh(server_url, stale=str(entry["access_token"]), timeout=timeout) or ""
     return str(entry["access_token"])
 
 
-def refresh(server_url: str, stale: str = "") -> str | None:
+def refresh(server_url: str, stale: str = "", timeout: float | None = None) -> str | None:
     """Нов токен с refresh токена; None — не стана (нужен е нов вход).
     `stale` — токенът, който е отказан: ако друг процес/нишка вече го е
-    подновил, ползваме неговия, вместо да харчим refresh токена втори път."""
-    with _FileLock():
+    подновил, ползваме неговия, вместо да харчим refresh токена втори път.
+    `timeout` — общ срок за чакането на ключалката и заявката (None — както
+    досега: ключалката докогато трябва, заявката _HTTP_TIMEOUT)."""
+    deadline = None if timeout is None else time.monotonic() + timeout
+    with _FileLock(timeout):
         entry = saved(server_url)
         if not entry or not _for_this_server(entry, server_url):
             return None
@@ -596,14 +741,21 @@ def refresh(server_url: str, stale: str = "") -> str | None:
             return str(entry["access_token"])
         if not entry.get("refresh_token"):
             return None
+        left = None if deadline is None else min(_HTTP_TIMEOUT, deadline - time.monotonic())
+        if left is not None and left <= 0:
+            return None
+        secret = str(entry.get("client_secret") or "")
+        auth_method = str(entry.get("token_endpoint_auth_method") or "")
         try:
             tokens = _token_request(_safe_url(entry["token_endpoint"], "адресът за токени"), {
                 "grant_type": "refresh_token", "refresh_token": entry["refresh_token"],
-                "client_id": entry.get("client_id", ""), "resource": entry.get("resource", "")})
+                "client_id": entry.get("client_id", ""), "resource": entry.get("resource", "")},
+                secret=secret, auth_method=auth_method, timeout=left)
         except OAuthError:
             return None
         new = _entry({"token_endpoint": entry["token_endpoint"],
                       "resource": entry.get("resource", ""), "issuer": entry.get("issuer", "")},
-                     entry.get("client_id", ""), tokens, entry)
+                     entry.get("client_id", ""), tokens, entry,
+                     secret=secret, auth_method=auth_method)
         _save(server_url, new)
         return str(new["access_token"])

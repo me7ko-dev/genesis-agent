@@ -1270,8 +1270,13 @@ def _tool_run_cmd(arg: str) -> str:
         _log_episode(f"RUN_CMD {command}", f"отказан: {res.stderr}", ["tool", "run_cmd", "blocked"])
         # Security alert през notifier — блокирана опасна операция.
         try:
-            from genesis_agent.notifier import notify
-            notify(f"🛡️ **Genesis Sandbox** блокира опасна команда:\n`{command[:300]}`\n{res.stderr[:200]}")
+            from genesis_agent.notifier import notify, redact
+            # redact ПРЕДИ рязането (одит 2026-10-31): срез на 300-ния знак
+            # между `https://me:парола` и `@` оставяше адрес без `@`, който
+            # маскирането в notify() вече не познава — паролата заминаваше цяла.
+            # Причината също: може да цитира команда (декодиран -EncodedCommand).
+            notify(f"🛡️ **Genesis Sandbox** блокира опасна команда:\n`{redact(command)[:300]}`\n"
+                   f"{redact(res.stderr)[:200]}")
         except Exception:
             log.debug("известието за блокирана команда не тръгна", exc_info=True)
         return f"[RUN_CMD: {command}]\n{res.stderr}"
@@ -1554,20 +1559,25 @@ def _tool_task_list(arg: str = "") -> str:
     return "\n".join(lines)
 
 
-def _tool_delegate(arg: str) -> str:
-    goal = arg.strip()
+def _tool_delegate(arg: object) -> str:
+    # Празна или нетекстова цел не пуска мисия (одит 2026-10-31): {}, „   “ и
+    # `[DELEGATE: ]` пускаха 8 платени рунда с цел „“, а {"goal": null} връщаше
+    # „'NoneType' object has no attribute 'strip'“.
+    goal = arg.strip() if isinstance(arg, str) else ""
+    if not goal:
+        return "[DELEGATE] Празна цел — опиши задачата, която да изпълни под-агентът."
     try:
         from genesis_agent.delegate import delegate_task, wait_all
     except Exception as e:
         log.debug("delegate не се зареди", exc_info=True)
         return f"[DELEGATE: {goal}] delegate модулът не е наличен: {e}"
-    task = delegate_task(goal, agent="autonomous", timeout=600)
-    # „Стоп“ на телефона се гледа и докато мисията върви, не само преди нея
-    # (одит 2026-11-04: мисията изкарваше всичките си рундове, до 600 s).
-    wait_all([task], timeout=600, cancelled=_cancelled)
+    # Стопът на ТОЗИ ход (не _cancelled — finally на run_turn го маха) спира и
+    # под-агента; wait_all го спира и при Ctrl-C (одит 2026-10-31).
+    task = delegate_task(goal, agent="autonomous", timeout=600, should_stop=_CANCEL)
+    wait_all([task], timeout=600)
     _log_episode(f"DELEGATE {goal}", task.status.value, ["tool", "delegate"])
     if task.status.value == "cancelled":
-        detail = "⏹ Спряно от оператора — мисията спира и нищо не записва."
+        detail = task.error or "⏹ Спряно от оператора — мисията спира и нищо не записва."
     else:
         detail = task.result or task.error or "(без резултат)"
     return f"[DELEGATE: {goal}]  статус={task.status.value}\n{detail}"

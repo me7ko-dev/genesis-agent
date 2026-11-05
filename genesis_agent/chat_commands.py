@@ -305,8 +305,11 @@ def handle(text: str, *, messages: Any, workspace: Path,
     if cmd == "/context":
         from genesis_agent import context_usage
         info = context() if context is not None else {}
+        # Винаги изгледът, който тръгва към модела (одит 2026-10-31): без
+        # доставчик — общото свиване на Brain, което важи за всеки извън кеша.
         out(context_usage.report(messages, info.get("tools"), int(info.get("window") or 0),
-                                 int(info.get("last") or 0)))
+                                 int(info.get("last") or 0), provider=str(info.get("provider") or ""),
+                                 model=str(info.get("model") or "")))
         return Result()
 
     if cmd in ("/image", "/картинка"):

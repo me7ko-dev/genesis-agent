@@ -80,6 +80,26 @@ def _remember(role: str, content: str) -> None:
 
 console = Console()
 
+
+def _command_out(text: str) -> None:
+    """Изходът на чат командите: без Rich разметка (`[a;touch PWNED;:]` в
+    hooks.json изчезваше от прегледа преди /hooks trust — одит 2026-10-08).
+
+    Ред с дума, по-широка от терминала (адресът за вход от /mcp login е ~300
+    знака), не се пренася от Rich — пренася го терминалът и той остава ЕДИН
+    ред: Ctrl/Cmd-клик и копирането взимат целия адрес. Rich го режеше с
+    истински нови редове (303 знака → 4 реда) и кликът отваряше адрес без
+    code_challenge и state (одит 2026-10-31, възпроизведено)."""
+    from rich.cells import cell_len
+    width = console.width
+    if not any(cell_len(word) > width for word in text.split()):
+        console.print(text, markup=False, highlight=False)
+        return
+    for line in text.split("\n"):
+        console.print(line, markup=False, highlight=False,
+                      soft_wrap=any(cell_len(word) > width for word in line.split()))
+
+
 # Терминалът е интерактивен → sandbox-ът пита оператора преди опасни операции,
 # вместо да ги отказва тихо. Потвърждението се рендира през rich console.
 try:
@@ -253,6 +273,12 @@ total_output_tokens = 0
 # Сборът за сесията (total_*) е разход, не контекст: статус редът показваше
 # „ctx 135K/131K (100%)“ в сесия, чиито заявки бяха по ~15K.
 last_context_tokens = 0
+# Същото, но само когато доставчикът е върнал usage — за „Последната заявка по
+# доставчика“ в /context. Одит 2026-10-31: без usage (локален Ollama /v1,
+# провален стар път) там стоеше собствената оценка на count_usage — само
+# съдържанието, без схемите и аргументите на tool_calls — 1.8K до „~8.8K“ на
+# самия /context, под етикет, че го е броил доставчикът.
+last_provider_tokens = 0
 
 def estimate_tokens(text: str) -> int:
     """Rough estimate: ~4 chars per token for mixed Bulgarian/English."""
@@ -270,22 +296,41 @@ def get_elapsed_time() -> str:
 def count_usage(usage: dict | None, messages, reply_text: str) -> None:
     """Добавя едно обръщение към разхода за сесията и запомня размера му като
     заетия контекст. Без usage от доставчика — оценка по целия prompt."""
-    global total_input_tokens, total_output_tokens, last_context_tokens
+    global total_input_tokens, total_output_tokens, last_context_tokens, last_provider_tokens
     if usage:
         prompt = usage.get("prompt_tokens", 0) or 0
         completion = usage.get("completion_tokens", 0) or 0
     else:
-        from genesis_agent.vision import content_chars  # картинка ≈ 1.5K, не base64
-        prompt = sum(content_chars(m.get("content")) // 4 for m in messages)
+        prompt = _history_tokens(messages)
         completion = estimate_tokens(reply_text or "")
     total_input_tokens += prompt
     total_output_tokens += completion
     last_context_tokens = prompt + completion
+    last_provider_tokens = last_context_tokens if usage else 0
 
 
 def reset_usage() -> None:
-    global total_input_tokens, total_output_tokens, last_context_tokens
-    total_input_tokens = total_output_tokens = last_context_tokens = 0
+    global total_input_tokens, total_output_tokens, last_context_tokens, last_provider_tokens
+    total_input_tokens = total_output_tokens = last_context_tokens = last_provider_tokens = 0
+
+
+def _history_tokens(messages) -> int:
+    """Оценка на историята: ~4 знака на токен, картинка ≈ 1.5K, не base64."""
+    from genesis_agent.vision import content_chars
+    return sum(content_chars(m.get("content")) // 4 for m in messages)
+
+
+def forget_last_request(messages=None) -> None:
+    """Историята е сменена (/compact, /resume, /rewind, /history, /undo,
+    компресията след хода, телефонът): размерът на последната заявка е на
+    разговор, който го няма. Σ остава — тези токени са похарчени. Одит
+    2026-10-31: след /compact (21 → 6 съобщения) /context показваше новите
+    ~7.9K до „по доставчика: 31.1K“, а статус редът — „ctx 31K/131K (23%)“.
+    Статус редът взема оценката на новата история, не 0 (прегледът,
+    2026-11-05: след /undo — същият разговор с бележка — показваше „ctx 0“)."""
+    global last_context_tokens, last_provider_tokens
+    last_provider_tokens = 0
+    last_context_tokens = _history_tokens(messages) if messages is not None else 0
 
 
 def _fmt_k(n: int) -> str:
@@ -833,6 +878,10 @@ def _brain_handles(provider: str) -> bool:
     return provider in _PROVIDERS
 
 
+# Началата на грешките, които call_ollama и call_gemini връщат като отговор.
+_LEGACY_ERRORS = ("[Ollama не отговаря", "[Ollama грешка", "[Грешка")
+
+
 def _ask_via_legacy(messages, tools, prov, model):
     """Стария директен път — само за ръчно избран доставчик извън brain.py."""
     global _last_usage
@@ -856,7 +905,12 @@ def _ask_via_legacy(messages, tools, prov, model):
     except Exception as e:
         log.debug("доставчикът %s/%s се провали", prov, model, exc_info=True)
         return f"[Грешка: {e}]", None
-    count_usage(_last_usage, msgs, response)
+    # call_ollama/call_gemini връщат грешката като низ, не като изключение.
+    # Само при истински отговор, както в ask_genesis (одит 2026-10-31: Ollama
+    # не слуша → „[Ollama не отговаря: …]“, а Σ растеше с ~2K и /context
+    # показваше заявка „по доставчика“, която не е тръгнала).
+    if _last_usage or not str(response or "").startswith(_LEGACY_ERRORS):
+        count_usage(_last_usage, msgs, response)
     if _last_usage:
         try:
             from genesis_agent.budget import record_usage
@@ -1687,8 +1741,11 @@ def _attach_viewed(messages: "deque") -> None:
 
 
 def context_info() -> dict:
-    """За /context: схемите на този ход, прозорецът и последната заявка."""
-    return {"tools": _turn_tools(), "window": DEFAULT_CONTEXT_WINDOW, "last": last_context_tokens}
+    """За /context: схемите на този ход, прозорецът, последната заявка по
+    доставчика и на кого отива следващата — от това зависи копието на
+    историята, което Brain праща (brain.sent_history, одит 2026-10-31)."""
+    return {"tools": _turn_tools(), "window": DEFAULT_CONTEXT_WINDOW, "last": last_provider_tokens,
+            "provider": current_provider, "model": current_model_id}
 
 
 _STOP_HOOK_ROUNDS = 2
@@ -2257,6 +2314,9 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
     try:
         messages = _compact_messages(messages)
         if len(messages) < before_len:
+            # Както /compact: „по доставчика“ оставаше на заявката отпреди
+            # компресията (прегледът на одита, 2026-11-05).
+            forget_last_request(messages)
             ui.info(f"🗜 История компресирана ({before_len} → {len(messages)} съобщения)")
             # Компресията е моментът, в който старото съдържание се изхвърля —
             # записваме трайното от НЕкомпресираната история, докато я имаме.
@@ -2396,7 +2456,7 @@ def _resume_at_start(messages: "deque", argv: list[str]) -> "deque":
     pick = argv[flag + 1] if flag + 1 < len(argv) and argv[flag + 1].isdigit() else ""
     res = chat_commands.handle(
         f"/resume {pick}".strip(), messages=messages, workspace=Path(WORKSPACE),
-        out=lambda text: console.print(text, markup=False, highlight=False),
+        out=_command_out,
         ask=console.input, conversations=_conversations(), choose=console.input)
     return res.messages if res is not None and res.messages is not None else messages
 
@@ -2951,6 +3011,7 @@ def main():
                         with open(shown[hsel - 1], "r", encoding="utf-8") as f:
                             loaded = json.load(f)
                         messages = _restore_session(loaded, SYSTEM_PROMPT)
+                        forget_last_request(messages)   # като /resume (одит 2026-10-31)
                         _new_session()   # продължението — в нов файл, старият остава
                         # Както /clear и /resume: /undo връщаше хода от разговора
                         # отпреди /history (одит 2026-10-22).
@@ -2971,9 +3032,7 @@ def main():
             # собствените на оператора от .genesis/commands/*.md.
             _res = _chat_commands.handle(
                 user_input, messages=messages, workspace=Path(WORKSPACE),
-                # Без Rich разметка: `[a;touch PWNED;:]` в hooks.json изчезваше от
-                # прегледа преди /hooks trust (одит 2026-10-08).
-                out=lambda text: console.print(text, markup=False, highlight=False),
+                out=_command_out,   # без Rich разметка, дълъг адрес — цял ред
                 ask=console.input, compact=_force_compact, context=context_info,
                 conversations=_conversations(), choose=console.input)
             _images: list[dict] = []
@@ -2984,6 +3043,7 @@ def main():
             if _res is not None:
                 if _res.messages is not None:
                     messages = _res.messages
+                    forget_last_request(messages)   # /compact, /resume, /rewind, /undo (одит 2026-10-31)
                 if not _res.prompt:
                     continue
                 user_input = _res.prompt

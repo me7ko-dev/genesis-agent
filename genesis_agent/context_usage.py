@@ -7,7 +7,9 @@ AGENT), разговорът (съобщения, отговори, изходи
 Защо: заявката порасна с 21% от 5-те нови инструмента (PR #52) и операторът
 нямаше как да види кое тежи, без да чете кода. Броенето е в знаци, а токените —
 оценка (~4 знака на токен, както статус реда); истинският размер на последната
-заявка идва от доставчика и се показва до нея, когато го има.
+заявка идва от доставчика и се показва до нея, когато го има. Разговорът е
+копието, което Brain праща на текущия доставчик (свити стари изходи, махнати
+стари картинки), не пълната история в паметта (2026-10-31).
 """
 from __future__ import annotations
 
@@ -74,19 +76,55 @@ def _text(content: Any) -> int:
     return _chars(content)
 
 
-def report(messages: Any, tools: list | None = None, window: int = 0,
-           last_tokens: int = 0) -> str:
-    from genesis_agent import vision
-    msgs = [m for m in list(messages or []) if isinstance(m, dict)]
-    # Картинките от по-стари ходове Brain.complete маха за ВСЕКИ доставчик, преди
-    # всичко друго (vision.elide_old_images) — броим каквото стига до модела.
-    # Одит 2026-11-04: 20 хода със снимка → „Разговор ~30.1K“, а отиват 3 (~4.5K).
-    msgs = vision.elide_old_images(msgs)
+def _talk_chars(rest: list[dict]) -> int:
+    """Знаците на разговора — както ги брои цикълът в report()."""
+    return sum(_text(m.get("content"))
+               + (_chars(m.get("tool_calls")) if m.get("role") == "assistant" else 0)
+               for m in rest)
+
+
+def _attachment_name(message: dict) -> str:
+    """„VIEW_IMAGE“ от „[прикачено от Genesis] VIEW_IMAGE: a.png“; иначе
+    началото на описанието („снимки на страницата от проверката…“)."""
+    from genesis_agent.vision import ATTACHMENT_PREFIX, text_of
+    what = text_of(message.get("content")).removeprefix(ATTACHMENT_PREFIX).strip()
+    head = what.split(":", 1)[0].strip()
+    if re.fullmatch(r"[A-Z][A-Z0-9_]*", head):
+        return head
+    line = what.split("\n", 1)[0]
+    return (line if len(line) <= 40 else line[:40].rsplit(" ", 1)[0] + "…") or "прикачено"
+
+
+def _without_system(msgs: list[dict]) -> tuple[str, list[dict]]:
     # Промптът е само първото съобщение. По-късните „system“ са от хода:
     # изходи на инструменти в текстов режим („[Резултат]:“), бележките на цикъла
     # и резюмето от /compact — броени бяха като инструкции за проекта (одит 2026-10-10).
-    system = str(msgs[0].get("content") or "") if msgs and msgs[0].get("role") == "system" else ""
-    rest = msgs[1:] if msgs and msgs[0].get("role") == "system" else msgs
+    if msgs and msgs[0].get("role") == "system":
+        return str(msgs[0].get("content") or ""), msgs[1:]
+    return "", msgs
+
+
+def report(messages: Any, tools: list | None = None, window: int = 0,
+           last_tokens: int = 0, provider: str | None = None, model: str = "") -> str:
+    """`provider` (и `model`) — броим копието, което Brain.complete праща на
+    него (brain.sent_history); None — историята, както е подадена."""
+    from genesis_agent import vision
+    msgs = [m for m in list(messages or []) if isinstance(m, dict)]
+    stored = msgs
+    if provider is not None:
+        # Одит 2026-10-31: процентът, „Свободно“ и съветът за /compact се
+        # смятаха по пълната история — обичаен ход с groq даваше 74% и
+        # „/compact“ при 35% изпратени (старите изходи са свити до 2000 знака,
+        # старите картинки — махнати). Пълната история остава отделен ред.
+        from genesis_agent.brain import sent_history
+        msgs = [m for m in sent_history(provider, msgs, model=model, tools=bool(tools))
+                if isinstance(m, dict)]
+    else:
+        # Без доставчик — поне картинките от по-стари ходове, които Brain.complete
+        # маха за ВСЕКИ доставчик преди всичко друго (vision.elide_old_images).
+        # Одит 2026-11-04: 20 хода със снимка → „Разговор ~30.1K“, а отиват 3 (~4.5K).
+        msgs = vision.elide_old_images(msgs)
+    system, rest = _without_system(msgs)
 
     names: dict[str, str] = {}
     user = assistant = results = notes = 0
@@ -101,18 +139,23 @@ def report(messages: Any, tools: list | None = None, window: int = 0,
                 if isinstance(call, dict):
                     fn = call.get("function") or {}
                     names[str(call.get("id"))] = str(fn.get("name") or "?")
-        # Снимката от VIEW_IMAGE / проверката в браузър е user „[прикачено от
-        # Genesis] …“ — изход на инструмент, не реплика на оператора (одит
-        # 2026-11-04: един ред и 3 снимки бяха „твоите съобщения 4 ~4.5K“).
-        elif (role == "tool" or vision.is_attachment(m)
-              or (role == "system" and str(m.get("content") or "").startswith("[Резултат"))):
+        elif role == "tool" or (role == "system" and str(m.get("content") or "").startswith("[Резултат")):
             n_results += 1
             size = _text(m.get("content"))
             results += size
             if size > biggest[1]:
                 biggest = (m.get("name") or names.get(str(m.get("tool_call_id")))
-                           or ("[Резултат]" if role == "system"
-                               else "[прикачено]" if role == "user" else "?"), size)
+                           or ("[Резултат]" if role == "system" else "?"), size)
+        elif role == "user" and vision.is_attachment(m):
+            # Снимките от VIEW_IMAGE и от проверката в браузър са user
+            # съобщение само защото tool резултатът не носи картинка — не са
+            # реплика на оператора (одит 2026-10-31: 2 реплики и 2 прикачвания
+            # по 8 снимки → „твоите съобщения 4 ~24.0K“, „най-голям: VIEW_IMAGE ~7“).
+            n_results += 1
+            size = _text(m.get("content"))
+            results += size
+            if size > biggest[1]:
+                biggest = (_attachment_name(m), size)
         elif role == "system":
             n_notes += 1
             notes += _text(m.get("content"))
@@ -152,6 +195,10 @@ def report(messages: Any, tools: list | None = None, window: int = 0,
     else:
         lines.append("    (без инструменти в този изглед)")
     lines.append(f"  Разговор          {_k(talk):>7}  {share(talk):>4}")
+    stored_talk = _talk_chars(_without_system(stored)[1]) if stored is not msgs else talk
+    if stored_talk > talk:
+        lines.append(f"    в историята {_k(stored_talk)}; към {provider or 'модела'} отива свито копие"
+                     " (по-старите изходи и картинки)")
     lines.append(f"    твоите съобщения {n_user} {_k(user)}, отговори {n_assistant} {_k(assistant)}")
     if n_results:
         lines.append(f"    изходи на инструменти {n_results} {_k(results)}"

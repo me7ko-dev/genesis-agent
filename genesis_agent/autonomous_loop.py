@@ -7,6 +7,7 @@ import os
 import re
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -188,6 +189,10 @@ class LoopOutcome:
     storage_note: str
     dna_audit: dict[str, object]
     reused_existing: bool = False
+    # Защо мисията свърши без успех, когато причината не е в last_stderr
+    # (веригата върна „Error: …“, Стоп, краен срок) — за викащия (DELEGATE).
+    # Не в last_stderr: той е входът на аварийния ремонт и на урока.
+    reason: str = ""
 
 
 # Краен срок на мисията за ТАЗИ нишка (DELEGATE). Одит 2026-10-07: wait_all
@@ -195,20 +200,35 @@ class LoopOutcome:
 _CTX = threading.local()
 
 
-def _cancelled() -> bool:
-    cancel = getattr(_CTX, "cancel", None)
-    return cancel is not None and cancel.is_set()
-
-
 def _past_deadline() -> bool:
-    # Спряна от оператора (Ctrl-C, „Стоп“ на телефона) е като изтекло време:
-    # нов рунд не започва и нищо не се записва. Одит 2026-11-04: след Ctrl-C в
-    # DELEGATE мисията във фоновата нишка продължаваше — измерено: 7 нови
-    # обръщения към модела за 2 s след „⏹ Прекъснато“.
-    if _cancelled():
-        return True
     deadline = getattr(_CTX, "deadline", None)
     return deadline is not None and time.time() > deadline
+
+
+def rounds_text(n: int) -> str:
+    """„1 рунд“, „2 рунда“ — DELEGATE и известията казваха „след 1 рунда“
+    (прегледът на одита, 2026-11-05)."""
+    return f"{n} рунд" if n == 1 else f"{n} рунда"
+
+
+def _halt_reason() -> str:
+    """Защо мисията трябва да спре СЕГА („“ — не трябва): Стоп/Ctrl-C на
+    оператора (`should_stop`) или изтекъл краен срок. Одит 2026-10-31: срокът
+    се гледаше само в началото на рунда и преди save_skill — отговор, поискан
+    преди него и дошъл след него, пак се изпълняваше (кодът, verify_skill,
+    критикът, инструментите), след като DELEGATE беше казал „timeout“; а Стоп
+    не стигаше до мисията изобщо."""
+    # Срокът пръв: при таймаут wait_all вдига и `cancel`, а с него `should_stop`
+    # казва „да“ — причината излизаше „спряно от оператора“ (прегледът, 2026-11-05).
+    if _past_deadline():
+        return "времето на делегираната задача изтече"
+    check = getattr(_CTX, "should_stop", None)
+    try:
+        if check is not None and check():
+            return "спряно от оператора"
+    except Exception:
+        log.debug("проверката за спиране се провали", exc_info=True)
+    return ""
 
 
 def run_autonomous_loop(
@@ -218,23 +238,25 @@ def run_autonomous_loop(
     skill_slug: str | None = None,
     operator_id: str | None = None,
     deadline: float | None = None,
-    cancel: threading.Event | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> LoopOutcome:
     """
     Публична обвивка: изпълнява мисията и известява резултата през notifier
     (ако са конфигурирани). Известията никога не чупят цикъла.
 
-    `deadline` (time.time()): след него нов рунд не започва и нищо не се записва.
-    `cancel` (DELEGATE): вдигнат — същото, веднага.
+    `deadline` (time.time()) и `should_stop()` (Стоп на оператора): след тях
+    нищо не се пуска, не се вика моделът и нищо не се записва. Ctrl-C и
+    „Стоп“ на телефона стигат дотук през should_stop (одит 2026-11-04: след
+    Ctrl-C в DELEGATE мисията правеше още 7 обръщения към модела за 2 s).
     """
     _CTX.deadline = deadline
-    _CTX.cancel = cancel
+    _CTX.should_stop = should_stop
     try:
         return _run_and_report(goal, max_rounds=max_rounds, skill_slug=skill_slug,
                                operator_id=operator_id)
     finally:
         _CTX.deadline = None
-        _CTX.cancel = None
+        _CTX.should_stop = None
 
 
 def _run_and_report(goal: str, *, max_rounds: int | None, skill_slug: str | None,
@@ -242,9 +264,10 @@ def _run_and_report(goal: str, *, max_rounds: int | None, skill_slug: str | None
     outcome = _run_autonomous_loop_impl(
         goal, max_rounds=max_rounds, skill_slug=skill_slug, operator_id=operator_id
     )
-    if _past_deadline() and not outcome.success:
+    if _halt_reason() and not outcome.success:
         # Изтекло време не е провал на мисията: без урок от стар traceback и
-        # без „❌ не успя“ (преглед 2026-10-07).
+        # без „❌ не успя“ (преглед 2026-10-07). Стоп — също (одит 2026-10-31:
+        # текстът „Спряно от оператора“ ставаше урок, а телефонът — „не успя“).
         return outcome
     # Мета-обучение: запиши изхода, за да се учи от грешките си.
     try:
@@ -254,13 +277,16 @@ def _run_and_report(goal: str, *, max_rounds: int | None, skill_slug: str | None
     except Exception:
         log.debug("record_mission се провали", exc_info=True)
     try:
-        from genesis_agent.notifier import notify
+        from genesis_agent.notifier import notify, redact
+        # redact ПРЕДИ рязането (одит 2026-10-31): срез между `://me:парола` и
+        # `@` оставяше адрес, който notify() вече не познава като тайна.
+        shown = redact(goal)[:200]
         if outcome.success:
-            notify(f"✅ **Genesis** изпълни мисия за {outcome.rounds} рунда\n"
-                   f"🎯 {goal[:200]}\n📦 {outcome.skill_path}")
+            notify(f"✅ **Genesis** изпълни мисия за {rounds_text(outcome.rounds)}\n"
+                   f"🎯 {shown}\n📦 {outcome.skill_path}")
         else:
-            notify(f"❌ **Genesis** не успя с мисия след {outcome.rounds} рунда\n"
-                   f"🎯 {goal[:200]}")
+            notify(f"❌ **Genesis** не успя с мисия след {rounds_text(outcome.rounds)}\n"
+                   f"🎯 {shown}")
     except Exception:
         log.debug("известието за мисията не замина", exc_info=True)
     return outcome
@@ -401,11 +427,15 @@ def _run_autonomous_loop_impl(
     # тръгнал, но е отхвърлен от критика/проверката, не се „ремонтира“ покрай
     # тях: ремонтът записваше отхвърлено умение като успех (одит 2026-10-09).
     last_exec_failed = False
+    # Рундовете, в които моделът наистина е питан, и защо цикълът е спрял по-
+    # рано (одит 2026-10-31): изходът казваше rounds=max_rounds и без причина,
+    # дори когато веригата отказа още на първия рунд.
+    rounds_done = 0
+    fail_reason = ""
+    halted = ""
     for round_i in range(max_rounds):
-        if _past_deadline():
-            report_thought("⏹ Делегираната задача е спряна от оператора — спирам, нищо не записвам."
-                           if _cancelled() else
-                           "⏰ Времето на делегираната задача изтече — спирам, нищо не записвам.")
+        halted = _halt_reason()
+        if halted:
             break
         try:
             from genesis_agent.config import stop_event
@@ -418,6 +448,12 @@ def _run_autonomous_loop_impl(
 
         messages = Brain.trim_round_history(messages)
         reply = brain.complete(messages, tools=MISSION_TOOLS)
+        rounds_done = round_i + 1
+        # Отговор, дошъл след Стоп или след срока, не се изпълнява — нито код,
+        # нито инструмент (одит 2026-10-31, виж _halt_reason).
+        halted = _halt_reason()
+        if halted:
+            break
 
         # ─── ПАДНАХМЕ НА ЛОКАЛНИЯ TIER — проучи преди да продължиш (design note,
         # 2026-08-11): облакът се пробва пръв за всяка нормална мисия, така че
@@ -459,6 +495,8 @@ def _run_autonomous_loop_impl(
 
                 import genesis_skills
                 for tc in reply.tool_calls:
+                    if _halt_reason():   # всеки инструмент може да е бавен
+                        break
                     fn = tc.get("function", {}) or {}
                     name = fn.get("name", "")
                     try:
@@ -480,6 +518,9 @@ def _run_autonomous_loop_impl(
                 log.debug("инструментът хвърли", exc_info=True)
                 messages.append({"role": "tool", "tool_call_id": "error",
                                   "name": "error", "content": f"[tool грешка: {_e}]"})
+            halted = _halt_reason()
+            if halted:
+                break
 
             _tool_only_rounds += 1
             if not _forced_code and (_tool_only_rounds >= _force_code_after or _spin_now):
@@ -544,6 +585,8 @@ def _run_autonomous_loop_impl(
                     for raw, code, _model in brain.generate_local_candidates(
                         messages, n=LOCAL_EXTRA_CANDIDATES
                     ):
+                        if _halt_reason():   # кандидатът се пуска — не след Стоп
+                            break
                         if not code or best_score == 2:
                             continue
                         score, scored_code = _score_local_candidate(code)
@@ -577,6 +620,7 @@ def _run_autonomous_loop_impl(
                 print(f"\n[КРИТИЧНА ГРЕШКА] Сървърът върна: {raw}")
                 # Спира веднага - няма смисъл да въртим 8 рунда при грешка на връзка
                 print("[!] Прекратявам опитите. Провери модела и повтори (/модел)")
+                fail_reason = raw   # единствената следа за DELEGATE (одит 2026-10-31)
                 break
 
             messages.append({"role": "assistant", "content": reply.raw_text})
@@ -588,11 +632,17 @@ def _run_autonomous_loop_impl(
             )
             continue
 
-        
+        # Локалните кандидати и ruff може да са отнели време (одит 2026-10-31).
+        halted = _halt_reason()
+        if halted:
+            break
         result = run_python_subprocess(reply.code)
         last_stdout = result.stdout
         last_stderr = result.stderr
         last_exec_failed = not result.ok
+        halted = _halt_reason()   # verify_skill пуска кода втори път
+        if halted:
+            break
 
         if result.ok:
             # ─── ТЕСТ-ГЕЙТ (реална проверка, не само мнение на LLM) ───
@@ -640,6 +690,9 @@ def _run_autonomous_loop_impl(
                 continue
 
             # ─── КРИТИК (семантично второ мнение) ───
+            halted = _halt_reason()   # критикът е още едно платено извикване
+            if halted:
+                break
             critic_prompt = (
                 f"Goal: {goal}\n\n"
                 f"Code Output:\n{last_stdout}\n\n"
@@ -682,8 +735,9 @@ def _run_autonomous_loop_impl(
                 continue
 
             report_thought("✅ Тест-гейт + критик одобриха резултата.")
-            if _past_deadline():
-                break  # викащият вече е казал „таймаут“ — умение след това е изненада
+            halted = _halt_reason()
+            if halted:
+                break  # викащият вече е казал „таймаут“/„спряно“ — умение след това е изненада
             slug = skill_slug or slugify(goal)
             ex: dict[str, Any] = {"rounds": round_i + 1, "test_gated": True}
             ex.update(audit)
@@ -761,8 +815,11 @@ def _run_autonomous_loop_impl(
     except ImportError:
         is_stopped = False
 
+    halted = halted or _halt_reason()
+    if halted:
+        report_thought(f"⏹ Мисията спира ({halted}) — нищо повече не пускам и не записвам.")
     if (last_generated_code and last_stderr and last_exec_failed
-            and not is_stopped and not _past_deadline()):
+            and not is_stopped and not halted):
         print("\n" + "\u2550" * 55)
         print("  [\u26a0\ufe0f  \u0410\u0412\u0410\u0420\u0418\u0415\u041d \u0420\u0415\u041c\u041e\u041d\u0422] Brain \u0435 \u043d\u0435\u0434\u043e\u0441\u0442\u044a\u043f\u0435\u043d. \u0410\u043a\u0442\u0438\u0432\u0438\u0440\u0430\u043c LocalRepairAgent...")
         print("  [\u041c\u0410\u041b\u042a\u041a \u041c\u041e\u0414\u0415\u041b] \u041f\u0430\u0442\u0435\u0440\u043d \u0430\u043d\u0430\u043b\u0438\u0437 + 1-3B \u043c\u043e\u0434\u0435\u043b")
@@ -781,7 +838,10 @@ def _run_autonomous_loop_impl(
         from genesis_agent.verifier import verify_skill
         repair_verified = False
         repair_vres = None
-        if repair.fixed:
+        # Ремонтът (локален модел) може да е траял — Стоп/срокът междувременно
+        # не пускат проверката му и не записват (одит 2026-10-31).
+        halted = _halt_reason()
+        if repair.fixed and not halted:
             repair_vres = verify_skill(repair.code)
             # Същият гейт като основния път: САМО минал самотест. `verified` е
             # True и за `runs_clean` (без никакъв тест) — така маскиращата
@@ -792,7 +852,8 @@ def _run_autonomous_loop_impl(
                       f"({repair_vres.method}) - вероятно маскира грешката вместо да я "
                       "поправя; НЕ се записва в библиотеката непроверен.")
 
-        if repair_verified and repair_vres is not None:
+        halted = halted or _halt_reason()
+        if repair_verified and repair_vres is not None and not halted:
             print(f"\n  [\u2705 \u0410\u0412\u0410\u0420\u0418\u0415\u041d \u0420\u0415\u041c\u041e\u041d\u0422 \u0423\u0421\u041f\u0415\u0428\u0415\u041d] {repair.fix_desc}")
             print(f"  Метод: {repair.method} | Рундове: {repair.rounds} | verify: {repair_vres.method}")
 
@@ -811,7 +872,7 @@ def _run_autonomous_loop_impl(
                 rel = str(path.relative_to(SKILLS_ROOT)).replace("\\", "/")
                 return LoopOutcome(
                     success=True,
-                    rounds=max_rounds + repair.rounds,
+                    rounds=rounds_done + repair.rounds,
                     skill_path=rel,
                     last_stdout=last_stdout,
                     last_stderr=last_stderr,
@@ -826,10 +887,11 @@ def _run_autonomous_loop_impl(
 
     return LoopOutcome(
         success=False,
-        rounds=max_rounds,
+        rounds=rounds_done,
         skill_path=None,
         last_stdout=last_stdout,
         last_stderr=last_stderr,
         storage_note=storage_note,
         dna_audit=audit,
+        reason=halted or fail_reason,
     )
