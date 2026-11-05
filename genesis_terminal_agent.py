@@ -2167,7 +2167,8 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                 # WRITE_FILE/RUN_CMD (отказани там) и `genesis -p --plan` печаташе
                 # втория отговор вместо плана.
                 _unsupported = ([] if _planning
-                                else claim_check.unsupported_claims(response, _executed))
+                                else claim_check.unsupported_claims(
+                                    response, _executed, Path(genesis_skills._WORKSPACE)))
                 if _unsupported and _claim_retries < 1:
                     _claim_retries += 1
                     ui.warn("Твърди свършена работа, която никой "

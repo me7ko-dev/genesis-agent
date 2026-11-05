@@ -518,3 +518,36 @@ def test_a_red_run_still_proves_it_was_run() -> None:
         "RUN_CMD", "node app.js", "[RUN_CMD: node app.js]  (rc=1)\nReferenceError: x")]
     assert claim_check.unsupported_claims("Пуснах го — гърми с ReferenceError.", ran) == []
     assert claim_check.unsupported_claims("Тествах скрипта: пада на ред 3.", ran) == []
+
+
+# ── 8. Записът е доказан, но на друг файл: назованото име го няма ────────────
+
+@pytest.mark.parametrize("reply, name", [
+    ("Записах отчета в report.csv.", "report.csv"),
+    ("Създадох tests/test_app.py с 5 теста.", "tests/test_app.py"),
+    ("I've saved the results to out/summary.json.", "out/summary.json"),
+])
+def test_a_named_file_that_does_not_exist_is_unsupported(tmp_path, reply, name) -> None:
+    (tmp_path / "app.py").write_text("x", encoding="utf-8")
+    claims = claim_check.unsupported_claims(reply, [("WRITE_FILE", str(tmp_path / "app.py"))], tmp_path)
+    assert [c.kind for c in claims] == ["запис на файл"] and name in claims[0].needed
+
+
+@pytest.mark.parametrize("reply", [
+    "Записах app.py.",
+    "Записах резултата в data.csv.",                      # командата го сложи в out/
+    "Създадох скрипт, който чете sales.xlsx.",             # входът, не записаното
+    "I've created a script that reads input.csv.",
+    "Не записах report.csv — няма права.",
+    "В предишния ход записах report.csv.",
+])
+def test_existing_input_or_unclaimed_files_are_left_alone(tmp_path, reply) -> None:
+    (tmp_path / "app.py").write_text("x", encoding="utf-8")
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "data.csv").write_text("x", encoding="utf-8")
+    executed = [("WRITE_FILE", str(tmp_path / "app.py")), ("RUN_CMD", "python app.py")]
+    assert claim_check.unsupported_claims(reply, executed, tmp_path) == []
+
+
+def test_without_a_workspace_the_names_are_not_checked(tmp_path) -> None:
+    assert claim_check.unsupported_claims("Записах отчета в report.csv.", [("WRITE_FILE", "app.py")]) == []

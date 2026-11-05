@@ -27,8 +27,10 @@ without ever executing anything").
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -690,7 +692,74 @@ def _works_claim(text: str, executed: list[tuple[str, str]]) -> Claim | None:
                         f"неуспехът е нарочен, напр. отказ на лош вход, кажи го)")
 
 
-def unsupported_claims(text: str, executed: list[tuple[str, str]]) -> list[Claim]:
+# Назован файл, който го няма (2026-11-05): WRITE_FILE на app.py и „Записах
+# отчета в report.csv.“ минаваше — запис има, но не този; 3 от 3 проби, вкл.
+# „I've saved the results to out/summary.json.“. Първото име на файл след глагола
+# за запис се търси на диска (в проекта до 4 нива — команда може да го е сложила
+# в подпапка) и в аргументите на изпълнените инструменти.
+_FILE_NAME_RE = re.compile(
+    r"(?<![\w/.~\\-])((?:~[/\\]|/|[A-Za-z]:[/\\])?(?:[\w.-]+[/\\])*[\w-][\w.-]*\."
+    r"(?:py|csv|json|md|txt|html?|css|js|ts|tsx|jsx|ya?ml|toml|xlsx|xls|docx|pdf|sql|sh|ps1|"
+    r"bat|ini|cfg|log|xml|png|jpe?g|svg))\b", re.IGNORECASE)
+_INPUT_WORDS_RE = re.compile(r"\b(?:кой|коя|кое|кои|който|която|което|които|чете|зарежда|обработва|"
+                             r"ползва|от|that|which|reads?|loads?|process\w*|uses?|from)\b",
+                             re.IGNORECASE)
+_SKIP_DIRS = frozenset({".git", "node_modules", ".venv", "venv", "__pycache__", ".tox", "dist",
+                        "build", ".mypy_cache", ".pytest_cache"})
+
+
+def _exists_somewhere(name: str, workspace: Path) -> bool:
+    candidate = Path(name).expanduser()
+    if not candidate.is_absolute():
+        candidate = workspace / candidate
+    try:
+        if candidate.exists():
+            return True
+    except OSError:
+        return True                       # не може да се провери — не тревожим
+    base = Path(name.replace("\\", "/")).name
+    root_depth = len(workspace.parts)
+    try:
+        for folder, dirs, files in os.walk(workspace):
+            if base in files:
+                return True
+            dirs[:] = [d for d in dirs if d not in _SKIP_DIRS] \
+                if len(Path(folder).parts) - root_depth < 4 else []
+    except OSError:
+        return True
+    return False
+
+
+def _missing_file_claim(text: str, executed: list[tuple[str, str]],
+                        workspace: Path) -> Claim | None:
+    args = " ".join(a for _, a in executed).replace("\\", "/")
+    for kind, pattern, *_ in _CATEGORIES:
+        if kind not in ("запис на файл", _EDIT_KIND):
+            continue
+        for match in pattern.finditer(text):
+            if _pass_sentence(text, match) == _NOT_A_CLAIM or _PAST_TURN_RE.search(
+                    _sentence(text, match)):
+                continue
+            rest = text[match.end():]
+            end = _SENTENCE_END_RE.search(rest)
+            named = _FILE_NAME_RE.search(rest[:end.start()] if end else rest)
+            # Името е обектът на глагола: до 3 думи след него и без „който чете“,
+            # „от“, „reads“ между тях — „Създадох скрипт, който чете sales.xlsx“
+            # назовава входа, не записаното.
+            between = rest[:named.start()] if named else ""
+            if not named or len(between.split()) > 3 or _INPUT_WORDS_RE.search(between):
+                continue
+            name = named.group(1)
+            if Path(name.replace("\\", "/")).name in args or _exists_somewhere(name, workspace):
+                continue
+            return Claim(kind="запис на файл", quote=_quote(text, match),
+                         needed=f"файл {name} — такъв няма нито на диска, нито в изпълнените "
+                                "инструменти")
+    return None
+
+
+def unsupported_claims(text: str, executed: list[tuple[str, str]],
+                       workspace: Path | None = None) -> list[Claim]:
     """Твърденията в `text`, които изпълненото не подкрепя.
 
     `executed` е [(име_на_tool, аргументите като текст), ...] за ТОЗИ разговор
@@ -735,6 +804,11 @@ def unsupported_claims(text: str, executed: list[tuple[str, str]]) -> list[Claim
         _works_claim(text, executed)
     if works:
         found.append(works)
+    # Записът е доказан, но на друг файл: с `workspace` назованото име се търси.
+    if workspace is not None and not any(c.kind in ("запис на файл", _EDIT_KIND) for c in found):
+        missing = _missing_file_claim(text, executed, workspace)
+        if missing:
+            found.append(missing)
     # Едно твърдение на изпълнение стига: „пуснах тестовете“/„работи“ вече са го казали.
     tried = None if any(c.kind in (_PASS_KIND, _RAN_KIND, _WORKS_KIND, "проверка в браузър")
                         for c in found) else \
