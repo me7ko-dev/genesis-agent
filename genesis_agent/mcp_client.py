@@ -414,14 +414,16 @@ class HttpServer(Server):
         self.notify("notifications/initialized")
         self.tools = self._list_tools(deadline)
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, refresh_timeout: float | None = None) -> dict[str, str]:
+        """`refresh_timeout` — колко може да чака подновяване на токена от
+        /mcp login (остатъкът от срока на извикването; 0 — без подновяване)."""
         h = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
              **{k: _expand(v) for k, v in self.headers.items()}}
         # Токен от /mcp login (mcp_oauth) — освен ако mcp.json не дава свой.
         if not any(k.lower() == "authorization" for k in h):
             from genesis_agent import mcp_oauth
             try:
-                token = mcp_oauth.access_token(_expand(self.url))
+                token = mcp_oauth.access_token(_expand(self.url), timeout=refresh_timeout)
             except Exception:   # „никога не хвърля“ — без токен, сървърът ще каже 401
                 log.debug("токенът от /mcp login не се прочете", exc_info=True)
                 token = ""
@@ -445,8 +447,11 @@ class HttpServer(Server):
 
     def _post(self, msg: dict, deadline: float, *, retried: bool = False):
         import requests
+        # Подновяването на токена е в срока на извикването, преди POST-а:
+        # извикване със срок 2 s чакаше 15 s спрял сървър за вход, капещ —
+        # завинаги (одит 2026-10-31, възпроизведено).
+        headers = self._headers(max(0.0, deadline - time.monotonic()))
         left = max(0.5, deadline - time.monotonic())
-        headers = self._headers()
         try:
             # Без пренасочване: requests маха Authorization при смяна на хоста,
             # но X-API-Key, Cookie и Mcp-Session-Id стигаха до чуждия адрес
@@ -475,7 +480,8 @@ class HttpServer(Server):
             try:
                 fresh = (not retried and "Authorization" in headers
                          and mcp_oauth.refresh(_expand(self.url),
-                                               stale=headers["Authorization"][7:]))
+                                               stale=headers["Authorization"][7:],
+                                               timeout=max(0.5, deadline - time.monotonic())))
             except Exception:
                 log.debug("токенът на MCP сървъра не се поднови", exc_info=True)
                 fresh = None
@@ -640,7 +646,9 @@ class HttpServer(Server):
         if self._ready and self.session_id:
             try:
                 import requests
-                requests.delete(_expand(self.url), headers=self._headers(), timeout=3,
+                # Без подновяване на токена (0): stop_all() при atexit чакаше
+                # сървъра за вход по 15 s на сървър (одит 2026-10-31).
+                requests.delete(_expand(self.url), headers=self._headers(0), timeout=3,
                                 allow_redirects=False)
             except Exception:
                 log.debug("MCP сесията не се затвори на сървъра", exc_info=True)
