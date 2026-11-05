@@ -10,6 +10,7 @@ from __future__ import annotations
 import http.client
 import json
 import logging
+import shlex
 
 import pytest
 
@@ -314,3 +315,51 @@ def test_a_long_mission_goal_cut_before_the_at_sign_leaks_no_password(telegram, 
     text = telegram[0][1]["text"]
     assert "hunter2pass" not in text, text
     assert "Направи" in text
+
+
+# ── 9. След прегледа (2026-11-05): стойността е цялата shell дума ──
+# `"…"|'…'|\S+` спираше на първата затваряща кавичка и опашката оставаше
+# видима. На 5c7462a падат 16 от 17; на a4fd75c (`\S+` — цялата дума) — 6:
+# флаговете, които там не се познаваха (слепено `-p`, `redis-cli -a`,
+# `sqlcmd -P`), и стойностите с интервал в кавички. Другите пазят изтичането
+# да не се върне.
+
+_QUOTED_PW = shlex.quote("Xy7'q9!secret")    # 'Xy7'"'"'q9!secret'
+
+
+@pytest.mark.parametrize("text", [
+    f"export DB_PASSWORD={_QUOTED_PW} && ./migrate",
+    f"mysql --password {_QUOTED_PW} db",
+    f"mysql --password={_QUOTED_PW} db",
+    f"mysql -uroot -p{_QUOTED_PW} db",
+    f"sshpass -p {_QUOTED_PW} ssh host",
+    f"sshpass -p{_QUOTED_PW} ssh host",
+    f"redis-cli -a {_QUOTED_PW} ping",
+    f"sqlcmd -S srv -U sa -P {_QUOTED_PW}",
+])
+def test_a_shlex_quoted_password_with_an_apostrophe_is_masked_whole(text) -> None:
+    out = redact(text)
+    assert "q9!secret" not in out, out
+    assert "Xy7" not in out, out
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ('PASSWORD="abc"def ./run.sh', "PASSWORD=*** ./run.sh"),
+    ("API_KEY='part1'\"part2\" make", "API_KEY=*** make"),
+    ("mysql --password='abc'\\''def' db", "mysql --password *** db"),
+    ('TOKEN=abc"def ghi" ./run.sh', "TOKEN=*** ./run.sh"),
+    ("curl -u 'me:a b'\"c\" https://h", "curl -u *** https://h"),
+])
+def test_quoted_parts_glued_into_one_word_are_masked_together(text, expected) -> None:
+    assert redact(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    r"chrome --user-data-dir=C:\Users\x",
+    "curl --user-agent=a:b https://h",
+    "gcc $(mysql_config --cflags) -pthread main.c",
+    "cc main.c $(mariadb_config --libs) -pthread",
+])
+def test_flags_that_only_start_like_a_password_flag_stay_readable(text) -> None:
+    """`--user-data-dir`, `--user-agent`, `mysql_config` не носят парола."""
+    assert redact(text) == text

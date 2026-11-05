@@ -74,7 +74,12 @@
 `conversation_memory.py`, `embeddings.py` (кръгът от 22.10 гледа само workspace_memory);
 `llm_api.py` (`genesis api`); `delegate.py`; `mcp_oauth.py` (`/mcp login` — кръгът за MCP
 покри клиента, не OAuth); `context_usage.py`. ~2000 реда, всичко с фалшиви HTTP/модели.
-Плюс дреболиите от петия кръг: слепено `-phunter2` в notifier.redact; `BYPASS:` с главни.
+Плюс дреболиите от петия кръг: ~~слепено `-phunter2` в notifier.redact; `BYPASS:` с главни~~
+— 2026-10-31 (`tests/test_audit_2026_10_31_notifier.py`). Остава в redact: голото
+`PASS:`/`PAT:` с главни нарочно не се маскира (изход на go test); не се познават
+`--passphrase`/`PASSPHRASE=`, `rar -hp…`, `"APIKEY"`, `d['password'] = 'x'`; правилото
+за `user:pass@` без `://` — 5 s на 50 KB ред `a-a-…` (debug.log минава всеки запис през
+redact); `_tool_run_cmd` пише командата нередактирана в `_log_episode` и я връща на модела.
 Същият ред: три одита с репродукция → поправка с тест, който пада преди → PR → сливане.
 
 ## 2026-10-27 — пети кръг (brain, умения/fix/verifier, мисия, web, облак)
@@ -112,7 +117,7 @@ claude_cli (чистене на env), 8 нишки × 40 complete(); DELEGATE ti
 temp папка, web_check на 60 MB HTML, page_check runner (`/.env`, `..` → 404; Chromium
 наживо: alert/beforeunload/busy-loop), monitor (аларма само при промяна), billing
 (подпис, повторения, суми, ledger append-only, 20 паралелни add_entry).
-Отворено: `-phunter2` (слепено) не се маскира; `BYPASS:` с главни се маскира като env.
+~~Отворено: `-phunter2` (слепено) не се маскира; `BYPASS:` с главни се маскира като env~~ — 2026-10-31.
 
 ## 2026-10-27 — sandbox.py (отложеното от 22.10)
 

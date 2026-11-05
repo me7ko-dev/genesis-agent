@@ -147,7 +147,17 @@ API_TOKEN_RE = re.compile(
 #   • `BYPASS:`/`COMPASS:` в главни и `--- PASS: TestX` (go test) ставаха
 #     `X=***`. Слепен отпред с главни букви вече е само дългият ключ
 #     (PGPASSWORD, APIKEY), а голото `PASS:`/`PAT:` в главни е изход, не тайна.
-_VALUE = r"""(?:"[^"\n]*"|'[^'\n]*'|\S+)"""
+#
+# Стойността е цялата shell дума: части в кавички и слепените за тях (след
+# прегледа, 2026-11-05). С `"…"|'…'|\S+` маскирането спираше на първата
+# затваряща кавичка — `shlex.quote("Xy7'q9!secret")` дава `'Xy7'"'"'q9!secret'`
+# и от `DB_PASSWORD=`, `--password `, `mysql -p`, `sshpass -p` оставаше видимо
+# `q9!secret`; също `PASSWORD="abc"def` → `***def`. Мерено на 2160 генерирани
+# входа (27 ключа/флага × 10 стойности × 8 обкръжения): с `…|\S+` изтичаха
+# 1248, от тях 448, които `\S+` на a4fd75c маскираше; сега 0. Стойността е
+# последна във всяко правило, затова назад не се връща: 50 KB вход — 0.01–0.1 s,
+# колкото и преди.
+_VALUE = r"""(?:"[^"\n]*"|'[^'\n]*'|\S)+"""
 
 
 def _tool_flag(tools: str, flag: str) -> re.Pattern[str]:
@@ -169,10 +179,16 @@ _SECRET_PATTERNS = [
                 r"""|[Pp]wd|PWD|[Pp]at|PAT|[Dd]sn|DSN)\\?["']\s*(?::|=>?)\s*)"""
                 r"""(?:"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|[^\s,}]+)"""),
      r'\1"***"'),
-    (_tool_flag(r"mysql\w*|mariadb\w*|sshpass|7z[ar]?|(?:un)?rar", "-p"), r"\1***"),
+    # `mysql_config`/`mariadb_config` не са клиенти: `gcc $(mysql_config
+    # --cflags) -pthread` ставаше `-p***` (прегледът, 2026-11-05).
+    (_tool_flag(r"(?:mysql|mariadb)(?!_config\b)\w*|sshpass|7z[ar]?|(?:un)?rar", "-p"),
+     r"\1***"),
     (_tool_flag(r"sqlcmd|osql|isql|bcp|zip|unzip|zipcloak", "-P ?"), r"\1***"),
     (_tool_flag(r"redis-cli", "-a ?"), r"\1***"),
-    (re.compile(rf"(?<!\S)(--(?:proxy-)?user|-u)[ =]?(?=[\"']?[^\s\"':]*:){_VALUE}"), r"\1 ***"),
+    # `--user` е цял флаг: `chrome --user-data-dir=C:\Users\x` и
+    # `--user-agent=a:b` ставаха `--user ***` (прегледът, 2026-11-05).
+    (re.compile(rf"(?<!\S)(--(?:proxy-)?user(?![\w-])|-u)[ =]?(?=[\"']?[^\s\"':]*:){_VALUE}"),
+     r"\1 ***"),
     (re.compile(r"(?i)(?<!\S)(--?pass(?:word|wd)?|--?pwd|(?-i:-p|-u)"
                 r"|--(?!no-)(?:[a-z0-9]+-)*(?:password|passwd|api-?key|secret(?:-access)?-key|private-key|secret))"
                 rf"[ =]{_VALUE}"), r"\1 ***"),
