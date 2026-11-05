@@ -1260,8 +1260,13 @@ def _tool_run_cmd(arg: str) -> str:
         _log_episode(f"RUN_CMD {command}", f"отказан: {res.stderr}", ["tool", "run_cmd", "blocked"])
         # Security alert през notifier — блокирана опасна операция.
         try:
-            from genesis_agent.notifier import notify
-            notify(f"🛡️ **Genesis Sandbox** блокира опасна команда:\n`{command[:300]}`\n{res.stderr[:200]}")
+            from genesis_agent.notifier import notify, redact
+            # redact ПРЕДИ рязането (одит 2026-10-31): срез на 300-ния знак
+            # между `https://me:парола` и `@` оставяше адрес без `@`, който
+            # маскирането в notify() вече не познава — паролата заминаваше цяла.
+            # Причината също: може да цитира команда (декодиран -EncodedCommand).
+            notify(f"🛡️ **Genesis Sandbox** блокира опасна команда:\n`{redact(command)[:300]}`\n"
+                   f"{redact(res.stderr)[:200]}")
         except Exception:
             log.debug("известието за блокирана команда не тръгна", exc_info=True)
         return f"[RUN_CMD: {command}]\n{res.stderr}"

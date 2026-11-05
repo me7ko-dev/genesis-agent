@@ -239,13 +239,16 @@ def _run_and_report(goal: str, *, max_rounds: int | None, skill_slug: str | None
     except Exception:
         log.debug("record_mission се провали", exc_info=True)
     try:
-        from genesis_agent.notifier import notify
+        from genesis_agent.notifier import notify, redact
+        # redact ПРЕДИ рязането (одит 2026-10-31): срез между `://me:парола` и
+        # `@` оставяше адрес, който notify() вече не познава като тайна.
+        shown = redact(goal)[:200]
         if outcome.success:
             notify(f"✅ **Genesis** изпълни мисия за {outcome.rounds} рунда\n"
-                   f"🎯 {goal[:200]}\n📦 {outcome.skill_path}")
+                   f"🎯 {shown}\n📦 {outcome.skill_path}")
         else:
             notify(f"❌ **Genesis** не успя с мисия след {outcome.rounds} рунда\n"
-                   f"🎯 {goal[:200]}")
+                   f"🎯 {shown}")
     except Exception:
         log.debug("известието за мисията не замина", exc_info=True)
     return outcome
