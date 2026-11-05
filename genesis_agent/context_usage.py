@@ -76,7 +76,12 @@ def _text(content: Any) -> int:
 
 def report(messages: Any, tools: list | None = None, window: int = 0,
            last_tokens: int = 0) -> str:
+    from genesis_agent import vision
     msgs = [m for m in list(messages or []) if isinstance(m, dict)]
+    # Картинките от по-стари ходове Brain.complete маха за ВСЕКИ доставчик, преди
+    # всичко друго (vision.elide_old_images) — броим каквото стига до модела.
+    # Одит 2026-11-04: 20 хода със снимка → „Разговор ~30.1K“, а отиват 3 (~4.5K).
+    msgs = vision.elide_old_images(msgs)
     # Промптът е само първото съобщение. По-късните „system“ са от хода:
     # изходи на инструменти в текстов режим („[Резултат]:“), бележките на цикъла
     # и резюмето от /compact — броени бяха като инструкции за проекта (одит 2026-10-10).
@@ -96,13 +101,18 @@ def report(messages: Any, tools: list | None = None, window: int = 0,
                 if isinstance(call, dict):
                     fn = call.get("function") or {}
                     names[str(call.get("id"))] = str(fn.get("name") or "?")
-        elif role == "tool" or (role == "system" and str(m.get("content") or "").startswith("[Резултат")):
+        # Снимката от VIEW_IMAGE / проверката в браузър е user „[прикачено от
+        # Genesis] …“ — изход на инструмент, не реплика на оператора (одит
+        # 2026-11-04: един ред и 3 снимки бяха „твоите съобщения 4 ~4.5K“).
+        elif (role == "tool" or vision.is_attachment(m)
+              or (role == "system" and str(m.get("content") or "").startswith("[Резултат"))):
             n_results += 1
             size = _text(m.get("content"))
             results += size
             if size > biggest[1]:
                 biggest = (m.get("name") or names.get(str(m.get("tool_call_id")))
-                           or ("[Резултат]" if role == "system" else "?"), size)
+                           or ("[Резултат]" if role == "system"
+                               else "[прикачено]" if role == "user" else "?"), size)
         elif role == "system":
             n_notes += 1
             notes += _text(m.get("content"))

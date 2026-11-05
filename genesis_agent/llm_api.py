@@ -29,6 +29,8 @@ import json
 import logging
 import os
 import re
+import socket
+import sys
 import threading
 import time
 import uuid
@@ -46,6 +48,10 @@ MAX_PARALLEL = 2
 REQUEST_TIMEOUT_S = 18.0      # клиентът на играта чака 20 s
 MODEL_TIMEOUT_S = 8           # на модел; бавният се прескача към следващия
 MAX_MODELS = 6                # най-много толкова модела от веригата на заявка
+# Отказ, преди тялото да е прочетено (413, 403, 404…): колко най-много да се
+# изхвърля остатъкът, за да стигне отговорът вместо RST (виж _linger_close).
+_LINGER_S = 0.5
+_DRAIN_CHUNK = 64 * 1024
 _ROLES = ("system", "user", "assistant")
 _LOCAL_ORIGIN = re.compile(r"http://(127\.0\.0\.1|localhost)(:\d{1,5})?")
 JSON_INSTRUCTION = ("Return exactly one valid JSON object and nothing else: "
@@ -138,7 +144,9 @@ def parse_request(body: bytes) -> tuple[list[dict], bool]:
     """(messages, json_mode) от тялото на заявката, или ApiError(400)."""
     try:
         data = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+    # RecursionError: `[` × 60 000 (под 64 KB) не е ValueError — беше 500
+    # „Вътрешна грешка“ за грешка на клиента (одит 2026-11-04).
+    except (UnicodeDecodeError, ValueError, RecursionError):
         raise ApiError(400, "Тялото не е валиден JSON.") from None
     if not isinstance(data, dict):
         raise ApiError(400, "Тялото трябва да е JSON обект.")
@@ -155,8 +163,15 @@ def parse_request(body: bytes) -> tuple[list[dict], bool]:
             raise ApiError(400, "Всяко съобщение иска role: system, user или assistant.")
         content = m.get("content")
         if isinstance(content, list):  # OpenAI части: [{"type":"text","text":…}]
-            content = "".join(str(p.get("text") or "") for p in content
-                              if isinstance(p, dict) and p.get("type") == "text")
+            # Само текстови части (одит 2026-11-04): другите се изпускаха тихо —
+            # картинка сама стигаше до модела като `content: ""` и клиентът
+            # получаваше 200 с отговор за нещо, което моделът не е видял.
+            other = next((p for p in content
+                          if not (isinstance(p, dict) and p.get("type") == "text")), None)
+            if other is not None:
+                kind = other.get("type") if isinstance(other, dict) else type(other).__name__
+                raise ApiError(400, f"Само текст: частта {str(kind)[:40]!r} не се поддържа.")
+            content = "".join(str(p.get("text") or "") for p in content)
         if not isinstance(content, str):
             raise ApiError(400, "content трябва да е текст.")
         messages.append({"role": m["role"], "content": content})
@@ -255,6 +270,7 @@ class _Handler(BaseHTTPRequestHandler):
     server_version = "genesis"
     sys_version = ""
     timeout = 10  # бавен/недовършен клиент не държи нишка завинаги
+    _body_read = False
 
     def log_message(self, format: str, *args: Any) -> None:
         return  # свой ред в _handle, без съдържание
@@ -269,7 +285,11 @@ class _Handler(BaseHTTPRequestHandler):
         self._handle("OPTIONS")
 
     def _send(self, status: int, obj: dict | None, origin: str | None) -> None:
-        body = b"" if obj is None else json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        # "replace": отговор на модела с половин двойка (`"\ud83d"` в JSON-а на
+        # доставчика — отрязано емоджи) даваше UnicodeEncodeError → 500 и
+        # платеният отговор се губеше (одит 2026-11-04); сега тя е „?“.
+        body = (b"" if obj is None
+                else json.dumps(obj, ensure_ascii=False).encode("utf-8", "replace"))
         self.send_response(status)
         if obj is not None:
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -303,13 +323,50 @@ class _Handler(BaseHTTPRequestHandler):
             raise ApiError(411, "Липсва Content-Length.") from None
         if length > MAX_BODY:
             raise ApiError(413, f"Тялото е над {MAX_BODY // 1024} KB.")
+        self._body_read = True
         return self.rfile.read(max(0, length))
+
+    def _linger_close(self) -> None:
+        """След отговор, който не е прочел тялото (413, 403, 404, 411…): първо
+        FIN, после до _LINGER_S се изхвърля остатъкът, на парчета.
+
+        Одит 2026-11-04: 413 и веднага close() с непрочетени данни → Linux праща
+        RST и клиентът, който още праща, вижда BrokenPipe вместо 413 — по сокет
+        0 от 10 при 1 MiB, http.client 0 от 5 при 24 MB (requests чете
+        отговора и така). На Windows close() с непрочетено е RST винаги.
+        Същото като _linger_close в remote_server (2026-10-20)."""
+        if self._body_read:
+            return
+        try:
+            left = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            left = 0
+        chunked = "chunked" in (self.headers.get("Transfer-Encoding") or "").lower()
+        if left <= 0 and not chunked:
+            return
+        self.close_connection = True
+        try:
+            self.wfile.flush()
+            self.connection.shutdown(socket.SHUT_WR)
+            deadline = time.monotonic() + _LINGER_S
+            while chunked or left > 0:
+                wait = deadline - time.monotonic()
+                if wait <= 0:
+                    break
+                self.connection.settimeout(wait)
+                got = len(self.rfile.read1(_DRAIN_CHUNK if chunked else min(left, _DRAIN_CHUNK)))
+                if not got:
+                    break
+                left -= got
+        except OSError:   # TimeoutError е OSError; клиентът се е отказал
+            pass
 
     def _handle(self, method: str) -> None:
         srv = cast(ApiServer, self.server)
         t0 = time.monotonic()
         path = self.path.split("?", 1)[0].rstrip("/")
         status, model, origin = 500, "-", None
+        self._body_read = False
         try:
             origin = self._check_caller()
             if method == "OPTIONS":
@@ -336,8 +393,15 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(500, {"error": {"message": f"Вътрешна грешка: {type(e).__name__}"}}, origin)
         finally:
             ms = int((time.monotonic() - t0) * 1000)
-            print(f"[api] {time.strftime('%H:%M:%S')} {method} {path[:60]} → {status} "
-                  f"{model} {ms} ms", flush=True)
+            self._linger_close()
+            # Едно write с \n-а (одит 2026-11-04): print пише реда и \n отделно —
+            # при 40 едновременни заявки редовете се слепваха („…0 ms[api] …“).
+            # None: процес без конзола (pythonw) — print мълчи, и тук.
+            out = sys.stdout
+            if out is not None:
+                out.write(f"[api] {time.strftime('%H:%M:%S')} {method} {path[:60]} → {status} "
+                          f"{model} {ms} ms\n")
+                out.flush()
 
 
 # ── `genesis api` ───────────────────────────────────────────────────────────
