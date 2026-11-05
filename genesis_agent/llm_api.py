@@ -56,6 +56,8 @@ MAX_MODELS = 6                # най-много толкова модела о
 MIN_CALL_S = 1.0
 _ROLES = ("system", "user", "assistant")
 _LOCAL_ORIGIN = re.compile(r"http://(127\.0\.0\.1|localhost)(:\d{1,5})?")
+# `[`, след която идва обект или масив — масив от стойности (може и счупен).
+_ARRAY_OF_VALUES = re.compile(r"\[\s*[\[{]")
 # Имена на заглавки (token по RFC 9110), разделени със запетаи — за CORS.
 _HEADER_NAME = r"[!#$%&'*+.^_`|~0-9A-Za-z-]+"
 _HEADER_LIST = re.compile(rf"{_HEADER_NAME}(?:[ \t]*,[ \t]*{_HEADER_NAME})*")
@@ -146,11 +148,22 @@ def extract_json_object(text: str) -> str | None:
     на {} и [] (низовете в тях — с кавичките и екраните с `\\`) и пробва само
     `{` на дълбочина 0. Кавичките в прозата отвън не се броят: там често са
     несдвоени. NaN/Infinity (и 1e400 → inf) JSON.parse в играта отхвърля, затова
-    такъв кандидат отпада, вместо да излезе като „валиден“ отговор."""
+    такъв кандидат отпада, вместо да излезе като „валиден“ отговор.
+
+    Ревю 2026-11-05: несдвоена `[` в прозата („виж [1): {…}“, „<think>[мисля
+    </think>{…}“) отваряше дълбочина, която не се затваря, и криеше обекта
+    (преди 2026-10-31 той се връщаше). `[` на дълбочина 0 е масив само ако се чете цял
+    (прескача се) или ако след нея идва `{`/`[` (масив от обекти — и счупен, и
+    отрязан пак крие елементите си); иначе е скоба в прозата. Несдвоена `{` в
+    прозата пак крие обекта: не се различава от `{reply: "Hi", mood: {…}}`, а
+    там вложеният фрагмент е грешен отговор — повторният опит е по-евтин.
+    RecursionError: обект, вложен на 50 000 нива, излизаше като 500."""
     decoder = json.JSONDecoder(parse_constant=_no_constant)
-    depth, tries = 0, 0
+    depth, objects, arrays, skip_to = 0, 0, 0, 0
     in_str = escaped = False
     for i, ch in enumerate(text):
+        if i < skip_to:
+            continue
         if in_str:
             if escaped:
                 escaped = False
@@ -160,16 +173,25 @@ def extract_json_object(text: str) -> str | None:
                 in_str = False
         elif ch == '"':
             in_str = depth > 0
+        elif ch == "{" and depth == 0:
+            objects += 1
+            if objects > 50:
+                return None
+            try:
+                obj, _ = decoder.raw_decode(text, i)
+                return json.dumps(obj, ensure_ascii=False, allow_nan=False)
+            except (ValueError, RecursionError):
+                depth = 1  # счупен: броенето по-долу го прескача целия
+        elif (ch == "[" and depth == 0 and arrays < 50
+              and not _ARRAY_OF_VALUES.match(text, i)):
+            # Най-много 50 опита: `[1,[1,[1,…` иначе е O(n²). След тях `[`
+            # пак отваря дълбочина — както преди, на сигурно.
+            arrays += 1
+            try:
+                _, skip_to = decoder.raw_decode(text, i)  # цял масив — прескача се
+            except (ValueError, RecursionError):
+                pass  # скоба в прозата: дълбочината не се променя
         elif ch in "{[":
-            if ch == "{" and depth == 0:
-                tries += 1
-                if tries > 50:
-                    return None
-                try:
-                    obj, _ = decoder.raw_decode(text, i)
-                    return json.dumps(obj, ensure_ascii=False, allow_nan=False)
-                except ValueError:
-                    pass  # счупен: броенето по-долу го прескача целия
             depth += 1
         elif ch in "}]" and depth:
             depth -= 1
@@ -242,6 +264,9 @@ def generate(messages: list[dict], json_mode: bool,
         reply = brain.complete(msgs, tools=None, avoid=avoid)
         text = str(reply.raw_text or "").strip()
         if text.startswith("Error:"):
+            # След start_by — 504 и при истински грешки (напр. само 502): веригата
+            # е спряна от срока, не е изчерпана; клиентът вижда същото като при
+            # 504 от run_limited (ревю 2026-11-05).
             if _late(start_by):
                 raise ApiError(504, "Моделите не отговориха навреме.")
             raise ApiError(502, f"Моделите не отговориха: {text[6:].strip()[:200]}")
