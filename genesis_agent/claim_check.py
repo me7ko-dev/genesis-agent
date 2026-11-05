@@ -39,6 +39,11 @@ class Claim:
     needed: str
 
 
+_EDIT_KIND = "промяна на код"
+# Изречение за минал ход: „В предишния ход поправих…“ — обобщение, не твърдение
+# за този ход (отговор на „какво направи?“).
+_PAST_TURN_RE = re.compile(r"(?:по-рано|преди това|предишни\w*|вчера|миналия|earlier|previously|"
+                           r"last (?:turn|time)|before that|in the previous)", re.IGNORECASE)
 _TEST_WORDS = frozenset({"pytest", "test", "tests", "unittest", "tox", "nose", "make",
                          "npm", "cargo", "go", "python", "python3"})
 _PASS_KIND = "минаващи тестове"
@@ -65,6 +70,16 @@ _CATEGORIES: tuple[tuple[str, re.Pattern[str], frozenset[str], frozenset[str]], 
         frozenset({"WRITE_FILE", "EDIT_FILE", "RUN_CMD", "USE_SKILL", "DELEGATE"}),
         frozenset({"tee", "cp", "mv", "touch", "mkdir", "curl", "wget", "git",
                    "python", "python3", "sh", "bash"}),
+    ),
+    (
+        # 2026-11-05: „Направих commit“, „Къмитнах и пушнах“, „I committed and
+        # pushed“ без git команда — същото.
+        "git commit/push",
+        re.compile(
+            r"\b(направих (?:git )?(?:commit|къмит)|къмитнах|commit-нах|пушнах|push-нах|"
+            r"i(?:'ve| have)? (?:just )?(?:committed|pushed)|committed and pushed)\b", re.IGNORECASE),
+        frozenset({"RUN_CMD", "USE_SKILL", "DELEGATE"}),
+        frozenset({"commit", "push"}),
     ),
     (
         "преместване/триене",
@@ -144,6 +159,21 @@ _CATEGORIES: tuple[tuple[str, re.Pattern[str], frozenset[str], frozenset[str]], 
         frozenset({"git", "systemctl", "chmod", "chown", "export", "sed", "tee",
                    "python", "python3", "sh", "bash", "npm", "pip"}),
     ),
+    (
+        # 2026-11-05: „Поправих бъга в calc.py“, „Добавих валидация“, „I fixed the
+        # bug“, „I've updated the config“ след само READ_FILE/SEARCH_CODE минаваха
+        # без подкана — 13 от 13 проби. Най-честата измислица на слаб модел.
+        # Само в ход с поне един инструмент и не за минал ход (_EDIT_KIND долу).
+        _EDIT_KIND,
+        re.compile(
+            r"\b(поправих|оправих|добавих|промених|обнових|написах|редактирах|коригирах|"
+            r"имплементирах|реализирах|преработих|рефакторирах|замених|"
+            r"i(?:'ve| have)? (?:just |now )?(?:fixed|added|updated|changed|modified|implemented|"
+            r"rewrote|rewritten|refactored|replaced|edited))\b", re.IGNORECASE),
+        frozenset({"WRITE_FILE", "EDIT_FILE", "RUN_CMD", "USE_SKILL", "DELEGATE"}),
+        frozenset({"sed", "perl", "awk", "patch", "tee", "cp", "mv", "git", "python", "python3",
+                   "sh", "bash", "node", "npm", "npx", "ruff", "black", "prettier", "cargo", "dotnet"}),
+    ),
 )
 
 # Достатъчно контекст, за да се вижда кое изречение е проблемното, без да се
@@ -212,6 +242,12 @@ _NEGATED_RE = re.compile(r"\b(?:не|not|no)\s+$", re.IGNORECASE)
 _CLAIM, _REPORT, _NOT_A_CLAIM = "claim", "report", "none"
 
 
+def _sentence(text: str, match: re.Match[str]) -> str:
+    start = max((m.end() for m in _SENTENCE_END_RE.finditer(text, 0, match.start())), default=0)
+    end_match = _SENTENCE_END_RE.search(text, match.end())
+    return text[start:end_match.end() if end_match else len(text)]
+
+
 def _pass_sentence(text: str, match: re.Match[str]) -> str:
     """Съвпадение за „тестовете минават“: зелено твърдение, смесен отчет
     (червена дума в изречението) или въпрос/условие/отрицание точно преди."""
@@ -236,6 +272,13 @@ def _find_claim(kind: str, pattern: re.Pattern[str],
     „пуснах тестовете“: иска пускане, но не и зелено последно пускане."""
     report = None
     for match in pattern.finditer(text):
+        if kind == _EDIT_KIND or kind == "git commit/push":
+            # „Не промених нищо“, „Ако добавих…?“ — не са твърдения; смесеният
+            # отчет („поправих го, но тестът пада“) пак твърди редакцията.
+            if _pass_sentence(text, match) == _NOT_A_CLAIM or _PAST_TURN_RE.search(
+                    _sentence(text, match)):
+                continue
+            return kind, match
         verdict = _pass_sentence(text, match) if kind == _PASS_KIND else _CLAIM
         if verdict == _CLAIM:
             return kind, match
@@ -634,6 +677,13 @@ def unsupported_claims(text: str, executed: list[tuple[str, str]]) -> list[Claim
         return []
     found: list[Claim] = []
     for category, pattern, ok_tools, ok_words in _CATEGORIES:
+        # Ход без нито един инструмент: „Поправих бъга, добавих тест“ е отговор на
+        # „какво направи?“ за предишния ход, не твърдение за този.
+        # Твърдение за тестовете или за запис вече носи бележката — „I fixed the bug
+        # and the tests pass“ след червено е едно твърдение, не две.
+        if category == _EDIT_KIND and (not executed or any(
+                c.kind in ("запис на файл", _PASS_KIND, _RAN_KIND) for c in found)):
+            continue
         hit = _find_claim(category, pattern, text)
         if not hit:
             continue

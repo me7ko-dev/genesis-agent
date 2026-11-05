@@ -424,7 +424,8 @@ def test_headless_counts_works_after_a_crash_as_a_failure(tmp_path, monkeypatch,
 
 @pytest.mark.parametrize("reply", ["Готово.", "Готово — добавих колоната.", "Done! The report is in out.csv."])
 def test_a_bare_done_after_a_crash_is_unsupported(reply) -> None:
-    assert [c.kind for c in claim_check.unsupported_claims(reply, _ran(_CRASH))] == ["работещ код"]
+    # „добавих колоната“ без редакция е и „промяна на код“ — тук важи „работещ код“.
+    assert "работещ код" in [c.kind for c in claim_check.unsupported_claims(reply, _ran(_CRASH))]
 
 
 @pytest.mark.parametrize("reply, executed", [
@@ -444,3 +445,46 @@ def test_done_with_red_tests_is_one_claim_not_two() -> None:
                                           "[RUN_CMD: python -m pytest -q]  (rc=1)\n1 failed in 0.1s")]
     assert [c.kind for c in claim_check.unsupported_claims("Done — the tests pass.", red)] == \
         ["минаващи тестове"]
+
+
+# ── 6. „Поправих/добавих…“ и „commit/push“ без нито една редакция/команда ────
+
+_READS = [("READ_FILE", "calc.py"), ("SEARCH_CODE", "def add")]
+
+
+@pytest.mark.parametrize("reply", [
+    "Поправих бъга в calc.py — вече връща сумата.", "Добавих валидация на имейла в forms.py.",
+    "Промених таймаута на 30 s.", "Обнових README с инструкциите.", "Написах тестовете.",
+    "I fixed the bug in calc.py.", "I've added input validation.", "I updated the config.",
+    "Поправих го, но тестът още пада.",
+])
+def test_an_edit_claimed_after_only_reading_is_unsupported(reply) -> None:
+    assert [c.kind for c in claim_check.unsupported_claims(reply, _READS)] == ["промяна на код"]
+
+
+@pytest.mark.parametrize("reply, executed", [
+    ("Поправих бъга в calc.py.", _READS + [("EDIT_FILE", "calc.py")]),
+    ("Поправих конфигурацията.", _READS + [("RUN_CMD", "sed -i s/30/60/ app.ini")]),
+    ("Поправих бъга, добавих тест.", []),                          # „какво направи?“ — предишният ход
+    ("В предишния ход поправих бъга в calc.py.", _READS),
+    ("Не промених нищо — само прочетох.", _READS),
+    ("Ако добавих грешен импорт, кажи.", _READS),
+    ("I haven't changed anything.", _READS),
+])
+def test_an_edit_claim_with_an_edit_or_about_another_turn_is_left_alone(reply, executed) -> None:
+    assert claim_check.unsupported_claims(reply, executed) == []
+
+
+@pytest.mark.parametrize("reply", ["Направих commit на промените.", "Къмитнах и пушнах.",
+                                   "I committed and pushed the changes."])
+def test_commit_or_push_without_git_is_unsupported(reply) -> None:
+    assert [c.kind for c in claim_check.unsupported_claims(reply, _READS)] == ["git commit/push"]
+    ran = _READS + [("RUN_CMD", "git commit -am x"), ("RUN_CMD", "git push")]
+    assert claim_check.unsupported_claims(reply, ran) == []
+
+
+def test_an_edit_and_red_tests_is_one_claim() -> None:
+    red = [claim_check.counts_as_executed("RUN_CMD", "python -m pytest -q",
+                                          "[RUN_CMD: python -m pytest -q]  (rc=1)\n1 failed in 0.1s")]
+    assert [c.kind for c in claim_check.unsupported_claims("I fixed the bug and the tests pass.", red)] \
+        == ["минаващи тестове"]
