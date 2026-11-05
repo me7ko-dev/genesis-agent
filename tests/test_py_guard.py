@@ -128,8 +128,11 @@ def test_a_comment_with_env_does_not_switch_the_guard_off(secret) -> None:
     def approve(_op, verdict) -> bool:
         asked.append(list(verdict.reasons))
         return True
-    code = ("# settings, as python-dotenv does for a .env file\nimport os, subprocess\n"
-            "subprocess.run(['true'])\n"
+    # Подпроцесът е Python-ът, не `true` (лаптопът 2026-11-05): на Windows без
+    # Git\usr\bin в PATH `true` го няма — FileNotFoundError спираше кода преди
+    # четенето и тестът падаше, без да провери пазача.
+    code = ("# settings, as python-dotenv does for a .env file\nimport os, subprocess, sys\n"
+            "subprocess.run([sys.executable, '-c', 'pass'])\n"
             f"print(open(os.path.join({_base(secret)!r}, '.s' + 'sh', 'id' + '_rsa')).read())\n")
     res = _run(code, policy=sandbox.SandboxPolicy(mode="interactive", confirm_fn=approve))
     assert "TOP-SECRET" not in res.stdout and "отказан" in res.stderr
