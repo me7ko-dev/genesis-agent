@@ -120,6 +120,7 @@ from genesis_agent import claim_check
 from genesis_agent.acceptance import AcceptanceCheck as _AcceptanceCheck
 from genesis_agent.acceptance import enabled as _acceptance_enabled
 from genesis_agent.budget import TEXT_RESULT_FOLLOWUP, clip_for_context
+from genesis_agent.code_check import MismatchCheck as _MismatchCheck
 from genesis_agent.code_check import RunCheck as _RunCheck
 from genesis_agent.config import TOOL_ROUND_CAP as _TOOL_ROUND_CAP
 from genesis_agent.page_check import FinalCheck as _PageCheck
@@ -1896,6 +1897,8 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
     # .py, записан и непуснат след последната промяна (genesis_agent.code_check).
     # Със заявката: буквалните думи от нея („ред ОБЩО“) се сверяват с кода.
     _run_check = _RunCheck(user_input)
+    # Разминаване в изхода на собствената проверка (code_check, 2026-11-05).
+    _mismatch = _MismatchCheck()
     # Приемни тестове само от заявката (genesis_agent.acceptance): с безплатен
     # модел — включени, с Claude/платен — не; GENESIS_ACCEPTANCE=1/0 решава изрично.
     _accept = _AcceptanceCheck(user_input, Path(genesis_skills._WORKSPACE), rules=knowledge,
@@ -1996,6 +1999,7 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                               else genesis_skills.dispatch_tool_call(name, call_args))
                     _page_check.observe(result)
                     _run_check.observe(result)
+                    _mismatch.observe(result)
                     _accept.observe(result)
                     _entry = claim_check.counts_as_executed(
                         name, " ".join(str(v) for v in args.values()), result)
@@ -2072,6 +2076,7 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                     ui.tool(_tag.group(1) if _tag else "инструмент", _r)
                 _page_check.observe(_r)
                 _run_check.observe(_r)
+                _mismatch.observe(_r)
                 _accept.observe(_r)
             if not tool_results:
                 # Празно ≠ непременно "приключи" — може да е объркан tool tag
@@ -2114,6 +2119,12 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                     ui.warn("Написа код — казвам му да го пробва и извън примерите.")
                     messages.append({"role": "system", "content": _run_check.note()})
                     with ui.thinking("Пробвам кода…", "aesthetic"):
+                        response, tool_calls = ask_genesis(messages, tools=_turn_tools())
+                    continue
+                if _mismatch.due(response) and not _planning:
+                    ui.warn("Собствената му проверка печата разминаване — казвам му да го сравни с условието.")
+                    messages.append({"role": "system", "content": _mismatch.note()})
+                    with ui.thinking("Сверявам разминаването…", "aesthetic"):
                         response, tool_calls = ask_genesis(messages, tools=_turn_tools())
                     continue
                 if _accept.due() and not _planning:
