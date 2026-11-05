@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import unicodedata
+from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
 from typing import Any
 
@@ -86,9 +87,14 @@ def _dedup_key(name: str) -> str:
     Затова + → p, # → sharp и точка между цифри → d преди махането. NFKC
     първо: NFD „Йордан“ (имена на файлове от macOS, поставен текст) губеше
     комбиниращата бреве и получаваше ключ „иордан“ — дубликат, който изглежда
-    еднакво."""
+    еднакво.
+
+    Преглед 2026-11-05: # → sharp само след буква и не пред цифра (C#, F#) —
+    иначе „Issue #123“ и „Issue 123“, „PR #42“ и „PR 42“ спряха да се сливат и
+    две противоречащи си състояния на един PR влизаха заедно в брифинга."""
     text = unicodedata.normalize("NFKC", name).casefold()
-    text = re.sub(r"(?<=\d)\.(?=\d)", "d", text.replace("+", "p").replace("#", "sharp"))
+    text = re.sub(r"(?<=[^\W\d_])#(?!\d)", "sharp", text.replace("+", "p"))
+    text = re.sub(r"(?<=\d)\.(?=\d)", "d", text)
     key = re.sub(r"[\W_]+", "", text)
     return key or name.casefold().strip()
 
@@ -183,7 +189,8 @@ def _cleaned(item: dict[str, Any], section: str) -> dict[str, Any]:
     return {**item, **{f: _clean_field(item.get(f)) for f in _TEXT_FIELDS[section]}}
 
 
-def _unique_relations(relations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _unique_relations(relations: list[dict[str, Any]],
+                      per_workspace: bool = True) -> list[dict[str, Any]]:
     """Една връзка на (source, relation, target, ws); последното споменаване
     печели и отива най-отзад. Непълните отпадат.
 
@@ -191,12 +198,18 @@ def _unique_relations(relations: list[dict[str, Any]]) -> list[dict[str, Any]]:
     компресията пази, влизат пак в pre_compact на следващата и фактите им се
     извличат отново — 6 извличания дадоха 13 връзки, 6 различни, а брифингът
     (последните 12) показваше същите факти отново и отново и избутваше
-    различните; таванът от 200 гонеше истински по-стари връзки."""
-    unique: dict[tuple[str, str, str, Any], dict[str, Any]] = {}
+    различните; таванът от 200 гонеше истински по-стари връзки.
+
+    Преглед 2026-11-05: str(ws) в ключа — ръчно редактирано `"ws": ["/x"]`
+    правеше ключа нехешируем и TypeError спираше и брифинга, и всяка
+    компресия, без файлът да бъде отделен (същият клас като записите, които не
+    са обекти)."""
+    unique: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     for r in relations:
         if r["source"] and r["relation"] and r["target"]:
+            ws = str(r.get("ws") or "") if per_workspace else ""
             key = (_dedup_key(r["source"]), _dedup_key(r["relation"]),
-                   _dedup_key(r["target"]), r.get("ws"))
+                   _dedup_key(r["target"]), ws)
             unique.pop(key, None)
             unique[key] = r
     return list(unique.values())
@@ -233,11 +246,15 @@ def _save(graph: dict[str, Any]) -> None:
 # Одит 2026-10-31: „```JSON“, изречение преди обекта, бележка след оградата и
 # „<think>…</think>“ отпред от разсъждаващ модел падаха на json.loads и кръгът
 # се губеше тихо, докато workspace_memory.auto_capture приемаше същия отговор.
-_THINK_RE = re.compile(r"(?is)<think>.*?</think>")
+# Преглед 2026-11-05: всичко до ПОСЛЕДНОТО </think>, не двойката <think>…</think> —
+# доставчик, който изпуска отварящия таг, връща „разсъждение…</think>{json}“, а
+# extract_json_object тогава вземаше първия обект от разсъжденията (повторената
+# схема „{"entities":[]}“) и кръгът излизаше празен.
+_THINK_RE = re.compile(r"(?is)^.*</think>")
 
 
 def _parse_llm_json(raw: str) -> dict[str, Any]:
-    text = _THINK_RE.sub("", raw).strip()
+    text = _THINK_RE.sub("", raw, count=1).strip()
     if text.startswith("```"):
         text = text.strip("`")
         text = text.removeprefix("json")
@@ -270,11 +287,54 @@ def _log_window(session_logs: str) -> str:
     които компресията ПАЗИ) са код по ~900-1365 знака и запълваха всичките
     6000 знака. По-старите — които компресията заменя с обобщение и в които
     са решенията („плащанията минават през Stripe, базата е PostgreSQL 16“) —
-    не стигаха до модела в нито едно от 6-те извличания."""
-    if len(session_logs) <= _MAX_LOG_CHARS:
-        return session_logs
-    half = _MAX_LOG_CHARS // 2
-    return session_logs[:half] + "\n…\n" + session_logs[-half:]
+    не стигаха до модела в нито едно от 6-те извличания. Само предпазител за
+    готов низ: agent_core подава transcript(), който вече се побира."""
+    return _clip_middle(session_logs, _MAX_LOG_CHARS, "\n…\n")
+
+
+def transcript(messages: Iterable[Mapping[str, Any]]) -> str:
+    """Преписът за compact_and_graph_memory: всяко user/assistant съобщение
+    получава дял от _MAX_LOG_CHARS, така че никое не изпада изцяло.
+
+    Преглед 2026-11-05 (шести кръг на одита), през истинския run_tool_loop
+    с компресия „обобщение + последните 10“, 30 хода и факт във всяко user
+    съобщение: _log_window сам не стига, щом отговорите са дълги — 3000 знака
+    начало събират едно-две съобщения, а средата изпада. От фактите, които
+    никога не стигнаха до графа: при отговори ~1.2K знака 2/29, ~1.9K — 12/29,
+    ~3.8K и ~10K — 21/29. Дяловете са max-min: късото съобщение влиза цяло
+    (решенията обикновено са кратки реплики), дългите делят остатъка поравно и
+    пазят начало и край. Със същото измерване — 0/29 при всички размери.
+    Фиксиран таван от 600 знака на съобщение също дава 0/29 там, но при 8
+    рунда с инструменти на ход (~3.8K знака на отговор) губи 19/20: 15+ дълги
+    съобщения пак надхвърлят бюджета и средата изпада заедно с късата user
+    реплика в нея; с дяловете — 0/20."""
+    lines = [f"{m.get('role')}: {m.get('content')}" for m in messages
+             if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)]
+    caps = _fair_shares([len(line) for line in lines], max(0, _MAX_LOG_CHARS - len(lines) + 1))
+    return "\n".join(_clip_middle(line, cap) for line, cap in zip(lines, caps))
+
+
+def _fair_shares(lengths: list[int], budget: int) -> list[int]:
+    """Max-min разпределение на `budget`: от най-късото нагоре всяко взима
+    колкото му трябва, но не повече от равен дял от остатъка."""
+    shares = [0] * len(lengths)
+    left = budget
+    order = sorted(range(len(lengths)), key=lengths.__getitem__)
+    for done, i in enumerate(order):
+        shares[i] = min(lengths[i], left // (len(order) - done))
+        left -= shares[i]
+    return shares
+
+
+def _clip_middle(text: str, limit: int, cut: str = " … ") -> str:
+    """Началото и краят на `text`, общо до `limit` знака."""
+    if len(text) <= limit:
+        return text
+    room = limit - len(cut)
+    if room < 2:
+        return text[:max(0, limit)]
+    head = (room + 1) // 2
+    return text[:head] + cut + text[-(room - head):]
 
 
 def compact_and_graph_memory(session_logs: str, workspace: str | None = None) -> dict[str, Any]:
@@ -397,11 +457,21 @@ def graph_briefing(max_relations: int = 12, max_states: int = 12,
     def here(item: dict[str, Any]) -> bool:
         return not workspace or item.get("ws") in (None, workspace)
 
-    relations = [r for r in graph["relations"] if here(r)][-max_relations:]
+    # Преглед 2026-11-05: дедупликация и СЛЕД филтъра — връзка/състояние без
+    # ws отпреди маркирането и същият факт, извлечен наново с ws="/a", са два
+    # записа, а брифингът за /a печаташе „- API USES Redis“ два пъти и старото
+    # „БД: счупена“ до новото „БД: оправена“. По-новото печели. Без workspace
+    # проектите остават отделни — там ws различава факти, а не копия.
+    relations = _unique_relations([r for r in graph["relations"] if here(r)],
+                                  per_workspace=not workspace)[-max_relations:]
     rel_lines = [f"- {r['source']} {r['relation']} {r['target']}{_age(r.get('at'))}"
                  for r in reversed(relations)]
-    states = [st for st in graph["states"].values() if here(st)]
-    states.sort(key=lambda st: str(st.get("updated_at", "")), reverse=True)
+    newest: dict[str, dict[str, Any]] = {}
+    for st in sorted((st for st in graph["states"].values() if here(st)),
+                     key=lambda st: str(st.get("updated_at", "")), reverse=True):
+        ws = "" if workspace else f"@{st.get('ws') or ''}"
+        newest.setdefault(_dedup_key(st["name"]) + ws, st)
+    states = list(newest.values())
     state_lines = [f"- {st['name']}: {st['status']}{_age(st.get('updated_at'))}"
                    for st in states[:max_states]]
     # Най-новите влизат първи в бюджета; връзките се показват в реда на запис.
