@@ -16,6 +16,7 @@
 
 import sqlite3
 
+from genesis_agent import sqlite_store
 from genesis_agent.config import MEMORY_DIR
 
 DB_PATH = str(MEMORY_DIR / "conversation_memory.db")
@@ -23,20 +24,24 @@ DB_PATH = str(MEMORY_DIR / "conversation_memory.db")
 # --------------------------------------------------------------
 # Инициализация на базата
 # --------------------------------------------------------------
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS conversations (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    role      TEXT NOT NULL,
+    content   TEXT NOT NULL,
+    ts        DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+
 def _init_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS conversations (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            role      TEXT NOT NULL,
-            content   TEXT NOT NULL,
-            ts        DATETIME DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-    )
-    conn.commit()
-    return conn
+    # През sqlite_store, както memory/episodic_memory/workspace_memory (одит
+    # 2026-10-31, възпроизведено): с голо sqlite3.connect нечетим файл връщаше
+    # „file is not a database“ на ВСЯКО add_message, а genesis_terminal_agent.
+    # _remember го гълта на ниво debug — записът спираше в тази и във всяка
+    # следваща сесия без дума към оператора. Сега файлът отива настрани като
+    # *.corrupt с едно предупреждение и историята продължава в нова база.
+    return sqlite_store.connect(DB_PATH, _SCHEMA)
 
 # --------------------------------------------------------------
 # Вътрешна помощна функция за сумиране (placeholder)
@@ -75,7 +80,8 @@ def _simple_summarize(messages: list[dict[str, str]]) -> str:
 
     ordered = ([m for m in messages if m.get("role") == "user"]
                + [m for m in messages if m.get("role") != "user"])
-    items: list[str] = []
+    users: list[str] = []
+    others: list[str] = []
     seen: set[str] = set()
     for msg in ordered:
         text = " ".join((msg.get("content") or "").split())[:_SUMMARY_ITEM_CHARS]
@@ -83,11 +89,30 @@ def _simple_summarize(messages: list[dict[str, str]]) -> str:
         if not text or key in seen:
             continue
         seen.add(key)
-        items.append(f"{msg.get('role', '?')}: {text}")
+        line = f"{msg.get('role', '?')}: {text}"
+        (users if msg.get("role") == "user" else others).append(line)
 
-    if len(items) > _SUMMARY_MAX_ITEMS:
-        items = [items[0], "…"] + items[-(_SUMMARY_MAX_ITEMS - 1):]
+    # Режем всяка роля поотделно (одит 2026-10-31, възпроизведено): общият
+    # списък „хора + останали“ се режеше с items[-7:], а последните 7 в него
+    # винаги са отговорите на модела. 51 реплики през add_message дадоха
+    # „user: искане №0 | … | assistant: Готово, стъпка 6..18“ — от 11-те
+    # искания на човека в блока оцеля едно, точно провалът от docstring-а.
+    if users:
+        room = _SUMMARY_MAX_ITEMS - len(users)
+        # Отговорите само допълват мястото — с най-новите (докъде стигнахме).
+        # Проверката room > 0 е задължителна: others[-0:] връща ВСИЧКИ.
+        items = _first_and_last(users) + (others[-room:] if room > 0 else [])
+    else:
+        items = _first_and_last(others)
     return header + (" | " + " | ".join(items) if items else "")
+
+
+def _first_and_last(items: list[str]) -> list[str]:
+    """Ако не се събират: първата, „…“ и последните — както казва docstring-ът
+    на _simple_summarize."""
+    if len(items) <= _SUMMARY_MAX_ITEMS:
+        return items
+    return [items[0], "…"] + items[-(_SUMMARY_MAX_ITEMS - 1):]
 
 # --------------------------------------------------------------
 # Основни публични функции
