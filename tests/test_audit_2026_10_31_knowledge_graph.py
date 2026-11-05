@@ -3,8 +3,9 @@
 редактиран файл, повтарящи се връзки, прозорецът на извличането, ключът за
 дедупликация, парсването на отговора, самотен surrogate, .gitignore и
 остарелите състояния. Всеки тест падаше срещу кода преди поправката
-(възпроизведено със скриптовете на одита, audit6/kg-a/), освен двата пазача,
-отбелязани изрично — те пазят поправките от прекаляване."""
+(възпроизведено със скриптовете на одита, audit6/kg-a/), освен пазачите,
+отбелязани изрично — те пазят поправките от прекаляване. Тестовете с
+„Преглед 2026-11-05“ са от прегледа на първата поправка (audit6/kg-r2)."""
 from __future__ import annotations
 
 import json
@@ -244,6 +245,32 @@ def test_duplicates_already_on_disk_show_once_in_the_briefing(graph_path) -> Non
     assert kg.graph_briefing().splitlines() == ["- API USES Redis", "- Auth DEPENDS_ON JWT"]
 
 
+@pytest.mark.parametrize("ws", [["/x"], {"path": "/x"}])
+def test_a_hand_edited_non_string_workspace_does_not_freeze_the_graph(graph_path, ws) -> None:
+    # Пазач (минаваше и преди одита, падна с дедупликацията на връзките):
+    # нехешируем ws не бива да спира брифинга и всяка следваща компресия.
+    rels = [{"source": "API", "relation": "USES", "target": "Redis", "at": _ago(0), "ws": ws}]
+    _write_graph(graph_path, {"entities": {}, "relations": rels, "states": {}})
+    assert kg.graph_briefing() == "- API USES Redis"
+    _reply({"relations": [{"source": "Auth", "relation": "USES", "target": "JWT"}]})
+    graph = kg.compact_and_graph_memory("user: ...", workspace="/proj")
+    assert [r["source"] for r in graph["relations"]] == ["API", "Auth"]
+
+
+def test_untagged_and_tagged_copies_show_once_in_a_workspace_briefing(graph_path) -> None:
+    # Преглед 2026-11-05: факт отпреди маркирането с ws и същият факт, извлечен
+    # наново за /a, са два записа — брифингът за /a показваше и двата.
+    rels = [{"source": "API", "relation": "USES", "target": "Redis", "at": _ago(200)},
+            {"source": "API", "relation": "uses", "target": "redis", "at": _ago(0), "ws": "/a"}]
+    states = {"бд": {"name": "БД", "status": "счупена", "updated_at": _ago(200)},
+              "бд@/a": {"name": "БД", "status": "оправена", "updated_at": _ago(0), "ws": "/a"},
+              "бд@/b": {"name": "БД", "status": "мигрира", "updated_at": _ago(1), "ws": "/b"}}
+    _write_graph(graph_path, {"entities": {}, "relations": rels, "states": states})
+    assert kg.graph_briefing(workspace="/a").splitlines() == ["- API uses redis", "- БД: оправена"]
+    # Без workspace нищо не се слива: ws там различава проекти, не копия.
+    assert kg.graph_briefing().count("- БД: ") == 3
+
+
 # ── kg-a5: извличането виждаше само последните 6000 знака — решенията отпред изпадаха ──
 
 def test_an_early_decision_reaches_the_extractor(graph_path) -> None:
@@ -315,6 +342,68 @@ def test_through_the_tool_loop_decisions_arrive_once(graph_path, monkeypatch) ->
     assert sorted(rels) == sorted(set(rels)), rels
 
 
+@pytest.mark.parametrize(("code_lines", "tool_rounds"), [(38, 0), (76, 0), (76, 8)])
+def test_facts_from_the_middle_survive_long_replies(graph_path, monkeypatch,
+                                                    code_lines: int, tool_rounds: int) -> None:
+    """Преглед на шести кръг (2026-11-05): само началото и краят на целия
+    препис стигат при къси отговори. С отговори от ~1.9K/3.8K знака (и с 8
+    рунда инструменти на ход) фактът от всяко user съобщение, което
+    компресията вече е изтрила, трябва да е в графа — не само от първото."""
+    from genesis_agent import agent_core as ac
+
+    monkeypatch.setattr(brain_module, "Brain", _ExtractingBrain)
+    code = "```python\n" + "def handler(request):\n    return process(request)\n" * code_lines + "```"
+    calls = [0]
+
+    def complete(messages: list[dict[str, Any]]) -> tuple[str, Any, str, str]:
+        calls[0] += 1
+        if calls[0] % (tool_rounds + 1):
+            return (code, [{"id": f"c{calls[0]}", "function": {
+                "name": "LIST_DIR", "arguments": json.dumps({"path": f"d{calls[0]}"})}}], "p", "m")
+        return (code, None, "p", "m")
+
+    core = SimpleNamespace(
+        workspace="/proj", complete=complete,
+        skills=SimpleNamespace(parse_and_execute_tools=lambda text: [],
+                               dispatch_tool_call=lambda name, args: f"listed {args}"),
+        wm=SimpleNamespace(auto_capture=lambda pre_compact: None),
+        remember=lambda *a: None,
+    )
+    history: list[dict[str, Any]] = []
+    turns = 30
+    for i in range(turns):
+        history.append({"role": "user", "content": f"Step {i}. FACT: Mod{i} USES Lib{i}"})
+        history = list(ac.run_tool_loop(core, history, on_assistant=lambda *a: None,
+                                        on_tool_result=lambda *a: None))
+    assert len(_FakeBrain.prompts) >= 8
+    graph = json.loads(graph_path.read_text(encoding="utf-8")) if graph_path.exists() else {}
+    stored = {r["source"] for r in graph.get("relations", [])}
+    kept = " ".join(str(m.get("content")) for m in history)
+    lost = [i for i in range(turns) if f"Mod{i} " not in kept and f"Mod{i}" not in stored]
+    assert lost == [], f"{len(lost)} факта от изтрити съобщения не стигнаха до графа: {lost}"
+    assert all(len(p) < len(kg._EXTRACT_PROMPT) + kg._MAX_LOG_CHARS for p in _FakeBrain.prompts)
+
+
+def test_transcript_keeps_every_message_within_the_budget() -> None:
+    """Късите реплики влизат цели, дългите пазят начало и край, а общото е до
+    _MAX_LOG_CHARS — колкото и да са съобщенията."""
+    long = "BEGIN " + "x" * 9000 + " END"
+    msgs: list[dict[str, Any]] = [{"role": "system", "content": "sys " * 3000}]
+    for i in range(12):
+        msgs += [{"role": "assistant", "content": long},
+                 {"role": "user", "content": f"Decision {i}: use Redis{i}."}]
+    msgs.append({"role": "assistant", "content": None})
+    text = kg.transcript(msgs)
+    assert len(text) <= kg._MAX_LOG_CHARS
+    for i in range(12):
+        assert f"user: Decision {i}: use Redis{i}." in text
+    assert text.count("assistant: BEGIN") == 12 and text.count("END") == 12
+    assert "sys" not in text
+    assert kg.transcript([]) == ""
+    short = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+    assert kg.transcript(short) == "user: hi\nassistant: hello"
+
+
 # ── kg-a6: _dedup_key сливаше C++/C#/C и v1.2/v12; NFD кирилица получаваше друг ключ ──
 
 def test_dedup_key_keeps_the_characters_that_tell_names_apart() -> None:
@@ -326,6 +415,14 @@ def test_dedup_key_keeps_the_characters_that_tell_names_apart() -> None:
     # Старите сливания остават.
     assert kg._dedup_key("AuthToken") == kg._dedup_key("auth token") == kg._dedup_key("Auth-Token!")
     assert kg._dedup_key("C++") == kg._dedup_key("cpp")
+    assert kg._dedup_key("F# модул") != kg._dedup_key("F модул")
+
+
+def test_a_number_sign_before_digits_still_merges() -> None:
+    # Пазач (минаваше и преди одита, падна с „# → sharp“ навсякъде, преглед
+    # 2026-11-05): „Issue #123“ и „Issue 123“ са един обект.
+    assert kg._dedup_key("Issue #123") == kg._dedup_key("Issue 123")
+    assert kg._dedup_key("PR #42") == kg._dedup_key("PR 42") == kg._dedup_key("PR#42")
 
 
 def test_states_of_similar_names_in_one_reply_all_survive(graph_path) -> None:
@@ -352,7 +449,11 @@ _OBJ = '{"entities":[{"name":"Redis","type":"db"}],"relations":[],"states":[{"en
     f"Ето графа: {_OBJ}",
     f"```json\n{_OBJ}\n```\nЗабележка: само изрично казаното.",
     f"<think>Търся обекти {{като този}}...</think>\n{_OBJ}",
-], ids=["upper-fence", "preamble-fence", "preamble", "trailing-note", "think-block"])
+    # Преглед 2026-11-05: доставчик, който изпуска отварящия <think>, а в
+    # разсъжденията има повторена схема — тя не бива да е „първият обект“.
+    f'Схемата е {{"entities": []}}, попълвам я.</think>\n{_OBJ}',
+], ids=["upper-fence", "preamble-fence", "preamble", "trailing-note", "think-block",
+        "think-without-opener"])
 def test_usable_replies_grow_the_graph(graph_path, raw: str) -> None:
     _reply(raw)
     graph = kg.compact_and_graph_memory("user: ...")
