@@ -206,25 +206,49 @@ def _same_value(a: str, b: str) -> bool:
         return False
 
 
-def mismatch_line(output: str) -> str:
-    """Първият ред от изхода, който показва разминаване; "" ако няма."""
+# Слабите сигнали (✗/FAIL ред, „N failed“, „4/5“, „3 expected 4“, Expected/Actual на
+# два реда) — само в изход на проверка (преглед 2026-11-05: 11 от 28 нормални изхода
+# на програми, чиято тема са неуспехите — „Imported 118 rows, 2 failed validation“,
+# „Attempt 1 failed, retrying“, „✗ Обади се на мама“, „Score: 1/2 correct“, бюджет
+# „Expected: 1200 лв / Actual: 1150 лв“ — даваха бележка). Проверка е: тестов
+# пускач, скрипт с check/test/verify/valid/spec/assert в името, `python -c`/`node -e`,
+# или изход, който сам казва „All tests passed“ (точно c365). Силното —
+# „expected 4, got 3“ на един ред — важи за всеки пуснат код.
+_CHECK_SCRIPT = re.compile(r"[\w./\\-]*(?:check|test|verify|valid|spec|assert)[\w.-]*\.(?:py|[cm]?js|ts|sh)\b"
+                           r"|\b(?:python\d*(?:\.\d+)?|py|node)(?:\.exe)?\"?\s+-[ce]\b", re.IGNORECASE)
+_SELF_SUMMARY = re.compile(r"\ball (?:\d+ )?(?:tests?|checks?|cases?) (?:passed|pass|ok)\b|\ball passed\b"
+                           r"|\btests? passed\b|\bвсички (?:\d+ )?(?:тестове|теста|проверки|случаи) "
+                           r"(?:минаха|минават)", re.IGNORECASE)
+
+
+def is_self_check(command: str, output: str) -> bool:
+    """Изходът е на проверка (тестове, check.py, `python -c`), не на програмата."""
+    from genesis_agent.claim_check import is_test_run
+    return is_test_run(command) or bool(_CHECK_SCRIPT.search(command) or _SELF_SUMMARY.search(output))
+
+
+def mismatch_line(output: str, *, self_check: bool = True) -> str:
+    """Първият ред от изхода, който показва разминаване; "" ако няма.
+    Без `self_check` — само „expected X, got Y“ на един ред (виж горе)."""
     lines = (output or "").splitlines()
     for i, line in enumerate(lines):
         text = line.strip()
         if not text:
             continue
-        if _FAIL_LINE.match(text) or _FAIL_COUNT.search(text):
+        if self_check and (_FAIL_LINE.match(text) or _FAIL_COUNT.search(text)):
             return text[:200]
-        ratio = _RATIO.search(text)
+        ratio = _RATIO.search(text) if self_check else None
         if ratio and int(ratio.group(1)) < int(ratio.group(2)):
             return text[:200]
         if _ERROR_LINE.search(text):
             continue
         pair = _EXP_FIRST.search(text) or _GOT_FIRST.search(text)
-        if pair is None and not _HAS_GOT.search(text):
+        if pair is None and self_check and not _HAS_GOT.search(text):
             pair = _BARE.search(text)
         if pair and not _same_value(pair.group("exp"), pair.group("got")):
             return text[:200]
+        if not self_check:
+            continue
         # „Expected: X“ и „Got: Y“ на съседни редове, в който и да е ред.
         exp = _LABEL_EXP.match(text)
         got = _LABEL_GOT.match(lines[i + 1].strip()) if exp and i + 1 < len(lines) else None
@@ -258,7 +282,8 @@ class MismatchCheck:
         command = head.group(1).strip()
         if not runs_code(command):
             return
-        line = mismatch_line(result[head.end():])
+        output = result[head.end():]
+        line = mismatch_line(output, self_check=is_self_check(command, output))
         if line:
             self._pending[command] = (line, False)
             return
@@ -306,7 +331,8 @@ _TEST_CHANGE_ASKED = re.compile(
     r"\b(?:обнови|смени|промени|пренапиши|редактирай|коригирай|махни|изтрий|премахни|пропусни|"
     r"update|change|rewrite|edit|adjust|correct|remove|delete|skip|modify)\w*\s+(?:\S+\s+){0,3}?"
     r"(?:тест|test|assert|spec)"
-    r"|\b(?:тест\w*|tests?)\s+(?:\S+\s+){0,2}?(?:греш(?:ен|н)|остар(?:ял|ел)|wrong|outdated|incorrect|stale)"
+    r"|\b(?:тест\w*|tests?|test_\w+)\s+(?:\S+\s+){0,2}?(?:греш(?:ен|н)|остар(?:ял|ел)|wrong|outdated|"
+    r"incorrect|stale)"
     # Преглед 2026-11-05: „параметризирай тестовете“, „refactor the tests to use
     # parametrize“ — поисканото преработване маха старите assert редове.
     r"|\bпараметриз|\bparametri[sz]"

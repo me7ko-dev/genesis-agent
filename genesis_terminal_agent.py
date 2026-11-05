@@ -1490,7 +1490,9 @@ class RichTurnUI(TurnUI):
             shown = _terminal_safe(text)
             content: Markdown | Text
             try:
-                content = Markdown(shown)
+                # hyperlinks=False (преглед 2026-11-05): `[README.md](https://evil…)`
+                # се рисуваше като щракаем „README.md“ — сега адресът се вижда.
+                content = Markdown(shown, hyperlinks=False)
             except Exception:
                 log.debug("отговорът не се показа като Markdown", exc_info=True)
                 content = Text(shown)
@@ -2382,7 +2384,7 @@ def _continue_session(messages: "deque", system_prompt: str) -> "deque":
                  and isinstance(m.get("content"), str) and m["content"]), "")
     console.print(f"[green]✓ Продължавам разговора от {path.name} ({len(restored)} съобщения)[/]")
     if last:
-        console.print(Panel(Text(last[:600] + ("…" if len(last) > 600 else "")),
+        console.print(Panel(Text(_terminal_safe(last[:600]) + ("…" if len(last) > 600 else "")),
                             title="[dim]последният отговор[/]", border_style="dim"))
     return restored
 

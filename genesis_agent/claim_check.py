@@ -287,10 +287,32 @@ def _quoted(text: str, match: re.Match[str]) -> bool:
     return bool(closer) and closer in text[match.end():line_end if line_end >= 0 else hi]
 
 
+# За самия отговор, не за файловете (преглед 2026-11-05: 11 от 15 проби след само
+# READ_FILE): „Написах ти пример“, „Коригирах се“ (се/си/ти/ви след глагола),
+# „Промених подхода“, „Обнових плана“, „I've updated my answer“ (обектът е отговорът),
+# „I committed nothing“, и „Добавих коментари към редовете по-долу:“ с код в самия
+# отговор. Поправката („Поправих го — диффът е по-долу“) пак е твърдение.
+_REPLY_ITSELF_RE = re.compile(
+    r"\s+(?:се|си|ти|ви|you|nothing|anything|нищо)\b"
+    r"|\s+(?:\S+\s+){0,2}?(?:подход\w*|план\w*|отговор\w*|обяснени\w*|answer|plan|approach|"
+    r"response|explanation|reply|message)\b", re.IGNORECASE)
+_BELOW_RE = re.compile(r"\b(?:по-долу|долу|отдолу|следни\w*|below|following)\b", re.IGNORECASE)
+_FIX_VERB_RE = re.compile(r"поправих|оправих|коригирах|fixed", re.IGNORECASE)
+
+
+def _about_the_reply(text: str, match: re.Match[str]) -> bool:
+    if _REPLY_ITSELF_RE.match(text, match.end()):
+        return True
+    return ("```" in text and not _FIX_VERB_RE.search(match.group(0))
+            and bool(_BELOW_RE.search(_sentence(text, match))))
+
+
 def _not_this_turn(text: str, match: re.Match[str]) -> bool:
-    """Отрицание/въпрос/условие, минал ход или цитат — не твърдение за хода."""
+    """Отрицание/въпрос/условие, минал ход, цитат или за самия отговор — не
+    твърдение за хода."""
     return (_pass_sentence(text, match) == _NOT_A_CLAIM
-            or bool(_PAST_TURN_RE.search(_sentence(text, match))) or _quoted(text, match))
+            or bool(_PAST_TURN_RE.search(_sentence(text, match))) or _quoted(text, match)
+            or _about_the_reply(text, match))
 
 
 def _pass_sentence(text: str, match: re.Match[str]) -> str:

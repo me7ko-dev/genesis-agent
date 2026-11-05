@@ -40,8 +40,15 @@ def _escape(match: re.Match[str]) -> str:
     return f"\\u{ord(match.group(0)):04x}"
 
 
+# Цветовете (SGR, `ESC[…m`) от `--color=yes` на команда се махат в обикновения
+# режим (преглед 2026-11-05: `␛[32m` по целия панел); махнат, и „скритият“ текст
+# (`ESC[8m`) става видим. В питането на sandbox-а — видими като всичко останало.
+_SGR = re.compile(r"\x1b\[[0-9;:]*m")
+
+
 def safe(text: str, *, strict: bool = False) -> str:
     """`text` с видими заместители на управляващите знаци. `strict` — и
-    невидимите знаци, за командата, която операторът одобрява."""
-    text = _BIDI.sub(_escape, _CONTROL.sub(_picture, str(text)))
+    невидимите знаци и цветовете, за командата, която операторът одобрява."""
+    text = str(text) if strict else _SGR.sub("", str(text))
+    text = _BIDI.sub(_escape, _CONTROL.sub(_picture, text))
     return _HIDDEN.sub(_escape, text) if strict else text
