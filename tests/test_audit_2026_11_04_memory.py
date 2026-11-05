@@ -187,3 +187,14 @@ def test_processes_creating_the_embeddings_index_at_once_lose_nothing(tmp_path) 
             assert p.returncode == 0, err
             errors += json.loads(out.strip().splitlines()[-1])
     assert errors == []
+
+
+def test_a_lone_surrogate_from_the_model_does_not_break_the_save(monkeypatch) -> None:
+    """Отвореното от одита (2026-11-05): `"\\ud800"` в JSON-а на модела (отрязано
+    емоджи) правеше UnicodeEncodeError при записа — ValueError, не OSError, тоест
+    compact_and_graph_memory хвърляше и оставяше `.tmp` до графа."""
+    _model_says(monkeypatch, '{"relations": [{"source": "API\\ud83d", "relation": "USES", '
+                             '"target": "Redis"}]}')
+    kg.compact_and_graph_memory("user: x", workspace="/proj/a")
+    assert "API? USES Redis" in kg.graph_briefing(workspace="/proj/a")
+    assert not list(kg.GRAPH_PATH.parent.glob(f"{kg.GRAPH_PATH.name}.*.tmp"))

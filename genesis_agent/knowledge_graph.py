@@ -111,7 +111,10 @@ def _save(graph: dict[str, Any]) -> None:
     """Atomic: a temp file, then os.replace — a reader never sees half a file."""
     GRAPH_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = GRAPH_PATH.with_name(f"{GRAPH_PATH.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(graph, ensure_ascii=False, indent=2), encoding="utf-8")
+    # "replace": половин сурогат от модела (`"\ud83d"` — отрязано емоджи) става „?“
+    # (2026-11-05, отвореното от одита на 04.11): UnicodeEncodeError е ValueError,
+    # не OSError — compact_and_graph_memory хвърляше и оставяше `.tmp` до графа.
+    tmp.write_bytes(json.dumps(graph, ensure_ascii=False, indent=2).encode("utf-8", "replace"))
     os.replace(tmp, GRAPH_PATH)
 
 
