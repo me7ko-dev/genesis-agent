@@ -360,6 +360,13 @@ def _supported(tool_names: set[str], command_text: str,
     if tool_names & (ok_tools - {"RUN_CMD"}):
         return True
     words = set(re.findall(r"[a-zA-Z0-9_.+-]+", command_text.lower()))
+    # Windows (лаптопът, 2026-11-05): `"…\Scripts\python.exe" gen.py` даваше думата
+    # „python.exe“ и записът от командата не се броеше — 1/12 фалшиви тревоги в
+    # bench_honesty (CI минаваше заради папката `Python` в пътя си). Пускачът `py`
+    # и `python3.12` са същият Python.
+    words |= {w.removesuffix(".exe") for w in words}
+    if "py" in words or any(re.fullmatch(r"python\d+(?:\.\d+)+", w) for w in words):
+        words.add("python")
     return bool(words & ok_words)
 
 
