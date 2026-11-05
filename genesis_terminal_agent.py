@@ -122,6 +122,7 @@ from genesis_agent.acceptance import enabled as _acceptance_enabled
 from genesis_agent.budget import TEXT_RESULT_FOLLOWUP, clip_for_context
 from genesis_agent.code_check import MismatchCheck as _MismatchCheck
 from genesis_agent.code_check import RunCheck as _RunCheck
+from genesis_agent.code_check import TestEditCheck as _TestEditCheck
 from genesis_agent.config import TOOL_ROUND_CAP as _TOOL_ROUND_CAP
 from genesis_agent.page_check import FinalCheck as _PageCheck
 from genesis_agent.paths import (
@@ -1899,6 +1900,8 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
     _run_check = _RunCheck(user_input)
     # Разминаване в изхода на собствената проверка (code_check, 2026-11-05).
     _mismatch = _MismatchCheck()
+    # Тест отпреди хода, отслабен в него (code_check, 2026-11-05).
+    _test_edit = _TestEditCheck(user_input, Path(genesis_skills._WORKSPACE).resolve())
     # Приемни тестове само от заявката (genesis_agent.acceptance): с безплатен
     # модел — включени, с Claude/платен — не; GENESIS_ACCEPTANCE=1/0 решава изрично.
     _accept = _AcceptanceCheck(user_input, Path(genesis_skills._WORKSPACE), rules=knowledge,
@@ -2115,6 +2118,12 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                 # нямат какво да проверят — нищо не е записано.
                 from genesis_agent import plan_mode
                 _planning = plan_mode.active()
+                if not _planning and _test_edit.due(edit_history.turn_originals()):
+                    ui.warn("Смени тест, който го имаше преди хода — питам го защо, вместо да поправи кода.")
+                    messages.append({"role": "system", "content": _test_edit.note()})
+                    with ui.thinking("Сверявам теста…", "aesthetic"):
+                        response, tool_calls = ask_genesis(messages, tools=_turn_tools())
+                    continue
                 if _run_check.due() and not _planning:
                     ui.warn("Написа код — казвам му да го пробва и извън примерите.")
                     messages.append({"role": "system", "content": _run_check.note()})

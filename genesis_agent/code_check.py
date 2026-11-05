@@ -10,6 +10,7 @@ not), and try a case per rule — harder input, the edges, input to reject.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from pathlib import Path
 
 _WRITTEN = re.compile(r"^\[(?:WRITE_FILE|EDIT_FILE): ([^\]\n]+)\] ✓", re.MULTILINE)
@@ -272,3 +273,97 @@ class MismatchCheck:
                 "rc=0 и „All tests passed!“ не го отменят — print не е assert. "
                 f"{_MISMATCH} Ако разминаването е нарочно (напр. отказ на невалиден вход), "
                 "кажи го в един ред и приключи.")
+
+
+# ─── Сменена проверка в тест, който е бил преди хода (2026-11-05) ─────────────
+# `genesis fix` не дава „✅ Поправено“ от отслабен тест от 22.10
+# (repo_agent._weakened_tests); чатът — дава. Възпроизведено с фалшив модел и
+# истински pytest: „оправи бъга, test_calc пада“ → EDIT_FILE на теста
+# `assert add(2, 2) == 4` → `== 0`, pytest зелен, „Всички тестове минават.“ —
+# без дума към оператора, бъгът в calc.py остава. Тест, написан в същия ход, е
+# на модела и се поправя свободно (c125 в bench_fcc); тест отпреди хода е на
+# оператора. Шаблоните са общи с repo_agent.
+TEST_FILE_RE = re.compile(
+    r"(?:^|/)(?:tests?|__tests__|spec)/"
+    r"|(?:^|/)(?:test_[^/]*\.py|[^/]*_test\.(?:py|go)|conftest\.py)$"
+    r"|\.(?:test|spec)\.[cm]?[jt]sx?$")
+ASSERT_RE = re.compile(r"\bassert|\bexpect\s*\(|\.should\b|\bt\.(?:Error|Fatal)")
+SKIP_RE = re.compile(
+    r"\bmark\.(?:skip|skipif|xfail)\b|\bpytest\.(?:skip|xfail|importorskip)\s*\("
+    r"|\bunittest\.(?:skip\w*|expectedFailure)\b|@(?:skip\w*|expectedFailure)\b"
+    r"|\b(?:it|test|describe)\.(?:skip|todo)\b|\bx(?:it|test|describe)\s*\(|\bt\.Skip\w*\s*\(")
+# Заявка, която сама иска тестът да се смени — тогава няма какво да се пита.
+# „Оправи тестовете“ не е такава: обикновено значи „направи ги зелени“.
+_TEST_CHANGE_ASKED = re.compile(
+    r"\b(?:обнови|смени|промени|пренапиши|редактирай|коригирай|махни|изтрий|премахни|пропусни|"
+    r"update|change|rewrite|edit|adjust|correct|remove|delete|skip|modify)\w*\s+(?:\S+\s+){0,3}?"
+    r"(?:тест|test|assert|spec)"
+    r"|\b(?:тест\w*|tests?)\s+(?:\S+\s+){0,2}?(?:греш(?:ен|н)|остар(?:ял|ел)|wrong|outdated|incorrect|stale)",
+    re.IGNORECASE)
+
+
+def is_test_file(rel: str) -> bool:
+    return bool(TEST_FILE_RE.search(rel.replace("\\", "/")))
+
+
+def weakening(before: str, after: str) -> str:
+    """Защо `after` е по-слаб тест от `before`: добавено пропускане или
+    махнат/сменен ред с проверка; "" ако няма такова. Интервалите не се броят —
+    `assert add(2,2)==4` → `assert add(2, 2) == 4` е форматиране, не промяна."""
+    def lines(text: str) -> Counter[str]:
+        return Counter(re.sub(r"\s+", "", ln) for ln in text.splitlines() if ln.strip())
+    old, new = lines(before), lines(after)
+    if any(SKIP_RE.search(ln) for ln in new - old):
+        return "добавено пропускане (skip/xfail)"
+    gone = next((ln for ln in before.splitlines()
+                 if ASSERT_RE.search(ln) and (old - new)[re.sub(r"\s+", "", ln)]), "")
+    return f"сменена или махната проверка `{gone.strip()[:120]}`" if gone else ""
+
+
+class TestEditCheck:
+    """Тестове отпреди хода, отслабени от WRITE/EDIT в него. `due(originals)`
+    с `edit_history.turn_originals()`, когато моделът спре; веднъж на ход."""
+
+    __test__ = False   # не е pytest клас, въпреки името
+
+    def __init__(self, request: str = "", workspace: Path | None = None) -> None:
+        self._asked = bool(_TEST_CHANGE_ASKED.search(request or ""))
+        self._workspace = workspace
+        self._found: list[str] = []
+        self._nudged = False
+
+    def _rel(self, path: Path) -> str:
+        try:
+            return path.relative_to(self._workspace).as_posix() if self._workspace else path.name
+        except ValueError:
+            return path.as_posix()
+
+    def weakened(self, originals: dict[Path, bytes]) -> list[str]:
+        found = []
+        for path, old in originals.items():
+            rel = self._rel(path)
+            if not is_test_file(rel):
+                continue
+            try:
+                new = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            why = weakening(old.decode("utf-8", errors="replace"), new)
+            if why:
+                found.append(f"{rel}: {why}")
+        return found
+
+    def due(self, originals: dict[Path, bytes]) -> bool:
+        if self._nudged or self._asked:
+            return False
+        self._found = self.weakened(originals)
+        return bool(self._found)
+
+    def note(self) -> str:
+        self._nudged = True
+        listed = "; ".join(self._found[:5])
+        return (f"[проверка на тестовете] Смени тест, който съществуваше преди хода: {listed}. "
+                "Тестът е на оператора и описва искането: ако кодът не го изпълнява, поправя се "
+                "кодът, не тестът. Тест се сменя само ако заявката го иска или тестът противоречи "
+                "на условието — тогава го кажи изрично в отговора (кой ред и защо). Иначе върни "
+                "теста както беше и поправи кода.")

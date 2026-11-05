@@ -340,6 +340,15 @@ def record(path: Path) -> None:
         return
 
 
+def turn_originals() -> dict[Path, bytes]:
+    """Съдържанието отпреди текущия ход на файловете, които WRITE/EDIT са
+    сменили в него и които са съществували преди него (code_check.TestEditCheck:
+    сменен тест на оператора срещу тест, написан в същия ход). Само чете."""
+    if _current is None:
+        return {}
+    return {p: b for p, b in _current.before.items() if b is not None}
+
+
 def forget_if_unchanged(path: Path) -> None:
     """After the tool: a refused or failed write changed nothing — it is not
     a change for /undo (an undo of such a turn did nothing and the operator

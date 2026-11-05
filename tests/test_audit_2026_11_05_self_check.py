@@ -233,3 +233,96 @@ def test_the_core_loop_reads_the_mismatch_too(tmp_path) -> None:
                              on_assistant=lambda *a: None, on_tool_result=lambda *a: None)
     assert any(m["role"] == "system" and m["content"].startswith("[проверка на изхода]")
                for m in core.seen[-1])
+
+
+# ── 4. Тест отпреди хода, отслабен в него (code_check.TestEditCheck) ────────
+
+from genesis_agent.code_check import TestEditCheck, weakening  # noqa: E402
+
+
+@pytest.mark.parametrize("before, after", [
+    ("def test_a():\n    assert add(2, 2) == 4\n", "def test_a():\n    assert add(2, 2) == 0\n"),
+    ("def test_a():\n    assert add(2, 2) == 4\n", "def test_a():\n    pass\n"),
+    ("def test_a():\n    assert add(2, 2) == 4\n",
+     "import pytest\n\n@pytest.mark.skip\ndef test_a():\n    assert add(2, 2) == 4\n"),
+    ("test('adds', () => {\n  expect(add(2, 2)).toBe(4);\n});\n",
+     "test.skip('adds', () => {\n  expect(add(2, 2)).toBe(4);\n});\n"),
+])
+def test_a_changed_or_skipped_check_is_weakening(before, after) -> None:
+    assert weakening(before, after)
+
+
+@pytest.mark.parametrize("before, after", [
+    ("def test_a():\n    assert add(2,2)==4\n", "def test_a():\n    assert add(2, 2) == 4\n"),   # формат
+    ("def test_a():\n    assert add(2, 2) == 4\n",
+     "def test_a():\n    assert add(2, 2) == 4\n\n\ndef test_b():\n    assert add(0, 0) == 0\n"),
+    ("def test_a():\n    assert add(2, 2) == 4\n", "def test_add():\n    assert add(2, 2) == 4\n"),
+])
+def test_added_or_reformatted_checks_are_not_weakening(before, after) -> None:
+    assert weakening(before, after) == ""
+
+
+def test_only_a_test_that_existed_before_the_turn_counts(tmp_path) -> None:
+    test = tmp_path / "tests" / "test_calc.py"
+    test.parent.mkdir()
+    test.write_text("def test_a():\n    assert add(2, 2) == 0\n", encoding="utf-8")
+    src = tmp_path / "calc.py"
+    src.write_text("def add(a, b):\n    return 0\n", encoding="utf-8")
+    check = TestEditCheck("оправи бъга", tmp_path)
+    assert not check.due({src: b"def add(a, b):\n    return a - b\n"})      # кодът — не
+    assert check.due({test: b"def test_a():\n    assert add(2, 2) == 4\n"})
+    note = check.note()
+    assert "tests/test_calc.py" in note and "== 4" in note
+    assert not check.due({test: b"def test_a():\n    assert add(2, 2) == 4\n"})   # веднъж
+
+
+@pytest.mark.parametrize("request_text", [
+    "обнови теста за новото поведение",
+    "update the tests to the new API",
+    "тестът е грешен — очакването трябва да е 5",
+    "the test is outdated",
+])
+def test_a_request_to_change_the_test_is_not_questioned(tmp_path, request_text) -> None:
+    test = tmp_path / "test_calc.py"
+    test.write_text("def test_a():\n    assert add(2, 2) == 5\n", encoding="utf-8")
+    assert not TestEditCheck(request_text, tmp_path).due(
+        {test: b"def test_a():\n    assert add(2, 2) == 4\n"})
+
+
+def test_fix_the_tests_is_not_a_request_to_change_them(tmp_path) -> None:
+    test = tmp_path / "test_calc.py"
+    test.write_text("def test_a():\n    assert add(2, 2) == 0\n", encoding="utf-8")
+    assert TestEditCheck("оправи тестовете, падат", tmp_path).due(
+        {test: b"def test_a():\n    assert add(2, 2) == 4\n"})
+
+
+def test_weakening_the_operators_test_does_not_end_the_turn_as_green(ws, monkeypatch) -> None:
+    (ws / "calc.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    (ws / "tests").mkdir()
+    (ws / "tests" / "test_calc.py").write_text(
+        "from calc import add\n\n\ndef test_add():\n    assert add(2, 2) == 4\n", encoding="utf-8")
+    (ws / "conftest.py").write_text("", encoding="utf-8")
+    pytest_cmd = f'"{sys.executable}" -m pytest -q tests'
+    replies = iter([
+        ("", [_call("READ_FILE", {"path": "tests/test_calc.py"}, "r0")]),
+        ("", [_call("EDIT_FILE", {"path": "tests/test_calc.py", "old": "== 4", "new": "== 0"}, "e1")]),
+        ("", [_call("RUN_CMD", {"command": pytest_cmd}, "r1")]),
+        ("Готово — всички тестове минават.", None),
+        ("Върнах теста; бъгът е в calc.py.", None),
+        ("Пробвах и други случаи.", None),                # → RunCheck (редактиран .py)
+    ])
+    seen: list = []
+
+    def fake(messages, tools=None):
+        seen.append([dict(m) for m in messages])
+        return next(replies)
+    monkeypatch.setattr(gta, "ask_genesis", fake)
+    ui = _UI()
+    gta.run_turn(deque([{"role": "system", "content": "SYS"}], maxlen=gta._HISTORY_MAXLEN),
+                 "оправи бъга, test_calc пада", ui)
+    tool_out = "\n".join(e[2] for e in ui.log if e[0] == "tool")
+    assert "1 passed" in tool_out, tool_out                 # отслабеният тест наистина е зелен
+    notes = [m["content"] for m in seen[-1] if m["role"] == "system"]
+    assert any(n.startswith("[проверка на тестовете]") and "tests/test_calc.py" in n
+               for n in notes), notes
+    assert any("Смени тест" in e[1] for e in ui.log if e[0] == "warn")

@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from genesis_agent.brain import Brain
+from genesis_agent.code_check import ASSERT_RE, SKIP_RE, TEST_FILE_RE
 from genesis_agent.repo_map import detect_project, repo_map
 from genesis_agent.review import safe_git
 from genesis_agent.tool_schemas import REPAIR_TOOLS, load_tool_arguments
@@ -724,15 +725,8 @@ def _verify_after_edit(root: Path, cmd: str | None, before: TestRun,
 # сложил @pytest.mark.skip, получаваше „✅ Поправено“ и код 0, а бъгът в
 # calc.py оставаше (възпроизведено с истински pytest). Пазеше го само правило
 # 3 в _SYSTEM; bench_fix го проверява, продуктът — не. Механизъм, не промпт.
-_TEST_FILE_RE = re.compile(
-    r"(?:^|/)(?:tests?|__tests__|spec)/"
-    r"|(?:^|/)(?:test_[^/]*\.py|[^/]*_test\.(?:py|go)|conftest\.py)$"
-    r"|\.(?:test|spec)\.[cm]?[jt]sx?$")
-_ASSERT_RE = re.compile(r"\bassert|\bexpect\s*\(|\.should\b|\bt\.(?:Error|Fatal)")
-_SKIP_RE = re.compile(
-    r"\bmark\.(?:skip|skipif|xfail)\b|\bpytest\.(?:skip|xfail|importorskip)\s*\("
-    r"|\bunittest\.(?:skip\w*|expectedFailure)\b|@(?:skip\w*|expectedFailure)\b"
-    r"|\b(?:it|test|describe)\.(?:skip|todo)\b|\bx(?:it|test|describe)\s*\(|\bt\.Skip\w*\s*\(")
+# Шаблоните са общи с чата (code_check.TestEditCheck, 2026-11-05).
+_TEST_FILE_RE, _ASSERT_RE, _SKIP_RE = TEST_FILE_RE, ASSERT_RE, SKIP_RE
 _MAX_TEST_SOURCE = 256 * 1024
 
 
