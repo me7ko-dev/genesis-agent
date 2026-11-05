@@ -121,7 +121,12 @@ def _recovering(op: Callable[[], _T]) -> _T:
     try:
         return op()
     except sqlite3.DatabaseError as e:
-        if not sqlite_store._unreadable(e):
+        # „Could not decode to UTF-8“ (ревю 2026-11-05, мерено): при bge-m3
+        # model/text_hash са в препълващата страница на реда (~88% от
+        # страниците); боклук там не е „malformed“ за SQLite, а грешка на
+        # sqlite3 модула — търсенето пак гърмеше завинаги. Местим само ако
+        # integrity_check долу потвърди повреда.
+        if not (sqlite_store._unreadable(e) or "Could not decode" in str(e)):
             raise
         first = e
     from genesis_agent.file_lock import locked
@@ -216,19 +221,20 @@ def index_skill(name: str, text: str) -> bool:
     vec = embed(text)
     if not vec:
         return False
-    import datetime
-
-    def store() -> None:
-        with _db() as c:
-            c.execute(
-                "INSERT INTO embeddings (name, vector, dim, updated_at, model, text_hash) VALUES (?,?,?,?,?,?) "
-                "ON CONFLICT(name) DO UPDATE SET vector=excluded.vector, dim=excluded.dim, "
-                "updated_at=excluded.updated_at, model=excluded.model, text_hash=excluded.text_hash",
-                (name, _pack(vec), len(vec), datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                 MODEL, _hash(text)),
-            )
-    _recovering(store)
+    _recovering(lambda: _store(name, text, vec))
     return True
+
+
+def _store(name: str, text: str, vec: list[float]) -> None:
+    import datetime
+    with _db() as c:
+        c.execute(
+            "INSERT INTO embeddings (name, vector, dim, updated_at, model, text_hash) VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(name) DO UPDATE SET vector=excluded.vector, dim=excluded.dim, "
+            "updated_at=excluded.updated_at, model=excluded.model, text_hash=excluded.text_hash",
+            (name, _pack(vec), len(vec), datetime.datetime.now(datetime.timezone.utc).isoformat(),
+             MODEL, _hash(text)),
+        )
 
 
 def _count_vectors() -> int:
@@ -310,7 +316,15 @@ def _index_missing(dim: int) -> int:
                 c.execute("SELECT name, model, text_hash, dim FROM embeddings")}
     count = 0
     for name, text in texts.items():
-        if have.get(name) != (MODEL, _hash(text), dim) and index_skill(name, text):
+        if have.get(name) == (MODEL, _hash(text), dim):
+            continue
+        # _store, не index_skill (ревю 2026-11-05, мерено): повреда, видима
+        # само при запис, местеше базата посред цикъла, а `have` е от старата —
+        # първото търсене връщаше само новото умение. Тук грешката стига до
+        # _recovering на semantic_search, който пуска целия обход наново.
+        vec = embed(text)
+        if vec:
+            _store(name, text, vec)
             count += 1
     return count
 

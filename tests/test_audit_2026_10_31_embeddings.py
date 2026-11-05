@@ -164,6 +164,68 @@ def test_a_busy_database_is_not_mistaken_for_a_damaged_one(tmp_path, monkeypatch
     assert not (tmp_path / "embeddings.db.corrupt").exists()
 
 
+def _smash(pgno: int) -> None:
+    raw = sqlite3.connect(emb.DB_PATH)
+    try:
+        page = raw.execute("PRAGMA page_size").fetchone()[0]
+    finally:
+        raw.close()
+    with open(emb.DB_PATH, "r+b") as f:
+        f.seek((pgno - 1) * page)
+        f.write(b"\xff" * page)
+
+
+def test_garbage_in_an_overflow_page_is_also_recovered(tmp_path, monkeypatch, caplog) -> None:
+    """Ревю 2026-11-05, мерено: при 1024 измерения векторът прелива в своя
+    страница и model/text_hash са там. Боклук в нея не е „malformed“, а
+    „Could not decode to UTF-8 column 'model'“ — търсенето гърмеше завинаги,
+    макар integrity_check да вижда повредата."""
+    _healthy_index(tmp_path, monkeypatch, ["a_skill", "b_skill", "c_skill"], dim=1024)
+    raw = sqlite3.connect(emb.DB_PATH)
+    try:
+        last = raw.execute("PRAGMA page_count").fetchone()[0]
+        roots = {r for (r,) in raw.execute("SELECT rootpage FROM sqlite_master")}
+    finally:
+        raw.close()
+    assert last not in roots | {1}
+    _smash(last)
+
+    with caplog.at_level(logging.WARNING):
+        hits = emb.semantic_search("q", top_k=10)
+    assert _names(hits) == ["a_skill", "b_skill", "c_skill"]
+    assert (tmp_path / "embeddings.db.corrupt").exists()
+    assert len(_kept_warning(caplog)) == 1, caplog.text
+
+
+def _damaged_freelist(tmp_path: Path, monkeypatch) -> list[str]:
+    """Повреда, която стига само записът: страницата-ствол на свободния списък
+    (SELECT-ите не я четат, нов ред с препълване — да)."""
+    names = [f"s{i}" for i in range(8)]
+    _healthy_index(tmp_path, monkeypatch, names, dim=1024)
+    _skills(tmp_path, monkeypatch, names[:4])  # _drop_ghosts трие → свободни страници
+    assert _names(emb.semantic_search("q", top_k=10)) == names[:4]
+    trunk = int.from_bytes(emb.DB_PATH.read_bytes()[32:36], "big")
+    assert trunk > 1
+    _smash(trunk)
+    return names[:4]
+
+
+def test_damage_seen_only_by_a_write_is_recovered_in_index_skill(tmp_path, monkeypatch) -> None:
+    _damaged_freelist(tmp_path, monkeypatch)
+    assert emb.index_skill("new_one", "new one. does things") is True
+    assert "new_one" in [n for n, _ in emb._all_vectors()]
+    assert (tmp_path / "embeddings.db.corrupt").exists()
+
+
+def test_damage_seen_only_by_a_write_still_returns_the_whole_index(tmp_path, monkeypatch) -> None:
+    """Възстановяване посред _index_missing не бива да оставя в новата база
+    само умението, което се е записвало в момента на повредата."""
+    kept = _damaged_freelist(tmp_path, monkeypatch)
+    _skills(tmp_path, monkeypatch, [*kept, "new_one"])
+    assert _names(emb.semantic_search("q", top_k=10)) == sorted([*kept, "new_one"])
+    assert (tmp_path / "embeddings.db.corrupt").exists()
+
+
 # ── embeddings-a5: HTTP грешка от Ollama не оставяше следа дори в debug.log ──
 
 
