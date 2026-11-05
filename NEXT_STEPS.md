@@ -115,8 +115,11 @@
   модела за 2 s след Ctrl-C; на Windows join(600) не се буди) — сега 0.5 s, статус cancelled.
   Проверено и наред: callback само на 127.0.0.1, PKCE S256, state, без пренасочване на
   /token, 4 процеса с един refresh, expires_in NaN/inf/низ, `--paste` във всички форми.
-  Отворено: ESC от изхода на модела/RUN_CMD/MCP стига до терминала (Rich го пуска) — общо
-  за целия чат, извън одита.
+  ~~ESC от изхода на модела/RUN_CMD/MCP стига до терминала~~ — `terminal_text.safe`
+  (`tests/test_audit_2026_11_05_terminal.py`): OSC 52 пишеше в клипборда от прочетен файл,
+  `ESC[2K` подменяше командата в питането на sandbox-а (`rm -rf …` → `ls -la`), U+202E
+  обръщаше реда. Сега ␛/\u202e видимо в RichTurnUI, в питането и в `genesis -p` към
+  терминал. Изходът на `!cmd` (командата е на оператора) — непипнат.
 - notifier.redact (отвореното от 27.10): `-phunter2` при mysql/mariadb/sshpass;
   `BYPASS:`, `COMPASS:`, `--- PASS: TestX` вече не са ключове.
 
