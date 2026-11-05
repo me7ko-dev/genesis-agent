@@ -1552,9 +1552,14 @@ def _tool_delegate(arg: str) -> str:
         log.debug("delegate не се зареди", exc_info=True)
         return f"[DELEGATE: {goal}] delegate модулът не е наличен: {e}"
     task = delegate_task(goal, agent="autonomous", timeout=600)
-    wait_all([task], timeout=600)
+    # „Стоп“ на телефона се гледа и докато мисията върви, не само преди нея
+    # (одит 2026-11-04: мисията изкарваше всичките си рундове, до 600 s).
+    wait_all([task], timeout=600, cancelled=_cancelled)
     _log_episode(f"DELEGATE {goal}", task.status.value, ["tool", "delegate"])
-    detail = task.result or task.error or "(без резултат)"
+    if task.status.value == "cancelled":
+        detail = "⏹ Спряно от оператора — мисията спира и нищо не записва."
+    else:
+        detail = task.result or task.error or "(без резултат)"
     return f"[DELEGATE: {goal}]  статус={task.status.value}\n{detail}"
 
 
