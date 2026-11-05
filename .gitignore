@@ -16,6 +16,13 @@ ranked_goals.json
 benchmark_history.json
 live_status.json
 knowledge_graph.json
+# Отделените нечетими копия (*.corrupt[.N] — knowledge_graph, SQLite базите) и
+# осиротелият .tmp от атомарния запис на графа са пълни копия на паметта, с
+# каквото е влязло в нея (одит 2026-10-31: показваха се като нови файлове в
+# checkout-а, където DATA_DIR е genesis_agent/).
+*.corrupt
+*.corrupt.*
+knowledge_graph.json.*.tmp
 
 # ---- Runtime директории ----
 .sandbox_run/
