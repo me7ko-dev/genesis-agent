@@ -244,22 +244,62 @@ _NEGATED_RE = re.compile(r"\b(?:не|not|no)\s+$", re.IGNORECASE)
 _CLAIM, _REPORT, _NOT_A_CLAIM = "claim", "report", "none"
 
 
+# Изречението се търси в прозорец около съвпадението (преглед 2026-11-05):
+# от началото на текста всяко съвпадение правеше проверката квадратична —
+# 50 KB „Не тествах.“ отнемаше 3.7 s, 100 KB „Не промених нищо.“ — 7 s.
+_SENTENCE_WINDOW = 2000
+
+
+def _bounds(text: str, match: re.Match[str]) -> tuple[int, int]:
+    lo = max(0, match.start() - _SENTENCE_WINDOW)
+    start = max((m.end() for m in _SENTENCE_END_RE.finditer(text, lo, match.start())), default=lo)
+    hi = min(len(text), match.end() + _SENTENCE_WINDOW)
+    end_match = _SENTENCE_END_RE.search(text, match.end(), hi)
+    return start, end_match.end() if end_match else hi
+
+
+# Без `text[match.end():]` — копие на остатъка при всяко съвпадение.
+_LI_RE = re.compile(r"\s+ли\b")
+
+
 def _sentence(text: str, match: re.Match[str]) -> str:
-    start = max((m.end() for m in _SENTENCE_END_RE.finditer(text, 0, match.start())), default=0)
-    end_match = _SENTENCE_END_RE.search(text, match.end())
-    return text[start:end_match.end() if end_match else len(text)]
+    start, end = _bounds(text, match)
+    return text[start:end]
+
+
+# Цитат (преглед 2026-11-05): „Ти написа: „Добавих нов endpoint““, „В
+# CHANGELOG пише „Поправих бъга““, „You wrote “I fixed the login bug”“ —
+# чуждите думи не са твърдение на модела за този ход. Само двойни кавички с
+# двойка на същия ред: „…“, “…”, «…», "…".
+_QUOTE_PAIRS = {"„": "“", "“": "”", "«": "»", '"': '"'}
+
+
+def _quoted(text: str, match: re.Match[str]) -> bool:
+    line_start = max(text.rfind("\n", 0, match.start()) + 1, match.start() - _SENTENCE_WINDOW)
+    closer = ""
+    for ch in text[line_start:match.start()]:
+        if not closer and ch in _QUOTE_PAIRS:
+            closer = _QUOTE_PAIRS[ch]
+        elif closer and ch == closer:
+            closer = ""
+    hi = min(len(text), match.end() + _SENTENCE_WINDOW)
+    line_end = text.find("\n", match.end(), hi)
+    return bool(closer) and closer in text[match.end():line_end if line_end >= 0 else hi]
+
+
+def _not_this_turn(text: str, match: re.Match[str]) -> bool:
+    """Отрицание/въпрос/условие, минал ход или цитат — не твърдение за хода."""
+    return (_pass_sentence(text, match) == _NOT_A_CLAIM
+            or bool(_PAST_TURN_RE.search(_sentence(text, match))) or _quoted(text, match))
 
 
 def _pass_sentence(text: str, match: re.Match[str]) -> str:
     """Съвпадение за „тестовете минават“: зелено твърдение, смесен отчет
     (червена дума в изречението) или въпрос/условие/отрицание точно преди."""
-    start = max((m.end() for m in _SENTENCE_END_RE.finditer(text, 0, match.start())),
-                default=0)
-    end_match = _SENTENCE_END_RE.search(text, match.end())
-    end = end_match.end() if end_match else len(text)
+    start, end = _bounds(text, match)
     sentence = text[start:end]
     before = text[start:match.start()]
-    if (sentence.rstrip().endswith("?") or re.match(r"\s+ли\b", text[match.end():])
+    if (sentence.rstrip().endswith("?") or _LI_RE.match(text, match.end())
             or _NOT_A_CLAIM_RE.search(before) or _NEGATED_RE.search(before)
             or _HEDGED_RE.search(before)):
         return _NOT_A_CLAIM
@@ -277,8 +317,7 @@ def _find_claim(kind: str, pattern: re.Pattern[str],
         if kind == _EDIT_KIND or kind == "git commit/push":
             # „Не промених нищо“, „Ако добавих…?“ — не са твърдения; смесеният
             # отчет („поправих го, но тестът пада“) пак твърди редакцията.
-            if _pass_sentence(text, match) == _NOT_A_CLAIM or _PAST_TURN_RE.search(
-                    _sentence(text, match)):
+            if _not_this_turn(text, match):
                 continue
             return kind, match
         verdict = _pass_sentence(text, match) if kind == _PASS_KIND else _CLAIM
@@ -647,7 +686,7 @@ def _tried_claim(text: str, executed: list[tuple[str, str]]) -> Claim | None:
     if not executed or any(name.upper() in _TRIED_TOOLS for name, _ in executed):
         return None
     for match in _TRIED_RE.finditer(text):
-        if _pass_sentence(text, match) == _NOT_A_CLAIM or _PAST_TURN_RE.search(_sentence(text, match)):
+        if _not_this_turn(text, match):
             continue
         return Claim(kind=_TRIED_KIND, quote=_quote(text, match),
                      needed="RUN_CMD (или RUN_BG/BROWSE), който го пуска")
@@ -737,10 +776,9 @@ def _missing_file_claim(text: str, executed: list[tuple[str, str]],
         if kind not in ("запис на файл", _EDIT_KIND):
             continue
         for match in pattern.finditer(text):
-            if _pass_sentence(text, match) == _NOT_A_CLAIM or _PAST_TURN_RE.search(
-                    _sentence(text, match)):
+            if _not_this_turn(text, match):
                 continue
-            rest = text[match.end():]
+            rest = text[match.end():match.end() + _SENTENCE_WINDOW]
             end = _SENTENCE_END_RE.search(rest)
             named = _FILE_NAME_RE.search(rest[:end.start()] if end else rest)
             # Името е обектът на глагола: до 3 думи след него и без „който чете“,

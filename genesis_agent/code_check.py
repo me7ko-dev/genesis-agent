@@ -140,8 +140,11 @@ class RunCheck:
 # „4/5 passed“. Нарочно тясно: стойностите са числа, низове в кавички, списъци,
 # True/False/None — „expected str, got int“ в съобщение за отхвърлен вход не е
 # разминаване, нито ред с Error/invalid.
-_VALUE = (r"""(?:-?\d+(?:[.,]\d+)?|'[^'\n]*'|"[^"\n]*"|\[[^\]\n]*\]|\([^)\n]*\)|\{[^}\n]*\}"""
-          r"""|<[^>\n]*>|True|False|None|true|false|null)""")
+# Низ в кавички не започва веднага след буква (преглед 2026-11-05): в JSON/repr
+# `{"expected": 3, "got": 3}, {"expected": 4, …` затварящата кавичка на ключа
+# започваше „стойност“ `": 3, "` и еднаквите 3/3 излизаха разминаване.
+_VALUE = (r"""(?:-?\d+(?:[.,]\d+)?|(?<!\w)'[^'\n]*'|(?<!\w)"[^"\n]*"|\[[^\]\n]*\]|\([^)\n]*\)"""
+          r"""|\{[^}\n]*\}|<[^>\n]*>|True|False|None|true|false|null)""")
 _EXP = r"(?:expected|expecting|очаквано|очакван[ао]?|очаквах|очаква)"
 _GOT = (r"(?:but\s+(?:got|was|is|returned|received)|got|received|actual|returned|"
         r"получено|получен[ао]?|получих|върна(?:то)?)")
@@ -162,8 +165,12 @@ _LABEL_GOT = re.compile(r"^\W*(?:got|actual|received|returned|output|получ�
                         r"(?:\s+(?:output|result|value|резултат))?\s*[:=]\s*(?P<v>\S.*?)\s*$",
                         re.IGNORECASE)
 _FAIL_LINE = re.compile(r"^\s*(?:❌|✗|✘|(?-i:FAIL(?:ED)?)\b(?![:=]?\s*0\b)|(?-i:MISMATCH|WRONG)\b)")
-_FAIL_COUNT = re.compile(r"\b(?:failed|failures?|wrong|грешни|паднали|неуспешни)\s*[:=]\s*[1-9]"
-                         r"|\b[1-9]\d*\s+(?:failed|failing|wrong|грешни|паднаха|паднали)\b",
+# Преглед 2026-11-05, зелени итози: „OK (expected failures=1)“ на unittest
+# (expectedFailure) не е паднал тест; в „passed=12 failed=0“ и „Passed: 12
+# Failed: 0“ числото пред „failed“ е на passed — след „failed“ идва собственото му.
+_FAIL_COUNT = re.compile(r"(?<!expected )\b(?:failed|failures?|wrong|грешни|паднали|неуспешни)\s*[:=]\s*[1-9]"
+                         r"|\b[1-9]\d*\s+(?:failed|failing|wrong|грешни|паднаха|паднали)\b"
+                         r"(?!\s*[:=]?\s*\d)",
                          re.IGNORECASE)
 _RATIO = re.compile(r"\b(\d+)\s*/\s*(\d+)\s+(?:tests?\s+)?(?:passed|pass|ok|correct|верни|минаха|"
                     r"минават|успешни)\b", re.IGNORECASE)
@@ -299,7 +306,11 @@ _TEST_CHANGE_ASKED = re.compile(
     r"\b(?:обнови|смени|промени|пренапиши|редактирай|коригирай|махни|изтрий|премахни|пропусни|"
     r"update|change|rewrite|edit|adjust|correct|remove|delete|skip|modify)\w*\s+(?:\S+\s+){0,3}?"
     r"(?:тест|test|assert|spec)"
-    r"|\b(?:тест\w*|tests?)\s+(?:\S+\s+){0,2}?(?:греш(?:ен|н)|остар(?:ял|ел)|wrong|outdated|incorrect|stale)",
+    r"|\b(?:тест\w*|tests?)\s+(?:\S+\s+){0,2}?(?:греш(?:ен|н)|остар(?:ял|ел)|wrong|outdated|incorrect|stale)"
+    # Преглед 2026-11-05: „параметризирай тестовете“, „refactor the tests to use
+    # parametrize“ — поисканото преработване маха старите assert редове.
+    r"|\bпараметриз|\bparametri[sz]"
+    r"|\b(?:рефакторирай|преработи|обедини|refactor)\w*\s+(?:\S+\s+){0,3}?(?:тест|test)",
     re.IGNORECASE)
 
 
