@@ -419,3 +419,39 @@ def test_logout_of_a_login_kept_only_in_memory_says_forgotten(oauth, monkeypatch
                          out=seen.append, ask=lambda q: "")
     assert any("е забравен" in s for s in seen), seen
     assert mcp_oauth.access_token(url) == ""
+
+
+# ── 2026-11-05 (прегледът): адресът на MCP сървъра в грешките — само хостът ──
+# `/mcp login` подава разгърнатия адрес (`${VAR}` вече заместени): ключ в
+# заявката или в пътя (Zapier, Smithery) излизаше на екрана в „❌ Входът … не
+# стана“. mcp_client пази същото с `_netloc()` (одит 2026-10-21).
+
+
+def test_a_non_https_mcp_url_error_does_not_show_its_key() -> None:
+    with pytest.raises(mcp_oauth.OAuthError) as e:
+        mcp_oauth.discover("http://mcp.corp.lan/s/PATHKEY-123/mcp?key=corp-SECRET-987")
+    msg = str(e.value)
+    assert "corp-SECRET-987" not in msg and "PATHKEY-123" not in msg, msg
+    assert "mcp.corp.lan" in msg and "https" in msg, msg
+
+
+def test_a_refused_resource_error_does_not_show_the_key_in_our_url(local) -> None:
+    holder: dict = {}
+
+    def get(h):
+        b = holder["base"]
+        if h.path.startswith("/.well-known/oauth-protected-resource"):
+            return h._send(200, {"resource": b + "/other", "authorization_servers": [b]})
+        if h.path == "/.well-known/oauth-authorization-server":
+            return h._send(200, {"issuer": b, "authorization_endpoint": b + "/a",
+                                 "token_endpoint": b + "/t"})
+        return h._send(404, {})
+    httpd, base = _tiny_server(get)
+    holder["base"] = base
+    try:
+        with pytest.raises(mcp_oauth.OAuthError, match="отказано") as e:
+            mcp_oauth.discover(base + "/s/PATHKEY-123/mcp?key=sk-live-SECRET-1234")
+        msg = str(e.value)
+        assert "sk-live-SECRET-1234" not in msg and "PATHKEY-123" not in msg, msg
+    finally:
+        httpd.shutdown()

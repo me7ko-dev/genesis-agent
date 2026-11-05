@@ -41,7 +41,7 @@ log = logging.getLogger("genesis.mcp_oauth")
 
 LOGIN_TIMEOUT = 300.0
 _HTTP_TIMEOUT = 15
-# Колко чака ключалката на файла с токените друг процес.
+# Колко чака ключалката на файла с токените друг процес (одит 2026-10-31).
 _LOCK_WAIT = 60.0
 # Метаданните и отговорите с токени са няколко KB. Без таван 100 MB тяло от
 # сървъра за токени влизаше цялото в паметта (RSS от 29 на 329 MB) и в
@@ -164,7 +164,7 @@ class _FileLock:
             _lock.release()
 
 
-# „Зает“ — ключалката е у друг: flock (EWOULDBLOCK/EAGAIN, EACCES при някои
+# „Зает“ — ключалката е у друг (одит 2026-10-31): flock (EWOULDBLOCK/EAGAIN, EACCES при някои
 # системи), msvcrt.locking на Windows (EACCES; EDEADLOCK при LK_LOCK).
 _BUSY = frozenset({errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES,
                    getattr(errno, "EDEADLOCK", errno.EAGAIN)})
@@ -240,6 +240,22 @@ def _covers(resource: str, server_url: str) -> bool:
     return sp == rp or sp.startswith(rp + "/")
 
 
+def _shown(url: str) -> str:
+    """Схемата и хостът (с порта) — за съобщенията. `/mcp login` подава
+    разгърнатия адрес (`${VAR}` вече заместени) и ключ в заявката или в пътя
+    (Zapier, Smithery) излизаше на екрана в „❌ Входът … не стана“ (прегледът
+    на одита, 2026-11-05); mcp_client пази същото с `_netloc()`."""
+    try:
+        parts = urlsplit(str(url or ""))
+        host, port = parts.hostname or "", parts.port
+    except ValueError:
+        return "<адрес>"
+    if not host:
+        return "<адрес>"
+    host = f"[{host}]" if ":" in host else host
+    return f"{parts.scheme}://{host}" + (f":{port}" if port else "")
+
+
 def _safe_url(url: str, what: str) -> str:
     """HTTPS, или http само към този компютър: токенът и кодът не тръгват
     по мрежата открито."""
@@ -249,7 +265,7 @@ def _safe_url(url: str, what: str) -> str:
         return url
     if parts.scheme == "http" and host in ("127.0.0.1", "localhost", "::1"):
         return url
-    raise OAuthError(f"{what}: {url!r} не е https — отказано")
+    raise OAuthError(f"{what}: {_shown(url)!r} не е https — отказано")
 
 
 def _shutdown(resp: Any) -> None:
@@ -410,7 +426,10 @@ def discover(server_url: str, www_authenticate: str = "") -> dict:
     # вижда истинската страница за вход, а токенът отива при злия (одит
     # 2026-10-09, възпроизведено).
     if not _covers(resource, server_url) or urlsplit(resource).query or urlsplit(resource).fragment:
-        raise OAuthError(f"сървърът иска токен за {resource!r}, а е {server_url!r} — отказано")
+        theirs, ours = _shown(resource), _shown(server_url)
+        if theirs == ours:
+            theirs += " (друг път или заявка)"
+        raise OAuthError(f"сървърът иска токен за {theirs!r}, а е {ours!r} — отказано")
     resource = _key(resource).rstrip("/") if urlsplit(resource).path in ("", "/") else _key(resource)
     return {
         "issuer": issuer,
