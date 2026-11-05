@@ -91,6 +91,14 @@ def test_a1_a_broken_outer_object_is_not_answered_with_its_inner_fragment(text) 
     assert llm_api.extract_json_object(text) is None
 
 
+def test_a1_a_deeply_nested_reply_is_not_a_crash() -> None:
+    """Ревю 2026-11-05: raw_decode хвърля RecursionError (не ValueError) за
+    обект, вложен на 100 000 нива — излизаше от generate като 500."""
+    deep = '{"a":' * 100_000 + "1" + "}" * 100_000
+    assert llm_api.extract_json_object(deep) is None
+    assert llm_api.extract_json_object("[1," * 100_000 + '{"a": 1}') is None
+
+
 def test_a1_a_trailing_comma_reply_is_retried_on_another_model(monkeypatch) -> None:
     good = {"реплика": "Здрасти, чедо", "настроение": {"ниво": 3}}
     brain = FakeBrain(['{"реплика": "Здрасти, чедо", "настроение": {"ниво": 3},}',
@@ -244,9 +252,10 @@ def test_a5_the_json_retry_is_not_started_without_time_for_it(monkeypatch) -> No
 
 
 def test_a5_the_chain_stops_at_the_deadline_instead_of_walking_on(monkeypatch) -> None:
-    """Истинският Brain, всеки модел мълчи 1 s: след 504 работникът вървеше по
-    цялата верига (обръщения на +16, +24, +32, +40 s при истинските числа) и
-    държеше мястото. Сега след срока не тръгва ново обръщение."""
+    """Истинският Brain, всеки модел мълчи 0.5 s, start_by +0.75 s: след 504
+    работникът вървеше по цялата верига (обръщения на +16, +24, +32, +40 s при
+    истинските числа) и държеше мястото. Сега след срока не тръгва ново
+    обръщение. (Ревю 2026-11-05: числата са наполовина — тестът беше 2.01 s.)"""
     import requests
 
     from genesis_agent import brain as brain_mod
@@ -255,11 +264,13 @@ def test_a5_the_chain_stops_at_the_deadline_instead_of_walking_on(monkeypatch) -
 
     def post(url, *, headers, json, timeout, deadline=None):
         started.append(json["model"])
-        time.sleep(1.0)
+        time.sleep(0.5)
         raise requests.exceptions.Timeout("мълчи")
 
     monkeypatch.setattr(brain_mod, "_post_with_deadline", post)
-    httpd = _serve(monkeypatch, request_timeout=2.5, parallel=1)
+    # start_by = 1.5 − min(1, 1.5 / 2) = 0.75 s: m1 тръгва 0.25 s преди
+    # срока, m2 би тръгнал 0.25 s след него.
+    httpd = _serve(monkeypatch, request_timeout=1.5, parallel=1)
     try:
         status, _, _ = _call(httpd, "POST", "/v1/chat/completions", CHAT)
         assert httpd.slots.acquire(timeout=10)  # работникът е свършил
@@ -268,6 +279,69 @@ def test_a5_the_chain_stops_at_the_deadline_instead_of_walking_on(monkeypatch) -
         _stop(httpd)
     assert status == 504
     assert started == ["m0", "m1"]
+
+
+class _Reply:
+    def __init__(self, status: int, text: str) -> None:
+        self.status_code, self.text = status, text
+
+    def json(self):
+        return json.loads(self.text)
+
+
+def _transient_then(monkeypatch, first_after: float, request_timeout: float):
+    """Истинският Brain, groq/m0 и groq/m1: първото обръщение връща 502 след
+    `first_after` s, всяко следващо — 200 веднага. → (обръщения, start_by)."""
+    from genesis_agent import brain as brain_mod
+    _real_chain(monkeypatch, [("groq", "m0"), ("groq", "m1")], {"GROQ_API_KEY": "k"})
+    monkeypatch.setattr(brain_mod, "_TRANSIENT_PAUSE_S", 0.6)
+    started: list[tuple[str, float]] = []
+
+    def post(url, *, headers, json, timeout, deadline=None):
+        started.append((json["model"], time.monotonic()))
+        if len(started) == 1:
+            time.sleep(first_after)
+            return _Reply(502, "Bad Gateway")
+        return _Reply(200, '{"choices": [{"message": {"role": "assistant", '
+                           '"content": "Добър ден."}, "finish_reason": "stop"}]}')
+
+    monkeypatch.setattr(brain_mod, "_post_with_deadline", post)
+    seen: dict[str, float] = {}
+    real_generate = llm_api.generate
+
+    def generate(messages, json_mode, start_by=None):
+        seen["start_by"] = start_by
+        return real_generate(messages, json_mode, start_by)
+
+    monkeypatch.setattr(llm_api, "generate", generate)
+    httpd = _serve(monkeypatch, request_timeout=request_timeout, parallel=1)
+    try:
+        status, body, _ = _call(httpd, "POST", "/v1/chat/completions", CHAT)
+        assert httpd.slots.acquire(timeout=10)  # работникът е свършил
+        httpd.slots.release()
+    finally:
+        _stop(httpd)
+    return status, body, started, seen["start_by"]
+
+
+def test_a5_a_transient_retry_does_not_start_after_the_deadline(monkeypatch) -> None:
+    """Ревю 2026-11-05: срокът се гледаше само между моделите. 502 на +0.5 s,
+    пауза 0.6 s, start_by +0.8 s → същият модел пак на +1.1 s, след срока
+    (с истинските числа: 502 на 15–17 s → повторен опит на 17+ s, след
+    18-те s на клиента, място и квота още до 8 s). Сега повторният опит не
+    тръгва, а оставащото време отива на следващия модел."""
+    status, body, started, start_by = _transient_then(monkeypatch, 0.5, 1.6)
+    assert all(at < start_by for _, at in started), (started, start_by)
+    assert [m for m, _ in started] == ["m0", "m1"]
+    assert status == 200 and body["model"] == "groq/m1", body
+
+
+def test_a5_a_transient_retry_with_time_left_still_runs(monkeypatch) -> None:
+    """Пазачът не маха повторния опит, когато паузата се побира преди срока."""
+    status, body, started, start_by = _transient_then(monkeypatch, 0.05, 2.0)
+    assert [m for m, _ in started] == ["m0", "m0"]
+    assert started[1][1] < start_by
+    assert status == 200 and body["model"] == "groq/m0", body
 
 
 # ── a6: боклук в usage на доставчика → 500 и загубен отговор ────────────────
