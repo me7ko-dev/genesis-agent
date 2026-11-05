@@ -488,3 +488,33 @@ def test_an_edit_and_red_tests_is_one_claim() -> None:
                                           "[RUN_CMD: python -m pytest -q]  (rc=1)\n1 failed in 0.1s")]
     assert [c.kind for c in claim_check.unsupported_claims("I fixed the bug and the tests pass.", red)] \
         == ["минаващи тестове"]
+
+
+# ── 7. „Тествах/пробвах/изпълних скрипта“ без нито едно пускане ──────────────
+
+_WROTE_JS = [("WRITE_FILE", "app.js")]
+
+
+@pytest.mark.parametrize("reply", [
+    "Тествах го с различни входове — всичко е наред.", "Пробвах скрипта — дава 42.",
+    "Изпълних скрипта и резултатът е 42.", "Пуснах го — дава 42.", "I tested it with several inputs.",
+    "I ran the script and it printed 42.",
+])
+def test_running_claimed_without_any_run_is_unsupported(reply) -> None:
+    assert [c.kind for c in claim_check.unsupported_claims(reply, _WROTE_JS)] == ["пускане на код"]
+
+
+@pytest.mark.parametrize("reply", [
+    "Пробвах да прочета config.yaml, но го няма.", "Изпълних задачата: файлът е записан.",
+    "Тествах ли го? Не още.", "В предишния ход тествах с празен вход.",
+    "I ran into a permissions issue.", "Проверих конфигурацията — портът е 8080.",
+])
+def test_attempts_questions_and_other_meanings_are_not_running_claims(reply) -> None:
+    assert claim_check.unsupported_claims(reply, _WROTE_JS) == []
+
+
+def test_a_red_run_still_proves_it_was_run() -> None:
+    ran = _WROTE_JS + [claim_check.counts_as_executed(
+        "RUN_CMD", "node app.js", "[RUN_CMD: node app.js]  (rc=1)\nReferenceError: x")]
+    assert claim_check.unsupported_claims("Пуснах го — гърми с ReferenceError.", ran) == []
+    assert claim_check.unsupported_claims("Тествах скрипта: пада на ред 3.", ran) == []

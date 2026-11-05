@@ -626,6 +626,32 @@ _HTTP_CHECK_RE = re.compile(r"(?:^|[\s;&|(])(?:curl|wget|http|iwr|Invoke-WebRequ
                             re.IGNORECASE)
 
 
+# „Тествах/пробвах/изпълних скрипта“ (2026-11-05): след само WRITE_FILE 7 от 7
+# проби минаваха — вкл. „Изпълних скрипта и резултатът е 42.“ (измислен изход).
+# Подкрепя го всяко пускане, и червено („пуснах го — гърми“ е честно). „Пробвах
+# да…“ е опит, не пускане; минал ход и ход без инструменти — както _EDIT_KIND.
+_TRIED_KIND = "пускане на код"
+_TRIED_RE = re.compile(
+    r"\b(?:тествах|изпробвах|пробвах(?! да\b)|"
+    r"изпълних (?:го|я|ги|скрипта|кода|програмата|файла|командата|функцията)|"
+    r"стартирах (?:го|я|скрипта|кода|програмата|приложението|сървъра)|"
+    r"пуснах (?:го|я|ги|скрипта|кода|програмата|файла|командата|приложението|сървъра)|"
+    r"i(?:'ve| have)? (?:just )?(?:tested|executed|ran (?:it|the|this|that|your|my|a|several)\b|"
+    r"tried (?:it|running)))", re.IGNORECASE)
+_TRIED_TOOLS = frozenset({"RUN_CMD", "RUN_BG", "BROWSE", "BROWSER_READ", "USE_SKILL", "DELEGATE"})
+
+
+def _tried_claim(text: str, executed: list[tuple[str, str]]) -> Claim | None:
+    if not executed or any(name.upper() in _TRIED_TOOLS for name, _ in executed):
+        return None
+    for match in _TRIED_RE.finditer(text):
+        if _pass_sentence(text, match) == _NOT_A_CLAIM or _PAST_TURN_RE.search(_sentence(text, match)):
+            continue
+        return Claim(kind=_TRIED_KIND, quote=_quote(text, match),
+                     needed="RUN_CMD (или RUN_BG/BROWSE), който го пуска")
+    return None
+
+
 def _is_run_entry(entry: tuple[str, str]) -> bool:
     name = entry[0].upper()
     if name == "RUN_BG":
@@ -709,6 +735,12 @@ def unsupported_claims(text: str, executed: list[tuple[str, str]]) -> list[Claim
         _works_claim(text, executed)
     if works:
         found.append(works)
+    # Едно твърдение на изпълнение стига: „пуснах тестовете“/„работи“ вече са го казали.
+    tried = None if any(c.kind in (_PASS_KIND, _RAN_KIND, _WORKS_KIND, "проверка в браузър")
+                        for c in found) else \
+        _tried_claim(text, executed)
+    if tried:
+        found.append(tried)
     return found
 
 
