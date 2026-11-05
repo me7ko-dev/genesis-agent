@@ -14,6 +14,7 @@
     clear_session()                     – изчиства цялата история.
 """
 
+import re
 import sqlite3
 
 from genesis_agent import sqlite_store
@@ -74,23 +75,56 @@ def _simple_summarize(messages: list[dict[str, str]]) -> str:
     какво започнахме) и последните (докъде стигнахме) — и двата края са
     по-полезни от произволен отрязък от средата.
     """
-    roles = {msg.get("role", "?") for msg in messages}
-    header = (f"[Context summary] {len(messages)} messages from roles: "
+    # Предишното резюме се РАЗГЪВА, не се обобщава като още една реплика (одит
+    # 2026-10-31, възпроизведено): при втората компресия най-старият ред е
+    # резюмето от първата (role=system). Влизаше в „останалите“, за които при
+    # 8+ искания няма място, и изчезваше цяло. 71 реплики през add_message
+    # дадоха „21 messages from roles: assistant, system, user | user: искане
+    # №22 …“ — искане №0 и всичко от първите 21 реплики го нямаше, а паметта
+    # покриваше само последните ~50. Сега бройката и ролите му се сумират, а
+    # редовете му застават най-отпред — „първата“ остава първата на разговора.
+    count = 0
+    roles: set[str] = set()
+    carried: list[tuple[str, str]] = []
+    gap = False
+    fresh: list[dict[str, str]] = []
+    for msg in messages:
+        parsed = _parse_summary(msg)
+        if parsed is None:
+            fresh.append(msg)
+            continue
+        n, old_roles, old_items, old_gap = parsed
+        count += n
+        roles |= old_roles
+        carried += old_items
+        gap = gap or old_gap
+    count += len(fresh)
+    roles |= {msg.get("role", "?") for msg in fresh}
+    header = (f"[Context summary] {count} messages from roles: "
               + ", ".join(sorted(roles)))
 
-    ordered = ([m for m in messages if m.get("role") == "user"]
-               + [m for m in messages if m.get("role") != "user"])
+    ordered = ([(r, t) for r, t in carried if r == "user"]
+               + [(m.get("role", "?"), m.get("content") or "") for m in fresh
+                  if m.get("role") == "user"]
+               + [(r, t) for r, t in carried if r != "user"]
+               + [(m.get("role", "?"), m.get("content") or "") for m in fresh
+                  if m.get("role") != "user"])
     users: list[str] = []
     others: list[str] = []
     seen: set[str] = set()
-    for msg in ordered:
-        text = " ".join((msg.get("content") or "").split())[:_SUMMARY_ITEM_CHARS]
+    for role, content in ordered:
+        text = " ".join(content.split())[:_SUMMARY_ITEM_CHARS]
         key = text.lower()
         if not text or key in seen:
             continue
         seen.add(key)
-        line = f"{msg.get('role', '?')}: {text}"
-        (users if msg.get("role") == "user" else others).append(line)
+        (users if role == "user" else others).append(f"{role}: {text}")
+
+    # „…“ на предишното резюме стои след първата реплика на списъка, който е
+    # бил съкратен (на човека, ако е имало такива). Ако пренесеното пак се
+    # събира, маркерът трябва да остане: иначе „стъпка 0 | стъпка 13“
+    # изглежда като два поредни хода.
+    carried_users = any(r == "user" for r, _ in carried)
 
     # Режем всяка роля поотделно (одит 2026-10-31, възпроизведено): общият
     # списък „хора + останали“ се режеше с items[-7:], а последните 7 в него
@@ -101,18 +135,49 @@ def _simple_summarize(messages: list[dict[str, str]]) -> str:
         room = _SUMMARY_MAX_ITEMS - len(users)
         # Отговорите само допълват мястото — с най-новите (докъде стигнахме).
         # Проверката room > 0 е задължителна: others[-0:] връща ВСИЧКИ.
-        items = _first_and_last(users) + (others[-room:] if room > 0 else [])
+        items = (_first_and_last(users, gap and carried_users)
+                 + (others[-room:] if room > 0 else []))
     else:
-        items = _first_and_last(others)
+        items = _first_and_last(others, gap and not carried_users)
     return header + (" | " + " | ".join(items) if items else "")
 
 
-def _first_and_last(items: list[str]) -> list[str]:
+def _first_and_last(items: list[str], gap: bool = False) -> list[str]:
     """Ако не се събират: първата, „…“ и последните — както казва docstring-ът
-    на _simple_summarize."""
+    на _simple_summarize. `gap`: между първата и втората вече има пропуск."""
     if len(items) <= _SUMMARY_MAX_ITEMS:
-        return items
+        return [items[0], "…"] + items[1:] if gap and len(items) > 1 else items
     return [items[0], "…"] + items[-(_SUMMARY_MAX_ITEMS - 1):]
+
+
+_SUMMARY_RE = re.compile(
+    r"\[Context summary\] (\d+) messages from roles: ([^|]*?)(?: \| (.*))?\Z", re.DOTALL)
+
+
+def _parse_summary(
+    msg: dict[str, str],
+) -> tuple[int, set[str], list[tuple[str, str]], bool] | None:
+    """Резюме от предишна компресия → (бройка, роли, [(роля, текст)], имаше ли
+    „…“). None, ако редът не е резюме — тогава е обикновена реплика."""
+    if msg.get("role") != "system":
+        return None
+    m = _SUMMARY_RE.match(msg.get("content") or "")
+    if m is None:
+        return None
+    roles = {r.strip() for r in m.group(2).split(",") if r.strip()}
+    items: list[tuple[str, str]] = []
+    gap = False
+    for piece in (m.group(3) or "").split(" | "):
+        if piece == "…":
+            gap = True
+            continue
+        role, sep, text = piece.partition(": ")
+        if sep and role in roles:
+            items.append((role, text))
+        elif items:
+            # Самата реплика е съдържала „ | “ — слепваме я обратно.
+            items[-1] = (items[-1][0], items[-1][1] + " | " + piece)
+    return int(m.group(1)), roles, items, gap
 
 # --------------------------------------------------------------
 # Основни публични функции
