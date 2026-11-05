@@ -326,3 +326,73 @@ def test_weakening_the_operators_test_does_not_end_the_turn_as_green(ws, monkeyp
     assert any(n.startswith("[проверка на тестовете]") and "tests/test_calc.py" in n
                for n in notes), notes
     assert any("Смени тест" in e[1] for e in ui.log if e[0] == "warn")
+
+
+# ── 5. „Работи“ след паднало пускане или без пускане (claim_check) ───────────
+
+from genesis_agent import claim_check  # noqa: E402
+
+_CRASH = ("[RUN_CMD: python app.py]  (rc=1)\nTraceback (most recent call last):\n"
+          "  File \"app.py\", line 3, in <module>\nNameError: name 'rows' is not defined")
+_OK = "[RUN_CMD: python app.py]  (rc=0)\n3 реда записани"
+
+
+def _ran(*results):
+    return [claim_check.counts_as_executed("RUN_CMD", "python app.py", r) for r in results]
+
+
+@pytest.mark.parametrize("reply", [
+    "Готово — скриптът вече работи правилно.",
+    "Всичко работи.",
+    "Приложението работи без грешки.",
+    "Done, it works now.",
+    "The script runs successfully.",
+])
+def test_works_after_a_crash_is_unsupported(reply) -> None:
+    claims = claim_check.unsupported_claims(reply, _ran(_CRASH))
+    assert [c.kind for c in claims] == ["работещ код"], claims
+    assert "rc=1" in claims[0].needed
+
+
+@pytest.mark.parametrize("reply", [
+    "Скриптът още не работи — NameError на ред 3.",
+    "Работи ли вече?",
+    "Работи правилно, освен за празен вход.",
+    "Функцията работи с отрицателни числа.",
+    "Here's how it works: it reads the CSV.",
+])
+def test_honest_reports_questions_and_explanations_are_not_claims(reply) -> None:
+    assert claim_check.unsupported_claims(reply, _ran(_CRASH)) == []
+
+
+def test_works_after_a_green_rerun_is_supported() -> None:
+    assert claim_check.unsupported_claims("Поправих го — вече работи.", _ran(_CRASH, _OK)) == []
+
+
+def test_works_after_writing_and_never_running_is_unsupported() -> None:
+    claims = claim_check.unsupported_claims("Записах app.py — всичко работи.",
+                                            [("WRITE_FILE", "app.py")])
+    assert [c.kind for c in claims] == ["работещ код"]
+
+
+def test_works_in_plain_conversation_is_an_explanation() -> None:
+    assert claim_check.unsupported_claims("От Python 3.12 вече работи с вложени кавички.", []) == []
+
+
+def test_a_crash_then_works_through_the_real_loop_gets_the_nudge(ws, monkeypatch) -> None:
+    (ws / "app.py").write_text("print(rows)\n", encoding="utf-8")
+    replies = iter([
+        ("", [_call("RUN_CMD", {"command": f'"{sys.executable}" app.py'}, "r1")]),
+        ("Готово — скриптът вече работи правилно.", None),
+        ("Прав си — пада с NameError: rows не е дефинирано.", None),
+    ])
+    seen: list = []
+
+    def fake(messages, tools=None):
+        seen.append([dict(m) for m in messages])
+        return next(replies)
+    monkeypatch.setattr(gta, "ask_genesis", fake)
+    gta.run_turn(deque([{"role": "system", "content": "SYS"}], maxlen=gta._HISTORY_MAXLEN),
+                 "пусни app.py", _UI())
+    notes = [m["content"] for m in seen[-1] if m["role"] == "system"]
+    assert any("работещ код" in n and "rc=1" in n for n in notes), notes

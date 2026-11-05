@@ -558,6 +558,56 @@ def executed_from_text_results(results: list[str]) -> list[tuple[str, str]]:
     return out
 
 
+# „Работи“ (2026-11-05): „Готово — скриптът вече работи правилно.“ след
+# `python app.py` с Traceback и rc=1 минаваше без подкана — никоя категория горе
+# не го покрива; същото без нито едно пускане (само READ/WRITE). Само силните
+# форми: „работи с CSV“, „ето как работи“ не твърдят нищо; „не работи“, въпрос,
+# условие и смесен отчет („работи, освен за празен вход“) — също не.
+_WORKS_KIND = "работещ код"
+_WORKS_RE = re.compile(
+    r"\b(?:(?:вече|сега|всичко|отново) (?:си )?работи|"
+    r"работи (?:вече |сега )?(?:правилно|коректно|успешно|без грешки|както трябва|както се очаква)|"
+    r"(?<!\bhow )(?<!\bwhat )(?:it|everything|this|that) (?:now )?works|works (?:correctly|as expected|fine|perfectly|now)|"
+    r"now works|is (?:now )?working (?:now|correctly|fine|as expected)|"
+    r"runs (?:successfully|without (?:any )?errors|cleanly))\b", re.IGNORECASE)
+# Какво доказва „работи“: пускане на кода/тестовете, проверка с curl/wget, браузър.
+_WORKS_TOOLS = frozenset({"BROWSE", "BROWSER_READ", "USE_SKILL", "DELEGATE"})
+_HTTP_CHECK_RE = re.compile(r"(?:^|[\s;&|(])(?:curl|wget|http|iwr|Invoke-WebRequest)(?=\s|$)",
+                            re.IGNORECASE)
+
+
+def _is_run_entry(entry: tuple[str, str]) -> bool:
+    name = entry[0].upper()
+    if name == "RUN_BG":
+        return True
+    if name != "RUN_CMD":
+        return False
+    from genesis_agent.code_check import runs_code
+    command = _failed_rc(entry)[0]
+    return is_test_run(command) or runs_code(command) or bool(_HTTP_CHECK_RE.search(command))
+
+
+def _works_claim(text: str, executed: list[tuple[str, str]]) -> Claim | None:
+    """„Работи“ без пускане или след червено последно пускане на кода."""
+    match = next((m for m in _WORKS_RE.finditer(text) if _pass_sentence(text, m) == _CLAIM), None)
+    if match is None or any(name.upper() in _WORKS_TOOLS for name, _ in executed):
+        return None
+    runs = [e for e in executed if _is_run_entry(e)]
+    # Без нищо пуснато — само ако ходът е писал: в чист разговор („от 3.12 вече
+    # работи с вложени кавички“) „работи“ е обяснение, не отчет за свършено.
+    if not runs and not any(name.upper() in ("WRITE_FILE", "EDIT_FILE") for name, _ in executed):
+        return None
+    if not runs:
+        return Claim(kind=_WORKS_KIND, quote=_quote(text, match),
+                     needed="пускане на кода (RUN_CMD), което го показва")
+    command, rc = _failed_rc(runs[-1])
+    if not rc:
+        return None
+    return Claim(kind=_WORKS_KIND, quote=_quote(text, match),
+                 needed=f"пускане с rc=0 (последното — `{command[:80]}` — е с rc={rc}; ако "
+                        f"неуспехът е нарочен, напр. отказ на лош вход, кажи го)")
+
+
 def unsupported_claims(text: str, executed: list[tuple[str, str]]) -> list[Claim]:
     """Твърденията в `text`, които изпълненото не подкрепя.
 
@@ -590,6 +640,9 @@ def unsupported_claims(text: str, executed: list[tuple[str, str]]) -> list[Claim
             continue
         needed = " / ".join(sorted(ok_tools - {"USE_SKILL", "DELEGATE"}))
         found.append(Claim(kind=kind, quote=_quote(text, match), needed=needed))
+    works = _works_claim(text, executed)
+    if works:
+        found.append(works)
     return found
 
 

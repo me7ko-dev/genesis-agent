@@ -184,7 +184,8 @@ _RUN_HEADER = re.compile(r"^\[RUN_CMD: (.*?)\]  \(rc=(-?\d+|None)\)$", re.DOTALL
 _EDITED = re.compile(r"^\[(?:WRITE_FILE|EDIT_FILE): [^\]\n]+\] ✓", re.MULTILINE)
 
 
-def _runs_code(command: str) -> bool:
+def runs_code(command: str) -> bool:
+    """Пуска ли `command` код (Python, node, скрипт), а не само чете файлове."""
     return _runs_python(command) or bool(_OTHER_CODE.search(command))
 
 
@@ -248,7 +249,7 @@ class MismatchCheck:
         if head is None or head.group(2) != "0":
             return   # не тръгна или е червена — това вече го вижда моделът и claim_check
         command = head.group(1).strip()
-        if not _runs_code(command):
+        if not runs_code(command):
             return
         line = mismatch_line(result[head.end():])
         if line:
