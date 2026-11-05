@@ -16,6 +16,7 @@ never become a reason the agent can't run at all.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -184,3 +185,78 @@ def lint_note(code: str) -> str:
     if len(errors) > _MAX_ERRORS_SHOWN:
         lines.append(f"  … и още {len(errors) - _MAX_ERRORS_SHOWN}")
     return "\nRuff (само отчет, файлът не е пипнат отвъд редакцията):\n" + "\n".join(lines)
+
+
+# ─── JSON / YAML / TOML при запис (2026-11-05) ────────────────────────────────
+# Проба: `package.json` със запетая накрая, `docker-compose.yml` с изместен
+# отстъп и `pyproject.toml` с `name = x` минаваха през WRITE_FILE с „✓“ — 3 от 3;
+# грешката излизаше чак при `npm install`, `docker compose up` или `pip install .`,
+# рундове по-късно и с чуждо съобщение. Като ruff за .py: записът не се спира
+# (моделът поиска точно това), но резултатът казва реда, за да го поправи веднага.
+_DATA_MAX_BYTES = 1_000_000
+# JSON с коментари по стандарт на инструмента (tsconfig, VS Code, devcontainer):
+# json.loads там е грешна мярка.
+_JSONC_NAMES = re.compile(r"^(?:tsconfig|jsconfig)(?:\.[\w-]+)?\.json$|^\.?(?:eslintrc|babelrc|"
+                          r"swcrc|devcontainer)\.json$", re.IGNORECASE)
+_JSONC_DIRS = {".vscode", ".devcontainer", ".idea"}
+
+
+def _toml_loads():
+    try:
+        import tomllib
+        return tomllib.loads
+    except ImportError:                     # 3.10: tomli, ако го има (pytest го носи)
+        try:
+            import tomli
+            return tomli.loads
+        except ImportError:
+            return None
+
+
+def data_error(path: Path, content: str) -> str:
+    """Защо `content` не е валиден JSON/YAML/TOML за `path`; "" ако е или не се знае."""
+    suffix = path.suffix.lower()
+    if not content.strip() or len(content) > _DATA_MAX_BYTES:
+        return ""
+    if suffix == ".json":
+        if _JSONC_NAMES.match(path.name) or _JSONC_DIRS & set(path.parts):
+            return ""
+        try:
+            json.loads(content)
+        except json.JSONDecodeError as e:
+            return f"не е валиден JSON (ред {e.lineno}, колона {e.colno}: {e.msg})"
+        except RecursionError:
+            return "не е валиден JSON (твърде дълбоко вложен)"
+        return ""
+    if suffix in (".yaml", ".yml"):
+        # Шаблони (Helm, Jinja, Go): `{{ … }}` не е YAML, докато не се изпълни.
+        if "{{" in content or "{%" in content:
+            return ""
+        import yaml
+        try:
+            # compose, не load: `!Ref`/`!Sub` (CloudFormation) и други тагове са валидни.
+            for _ in yaml.compose_all(content, Loader=yaml.SafeLoader):
+                pass
+        except yaml.MarkedYAMLError as e:
+            mark = e.problem_mark or e.context_mark
+            where = f"ред {mark.line + 1}, колона {mark.column + 1}: " if mark else ""
+            return f"не е валиден YAML ({where}{e.problem or e.context})"
+        except yaml.YAMLError as e:
+            return f"не е валиден YAML ({e})"
+        return ""
+    if suffix == ".toml":
+        loads = _toml_loads()
+        if loads is None:
+            return ""
+        try:
+            loads(content)
+        except ValueError as e:              # TOMLDecodeError е ValueError
+            return f"не е валиден TOML ({e})"
+    return ""
+
+
+def data_note(path: Path, content: str) -> str:
+    """Бележката към резултата на WRITE_FILE/EDIT_FILE, или ""."""
+    why = data_error(path, content)
+    return (f"\n⚠ Записаният файл {why}. Поправи го, преди да го ползваш — инструментът, "
+            "който го чете, ще падне със същото.") if why else ""

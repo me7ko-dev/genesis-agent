@@ -234,9 +234,11 @@ def test_url_credentials_without_a_user_are_masked(text, expected) -> None:
     "COMPASS: 270",
     "SURPASS: x",
     "--- PASS: TestAdd (0.00s)",
-    "PASS: test_login",
 ])
 def test_uppercase_words_ending_in_pass_are_not_masked(text) -> None:
+    # Голото `PASS: x` вече се маскира (сливане с одита 2026-11-05 от main):
+    # `PASS: hunter2` и `PASS: test_login` не се различават, а изтекла тайна е
+    # по-лошо от маскиран ред на тест.
     assert redact(text) == text
 
 

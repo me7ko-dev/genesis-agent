@@ -446,7 +446,7 @@ def run_tool_loop(
     """
     from genesis_agent import claim_check
     from genesis_agent.budget import clip_for_context
-    from genesis_agent.code_check import RunCheck
+    from genesis_agent.code_check import MismatchCheck, RunCheck
     from genesis_agent.page_check import FinalCheck
     from genesis_agent.repeat_guard import RepeatGuard
 
@@ -474,6 +474,8 @@ def run_tool_loop(
     # Заявката преди превода: буквалните думи от нея („ред ОБЩО“) се сверяват с кода.
     run_check = RunCheck(next((str(m.get("content") or "") for m in reversed(messages)
                                if m.get("role") == "user"), ""))
+    # Разминаване в изхода на собствената проверка (code_check, 2026-11-05).
+    mismatch = MismatchCheck()
 
     _translate_last_user_message_to_en(messages)
     text, tool_calls, prov, model = core.complete(messages)
@@ -516,6 +518,7 @@ def run_tool_loop(
                 result = core.skills.dispatch_tool_call(name, args or fn.get("arguments") or {})
                 page_check.observe(result)
                 run_check.observe(result)
+                mismatch.observe(result)
                 entry = claim_check.counts_as_executed(
                     name, " ".join(str(v) for v in args.values()), result)
                 if entry:
@@ -563,6 +566,7 @@ def run_tool_loop(
         for r in results:
             page_check.observe(r)
             run_check.observe(r)
+            mismatch.observe(r)
         # Името на инструмента стои в самия резултат (`[RUN_CMD: ...]`).
         # Извличането живее в claim_check, за да не се дублира между
         # фронтендите — иначе промяна във формата ги обезоръжава наведнъж.
@@ -612,6 +616,11 @@ def run_tool_loop(
             if run_check.due():
                 messages.append({"role": "system", "content": run_check.note()})
                 _status("пробва кода…")
+                text, tool_calls, prov, model = core.complete(messages)
+                continue
+            if mismatch.due(text):
+                messages.append({"role": "system", "content": mismatch.note()})
+                _status("сверява разминаването…")
                 text, tool_calls, prov, model = core.complete(messages)
                 continue
             promise = claim_check.unfinished_promise(text)

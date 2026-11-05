@@ -304,12 +304,19 @@ def _halt(task: DelegatedTask, status: TaskStatus) -> None:
             task.error = CANCELLED_NOTE
 
 
-def wait_all(tasks: list[DelegatedTask], timeout: int = 300) -> list[DelegatedTask]:
+def cancel_tasks(tasks: list[DelegatedTask]) -> None:
+    """Спира недовършените: статус „cancelled“ и сигнал към под-агента."""
+    for task in tasks:
+        _halt(task, TaskStatus.CANCELLED)
+
+
+def wait_all(tasks: list[DelegatedTask], timeout: int = 300, *,
+             cancelled: Callable[[], bool] | None = None) -> list[DelegatedTask]:
     """
     Изчаква всички задачи да приключат (или да изтече timeout, или Стоп на
     задачата). Междувременно задава въпросите им за потвърждение в ТАЗИ нишка.
-    При timeout, Стоп и Ctrl-C (KeyboardInterrupt) задачата спира, не остава
-    да работи на заден план.
+    При timeout, Стоп (на задачата или `cancelled()` на викащия) и Ctrl-C
+    (KeyboardInterrupt) задачата спира, не остава да работи на заден план.
 
     Returns:
         Списъкът от задачи с попълнени status, result, error.
@@ -324,6 +331,10 @@ def wait_all(tasks: list[DelegatedTask], timeout: int = 300) -> list[DelegatedTa
         task._waited.set()
     try:
         while alive := running():
+            if cancelled is not None and cancelled():
+                cancel_tasks(alive)
+                log.warning("[delegate] ⏹ Задачите са спрени от оператора")
+                break
             for task in alive:
                 task._serve_asks()
                 if task.stopped():

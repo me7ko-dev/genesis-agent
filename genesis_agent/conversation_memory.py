@@ -36,12 +36,13 @@ CREATE TABLE IF NOT EXISTS conversations (
 
 
 def _init_db() -> sqlite3.Connection:
-    # През sqlite_store, както memory/episodic_memory/workspace_memory (одит
-    # 2026-10-31, възпроизведено): с голо sqlite3.connect нечетим файл връщаше
-    # „file is not a database“ на ВСЯКО add_message, а genesis_terminal_agent.
-    # _remember го гълта на ниво debug — записът спираше в тази и във всяка
-    # следваща сесия без дума към оператора. Сега файлът отива настрани като
-    # *.corrupt с едно предупреждение и историята продължава в нова база.
+    # През sqlite_store, както memory/episodic_memory/workspace_memory (одити
+    # 2026-10-31 и 2026-11-04, възпроизведено): с голо sqlite3.connect нечетим
+    # файл връщаше „file is not a database“ на ВСЯКО add_message, а
+    # genesis_terminal_agent._remember го гълта на ниво debug — записът спираше
+    # в тази и във всяка следваща сесия без дума към оператора. Сега файлът
+    # отива настрани като *.corrupt с едно предупреждение и историята
+    # продължава в нова база.
     return sqlite_store.connect(DB_PATH, _SCHEMA)
 
 # --------------------------------------------------------------

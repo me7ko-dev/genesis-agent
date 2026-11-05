@@ -62,11 +62,13 @@ CREATE TABLE IF NOT EXISTS embeddings (
 
 def _conn() -> sqlite3.Connection:
     # Нечетим файл отива настрани като .corrupt и базата се създава наново
-    # (одит 2026-10-31, възпроизведено): с голо sqlite3.connect чужд или
-    # наполовина копиран embeddings.db даваше „file is not a database“ /
-    # „database disk image is malformed“ на всяко търсене и всеки запис на
+    # (одит 2026-10-31, възпроизведено; и 2026-11-04): с голо sqlite3.connect
+    # чужд или наполовина копиран embeddings.db даваше „file is not a database“
+    # / „database disk image is malformed“ на всяко търсене и всеки запис на
     # умение, гълтано на debug — търсенето по смисъл спираше завинаги, без
     # дума към оператора. Тук е само кеш, който _index_missing пълни наново.
+    # wal=True чака заетата база вместо веднага „database is locked“: два
+    # процеса върху нова база губеха запис или търсене в 17 от 30 пускания.
     c = sqlite_store.connect(DB_PATH, _SCHEMA, wal=True)
     try:
         # С кой модел и от какъв текст е векторът (одит 2026-10-07): bge-m3 →
@@ -75,7 +77,13 @@ def _conn() -> sqlite3.Connection:
         cols = {row[1] for row in c.execute("PRAGMA table_info(embeddings)")}
         for col in ("model", "text_hash"):
             if col not in cols:
-                c.execute(f"ALTER TABLE embeddings ADD COLUMN {col} TEXT")
+                # Друг процес може да я е добавил между проверката и ALTER-а —
+                # „duplicate column“ е точно това (същото като workspace_memory).
+                try:
+                    c.execute(f"ALTER TABLE embeddings ADD COLUMN {col} TEXT")
+                except sqlite3.OperationalError as e:
+                    if "duplicate column" not in str(e):
+                        raise
     except BaseException:
         c.close()
         raise

@@ -104,6 +104,7 @@ def _command_out(text: str) -> None:
 # вместо да ги отказва тихо. Потвърждението се рендира през rich console.
 try:
     from genesis_agent import sandbox as _sandbox
+    from genesis_agent.terminal_text import safe as _shown
 
     def _terminal_confirm(operation: str, verdict) -> bool | str:
         # Цялата операция, като текст (без Rich разметка: `[bold]` в командата
@@ -114,9 +115,11 @@ try:
             return False
         console.print("\n[bold yellow]⚠️  GENESIS SANDBOX — изисква потвърждение[/]")
         for r in verdict.reasons:
-            console.print(Text(f"    • {r}", style="yellow"))
+            console.print(Text(f"    • {_shown(r)}", style="yellow"))
         console.print(Text(f"    Операция ({len(operation)} знака):", style="dim"))
-        console.print(Text(operation), soft_wrap=True)
+        # Видимо всеки управляващ/невидим знак (2026-11-05): `ESC[2K ESC[1G` показваше
+        # `rm -rf ~/projects…ls -la` като `ls -la` — одобрява се друга команда.
+        console.print(Text(_shown(operation, strict=True)), soft_wrap=True)
         # „s“ = да, за тази сесия: само за проста команда (permissions.py);
         # после същата команда не се пита до /clear (2026-10-15).
         try:
@@ -140,7 +143,9 @@ from genesis_agent import claim_check
 from genesis_agent.acceptance import AcceptanceCheck as _AcceptanceCheck
 from genesis_agent.acceptance import enabled as _acceptance_enabled
 from genesis_agent.budget import TEXT_RESULT_FOLLOWUP, clip_for_context
+from genesis_agent.code_check import MismatchCheck as _MismatchCheck
 from genesis_agent.code_check import RunCheck as _RunCheck
+from genesis_agent.code_check import TestEditCheck as _TestEditCheck
 from genesis_agent.config import TOOL_ROUND_CAP as _TOOL_ROUND_CAP
 from genesis_agent.page_check import FinalCheck as _PageCheck
 from genesis_agent.paths import (
@@ -152,6 +157,7 @@ from genesis_agent.paths import (
     workspace_dir,
 )
 from genesis_agent.repeat_guard import RepeatGuard as _RepeatGuard
+from genesis_agent.terminal_text import safe as _terminal_safe
 from genesis_agent.tool_schemas import load_tool_arguments
 
 # load_config проверява и формата (одит 2026-10-22): `workspace: ~/proj` вместо
@@ -1529,36 +1535,42 @@ class RichTurnUI(TurnUI):
     def thinking(self, label: str, spinner: str = "dots"):
         return console.status(f"[dim]{label}[/]", spinner=spinner)
 
+    # Всичко тук е чужд текст (модел, файл, команда, MCP) — без ESC
+    # последователности към терминала (genesis_agent.terminal_text, 2026-11-05).
     def assistant(self, text: str) -> None:
         self.last_text = text
         console.print()
         if text.strip():
+            shown = _terminal_safe(text)
             content: Markdown | Text
             try:
-                content = Markdown(text)
+                # hyperlinks=False (преглед 2026-11-05): `[README.md](https://evil…)`
+                # се рисуваше като щракаем „README.md“ — сега адресът се вижда.
+                content = Markdown(shown, hyperlinks=False)
             except Exception:
                 log.debug("отговорът не се показа като Markdown", exc_info=True)
-                content = Text(text)
+                content = Text(shown)
             console.print(Panel(content, border_style="cyan", padding=(1, 2)))
 
     def tool(self, name: str, result: str) -> None:
-        console.print(Panel(Text(result[:2000]), title=f"🔧 {name}", border_style="green"))
+        console.print(Panel(Text(_terminal_safe(result[:2000])), title=f"🔧 {_terminal_safe(name)}",
+                            border_style="green"))
 
     def asked(self, question: str) -> None:
-        console.print(Panel(Text(question), title="❓ Genesis пита",
+        console.print(Panel(Text(_terminal_safe(question)), title="❓ Genesis пита",
                             border_style="yellow", padding=(1, 2)))
 
     def spinning(self, note: str) -> None:
-        console.print(Panel(Text(note), title="🔁 Въртене на място",
+        console.print(Panel(Text(_terminal_safe(note)), title="🔁 Въртене на място",
                             border_style="yellow", padding=(1, 2)))
 
     # Text, не разметка: съобщение от hook или инструмент с `[` хвърляше
     # MarkupError насред хода (одит 2026-10-08).
     def warn(self, text: str) -> None:
-        console.print(Text(f"⚠ {text}", style="yellow"))
+        console.print(Text(f"⚠ {_terminal_safe(text)}", style="yellow"))
 
     def info(self, text: str) -> None:
-        console.print(Text(text, style="dim"))
+        console.print(Text(_terminal_safe(text), style="dim"))
 
 
 RICH_UI = RichTurnUI()
@@ -1953,6 +1965,10 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
     # .py, записан и непуснат след последната промяна (genesis_agent.code_check).
     # Със заявката: буквалните думи от нея („ред ОБЩО“) се сверяват с кода.
     _run_check = _RunCheck(user_input)
+    # Разминаване в изхода на собствената проверка (code_check, 2026-11-05).
+    _mismatch = _MismatchCheck()
+    # Тест отпреди хода, отслабен в него (code_check, 2026-11-05).
+    _test_edit = _TestEditCheck(user_input, Path(genesis_skills._WORKSPACE).resolve())
     # Приемни тестове само от заявката (genesis_agent.acceptance): с безплатен
     # модел — включени, с Claude/платен — не; GENESIS_ACCEPTANCE=1/0 решава изрично.
     _accept = _AcceptanceCheck(user_input, Path(genesis_skills._WORKSPACE), rules=knowledge,
@@ -2053,6 +2069,7 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                               else genesis_skills.dispatch_tool_call(name, call_args))
                     _page_check.observe(result)
                     _run_check.observe(result)
+                    _mismatch.observe(result)
                     _accept.observe(result)
                     _entry = claim_check.counts_as_executed(
                         name, " ".join(str(v) for v in args.values()), result)
@@ -2129,6 +2146,7 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                     ui.tool(_tag.group(1) if _tag else "инструмент", _r)
                 _page_check.observe(_r)
                 _run_check.observe(_r)
+                _mismatch.observe(_r)
                 _accept.observe(_r)
             if not tool_results:
                 # Празно ≠ непременно "приключи" — може да е объркан tool tag
@@ -2167,10 +2185,22 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                 # нямат какво да проверят — нищо не е записано.
                 from genesis_agent import plan_mode
                 _planning = plan_mode.active()
+                if not _planning and _test_edit.due(edit_history.turn_originals()):
+                    ui.warn("Смени тест, който го имаше преди хода — питам го защо, вместо да поправи кода.")
+                    messages.append({"role": "system", "content": _test_edit.note()})
+                    with ui.thinking("Сверявам теста…", "aesthetic"):
+                        response, tool_calls = ask_genesis(messages, tools=_turn_tools())
+                    continue
                 if _run_check.due() and not _planning:
                     ui.warn("Написа код — казвам му да го пробва и извън примерите.")
                     messages.append({"role": "system", "content": _run_check.note()})
                     with ui.thinking("Пробвам кода…", "aesthetic"):
+                        response, tool_calls = ask_genesis(messages, tools=_turn_tools())
+                    continue
+                if _mismatch.due(response) and not _planning:
+                    ui.warn("Собствената му проверка печата разминаване — казвам му да го сравни с условието.")
+                    messages.append({"role": "system", "content": _mismatch.note()})
+                    with ui.thinking("Сверявам разминаването…", "aesthetic"):
                         response, tool_calls = ask_genesis(messages, tools=_turn_tools())
                     continue
                 if _accept.due() and not _planning:
@@ -2196,7 +2226,8 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                 # WRITE_FILE/RUN_CMD (отказани там) и `genesis -p --plan` печаташе
                 # втория отговор вместо плана.
                 _unsupported = ([] if _planning
-                                else claim_check.unsupported_claims(response, _executed))
+                                else claim_check.unsupported_claims(
+                                    response, _executed, Path(genesis_skills._WORKSPACE)))
                 if _unsupported and _claim_retries < 1:
                     _claim_retries += 1
                     ui.warn("Твърди свършена работа, която никой "
@@ -2209,6 +2240,9 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
                 _red_rc = claim_check.green_claim_after_red(_unsupported, _executed)
                 if _red_rc:
                     ui.warn(f"{claim_check.RED_TESTS_WARNING} (rc={_red_rc}).")
+                _crash_rc = claim_check.works_claim_after_red(_unsupported, _executed)
+                if _crash_rc:
+                    ui.warn(f"{claim_check.RED_RUN_WARNING} (rc={_crash_rc}).")
                 break
             _text_note = ""
             for _r in tool_results:
@@ -2410,7 +2444,7 @@ def _continue_session(messages: "deque", system_prompt: str) -> "deque":
                  and isinstance(m.get("content"), str) and m["content"]), "")
     console.print(f"[green]✓ Продължавам разговора от {path.name} ({len(restored)} съобщения)[/]")
     if last:
-        console.print(Panel(Text(last[:600] + ("…" if len(last) > 600 else "")),
+        console.print(Panel(Text(_terminal_safe(last[:600]) + ("…" if len(last) > 600 else "")),
                             title="[dim]последният отговор[/]", border_style="dim"))
     return restored
 

@@ -31,6 +31,7 @@ import math
 import os
 import re
 import socket
+import sys
 import threading
 import time
 import uuid
@@ -214,7 +215,9 @@ def parse_request(body: bytes) -> tuple[list[dict], bool]:
         # (-InFile, curl --data-binary @файл) започват с BOM — беше 400 „не е
         # валиден JSON“ (одит 2026-10-31; същият BOM в .env — brain._load_keys).
         data = json.loads(body.decode("utf-8-sig"))
-    except (UnicodeDecodeError, ValueError):
+    # RecursionError: `[` × 60 000 (под 64 KB) не е ValueError — беше 500
+    # „Вътрешна грешка“ за грешка на клиента (одит 2026-11-04).
+    except (UnicodeDecodeError, ValueError, RecursionError):
         raise ApiError(400, "Тялото не е валиден JSON.") from None
     if not isinstance(data, dict):
         raise ApiError(400, "Тялото трябва да е JSON обект.")
@@ -231,8 +234,15 @@ def parse_request(body: bytes) -> tuple[list[dict], bool]:
             raise ApiError(400, "Всяко съобщение иска role: system, user или assistant.")
         content = m.get("content")
         if isinstance(content, list):  # OpenAI части: [{"type":"text","text":…}]
-            content = "".join(str(p.get("text") or "") for p in content
-                              if isinstance(p, dict) and p.get("type") == "text")
+            # Само текстови части (одит 2026-11-04): другите се изпускаха тихо —
+            # картинка сама стигаше до модела като `content: ""` и клиентът
+            # получаваше 200 с отговор за нещо, което моделът не е видял.
+            other = next((p for p in content
+                          if not (isinstance(p, dict) and p.get("type") == "text")), None)
+            if other is not None:
+                kind = other.get("type") if isinstance(other, dict) else type(other).__name__
+                raise ApiError(400, f"Само текст: частта {str(kind)[:40]!r} не се поддържа.")
+            content = "".join(str(p.get("text") or "") for p in content)
         if not isinstance(content, str):
             raise ApiError(400, "content трябва да е текст.")
         messages.append({"role": m["role"], "content": content})
@@ -394,7 +404,11 @@ class _Handler(BaseHTTPRequestHandler):
         self._handle("OPTIONS")
 
     def _send(self, status: int, obj: dict | None, origin: str | None) -> None:
-        body = b"" if obj is None else json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        # "replace": отговор на модела с половин двойка (`"\ud83d"` в JSON-а на
+        # доставчика — отрязано емоджи) даваше UnicodeEncodeError → 500 и
+        # платеният отговор се губеше (одит 2026-11-04); сега тя е „?“.
+        body = (b"" if obj is None
+                else json.dumps(obj, ensure_ascii=False).encode("utf-8", "replace"))
         self.send_response(status)
         if obj is not None:
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -462,20 +476,22 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             left = int(self.headers.get("Content-Length") or 0)
         except ValueError:
-            return
-        if left <= 0:
+            left = 0
+        # И chunked тяло (одит 2026-11-04) — без Content-Length.
+        chunked = "chunked" in (self.headers.get("Transfer-Encoding") or "").lower()
+        if left <= 0 and not chunked:
             return
         self.close_connection = True
         try:
             self.wfile.flush()
             self.connection.shutdown(socket.SHUT_WR)
             deadline = time.monotonic() + _LINGER_S
-            while left > 0:
+            while chunked or left > 0:
                 wait = deadline - time.monotonic()
                 if wait <= 0:
                     break
                 self.connection.settimeout(wait)
-                got = len(self.rfile.read1(min(left, _DRAIN_CHUNK)))
+                got = len(self.rfile.read1(_DRAIN_CHUNK if chunked else min(left, _DRAIN_CHUNK)))
                 if not got:
                     break
                 left -= got
@@ -509,16 +525,22 @@ class _Handler(BaseHTTPRequestHandler):
         except ApiError as e:
             status = e.status
             self._send(status, {"error": {"message": e.message}}, origin)
-            self._close_after_unread_body()
         except Exception as e:
             log.debug("вътрешна грешка в genesis api", exc_info=True)
             status = 500
             self._send(500, {"error": {"message": f"Вътрешна грешка: {type(e).__name__}"}}, origin)
-            self._close_after_unread_body()
         finally:
             ms = int((time.monotonic() - t0) * 1000)
-            print(f"[api] {time.strftime('%H:%M:%S')} {method} {path[:60]} → {status} "
-                  f"{model} {ms} ms", flush=True)
+            # И след успешен отговор, който не е чел тялото (GET/OPTIONS с тяло).
+            self._close_after_unread_body()
+            # Едно write с \n-а (одит 2026-11-04): print пише реда и \n отделно —
+            # при 40 едновременни заявки редовете се слепваха („…0 ms[api] …“).
+            # None: процес без конзола (pythonw) — print мълчи, и тук.
+            out = sys.stdout
+            if out is not None:
+                out.write(f"[api] {time.strftime('%H:%M:%S')} {method} {path[:60]} → {status} "
+                          f"{model} {ms} ms\n")
+                out.flush()
 
 
 # ── `genesis api` ───────────────────────────────────────────────────────────

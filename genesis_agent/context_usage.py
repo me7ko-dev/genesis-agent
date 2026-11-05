@@ -118,6 +118,12 @@ def report(messages: Any, tools: list | None = None, window: int = 0,
         from genesis_agent.brain import sent_history
         msgs = [m for m in sent_history(provider, msgs, model=model, tools=bool(tools))
                 if isinstance(m, dict)]
+    else:
+        # Без доставчик — поне картинките от по-стари ходове, които Brain.complete
+        # маха за ВСЕКИ доставчик преди всичко друго (vision.elide_old_images).
+        # Одит 2026-11-04: 20 хода със снимка → „Разговор ~30.1K“, а отиват 3 (~4.5K).
+        from genesis_agent import vision as _vision
+        msgs = _vision.elide_old_images(msgs)
     system, rest = _without_system(msgs)
 
     from genesis_agent import vision

@@ -228,8 +228,12 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str] | Callable[[str], str]] = [
                 r"|--(?!no-)(?:[a-z0-9]+-)*(?:password|passwd|api-?key|secret(?:-access)?-key|private-key|secret))"
                 rf"[ =]{_VALUE}"), r"\1 ***"),
     (re.compile(r"(?i)\b(bearer|token|basic)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 ***"),
-    (re.compile(r"(?i)\b(?!(?-i:PASS|PAT)\s*:)((?:[A-Z0-9]+_)*"
-                r"(?:(?-i:[A-Z0-9]+)(?=(?-i:PASSWORD|PASSWD|TOKEN|SECRET|KEY))|api|auth|access|db)?"
+    # Сливане с одита 2026-11-05 от main: голото `PASS: x`/`PAT: x` се маскира
+    # (изтекла тайна е по-лошо от маскиран ред на тест); само `--- PASS:` на
+    # `go test` остава. Слепено отпред — само пред силна дума: `TURKEY:`,
+    # `MONKEY:` не са ключове.
+    (re.compile(r"(?i)(?<!--- )\b((?:[A-Z0-9]+_)*"
+                r"(?:(?-i:[A-Z0-9]+)(?=(?-i:PASSWORD|PASSWD|TOKEN|SECRET)(?![A-Za-z]))|api|auth|access|db)?"
                 r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|PASS|PAT|DSN)(?![A-Za-z])[A-Z0-9_]*)"
                 rf"\s*[=:]\s*{_VALUE}"),
      r"\1=***"),

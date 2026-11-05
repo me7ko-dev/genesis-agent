@@ -31,6 +31,7 @@ import secrets
 import sys
 import threading
 import time
+import unicodedata
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -47,6 +48,10 @@ _LOCK_WAIT = 60.0
 # сървъра за токени влизаше цялото в паметта (RSS от 29 на 329 MB) и в
 # mcp_tokens.json (одит 2026-10-31, възпроизведено).
 _MAX_BODY = 256 * 1024
+# Общият срок на една размяна със сървъра за вход (одит 2026-11-04 — същото
+# като горе: /token, който капе по байт на 0.5 s, държеше refresh() над 40 s).
+# Подразбиращият се срок е по-малкото от него и _HTTP_TIMEOUT.
+_HTTP_DEADLINE = 20.0
 
 
 class OAuthError(RuntimeError):
@@ -256,9 +261,27 @@ def _shown(url: str) -> str:
     return f"{parts.scheme}://{host}" + (f":{port}" if port else "")
 
 
+def _has_controls(text: str) -> bool:
+    """Управляващи и невидими знаци (ESC, CR, U+202E…) и интервали."""
+    return any(unicodedata.category(ch) in ("Cc", "Cf", "Zs", "Zl", "Zp") for ch in text)
+
+
+def _plain(text: object, limit: int = 300) -> str:
+    """Текст от сървъра за терминала: без управляващи знаци, на един ред, кратък."""
+    raw = "".join(" " if unicodedata.category(ch) in ("Cc", "Cf") else ch for ch in str(text or ""))
+    return " ".join(raw.split())[:limit]
+
+
 def _safe_url(url: str, what: str) -> str:
     """HTTPS, или http само към този компютър: токенът и кодът не тръгват
     по мрежата открито."""
+    # Адресът се показва на оператора и се отваря в браузъра. Одит
+    # 2026-11-04: OSC 52 (запис в клипборда) и „изчисти екрана“ в
+    # authorization_endpoint стигаха до терминала непокътнати (Rich с
+    # markup=False пропуска ESC), а urlsplit проверяваше адрес без \t\r\n —
+    # не този, който се показва и отваря.
+    if _has_controls(str(url or "")):
+        raise OAuthError(f"{what}: {_shown(_plain(url, 200))!r} съдържа управляващи знаци — отказано")
     parts = urlsplit(str(url or ""))
     host = (parts.hostname or "").lower()
     if parts.scheme == "https" and host:
@@ -294,7 +317,7 @@ def _http(method: str, url: str, timeout: float | None = None, **kw: Any) -> tup
     при atexit подновяваше (одит 2026-10-31, възпроизведено). Размяната е в
     нишка: извикващият продължава в срока, а връзката се прекъсва."""
     import requests
-    limit = _HTTP_TIMEOUT if timeout is None else max(0.0, timeout)
+    limit = min(_HTTP_TIMEOUT, _HTTP_DEADLINE) if timeout is None else max(0.0, timeout)
     done: queue.Queue = queue.Queue()
     guard = threading.Lock()
     cancelled = threading.Event()
@@ -326,14 +349,20 @@ def _http(method: str, url: str, timeout: float | None = None, **kw: Any) -> tup
                     resp.close()
 
     threading.Thread(target=work, name="genesis-oauth-http", daemon=True).start()
-    try:
-        item = done.get(timeout=limit)
-    except queue.Empty:
-        with guard:
-            cancelled.set()
-            for resp in live:
-                _shutdown(resp)
-        raise OAuthError(f"няма отговор за {limit:g} s") from None
+    end = time.monotonic() + limit
+    while True:
+        try:
+            # На парчета: на Windows (до 3.14) едно дълго чакане не се буди от
+            # Ctrl-C (одит 2026-11-04).
+            item = done.get(timeout=max(0.0, min(0.25, end - time.monotonic())))
+            break
+        except queue.Empty:
+            if time.monotonic() >= end:
+                with guard:
+                    cancelled.set()
+                    for resp in live:
+                        _shutdown(resp)
+                raise OAuthError(f"няма отговор за {limit:g} s") from None
     if isinstance(item, OAuthError):
         raise item
     if isinstance(item, Exception):
@@ -549,8 +578,9 @@ def _token_request(endpoint: str, form: dict[str, str], *, secret: str = "",
         if data is None:
             raise OAuthError(f"токенът не дойде (HTTP {status}, отговорът не е JSON)")
         said = [data.get("error_description"), data.get("error")] if isinstance(data, dict) else []
-        err = next((" ".join(s.split()) for s in said if isinstance(s, str) and s.strip()), "")
-        raise OAuthError(f"токенът не дойде (HTTP {status}) {err[:300]}".strip())
+        # Текстът е на сървъра, а отива в терминала (одит 2026-11-04: ESC).
+        err = next((_plain(s) for s in said if isinstance(s, str) and s.strip()), "")
+        raise OAuthError(f"токенът не дойде (HTTP {status}) {err}".strip())
     return data
 
 
@@ -637,7 +667,8 @@ def login(server_url: str, *, www_authenticate: str = "",
     if not result:
         raise OAuthError("входът не завърши навреме")
     if "code" not in result:
-        raise OAuthError(f"входът е отказан: {result.get('error_description') or result.get('error') or '?'}")
+        why = result.get("error_description") or result.get("error") or "?"
+        raise OAuthError(f"входът е отказан: {_plain(why)}")
     tokens = _token_request(info["token_endpoint"], {
         "grant_type": "authorization_code", "code": result["code"], "redirect_uri": redirect_uri,
         "client_id": client_id, "code_verifier": verifier, "resource": info["resource"]},
