@@ -234,6 +234,11 @@ def _worker(task: DelegatedTask, timeout: int, on_done: Callable | None):
         log.info(f"[delegate] ✅ Task {task.id[:8]} завършен ({task.elapsed}s)")
 
     except Exception as e:  # noqa: BLE001 — вече се записва с log.error по-долу
+        # Мисията сама видя Стоп и свърши, преди wait_all да я спре (Windows CI
+        # 2026-11-06, PR #111): той проверява на _POLL_S, а свършила нишка вече
+        # не гледа — статусът оставаше failed с „Причина: спряно от оператора“.
+        if task.status not in _HALTED and task.stopped():
+            _halt(task, TaskStatus.CANCELLED)
         if task.status != TaskStatus.CANCELLED:   # CANCELLED_NOTE остава
             task.error = str(e)
         if task.status not in _HALTED:

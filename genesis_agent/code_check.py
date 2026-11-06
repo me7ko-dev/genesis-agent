@@ -143,8 +143,11 @@ class RunCheck:
 # Низ в кавички не започва веднага след буква (преглед 2026-11-05): в JSON/repr
 # `{"expected": 3, "got": 3}, {"expected": 4, …` затварящата кавичка на ключа
 # започваше „стойност“ `": 3, "` и еднаквите 3/3 излизаха разминаване.
-_VALUE = (r"""(?:-?\d+(?:[.,]\d+)?|(?<!\w)'[^'\n]*'|(?<!\w)"[^"\n]*"|\[[^\]\n]*\]|\([^)\n]*\)"""
-          r"""|\{[^}\n]*\}|<[^>\n]*>|True|False|None|true|false|null)""")
+# Хиляди с разделител (2026-11-06): „2,500,000“ / „1.000.000“ — цялото число, не
+# „2,500“ и остатък, иначе „expected 2,500,000, got 2500001“ не се хващаше.
+_GROUPED = r"-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d{1,3}(?:\.\d{3})+(?:,\d+)?"
+_VALUE = (rf"""(?:{_GROUPED}|-?\d+(?:[.,]\d+)?|(?<!\w)'[^'\n]*'|(?<!\w)"[^"\n]*"|\[[^\]\n]*\]"""
+          r"""|\([^)\n]*\)|\{[^}\n]*\}|<[^>\n]*>|True|False|None|true|false|null)""")
 _EXP = r"(?:expected|expecting|очаквано|очакван[ао]?|очаквах|очаква)"
 _GOT = (r"(?:but\s+(?:got|was|is|returned|received)|got|received|actual|returned|"
         r"получено|получен[ао]?|получих|върна(?:то)?)")
@@ -196,14 +199,29 @@ def runs_code(command: str) -> bool:
     return _runs_python(command) or bool(_OTHER_CODE.search(command))
 
 
+_THOUSANDS = re.compile(r"-?\d{1,3}(?P<sep>[.,])\d{3}(?:(?P=sep)\d{3})*(?:(?!(?P=sep))[.,]\d+)?")
+
+
+def _numbers(value: str) -> set[float]:
+    """Какви числа може да е `value`. „1,000“ е и 1.0 (десетична запетая), и 1000
+    (хиляди в изход на английски) — NEXT_STEPS 11-05: „Total: 1,000 expected 1000“
+    излизаше разминаване, защото се четеше само като 1.0. Нарочно щедро: еднакво
+    при някое от четенията = не е разминаване (фалшива тревога струва повече)."""
+    out: set[float] = set()
+    grouped = _THOUSANDS.fullmatch(value)
+    if grouped:
+        sep = grouped.group("sep")
+        out.add(float(value.replace(sep, "").replace("," if sep == "." else ".", ".")))
+    try:
+        out.add(float(value.replace(",", ".")))
+    except ValueError:
+        pass
+    return out
+
+
 def _same_value(a: str, b: str) -> bool:
     a, b = a.strip().rstrip(".,;"), b.strip().rstrip(".,;")
-    if a == b:
-        return True
-    try:
-        return float(a.replace(",", ".")) == float(b.replace(",", "."))
-    except ValueError:
-        return False
+    return a == b or bool(_numbers(a) & _numbers(b))
 
 
 # Слабите сигнали (✗/FAIL ред, „N failed“, „4/5“, „3 expected 4“, Expected/Actual на
