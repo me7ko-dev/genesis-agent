@@ -19,6 +19,7 @@ import sqlite3
 
 from genesis_agent import sqlite_store
 from genesis_agent.config import MEMORY_DIR
+from genesis_agent.workspace_memory import mask_secrets
 
 DB_PATH = str(MEMORY_DIR / "conversation_memory.db")
 
@@ -189,9 +190,12 @@ def add_message(role: str, content: str) -> None:
     автоматично обобщаване.
     """
     conn = _init_db()
+    # Тайните — маскирани, както в графа и workspace_memory (2026-11-06,
+    # отвореното от одита 11-04): `sk_live_…`, `ghp_…` и паролата в
+    # `postgres://u:pw@` лежаха сурово в conversation_memory.db.
     conn.execute(
         "INSERT INTO conversations (role, content) VALUES (?, ?);",
-        (role, content),
+        (role, mask_secrets(content)),
     )
     conn.commit()
     conn.close()
@@ -271,8 +275,8 @@ def summarize_old_context(threshold: int = 50, keep: int | None = None) -> None:
     )
     old_messages = [{"id": row[0], "role": row[1], "content": row[2]} for row in cur.fetchall()]
 
-    # Създаваме резюме.
-    summary_text = _simple_summarize(old_messages)
+    # Създаваме резюме. Маскирано: в база отпреди 2026-11-06 редовете са сурови.
+    summary_text = mask_secrets(_simple_summarize(old_messages))
 
     # Изтриваме старите съобщения; мястото им се заема от резюмето отдолу.
     ids_to_delete = tuple(msg["id"] for msg in old_messages)
