@@ -159,6 +159,28 @@ def test_stop_ends_delegate_within_a_second_and_the_mission_does_nothing_more(re
     assert rec.recorded == [], "Стоп не е провал на мисията — без урок от него"
 
 
+def test_a_stop_the_mission_sees_before_the_waiter_is_still_cancelled(rec, monkeypatch) -> None:
+    """Windows CI 2026-11-06 (PR #111, job 128172511159): горният тест падна със
+    „статус=failed … Причина: спряно от оператора“. Мисията сама видя Стоп и
+    свърши, преди wait_all (проверява на 0.1 s) да я маркира cancelled — _worker
+    записваше failed, а wait_all виждаше вече мъртва нишка. С wait_all, който се
+    буди само на края на нишката, това става всеки път."""
+    from genesis_agent import delegate
+    monkeypatch.setattr(delegate, "_POLL_S", 5.0)
+    _Brain.delay = 0.3
+    _Brain.script = lambda n: _code(_FAIL)
+    stop = threading.Event()
+    genesis_skills._set_cancel(stop.is_set)
+    timer = threading.Timer(0.5, stop.set)
+    timer.start()
+    out = genesis_skills.dispatch_tool_call("DELEGATE", {"goal": "напиши скрипт"})
+    timer.join()
+    genesis_skills._set_cancel(None)
+    _join_missions()
+
+    assert "статус=cancelled" in out and "Спряно от оператора" in out, out
+
+
 def test_ctrl_c_during_delegate_interrupts_at_once_and_nothing_is_saved_afterwards(rec) -> None:
     """Ctrl-C идва като _thread.interrupt_main (не буди чакането, както Ctrl-C
     на Windows преди 3.14). Измерено преди: KeyboardInterrupt чак когато мисията
