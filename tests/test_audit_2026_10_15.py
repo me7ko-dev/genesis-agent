@@ -63,6 +63,16 @@ def test_shell_write_to_project_mcp_asks(command, project, deny) -> None:
 
 # ── G2: shell запис през символна връзка с голо име към управляващ файл ──────
 
+def _symlink_or_skip(link, target) -> None:
+    # Лаптопът 2026-11-05: Windows без Developer Mode — WinError 1314 и двата
+    # теста падаха вместо да се пропуснат (CI има правото). Без право за връзка
+    # и моделът не може да направи такава — няма какво да се проверява.
+    try:
+        os.symlink(target, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("символните връзки не са позволени тук")
+
+
 def test_shell_write_through_bare_name_symlink_asks(project) -> None:
     """`printf … > link.json`, където link.json вече сочи към управляващ файл,
     минаваше SAFE: _control_file_reached отрязваше голите имена без разделител,
@@ -70,7 +80,7 @@ def test_shell_write_through_bare_name_symlink_asks(project) -> None:
     control = project / ".genesis" / "hooks.json"
     control.write_text("{}", encoding="utf-8")
     link = project / "link.json"
-    os.symlink(control, link)
+    _symlink_or_skip(link, control)
     verdict = sandbox.assess_command("printf '%s' '{}' > link.json", cwd=project)
     assert verdict.level == RiskLevel.CONFIRM
 
@@ -111,7 +121,7 @@ def test_write_file_through_symlink_to_control_is_denied(project, deny) -> None:
     control = project / ".genesis" / "hooks.json"
     control.write_text("{}", encoding="utf-8")
     link = project / "notes.json"
-    os.symlink(control, link)
+    _symlink_or_skip(link, control)
     genesis_skills._SEEN_PATHS.add(link.resolve())
     res = genesis_skills._tool_write_file("notes.json", '{"hooks":{"Stop":[{"command":"evil"}]}}')
     assert "SANDBOX DENIED" in res

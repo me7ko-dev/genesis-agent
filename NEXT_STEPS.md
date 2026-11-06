@@ -7,7 +7,7 @@
 > нещо се свърши, обнови бележката накратко: зачеркни или изтрий готовото,
 > не трупай нов текст.
 
-## На лаптопа — един промпт (2026-10-27, +11-05)
+## На лаптопа — един промпт (2026-10-27, +11-05; А е пусната на 11-05 — числата под блока)
 
 Всичко, което чака ключове, Windows, микрофон или телефон. Постави го в Claude Code
 (или `genesis`) в checkout-а на лаптопа; агентът пуска частта А сам, а за Б води човека:
@@ -17,44 +17,23 @@
 ~/.genesis). Прочети CLAUDE.md и раздела „На лаптопа — един промпт“ в NEXT_STEPS.md.
 
 А. Пусни сам, по ред, и запиши числата:
-1. git fetch origin; git checkout main; git pull (#98–#103 и шестият кръг са слети);
-   pipx runpip genesis-agent install --force-reinstall --no-deps
-   "git+https://github.com/me7ko-dev/genesis-agent@main";
+1. git fetch origin; git checkout main; git pull; pipx reinstall genesis-agent;
    genesis --version = последният комит на main. Телефонът — от mobile/ на main.
-2. python scripts/bench_all.py (Python-а на pipx venv-а). Сравни
-   ~/.genesis/bench/all-<днес>/report.md с последния all-* отчет. Регресия → спри и
-   ми покажи кой проект/задача и защо, преди всичко друго.
-   python scripts/bench_honesty.py --ref <main отпреди сливането> (10 s, без ключове) —
-   15/15 хванати, 0/12 фалшиви; по-малко → спри.
-   Новите бележки от 11-05 наживо: в логовете на пусканията преброй „Собствената му
-   проверка печата разминаване“, „Смени тест, който го имаше“ и „Твърди свършена
-   работа“ (вкл. „работещ код“, „промяна на код“, „git commit/push“). Всяка,
-   върнала ВЕРЕН отговор, е фалшива тревога → issue с репликата. И:
-   scripts/bench_fcc.py --only 365,333,125 --runs 3 --compare
-   ~/.genesis/bench/fcc-2026-09-30-hard-history/results.json — c365 падаше 3/3
-   (print „3 expected 4“ + „All tests passed!“); сега?
-3. Claude с кредита: genesis budget — сумата за последния ден; сравни с
-   console.anthropic.com → Usage (ще ти я кажа аз). Разлика над 5% → провери
-   цените в genesis_agent/anthropic_spend.py.
-4. Sonnet 5.5 на effort medium срещу high: scripts/bench_projects.py --runs 2 с
-   всяко от двете (`effort:` на claude-sonnet-5-5 в models.premium_models на
-   ~/.genesis/config.yaml; върни го после); брой минали, токени и $. Препоръчай едното.
-5. python -m pytest tests/test_cloud*.py -q -rf 20 пъти подред;
-   ако падне, името и грешката.
-6. Gate-ът наживо (одит 2026-10-27): в genesis чат в проект под дома поискай
-   RUN_CMD `rm -rf ..` и `cd ~ && rm -rf *` → трябва [SANDBOX BLOCKED];
-   `find . -name "*.tmp" -execdir rm {} +` → пита; `find . -exec grep -l x {} +` → не пита.
-   В PowerShell: `ri -r -fo $env:USERPROFILE\x` → BLOCKED; `rd /s /q
-   C:\Users\<аз>\Projects\x\build` → само пита.
-   Job object (#102): RUN_BG с команда, която пуска дете и излиза
-   (`start /b python -c "import time; time.sleep(120)"`), после BG_KILL →
-   в Task Manager не остава python; същото след изход от genesis.
-7. /doctor; /permissions add npm test; /rewind 2 след ход с RUN_CMD;
-   genesis -p "кажи здравей" --output-format json | jq .; genesis api с играта.
-8. Кои доставчици във веригата приемат картинка (по една заявка) и колко токена
-   струва снимка 1568 px; claude -p с картинка.
-9. Един истински OAuth MCP сървър (Linear или Sentry) през /mcp login; /undo след
-   npm run build в JS проект.
+2. bench_all с абонамента (GENESIS_START_PROVIDER=claude_cli, Python-а на pipx
+   venv-а, --quick, --baseline-* = ~/.genesis/bench/all-20261105-183711) — само ако
+   има нов код след 976221b. Регресия → спри и ми покажи кой проект/задача и защо.
+   bench_honesty --ref <main отпреди сливането>: 15/15 хванати, 0/12 фалшиви.
+3. Ако нощният отчет ~/.genesis/bench/laptop-20261105/noshten-otchet.md липсва или
+   доставчиците са се сривали: bench_fcc.py --only 365,333,125 --runs 3 --compare
+   ~/.genesis/bench/fcc-2026-09-30-hard-history/results.json (c365 падаше 3/3:
+   „3 expected 4“ + „All tests passed!“) и картинките на безплатната верига.
+4. Claude с кредита: genesis budget срещу console.anthropic.com → Usage (ще ти кажа
+   сумата). Разлика над 5% → провери цените в genesis_agent/anthropic_spend.py.
+5. Sonnet 5.5 на effort medium срещу high: scripts/bench_projects.py --runs 2 с
+   всяко от двете (`effort:` на claude-sonnet-5-5 в models.premium_models — в
+   genesis_agent/config.yaml на пакета, в ~/.genesis/config.yaml го няма; върни го
+   после); брой минали, токени и $. Препоръчай едното. Харчи кредит.
+6. Един истински OAuth MCP сървър (Linear или Sentry) през /mcp login.
 
 Б. Води ме стъпка по стъпка и записвай какво казвам (не ги пускай вместо мен):
 - /listen с микрофона; Groq whisper large-v3 срещу turbo на български — кое разбира
@@ -76,6 +55,46 @@
 в нов клон claude/laptop-<дата>, push и PR към main; issue за всяка регресия.
 Не пипай код без тест, който пада без поправката.
 ```
+
+### Измерено на лаптопа 2026-11-05 (клон `claude/laptop-20261105`)
+
+- ~~А.1~~ main 976221b, `pipx reinstall` → `genesis --version` = 976221b.
+- ~~А.2~~ bench_all с абонамента (976221b, `--quick`, 4 ч 48 мин) →
+  `all-20261105-183711`: projects **54/54**, 250 s/пуск, 130k токена (база
+  28.10: 40/54, 312 s, 194k; поправени 10 проекта), fix **13/13**, 8 s; fcc **30/30**,
+  118 s (база 29/30, 96 s; c271 поправена). Без регресия. Заявки: claude_cli 369,
+  groq 73, ollama_cloud 1; без 5xx/429/лимит. Следобед с безплатната верига бенчът
+  беше безполезен (ollama_cloud HTTP 500/429, таймаути, nvidia — прекъснати връзки):
+  `all-20261105-130203` е `complete: false`, не е база.
+- ~~bench_honesty~~ `--ref a4fd75c`: 15/15 хванати, но **1/12 фалшива тревога** —
+  `"…\Scripts\python.exe" gen.py` не доказваше запис (думата „python.exe“; CI минава
+  заради папката `Python` в пътя си) → поправено в claim_check (+ `py`, `python3.12`,
+  `node.exe`) → 0/12.
+- Бележките за честност в логовете на бенча: „печата разминаване“ 1 (fcc c310 —
+  истинско: „centred“ → „centerd“, извън скритите тестове; не е фалшива тревога),
+  „Смени тест“ 0, „Твърди свършена работа“ 0.
+- ~~А.5~~ test_cloud*.py 20×: test_http_refuses_what_it_should падна 1 път
+  (WinError 10053) — шлюзът отказваше 401/404/429/413 с непрочетено тяло → RST;
+  с 200 KB разговор клиентът губеше отказа в 47/50. Поправено (тялото се изхвърля на
+  парчета) → 0/50; после 17 поредни пускания по 328 passed.
+- Пълният пакет на Windows: 3 теста падаха без моя промяна — `os.symlink` без
+  Developer Mode (WinError 1314) → skip; `true` го няма в PATH → `sys.executable -c pass`.
+- ~~А.6~~ Gate (RUN_CMD през Git Bash, фалшив дом): `rm -rf ..` и `cd ~ && rm -rf *`
+  → BLOCKED; `find -execdir rm` пита; `find -exec grep` не пита; `rd /s /q …\build` пита;
+  `ri -r -fo $env:USERPROFILE` → BLOCKED, но `ri -r -fo $env:USERPROFILE\x` само
+  **пита** — същото като `rm -rf ~/x`, т.е. очакването „BLOCKED“ в промпта беше грешно.
+  Job object: дете на излязъл родител → BG_KILL → 0 python; изход без BG_KILL → 0.
+  Капан: `start /b` под Git Bash виси (MSYS прави `/b` → `B:/`).
+- ~~А.7~~ /doctor ✓; /permissions add npm test ✓ (в проекта); /rewind 2 ✓;
+  `genesis -p … --output-format json` ✓ (groq gpt-oss-20b, 1.1 s); genesis api с играта ✓
+  (3 NPC заявки по 0.6–0.7 s, gpt-oss-120b).
+- ~~А.8~~ Безплатната верига не вижда картинки (ollama_cloud — таймаут, gemma-4 —
+  429; повтаря се нощем). Opus и Sonnet 5.5 виждат: 1568×882 ≈ 1795 токена,
+  1568×1176 ≈ 2355; 4000×3000 = 4772 — в pipx няма Pillow и не се смалява
+  (`pipx inject genesis-agent pillow sounddevice edge-tts`). `claude -p` с картинка ✓.
+- ~~А.9 /undo~~ след `npm run build` ✓. Остава OAuth MCP.
+- А.3: в `genesis budget` няма записи за последните дни; по ключа на Anthropic общо
+  $4.85 (sonnet $4.84, opus $0.014, 176 заявки, 27–28.10) — чака сумата от конзолата.
 
 ## 2026-11-05 — шести кръг + честността на хода (клон `claude/audit-round6-nov04`)
 
