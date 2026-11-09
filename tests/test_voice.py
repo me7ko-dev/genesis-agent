@@ -149,8 +149,13 @@ def test_no_network_falls_through_to_the_next_backend(monkeypatch, calls) -> Non
     assert got.seconds == pytest.approx(1.5)          # от WAV заглавката, доставчикът не каза
 
 
-def test_nothing_configured_is_one_clear_bulgarian_error(calls) -> None:
+def test_nothing_configured_is_one_clear_bulgarian_error(monkeypatch, calls) -> None:
     sent, _ = calls
+    # 2026-11-09: на лаптопа faster-whisper Е инсталиран (за /listen офлайн) и
+    # тестът падаше с „DID NOT RAISE“ — истинският Whisper разпознаваше секунда
+    # тишина. „Нищо не е настроено“ се задава тук, не се взима от машината.
+    real = voice.find_spec
+    monkeypatch.setattr(voice, "find_spec", lambda name: None if name == "faster_whisper" else real(name))
     with pytest.raises(VoiceError) as e:
         voice.transcribe_detail(_wav(1), cfg=_cfg())
     msg = str(e.value)

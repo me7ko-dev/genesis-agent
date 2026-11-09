@@ -225,8 +225,9 @@ conversation_memory,embeddings,llm_api,delegate,context_usage,mcp_oauth,notifier
   (`shlex.quote`); `redis://:парола@`; `BYPASS:`/`COMPASS:`/`--- PASS:` не са тайни;
   Markdown → HTML за Telegram; маскира преди рязането; `user:pass@` с един проход (ред от
   50 000 точки: 8 s → 0.01 s, debug.log минава всеки запис през redact).
-Отворено (ниско): redact не познава `--passphrase`/`PASSPHRASE=`, `rar -hp`, `"APIKEY"`,
-`d['password'] = 'x'`. knowledge_graph:
+~~Отворено (ниско): redact не познава `--passphrase`/`PASSPHRASE=`, `rar -hp`, `"APIKEY"`,
+`d['password'] = 'x'`~~ — 11-09 (+ `ssh-keygen -N`, `== 'x'`;
+`tests/test_2026_11_09_redact_open.py`). knowledge_graph:
 `## ЗНАНИЕВ ГРАФ` не е обозначен като данни, а известните състояния не влизат в промпта за
 извличане — и двете искат bench_all.py с ключове. conversation_memory: елемент от
 резюмето, завършващ на `|`, се слепва със следващия. mcp_oauth: подновяване, срязано от
@@ -571,9 +572,10 @@ $1.60 → $0.78; кешът 30% → 91% от входа, некеширан вх
 nvidia nemotron-3-super 44% → 81% (7 036 → 3 059), nemotron-3-ultra 17% → 35%
 (10 644 → 10 241). Groq безплатно не кешира (gpt-oss-20b: три еднакви заявки,
 нито `cached_tokens`, нито пощадено от лимита 8 000 токена/мин) — остава на
-свиването. Не е мерено: Groq gpt-oss-120b (дневният лимит 200 000 беше изчерпан
-от bench-а); ако върне `cached_tokens` редовно, `groq::openai/gpt-oss-120b`
-влиза в списъка (кешираното не се брои в лимита му по документацията).
+свиването. ~~Не е мерено: Groq gpt-oss-120b~~ — 11-09, `cache_replay.py --rounds 8
+groq=openai/gpt-oss-120b`: и при двете форми минаха 2 от 8 рунда (вход 11 865,
+от кеша 0); от рунд 4 нататък HTTP 413 (заявка над ~6 000 токена), иначе 429. Не
+влиза в `GENESIS_CACHE_PROVIDERS` — допълваната история изобщо не минава.
 Слят с main на 2026-10-13 (след #60/#64/#66). Двата клона решиха „0898/123-456“
 поотделно: bg_contact_form_phone (форма + телефон) и bg_phone_numbers (само номерът).
 Сега формите (booking-form, booking-guesthouse, contact-form, clients-migrate) получават

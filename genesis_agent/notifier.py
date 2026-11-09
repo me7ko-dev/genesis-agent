@@ -212,23 +212,31 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str] | Callable[[str], str]] = [
     (re.compile(r"\b((?:bot)?)\d{6,12}:AA[A-Za-z0-9_-]{30,}"), r"\1***"),
     (re.compile(r"(://)[^/\s:@]*:[^/\s@]+@"), r"\1***@"),
     _mask_user_pass_at,
-    (re.compile(r"""(["'](?:[\w-]*[_-]|[A-Za-z0-9]*[a-z0-9](?=[A-Z]))?"""
-                r"(?:[Kk]ey|KEY|[Tt]oken|TOKEN|[Ss]ecret|SECRET|[Pp]ass(?:word|wd)?|PASS(?:WORD|WD)?"
-                r"""|[Pp]wd|PWD|[Pp]at|PAT|[Dd]sn|DSN)\\?["']\s*(?::|=>?)\s*)"""
+    # 2026-11-09 (отвореното от 31.10, мерено с 29 реда): `"APIKEY"`/`"apikey"`
+    # (слепено без граница — само api/auth/access/db, `"monkey"` остава),
+    # `"passphrase"`, индекс вместо литерал — `d['password'] = 'x'`, — и
+    # сравнение (`== 'x'`, `!= 'x'`: стойността пак е тайната) изтичаха.
+    (re.compile(r"""(["'](?:[\w-]*[_-](?i:api|auth|access|db)?|[A-Za-z0-9]*[a-z0-9](?=[A-Z])"""
+                r"|(?i:api|auth|access|db))?"
+                r"(?:[Kk]ey|KEY|[Tt]oken|TOKEN|[Ss]ecret|SECRET|[Pp]ass(?:word|wd|phrase)?|PASS(?:WORD|WD|PHRASE)?"
+                r"""|[Pp]wd|PWD|[Pp]at|PAT|[Dd]sn|DSN)\\?["']\]?\s*(?::|=>|!?={1,3})\s*)"""
                 r"""(?:"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|[^\s,}]+)"""),
      r'\1"***"'),
     # `mysql_config`/`mariadb_config` не са клиенти: `gcc $(mysql_config
     # --cflags) -pthread` ставаше `-p***` (прегледът, 2026-11-05).
     (_tool_flag(r"(?:mysql|mariadb)(?!_config\b)\w*|sshpass|7z[ar]?|(?:un)?rar", "-p"),
      r"\1***"),
+    # `rar -hp<парола>` шифрова и имената; `ssh-keygen -N <фраза>` (2026-11-09).
+    (_tool_flag(r"(?:un)?rar", "-hp"), r"\1***"),
+    (_tool_flag(r"ssh-keygen", "-N ?"), r"\1***"),
     (_tool_flag(r"sqlcmd|osql|isql|bcp|zip|unzip|zipcloak", "-P ?"), r"\1***"),
     (_tool_flag(r"redis-cli", "-a ?"), r"\1***"),
     # `--user` е цял флаг: `chrome --user-data-dir=C:\Users\x` и
     # `--user-agent=a:b` ставаха `--user ***` (прегледът, 2026-11-05).
     (re.compile(rf"(?<!\S)(--(?:proxy-)?user(?![\w-])|-u)[ =]?(?=[\"']?[^\s\"':]*:){_VALUE}"),
      r"\1 ***"),
-    (re.compile(r"(?i)(?<!\S)(--?pass(?:word|wd)?|--?pwd|(?-i:-p|-u)"
-                r"|--(?!no-)(?:[a-z0-9]+-)*(?:password|passwd|api-?key|secret(?:-access)?-key|private-key|secret))"
+    (re.compile(r"(?i)(?<!\S)(--?pass(?:word|wd|phrase)?|--?pwd|(?-i:-p|-u)"
+                r"|--(?!no-)(?:[a-z0-9]+-)*(?:password|passwd|passphrase|api-?key|secret(?:-access)?-key|private-key|secret))"
                 rf"[ =]{_VALUE}"), r"\1 ***"),
     (re.compile(r"(?i)\b(bearer|token|basic)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 ***"),
     # Сливане с одита 2026-11-05 от main: голото `PASS: x`/`PAT: x` се маскира
@@ -236,8 +244,8 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str] | Callable[[str], str]] = [
     # `go test` остава. Слепено отпред — само пред силна дума: `TURKEY:`,
     # `MONKEY:` не са ключове.
     (re.compile(r"(?i)(?<!--- )\b((?:[A-Z0-9]+_)*"
-                r"(?:(?-i:[A-Z0-9]+)(?=(?:PASSWORD|PASSWD|TOKEN|SECRET)(?![A-Za-z]))|api|auth|access|db)?"
-                r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|PASS|PAT|DSN)(?![A-Za-z])[A-Z0-9_]*)"
+                r"(?:(?-i:[A-Z0-9]+)(?=(?:PASSWORD|PASSWD|PASSPHRASE|TOKEN|SECRET)(?![A-Za-z]))|api|auth|access|db)?"
+                r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|PWD|PASS|PAT|DSN)(?![A-Za-z])[A-Z0-9_]*)"
                 rf"\s*[=:]\s*{_VALUE}"),
      r"\1=***"),
     (API_TOKEN_RE, "***"),
