@@ -383,7 +383,10 @@ _OLD_USERPASS = re.compile(r"(?<![\w/@:])[\w.+-]+:[^\s@/:]+@(?=[\w.-]+)")
     "-" * 60000 + " a:b@c",
     "a." * 30000 + ":x y@z",
     "/" + "ab-" * 20000 + ":pw@host",
-])
+    # ids: без тях името на случая е самият ред от 60 000 знака, а Windows
+    # отказва PYTEST_CURRENT_TEST над 32 767 („environment variable is longer
+    # than 32767 characters“ — 8 грешки на лаптопа, 2026-11-09; същото като #80).
+], ids=["dots", "dashes", "a-dot", "ab-dash"])
 def test_long_runs_of_dots_or_dashes_are_redacted_in_linear_time(line) -> None:
     t0 = time.perf_counter()
     redact(line)

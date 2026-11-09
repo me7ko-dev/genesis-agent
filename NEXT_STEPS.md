@@ -225,8 +225,9 @@ conversation_memory,embeddings,llm_api,delegate,context_usage,mcp_oauth,notifier
   (`shlex.quote`); `redis://:парола@`; `BYPASS:`/`COMPASS:`/`--- PASS:` не са тайни;
   Markdown → HTML за Telegram; маскира преди рязането; `user:pass@` с един проход (ред от
   50 000 точки: 8 s → 0.01 s, debug.log минава всеки запис през redact).
-Отворено (ниско): redact не познава `--passphrase`/`PASSPHRASE=`, `rar -hp`, `"APIKEY"`,
-`d['password'] = 'x'`. knowledge_graph:
+~~Отворено (ниско): redact не познава `--passphrase`/`PASSPHRASE=`, `rar -hp`, `"APIKEY"`,
+`d['password'] = 'x'`~~ — 11-09 (+ `ssh-keygen -N`, `== 'x'`;
+`tests/test_2026_11_09_redact_open.py`). knowledge_graph:
 `## ЗНАНИЕВ ГРАФ` не е обозначен като данни, а известните състояния не влизат в промпта за
 извличане — и двете искат bench_all.py с ключове. conversation_memory: елемент от
 резюмето, завършващ на `|`, се слепва със следващия. mcp_oauth: подновяване, срязано от
