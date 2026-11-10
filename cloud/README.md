@@ -324,7 +324,8 @@ Webhook-ът проверява подписа (HMAC-SHA256 върху суро�
 3. Stripe CLI (`stripe login` веднъж), терминал 1 — тайната за webhook-а:
    ```bash
    stripe listen --print-secret                 # → whsec_… (не се сменя между пусканията)
-   stripe listen --forward-to localhost:8080/api/stripe/webhook
+   stripe listen --forward-to localhost:8080/api/stripe/webhook \n     --events checkout.session.completed,checkout.session.async_payment_succeeded,invoice.paid,customer.subscription.deleted
+   # Stripe CLI 1.55 (2026-11-10) без --events: „must specify events to forward“
    ```
 4. Терминал 2 — сървърът с тестовите ключове (`read -rs` — ключът не влиза в историята):
    ```bash
@@ -374,7 +375,10 @@ Webhook-ът проверява подписа (HMAC-SHA256 върху суро�
 live ключ → отказ без мрежа, `simulate` срещу сървър в процеса зарежда точно
 веднъж (и с чужда тайна или live сървър — нищо, без фалшив „втори път“),
 `checkout` с фалшив Stripe.
-С истински тестов Stripe **още не е пускано** — това е първата стъпка на оператора.
+С истински тестов Stripe (2026-11-10, лаптоп, Stripe CLI 1.55.9): `prices` — двете
+цени наред; `simulate` — 400/200/повтор без второ зареждане; `checkout` p5 с 4242 →
+`checkout.session.completed` [200], 500 → 1000; `--plan basic` → `invoice.paid`
+[200], +1500, план basic; „Сметка“ показва 2500.00, бутон само за пакета, 3 реда.
 
 ### Командите на оператора (само локално — няма админ адрес в уеба)
 

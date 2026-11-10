@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import threading
 import urllib.error
 from pathlib import Path
@@ -304,8 +305,16 @@ def test_checkout_times_out_with_what_to_check(tmp_path, capsys) -> None:
     store = _store(tmp_path)
     ticks = iter(range(100))
     assert _checkout(tmp_path, FakeStripe(), lambda s: None, lambda: float(next(ticks))) == 1
-    assert "stripe listen" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "stripe listen" in err and f"--events {sc.LISTEN_EVENTS}" in err
     assert store.balance(1) == 0
+
+
+def test_the_listen_events_are_the_ones_the_webhook_acts_on() -> None:
+    # Stripe CLI 1.55 (2026-11-10) иска --events; липсващо тук = никога не идва.
+    src = Path(billing.__file__).read_text(encoding="utf-8")
+    handled = set(re.findall(r'"((?:checkout|invoice|customer)\.[a-z_.]+)"', src))
+    assert set(sc.LISTEN_EVENTS.split(",")) == handled
 
 
 def test_checkout_stops_before_paying_on_a_bad_price(tmp_path, capsys) -> None:
