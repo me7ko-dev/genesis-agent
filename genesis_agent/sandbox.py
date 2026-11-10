@@ -266,7 +266,7 @@ _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
      "инсталиране на пакети"),
     (_c(r"\bnpm\s+(install|i)\b[^\n]*-g\b"),
      "глобална npm инсталация"),
-    (_c(r"\bgit\s+push\b"),
+    (_c(r"\bgit\s+(?:(?:-[Cc]\s+\S+|--?[\w-]+(?:=\S+)?)\s+)*push\b"),
      "git push (публикуване)"),
     (_c(_SECRET_PATHS),
      "достъп до чувствителни файлове (ключове/тайни)"),
@@ -746,6 +746,19 @@ def _find_roots(argv: list[str]) -> list[str]:
     return roots
 
 
+_GIT_OPTS_WITH_VALUE = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace",
+                                  "--exec-path", "--super-prefix", "--config-env"})
+
+
+def _git_subcommand_at(argv: list[str]) -> int:
+    """Индексът на подкомандата на git след общите ключове (`-C път`, `-c k=v`,
+    `--no-pager`, `--git-dir=…`)."""
+    i = 1
+    while i < len(argv) and argv[i].startswith("-"):
+        i += 2 if argv[i] in _GIT_OPTS_WITH_VALUE else 1
+    return i
+
+
 def _assess_file_ops(command: str, cwd: Path | None = None) -> RiskVerdict:
     """Структурна оценка на файлови операции + РАЗГЪНАТ преглед кои файлове
     реално ще бъдат засегнати. Виж коментара при _DESTRUCTIVE_MOVE_CMDS."""
@@ -835,8 +848,14 @@ def _assess_file_ops(command: str, cwd: Path | None = None) -> RiskVerdict:
             bump(RiskLevel.CONFIRM, f"{cmd} (унищожава съдържание): {_describe_paths(paths)}")
 
         elif cmd == "git" and len(argv) > 1:
-            sub = argv[1]
-            rest = " ".join(argv[2:])
+            # Общите ключове пред подкомандата (одит 2026-11-10): `git -C ~ clean
+            # -fdx`, `git --no-pager reset --hard`, `git -c x=1 reset --hard` бяха
+            # SAFE — за подкоманда се взимаше `-C`.
+            at = _git_subcommand_at(argv)
+            if at >= len(argv):
+                continue
+            sub = argv[at]
+            rest = " ".join(argv[at + 1:])
             if sub == "reset" and "--hard" in rest:
                 bump(RiskLevel.CONFIRM, "git reset --hard (изхвърля незакоммитната работа)")
             elif sub == "clean" and re.search(r"-[a-z]*[fdx]", rest):
@@ -1713,6 +1732,14 @@ def _named_secret(path: str) -> str | None:
         return None
     from genesis_agent.mentions import secret_reason
     return secret_reason(path)
+
+
+def file_secret_reason(path: str | os.PathLike[str]) -> str | None:
+    """Решението за ЕДИН файл, общо за шела и инструментите (одит 2026-11-10):
+    `cat config/master.key` питаше, @config/master.key се отказваше, а READ_FILE
+    и SEARCH_CODE показваха същия файл (`.envrc`, `terraform.tfvars`,
+    `secrets.toml`) в режим deny — гледаха само sensitive_path_reason."""
+    return sensitive_path_reason(path) or _named_secret(os.fspath(path))
 
 
 def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:

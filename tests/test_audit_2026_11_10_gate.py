@@ -156,3 +156,48 @@ def test_ordinary_work_around_the_genesis_folder_does_not_ask(home: Path) -> Non
                     "cp notes.txt ~/.genesis/", "cd /tmp && echo x > hooks.json",
                     "X=1; echo $X"):
         assert sandbox.assess_command(command, cwd=ws).level is SAFE, command
+
+
+# ── git с общи ключове пред подкомандата ─────────────────────────────────────
+
+@pytest.mark.parametrize("command", [
+    "git -C ~ clean -fdx",
+    "git --no-pager reset --hard HEAD~3",
+    "git -c core.x=1 reset --hard",
+    "git -C . push --force origin main",
+])
+def test_git_global_options_do_not_hide_the_subcommand(command: str) -> None:
+    assert sandbox.assess_command(command).level is CONFIRM, command
+
+
+def test_harmless_git_with_global_options_stays_safe() -> None:
+    for command in ("git -C sub status", "git --no-pager log -5", "git -c color.ui=false diff",
+                    "git --version", "git -C sub commit -m 'push later'"):
+        assert sandbox.assess_command(command).level is SAFE, command
+
+
+# ── тайни по име: инструментите решават като шела ────────────────────────────
+
+@pytest.mark.parametrize(("rel", "body", "secret"), [
+    ("config/master.key", "RAILS-MASTER-SECRET", "RAILS-MASTER-SECRET"),
+    (".envrc", "export AWS_SECRET_ACCESS_KEY=ENVRC-SECRET", "ENVRC-SECRET"),
+    ("terraform.tfvars", 'db_password = "TFVARS-SECRET"', "TFVARS-SECRET"),
+    ("secrets.toml", 'token = "TOML-SECRET"', "TOML-SECRET"),
+])
+def test_the_file_tools_hide_what_cat_asks_about(home: Path, monkeypatch, rel, body, secret) -> None:
+    """`cat config/master.key` питаше, @път се отказваше, а READ_FILE и SEARCH_CODE
+    показваха файла в режим deny."""
+    import genesis_skills as gs
+
+    ws = home / "proj"
+    (ws / "config").mkdir()
+    (ws / rel).write_text(body + "\n", encoding="utf-8")
+    monkeypatch.setattr(gs, "_WORKSPACE", ws)
+    old = sandbox.get_policy()
+    sandbox.set_policy(sandbox.SandboxPolicy(mode="deny"))
+    try:
+        assert sandbox.assess_command(f"cat {rel}", cwd=ws).level is CONFIRM
+        assert secret not in gs.dispatch_tool_call("READ_FILE", {"path": rel})
+        assert secret not in gs.dispatch_tool_call("SEARCH_CODE", {"pattern": "SECRET"})
+    finally:
+        sandbox.set_policy(old)
