@@ -166,13 +166,21 @@ def test_ctrl_c_in_parallel_reads_returns_at_once_and_keeps_done_results(ws, mon
     monkeypatch.setattr(hooks, "fire", _no_hooks)
     for n in ("b.py", "c.py"):
         (ws / n).write_text("x = 1\n", encoding="utf-8")
-    release = threading.Event()
+    release, first_done = threading.Event(), threading.Event()
     real = gs.dispatch_tool_call
 
     def dispatch(name, args):
         path = args.get("path", "")
+        if path == "app.py":
+            out = real(name, args)
+            first_done.set()
+            return out
         if path == "b.py":
-            time.sleep(0.3)
+            # Ctrl-C след като app.py е прочетен, не след 0.3 s: на CI Windows
+            # (2026-11-10, main след #114) четенето отне повече и r1 излезе
+            # „прекъснато“ — тестът мереше скоростта на машината.
+            first_done.wait(5)
+            time.sleep(0.1)
             raise KeyboardInterrupt         # операторът натиска Ctrl-C посред партидата
         if path == "c.py":
             release.wait(10)                # бавен WEB_FETCH / SEARCH_CODE
