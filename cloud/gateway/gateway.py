@@ -55,6 +55,7 @@ UPSTREAMS: dict[str, tuple[str, str]] = {
     "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY"),
 }
 MAX_BODY = 2 * 1024 * 1024
+DRAIN_MAX = 64 * 1024 * 1024   # колко от отказано тяло се прочита и изхвърля
 UPSTREAM_TIMEOUT = 300
 _ROTATE_ON = {401, 403, 429}
 # Полета, с които доставчикът (OpenRouter) сам избира модела или пуска платени
@@ -286,7 +287,9 @@ def usage_lines(path: Path, job: str, start: int = 0) -> list[dict[str, Any]]:
 def read_keys(path: Path) -> dict[str, str]:
     """KEY=value редове (като .env). Коментари и празни редове се пропускат."""
     out: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
+    # utf-8-sig (одит 2026-11-10): keys.env, записан от Notepad/PowerShell с BOM,
+    # даваше ключ '\ufeffGATEWAY_SECRET' → „липсва GATEWAY_SECRET“ и serve спира.
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -529,8 +532,12 @@ class Handler(BaseHTTPRequestHandler):
         # Отказ с непрочетено тяло и затворена връзка праща RST (лаптопът
         # 2026-11-05): клиентът с 200 KB разговор губеше 401/429 в 47 от 50 проби
         # (WinError 10053) — „мрежова грешка“ вместо „бюджетът е изчерпан“. Тялото
-        # се изхвърля на парчета (до MAX_BODY), без да се държи в паметта.
-        left = min(length, MAX_BODY)
+        # се изхвърля на парчета, без да се държи в паметта.
+        # Одит 2026-11-10: изхвърляше се само до MAX_BODY (2 MB) — точно отказът
+        # „твърде голямо“ (413) се губеше: 6 MB тяло → BrokenPipe в 29 от 30 проби,
+        # 429/401 с такова тяло — в 24 и 28 от 30. Сега до DRAIN_MAX; нагоре пак се реже
+        # (чакането е вързано и от таймаута на сокета).
+        left = min(length, DRAIN_MAX)
         while left > 0:
             chunk = self.rfile.read(min(left, 65536))
             if not chunk:

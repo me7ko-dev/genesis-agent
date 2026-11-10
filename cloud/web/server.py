@@ -62,6 +62,7 @@ log = logging.getLogger("genesis.cloud.web")
 STATIC = Path(__file__).with_name("static")
 COOKIE = "genesis_session"
 MAX_BODY = 64 * 1024
+DRAIN_MAX = 16 * 1024 * 1024   # колко от отказано тяло се прочита и изхвърля
 MAX_WEBHOOK = 256 * 1024     # събитие от Stripe (сесия/фактура) е няколко KiB
 MAX_TEXT = 4000
 MAX_FILES = 1000
@@ -315,6 +316,12 @@ class App:
         uid = user["id"]
         account = self.store.account(uid)
         per_day, max_tokens, cap = self.limits_for(account)
+        if self.prices is not None and self.gateway is not None:
+            # Одит 2026-11-10: окончателната сметка се правеше само при нов ход —
+            # на тих сървър страницата показваше „задържани … до ~17 мин“ и 2 часа
+            # след изтичането на жетона (96.20 от 97.87 кр.).
+            with self._lock:
+                billing.settle(self.store, self.prices, self.gateway.usage, user_id=uid)
         balance = self.store.balance(uid)
         spent = self.store.month_spent(uid)
         prices = self.prices
@@ -337,7 +344,9 @@ class App:
             "packs": packs, "plans": plans,
             # Stripe без нито един price_… в prices.json (2026-11-10): страницата
             # оставаше без бутон и без дума защо — сега казва „пиши ни“.
-            "can_buy": self.stripe is not None and bool(packs or (plans and not account["plan"])),
+            # Одит 2026-11-10: абонат при цени само с планове (без пакети) виждаше
+            # „зареждането с карта още не е включено“ — а то е включено и той плаща.
+            "can_buy": self.stripe is not None and bool(packs or plans),
             "history": [{"at": e["created"], "kind": e["kind"], "credits": fmt(e["amount"]),
                          "turn_id": e["turn_id"]} for e in self.store.ledger_entries(uid, 50)],
         }
@@ -404,9 +413,17 @@ class App:
             if self.store.turns_today(uid) >= per_day:
                 raise TurnRefused(429, f"днешният лимит от {per_day} задачи е изчерпан — "
                                        "опитай пак утре")
+            if budget <= 0:
+                # Одит 2026-11-10: `limits --max-tokens 0` („0 спира човека“) пускаше
+                # хода с жетон за 0 токена — всяко обръщение 429, ходът пада и се
+                # таксува таксата на ход (3 хода: 100 → 94 кр.).
+                raise TurnRefused(403, "лимитът ти на токени за задача е 0 — пиши на поддръжката")
             if self.prices is not None:
                 budget = min(budget, self._affordable(uid, cap, self.prices, budget))
-            gateway = (dataclasses.replace(self.gateway, budget=min(self.gateway.budget, budget))
+            # Таванът е лимитът (на сървъра или на профила), не подразбирането на
+            # launch.Gateway (одит 2026-11-10): --max-tokens-per-turn 1000000 печаташе
+            # „токени на ход 1000000“, а жетонът оставаше 300 000.
+            gateway = (dataclasses.replace(self.gateway, budget=budget)
                        if self.gateway is not None else None)
             turn_id = self.store.add_turn(chat_id, text)
             job = launch.new_task_name()
@@ -710,20 +727,40 @@ class Handler(BaseHTTPRequestHandler):
             parts.append("Secure")
         return "; ".join(parts)
 
+    def _drain(self, length: int) -> None:
+        """Изхвърля тялото на отказана заявка. Без това затварянето праща RST и
+        клиентът губи отказа (шлюзът, 2026-11-05; тук 2026-11-10: 3 MB към
+        /api/login → BrokenPipe в 3 от 20 проби вместо 413)."""
+        left = min(length, DRAIN_MAX)
+        while left > 0:
+            chunk = self.rfile.read(min(left, 65536))
+            if not chunk:
+                break
+            left -= len(chunk)
+
     def _body(self) -> dict[str, Any] | None:
         """JSON тялото на POST, или None (и отговорът вече е пратен)."""
-        if not self.headers.get("Content-Type", "").startswith("application/json"):
-            self._error(415, "очаква се JSON")
-            return None
-        origin = self.headers.get("Origin")
-        if origin and urlsplit(origin).netloc != self.headers.get("Host"):
-            self._error(403, "чужд произход")
-            return None
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             length = -1
+        if not self.headers.get("Content-Type", "").startswith("application/json"):
+            self._drain(length)
+            self._error(415, "очаква се JSON")
+            return None
+        origin = self.headers.get("Origin")
+        try:
+            foreign = bool(origin) and urlsplit(origin or "").netloc != self.headers.get("Host")
+        except ValueError:
+            # Одит 2026-11-10: `Origin: http://[` е ValueError в urlsplit — нишката
+            # падаше с traceback и връзката се затваряше без отговор (без вход).
+            foreign = True
+        if foreign:
+            self._drain(length)
+            self._error(403, "чужд произход")
+            return None
         if length < 0 or length > MAX_BODY:
+            self._drain(length)
             self._error(413, "твърде голяма заявка")
             return None
         try:
