@@ -1616,3 +1616,21 @@ def test_turns_cancelled_by_shutdown_are_not_charged_after_the_restart(tmp_path)
     assert app2.store.balance(2) == 100 * MICRO
     assert app2.held(2) == 0
     assert app2.store.turn(1, ana)["cost_micro"] == GROQ_TURN   # type: ignore[index]
+
+
+# ── 2026-11-10: Stripe включен, а prices.json без нито един price_… ─────────
+
+def test_stripe_without_any_price_id_says_why_there_is_no_button(tmp_path) -> None:
+    stripe = billing.StripeConfig(SK, WHSEC, "https://genesis.example")
+    bare = {"p5": {"credits": 500, "amount_cents": 500, "currency": "eur", "stripe_price": ""}}
+    app, _ = _billing_app(tmp_path, stripe=stripe, prices=_prices(packs=bare, plans={}))
+    ana = app.store.user_by_email("ana@example.com")
+    a = app.account_view(ana)
+    assert a["stripe"] is True and a["packs"] == [] and a["can_buy"] is False
+    app.pool.shutdown(wait=True)
+
+    app, _ = _billing_app(tmp_path / "ok", stripe=stripe)
+    assert app.account_view(app.store.user_by_email("ana@example.com"))["can_buy"] is True
+    app.pool.shutdown(wait=True)
+    js = (Path(web.__file__).parent / "static" / "app.js").read_text(encoding="utf-8")
+    assert '$("stripe-off").hidden = a.can_buy || !a.billing;' in js
