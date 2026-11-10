@@ -19,6 +19,7 @@ Genesis казваше само „провери headers в mcp.json“. Тук
 """
 from __future__ import annotations
 
+import atexit
 import base64
 import errno
 import hashlib
@@ -725,6 +726,25 @@ def access_token(server_url: str, timeout: float | None = None) -> str:
     return str(entry["access_token"])
 
 
+# Заявките за подновяване, които още летят. Одит 2026-11-10: нишката е daemon —
+# `genesis -p` или /exit веднага след срока на викащия я убиваше, сървърът вече
+# беше завъртял refresh токена, новият не се записваше → следващият старт иска
+# /mcp login. На изход се дочакват, общо не повече от _HTTP_TIMEOUT.
+_IN_FLIGHT: list[threading.Thread] = []
+_IN_FLIGHT_LOCK = threading.Lock()
+
+
+def _finish_in_flight() -> None:
+    end = time.monotonic() + _HTTP_TIMEOUT
+    with _IN_FLIGHT_LOCK:
+        waiting = list(_IN_FLIGHT)
+    for t in waiting:
+        t.join(max(0.0, end - time.monotonic()))
+
+
+atexit.register(_finish_in_flight)
+
+
 def refresh(server_url: str, stale: str = "", timeout: float | None = None) -> str | None:
     """Нов токен с refresh токена; None — не стана (нужен е нов вход).
     `stale` — токенът, който е отказан: ако друг процес/нишка вече го е
@@ -746,7 +766,10 @@ def refresh(server_url: str, stale: str = "", timeout: float | None = None) -> s
         except BaseException as e:  # noqa: BLE001 — хвърля се у викащия
             result.put(e)
 
-    threading.Thread(target=work, name="genesis-oauth-refresh", daemon=True).start()
+    worker = threading.Thread(target=work, name="genesis-oauth-refresh", daemon=True)
+    with _IN_FLIGHT_LOCK:
+        _IN_FLIGHT[:] = [t for t in _IN_FLIGHT if t.is_alive()] + [worker]
+    worker.start()
     end = time.monotonic() + timeout
     while True:
         try:

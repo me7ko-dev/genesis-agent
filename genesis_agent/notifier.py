@@ -208,6 +208,16 @@ def _mask_user_pass_at(text: str) -> str:
     return "".join(out)
 
 
+_FLAG_RULE = (r"(?i)(?<!\S)(--?pass(?:word|wd|phrase)?|--?pwd{short}"
+              r"|--(?!no-)(?:[a-z0-9]+-)*(?:password|passwd|passphrase|api-?key"
+              r"|secret(?:-access)?-key|private-key|secret))"
+              rf"[ =]{_VALUE}")
+_GENERIC_FLAG_RE = re.compile(_FLAG_RULE.format(short="|(?-i:-p|-u)"))
+_NAME_VALUE_RE = re.compile(
+    r"(?i)(?<!--- )\b((?:[A-Z0-9]+_)*"
+    r"(?:(?-i:[A-Z0-9]+)(?=(?:PASSWORD|PASSWD|PASSPHRASE|TOKEN|SECRET)(?![A-Za-z]))|api|auth|access|db)?"
+    r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|PWD|PASS|PAT|DSN)(?![A-Za-z])[A-Z0-9_]*)"
+    rf"\s*[=:]\s*{_VALUE}")
 _SECRET_PATTERNS: list[tuple[re.Pattern[str], str] | Callable[[str], str]] = [
     (re.compile(r"\b((?:bot)?)\d{6,12}:AA[A-Za-z0-9_-]{30,}"), r"\1***"),
     (re.compile(r"(://)[^/\s:@]*:[^/\s@]+@"), r"\1***@"),
@@ -229,32 +239,41 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str] | Callable[[str], str]] = [
     # `rar -hp<парола>` шифрова и имената; `ssh-keygen -N <фраза>` (2026-11-09).
     (_tool_flag(r"(?:un)?rar", "-hp"), r"\1***"),
     (_tool_flag(r"ssh-keygen", "-N ?"), r"\1***"),
+    # С интервал — изрично по инструмент, за да важи и за паметта (без голото -p).
+    (_tool_flag(r"sshpass", "-p ?"), r"\1***"),
     (_tool_flag(r"sqlcmd|osql|isql|bcp|zip|unzip|zipcloak", "-P ?"), r"\1***"),
     (_tool_flag(r"redis-cli", "-a ?"), r"\1***"),
     # `--user` е цял флаг: `chrome --user-data-dir=C:\Users\x` и
     # `--user-agent=a:b` ставаха `--user ***` (прегледът, 2026-11-05).
     (re.compile(rf"(?<!\S)(--(?:proxy-)?user(?![\w-])|-u)[ =]?(?=[\"']?[^\s\"':]*:){_VALUE}"),
      r"\1 ***"),
-    (re.compile(r"(?i)(?<!\S)(--?pass(?:word|wd|phrase)?|--?pwd|(?-i:-p|-u)"
-                r"|--(?!no-)(?:[a-z0-9]+-)*(?:password|passwd|passphrase|api-?key|secret(?:-access)?-key|private-key|secret))"
-                rf"[ =]{_VALUE}"), r"\1 ***"),
+    (_GENERIC_FLAG_RE, r"\1 ***"),
     (re.compile(r"(?i)\b(bearer|token|basic)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 ***"),
     # Сливане с одита 2026-11-05 от main: голото `PASS: x`/`PAT: x` се маскира
     # (изтекла тайна е по-лошо от маскиран ред на тест); само `--- PASS:` на
     # `go test` остава. Слепено отпред — само пред силна дума: `TURKEY:`,
     # `MONKEY:` не са ключове.
-    (re.compile(r"(?i)(?<!--- )\b((?:[A-Z0-9]+_)*"
-                r"(?:(?-i:[A-Z0-9]+)(?=(?:PASSWORD|PASSWD|PASSPHRASE|TOKEN|SECRET)(?![A-Za-z]))|api|auth|access|db)?"
-                r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|PWD|PASS|PAT|DSN)(?![A-Za-z])[A-Z0-9_]*)"
-                rf"\s*[=:]\s*{_VALUE}"),
-     r"\1=***"),
+    (_NAME_VALUE_RE, r"\1=***"),
     (API_TOKEN_RE, "***"),
+]
+# За паметта (episodes.db) — одит 2026-11-10: пълният redact е нарочно алчен (за
+# известия да хване повече не вреди), но в запомнените команди и уроци изяждаше
+# обикновени аргументи: `mkdir -p ***`, `git push -u ***`, `pytest -p ***`,
+# `sorted(rows, key=***`. Тук голите `-p`/`-u <дума>` и общото ИМЕ=стойност
+# отпадат; формите по инструмент (mysql -p, sshpass -p, …) и по вид на ключа
+# остават, а ИМЕ=стойност поема workspace_memory.mask_secrets с по-тясното правило.
+_MEMORY_PATTERNS: list[tuple[re.Pattern[str], str] | Callable[[str], str]] = [
+    ((re.compile(_FLAG_RULE.format(short="")), r"\1 ***")
+     if isinstance(rule, tuple) and rule[0] is _GENERIC_FLAG_RE else rule)
+    for rule in _SECRET_PATTERNS
+    if not (isinstance(rule, tuple) and rule[0] is _NAME_VALUE_RE)
 ]
 
 
-def redact(text: str) -> str:
-    """Текстът без ключове, токени и пароли в адреси."""
-    for rule in _SECRET_PATTERNS:
+def redact(text: str, *, memory: bool = False) -> str:
+    """Текстът без ключове, токени и пароли в адреси. `memory` — по-тесният
+    набор за запомнен текст (виж _MEMORY_PATTERNS)."""
+    for rule in (_MEMORY_PATTERNS if memory else _SECRET_PATTERNS):
         if callable(rule):
             text = rule(text)
         else:
