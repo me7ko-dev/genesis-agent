@@ -42,8 +42,12 @@
   Genesis брои ~5.6% отгоре, т.е. таванът GENESIS_ANTHROPIC_MAX_USD спира по-рано, не
   по-късно. Таблицата с токените в `budget` не показва тези 182 — пускани са от
   checkout, където DATA_DIR е genesis_agent/, а сборът в $ е в ~/.genesis.
-- site/public не е качен наново: wrangler на лаптопа е влязъл в друг Cloudflare акаунт
-  (Pages проект `genesis-waitlist` не се вижда) — `npx wrangler login` с правилния.
+- site/public качен (10.11, f7e51b60): страницата е в Cloudflare акаунта, където е KV
+  `genesis-waitlist` — не в този на другите сайтове; качване с `CLOUDFLARE_ACCOUNT_ID`
+  на него. Живата страница вече казва, че файловете остават на сървъра.
+- Б, остава (с оператора): `/mcp login` — няма профил в Linear/Sentry, нужен е друг
+  MCP сървър с OAuth; микрофон и гласове; телефон (`genesis serve` + QR); Desktop;
+  install.ps1 (слага втори `genesis` до pipx — решение кой остава).
 
 ## На лаптопа — един промпт (2026-10-27, +11-05; А е пусната на 11-05 — числата под блока)
 
