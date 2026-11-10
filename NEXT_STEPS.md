@@ -26,13 +26,22 @@
 - Чиста инсталация (`python -m pipx install git+…`, празен дом): `--version` = 0204b48 ✓,
   `doctor` ✓, `setup` без ключ казва ясно и rc=1 ✓, `-p` без ключ → rc=1 (грешката
   излизаше 2 пъти — поправено), с Groq ключ: hello.py → „здравей“, rc=0, 26 s.
-  **Smart App Control (Windows 11) спира `pipx.exe` и създадения от pipx `genesis.exe`**
-  — решение на оператора (подпис или `python -m`).
+  Smart App Control спря `pipx.exe` веднъж сутринта; следобед (SAC вкл.) и `pipx.exe`,
+  и `genesis.exe` тръгват, журналът CodeIntegrity няма запис за тях — не се повтаря.
+  Ако се върне: `python -m genesis_agent.cli` върви без exe (cli.py има `__main__`).
 - README: „Fourteen verified skills“ → 37 (33 verified); цените = anthropic_spend.py
   (`tests/test_readme_numbers.py`). site: „средата се изтрива“ → файловете остават.
 - cloud „Сметка“ в браузър (локално, `simulate`): вход, баланс 500.00, история,
   покана (+10 кр., втори път — отказ), 5-и грешен опит → 429, после и верният → 429.
-  Без `stripe_price` в prices.json няма бутон за покупка и няма обяснение.
+  ~~Без `stripe_price` в prices.json няма бутон за покупка и няма обяснение~~ — `can_buy`,
+  страницата казва „пиши ни“ (`test_stripe_without_any_price_id_says_why_there_is_no_button`).
+- Б: console (Cost, 30 дни, 10.11): $4.63 (Sonnet 5.5 $4.61, Opus 5.5 $0.02; баланс $95.37)
+  срещу `genesis budget` $4.89 (Sonnet $4.86, Opus $0.025, 182 обръщения от 27.10) —
+  Genesis брои ~5.6% отгоре, т.е. таванът GENESIS_ANTHROPIC_MAX_USD спира по-рано, не
+  по-късно. Таблицата с токените в `budget` не показва тези 182 — пускани са от
+  checkout, където DATA_DIR е genesis_agent/, а сборът в $ е в ~/.genesis.
+- site/public не е качен наново: wrangler на лаптопа е влязъл в друг Cloudflare акаунт
+  (Pages проект `genesis-waitlist` не се вижда) — `npx wrangler login` с правилния.
 
 ## На лаптопа — един промпт (2026-10-27, +11-05; А е пусната на 11-05 — числата под блока)
 

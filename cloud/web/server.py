@@ -324,6 +324,8 @@ class App:
             return [{"id": o.id, "credits": o.credits, "price": o.price}
                     for o in items.values() if o.stripe_price]
 
+        packs = offers(prices.packs) if prices else []
+        plans = offers(prices.plans) if prices else []
         fmt = billing.fmt_credits
         return {
             "email": user["email"], "balance": fmt(balance), "balance_micro": balance,
@@ -332,8 +334,10 @@ class App:
             "turns_today": self.store.turns_today(uid), "turns_per_day": per_day,
             "max_tokens_per_turn": max_tokens, "plan": account["plan"],
             "billing": prices is not None, "stripe": self.stripe is not None,
-            "packs": offers(prices.packs) if prices else [],
-            "plans": offers(prices.plans) if prices else [],
+            "packs": packs, "plans": plans,
+            # Stripe без нито един price_… в prices.json (2026-11-10): страницата
+            # оставаше без бутон и без дума защо — сега казва „пиши ни“.
+            "can_buy": self.stripe is not None and bool(packs or (plans and not account["plan"])),
             "history": [{"at": e["created"], "kind": e["kind"], "credits": fmt(e["amount"]),
                          "turn_id": e["turn_id"]} for e in self.store.ledger_entries(uid, 50)],
         }

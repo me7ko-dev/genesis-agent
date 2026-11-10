@@ -302,7 +302,7 @@ function renderAccount(a) {
   $("acc-month-bar").value = Math.max(parseFloat(a.month_spent) || 0, 0);
   $("acc-plan").textContent = a.plan ? `Абонамент: ${a.plan}` : "";
   $("acc-turns").textContent = `Задачи днес: ${a.turns_today} от ${a.turns_per_day}`;
-  $("stripe-off").hidden = a.stripe || !a.billing;
+  $("stripe-off").hidden = a.can_buy || !a.billing;
   const offers = $("offers");
   offers.replaceChildren();
   if (a.stripe) {
