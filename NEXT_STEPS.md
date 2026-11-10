@@ -35,6 +35,11 @@
   покана (+10 кр., втори път — отказ), 5-и грешен опит → 429, после и верният → 429.
   ~~Без `stripe_price` в prices.json няма бутон за покупка и няма обяснение~~ — `can_buy`,
   страницата казва „пиши ни“ (`test_stripe_without_any_price_id_says_why_there_is_no_button`).
+- Б: console (Cost, 30 дни, 10.11): $4.63 (Sonnet 5.5 $4.61, Opus 5.5 $0.02; баланс $95.37)
+  срещу `genesis budget` $4.89 (Sonnet $4.86, Opus $0.025, 182 обръщения от 27.10) —
+  Genesis брои ~5.6% отгоре, т.е. таванът GENESIS_ANTHROPIC_MAX_USD спира по-рано, не
+  по-късно. Таблицата с токените в `budget` не показва тези 182 — пускани са от
+  checkout, където DATA_DIR е genesis_agent/, а сборът в $ е в ~/.genesis.
 - site/public не е качен наново: wrangler на лаптопа е влязъл в друг Cloudflare акаунт
   (Pages проект `genesis-waitlist` не се вижда) — `npx wrangler login` с правилния.
 
