@@ -1807,7 +1807,11 @@ class Brain:
         if tools:
             params["tools"] = self._to_anthropic_tools(tools)
 
-        client = anthropic.Anthropic(api_key=key, timeout=float(self.timeout))
+        # max_retries=0 (одит 2026-11-10, истинският SDK срещу фалшив сървър): SDK-то
+        # само повтаря 429/5xx/таймаут 2 пъти и спи `retry-after`, преди веригата да
+        # види нещо — 429 с retry-after 10 държеше хода 20 s, 500 правеше 6 заявки.
+        # Повторите и паузите са на веригата (_is_transient, cooldown).
+        client = anthropic.Anthropic(api_key=key, timeout=float(self.timeout), max_retries=0)
 
         def send(api: Any, **extra: Any) -> Any:
             # Една и съща преводна таблица за двата опита (2026-10-22): повторът
@@ -1841,6 +1845,15 @@ class Brain:
                 # грешка на API-то. Ревю 2026-10-22: тя минаваше покрай
                 # веригата (там се ловят само RuntimeError) и ходът падаше.
                 raise RuntimeError(f"SDK: {e}") from e
+            except RuntimeError:
+                raise
+            except Exception as e:
+                # Скъсан ВЕЧЕ започнат поток (одит 2026-11-10, истинският SDK): идва
+                # суровото изключение на транспорта (httpx RemoteProtocolError,
+                # ReadTimeout; AssertionError при 200 text/html), не
+                # APIConnectionError — излизаше от complete() и ходът падаше, без
+                # да се пита следващият модел. Ctrl-C е BaseException и не минава оттук.
+                raise RuntimeError(f"мрежа: {type(e).__name__}: {e}") from e
 
         try:
             # Класификаторите за безопасност могат да откажат заявка (връща се
