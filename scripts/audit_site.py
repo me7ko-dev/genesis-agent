@@ -12,6 +12,10 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from genesis_agent.paths import ensure_utf8_streams
+
+ensure_utf8_streams()
 url, out = sys.argv[1], Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True)
 CHECKS = r"""
 () => {

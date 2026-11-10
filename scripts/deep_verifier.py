@@ -195,6 +195,9 @@ def run_skill_isolated(code: str, timeout: int = 30) -> tuple[bool, str]:
 
 
 def main() -> None:
+    from genesis_agent.paths import ensure_utf8_streams
+
+    ensure_utf8_streams()
     heavy = "--heavy" in sys.argv
     do_install = "--install" in sys.argv or "--install-light" in sys.argv
     do_run = "--run" in sys.argv

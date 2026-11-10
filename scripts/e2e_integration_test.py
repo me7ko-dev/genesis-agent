@@ -24,8 +24,10 @@ sys.path.insert(0, str(ROOT))
 import genesis_skills
 from genesis_agent import conversation_memory, sandbox, skills_manager
 from genesis_agent import episodic_memory as em
+from genesis_agent.paths import ensure_utf8_streams
 from genesis_agent.skill_loader import reload_skills_index, search_skills
 
+ensure_utf8_streams()
 PASS, FAIL = "✅", "❌"
 _ok = True
 

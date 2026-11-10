@@ -359,3 +359,13 @@ def test_json_survives_a_file_name_that_is_not_utf8(ws, monkeypatch) -> None:
     lines = strict.buffer.getvalue().decode("utf-8").splitlines()
     result = json.loads(lines[-1])
     assert result["type"] == "result" and result["files"]["created"] == ["\udcff.txt"]
+
+
+def test_no_model_is_said_once_in_text_mode(ws, monkeypatch, capsys) -> None:
+    # 2026-11-10, чиста инсталация без ключ: „⚠ [Грешка: …]“ и после
+    # „❌ [Грешка: …]“ — една и съща грешка два пъти.
+    _script(monkeypatch, [("[Грешка: цялата верига е изчерпана]", None)])
+    assert headless.run(["здравей", "--cwd", str(ws)]) == 1
+    err = capsys.readouterr().err
+    assert err.count("цялата верига е изчерпана") == 1, err
+    assert "❌ [Грешка: цялата верига е изчерпана]" in err

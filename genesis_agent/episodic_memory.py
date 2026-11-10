@@ -33,6 +33,8 @@ import sqlite3
 # ---------- SQLite setup ----------
 from genesis_agent import sqlite_store
 from genesis_agent.config import MEMORY_DIR
+from genesis_agent.notifier import redact
+from genesis_agent.workspace_memory import mask_secrets
 
 DB_PATH = MEMORY_DIR / "episodes.db"
 SCHEMA = """
@@ -82,6 +84,10 @@ def _json_decode(s: str | None) -> list[str]:
     return json.loads(s) if s else []
 
 # ---------- Core API ----------
+def _mask(text: str) -> str:
+    return mask_secrets(redact(str(text or "")))
+
+
 def record_episode(
     goal: str,
     outcome: str,
@@ -90,6 +96,12 @@ def record_episode(
     tags: list[str] | None = None,
 ) -> None:
     """Записва нов епизод в базата."""
+    # Тайните — маскирани при запис (2026-11-10, отвореното от одита 11-04):
+    # `RUN_CMD mysql -phunter2 …`, `sshpass -p …`, `export X=sk_live_…` лежаха
+    # сурово в episodes.db. redact знае формите в команден ред, mask_secrets —
+    # ключовете по вид; всяко поотделно пропуска част от тях.
+    goal, outcome = _mask(goal), _mask(outcome)
+    lessons_learned = [_mask(x) for x in lessons_learned] if lessons_learned else lessons_learned
     timestamp = _now_iso()
     lessons_json = _json_encode(lessons_learned)
     tags_str = ",".join(tags) if tags else None

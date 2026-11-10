@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Бърз статус на библиотеката с умения (за десктоп shortcut-а)."""
 import json
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -8,6 +9,10 @@ SKILLS_JSON = Path(__file__).resolve().parent.parent / "genesis_agent" / "skills
 
 
 def main() -> None:
+    sys.path.insert(0, str(SKILLS_JSON.parents[2]))
+    from genesis_agent.paths import ensure_utf8_streams
+
+    ensure_utf8_streams()
     data = json.loads(SKILLS_JSON.read_text(encoding="utf-8"))
     skills = data["skills"]
     methods = Counter(s.get("verification", {}).get("method", "?") for s in skills)

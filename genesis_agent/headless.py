@@ -142,7 +142,9 @@ class HeadlessUI:
 
     def warn(self, text: str) -> None:
         self.warnings.append(text)
-        self._err(f"⚠ {text}")
+        # Грешката на веригата е краят на хода: „❌“, и само веднъж (2026-11-10,
+        # чиста инсталация без ключ: същият ред излизаше с ⚠ и после с ❌).
+        self._err(f"{'❌' if _is_chain_error(text) else '⚠'} {text}")
         self.event("warning", text=text)
 
     def info(self, text: str) -> None:
@@ -224,6 +226,10 @@ def _shown(path: str, cwd: Path) -> str:
         return Path(path).resolve().relative_to(cwd).as_posix()
     except ValueError:
         return path
+
+
+def _is_chain_error(text: str) -> bool:
+    return text.lstrip().startswith("[Грешка")
 
 
 def run(argv: list[str]) -> int:
@@ -319,7 +325,7 @@ def run(argv: list[str]) -> int:
         error = "прекъснато (Ctrl-C)"
     cut = next((w for w in ui.warnings if "таван" in w), "") or (ui.warnings[-1] if ui.spun else "")
     # Грешката на веригата идва като предупреждение, не като отговор (2026-10-11).
-    chain_errors = [w for w in ui.warnings if w.lstrip().startswith("[Грешка")]
+    chain_errors = [w for w in ui.warnings if _is_chain_error(w)]
     if not error:
         error = next(iter(chain_errors), "")
     # Зелено, казано срещу червено пускане на тестовете — неуспех, не ok:true
@@ -333,7 +339,7 @@ def run(argv: list[str]) -> int:
     code = 130 if error.startswith("прекъснато") else (3 if ui.question and not failed else
                                                         1 if failed else 0)
     if fmt == "text":
-        if error:
+        if error and not (error in chain_errors and not ui.quiet):   # вече казана в warn()
             print(f"❌ {error}", file=sys.stderr)
         # В терминал — без ESC последователности от отговора (terminal_text,
         # 2026-11-05); в pipe/файл текстът остава какъвто е, за скриптовете.

@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 import time
 from pathlib import Path
 
@@ -173,6 +174,10 @@ def run(model: str, skills: dict[str, str], threshold: float) -> dict[str, float
 
 
 def main() -> None:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from genesis_agent.paths import ensure_utf8_streams
+
+    ensure_utf8_streams()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--models", default="nomic-embed-text,bge-m3")
     ap.add_argument("--threshold", type=float, default=THRESHOLD)
