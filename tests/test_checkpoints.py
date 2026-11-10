@@ -617,3 +617,28 @@ def test_a_symlink_a_command_created_is_removed_by_undo(ws, tmp_path) -> None:
     assert any("link.txt" in ln and ln.startswith("изтрит") for ln in done), done
     assert not link.is_symlink() and not link.exists()
     assert outside.read_text(encoding="utf-8") == "SECRET\n"
+
+
+# ── одит 2026-11-10 ──────────────────────────────────────────────────────────
+
+@pytest.mark.skipif(os.name == "nt", reason="символни връзки на Windows искат права")
+def test_undo_never_writes_through_a_file_that_became_a_link_out(ws, tmp_path) -> None:
+    """EDIT на файл, после команда го сменя с връзка навън: /undo пишеше старото
+    съдържание през връзката и презаписваше файл извън проекта."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    shared = outside / "shared.yml"
+    shared.write_text("на оператора\n", encoding="utf-8")
+    keep = ws / "keep.txt"
+    edit_history.begin_turn("редакция, после връзка на мястото на файла")
+    edit_history.record(keep)
+    keep.write_text("редактиран\n", encoding="utf-8")
+    edit_history.forget_if_unchanged(keep)
+    edit_history.before_command(ws)
+    keep.unlink()
+    os.symlink(shared, keep)
+    edit_history.after_command()
+    edit_history.end_turn()
+    _label, lines = edit_history.undo()
+    assert shared.read_text(encoding="utf-8") == "на оператора\n"
+    assert any("извън проекта" in line for line in lines)

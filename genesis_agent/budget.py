@@ -548,6 +548,30 @@ def _add_cost(totals: dict, prov: str, entry: dict) -> None:
     stats["cost_usd"] = round(stats.get("cost_usd", 0.0) + cost, 6)
 
 
+def _count(entry: dict, key: str) -> int:
+    value = entry.get(key, 0)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return 0
+    return int(value)
+
+
+def _add_entry(totals: dict, e: dict) -> None:
+    """Един ред от лога в сбора. Одит 2026-11-10: ред с валиден JSON, но с
+    `"prompt_tokens": null`, числов `ts` или списък за `provider` (ръчно пипнат
+    или повреден лог) събаряше `genesis budget` с TypeError — а обещанието е нули."""
+    prov = e.get("provider", "?")
+    if not isinstance(prov, str):
+        prov = "?"
+    totals["calls"] += 1
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens",
+                "cached_read_tokens", "cached_write_tokens"):
+        totals[key] += _count(e, key)
+    totals["by_provider"][prov]["calls"] += 1
+    totals["by_provider"][prov]["total_tokens"] += _count(e, "total_tokens")
+    _add_audio(totals, prov, e)
+    _add_cost(totals, prov, e)
+
+
 def daily_totals(day: date | None = None) -> dict:
     """Обобщение за конкретен ден (по подразбиране днес, UTC — записите се
     пазят с UTC timestamp, сравнение с локална дата дава грешен резултат
@@ -562,19 +586,9 @@ def daily_totals(day: date | None = None) -> dict:
         "by_provider": defaultdict(lambda: {"calls": 0, "total_tokens": 0})}
     for e in _read_entries():
         ts = e.get("ts", "")
-        if not ts.startswith(day_str):
+        if not isinstance(ts, str) or not ts.startswith(day_str):
             continue
-        totals["calls"] += 1
-        totals["prompt_tokens"] += e.get("prompt_tokens", 0)
-        totals["completion_tokens"] += e.get("completion_tokens", 0)
-        totals["total_tokens"] += e.get("total_tokens", 0)
-        totals["cached_read_tokens"] += e.get("cached_read_tokens", 0)
-        totals["cached_write_tokens"] += e.get("cached_write_tokens", 0)
-        prov = e.get("provider", "?")
-        totals["by_provider"][prov]["calls"] += 1
-        totals["by_provider"][prov]["total_tokens"] += e.get("total_tokens", 0)
-        _add_audio(totals, prov, e)
-        _add_cost(totals, prov, e)
+        _add_entry(totals, e)
     totals["by_provider"] = dict(totals["by_provider"])
     return totals
 
@@ -597,22 +611,12 @@ def range_totals(days: int = 7) -> dict:
         ts = e.get("ts", "")
         try:
             d = date.fromisoformat(ts[:10])
-        except ValueError:
+        except (ValueError, TypeError):
             log.debug("budget: невалиден timestamp в лог реда: %r", ts)
             continue
         if d < cutoff:
             continue
-        totals["calls"] += 1
-        totals["prompt_tokens"] += e.get("prompt_tokens", 0)
-        totals["completion_tokens"] += e.get("completion_tokens", 0)
-        totals["total_tokens"] += e.get("total_tokens", 0)
-        totals["cached_read_tokens"] += e.get("cached_read_tokens", 0)
-        totals["cached_write_tokens"] += e.get("cached_write_tokens", 0)
-        prov = e.get("provider", "?")
-        totals["by_provider"][prov]["calls"] += 1
-        totals["by_provider"][prov]["total_tokens"] += e.get("total_tokens", 0)
-        _add_audio(totals, prov, e)
-        _add_cost(totals, prov, e)
+        _add_entry(totals, e)
     totals["by_provider"] = dict(totals["by_provider"])
     return totals
 

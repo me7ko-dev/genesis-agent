@@ -85,7 +85,7 @@ def _json_decode(s: str | None) -> list[str]:
 
 # ---------- Core API ----------
 def _mask(text: str) -> str:
-    return mask_secrets(redact(str(text or "")))
+    return mask_secrets(redact(str(text or ""), memory=True))
 
 
 def record_episode(

@@ -167,7 +167,8 @@ def check_models(prices: Prices, models: frozenset[str] | None) -> None:
 
 def load_prices(path: Path = PRICES) -> Prices:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        # utf-8-sig (одит 2026-11-10): prices.json с BOM беше „невалиден JSON“.
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except OSError as e:
         raise ValueError(f"{path}: не се чете ({e.strerror})") from None
     except (ValueError, RecursionError):

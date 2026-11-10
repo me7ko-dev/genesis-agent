@@ -455,7 +455,7 @@ def _tool_read_file(arg: str, offset=None, limit=None) -> str:
     # съдържанието не остава на машината: то влиза в историята и се праща на
     # следващия доставчик във веригата, който при тази конфигурация е чужда,
     # безплатна услуга. SECURITY.md обещава точно обратното.
-    sensitive = sandbox.sensitive_path_reason(path)
+    sensitive = sandbox.file_secret_reason(path)
     if sensitive:
         verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM, [sensitive])
         allowed, reason = sandbox._decide(f"READ_FILE {path}", verdict, sandbox.get_policy())
@@ -978,7 +978,7 @@ def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False
     # редове. Редакция на `.env` с произволна котва връща в отговора реда
     # `OPENROUTER_API_KEY=...`, който никой не е искал да вижда. Гейтът на
     # READ_FILE пазеше едната врата; тази водеше към същото съдържание.
-    sensitive = sandbox.sensitive_path_reason(path)
+    sensitive = sandbox.file_secret_reason(path)
     if sensitive:
         verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM, [sensitive])
         allowed, reason = sandbox._decide(f"EDIT_FILE {path}", verdict, sandbox.get_policy())
@@ -1115,16 +1115,16 @@ def _tool_search_code(arg: str, path: str = "", glob: str = "") -> str:
     # правеше инструмента негоден за работа, която той е одобрил.
     # Скритото попадение се БРОИ на глас: премълчаното значи „низът го няма",
     # а е точно обратното, и моделът строи план върху грешен извод.
-    sensitive_hits = [h for h in hits if sandbox.sensitive_path_reason(h.path)]
+    sensitive_hits = [h for h in hits if sandbox.file_secret_reason(h.path)]
     hidden: list = []
     if sensitive_hits:
-        reasons = sorted({sandbox.sensitive_path_reason(h.path) or "" for h in sensitive_hits})
+        reasons = sorted({sandbox.file_secret_reason(h.path) or "" for h in sensitive_hits})
         verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM, reasons)
         allowed, _ = sandbox._decide(f"SEARCH_CODE съвпадения в {len(sensitive_hits)} "
                                      "чувствителни файла", verdict, sandbox.get_policy())
         if not allowed:
             hidden = sensitive_hits
-            hits = [h for h in hits if not sandbox.sensitive_path_reason(h.path)]
+            hits = [h for h in hits if not sandbox.file_secret_reason(h.path)]
     if not hits and hidden:
         return (f"[SEARCH_CODE: {pattern}] {len(hidden)} съвпадения, всички в "
                 "чувствителни файлове (ключове/тайни) — съдържанието им не се показва.")

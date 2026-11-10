@@ -111,6 +111,9 @@ $("new-chat").addEventListener("click", () => {
   showChatView();
   current = null;
   stopPolling();
+  // Одит 2026-11-10: без това „Прати“ оставаше „Работи…“ след „Нов разговор“ насред
+  // задача — никой вече не пита за нея. Втора задача сървърът и без това спира с 409.
+  setBusy(false);
   $("log").replaceChildren(el("p", "muted", "Нов разговор. Напиши задачата долу."));
   $("files").hidden = true;
   for (const li of $("chats").children) li.classList.remove("active");

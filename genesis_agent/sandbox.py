@@ -117,6 +117,20 @@ _BLOCK_DEVICE = r"(sd|nvme|vd|hd|xvd|mmcblk|r?disk\d|disk/|dm-\d|mapper/|md\d)"
 #
 # Дългите форми на флаговете са отделен образец по-долу: `-[a-z]*` не може да
 # изрази `--recursive`, така че `rm --recursive --force /` минаваше за SAFE.
+# Одит 2026-11-10: `\b(shutdown|reboot|halt|poweroff)\b`, `\bmkfs\b` и
+# `\bformat\s+X:` се търсеха като голи думи в целия текст — BLOCKED (без въпрос,
+# и в режим allow) бяха `grep -rn shutdown src/`, `git commit -m 'Handle shutdown
+# signal'`, `pytest -k 'reboot or halt'`, `vagrant halt`, `adb reboot`, `ruff
+# format C:\proj\app.py`, а в Python — `executor.shutdown()` и `logging.shutdown()`.
+# Сега думата трябва да е КОМАНДАТА: в началото, след ; & | ( ` $( или `cmd /c`,
+# евентуално зад sudo/exec и път. Зад env/timeout/кавички я вижда _command_word_block.
+_CMD_START = (r"(?:^|[;&|(`\n]|\$\(|/[ck]\s+[\"']?)\s*"
+              r"(?:(?:sudo|doas|exec|nohup|command|builtin)\s+(?:-\S+\s+)*)*"
+              r"(?:[\w.~/\\:-]*[/\\])?")
+_POWER = r"(?:shutdown|reboot|halt|poweroff)"
+_POWER_REASON = "изключване/рестарт на машината"
+# В Python кода `shutdown = True`, `halt(…)`, `reboot: bool` не са команди.
+_NOT_PY = r"(?!\s*[=(:,.\[])"
 _BLOCK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (_c(r"""\brm\s+(-[a-z]*\s+)*-[a-z]*r[a-z]*f?[a-z]*\s+['"]?(/|~|\$HOME|/\*)(\s|$|['";])"""),
      "rm -rf върху root/home директория"),
@@ -127,7 +141,7 @@ _BLOCK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
      "rm с дълги флагове (--recursive/--force) върху root/home директория"),
     (_c(r":\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:"),
      "fork bomb"),
-    (_c(r"\bmkfs\b"),
+    (_c(_CMD_START + r"mkfs(?:\.\w+)?(?![\w.-])" + _NOT_PY),
      "форматиране на файлова система (mkfs)"),
     (_c(r"\bwipefs\b"),
      "изтриване на FS сигнатури (wipefs)"),
@@ -146,8 +160,19 @@ _BLOCK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
      "затриване/форматиране на диск"),
     (_c(r"\bchmod\s+(-[a-z]*\s+)*-R\s+[0-7]{3,4}\s+/(\s|$)"),
      "рекурсивен chmod върху root"),
-    (_c(r"\b(shutdown|reboot|halt|poweroff)\b"),
-     "изключване/рестарт на машината"),
+    (_c(_CMD_START + _POWER + r"(?:\.exe)?(?![\w.-])" + _NOT_PY
+        + r"|\bsystemctl\s+(?:-\S+\s+)*(?:reboot|poweroff|halt)\b"),
+     _POWER_REASON),
+]
+# Същите думи в низ на Python (os.system("shutdown -h now"), ["reboot"]) — само
+# за кода (assess_code): в шел `grep 'reboot' log` е търсене, не команда.
+_PY_BLOCK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (_c(r"""["'](?:sudo\s+)?(?:/\S*/)?""" + _POWER + r"""(?:\.exe)?(?:["']|\s+(?:[-/+]|now\b|\d))"""),
+     _POWER_REASON),
+    (_c(r"""["'](?:sudo\s+)?(?:/\S*/)?mkfs(?:\.\w+)?(?:["']|\s)"""),
+     "форматиране на файлова система (mkfs)"),
+    (_c(r"""["']format(?:\.com|\.exe)?\s+(?:/\S+\s+)*[A-Za-z]:(?![\\/\w.])"""),
+     "форматиране на дял (format)"),
 ]
 
 # Файловете с ключове и тайни — ЕДИН образец за shell командите (двата вида
@@ -241,7 +266,7 @@ _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
      "инсталиране на пакети"),
     (_c(r"\bnpm\s+(install|i)\b[^\n]*-g\b"),
      "глобална npm инсталация"),
-    (_c(r"\bgit\s+push\b"),
+    (_c(r"\bgit\s+(?:(?:-[Cc]\s+\S+|--?[\w-]+(?:=\S+)?)\s+)*push\b"),
      "git push (публикуване)"),
     (_c(_SECRET_PATHS),
      "достъп до чувствителни файлове (ключове/тайни)"),
@@ -324,7 +349,9 @@ _WIN_BLOCK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
      "del /s върху диск/системна/домашна директория"),
     (_c(r"\brd\b[^\n]*\s(?:/[a-z])*/s\b[^\n]*" + _WIN_ROOT),
      "rd /s върху диск/системна/домашна директория"),
-    (_c(r"\bformat\s+[A-Za-z]:"),
+    # Ключовете може да са преди буквата (`format /q D:`), а `ruff format
+    # C:\proj\app.py` е път, не дял (одит 2026-11-10).
+    (_c(_CMD_START + r"format(?:\.com|\.exe)?\s+(?:/\S+\s+)*[A-Za-z]:(?![\\/\w.])"),
      "форматиране на дял (format)"),
     (_c(r"\b(Format-Volume|Clear-Disk|Initialize-Disk)\b"),
      "форматиране/изчистване на диск (PowerShell)"),
@@ -719,6 +746,19 @@ def _find_roots(argv: list[str]) -> list[str]:
     return roots
 
 
+_GIT_OPTS_WITH_VALUE = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace",
+                                  "--exec-path", "--super-prefix", "--config-env"})
+
+
+def _git_subcommand_at(argv: list[str]) -> int:
+    """Индексът на подкомандата на git след общите ключове (`-C път`, `-c k=v`,
+    `--no-pager`, `--git-dir=…`)."""
+    i = 1
+    while i < len(argv) and argv[i].startswith("-"):
+        i += 2 if argv[i] in _GIT_OPTS_WITH_VALUE else 1
+    return i
+
+
 def _assess_file_ops(command: str, cwd: Path | None = None) -> RiskVerdict:
     """Структурна оценка на файлови операции + РАЗГЪНАТ преглед кои файлове
     реално ще бъдат засегнати. Виж коментара при _DESTRUCTIVE_MOVE_CMDS."""
@@ -808,8 +848,14 @@ def _assess_file_ops(command: str, cwd: Path | None = None) -> RiskVerdict:
             bump(RiskLevel.CONFIRM, f"{cmd} (унищожава съдържание): {_describe_paths(paths)}")
 
         elif cmd == "git" and len(argv) > 1:
-            sub = argv[1]
-            rest = " ".join(argv[2:])
+            # Общите ключове пред подкомандата (одит 2026-11-10): `git -C ~ clean
+            # -fdx`, `git --no-pager reset --hard`, `git -c x=1 reset --hard` бяха
+            # SAFE — за подкоманда се взимаше `-C`.
+            at = _git_subcommand_at(argv)
+            if at >= len(argv):
+                continue
+            sub = argv[at]
+            rest = " ".join(argv[at + 1:])
             if sub == "reset" and "--hard" in rest:
                 bump(RiskLevel.CONFIRM, "git reset --hard (изхвърля незакоммитната работа)")
             elif sub == "clean" and re.search(r"-[a-z]*[fdx]", rest):
@@ -1312,6 +1358,11 @@ def _windows_delete_verdict(command: str) -> RiskVerdict:
     | ri -r -fo` е BLOCKED като `find / | xargs rm -rf`, а не CONFIRM; и първото
     намерено триене вече не скрива по-късен израз, който трие корен."""
     command = re.sub(r"\$\{env:([A-Za-z_]\w*)\}", r"$env:\1", command, flags=re.IGNORECASE)
+    # Правописът на cmd.exe (одит 2026-11-10): `rd/s/q C:\Users\ivan`, `del/f/s/q …`
+    # и `r^d /s /q …` бяха SAFE — думите се делят по интервал, а cmd не иска интервал
+    # пред ключа и маха `^` пред всеки знак. `C:\Us^ers\ivan` беше само CONFIRM.
+    command = re.sub(r"\^(?=\S)", "", command)
+    command = re.sub(r"(?i)(?<![\w.\\/-])(rd|rmdir|del|erase)(?=/[a-z?](?:[\s/]|$))", r"\1 ", command)
     confirm: RiskVerdict | None = None
     for statement in re.split(r"[;&\n(){}]", command):
         stages = statement.split("|")
@@ -1561,7 +1612,64 @@ _CONTROL_ARG_RX = re.compile(_GENESIS_CONTROL_ARG, re.IGNORECASE)
 _REDIRECT_PREFIX = re.compile(r"^\d*[<>]+&?")
 
 
-def _control_file_reached(token: str, expanded: str) -> bool:
+# Команди, за които папката .genesis като аргумент е само четене/обхождане.
+_CONTROL_DIR_READERS = frozenset({
+    "ls", "dir", "cat", "head", "tail", "less", "more", "wc", "stat", "file", "du", "tree",
+    "grep", "rg", "egrep", "fgrep", "find", "fd", "test", "[", "echo", "printf", "realpath",
+    "readlink", "dirname", "basename", "mkdir", "pwd", "cd", "pushd", "which", "type",
+})
+_CONTROL_DIR_RX = re.compile(r"(?:^|/)(?:\.genesis|genesi~\d)/?\.?$", re.IGNORECASE)
+
+
+_COPIERS = frozenset({"cp", "mv", "install", "ln", "rsync", "copy", "move", "xcopy"})
+_CONTROL_NAME_RX = re.compile(
+    r"^(?:(?:hooks|mcp|settings|permissions|trusted_\w+)\.json|agents|commands|trusted_hooks)$",
+    re.IGNORECASE)
+
+
+def _may_land_a_control_file(head: str, others: list[str], base: Path,
+                             local_vars: dict[str, str]) -> bool:
+    """Командата пише в папката .genesis — може ли да остави там управляващ файл?
+    Копиране на обикновени файлове по име (`cp e/notes.txt ~/.genesis/`) не може
+    (решено 2026-10-21); папка за източник (`cp -rT e`), архив (`tar -C`, `unzip
+    -d`) или каквото и да е друго — може, съдържанието не се вижда оттук."""
+    import glob as _glob
+
+    if head not in _COPIERS:
+        return True
+    for tok in others:
+        if not tok or tok.startswith("-") or tok == head:
+            continue
+        path = _expand_token(tok, local_vars)
+        if not os.path.isabs(path):
+            path = str(base / path)
+        found = _glob.glob(path)[:32] if any(c in tok for c in "*?[") else [path]
+        for item in found or [path]:
+            if os.path.isdir(item) or _CONTROL_NAME_RX.match(os.path.basename(item.rstrip("/\\"))):
+                return True
+    return False
+
+
+def _is_control_dir(path: str) -> bool:
+    """Самата папка .genesis (домашната или на проекта), не ~/.genesis/workspace."""
+    try:
+        real = os.path.realpath(path).replace("\\", "/")
+    except (OSError, ValueError):
+        return False
+    return bool(_CONTROL_DIR_RX.search(real)) and os.path.isdir(real)
+
+
+def _expand_token(tok: str, local_vars: dict[str, str]) -> str:
+    """~, $VAR и ${VAR} — и с променливите, присвоени по-рано в същата команда."""
+    def local(m: re.Match[str]) -> str:
+        name = m.group(1) or m.group(2)
+        return local_vars.get(name, m.group(0))
+    if local_vars:
+        tok = re.sub(r"\$\{([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)", local, tok)
+    return os.path.expanduser(os.path.expandvars(tok))
+
+
+def _control_file_reached(token: str, expanded: str, *, bare: bool = False) -> bool:
     """Стига ли аргументът до управляващ файл на Genesis — и без кавичките и
     escape-ите (`~/.gene''sis/hooks.json`), и по истинския път: realpath
     разгъва символните връзки, а на Windows и 8.3 имената (`GENESI~1`), и то
@@ -1572,7 +1680,9 @@ def _control_file_reached(token: str, expanded: str) -> bool:
     # символна връзка `link.json -> ~/.genesis/hooks.json` се пишеше през
     # точно такова име и realpath я разгъваше до него (одит 2026-10-15).
     # Затова голото име се проверява само когато вече съществува на диска.
-    if not any(ch in token for ch in "/\\~") and not os.path.lexists(expanded):
+    # `bare` — командата вече е влязла с `cd` в папката .genesis: там голото
+    # `hooks.json` Е управляващият файл и преди да съществува (одит 2026-11-10).
+    if not bare and not any(ch in token for ch in "/\\~") and not os.path.lexists(expanded):
         return False
     try:
         real = os.path.realpath(expanded)
@@ -1624,6 +1734,14 @@ def _named_secret(path: str) -> str | None:
     return secret_reason(path)
 
 
+def file_secret_reason(path: str | os.PathLike[str]) -> str | None:
+    """Решението за ЕДИН файл, общо за шела и инструментите (одит 2026-11-10):
+    `cat config/master.key` питаше, @config/master.key се отказваше, а READ_FILE
+    и SEARCH_CODE показваха същия файл (`.envrc`, `terraform.tfvars`,
+    `secrets.toml`) в режим deny — гледаха само sensitive_path_reason."""
+    return sensitive_path_reason(path) or _named_secret(os.fspath(path))
+
+
 def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:
     """Тайна, до която стигат АРГУМЕНТИТЕ на командата, а не само текстът ѝ.
 
@@ -1638,7 +1756,33 @@ def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:
 
     base = cwd if (cwd and cwd.is_dir()) else Path.cwd()
     seen = 0
+    # Одит 2026-11-10: hooks.json се подхвърляше с команди SAFE и в режим deny —
+    # `cd ~/.genesis && cp /дълъг/път/hooks.json .`, `tar xf e.tar -C ~/.genesis`,
+    # `unzip -d ~/.genesis`, `cp -rT e ~/.genesis`, `ln e/hooks.json ~/.genesis/`,
+    # `cp … ~/.genes?s/`, `G=~/.gene; cp … ${G}sis/`. Затова тук се следят `cd` и
+    # простите присвоявания, а самата папка .genesis като аргумент на команда,
+    # която не е само четене, е запис в управляващите файлове.
+    local_vars: dict[str, str] = {}
+    in_control_dir = False
     for seg in _split_segments(command):
+        try:
+            words = shlex.split(seg)
+        except ValueError:
+            words = []
+        if len(words) == 1 and re.fullmatch(r"[A-Za-z_]\w*=.*", words[0]):
+            name, _, value = words[0].partition("=")
+            local_vars[name] = value
+            continue
+        head = os.path.basename(_strip_wrappers(words)[0]).lower() if _strip_wrappers(words) else ""
+        if head == "cd":
+            target = _expand_token(words[-1] if len(words) > 1 else "~", local_vars)
+            if not os.path.isabs(target):
+                target = str(base / target)
+            landed = next(iter(_glob.glob(target)), target) if any(c in target for c in "*?[") else target
+            if os.path.isdir(landed):
+                base = Path(landed)
+                in_control_dir = _is_control_dir(landed)
+            continue
         tokens = [tok for reading in _argument_readings(seg) for tok in reading]
         for tok in tokens:
             tok = _REDIRECT_PREFIX.sub("", tok)     # `>~/x`, `2>>log` — целта е пътят
@@ -1647,11 +1791,16 @@ def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:
             match = _SECRET_ARG_RX.search(tok.replace("\\", "/"))
             if match and not _SENSITIVE_PATH_EXEMPT_RE.search(tok):
                 return f"достъп до чувствителен файл ({match.group(0)})"
-            expanded = os.path.expanduser(os.path.expandvars(tok))
+            expanded = _expand_token(tok, local_vars)
             if not os.path.isabs(expanded):
                 expanded = str(base / expanded)
-            if _control_file_reached(tok, expanded):
+            if _control_file_reached(tok, expanded, bare=in_control_dir):
                 return _GENESIS_CONTROL_REASON
+            if head not in _CONTROL_DIR_READERS and tok != words[0]:
+                dirs = (_glob.glob(expanded)[:8] if any(c in tok for c in "*?[") else [expanded])
+                if any(_is_control_dir(d) for d in dirs) and _may_land_a_control_file(
+                        head, [t for t in tokens if t != tok], base, local_vars):
+                    return _GENESIS_CONTROL_REASON
             if any(ch in tok for ch in "*?["):
                 try:
                     paths = _glob.glob(expanded)[:_MAX_SECRET_GLOB - seen]
@@ -1726,7 +1875,75 @@ def _shell_scripts(command: str) -> list[str]:
                 if re.fullmatch(r"-[a-z]*c[a-z]*", arg, re.IGNORECASE):
                     out.append(argv[i + 1])
                     break
+    out.extend(_fed_scripts(command))
     return [s for s in out if s.strip() and len(s) < len(command)]
+
+
+# Скрипт, подаден на шел не с `-c`, а на входа му — одит 2026-11-10: `bash <<EOF\n
+# find /home/ivan -delete\nEOF`, `echo 'find /home/ivan -delete' | sh` и `bash <<<
+# '…'` бяха SAFE (голата команда е BLOCKED), а `sh <<EOF\ncat ~/.s?h/id_r?a\nEOF`
+# печаташе ключа в режим deny: тялото на heredoc се изхвърля като данни и никоя
+# структурна проверка не го виждаше.
+# Шел без файл със скрипт: само флагове след името (`bash -s`, `sh -eu`). При
+# `bash build.sh <<EOF` входът е данни за build.sh, не команди.
+_BARE_SHELL = (r"(?:(?:sudo|doas|env|exec|nohup|command)\s+(?:-\S+\s+)*)*"
+               r"(?:[\w./~-]*/)?(?:sh|bash|zsh|dash|ksh|ash|fish)(?:\.exe)?"
+               r"(?:\s+-(?![a-z]*c)[a-z-]+)*\s*")
+_SHELL_STAGE = r"(?:^|[|;&(]\s*)" + _BARE_SHELL
+_HEREDOC_RE = re.compile(r"<<-?[ \t]*(['\"]?)([A-Za-z_]\w*)\1([^\n]*)\n(.*?)\n[ \t]*\2[ \t]*(?=\n|$)",
+                         re.DOTALL)
+_HERESTRING_RE = re.compile(_SHELL_STAGE + r"""<<<[ \t]*('[^']*'|"(?:[^"\\]|\\.)*"|\S+)""",
+                            re.MULTILINE)
+_ECHO_PIPE_RE = re.compile(
+    r"""(?:^|[;&(]\s*)(?:echo|printf)\s+(?:-[A-Za-z]+\s+)*('[^']*'|"(?:[^"\\]|\\.)*")"""
+    r"\s*\|\s*(?:(?:sudo|doas|env|exec|nohup|command)\s+(?:-\S+\s+)*)*"
+    r"(?:[\w./~-]*/)?(?:sh|bash|zsh|dash|ksh|ash|fish)(?:\.exe)?(?=\s|$|[;&|])", re.MULTILINE)
+
+
+def _unquote(word: str) -> str:
+    try:
+        parts = shlex.split(word)
+    except ValueError:
+        return word.strip("'\"")
+    return parts[0] if parts else ""
+
+
+def _fed_scripts(command: str) -> list[str]:
+    out: list[str] = []
+    for m in _HEREDOC_RE.finditer(command):
+        line_start = command.rfind("\n", 0, m.start()) + 1
+        before, after = command[line_start:m.start()], m.group(3)
+        if (re.search(_SHELL_STAGE + r"$", before, re.IGNORECASE)
+                or re.search(r"\|\s*" + _BARE_SHELL + r"(?:$|[|;&])",
+                             after, re.IGNORECASE)):
+            out.append(m.group(4))
+    out.extend(_unquote(m.group(1)) for m in _HERESTRING_RE.finditer(command))
+    out.extend(_unquote(m.group(1)) for m in _ECHO_PIPE_RE.finditer(command))
+    return out
+
+
+_POWER_WORDS = frozenset({"shutdown", "reboot", "halt", "poweroff"})
+
+
+def _command_word_block(command: str) -> str | None:
+    """Командата на някой сегмент (след sudo/env/timeout/…, със свалени кавички)
+    е shutdown/reboot/halt/poweroff, mkfs* или `format X:` — онова, което
+    образците с _CMD_START не виждат: `timeout 5 reboot`, `env X=1 "shutdown" now`."""
+    for seg in _split_segments(command):
+        try:
+            argv = _strip_wrappers(shlex.split(seg))
+        except ValueError:
+            continue
+        if not argv:
+            continue
+        head = re.split(r"[/\\]", argv[0])[-1].lower().removesuffix(".exe").removesuffix(".com")
+        if head in _POWER_WORDS:
+            return _POWER_REASON
+        if head == "mkfs" or head.startswith("mkfs."):
+            return "форматиране на файлова система (mkfs)"
+        if head == "format" and any(re.fullmatch(r"[A-Za-z]:", a) for a in argv[1:]):
+            return "форматиране на дял (format)"
+    return None
 
 
 def assess_command(command: str, cwd: Path | None = None, *, arguments: bool = True) -> RiskVerdict:
@@ -1774,6 +1991,16 @@ def assess_command(command: str, cwd: Path | None = None, *, arguments: bool = T
         if rx.search(command):
             reasons.append(why)
             level = RiskLevel.BLOCKED
+    if arguments:
+        word = _command_word_block(command)
+        if word and word not in reasons:
+            reasons.append(word)
+            level = RiskLevel.BLOCKED
+    else:
+        for rx, why in _PY_BLOCK_PATTERNS:
+            if rx.search(command) and why not in reasons:
+                reasons.append(why)
+                level = RiskLevel.BLOCKED
     if level == RiskLevel.BLOCKED:
         return RiskVerdict(level, reasons)
     for rx, why in _CONFIRM_PATTERNS:

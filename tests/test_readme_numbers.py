@@ -29,7 +29,8 @@ def test_the_claude_prices_in_the_readme_are_the_ones_charged() -> None:
     opus, sonnet = PRICES["claude-opus-5-5"], PRICES["claude-sonnet-5-5"]
     assert f"Opus 5.5 ${opus[0]:g}/${opus[1]:g}" in readme
     assert f"Sonnet 5.5\n${sonnet[0]:g}/${sonnet[1]:g}" in readme.replace("Sonnet 5.5 $", "Sonnet 5.5\n$")
-    assert f"четене от кеша ${opus[2]:.2f}" in readme and opus[2] == sonnet[2]
+    # Одит 2026-11-10: Sonnet 5.5 чете от кеша за $0.10, не колкото Opus 5.5.
+    assert f"четене от кеша ${opus[2]:.2f} и ${sonnet[2]:.2f}" in readme
 
 
 def test_the_waitlist_page_does_not_promise_the_files_are_deleted() -> None:

@@ -17,6 +17,7 @@ operator message the turn answered (`mark`): no second mechanism.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -478,7 +479,19 @@ def _led_out(turn: _Turn, path: Path) -> bool:
         path.relative_to(ws)
     except ValueError:
         return False          # извън проекта по замисъл (EDIT на абсолютен път)
-    return not checkpoints.inside(ws, path)
+    if not checkpoints.inside(ws, path):
+        return True
+    # Самият файл е станал връзка навън (одит 2026-11-10): EDIT_FILE config.yml,
+    # после `ln -sf /outside/shared.yml config.yml` в същия ход — /undo пишеше
+    # старото съдържание ПРЕЗ връзката и презаписваше файл извън проекта.
+    # Проверяваше се само папката над файла.
+    if path.is_symlink():
+        try:
+            real, root = os.path.realpath(path), os.path.realpath(ws)
+            return os.path.commonpath([real, root]) != root
+        except (OSError, ValueError):
+            return True
+    return False
 
 
 def _undo_commands(turn: _Turn, ws: Path,

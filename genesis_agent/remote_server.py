@@ -95,6 +95,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from genesis_agent import file_lock
+
 log = logging.getLogger("genesis.remote_server")
 
 PROTOCOL = 1
@@ -345,17 +347,44 @@ class ReplayGuard:
             horizon = now_ms - 2 * self._max_skew_ms
             for old in [r for r, t in self._seen.items() if t < horizon]:
                 del self._seen[old]
-            if rid in self._seen:
-                raise ProtocolError("replayed request")
-            self._seen[rid] = now_ms
-            if self._path is not None:
-                try:
-                    tmp = self._path.with_name(self._path.name + ".tmp")
+            if self._path is None:
+                if rid in self._seen:
+                    raise ProtocolError("replayed request")
+                self._seen[rid] = now_ms
+                return rid
+            # Два `genesis serve` с един ключ и един файл (Desktop пуска свой на
+            # 127.0.0.1 до този за телефона) — одит 2026-11-10: всеки четеше файла
+            # само при старт и го презаписваше само със своите rid. Хванат плик,
+            # приет от единия, минаваше и през другия, а едно запитване на Desktop
+            # триеше от диска видяното от другия. Затова: под ключалката на файла
+            # видяното от другия процес се долива преди проверката и записа.
+            try:
+                with file_lock.locked(self._path):
+                    self._merge_from_disk(horizon)
+                    if rid in self._seen:
+                        raise ProtocolError("replayed request")
+                    self._seen[rid] = now_ms
+                    tmp = self._path.with_name(f"{self._path.name}.{os.getpid()}.tmp")
                     tmp.write_text(json.dumps(self._seen), encoding="utf-8")
                     os.replace(tmp, self._path)
-                except OSError:
-                    pass  # без запис пазим поне в паметта — както преди
+            except OSError:
+                # без запис пазим поне в паметта — както преди
+                if rid in self._seen and self._seen[rid] != now_ms:
+                    raise ProtocolError("replayed request") from None
+                self._seen[rid] = now_ms
         return rid
+
+    def _merge_from_disk(self, horizon: float) -> None:
+        assert self._path is not None
+        try:
+            data = json.loads(self._path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        for r, t in data.items():
+            if isinstance(t, (int, float)) and not isinstance(t, bool) and t >= horizon:
+                self._seen.setdefault(str(r), float(t))
 
 
 # ── сесията: събития, ход на агента, потвърждения ──────────────────────────
