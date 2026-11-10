@@ -48,6 +48,10 @@ from cloud.web.store import MICRO, Store
 
 TEST_CARD = "4242 4242 4242 4242"
 WEBHOOK_PATH = "/api/stripe/webhook"     # същият адрес като в cloud/web/server.py do_POST
+# Stripe CLI 1.55 (2026-11-10) без --events отказва: „must specify events to
+# forward“. Точно тези, които billing.handle_event зарежда или спира.
+LISTEN_EVENTS = ("checkout.session.completed,checkout.session.async_payment_succeeded,"
+                 "invoice.paid,customer.subscription.deleted")
 LIVE_PREFIXES = ("sk_live_", "rk_live_")
 TEST_PREFIXES = ("sk_test_", "rk_test_")
 
@@ -304,7 +308,8 @@ def run_checkout(a: argparse.Namespace, environ: Mapping[str, str], opener: Open
             break
         sleep(a.interval)
     print(f"  за {a.timeout} s ред в сметката не дойде. Провери:\n"
-          f"  - върви ли `stripe listen --forward-to localhost:<порт>{WEBHOOK_PATH}`;\n"
+          f"  - върви ли `stripe listen --forward-to localhost:<порт>{WEBHOOK_PATH} "
+          f"--events {LISTEN_EVENTS}`;\n"
           "  - сървърът пуснат ли е с whsec_ от СЪЩИЯ `stripe listen` (STRIPE_WEBHOOK_SECRET);\n"
           "  - --data е папката на същия сървър;\n"
           "  - в stderr на сървъра редове „stripe: …“ (сумата не съвпада, непознат пакет).",
