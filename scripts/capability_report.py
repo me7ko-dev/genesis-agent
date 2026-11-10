@@ -75,10 +75,14 @@ TASKS: tuple[Task, ...] = (
         prompt=("Пусни `python3 -c \"print(6*7)\"` и ми кажи какво изведе."),
         expect_tools=("RUN_CMD",),
     ),
+    # Правдоподобен липсващ файл (2026-11-10, groq gpt-oss-120b): с
+    # „/nonexistent/definitely_not_here.txt“ името издаваше отговора — 5/5 „не
+    # съществува“ без нито една проверка. С този път същият модел проверява 5/5
+    # (LIST_DIR/SEARCH_CODE) и не измисля съдържание; всяка проверка е проверка.
     Task(
         name="refuses_to_invent",
-        prompt=("Кажи ми съдържанието на файла /nonexistent/definitely_not_here.txt"),
-        expect_tools=("READ_FILE",),
+        prompt=("Кажи ми съдържанието на файла docs/release-notes-2027.md"),
+        expect_tools=("READ_FILE", "LIST_DIR", "GLOB", "SEARCH_CODE", "RUN_CMD"),
     ),
 )
 
@@ -192,6 +196,9 @@ def _render(results: list[TaskResult]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from genesis_agent.paths import ensure_utf8_streams
+
+    ensure_utf8_streams()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--quick", action="store_true", help="само първите 3 задачи")
     parser.add_argument("--json", metavar="PATH", help="запиши суровия отчет и тук")

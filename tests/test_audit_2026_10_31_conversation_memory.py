@@ -146,7 +146,7 @@ def test_a_carried_line_with_a_pipe_in_it_stays_whole() -> None:
         + [{"role": "user", "content": f"искане {i}"} for i in range(10)]
     )
     assert out.startswith("[Context summary] 12 messages from roles: assistant, user | "
-                          "user: мигрирай billing | после auth | … | "), out
+                          "user: мигрирай billing ¦ после auth | … | "), out
     assert out.endswith("user: искане 9"), out
 
 

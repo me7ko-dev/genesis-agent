@@ -70,6 +70,9 @@ def bench_one(provider: str, model: str, tasks: list) -> dict:
 
 
 def main() -> int:
+    from genesis_agent.paths import ensure_utf8_streams
+
+    ensure_utf8_streams()
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("models", nargs="*", help="provider/model (default: the coding chain)")

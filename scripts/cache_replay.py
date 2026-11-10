@@ -105,6 +105,9 @@ def replay(provider: str, model: str, shape: str, rounds: int) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from genesis_agent.paths import ensure_utf8_streams
+
+    ensure_utf8_streams()
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0] if __doc__ else None)
     ap.add_argument("models", nargs="+", metavar="доставчик=модел")
     ap.add_argument("--rounds", type=int, default=14)

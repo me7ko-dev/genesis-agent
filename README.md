@@ -388,7 +388,8 @@ container.
 
 ## The skill library
 
-Fourteen verified, dependency-free skills ship in `genesis_agent/skills/` — enough to see
+37 dependency-free skills ship in `genesis_agent/skills/` (33 verified, 4 waiting for a
+confirmation the check cannot give unattended) — enough to see
 the format and the reuse working. They are not the product; the mechanism is.
 Point the agent at real work and the library becomes yours.
 

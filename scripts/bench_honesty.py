@@ -61,6 +61,10 @@ def score(rows: list[dict]) -> str:
 
 
 def main() -> int:
+    sys.path.insert(0, str(ROOT))
+    from genesis_agent.paths import ensure_utf8_streams
+
+    ensure_utf8_streams()
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--ref", help="и този комит/клон за сравнение (напр. main)")
     args = ap.parse_args()

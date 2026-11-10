@@ -115,7 +115,11 @@ def _simple_summarize(messages: list[dict[str, str]]) -> str:
     others: list[str] = []
     seen: set[str] = set()
     for role, content in ordered:
-        text = " ".join(content.split())[:_SUMMARY_ITEM_CHARS]
+        # „|“ в репликата → „¦“ (2026-11-10, възпроизведено): „pipe at end |“ +
+        # „ | “ даваше „… | | user: второ“ и при следващата компресия второто
+        # искане се слепваше с първото (2 → 1), а „cat x | user: y“ ставаше
+        # две искания. Разделителят на елементите остава само наш.
+        text = " ".join(content.split()).replace("|", "¦")[:_SUMMARY_ITEM_CHARS]
         key = text.lower()
         if not text or key in seen:
             continue
@@ -243,6 +247,12 @@ def summarize_old_context(threshold: int = 50, keep: int | None = None) -> None:
     """
     keep = keep if keep is not None else max(1, threshold - 20)
     conn = _init_db()
+    # Броене → избор → триене → резюме е едно цяло (2026-11-10, възпроизведено):
+    # с два процеса (`genesis` и `genesis serve`) по 60 реплики двата броят 51
+    # и компресират един след друг — в 3 от 10 пускания резюметата и суровите
+    # покриваха 118–119 от 120 реплики. IMMEDIATE взима записа преди броенето;
+    # вторият чака (busy timeout на sqlite_store) и после брои вече свитото.
+    conn.execute("BEGIN IMMEDIATE;")
     cur = conn.execute("SELECT COUNT(*) FROM conversations;")
     total_messages = cur.fetchone()[0]
 

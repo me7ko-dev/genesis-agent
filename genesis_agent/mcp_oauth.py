@@ -731,6 +731,37 @@ def refresh(server_url: str, stale: str = "", timeout: float | None = None) -> s
     подновил, ползваме неговия, вместо да харчим refresh токена втори път.
     `timeout` — общ срок за чакането на ключалката и заявката (None — както
     досега: ключалката докогато трябва, заявката _HTTP_TIMEOUT)."""
+    if timeout is None:
+        return _refresh(server_url, stale, None)
+    # Пратената заявка се дочаква, дори викащият да се откаже (2026-11-10,
+    # възпроизведено): сървърът завърта refresh токена, щом я получи. Срязана
+    # от срока на извикването (mcp_client._post дава остатъка, ≥ 0.5 s), тя
+    # губеше новия — старият вече е невалиден, и следва нов вход. Сега
+    # нишката записва отговора, а викащият получава None след своя срок.
+    result: queue.Queue = queue.Queue()
+
+    def work() -> None:
+        try:
+            result.put(_refresh(server_url, stale, timeout))
+        except BaseException as e:  # noqa: BLE001 — хвърля се у викащия
+            result.put(e)
+
+    threading.Thread(target=work, name="genesis-oauth-refresh", daemon=True).start()
+    end = time.monotonic() + timeout
+    while True:
+        try:
+            # На парчета: на Windows едно дълго чакане не се буди от Ctrl-C.
+            item = result.get(timeout=max(0.0, min(0.25, end - time.monotonic())))
+            break
+        except queue.Empty:
+            if time.monotonic() >= end:
+                return None
+    if isinstance(item, BaseException):
+        raise item
+    return item
+
+
+def _refresh(server_url: str, stale: str, timeout: float | None) -> str | None:
     deadline = None if timeout is None else time.monotonic() + timeout
     with _FileLock(timeout):
         entry = saved(server_url)
@@ -741,8 +772,9 @@ def refresh(server_url: str, stale: str = "", timeout: float | None = None) -> s
             return str(entry["access_token"])
         if not entry.get("refresh_token"):
             return None
-        left = None if deadline is None else min(_HTTP_TIMEOUT, deadline - time.monotonic())
-        if left is not None and left <= 0:
+        # Срокът на викащия решава само дали да се прати; пратената заявка
+        # има целия си срок (виж refresh).
+        if deadline is not None and deadline - time.monotonic() <= 0:
             return None
         secret = str(entry.get("client_secret") or "")
         auth_method = str(entry.get("token_endpoint_auth_method") or "")
@@ -750,7 +782,7 @@ def refresh(server_url: str, stale: str = "", timeout: float | None = None) -> s
             tokens = _token_request(_safe_url(entry["token_endpoint"], "адресът за токени"), {
                 "grant_type": "refresh_token", "refresh_token": entry["refresh_token"],
                 "client_id": entry.get("client_id", ""), "resource": entry.get("resource", "")},
-                secret=secret, auth_method=auth_method, timeout=left)
+                secret=secret, auth_method=auth_method)
         except OAuthError:
             return None
         new = _entry({"token_endpoint": entry["token_endpoint"],
