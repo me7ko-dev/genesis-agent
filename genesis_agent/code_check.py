@@ -187,9 +187,20 @@ _ACKNOWLEDGED = re.compile(r"\b(?:пада|падат|падна|паднаха|
                            r"reject\w*)\b|❌", re.IGNORECASE)
 # Чете се само изходът на команда, която пуска код: `cat README.md` с „❌ не
 # прави така“ или `grep FAIL logs/` не е собствена проверка.
-_OTHER_CODE = re.compile(r"(?:^|[\s;&|(])(?:node|deno|bun|ruby|php|java|go\s+run|cargo\s+(?:run|test)|"
-                         r"dotnet\s+(?:run|test)|npm\s+(?:test|run|start)|npx|yarn|pnpm|bash|sh|"
-                         r"\.{1,2}/\S+)(?=\s|$)", re.IGNORECASE)
+# Одит 2026-11-10 (Windows и още няколко форми): `node.exe app.js`, `"C:\Program
+# Files\nodejs\node.exe" app.js`, `.\app.exe`, `app.exe`, `run.bat`, `powershell
+# -File .\run.ps1`, `uv run app.py`, `make run`, `tsx app.ts`, `Rscript a.R` не се
+# брояха за пускане: „It works now.“ след зелено пускане беше „няма пускане“, а
+# изходът им („expected 4, got 3“) не се четеше. Файл .exe/.bat/.cmd/.ps1 — само
+# като командата (в началото или след ; & | ( ), не като аргумент на `cat`/`git add`.
+_OTHER_CODE = re.compile(
+    r"""(?:^|[\s;&|("'\\/])(?:(?:node|deno|bun|ruby|php|java|tsx|ts-node|rscript|pwsh|powershell)"""
+    r"""(?:\.exe)?["']?|go\s+run|cargo\s+(?:run|test)|"""
+    r"dotnet\s+(?:run|test)|npm\s+(?:test|run|start)|npx|yarn|pnpm|bash|sh|"
+    r"uv\s+run|make\s+(?:run|test|check))(?=\s|$)"
+    r"|(?:^|[\s;&|(])\.{1,2}[/\\]\S+(?=\s|$)"
+    r"""|(?:^|[;&|(])\s*["']?[^\s;&|()"']*\.(?:exe|bat|cmd|ps1)["']?(?=\s|$)""",
+    re.IGNORECASE)
 _RUN_HEADER = re.compile(r"^\[RUN_CMD: (.*?)\]  \(rc=(-?\d+|None)\)$", re.DOTALL | re.MULTILINE)
 _EDITED = re.compile(r"^\[(?:WRITE_FILE|EDIT_FILE): [^\]\n]+\] ✓", re.MULTILINE)
 

