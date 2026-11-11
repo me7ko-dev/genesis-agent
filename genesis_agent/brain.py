@@ -2668,6 +2668,14 @@ class Brain:
                         continue
                     except RuntimeError as e:
                         last_error = str(e)
+                        # Лек модел без инструменти, който все пак поиска инструмент
+                        # (groq: 400 „Tool choice is none, but model called a tool“),
+                        # значи, че задачата не е лека — викащият ескалира към силния.
+                        # Следващият лек модел измисляше отговора (2026-11-12: „62 Mbps“
+                        # вместо Cloudflare Radar). Не е провал на доставчика.
+                        if self.light and not tools and "model called a tool" in last_error:
+                            _print_skip(prov, model, last_error, time.time() - t0)
+                            return self._error_result("Error: лекият модел поиска инструмент")
                         # Пропуск без заявка („skip: няма ключ“, „cooling down“) не
                         # е провал на доставчика — в статистиката влизат само
                         # истински обръщения (одит 2026-10-07: 3 провала на groq

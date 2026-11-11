@@ -104,9 +104,26 @@
 - site/public качен (10.11, f7e51b60): страницата е в Cloudflare акаунта, където е KV
   `genesis-waitlist` — не в този на другите сайтове; качване с `CLOUDFLARE_ACCOUNT_ID`
   на него. Живата страница вече казва, че файловете остават на сървъра.
-- Б, остава (с оператора): `/mcp login` — няма профил в Linear/Sentry, нужен е друг
-  MCP сървър с OAuth; микрофон и гласове; телефон (`genesis serve` + QR); Desktop;
-  install.ps1 (слага втори `genesis` до pipx — решение кой остава).
+- Б (12.11, клон `claude/mcp-light-route-20261112`):
+  - ~~`/mcp login`~~ — Cloudflare Radar (`https://radar.mcp.cloudflare.com/mcp`, DCR +
+    PKCE, само чете): входът минава, 9 инструмента. На живо „ползвай MCP инструмента
+    get_internet_speed_data…“ отиваше на лекия модел без инструменти → 20b поиска
+    инструмента, groq 400 „Tool choice is none, but model called a tool“, 120b измисли
+    „62 Mbps“. Поправено: `_TOOL_ASK` в model_router (име на инструмент/MCP не е лек
+    въпрос) + Brain(light) спира веригата при този 400 → ескалира. След: истинските
+    175.43 Mbps от Radar. Без `autoApprove` в mcp.json `-p` отказва инструмента (няма
+    readOnlyHint) — правилно.
+  - pipx на лаптопа беше БЕЗ допълнения (нямаше sounddevice, edge-tts, cryptography,
+    qrcode, pillow, playwright, ruff, google-auth) → гласът, `serve`, картинките и
+    ruff проверката не тръгваха. Добавени с `pipx inject`. При преинсталация на pipx —
+    пак `inject` (или `[all]`).
+  - ~~Глас~~: edge-tts bg-BG-KalinaNeural 2–5 s (първият студен 35 s), Groq whisper
+    разпозна изречението за 0.4 s (1 буква), микрофонът Realtek записва. Остава: живо
+    `/listen` с човек.
+  - Телефон: остава живо сдвояване (`genesis serve` + QR с Genesis Remote) — с оператора.
+  - ~~Desktop~~: от 13.10 → Genesis-Setup от native-build-332 (5a9ebc7), тръгва и пуска
+    pipx `genesis serve` на 127.0.0.1. install.ps1 НЕ се пуска на лаптопа: pipx остава
+    единственият `genesis`; install.ps1 се мери в CI на чист Windows при всеки PR.
 
 ## На лаптопа — един промпт (2026-10-27, +11-05; А е пусната на 11-05 — числата под блока)
 

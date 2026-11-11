@@ -283,3 +283,15 @@ def test_anything_more_than_the_intent_goes_to_the_model(text) -> None:
 
 def test_only_commands_that_change_something_ask_first() -> None:
     assert mr.CONFIRM_COMMANDS == {"/backup", "/clear", "/export"}
+
+
+@pytest.mark.parametrize("text", [
+    # 2026-11-12 на живо: лекият модел без инструменти измисли „62 Mbps“.
+    ("Ползвай MCP инструмента get_internet_speed_data на cloudflare-radar и кажи с едно "
+     "изречение средната скорост на свалянето в България (BG)."),
+    "колко е скоростта в България според get_internet_speed_data?",
+    "питай cloudflare-radar за скоростта в България",
+    "use the radar tool for Bulgaria",
+])
+def test_an_explicitly_named_tool_is_not_a_light_question(text) -> None:
+    assert mr.is_light_request(text) is False

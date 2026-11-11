@@ -150,6 +150,14 @@ _MACHINE = re.compile(
     r"\b(cpu|gpu|memory|disk|space|version|installed|my|mine|machine|computer|pc)\b)",
     re.IGNORECASE)
 _TECHNICAL = re.compile(r"```|`|https?://|[\\/~]\w|\b\w+\.(py|js|ts|json|ya?ml|md|txt|sh|ps1|exe|zip)\b|[{}<>=;]")
+# Изрично поискан инструмент: „ползвай MCP инструмента get_internet_speed_data на
+# cloudflare-radar …“ (2026-11-12, на живо) отиваше на лекия модел без
+# инструменти; 20b поиска инструмента и groq върна 400, а 120b измисли „62 Mbps“.
+# Име като get_x_y или сървър-с-тире е име на инструмент, не на разговор.
+_TOOL_ASK = re.compile(
+    r"(инструмент|ползвай|използвай|polzvai|izpolzvai|instrument|\bmcp\b|"
+    r"\b(tool|tools|use|using)\b|\b[a-z]+_[a-z0-9_]+\b|\b[a-z]+-[a-z]+\b)",
+    re.IGNORECASE)
 
 LIGHT_MAX_CHARS = 160
 
@@ -160,7 +168,8 @@ def is_light_request(text: str) -> bool:
     if not t or len(t) > LIGHT_MAX_CHARS or t.count("\n") > 1:
         return False
     return not (_TECHNICAL.search(t) or _ACTION.search(t) or _WORK_NOUN.search(t)
-                or _LIVE_INFO.search(t) or _CONFIRM.search(t) or _MACHINE.search(t))
+                or _LIVE_INFO.search(t) or _CONFIRM.search(t) or _MACHINE.search(t)
+                or _TOOL_ASK.search(t))
 
 
 def is_light_turn(messages: list[dict]) -> bool:
