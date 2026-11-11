@@ -713,3 +713,19 @@ def test_an_empty_local_model_turns_the_local_fallback_off(monkeypatch, _ollama_
     monkeypatch.setenv("GENESIS_LOCAL_MODEL", "")
     monkeypatch.setattr(brain, "LOCAL_MODEL", "")
     assert brain.Brain().local is None
+
+
+def test_a_light_model_that_calls_a_tool_escalates_instead_of_the_next_light_model(monkeypatch) -> None:
+    """2026-11-12 на живо: „ползвай MCP инструмента get_internet_speed_data…“ —
+    gpt-oss-20b поиска инструмента, groq върна 400 „Tool choice is none, but
+    model called a tool“, а следващият лек модел (120b) измисли „62 Mbps“.
+    Лекият модел, поискал инструмент, значи, че задачата не е лека."""
+    monkeypatch.setattr(brain, "_load_light_chain", lambda: chain(("groq", "small"), ("groq", "big")))
+    monkeypatch.setenv("GROQ_API_KEY", "g")
+    refused = FakeResp(400, {"error": {"message": "Tool choice is none, but model called a tool",
+                                       "type": "invalid_request_error", "code": "tool_use_failed"}})
+    seen = _route(monkeypatch, lambda p: refused if p["model"] == "small" else ok("62 Mbps"))
+    r = brain.Brain(light=True, use_local=False).complete([{"role": "user", "content": "x"}])
+    from genesis_agent.model_router import light_reply_needs_escalation
+    assert light_reply_needs_escalation(r.raw_text, r.tool_calls)
+    assert [m for m, _ in seen] == ["small"]
