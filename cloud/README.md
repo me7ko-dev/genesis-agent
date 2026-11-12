@@ -294,7 +294,8 @@ python -m cloud.web.server serve ... --env-file /srv/genesis/keys.env \
 1. Продукти и цени (Price) за пакетите и плана; `price_…` в `stripe_price` в `prices.json`.
 2. Webhook към `https://<адрес>/api/stripe/webhook` със събития
    `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
-   `invoice.paid`, `customer.subscription.deleted`; тайната му е `STRIPE_WEBHOOK_SECRET`.
+   `invoice.paid`, `customer.subscription.deleted`, `charge.refunded`; тайната му е
+   `STRIPE_WEBHOOK_SECRET`.
 
 Webhook-ът проверява подписа (HMAC-SHA256 върху суровите байтове, ±5 мин)
 преди всичко друго; зарежда само ако сумата и валутата съвпадат с пакета/плана
@@ -324,7 +325,7 @@ Webhook-ът проверява подписа (HMAC-SHA256 върху суро�
 3. Stripe CLI (`stripe login` веднъж), терминал 1 — тайната за webhook-а:
    ```bash
    stripe listen --print-secret                 # → whsec_… (не се сменя между пусканията)
-   stripe listen --forward-to localhost:8080/api/stripe/webhook \n     --events checkout.session.completed,checkout.session.async_payment_succeeded,invoice.paid,customer.subscription.deleted
+   stripe listen --forward-to localhost:8080/api/stripe/webhook \n     --events checkout.session.completed,checkout.session.async_payment_succeeded,invoice.paid,customer.subscription.deleted,charge.refunded
    # Stripe CLI 1.55 (2026-11-10) без --events: „must specify events to forward“
    ```
 4. Терминал 2 — сървърът с тестовите ключове (`read -rs` — ключът не влиза в историята):

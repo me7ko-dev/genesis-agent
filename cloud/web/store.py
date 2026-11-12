@@ -127,6 +127,17 @@ CREATE TABLE IF NOT EXISTS invites (
 -- Заключен вход (2026-10-12, за cloud/monitor.py): броячът на грешните опити
 -- е в паметта на сървъра и наблюдението не го вижда. По един ред на ключ
 -- (имейл или IP) на прозорец — без имейла и адреса, само вида.
+-- Какво е заредило всяко плащане (2026-11-13), за да се върне при refund:
+-- `pi_…` за пакет (от сесията), `cus_…` за абонамент (всеки абонамент е свой
+-- клиент с един план). Charge.refunded носи payment_intent и customer, не
+-- сесията, а от API „basil“ нататък — и не фактурата.
+CREATE TABLE IF NOT EXISTS stripe_payments (
+    ref TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    credits INTEGER NOT NULL,       -- µc, заредени за amount_cents
+    amount_cents INTEGER NOT NULL,
+    currency TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS lockouts (
     id INTEGER PRIMARY KEY,
     kind TEXT NOT NULL,            -- email | ip | signup
@@ -496,6 +507,46 @@ class Store:
                 return
             c.execute("UPDATE stripe_customers SET plan = '' WHERE customer = ?", (customer,))
             self._sync_plan(c, int(row["user_id"]))
+
+    def record_payment(self, ref: str, user_id: int, credits: int, amount_cents: int,
+                       currency: str) -> None:
+        """Плащането `ref` (pi_… или cus_…) е заредило `credits` µc. Първият запис остава."""
+        with self._db() as c:
+            c.execute("INSERT INTO stripe_payments (ref, user_id, credits, amount_cents, currency) "
+                      "VALUES (?,?,?,?,?) ON CONFLICT(ref) DO NOTHING",
+                      (ref, user_id, credits, amount_cents, currency))
+
+    def payment(self, ref: str) -> dict[str, Any] | None:
+        if not ref:
+            return None
+        with self._db() as c:
+            row = c.execute("SELECT * FROM stripe_payments WHERE ref = ?", (ref,)).fetchone()
+        return dict(row) if row else None
+
+    def refund(self, user_id: int, charge: str, refunded_cents: int, owed: int, ref: str) -> int:
+        """Сваля до `owed` µc общо за върнатото по `charge`. Връща сваленото сега.
+
+        Частичните връщания идват като нови charge.refunded с нарастващ
+        amount_refunded — всяко сваля само разликата до дължимото. Сборът се
+        чете под BEGIN IMMEDIATE: две доставки наведнъж иначе свалят двойно."""
+        prefix = f"stripe:refund:{charge}:"
+        c = sqlite3.connect(self.path, timeout=10, isolation_level=None)
+        try:
+            c.execute("BEGIN IMMEDIATE")
+            done = -int(c.execute("SELECT COALESCE(SUM(amount), 0) FROM ledger "
+                                  "WHERE substr(event_id, 1, ?) = ?",
+                                  (len(prefix), prefix)).fetchone()[0])
+            delta = owed - done
+            new = delta > 0 and self._add_entry(c, user_id, f"{prefix}{refunded_cents}", "adjust",
+                                                -delta, None, ref)
+            c.execute("COMMIT")
+        except BaseException:
+            if c.in_transaction:
+                c.execute("ROLLBACK")
+            raise
+        finally:
+            c.close()
+        return delta if new else 0
 
     def turns_today(self, user_id: int, now: float | None = None) -> int:
         """Ходовете от полунощ UTC — всякакви, и провалените: спам с грешни

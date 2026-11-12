@@ -1634,3 +1634,126 @@ def test_stripe_without_any_price_id_says_why_there_is_no_button(tmp_path) -> No
     app.pool.shutdown(wait=True)
     js = (Path(web.__file__).parent / "static" / "app.js").read_text(encoding="utf-8")
     assert '$("stripe-off").hidden = a.can_buy || !a.billing;' in js
+
+
+# ── връщане на пари (2026-11-13) ─────────────────────────────────────────────
+# Преди: refund в таблото на Stripe връщаше парите, а кредитите оставаха.
+
+def _ev(etype: str, obj: dict[str, Any], eid: str = "evt") -> dict[str, Any]:
+    return {"id": eid, "type": etype, "livemode": False, "data": {"object": obj}}
+
+
+def _charge(refunded: int, **over: Any) -> dict[str, Any]:
+    return {"id": "ch_1", "object": "charge", "amount": 500, "amount_refunded": refunded,
+            "currency": "eur", "payment_intent": "pi_1", "customer": None, **over}
+
+
+def _paid_pack(app: web.App) -> None:
+    h = billing.handle_event
+    done = _ev("checkout.session.completed", _session(payment_intent="pi_1"))
+    assert h(app.store, app.prices, done, live=False) == (200, "заредено")
+    assert app.store.balance(1) == 500 * MICRO
+
+
+def test_a_refund_takes_back_the_credits_once(tmp_path) -> None:
+    app, _ = _billing_app(tmp_path)
+    _paid_pack(app)
+    h = billing.handle_event
+    assert h(app.store, app.prices, _ev("charge.refunded", _charge(500)), live=False) == \
+        (200, "върнати 500.00 кредита")
+    assert h(app.store, app.prices, _ev("charge.refunded", _charge(500)), live=False) == \
+        (200, "вече е отразено")
+    assert app.store.balance(1) == 0
+    assert [e["kind"] for e in app.store.ledger_entries(1)] == ["adjust", "purchase"]
+
+
+def test_partial_refunds_add_up_to_the_pack_and_never_more(tmp_path) -> None:
+    app, _ = _billing_app(tmp_path)
+    _paid_pack(app)
+    h = billing.handle_event
+    h(app.store, app.prices, _ev("charge.refunded", _charge(200)), live=False)
+    assert app.store.balance(1) == 300 * MICRO
+    h(app.store, app.prices, _ev("charge.refunded", _charge(200), eid="evt_again"), live=False)
+    assert app.store.balance(1) == 300 * MICRO
+    h(app.store, app.prices, _ev("charge.refunded", _charge(500)), live=False)
+    assert app.store.balance(1) == 0
+    # повече от платеното (грешно поле) не сваля над пакета
+    h(app.store, app.prices, _ev("charge.refunded", _charge(900)), live=False)
+    assert app.store.balance(1) == 0
+
+
+def test_a_refund_after_spending_leaves_a_negative_balance(tmp_path) -> None:
+    app, _ = _billing_app(tmp_path)
+    _paid_pack(app)
+    app.store.add_entry(1, "turn:1", "charge", -400 * MICRO)
+    billing.handle_event(app.store, app.prices, _ev("charge.refunded", _charge(500)), live=False)
+    assert app.store.balance(1) == -400 * MICRO
+
+
+def test_a_subscription_refund_is_found_by_the_customer(tmp_path) -> None:
+    app, _ = _billing_app(tmp_path)
+    h = billing.handle_event
+    sub = _session(id="cs_sub", mode="subscription", customer="cus_9",
+                   metadata={"user_id": "1", "plan": "basic"})
+    h(app.store, app.prices, _ev("checkout.session.completed", sub), live=False)
+    inv = {"id": "in_1", "customer": "cus_9", "status": "paid", "amount_paid": 1500,
+           "currency": "eur"}
+    h(app.store, app.prices, _ev("invoice.paid", inv), live=False)
+    # спрян абонамент: планът е празен, а върнатата фактура пак се намира
+    h(app.store, app.prices, _ev("customer.subscription.deleted", {"customer": "cus_9"}),
+      live=False)
+    ch = _charge(750, id="ch_sub", amount=1500, payment_intent="pi_unknown", customer="cus_9")
+    assert h(app.store, app.prices, _ev("charge.refunded", ch), live=False)[1] == \
+        "върнати 750.00 кредита"
+    assert app.store.balance(1) == 750 * MICRO
+
+
+@pytest.mark.parametrize("over", [
+    {"payment_intent": "pi_other"},
+    {"currency": "usd"},
+    {"amount_refunded": 0},
+    {"amount_refunded": "500"},
+    {"id": "re_1"},
+])
+def test_a_refund_of_an_unknown_or_odd_charge_changes_nothing(tmp_path, over) -> None:
+    app, _ = _billing_app(tmp_path)
+    _paid_pack(app)
+    billing.handle_event(app.store, app.prices, _ev("charge.refunded", _charge(500, **over)),
+                         live=False)
+    assert app.store.balance(1) == 500 * MICRO
+
+
+def test_parallel_partial_refunds_do_not_take_twice(tmp_path) -> None:
+    # Две доставки наведнъж (200 и 500 от 500): без транзакция и двете четат
+    # „свалено 0“ и свалят 200 + 500 = 700; с обикновен BEGIN втората пада с
+    # „database is locked“ (пробвано тук) — Stripe я праща пак, но е 500.
+    app, _ = _billing_app(tmp_path)
+    _paid_pack(app)
+    errors: list[BaseException] = []
+    for _ in range(5):
+        start = threading.Barrier(2)
+
+        def deliver(refunded: int, start: threading.Barrier = start) -> None:
+            start.wait()
+            try:
+                billing.handle_event(app.store, app.prices,
+                                     _ev("charge.refunded", _charge(refunded)), live=False)
+            except BaseException as e:  # noqa: BLE001 — нишката не бива да гърми
+                errors.append(e)
+
+        ts = [threading.Thread(target=deliver, args=(n,)) for n in (200, 500)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        assert errors == []
+        assert app.store.balance(1) == 0
+
+
+def test_a_refund_over_http_with_a_signed_webhook(stripe) -> None:
+    app, client = stripe
+    cl = client()
+    assert _deliver(cl, _event("checkout.session.completed",
+                               _session(payment_intent="pi_1"))) == 200
+    assert _deliver(cl, _event("charge.refunded", _charge(500), eid="evt_r")) == 200
+    assert app.store.balance(1) == 0
