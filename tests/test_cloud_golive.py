@@ -65,7 +65,8 @@ class Setup:
         self.write(prices=_prices(), stripe=_stripe_list(), values=VALUES)
         self.keys.write_text("GATEWAY_SECRET=" + "s" * 40 + "\nGROQ_API_KEY=gsk_x\n"
                              "GATEWAY_MODELS=groq/openai/gpt-oss-120b\n", encoding="utf-8")
-        self.env = {"STRIPE_SECRET_KEY": LIVE, "STRIPE_WEBHOOK_SECRET": HOOK}
+        self.keys.chmod(0o640)          # като на сървъра (up.sh); 644 е отделна проверка
+        self.env ={"STRIPE_SECRET_KEY": LIVE, "STRIPE_WEBHOOK_SECRET": HOOK}
         self.args = {"--env-file": self.keys.as_posix(),
                      "--gateway-usage": (tmp / "usage.jsonl").as_posix(),
                      "--billing": None, "--public-url": "https://genesis.mydomain.eu",
