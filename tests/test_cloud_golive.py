@@ -66,7 +66,7 @@ class Setup:
         self.keys.write_text("GATEWAY_SECRET=" + "s" * 40 + "\nGROQ_API_KEY=gsk_x\n"
                              "GATEWAY_MODELS=groq/openai/gpt-oss-120b\n", encoding="utf-8")
         self.keys.chmod(0o640)          # като на сървъра (up.sh); 644 е отделна проверка
-        self.env ={"STRIPE_SECRET_KEY": LIVE, "STRIPE_WEBHOOK_SECRET": HOOK}
+        self.env = {"STRIPE_SECRET_KEY": LIVE, "STRIPE_WEBHOOK_SECRET": HOOK}
         self.args = {"--env-file": self.keys.as_posix(),
                      "--gateway-usage": (tmp / "usage.jsonl").as_posix(),
                      "--billing": None, "--public-url": "https://genesis.mydomain.eu",
@@ -432,3 +432,18 @@ def test_forget_waits_for_a_running_turn(tmp_path, capsys) -> None:
                      "--jobs", str(tmp_path / "jobs")]) == 1
     assert "върви задача" in capsys.readouterr().err
     assert store.user_by_email("ana@example.com") is not None
+
+
+def test_the_proposed_prices_in_pricing_md_load_and_cover_their_models() -> None:
+    # PRICING.md е предложение (2026-11-13); ако се копира в prices.json, трябва
+    # да тръгне с плащане и с изброените в него GATEWAY_MODELS.
+    from cloud.gateway import gateway as gw
+    from cloud.web import billing
+    text = (ROOT / "cloud" / "PRICING.md").read_text(encoding="utf-8")
+    block = text.split("```json", 1)[1].split("```", 1)[0]
+    prices = billing.parse_prices(json.loads(block))
+    models_line = next(line for line in text.splitlines() if "GATEWAY_MODELS=" in line)
+    models = gw.read_models({"GATEWAY_MODELS": models_line.split("GATEWAY_MODELS=", 1)[1]
+                             .split("`", 1)[0]})
+    billing.check_models(prices, models)
+    assert models is not None and not any(m.endswith("/*") for m in models)
