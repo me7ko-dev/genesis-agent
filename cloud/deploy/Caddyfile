@@ -6,7 +6,15 @@
 # в лога Cookie е REDACTED.
 @DOMAIN@ {
 	encode gzip
-	request_body {
+	# Качването на файл (cloud/web/server.py MAX_UPLOAD = 25 MiB) е единственият
+	# адрес с голямо тяло; всичко друго остава на 1 MB (2026-11-12, тук без
+	# Caddy — deploy.sh пуска `caddy validate` преди презареждането).
+	@upload path_regexp ^/api/chats/[0-9a-f]+/upload$
+	@rest not path_regexp ^/api/chats/[0-9a-f]+/upload$
+	request_body @upload {
+		max_size 26MB
+	}
+	request_body @rest {
 		max_size 1MB
 	}
 	header {

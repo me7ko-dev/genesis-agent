@@ -45,9 +45,14 @@
         <h2>Файлове <a id="zip" href="#">свали всички (zip)</a></h2>
         <ul id="file-list"></ul>
       </div>
+      <p id="upload-note" class="muted" role="status" aria-live="polite" hidden></p>
       <form id="ask">
         <textarea id="text" rows="3" maxlength="4000" placeholder="Какво да направя? (Ctrl+Enter праща)" required></textarea>
-        <button type="submit" id="send">Прати</button>
+        <div class="ask-buttons">
+          <button type="submit" id="send">Прати</button>
+          <button type="button" id="attach" class="quiet" title="До 25 MB на файл">Прикачи файлове</button>
+        </div>
+        <input type="file" id="file-input" multiple hidden>
       </form>
     </div>
     <div id="account" hidden>

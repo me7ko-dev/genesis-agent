@@ -21,6 +21,8 @@
   - файловете се сваля само като прикачени (никога не се показват в нашия
     произход), без символни връзки (кодът в контейнера е чужд) и само докато
     в разговора не върви ход;
+  - качването (2026-11-12) е сурово тяло към /upload, само между ходовете,
+    само в корена на папката и никога през връзка, оставена от контейнера;
   - етап 3 (2026-10-11): спрян профил няма сесия; таксата е от шлюза, не от
     контейнера; webhook-ът на Stripe е единственият POST без вход — пази го
     подписът; админ командите са само в командния ред.
@@ -42,6 +44,7 @@ import stat
 import sys
 import threading
 import time
+import unicodedata
 import uuid
 import zipfile
 from collections import Counter
@@ -70,6 +73,19 @@ MAX_FILES = 1000
 # файла в out/ result/report.pdf липсваше без знак). Над този брой — 413.
 MAX_ZIP_FILES = 20000
 MAX_ZIP_BYTES = 200 * 1024 * 1024
+# Качване на файл в разговора (2026-11-12). Страницата за ранен достъп обещава
+# „извади сумите от тези PDF фактури“, а чатът приемаше само 4000 знака текст.
+# 25 MiB на файл: сканирана фактура е 0.2–3 MB, снимка от телефон 3–8 MB. Общо
+# колкото архивът за сваляне — иначе „свали всички“ спира да работи.
+MAX_UPLOAD = 25 * 1024 * 1024
+MAX_UPLOAD_TOTAL = MAX_ZIP_BYTES
+# На човек на ден (UTC), през всичките му разговори: таванът на разговор сам не
+# пази диска — разговорите са без брой, а качването е без такса.
+MAX_UPLOAD_DAY = 1024 * 1024 * 1024
+UPLOAD_SECONDS = 300          # общ срок: сокетът чака 60 s на четене, не общо
+UPLOAD_PART = ".upload-"      # недовършеното — до папката на разговора, не в нея
+MAX_NAME_BYTES = 200
+NOTE_FILES = 30               # колко имена влизат в бележката към модела
 LOGIN_WINDOW = 15 * 60
 LOGIN_FAILURES = 5
 # Подразбиранията за всеки човек (2026-10-11) — профилът може да ги смени
@@ -148,6 +164,11 @@ class App:
         # тече, получаваше 409 „задачата още върви“, а задача нямаше. Свалянията
         # не си пречат — само нов ход чака да свършат.
         self._downloading: Counter[str] = Counter()
+        # Качените след последния ход, по разговор — за бележката към модела.
+        # Само в паметта: след рестарт моделът пак ги вижда в папката.
+        self._uploaded: dict[str, list[str]] = {}
+        self._uploading: set[str] = set()                 # разговори с качване в ход
+        self._upload_day: dict[int, tuple[int, int]] = {}  # човек → (ден, байтове)
         self._cleanup = cleanup or launch.cleanup_leftovers
         self._stopping = threading.Event()
         self._futures: set[Future[None]] = set()
@@ -163,6 +184,12 @@ class App:
         ЧАК след като портът е зает — втори `serve`, който пада с „Address
         already in use“, не пипа ходовете и контейнерите на живия сървър."""
         self._cleanup()
+        # Недовършени качвания от убит процес. Стоят до папките на разговорите
+        # (jobs/<човек>/), където контейнерът не пише — връзка там няма кой да сложи.
+        for part in self.jobs_dir.glob(f"*/{UPLOAD_PART}*"):
+            with contextlib.suppress(OSError):
+                if stat.S_ISREG(part.lstat().st_mode):
+                    part.unlink()
         self.store.fail_unfinished("сървърът беше рестартиран по време на задачата")
         if self.prices is not None and self.gateway is not None:
             # Ходове без такса от предишния живот: срив между края и таксата,
@@ -298,6 +325,45 @@ class App:
             if self._downloading[chat_id] <= 0:
                 del self._downloading[chat_id]
 
+    # ── качване ─────────────────────────────────────────────────────────────
+    def begin_upload(self, user_id: int, chat_id: str, length: int) -> str:
+        """"" ако качването може да започне, иначе причината: "busy" (върви ход),
+        "uploading" (друго качване в същия разговор — двете биха минали заедно
+        покрай тавана на папката) или "day" (дневният таван на човека).
+
+        Държи разговора като свалянето (begin_download): само между ходовете —
+        жив контейнер може да подмени име с връзка между проверката и записа —
+        и докато трае, ход в този разговор не започва."""
+        with self._lock:
+            if self.store.busy(chat_id=chat_id):
+                return "busy"
+            if chat_id in self._uploading:
+                return "uploading"
+            day = int(time.time() // 86400)
+            was, used = self._upload_day.get(user_id, (day, 0))
+            if was != day:
+                used = 0
+            if used + length > MAX_UPLOAD_DAY:
+                return "day"
+            self._upload_day[user_id] = (day, used + length)
+            self._uploading.add(chat_id)
+            self._downloading[chat_id] += 1
+            return ""
+
+    def end_upload(self, user_id: int, chat_id: str, *, name: str = "", refund: int = 0) -> None:
+        """Край на качването. `name` — качено е, следващият ход го казва на
+        модела; `refund` — байтове, които не са стигнали до диска."""
+        with self._lock:
+            self._uploading.discard(chat_id)
+            if refund:
+                day, used = self._upload_day.get(user_id, (0, 0))
+                self._upload_day[user_id] = (day, max(0, used - refund))
+            if name:
+                names = self._uploaded.setdefault(chat_id, [])
+                if name not in names:
+                    names.append(name)
+        self.end_download(chat_id)
+
     # ── ходове ──────────────────────────────────────────────────────────────
     def workspace(self, user_id: int, chat_id: str) -> Path:
         return self.jobs_dir / str(user_id) / chat_id
@@ -426,6 +492,10 @@ class App:
             gateway = (dataclasses.replace(self.gateway, budget=budget)
                        if self.gateway is not None else None)
             turn_id = self.store.add_turn(chat_id, text)
+            # След всички откази: отказан ход не губи бележката за файловете.
+            # В разговора остава написаното от човека; бележката е за модела —
+            # без нея „тези фактури“ е гадаене кое в папката е ново.
+            task_text = text + upload_note(self._uploaded.pop(chat_id, []))
             job = launch.new_task_name()
             usage_start = gw.usage_size(gateway.usage) if gateway is not None else 0
             if self.prices is not None and gateway is not None:
@@ -435,7 +505,7 @@ class App:
                 # докъде е файлът на шлюза сега: по-рано редове на задачата
                 # няма, четенето на сметката почва оттам (както usage_for).
                 self.store.set_job(turn_id, job, gateway.budget, usage_start=usage_start)
-        fut = self.pool.submit(self._run, turn_id, uid, text, self.workspace(uid, chat_id),
+        fut = self.pool.submit(self._run, turn_id, uid, task_text, self.workspace(uid, chat_id),
                                job, gateway, usage_start)
         with self._lock:
             self._futures.add(fut)
@@ -634,6 +704,50 @@ def zip_files(workspace: Path) -> bytes | None:
     return buf.getvalue()
 
 
+# ── качване ──────────────────────────────────────────────────────────────────
+
+# Знаци, които обръщат реда на показване: U+202E пред „fdp.exe“ се чете като exe.pdf.
+_BIDI = frozenset("\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+
+
+def upload_name(raw: str) -> str | None:
+    """Името на качен файл, или None. Само в корена на папката: без разделители
+    и `:` (safe_file не би го дал обратно), без водеща точка (.genesis е
+    историята, .env — навик), без управляващи знаци (името се показва и влиза
+    в текста към модела)."""
+    if not raw or raw != raw.strip() or raw.startswith(".") or raw.endswith("."):
+        return None
+    if any(c in "/\\:" or c in _BIDI or unicodedata.category(c) in ("Cc", "Cs") for c in raw):
+        return None
+    try:
+        if len(raw.encode("utf-8")) > MAX_NAME_BYTES:
+            return None
+    except UnicodeEncodeError:
+        return None
+    return raw
+
+
+def upload_note(names: list[str]) -> str:
+    if not names:
+        return ""
+    shown = ", ".join(names[:NOTE_FILES])
+    more = f" и още {len(names) - NOTE_FILES}" if len(names) > NOTE_FILES else ""
+    return f"\n\n[Качени файлове в работната папка: {shown}{more}]"
+
+
+def _give_to_runner(path: Path) -> None:
+    """Качен файл е на потребителя в контейнера (като папката му в
+    prepare_workspace) — иначе задачата го чете, но не може да го промени."""
+    chown = getattr(os, "chown", None)  # няма го на Windows (там се тества)
+    try:
+        if chown is None:
+            raise OSError("no chown")
+        chown(path, launch.RUNNER_UID, launch.RUNNER_UID)
+        path.chmod(0o644)
+    except OSError:
+        path.chmod(0o666)
+
+
 # ── HTTP ─────────────────────────────────────────────────────────────────────
 
 def _with_cost(turn: dict[str, Any]) -> dict[str, Any]:
@@ -649,6 +763,7 @@ _TURNS = re.compile(r"^/api/chats/([0-9a-f]{32})/turns$")
 _FILES = re.compile(r"^/api/chats/([0-9a-f]{32})/files$")
 _ZIP = re.compile(r"^/api/chats/([0-9a-f]{32})/files\.zip$")
 _FILE = re.compile(r"^/api/chats/([0-9a-f]{32})/files/(.+)$")
+_UPLOAD = re.compile(r"^/api/chats/([0-9a-f]{32})/upload$")
 # До 18 цифри (одит 2026-10-22): 20 цифри гърмяха с OverflowError в sqlite,
 # 5000 — с ValueError в int(); връзката се затваряше без отговор. Сега — 404.
 _EVENTS = re.compile(r"^/api/turns/(\d{1,18})/events$")
@@ -727,16 +842,25 @@ class Handler(BaseHTTPRequestHandler):
             parts.append("Secure")
         return "; ".join(parts)
 
-    def _drain(self, length: int) -> None:
+    def _drain(self, length: int, cap: int = DRAIN_MAX) -> None:
         """Изхвърля тялото на отказана заявка. Без това затварянето праща RST и
         клиентът губи отказа (шлюзът, 2026-11-05; тук 2026-11-10: 3 MB към
         /api/login → BrokenPipe в 3 от 20 проби вместо 413)."""
-        left = min(length, DRAIN_MAX)
+        left = min(length, cap)
         while left > 0:
             chunk = self.rfile.read(min(left, 65536))
             if not chunk:
                 break
             left -= len(chunk)
+
+    def _foreign_origin(self) -> bool:
+        origin = self.headers.get("Origin")
+        try:
+            return bool(origin) and urlsplit(origin or "").netloc != self.headers.get("Host")
+        except ValueError:
+            # Одит 2026-11-10: `Origin: http://[` е ValueError в urlsplit — нишката
+            # падаше с traceback и връзката се затваряше без отговор (без вход).
+            return True
 
     def _body(self) -> dict[str, Any] | None:
         """JSON тялото на POST, или None (и отговорът вече е пратен)."""
@@ -748,14 +872,7 @@ class Handler(BaseHTTPRequestHandler):
             self._drain(length)
             self._error(415, "очаква се JSON")
             return None
-        origin = self.headers.get("Origin")
-        try:
-            foreign = bool(origin) and urlsplit(origin or "").netloc != self.headers.get("Host")
-        except ValueError:
-            # Одит 2026-11-10: `Origin: http://[` е ValueError в urlsplit — нишката
-            # падаше с traceback и връзката се затваряше без отговор (без вход).
-            foreign = True
-        if foreign:
+        if self._foreign_origin():
             self._drain(length)
             self._error(403, "чужд произход")
             return None
@@ -916,6 +1033,10 @@ class Handler(BaseHTTPRequestHandler):
             # праща Origin. Единственият POST без вход — пази го HMAC-ът.
             self._stripe_webhook()
             return
+        if m := _UPLOAD.match(path):
+            # Преди _body(): тялото е самият файл, не JSON.
+            self._upload(m)
+            return
         body = self._body()
         if body is None:
             return
@@ -975,6 +1096,160 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._error(404, "няма такъв адрес")
 
+
+    # ── качване ──
+    def _upload(self, m: re.Match[str]) -> None:
+        """POST /api/chats/<id>/upload?name=<име> със суровите байтове на файла.
+
+        application/octet-stream, не форма: такава заявка от чужда страница иска
+        preflight, който тук няма кой да разреши (плюс Origin и SameSite=Strict).
+        Всеки отказ първо изчита тялото — иначе клиентът вижда RST, не причината."""
+        app = self.app
+        raw_length = self.headers.get("Content-Length")
+        try:
+            length = int(raw_length) if raw_length is not None else None
+        except ValueError:
+            length = None
+        if length is not None and length < 0:
+            length = None
+        sent = length or 0
+
+        def refuse(code: int, message: str, cap: int = DRAIN_MAX) -> None:
+            self._drain(sent, cap)
+            self._error(code, message)
+
+        if self._foreign_origin():
+            refuse(403, "чужд произход")
+            return
+        user = self._user()
+        if user is None:
+            refuse(401, "нужен е вход")
+            return
+        # Оттук нататък заявката е на влязъл човек: изчита се и файл до тавана,
+        # за да стигне отказът (409 „още върви“) и при 20 MB тяло.
+        cap = max(DRAIN_MAX, 2 * MAX_UPLOAD)
+        chat = app.store.chat(user["id"], m[1])
+        if chat is None:
+            refuse(404, "няма такъв разговор", cap)
+            return
+        if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/octet-stream":
+            refuse(415, "очаква се файл (application/octet-stream)", cap)
+            return
+        name = upload_name(parse_qs(urlsplit(self.path).query,
+                                    keep_blank_values=True).get("name", [""])[0])
+        if name is None:
+            refuse(400, "името на файла не става: без /, \\, :, без точка отпред и "
+                        f"до {MAX_NAME_BYTES} байта", cap)
+            return
+        if length is None:
+            # Без дължина (chunked) няма как да се знае таванът предварително.
+            self.close_connection = True
+            self._error(411, "липсва Content-Length")
+            self._linger()
+            return
+        if length == 0:
+            self._error(400, "файлът е празен")
+            return
+        if length > MAX_UPLOAD:
+            refuse(413, f"файлът е над {MAX_UPLOAD // (1024 * 1024)} MB", cap)
+            return
+        why = app.begin_upload(user["id"], chat["id"], length)
+        if why:
+            code, message = {
+                "busy": (409, "задачата още върви — качи файла след нея"),
+                "uploading": (409, "в този разговор вече се качва файл — изчакай го"),
+                "day": (429, ("днешният лимит за качване "
+                              f"({MAX_UPLOAD_DAY // (1024 * 1024)} MB) е изчерпан — опитай пак утре")),
+            }[why]
+            refuse(code, message, cap)
+            return
+        part: Path | None = None
+        stored = ""
+        try:
+            ws = app.workspace(user["id"], chat["id"])
+            launch.prepare_workspace(ws)
+            target = ws / name
+            try:
+                st: os.stat_result | None = target.lstat()
+            except OSError:
+                st = None
+            if st is not None and stat.S_ISDIR(st.st_mode):
+                refuse(409, "в разговора вече има папка с това име", cap)
+                return
+            replaced = st.st_size if st is not None and stat.S_ISREG(st.st_mode) else 0
+            files = _walk(ws, MAX_ZIP_FILES + 1)
+            total = sum(size for _, _, size in files) - replaced + length
+            if total > MAX_UPLOAD_TOTAL or (not replaced and len(files) >= MAX_ZIP_FILES):
+                refuse(413, "разговорът е пълен — файловете в него са над "
+                            f"{MAX_UPLOAD_TOTAL // (1024 * 1024)} MB; започни нов разговор", cap)
+                return
+            # Недовършеното е ДО папката на разговора: контейнерът не я вижда,
+            # а прекъснато качване не оставя половин файл с истинското име.
+            part = ws.parent / f"{UPLOAD_PART}{uuid.uuid4().hex}"
+            outcome = self._receive(part, length)
+            if outcome != "ok":
+                self.close_connection = True
+                if outcome == "slow":
+                    self._error(408, "качването отне твърде дълго — опитай пак")
+                elif outcome == "disk":
+                    self._error(507, "на сървъра няма място — пиши на поддръжката")
+                return  # "cut": връзката я няма, няма на кого да се отговори
+            _give_to_runner(part)
+            # replace сменя самото име: ако там има връзка, оставена от задачата,
+            # изчезва връзката, не се пише в това, към което сочи.
+            os.replace(part, target)
+            part, stored = None, name
+            self._json(201, {"path": name, "size": length})
+        except OSError as e:
+            print(f"качване: {type(e).__name__}: {e}", file=sys.stderr)
+            self.close_connection = True
+            if not stored:
+                self._error(500, "файлът не се записа — опитай пак")
+        finally:
+            if part is not None:
+                with contextlib.suppress(OSError):
+                    part.unlink()
+            app.end_upload(user["id"], chat["id"], name=stored, refund=0 if stored else length)
+
+    def _receive(self, part: Path, length: int) -> str:
+        """Тялото → `part`, на парчета. "ok", "cut" (връзката спря), "slow"
+        (над общия срок) или "disk" (записът не мина)."""
+        flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+                 | getattr(os, "O_BINARY", 0))
+        deadline = time.monotonic() + UPLOAD_SECONDS
+        with os.fdopen(os.open(part, flags, 0o600), "wb") as f:
+            left = length
+            while left > 0:
+                if time.monotonic() > deadline:
+                    return "slow"
+                try:
+                    chunk = self.rfile.read(min(1 << 16, left))
+                except OSError:
+                    return "cut"
+                if not chunk:
+                    return "cut"
+                try:
+                    f.write(chunk)
+                except OSError as e:
+                    print(f"качване: записът спря: {type(e).__name__}: {e}", file=sys.stderr)
+                    return "disk"
+                left -= len(chunk)
+        return "ok"
+
+    def _linger(self) -> None:
+        """След отказ на тяло без дължина: изчита каквото вече е дошло (до 1 s),
+        за да не стане затварянето RST преди клиентът да е прочел отказа."""
+        end = time.monotonic() + 1.0
+        try:
+            self.connection.settimeout(0.25)
+            left = DRAIN_MAX
+            while left > 0 and time.monotonic() < end:
+                chunk = self.rfile.read1(65536)
+                if not chunk:
+                    break
+                left -= len(chunk)
+        except OSError:
+            pass
 
     # ── плащане ──
     def _stripe_webhook(self) -> None:
