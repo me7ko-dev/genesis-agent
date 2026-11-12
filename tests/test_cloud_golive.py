@@ -7,6 +7,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import sqlite3
 import threading
 from pathlib import Path
 from typing import Any
@@ -373,3 +374,60 @@ def test_caddy_keeps_ip_logs_no_longer_than_the_privacy_page_says() -> None:
     caddy = (ROOT / "cloud" / "deploy" / "Caddyfile").read_text(encoding="utf-8")
     assert "roll_keep_for 720h" in caddy
     assert "до 30 дни" in legal.template("privacy", "bg")
+
+
+# ── изтриване по искане (ОРЗД) ───────────────────────────────────────────────
+# Поверителността обещава „изтриваме профила, разговорите и файловете до 30
+# дни“ — без команда операторът нямаше как (сметката е само с добавяне).
+
+def test_forget_deletes_the_person_but_keeps_the_ledger(tmp_path, capsys) -> None:
+    store = Store(tmp_path / "web.db")
+    uid = store.add_user("ana@example.com", "correct-horse-battery")
+    other = store.add_user("bob@example.com", "correct-horse-battery")
+    token = store.new_session(uid)
+    chat = store.new_chat(uid, "таен проект")
+    turn = store.add_turn(chat, "моята тайна задача")
+    store.add_event(turn, {"type": "answer", "text": "тайният отговор"})
+    store.finish_turn(turn, ok=True, error="", tokens={}, seconds=1.0)
+    store.set_job(turn, "genesis-task-1", 100)
+    store.job_started(turn, 0.0)
+    store.add_entry(uid, "stripe:cs_1", "purchase", 500 * 1_000_000)
+    bob_chat = store.new_chat(other, "на Боб")
+    files = tmp_path / "jobs" / str(uid) / chat
+    files.mkdir(parents=True)
+    (files / "report.csv").write_text("x", encoding="utf-8")
+    (tmp_path / "jobs" / str(other)).mkdir()
+    args = ["forget", "ana@example.com", "--data", str(tmp_path), "--jobs", str(tmp_path / "jobs")]
+
+    assert web.main(args) == 1                       # сметката на хода не е окончателна
+    assert "17 мин" in capsys.readouterr().err and files.exists()
+    store.mark_settled(turn)
+    assert web.main(args) == 0
+    assert "deleted-" in capsys.readouterr().out
+
+    assert not (tmp_path / "jobs" / str(uid)).exists()
+    assert (tmp_path / "jobs" / str(other)).exists()
+    assert store.user_by_email("ana@example.com") is None
+    assert store.session_user(token) is None
+    assert store.check_password(f"deleted-{uid}@invalid", "correct-horse-battery") is None
+    assert store.account(uid)["disabled"] is True
+    assert store.balance(uid) == 500 * 1_000_000      # сметката остава
+    # и не остава в свободните страници на файла (secure_delete)
+    raw = (tmp_path / "web.db").read_bytes()
+    assert "тайна задача".encode() not in raw and "тайният отговор".encode() not in raw
+    assert b"ana@example.com" not in raw
+    with sqlite3.connect(tmp_path / "web.db") as c:
+        assert c.execute("SELECT COUNT(*) FROM chats WHERE user_id = ?", (uid,)).fetchone()[0] == 0
+        assert c.execute("SELECT COUNT(*) FROM turns WHERE chat_id = ?", (chat,)).fetchone()[0] == 0
+        assert c.execute("SELECT COUNT(*) FROM events WHERE turn_id = ?", (turn,)).fetchone()[0] == 0
+        assert c.execute("SELECT COUNT(*) FROM chats WHERE id = ?", (bob_chat,)).fetchone()[0] == 1
+
+
+def test_forget_waits_for_a_running_turn(tmp_path, capsys) -> None:
+    store = Store(tmp_path / "web.db")
+    uid = store.add_user("ana@example.com", "correct-horse-battery")
+    store.add_turn(store.new_chat(uid, "x"), "върви")
+    assert web.main(["forget", "ana@example.com", "--data", str(tmp_path),
+                     "--jobs", str(tmp_path / "jobs")]) == 1
+    assert "върви задача" in capsys.readouterr().err
+    assert store.user_by_email("ana@example.com") is not None

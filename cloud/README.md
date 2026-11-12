@@ -389,6 +389,7 @@ $S users $D                                   # баланс, похарчено
 $S balance ana@example.com $D                 # баланс и последните 20 реда
 $S grant ana@example.com 12.5 $D --note бета  # кредити; отрицателно = корекция
 $S disable ana@example.com $D                 # спира и затваря сесиите; enable го връща
+$S forget ana@example.com $D --jobs /srv/jobs # изтриване по искане (ОРЗД); сметката остава
 $S limits ana@example.com $D --turns-per-day 10 --max-tokens 100000 --monthly-cap 500
 $S limits ana@example.com $D --clear          # обратно към подразбирането
 $S invite $D --count 10 --credits 50 --public-url https://genesis.example.com

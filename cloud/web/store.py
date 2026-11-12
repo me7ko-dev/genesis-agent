@@ -124,9 +124,6 @@ CREATE TABLE IF NOT EXISTS invites (
     used_by INTEGER,
     used_at REAL
 );
--- Заключен вход (2026-10-12, за cloud/monitor.py): броячът на грешните опити
--- е в паметта на сървъра и наблюдението не го вижда. По един ред на ключ
--- (имейл или IP) на прозорец — без имейла и адреса, само вида.
 -- Какво е заредило всяко плащане (2026-11-13), за да се върне при refund:
 -- `pi_…` за пакет (от сесията), `cus_…` за абонамент (всеки абонамент е свой
 -- клиент с един план). Charge.refunded носи payment_intent и customer, не
@@ -138,6 +135,9 @@ CREATE TABLE IF NOT EXISTS stripe_payments (
     amount_cents INTEGER NOT NULL,
     currency TEXT NOT NULL
 );
+-- Заключен вход (2026-10-12, за cloud/monitor.py): броячът на грешните опити
+-- е в паметта на сървъра и наблюдението не го вижда. По един ред на ключ
+-- (имейл или IP) на прозорец — без имейла и адреса, само вида.
 CREATE TABLE IF NOT EXISTS lockouts (
     id INTEGER PRIMARY KEY,
     kind TEXT NOT NULL,            -- email | ip | signup
@@ -507,6 +507,49 @@ class Store:
                 return
             c.execute("UPDATE stripe_customers SET plan = '' WHERE customer = ?", (customer,))
             self._sync_plan(c, int(row["user_id"]))
+
+    def forget(self, user_id: int) -> str:
+        """Изтриване по искане на човека (ОРЗД, 2026-11-13): сесии, разговори,
+        ходове и събитията им; имейлът става deleted-<id>@invalid, паролата —
+        непозната, профилът е спрян. Сметката (ledger) остава — тя е запис за
+        плащанията, който законът иска да се пази, и е само с добавяне.
+
+        Връща "" или защо не може: върви ход, или сметката на ход още не е
+        окончателна (~17 мин след хода) — без ходовете settle не я довършва."""
+        c = sqlite3.connect(self.path, timeout=10, isolation_level=None)
+        c.row_factory = sqlite3.Row
+        # Без secure_delete изтритият текст остава в свободните страници на
+        # файла (и в следващото копие от backup.py) — пробвано тук.
+        c.execute("PRAGMA secure_delete = ON")
+        try:
+            c.execute("BEGIN IMMEDIATE")
+            mine = "SELECT t.id FROM turns t JOIN chats ch ON ch.id = t.chat_id WHERE ch.user_id = ?"
+            if c.execute(f"SELECT 1 FROM turns WHERE id IN ({mine}) "
+                         "AND status IN ('queued', 'running')", (user_id,)).fetchone():
+                c.execute("ROLLBACK")
+                return "върви задача — опитай след нея"
+            if c.execute(f"SELECT 1 FROM turn_jobs WHERE settled = 0 AND turn_id IN ({mine})",
+                         (user_id,)).fetchone():
+                c.execute("ROLLBACK")
+                return "сметката на последния ход още не е окончателна — опитай след ~17 мин"
+            for sql in (f"DELETE FROM events WHERE turn_id IN ({mine})",
+                        f"DELETE FROM turn_jobs WHERE turn_id IN ({mine})",
+                        f"DELETE FROM turns WHERE id IN ({mine})",
+                        "DELETE FROM chats WHERE user_id = ?",
+                        "DELETE FROM sessions WHERE user_id = ?"):
+                c.execute(sql, (user_id,))
+            c.execute("UPDATE users SET email = ?, password = ? WHERE id = ?",
+                      (f"deleted-{user_id}@invalid", hash_password(secrets.token_hex(32)), user_id))
+            c.execute("INSERT INTO accounts (user_id, disabled) VALUES (?, 1) "
+                      "ON CONFLICT(user_id) DO UPDATE SET disabled = 1", (user_id,))
+            c.execute("COMMIT")
+        except BaseException:
+            if c.in_transaction:
+                c.execute("ROLLBACK")
+            raise
+        finally:
+            c.close()
+        return ""
 
     def record_payment(self, ref: str, user_id: int, credits: int, amount_cents: int,
                        currency: str) -> None:

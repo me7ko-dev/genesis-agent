@@ -36,6 +36,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import signal
 import sqlite3
 import stat
@@ -1135,6 +1136,18 @@ def _admin(a: argparse.Namespace, store: Store) -> int:
         print(f"{user['email']}: {billing.fmt_credits(amount)} → баланс "
               f"{billing.fmt_credits(store.balance(uid))} кредита")
         return 0
+    if a.cmd == "forget":
+        why = store.forget(uid)
+        if why:
+            print(f"{user['email']}: не е изтрит — {why}", file=sys.stderr)
+            return 1
+        # Папките на разговорите (файловете от задачите) — след базата: ако
+        # триенето спре по средата, човекът вече не може да влезе.
+        folder = a.jobs / str(uid)
+        if folder.is_dir() and not folder.is_symlink():
+            shutil.rmtree(folder)
+        print(f"{user['email']}: изтрит (deleted-{uid}@invalid); сметката остава за счетоводството")
+        return 0
     if a.cmd in ("disable", "enable"):
         store.set_disabled(uid, a.cmd == "disable")
         print(f"{user['email']}: {'спрян, сесиите са затворени' if a.cmd == 'disable' else 'пуснат'}")
@@ -1185,13 +1198,14 @@ def build_parser() -> argparse.ArgumentParser:
         "grant": sub.add_parser("grant", help="кредити на човек (отрицателно = корекция)"),
         "disable": sub.add_parser("disable", help="спира човека и затваря сесиите му"),
         "enable": sub.add_parser("enable", help="пуска спрян човек"),
+        "forget": sub.add_parser("forget", help="изтрива човека по искане (ОРЗД); сметката остава"),
         "limits": sub.add_parser("limits", help="лимити на един човек"),
         "invite": sub.add_parser("invite", help="нови покани (кодове за еднократна регистрация)"),
         "reconcile": sub.add_parser("reconcile", help="таксува ходовете без такса от шлюза"),
     }
     for name, sp in admin.items():
         sp.add_argument("--data", type=Path, default=Path("/srv/genesis/web"))
-        if name in ("balance", "grant", "disable", "enable", "limits"):
+        if name in ("balance", "grant", "disable", "enable", "limits", "forget"):
             sp.add_argument("email")
     admin["grant"].add_argument("credits", help="напр. 12.5 или -3")
     admin["grant"].add_argument("--note", default="")
@@ -1203,6 +1217,7 @@ def build_parser() -> argparse.ArgumentParser:
     admin["invite"].add_argument("--credits", default="0", help="подарени кредити при регистрация")
     admin["invite"].add_argument("--note", default="")
     admin["invite"].add_argument("--public-url", default="")
+    admin["forget"].add_argument("--jobs", type=Path, default=Path("/srv/jobs"))
     admin["reconcile"].add_argument("--gateway-usage", type=Path, required=True)
     admin["reconcile"].add_argument("--prices", type=Path, default=billing.PRICES)
     srv = sub.add_parser("serve")
