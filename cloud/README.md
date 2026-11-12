@@ -284,6 +284,25 @@ python -m cloud.web.server serve ... --env-file /srv/genesis/keys.env \
 
 ### Stripe (по желание)
 
+**На сървъра (2026-11-13):** `/etc/default/genesis-web` се пише наново от `deploy.sh`,
+затова плащането стои в два файла, които деплоят не пипа:
+
+```bash
+# /srv/genesis/web.args — още аргументи на сървъра (deploy.sh ги добавя)
+--billing --public-url https://genesis.example.com --prices /srv/genesis/prices.json
+--legal /srv/genesis/legal.json --monthly-cap 2000 --turns-per-day 50
+# /srv/genesis/stripe.env (chmod 600) — EnvironmentFile на genesis-web
+STRIPE_SECRET_KEY=sk_live_…
+STRIPE_WEBHOOK_SECRET=whsec_…
+```
+`prices.json` с истинските `price_…` е извън репото (то е публично, а `git pull` би
+спрял на местна промяна). `legal.json` попълва празните места на `/legal/terms`,
+`/legal/privacy`, `/legal/refunds`, `/legal/contact` (`cloud/web/legal.py`, `FIELDS`) и
+след преглед от юрист — `"ПРЕГЛЕДАНО": "да"` маха лентата „чернова“.
+Преди първия истински клиент: `sudo python3 -m cloud.golive_check --stripe-prices
+stripe-prices.json` (от `stripe prices list --live --limit 100`) — без обръщение
+към Stripe казва „ГОТОВО ЗА LIVE“ или какво липсва.
+
 Ключовете **само от средата** на процеса (не флагове, не `prices.json`):
 `STRIPE_SECRET_KEY` (`sk_…`/`rk_…`) и `STRIPE_WEBHOOK_SECRET` (`whsec_…`).
 Нито един → картите са изключени (зареждане само с `grant`); само единият → сървърът
@@ -380,6 +399,15 @@ live ключ → отказ без мрежа, `simulate` срещу сървъ
 цени наред; `simulate` — 400/200/повтор без второ зареждане; `checkout` p5 с 4242 →
 `checkout.session.completed` [200], 500 → 1000; `--plan basic` → `invoice.paid`
 [200], +1500, план basic; „Сметка“ показва 2500.00, бутон само за пакета, 3 реда.
+Отново от край до край (2026-11-13, лаптоп, Stripe CLI 1.55.9, API 2026-10-28.endive,
+отделна папка и порт 8091; Checkout платен от headless Chromium с 4242):
+`simulate` 400/200/повтор без второ зареждане; пакет p5 → +500 (500 → 1000);
+`stripe events resend` на същото събитие → [200], баланс 1000 → 1000; пакет на цена
+4.99 EUR при 500 в цените → „499 eur ≠ 500 eur … без кредити“, баланс без промяна;
+план basic → `invoice.paid` +1500, план basic; refund 2.50 EUR → −250 (1000 → 750),
+refund на останалото → −250 (→ 500); refund на фактурата на плана (по клиента) →
+−1500; DELETE на абонамента → `customer.subscription.deleted`, план ''. Всички
+събития [200]; `custom_text` с връзките към условията се приема от Checkout.
 
 ### Командите на оператора (само локално — няма админ адрес в уеба)
 
@@ -411,7 +439,8 @@ $S reconcile $D --gateway-usage /srv/genesis/gateway/usage.jsonl
 
 Известни пропуски (бетата е с 10 души и ръчно раздадени покани):
 - няма потвърждение на имейла;
-- връщане на пари и chargeback не се отразяват сами — `grant … -X` ръчно;
+- връщане на пари (`charge.refunded`) сваля кредитите сам — пропорционално, веднъж
+  (2026-11-13); оспорено плащане (chargeback) — още ръчно с `grant … -X`;
 - `usage.jsonl` се чете от мястото, до което стигаше преди хода (записано в
   `turn_jobs.usage_start`); `reconcile` и окончателната сметка — от най-ранното
   такова място сред чакащите ходове;
