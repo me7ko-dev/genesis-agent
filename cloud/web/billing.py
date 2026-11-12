@@ -435,6 +435,11 @@ def create_checkout(cfg: StripeConfig, *, user_id: int, email: str, offer: Offer
         form += [("subscription_data[metadata][user_id]", str(user_id)),
                  ("subscription_data[metadata][plan]", offer.id)]
     form.append(("customer_email", email))
+    # Под бутона на Stripe (2026-11-13): изричното искане услугата да започне
+    # веднага и къде са условията — на страницата, където се плаща.
+    form.append(("custom_text[submit][message]",
+                 ("С плащането искаш услугата да започне веднага и приемаш условията: "
+                  f"{cfg.public_url}/legal/terms · връщане на пари: {cfg.public_url}/legal/refunds")))
     req = urllib.request.Request(
         f"{STRIPE_API}/checkout/sessions", data=urllib.parse.urlencode(form).encode(),
         method="POST", headers={

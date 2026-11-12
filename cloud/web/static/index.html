@@ -16,6 +16,7 @@
     <label>Парола <input name="password" type="password" autocomplete="current-password" required></label>
     <button type="submit">Вход</button>
     <p id="login-error" class="error" role="alert"></p>
+    <p class="muted legal-links"><a href="/legal/terms">Условия</a> · <a href="/legal/privacy">Поверителност</a> · <a href="/legal/refunds">Връщане на пари</a> · <a href="/legal/contact">Контакт</a></p>
   </form>
   <form id="signup-form" class="card" hidden>
     <h1>Регистрация с покана</h1>
@@ -23,6 +24,7 @@
     <label>Покана <input name="code" autocomplete="off" required></label>
     <label>Имейл <input name="email" type="email" autocomplete="username" required></label>
     <label>Парола <input name="password" type="password" autocomplete="new-password" minlength="10" required></label>
+    <p class="muted">С регистрацията приемаш <a href="/legal/terms" target="_blank">Условията</a> и <a href="/legal/privacy" target="_blank">Поверителността</a>.</p>
     <button type="submit">Регистрация</button>
     <p id="signup-error" class="error" role="alert"></p>
     <button type="button" id="to-login" class="link">Имам профил — вход</button>
@@ -61,6 +63,7 @@
           <progress id="acc-month-bar" max="1" value="0"></progress></label>
         <p id="acc-plan" class="muted"></p>
         <div id="offers"></div>
+        <p id="offers-legal" class="muted" hidden>С плащането искаш услугата да започне веднага и приемаш <a href="/legal/terms" target="_blank">Условията</a>. Неизползваните кредити се връщат в 14 дни — <a href="/legal/refunds" target="_blank">Връщане на пари</a>.</p>
         <p id="stripe-off" class="muted" hidden>Зареждането с карта още не е включено — пиши ни.</p>
       </div>
       <p class="muted" id="acc-turns"></p>
@@ -70,6 +73,7 @@
         <tbody></tbody>
       </table>
       <p id="account-error" class="error" role="alert"></p>
+      <p class="muted legal-links"><a href="/legal/terms" target="_blank">Условия</a> · <a href="/legal/privacy" target="_blank">Поверителност</a> · <a href="/legal/refunds" target="_blank">Връщане на пари</a> · <a href="/legal/contact" target="_blank">Контакт</a> · <a href="/legal/terms?lang=en" target="_blank" lang="en">English</a></p>
     </div>
   </main>
 </section>

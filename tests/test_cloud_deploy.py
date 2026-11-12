@@ -135,8 +135,8 @@ def test_shell_scripts_parse(script) -> None:
 
 # ── cloud/deploy.sh: сухо пускане ────────────────────────────────────────────
 
-def _dry(tmp_path: Path, keys: str | None,
-         root: Path = ROOT) -> tuple[int, str, Path, list[list[str]]]:
+def _dry(tmp_path: Path, keys: str | None, root: Path = ROOT,
+         **extra: str) -> tuple[int, str, Path, list[list[str]]]:
     fake = tmp_path / "fake"
     fake.write_text(_FAKE.format(python=sys.executable), encoding="utf-8")
     fake.chmod(0o755)
@@ -151,7 +151,9 @@ def _dry(tmp_path: Path, keys: str | None,
            "PYTHON": str(fake), "SYSTEMCTL": str(fake), "FAKE_LOG": str(log),
            "GENESIS_KEYS": str(keys_path), "GENESIS_DOMAIN": "genesis.example.com",
            # не /srv/genesis/monitor.env на машината, на която вървят тестовете
-           "GENESIS_MONITOR_ENV": str(tmp_path / "monitor.env")}
+           "GENESIS_MONITOR_ENV": str(tmp_path / "monitor.env"),
+           "GENESIS_WEB_ARGS_FILE": str(tmp_path / "web.args"),
+           "GENESIS_STRIPE_ENV": str(tmp_path / "stripe.env"), **extra}
     p = subprocess.run([str(BASH), str(root / "cloud" / "deploy.sh")], capture_output=True,
                        check=False, text=True, encoding="utf-8", env=env, cwd=tmp_path, timeout=60)
     calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
@@ -208,6 +210,28 @@ def test_deploy_refuses_a_monitor_config_others_can_read(tmp_path) -> None:
     code, out, _, calls = _dry(tmp_path, SECRET)
     assert code == 0 and f"аларми: {config}" in out, out
     assert any(c[:1] == ["-c"] and "load_settings" in c[1] and c[-1] == str(config) for c in calls)
+
+
+def test_dry_deploy_keeps_the_billing_args_and_the_stripe_keys(tmp_path) -> None:
+    """Плащане (2026-11-13): /etc/default/genesis-web се пише наново при всеки
+    деплой — без web.args --billing изчезваше, а Stripe ключовете нямаха място."""
+    (tmp_path / "web.args").write_text(
+        "# плащане\n--billing --public-url https://genesis.mydomain.eu\n"
+        "--prices /srv/genesis/prices.json  --legal /srv/genesis/legal.json\n", encoding="utf-8")
+    stripe = tmp_path / "stripe.env"
+    stripe.write_text("STRIPE_SECRET_KEY=sk_test_x\n", encoding="utf-8")
+    stripe.chmod(0o644)
+    code, out, _, _ = _dry(tmp_path, SECRET)
+    assert code == 1 and "stripe.env трябва да е 600" in out, out
+    stripe.chmod(0o600)
+    code, out, files, _ = _dry(tmp_path, SECRET)
+    assert code == 0, out
+    line = (files / "genesis-web").read_text(encoding="utf-8").splitlines()[-1]
+    assert line.startswith("GENESIS_WEB_ARGS=--env-file ") and "--gateway-usage" in line
+    assert line.endswith(" --billing --public-url https://genesis.mydomain.eu --prices "
+                         "/srv/genesis/prices.json --legal /srv/genesis/legal.json"), line
+    unit = (files / "genesis-web.service").read_text(encoding="utf-8")
+    assert "EnvironmentFile=-/srv/genesis/stripe.env" in unit
 
 
 def test_the_web_unit_cleans_up_and_keeps_the_database_private() -> None:

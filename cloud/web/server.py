@@ -54,7 +54,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from cloud.gateway import gateway as gw
 from cloud.runner import launch
-from cloud.web import billing
+from cloud.web import billing, legal
 from cloud.web.store import MICRO, SESSION_SECONDS, Store
 
 log = logging.getLogger("genesis.cloud.web")
@@ -118,7 +118,8 @@ class App:
                  prices: billing.Prices | None = None, turns_per_day: int = TURNS_PER_DAY,
                  max_tokens_per_turn: int = launch.TASK_BUDGET,
                  monthly_cap: int = MONTHLY_CAP, stripe: billing.StripeConfig | None = None,
-                 stripe_opener: billing.Opener | None = None) -> None:
+                 stripe_opener: billing.Opener | None = None,
+                 legal_values: dict[str, str] | None = None) -> None:
         if prices is not None and gateway is None:
             # Без шлюза токените ги казва кодът в контейнера (2026-10-11).
             raise ValueError("плащането иска шлюза (--gateway-usage)")
@@ -139,6 +140,8 @@ class App:
             raise ValueError("Stripe иска плащане (--billing) и --public-url")
         self.stripe = stripe
         self.stripe_opener = stripe_opener
+        # Данните на продавача за правните страници (--legal); {} = празни места.
+        self.legal_values = legal_values or {}
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="turn")
         self._failures: dict[str, list[float]] = {}
         self._noted: dict[str, float] = {}     # ключ → кога заключването е записано
@@ -795,6 +798,16 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/healthz":
             self._json(200, {"ok": True})
             return
+        if path.startswith("/legal/"):
+            # Без вход (2026-11-13): условията се четат преди регистрация и плащане.
+            page = path.removeprefix("/legal/")
+            lang = "en" if parse_qs(url.query).get("lang") == ["en"] else "bg"
+            if page not in legal.PAGES:
+                self._error(404, "няма такава страница")
+                return
+            body = legal.render(page, lang, self.app.legal_values).encode()
+            self._send(200, body, _STATIC_TYPES[".html"])
+            return
         user = self._user()
         if user is None:
             self._error(401, "нужен е вход")
@@ -1158,7 +1171,9 @@ def _admin(a: argparse.Namespace, store: Store) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """Командите и флаговете — и за main, и за cloud/golive_check.py, който
+    чете аргументите от /etc/default/genesis-web точно както serve."""
     p = argparse.ArgumentParser(description="Genesis онлайн — вход, чат, файлове.")
     sub = p.add_subparsers(dest="cmd", required=True)
     add = sub.add_parser("add-user", help="нов човек (бета — само ръчно)")
@@ -1219,7 +1234,13 @@ def main(argv: list[str] | None = None) -> int:
                      help="месечен таван на харченето в кредити (с плащане)")
     srv.add_argument("--public-url", default="",
                      help="https://адресът на услугата (за Stripe; иначе GENESIS_PUBLIC_URL)")
-    a = p.parse_args(argv)
+    srv.add_argument("--legal", type=Path,
+                     help="JSON с данните на продавача за правните страници (/legal/…)")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    a = build_parser().parse_args(argv)
     # README-то казва „никога и двете“, а кодът приемаше и вярваше на
     # CF-Connecting-IP — зад Caddy клиентът си го пише сам и спирачката на
     # входа не спираше нищо (одит 2026-10-11: 12 × 401, нито един 429).
@@ -1266,6 +1287,13 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as e:
         print(e, file=sys.stderr)
         return 2
+    legal_values: dict[str, str] = {}
+    if a.legal:
+        try:
+            legal_values = legal.load_values(a.legal)
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 2
     gateway = None
     if a.gateway_usage:
         if not a.env_file:
@@ -1282,7 +1310,8 @@ def main(argv: list[str] | None = None) -> int:
               env_file=a.env_file, runtime=a.runtime, secure_cookie=not a.insecure_cookie,
               trust_proxy="cloudflare" if a.trust_cloudflare else a.trust_proxy, gateway=gateway,
               recover=False, prices=prices, turns_per_day=a.turns_per_day,
-              max_tokens_per_turn=a.max_tokens_per_turn, monthly_cap=monthly_cap, stripe=stripe)
+              max_tokens_per_turn=a.max_tokens_per_turn, monthly_cap=monthly_cap, stripe=stripe,
+              legal_values=legal_values)
     try:
         server = make_server(app, a.host, a.port)
     except OSError as e:

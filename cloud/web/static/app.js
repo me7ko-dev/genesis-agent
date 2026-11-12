@@ -312,6 +312,9 @@ function renderAccount(a) {
     for (const p of a.packs) offers.append(offerButton(`${p.credits} кредита — ${p.price}`, { pack: p.id }));
     if (!a.plan) for (const p of a.plans) offers.append(offerButton(`Абонамент: ${p.credits} кредита на месец — ${p.price}`, { plan: p.id }));
   }
+  // Условията до бутона за плащане (2026-11-13): правото на отказ се губи
+  // за изхарченото само ако човекът е знаел, че услугата започва веднага.
+  $("offers-legal").hidden = offers.children.length === 0;
   const body = $("history").tBodies[0];
   body.replaceChildren();
   for (const h of a.history) {

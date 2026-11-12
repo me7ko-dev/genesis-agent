@@ -9,7 +9,10 @@
 # (/srv/genesis/keys.env), GENESIS_RUNTIME (напр. runsc за gVisor),
 # GENESIS_NO_PULL=1, DEPLOY_DRY_DIR (къде сухото пускане пише файловете),
 # GENESIS_MONITOR_ENV (само за тестовете: genesis-monitor.service чете
-# /srv/genesis/monitor.env).
+# /srv/genesis/monitor.env), GENESIS_WEB_ARGS_FILE (/srv/genesis/web.args —
+# още аргументи на сървъра: --billing, --public-url, --prices, --legal…),
+# GENESIS_STRIPE_ENV (само за тестовете: genesis-web.service чете
+# /srv/genesis/stripe.env).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO="$(pwd)"
@@ -17,6 +20,8 @@ DRY="${DEPLOY_DRY_RUN:-0}"
 DOMAIN="${GENESIS_DOMAIN:-}"
 KEYS="${GENESIS_KEYS:-/srv/genesis/keys.env}"
 MONITOR_ENV="${GENESIS_MONITOR_ENV:-/srv/genesis/monitor.env}"
+WEB_ARGS_FILE="${GENESIS_WEB_ARGS_FILE:-/srv/genesis/web.args}"
+STRIPE_ENV="${GENESIS_STRIPE_ENV:-/srv/genesis/stripe.env}"
 USAGE="${GENESIS_GATEWAY_DATA:-/srv/genesis/gateway}/usage.jsonl"
 DOCKER="${DOCKER:-docker}"
 PYTHON="${PYTHON:-python3}"
@@ -90,6 +95,19 @@ if [ -f "$MONITOR_ENV" ]; then
 else
   echo "  внимание: няма $MONITOR_ENV — алармите ще са само в журнала (виж cloud/deploy/monitor.env.example)"
 fi
+# Плащане (2026-11-13): /etc/default/genesis-web се пише наново при всеки
+# деплой, затова --billing и останалите стоят в web.args, а Stripe ключовете —
+# в stripe.env (EnvironmentFile на услугата, само за root).
+if [ -f "$STRIPE_ENV" ]; then
+  [ "$(stat -c %a "$STRIPE_ENV")" = 600 ]     || fail "$STRIPE_ENV трябва да е 600 (Stripe ключове), а е $(stat -c %a "$STRIPE_ENV")"
+  echo "  Stripe: $STRIPE_ENV"
+fi
+EXTRA=""
+if [ -f "$WEB_ARGS_FILE" ]; then
+  EXTRA="$(grep -v '^[[:space:]]*#' "$WEB_ARGS_FILE" | tr '
+' ' ' | tr -s ' ' | sed 's/^ //; s/ $//')"
+  echo "  още аргументи: $EXTRA"
+fi
 AVAIL_KB="$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4}')"
 FREE_GB=$(( ${AVAIL_KB:-0} / 1048576 ))
 [ "$FREE_GB" -ge 10 ] || echo "  внимание: само ${FREE_GB} GB свободни (образите са ~1 GB, задачите пишат в /srv/jobs)"
@@ -122,6 +140,7 @@ ARGS=""
 if [ "$MODE" = gateway ]; then ARGS="--env-file $KEYS --gateway-usage $USAGE"
 elif [ -f "$KEYS" ]; then ARGS="--env-file $KEYS"; fi
 [ -n "${GENESIS_RUNTIME:-}" ] && ARGS="$ARGS --runtime $GENESIS_RUNTIME"
+[ -n "$EXTRA" ] && ARGS="$ARGS $EXTRA"
 DEFAULTS="$(mktemp)"
 printf '# cloud/deploy.sh — режим %s\nGENESIS_WEB_ARGS=%s\n' "$MODE" "$ARGS" > "$DEFAULTS"
 install_file "$DEFAULTS" /etc/default/genesis-web

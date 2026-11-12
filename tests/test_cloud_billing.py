@@ -1016,7 +1016,11 @@ def test_checkout_sends_exactly_what_stripe_needs(tmp_path) -> None:
             "success_url": "https://genesis.example/?view=account&paid=1",
             "cancel_url": "https://genesis.example/?view=account",
             "client_reference_id": "1", "metadata[user_id]": "1", "metadata[pack]": "p5",
-            "customer_email": "ana@example.com"}
+            "customer_email": "ana@example.com",
+            "custom_text[submit][message]":
+                "С плащането искаш услугата да започне веднага и приемаш условията: "
+                "https://genesis.example/legal/terms · връщане на пари: "
+                "https://genesis.example/legal/refunds"}
         # абонамент: метаданни и на абонамента; винаги нов клиент по имейла —
         # всеки абонамент е свой клиент (ревю 2026-10-11), и след стар абонамент
         app.store.link_customer("cus_9", 1, "basic")

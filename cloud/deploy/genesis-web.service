@@ -15,6 +15,9 @@ Type=simple
 WorkingDirectory=@REPO@
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-/etc/default/genesis-web
+# Stripe ключовете (2026-11-13): root 600, не в /etc/default — deploy.sh пише
+# онзи файл наново всеки път. Проверка: python3 -m cloud.golive_check.
+EnvironmentFile=-/srv/genesis/stripe.env
 # web.db държи scrypt хешове; с umask 022 се създаваше 0644 (одит 2026-10-11).
 UMask=0077
 ExecStart=/usr/bin/python3 -m cloud.web.server serve --data /srv/genesis/web --jobs /srv/jobs --trust-proxy $GENESIS_WEB_ARGS

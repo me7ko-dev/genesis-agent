@@ -313,7 +313,7 @@ def test_checkout_times_out_with_what_to_check(tmp_path, capsys) -> None:
 def test_the_listen_events_are_the_ones_the_webhook_acts_on() -> None:
     # Stripe CLI 1.55 (2026-11-10) иска --events; липсващо тук = никога не идва.
     src = Path(billing.__file__).read_text(encoding="utf-8")
-    handled = set(re.findall(r'"((?:checkout|invoice|customer)\.[a-z_.]+)"', src))
+    handled = set(re.findall(r'"((?:checkout|invoice|customer|charge)\.[a-z_.]+)"', src))
     assert set(sc.LISTEN_EVENTS.split(",")) == handled
 
 
