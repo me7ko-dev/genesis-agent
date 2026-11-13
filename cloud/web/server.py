@@ -344,6 +344,7 @@ class App:
             "month_spent": fmt(spent), "monthly_cap": fmt(cap),
             "turns_today": self.store.turns_today(uid), "turns_per_day": per_day,
             "max_tokens_per_turn": max_tokens, "plan": account["plan"],
+            "plan_ends": self.store.plan_ends(uid) if account["plan"] else None,
             "billing": prices is not None, "stripe": self.stripe is not None,
             "packs": packs, "plans": plans,
             # Stripe без нито един price_… в prices.json (2026-11-10): страницата
@@ -968,6 +969,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"ok": True}, {"Set-Cookie": self._cookie("", 0)})
         elif path == "/api/checkout":
             self._checkout(user, body)
+        elif path == "/api/subscription/cancel":
+            self._cancel_plan(user)
         elif path == "/api/chats":
             title = str(body.get("title") or "Нов разговор").strip()
             self._json(201, {"id": store.new_chat(user["id"], title)})
@@ -1052,6 +1055,31 @@ class Handler(BaseHTTPRequestHandler):
             self._error(502, "плащането не отговаря — опитай пак след малко")
             return
         self._json(200, {"url": url})
+
+
+    def _cancel_plan(self, user: dict[str, Any]) -> None:
+        app = self.app
+        if app.prices is None or app.stripe is None:
+            self._error(404, "няма такъв адрес")
+            return
+        customers = app.store.active_customers(user["id"])
+        if not customers:
+            self._error(409, "нямаш активен абонамент")
+            return
+        kw = {"opener": app.stripe_opener} if app.stripe_opener is not None else {}
+        try:
+            ends = billing.cancel_subscriptions(app.stripe, customers, **kw)
+        except billing.StripeError:
+            self._error(502, "Stripe не отговаря — опитай пак след малко")
+            return
+        if not ends:
+            # В Stripe вече няма активен; customer.subscription.deleted идва
+            # или е дошъл — планът изчезва с него.
+            self._error(409, "абонаментът вече е спрян")
+            return
+        for customer, at in ends.items():
+            app.store.set_cancel(customer, at)
+        self._json(200, {"ends": app.store.plan_ends(user["id"]) or max(ends.values())})
 
 
 # socketserver слуша с опашка 5: при 20 едновременни заявки Linux

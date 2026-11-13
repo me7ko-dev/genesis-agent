@@ -409,6 +409,12 @@ live ключ → отказ без мрежа, `simulate` срещу сървъ
 refund на останалото → −250 (→ 500); refund на фактурата на плана (по клиента) →
 −1500; DELETE на абонамента → `customer.subscription.deleted`, план ''. Всички
 събития [200]; `custom_text` с връзките към условията се приема от Checkout.
+Следобед (2026-11-13): „Спри абонамента“ (`POST /api/subscription/cancel`) → в Stripe
+`cancel_at_period_end=true`, `cancel_at` = краят на месеца, „Сметка“: план basic, „важи до…“;
+пакет с карта 4000 0000 0000 0259 → `charge.dispute.created` −500, спор с
+`winning_evidence` → `charge.dispute.closed` (won) +500. Номерата на споровете са `du_…`
+(не само `dp_…`), а спорът може да дойде в същата секунда ПРЕДИ
+`checkout.session.completed` — затова пресен спор за непознато плащане е 503.
 
 ### Командите на оператора (само локално — няма админ адрес в уеба)
 

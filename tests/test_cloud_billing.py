@@ -1787,6 +1787,29 @@ def test_a_dispute_takes_the_credits_and_a_won_dispute_gives_them_back(tmp_path)
     assert app.store.balance(1) == 500 * MICRO
 
 
+def test_disputes_with_the_new_du_ids_are_found(tmp_path) -> None:
+    # Stripe тестов режим (2026-11-13, API 2026-10-28.endive): спорът е du_…, не
+    # dp_… — с проверка само за dp_ истинският спор беше „непознато плащане“.
+    app, _ = _billing_app(tmp_path)
+    _paid_pack(app)
+    assert _h(app, "charge.dispute.created", _dispute(id="du_1"))[1].startswith("оспорено")
+    assert app.store.balance(1) == 0
+
+
+def test_a_dispute_before_the_checkout_event_is_retried(tmp_path) -> None:
+    # Stripe тестов режим (2026-11-13): charge.dispute.created дойде преди
+    # checkout.session.completed — с 200 не се повтаряше и кредитите оставаха.
+    app, _ = _billing_app(tmp_path)
+    fresh = _dispute(created=int(time.time()))
+    assert _h(app, "charge.dispute.created", fresh)[0] == 503
+    _paid_pack(app)
+    assert _h(app, "charge.dispute.created", fresh)[1] == "оспорено — свалени 500.00 кредита"
+    assert app.store.balance(1) == 0
+    # стар спор за непознато плащане (купено преди 13.11, абонамент) — 200, ръчно
+    old = _dispute(payment_intent="pi_old", created=int(time.time()) - 2 * 3600)
+    assert _h(app, "charge.dispute.created", old) == (200, "непознато плащане — пропуснато")
+
+
 def test_a_lost_dispute_keeps_the_credits_taken(tmp_path) -> None:
     app, _ = _billing_app(tmp_path)
     _paid_pack(app)
@@ -1819,9 +1842,111 @@ def test_a_partial_refund_then_a_full_dispute_takes_only_the_rest(tmp_path) -> N
 
 
 @pytest.mark.parametrize("over", [{"payment_intent": "pi_other"}, {"currency": "usd"},
-                                  {"amount": 0}, {"id": "du_1"}])
+                                  {"amount": 0}, {"id": ""}])
 def test_a_dispute_of_an_unknown_or_odd_payment_changes_nothing(tmp_path, over) -> None:
     app, _ = _billing_app(tmp_path)
     _paid_pack(app)
     _h(app, "charge.dispute.created", _dispute(**over))
     assert app.store.balance(1) == 500 * MICRO
+
+
+# ── абонаментът се спира от самия човек (2026-11-13) ─────────────────────────
+# Преди: само с имейл до оператора.
+
+class FakeSubs:
+    """Stripe за /v1/subscriptions: списък по клиент и cancel_at_period_end."""
+
+    def __init__(self, status: int = 200) -> None:
+        self.status = status
+        self.subs = {"cus_9": {"id": "sub_9", "customer": "cus_9", "status": "active",
+                               "cancel_at_period_end": False, "cancel_at": None}}
+        self.seen: list[Any] = []
+
+    def __call__(self, req: Any, timeout: float = 0) -> Any:
+        from urllib.parse import parse_qsl, urlsplit
+        self.seen.append(req)
+        if self.status != 200:
+            import io
+            import urllib.error
+            raise urllib.error.HTTPError(req.full_url, self.status, "err", {},  # type: ignore[arg-type]
+                                         io.BytesIO(b"{}"))
+        url = urlsplit(req.full_url)
+        if req.get_method() == "GET":
+            customer = dict(parse_qsl(url.query))["customer"]
+            data = [s for s in self.subs.values() if s["customer"] == customer]
+            return _Resp(json.dumps({"data": data}).encode())
+        sid = url.path.rsplit("/", 1)[1]
+        sub = next(s for s in self.subs.values() if s["id"] == sid)
+        if dict(parse_qsl(req.data.decode())).get("cancel_at_period_end") == "true":
+            sub.update(cancel_at_period_end=True, cancel_at=1_900_000_000)
+        return _Resp(json.dumps(sub).encode())
+
+
+def _cancel_app(tmp_path: Path, fake: FakeSubs) -> tuple[web.App, Any]:
+    app, _ = _billing_app(tmp_path, stripe=billing.StripeConfig(SK, WHSEC, "https://genesis.example"),
+                          stripe_opener=fake)
+    return app, _serve(app)
+
+
+def test_a_subscriber_cancels_at_the_end_of_the_paid_month(tmp_path) -> None:
+    fake = FakeSubs()
+    app, srv = _cancel_app(tmp_path, fake)
+    try:
+        cl = Client(srv.server_address[1])
+        cl.login()
+        assert cl.json("POST", "/api/subscription/cancel", {})[0] == 409   # няма абонамент
+        app.store.link_customer("cus_9", 1, "basic")
+        assert cl.json("GET", "/api/account")[1]["plan_ends"] is None
+        code, data = cl.json("POST", "/api/subscription/cancel", {})
+        assert code == 200 and data == {"ends": 1_900_000_000}
+        post = [r for r in fake.seen if r.get_method() == "POST"]
+        assert len(post) == 1 and post[0].full_url.endswith("/v1/subscriptions/sub_9")
+        assert post[0].data == b"cancel_at_period_end=true"
+        assert post[0].get_header("Authorization") == f"Bearer {SK}"
+        acc = cl.json("GET", "/api/account")[1]
+        assert acc["plan"] == "basic" and acc["plan_ends"] == 1_900_000_000
+        # повторно: вече е спрян — не праща втори POST
+        assert cl.json("POST", "/api/subscription/cancel", {})[0] == 200
+        assert len([r for r in fake.seen if r.get_method() == "POST"]) == 1
+        # чужд Origin — като при плащането
+        assert cl.json("POST", "/api/subscription/cancel", {},
+                       headers={"Origin": "https://evil.example"})[0] == 403
+        # в края Stripe праща customer.subscription.deleted → без план
+        billing.handle_event(app.store, app.prices,
+                             _ev("customer.subscription.deleted", {"customer": "cus_9"}), live=False)
+        acc = cl.json("GET", "/api/account")[1]
+        assert acc["plan"] == "" and acc["plan_ends"] is None
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_a_stripe_error_while_cancelling_is_a_502_and_changes_nothing(tmp_path) -> None:
+    app, srv = _cancel_app(tmp_path, FakeSubs(status=500))
+    try:
+        cl = Client(srv.server_address[1])
+        cl.login()
+        app.store.link_customer("cus_9", 1, "basic")
+        assert cl.json("POST", "/api/subscription/cancel", {})[0] == 502
+        assert app.store.plan_ends(1) is None
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_a_second_active_subscription_keeps_the_plan_uncancelled(tmp_path) -> None:
+    app, _ = _billing_app(tmp_path)
+    app.store.link_customer("cus_1", 1, "basic")
+    app.store.link_customer("cus_2", 1, "basic")
+    app.store.set_cancel("cus_1", 1_900_000_000)
+    assert app.store.plan_ends(1) is None
+    app.store.set_cancel("cus_2", 1_900_000_100)
+    assert app.store.plan_ends(1) == 1_900_000_100
+
+
+def test_the_page_has_the_cancel_button_without_a_browser_dialog() -> None:
+    root = Path(web.__file__).parent / "static"
+    page = (root / "index.html").read_text(encoding="utf-8")
+    js = (root / "app.js").read_text(encoding="utf-8")
+    assert 'id="plan-cancel-btn"' in page and 'id="plan-cancel-yes"' in page
+    assert '"/api/subscription/cancel"' in js and "confirm(" not in js

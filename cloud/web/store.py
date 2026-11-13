@@ -138,6 +138,12 @@ CREATE TABLE IF NOT EXISTS stripe_payments (
 -- Заключен вход (2026-10-12, за cloud/monitor.py): броячът на грешните опити
 -- е в паметта на сървъра и наблюдението не го вижда. По един ред на ключ
 -- (имейл или IP) на прозорец — без имейла и адреса, само вида.
+-- Абонамент, спрян от самия човек (2026-11-13): Stripe го държи до края на
+-- платения месец (cancel_at_period_end), после идва customer.subscription.deleted.
+CREATE TABLE IF NOT EXISTS stripe_cancels (
+    customer TEXT PRIMARY KEY,
+    ends REAL NOT NULL               -- cancel_at от Stripe (unix)
+);
 CREATE TABLE IF NOT EXISTS lockouts (
     id INTEGER PRIMARY KEY,
     kind TEXT NOT NULL,            -- email | ip | signup
@@ -550,6 +556,28 @@ class Store:
         finally:
             c.close()
         return ""
+
+    def active_customers(self, user_id: int) -> list[str]:
+        """Stripe клиентите на човека с още активен абонамент."""
+        with self._db() as c:
+            rows = c.execute("SELECT customer FROM stripe_customers WHERE user_id = ? "
+                             "AND plan != '' ORDER BY rowid", (user_id,)).fetchall()
+        return [r["customer"] for r in rows]
+
+    def set_cancel(self, customer: str, ends: float) -> None:
+        with self._db() as c:
+            c.execute("INSERT INTO stripe_cancels (customer, ends) VALUES (?, ?) "
+                      "ON CONFLICT(customer) DO UPDATE SET ends = excluded.ends", (customer, ends))
+
+    def plan_ends(self, user_id: int) -> float | None:
+        """Кога спира абонаментът, ако човекът е спрял всичките си активни."""
+        with self._db() as c:
+            rows = c.execute("SELECT x.ends FROM stripe_customers s LEFT JOIN stripe_cancels x "
+                             "ON x.customer = s.customer WHERE s.user_id = ? AND s.plan != ''",
+                             (user_id,)).fetchall()
+        if not rows or any(r["ends"] is None for r in rows):
+            return None
+        return max(float(r["ends"]) for r in rows)
 
     def record_payment(self, ref: str, user_id: int, credits: int, amount_cents: int,
                        currency: str) -> None:

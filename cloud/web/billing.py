@@ -468,6 +468,60 @@ def create_checkout(cfg: StripeConfig, *, user_id: int, email: str, offer: Offer
     return url
 
 
+def _call(cfg: StripeConfig, method: str, path: str, form: list[tuple[str, str]] | None,
+          opener: Opener) -> dict[str, Any]:
+    """Едно обръщение към Stripe API → JSON обект, или StripeError (подробностите в stderr)."""
+    headers = {"Authorization": f"Bearer {cfg.secret_key}"}
+    data = None
+    if form is not None:
+        data = urllib.parse.urlencode(form).encode()
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+        headers["Idempotency-Key"] = str(uuid.uuid4())
+    req = urllib.request.Request(f"{STRIPE_API}/{path}", data=data, method=method, headers=headers)
+    where = f"{method} {path.split('?')[0]}"
+    try:
+        with opener(req, timeout=20) as r:
+            body = r.read()
+    except urllib.error.HTTPError as e:
+        _log(f"{where} {e.code}: {e.read()[:2000].decode('utf-8', 'replace')}")
+        raise StripeError(f"stripe {e.code}") from None
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        _log(f"{where}: {type(e).__name__}: {e}")
+        raise StripeError(type(e).__name__) from None
+    try:
+        out = json.loads(body)
+    except (ValueError, RecursionError):
+        out = None
+    if not isinstance(out, dict):
+        raise StripeError("bad json")
+    return out
+
+
+def cancel_subscriptions(cfg: StripeConfig, customers: list[str], *,
+                         opener: Opener = urllib.request.urlopen) -> dict[str, float]:
+    """Човекът сам спира абонамента (2026-11-13): в края на платения месец
+    (cancel_at_period_end), не веднага — платеното си остава негово. Преди: само
+    с имейл до оператора, а отказът трябва да е лесен колкото покупката.
+
+    Връща клиент → кога спира (cancel_at). В края Stripe праща
+    customer.subscription.deleted — тогава планът изчезва (handle_event)."""
+    ends: dict[str, float] = {}
+    for customer in customers:
+        q = urllib.parse.urlencode({"customer": customer, "status": "active", "limit": "10"})
+        subs = _call(cfg, "GET", f"subscriptions?{q}", None, opener).get("data")
+        for sub in subs if isinstance(subs, list) else []:
+            sid = sub.get("id") if isinstance(sub, dict) else None
+            if not isinstance(sid, str) or not sid.startswith("sub_"):
+                continue
+            if not sub.get("cancel_at_period_end"):
+                sub = _call(cfg, "POST", f"subscriptions/{sid}",
+                            [("cancel_at_period_end", "true")], opener)
+            at = sub.get("cancel_at")
+            if type(at) is int and at > 0:
+                ends[customer] = max(ends.get(customer, 0.0), float(at))
+    return ends
+
+
 def _log(msg: str) -> None:
     print(f"stripe: {msg}", file=sys.stderr)
 
@@ -611,6 +665,10 @@ def _owed(paid: dict[str, Any], cents: int) -> int:
     return paid["credits"] * min(cents, paid["amount_cents"]) // paid["amount_cents"]
 
 
+# Колко време след спора „непознато плащане“ още може да е сесия, която идва.
+DISPUTE_RETRY = 3600
+
+
 def _disputed(store: Store, obj: dict[str, Any], ref: str, *, closed: bool) -> tuple[int, str]:
     """Оспорено плащане (chargeback, 2026-11-13): банката взима парите още при
     отварянето на спора, затова кредитите се свалят тогава (charge.dispute.created);
@@ -622,7 +680,15 @@ def _disputed(store: Store, obj: dict[str, Any], ref: str, *, closed: bool) -> t
     dispute, charge = _str(obj, "id"), _str(obj, "charge")
     amount, currency = obj.get("amount"), _str(obj, "currency").lower()
     paid = store.payment(_str(obj, "payment_intent"))
-    if paid is None or not dispute.startswith("dp_") or not charge.startswith(("ch_", "py_")):
+    if not dispute.startswith(("dp_", "du_")) or not charge.startswith(("ch_", "py_")):
+        return 200, "непознат спор — пропуснато"
+    if paid is None:
+        # Stripe тестов режим (2026-11-13): спорът дойде в същата секунда, но
+        # ПРЕДИ checkout.session.completed — „непознато“ с 200 не се повтаря и
+        # кредитите оставаха. Пресен спор → 503, Stripe опитва пак след сесията.
+        created = obj.get("created")
+        if not closed and type(created) is int and time.time() - created < DISPUTE_RETRY:
+            return 503, "плащането още не е записано — ще се опита пак"
         _log(f"спор {dispute} за {charge}: непознато плащане — свали кредитите с grant … -X")
         return 200, "непознато плащане — пропуснато"
     if closed:
