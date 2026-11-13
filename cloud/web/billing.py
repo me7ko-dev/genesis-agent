@@ -505,6 +505,8 @@ def handle_event(store: Store, prices: Prices, event: dict[str, Any], *,
         return 200, "абонаментът е спрян"
     if etype == "charge.refunded":
         return _refunded(store, obj, ref)
+    if etype in ("charge.dispute.created", "charge.dispute.closed"):
+        return _disputed(store, obj, ref, closed=etype == "charge.dispute.closed")
     return 200, "пропуснато"
 
 
@@ -599,6 +601,38 @@ def _refunded(store: Store, obj: dict[str, Any], ref: str) -> tuple[int, str]:
     if type(refunded) is not int or refunded <= 0 or currency != paid["currency"]:
         _log(f"refund {charge}: {refunded!r} {currency} — без промяна")
         return 200, "сумата не съвпада — пропуснато"
-    owed = paid["credits"] * min(refunded, paid["amount_cents"]) // paid["amount_cents"]
-    taken = store.refund(paid["user_id"], charge, refunded, owed, ref)
+    taken = store.settle_charge(paid["user_id"], charge, f"refund:{refunded}",
+                                _owed(paid, refunded), ref)
     return 200, f"върнати {fmt_credits(taken)} кредита" if taken else "вече е отразено"
+
+
+def _owed(paid: dict[str, Any], cents: int) -> int:
+    """Кредитите (µc), купени с `cents` от плащането — пропорционално, до цялото."""
+    return paid["credits"] * min(cents, paid["amount_cents"]) // paid["amount_cents"]
+
+
+def _disputed(store: Store, obj: dict[str, Any], ref: str, *, closed: bool) -> tuple[int, str]:
+    """Оспорено плащане (chargeback, 2026-11-13): банката взима парите още при
+    отварянето на спора, затова кредитите се свалят тогава (charge.dispute.created);
+    спечелен спор (closed + won) ги връща. Преди: само ръчно с grant … -X.
+
+    Спорът носи payment_intent, но не и клиента — пакетите се намират,
+    абонаментните фактури не (от API „basil“ фактурата няма payment_intent):
+    тях операторът сваля ръчно, редът в журнала казва кое."""
+    dispute, charge = _str(obj, "id"), _str(obj, "charge")
+    amount, currency = obj.get("amount"), _str(obj, "currency").lower()
+    paid = store.payment(_str(obj, "payment_intent"))
+    if paid is None or not dispute.startswith("dp_") or not charge.startswith(("ch_", "py_")):
+        _log(f"спор {dispute} за {charge}: непознато плащане — свали кредитите с grant … -X")
+        return 200, "непознато плащане — пропуснато"
+    if closed:
+        if _str(obj, "status") != "won":
+            return 200, "спорът е загубен — кредитите остават свалени"
+        back = store.dispute_won(paid["user_id"], charge, dispute, ref)
+        return 200, f"спорът е спечелен — върнати {fmt_credits(back)} кредита" if back             else "вече е отразено"
+    if type(amount) is not int or amount <= 0 or currency != paid["currency"]:
+        _log(f"спор {dispute}: {amount!r} {currency} — без промяна")
+        return 200, "сумата не съвпада — пропуснато"
+    taken = store.settle_charge(paid["user_id"], charge, f"dispute:{dispute}",
+                                _owed(paid, amount), ref)
+    return 200, f"оспорено — свалени {fmt_credits(taken)} кредита" if taken else "вече е отразено"

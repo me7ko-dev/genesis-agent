@@ -1761,3 +1761,67 @@ def test_a_refund_over_http_with_a_signed_webhook(stripe) -> None:
                                _session(payment_intent="pi_1"))) == 200
     assert _deliver(cl, _event("charge.refunded", _charge(500), eid="evt_r")) == 200
     assert app.store.balance(1) == 0
+
+
+# ── оспорено плащане (chargeback, 2026-11-13) ────────────────────────────────
+# Преди: само ръчно с grant … -X, а банката взима парите още при спора.
+
+def _dispute(**over: Any) -> dict[str, Any]:
+    return {"id": "dp_1", "object": "dispute", "charge": "ch_1", "payment_intent": "pi_1",
+            "amount": 500, "currency": "eur", "status": "needs_response", **over}
+
+
+def _h(app: web.App, etype: str, obj: dict[str, Any]) -> tuple[int, str]:
+    return billing.handle_event(app.store, app.prices, _ev(etype, obj), live=False)
+
+
+def test_a_dispute_takes_the_credits_and_a_won_dispute_gives_them_back(tmp_path) -> None:
+    app, _ = _billing_app(tmp_path)
+    _paid_pack(app)
+    assert _h(app, "charge.dispute.created", _dispute()) == (200, "оспорено — свалени 500.00 кредита")
+    assert _h(app, "charge.dispute.created", _dispute()) == (200, "вече е отразено")
+    assert app.store.balance(1) == 0
+    won = _dispute(status="won")
+    assert _h(app, "charge.dispute.closed", won) == (200, "спорът е спечелен — върнати 500.00 кредита")
+    assert _h(app, "charge.dispute.closed", won) == (200, "вече е отразено")
+    assert app.store.balance(1) == 500 * MICRO
+
+
+def test_a_lost_dispute_keeps_the_credits_taken(tmp_path) -> None:
+    app, _ = _billing_app(tmp_path)
+    _paid_pack(app)
+    _h(app, "charge.dispute.created", _dispute())
+    assert _h(app, "charge.dispute.closed", _dispute(status="lost"))[1].startswith("спорът е загубен")
+    assert app.store.balance(1) == 0
+
+
+@pytest.mark.parametrize("order", ["refund_first", "dispute_first"])
+def test_a_refund_and_a_dispute_on_one_charge_never_take_twice(tmp_path, order) -> None:
+    app, _ = _billing_app(tmp_path)
+    _paid_pack(app)
+    steps = [("charge.refunded", _charge(500)), ("charge.dispute.created", _dispute())]
+    if order == "dispute_first":
+        steps.reverse()
+    for etype, obj in steps:
+        _h(app, etype, obj)
+    assert app.store.balance(1) == 0                     # не −500
+
+
+def test_a_partial_refund_then_a_full_dispute_takes_only_the_rest(tmp_path) -> None:
+    app, _ = _billing_app(tmp_path)
+    _paid_pack(app)
+    _h(app, "charge.refunded", _charge(200))
+    assert _h(app, "charge.dispute.created", _dispute())[1] == "оспорено — свалени 300.00 кредита"
+    assert app.store.balance(1) == 0
+    # спечелен спор връща само своето, не и върнатото по refund
+    _h(app, "charge.dispute.closed", _dispute(status="won"))
+    assert app.store.balance(1) == 300 * MICRO
+
+
+@pytest.mark.parametrize("over", [{"payment_intent": "pi_other"}, {"currency": "usd"},
+                                  {"amount": 0}, {"id": "du_1"}])
+def test_a_dispute_of_an_unknown_or_odd_payment_changes_nothing(tmp_path, over) -> None:
+    app, _ = _billing_app(tmp_path)
+    _paid_pack(app)
+    _h(app, "charge.dispute.created", _dispute(**over))
+    assert app.store.balance(1) == 500 * MICRO

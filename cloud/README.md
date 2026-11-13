@@ -313,7 +313,8 @@ stripe-prices.json` (от `stripe prices list --live --limit 100`) — без о
 1. Продукти и цени (Price) за пакетите и плана; `price_…` в `stripe_price` в `prices.json`.
 2. Webhook към `https://<адрес>/api/stripe/webhook` със събития
    `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
-   `invoice.paid`, `customer.subscription.deleted`, `charge.refunded`; тайната му е
+   `invoice.paid`, `customer.subscription.deleted`, `charge.refunded`,
+   `charge.dispute.created`, `charge.dispute.closed`; тайната му е
    `STRIPE_WEBHOOK_SECRET`.
 
 Webhook-ът проверява подписа (HMAC-SHA256 върху суровите байтове, ±5 мин)
@@ -344,7 +345,7 @@ Webhook-ът проверява подписа (HMAC-SHA256 върху суро�
 3. Stripe CLI (`stripe login` веднъж), терминал 1 — тайната за webhook-а:
    ```bash
    stripe listen --print-secret                 # → whsec_… (не се сменя между пусканията)
-   stripe listen --forward-to localhost:8080/api/stripe/webhook \n     --events checkout.session.completed,checkout.session.async_payment_succeeded,invoice.paid,customer.subscription.deleted,charge.refunded
+   stripe listen --forward-to localhost:8080/api/stripe/webhook \n     --events checkout.session.completed,checkout.session.async_payment_succeeded,invoice.paid,customer.subscription.deleted,charge.refunded,charge.dispute.created,charge.dispute.closed
    # Stripe CLI 1.55 (2026-11-10) без --events: „must specify events to forward“
    ```
 4. Терминал 2 — сървърът с тестовите ключове (`read -rs` — ключът не влиза в историята):
@@ -439,8 +440,10 @@ $S reconcile $D --gateway-usage /srv/genesis/gateway/usage.jsonl
 
 Известни пропуски (бетата е с 10 души и ръчно раздадени покани):
 - няма потвърждение на имейла;
-- връщане на пари (`charge.refunded`) сваля кредитите сам — пропорционално, веднъж
-  (2026-11-13); оспорено плащане (chargeback) — още ръчно с `grant … -X`;
+- връщане на пари (`charge.refunded`) и оспорено плащане (`charge.dispute.created`)
+  свалят кредитите сами — пропорционално, веднъж, и двете заедно никога над плащането;
+  спечелен спор ги връща (2026-11-13). Спор по абонаментна фактура не се намира
+  (спорът няма клиента) — журналът казва „непознато плащане“, ръчно `grant … -X`;
 - `usage.jsonl` се чете от мястото, до което стигаше преди хода (записано в
   `turn_jobs.usage_start`); `reconcile` и окончателната сметка — от най-ранното
   такова място сред чакащите ходове;

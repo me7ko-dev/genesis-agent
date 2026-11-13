@@ -566,21 +566,20 @@ class Store:
             row = c.execute("SELECT * FROM stripe_payments WHERE ref = ?", (ref,)).fetchone()
         return dict(row) if row else None
 
-    def refund(self, user_id: int, charge: str, refunded_cents: int, owed: int, ref: str) -> int:
-        """Сваля до `owed` µc общо за върнатото по `charge`. Връща сваленото сега.
+    def settle_charge(self, user_id: int, charge: str, key: str, owed: int, ref: str) -> int:
+        """Сваля до `owed` µc общо за плащането `charge`. Връща сваленото сега.
 
-        Частичните връщания идват като нови charge.refunded с нарастващ
-        amount_refunded — всяко сваля само разликата до дължимото. Сборът се
-        чете под BEGIN IMMEDIATE: две доставки наведнъж иначе свалят двойно."""
-        prefix = f"stripe:refund:{charge}:"
+        Връщанията (charge.refunded, нарастващ amount_refunded) и оспорванията
+        (charge.dispute.created) по едно плащане се смятат заедно — редовете им
+        са stripe:charge:<charge>:…, и всяко сваля само разликата до дължимото:
+        върнато и после оспорено не се сваля два пъти. Сборът се чете под BEGIN
+        IMMEDIATE: две доставки наведнъж иначе свалят двойно."""
+        prefix = f"stripe:charge:{charge}:"
         c = sqlite3.connect(self.path, timeout=10, isolation_level=None)
         try:
             c.execute("BEGIN IMMEDIATE")
-            done = -int(c.execute("SELECT COALESCE(SUM(amount), 0) FROM ledger "
-                                  "WHERE substr(event_id, 1, ?) = ?",
-                                  (len(prefix), prefix)).fetchone()[0])
-            delta = owed - done
-            new = delta > 0 and self._add_entry(c, user_id, f"{prefix}{refunded_cents}", "adjust",
+            delta = owed - self._taken(c, prefix)
+            new = delta > 0 and self._add_entry(c, user_id, f"{prefix}{key}", "adjust",
                                                 -delta, None, ref)
             c.execute("COMMIT")
         except BaseException:
@@ -590,6 +589,21 @@ class Store:
         finally:
             c.close()
         return delta if new else 0
+
+    def dispute_won(self, user_id: int, charge: str, dispute: str, ref: str) -> int:
+        """Спечелен спор: връща точно сваленото от този спор, веднъж."""
+        prefix = f"stripe:charge:{charge}:dispute:{dispute}"
+        with self._db() as c:
+            back = self._taken(c, prefix)
+            if back > 0 and self._add_entry(c, user_id, f"{prefix}:won", "adjust", back, None, ref):
+                return back
+        return 0
+
+    @staticmethod
+    def _taken(c: sqlite3.Connection, prefix: str) -> int:
+        return -int(c.execute("SELECT COALESCE(SUM(amount), 0) FROM ledger "
+                              "WHERE substr(event_id, 1, ?) = ?",
+                              (len(prefix), prefix)).fetchone()[0])
 
     def turns_today(self, user_id: int, now: float | None = None) -> int:
         """Ходовете от полунощ UTC — всякакви, и провалените: спам с грешни
