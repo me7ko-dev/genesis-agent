@@ -303,7 +303,14 @@ function renderAccount(a) {
   $("acc-month").textContent = `${a.month_spent} от ${a.monthly_cap} кредита`;
   $("acc-month-bar").max = Math.max(parseFloat(a.monthly_cap) || 1, 0.01);
   $("acc-month-bar").value = Math.max(parseFloat(a.month_spent) || 0, 0);
-  $("acc-plan").textContent = a.plan ? `Абонамент: ${a.plan}` : "";
+  const ends = a.plan_ends ? new Date(a.plan_ends * 1000).toLocaleDateString("bg-BG") : "";
+  $("acc-plan").textContent = !a.plan ? "" : ends
+    ? `Абонамент: ${a.plan} — спрян, важи до ${ends}; кредитите остават`
+    : `Абонамент: ${a.plan}`;
+  // Спиране от самия човек (2026-11-13) — без window.confirm: втори бутон.
+  $("plan-cancel").hidden = !(a.plan && a.stripe && !a.plan_ends);
+  $("plan-cancel-ask").hidden = true;
+  $("plan-cancel-btn").hidden = false;
   $("acc-turns").textContent = `Задачи днес: ${a.turns_today} от ${a.turns_per_day}`;
   $("stripe-off").hidden = a.can_buy || !a.billing;
   const offers = $("offers");
@@ -312,6 +319,9 @@ function renderAccount(a) {
     for (const p of a.packs) offers.append(offerButton(`${p.credits} кредита — ${p.price}`, { pack: p.id }));
     if (!a.plan) for (const p of a.plans) offers.append(offerButton(`Абонамент: ${p.credits} кредита на месец — ${p.price}`, { plan: p.id }));
   }
+  // Условията до бутона за плащане (2026-11-13): правото на отказ се губи
+  // за изхарченото само ако човекът е знаел, че услугата започва веднага.
+  $("offers-legal").hidden = offers.children.length === 0;
   const body = $("history").tBodies[0];
   body.replaceChildren();
   for (const h of a.history) {
@@ -342,6 +352,24 @@ function offerButton(label, body) {
   });
   return b;
 }
+
+$("plan-cancel-btn").addEventListener("click", () => {
+  $("plan-cancel-btn").hidden = true;
+  $("plan-cancel-ask").hidden = false;
+});
+$("plan-cancel-no").addEventListener("click", () => {
+  $("plan-cancel-ask").hidden = true;
+  $("plan-cancel-btn").hidden = false;
+});
+$("plan-cancel-yes").addEventListener("click", async () => {
+  const b = $("plan-cancel-yes");
+  b.disabled = true;
+  try {
+    await api("/api/subscription/cancel", {});
+    renderAccount(await api("/api/account"));
+  } catch (e) { $("account-error").textContent = e.message; }
+  b.disabled = false;
+});
 
 $("account-link").addEventListener("click", () => showAccount());
 

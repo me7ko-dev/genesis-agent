@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Policy — Genesis</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body class="legal">
+<main>
+<nav><a href="/">Genesis</a> · <a href="/legal/terms?lang=en">Terms</a> · <a href="/legal/privacy?lang=en">Privacy</a> · <a href="/legal/refunds?lang=en">Refunds</a> · <a href="/legal/contact?lang=en">Contact</a> · <a href="/legal/privacy" lang="bg">Български</a></nav>
+<!--draft--><p class="draft">Draft for review — not legal advice. A lawyer should review this text before the first real payment.</p><!--/draft-->
+<h1>Privacy Policy</h1>
+<p class="muted">Effective from {{В_СИЛА_ОТ}}</p>
+<p class="muted">The Bulgarian version is the binding one; this translation is for convenience.</p>
+
+<h2>1. Controller</h2>
+<p>The controller of your personal data is {{ПРОДАВАЧ}}, {{ИДЕНТИФИКАТОР}}, address: {{АДРЕС}}, email: {{ИМЕЙЛ}}. Write to this address about anything concerning your data.</p>
+
+<h2>2. What data we process and why</h2>
+<table>
+<thead><tr><th>Data</th><th>Why</th><th>Legal basis (GDPR)</th><th>How long</th></tr></thead>
+<tbody>
+<tr><td>Email and password (we keep only a protected scrypt hash, never the password)</td><td>account and sign-in</td><td>contract, Art. 6(1)(b)</td><td>while the account exists; up to 30 days after a deletion request</td></tr>
+<tr><td>Session cookie (the database keeps only its hash)</td><td>keeping you signed in</td><td>contract, Art. 6(1)(b)</td><td>up to 14 days or until sign-out</td></tr>
+<tr><td>Task texts, answers and files</td><td>to carry out the task and let you see it later</td><td>contract, Art. 6(1)(b)</td><td>{{СРОК_РАЗГОВОРИ}}</td></tr>
+<tr><td>Billing: credits, turns, tokens, models, amounts, Stripe customer ID</td><td>charging and records</td><td>contract and legal obligation, Art. 6(1)(b) and (c)</td><td>while the account exists; payments as long as accounting and tax law requires (up to 10 years)</td></tr>
+<tr><td>IP address and requests in the server log</td><td>security, abuse and password-guessing protection</td><td>legitimate interest, Art. 6(1)(f)</td><td>up to 30 days</td></tr>
+</tbody>
+</table>
+<p>We do not collect your card details — payment happens at Stripe. We have no ads, no behavioural analytics and no tracking cookies. We make no automated decisions with legal effects on you.</p>
+
+<h2>3. Who receives data</h2>
+<ul>
+<li><strong>Stripe</strong> (Stripe Payments Europe, Ltd., Ireland) — payments. It receives your email and the amount; you enter card details directly at Stripe.</li>
+<li><strong>Language model providers</strong>: {{ДОСТАВЧИЦИ_НА_МОДЕЛИ}}. They receive the task text and the content the agent sends them in order to answer. They do not receive your email, password or payment details.</li>
+<li><strong>Hosting</strong>: {{ХОСТИНГ}} — the server the service runs on.</li>
+</ul>
+<p>Where a provider is outside the European Economic Area (for example in the USA), the transfer relies on the European Commission’s adequacy decision (EU-US Data Privacy Framework) if the provider is certified under it, or on the Commission’s standard contractual clauses.</p>
+<p>We do not sell personal data and do not share it for advertising.</p>
+
+<h2>4. Security</h2>
+<p>Each task runs in its own isolated container with no internet access and no access to other tasks; the model API keys never enter it. Connections are HTTPS only. Passwords and sessions are stored as hashes.</p>
+
+<h2>5. Cookies</h2>
+<p>We use a single cookie — the session after sign-in. It is strictly necessary for the service and does not need consent. There are no other cookies.</p>
+
+<h2>6. Your rights</h2>
+<p>You have the right of access, rectification, erasure, restriction, portability, and to object to processing based on legitimate interest. Write to {{ИМЕЙЛ}} — we answer within one month. You can also complain to the Bulgarian Commission for Personal Data Protection (<a href="https://www.cpdp.bg">cpdp.bg</a>) or the authority in your EU country.</p>
+<p>If you ask for deletion, we delete the account, conversations and files within 30 days. Payment records are kept as long as the law requires.</p>
+
+<h2>7. Children</h2>
+<p>The service is for people aged 18 or over. We do not knowingly collect children’s data.</p>
+
+<h2>8. Changes</h2>
+<p>We will tell you by email before any significant change takes effect.</p>
+</main>
+</body>
+</html>
