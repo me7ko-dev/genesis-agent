@@ -108,3 +108,65 @@ jobs:
             exit 1
           fi
           echo "clean"
+
+  # Сървърът (cloud/) се сглобява и пуска при всеки PR (2026-11-13): деплоят
+  # на истинската машина беше проверяван само на ръка. GitHub runner-ът има
+  # Docker и sudo без парола — като чист Ubuntu сървър, само без ключове.
+  server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Deploy dry run
+        run: |
+          printf 'GATEWAY_SECRET=%s\nGROQ_API_KEY=x\nGATEWAY_MODELS=groq/openai/gpt-oss-120b\n' \
+            "$(openssl rand -hex 24)" > "$RUNNER_TEMP/keys.env"
+          chmod 600 "$RUNNER_TEMP/keys.env"
+          printf -- '--billing --public-url https://genesis.example.org\n' > "$RUNNER_TEMP/web.args"
+          DEPLOY_DRY_RUN=1 DEPLOY_DRY_DIR="$RUNNER_TEMP/dry" GENESIS_DOMAIN=genesis.example.org \
+            GENESIS_KEYS="$RUNNER_TEMP/keys.env" GENESIS_WEB_ARGS_FILE="$RUNNER_TEMP/web.args" \
+            GENESIS_MONITOR_ENV="$RUNNER_TEMP/none" GENESIS_STRIPE_ENV="$RUNNER_TEMP/none" \
+            ./cloud/deploy.sh | tee "$RUNNER_TEMP/dry.log"
+          grep -q "режим: gateway" "$RUNNER_TEMP/dry.log"
+          grep -q -- "--billing --public-url https://genesis.example.org" "$RUNNER_TEMP/dry/genesis-web"
+          # шаблоните на systemd са валидни (само синтаксис — без systemd като PID 1 няма пускане)
+          systemd-analyze verify --man=no "$RUNNER_TEMP"/dry/*.service 2>&1 | tee "$RUNNER_TEMP/verify.log" || true
+          ! grep -E "Unknown (key|section)|Invalid|bad-setting" "$RUNNER_TEMP/verify.log"
+
+      - name: Build images (cloud/build.sh)
+        run: bash cloud/build.sh
+
+      # Мярката от етап 1 (изолация, тавани, задача без модел) — cloud/check.py
+      # по истинския път на задача. Без ключове: шлюзът е с фалшив GROQ ключ,
+      # задачата не вика модел. bench_fix 12/12 иска истински ключ и интернет
+      # от контейнера — не се пуска тук (README, „Известно и отложено“).
+      - name: Proxy mode — up.sh + check.py
+        run: |
+          sudo mkdir -p /srv/genesis
+          printf 'GROQ_API_KEY=x\n' | sudo tee /srv/genesis/keys-proxy.env >/dev/null
+          sudo GENESIS_KEYS=/srv/genesis/keys-proxy.env bash cloud/up.sh
+          sudo python3 -m cloud.check --jobs "$RUNNER_TEMP" --min-free-gb 2
+
+      - name: Gateway mode — up.sh + check.py
+        run: |
+          sudo cp "$RUNNER_TEMP/keys.env" /srv/genesis/keys.env
+          sudo GENESIS_KEYS=/srv/genesis/keys.env bash cloud/up.sh
+          sudo python3 -m cloud.check --jobs "$RUNNER_TEMP" --min-free-gb 2
+
+      - name: Web server with billing starts and serves the legal pages
+        run: |
+          sudo mkdir -p /srv/genesis/web /srv/jobs
+          printf '{"ПРОДАВАЧ": "CI"}' > "$RUNNER_TEMP/legal.json"
+          sudo python3 -m cloud.web.server serve --data /srv/genesis/web --jobs /srv/jobs \
+            --env-file /srv/genesis/keys.env --gateway-usage /srv/genesis/gateway/usage.jsonl \
+            --billing --legal "$RUNNER_TEMP/legal.json" --port 8080 > "$RUNNER_TEMP/web.log" 2>&1 &
+          for _ in $(seq 30); do curl -fsS http://127.0.0.1:8080/healthz && break; sleep 1; done
+          curl -fsS http://127.0.0.1:8080/legal/terms | grep -q "CI"
+          curl -fsS "http://127.0.0.1:8080/legal/privacy?lang=en" | grep -q "Privacy Policy"
+          sudo python3 -m cloud.check --jobs "$RUNNER_TEMP" --min-free-gb 2 --web http://127.0.0.1:8080
+          sudo pkill -f "cloud.web.server serve" || true
+          cat "$RUNNER_TEMP/web.log"

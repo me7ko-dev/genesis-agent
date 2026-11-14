@@ -36,6 +36,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import signal
 import sqlite3
 import stat
@@ -54,7 +55,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from cloud.gateway import gateway as gw
 from cloud.runner import launch
-from cloud.web import billing
+from cloud.web import billing, legal
 from cloud.web.store import MICRO, SESSION_SECONDS, Store
 
 log = logging.getLogger("genesis.cloud.web")
@@ -118,7 +119,8 @@ class App:
                  prices: billing.Prices | None = None, turns_per_day: int = TURNS_PER_DAY,
                  max_tokens_per_turn: int = launch.TASK_BUDGET,
                  monthly_cap: int = MONTHLY_CAP, stripe: billing.StripeConfig | None = None,
-                 stripe_opener: billing.Opener | None = None) -> None:
+                 stripe_opener: billing.Opener | None = None,
+                 legal_values: dict[str, str] | None = None) -> None:
         if prices is not None and gateway is None:
             # Без шлюза токените ги казва кодът в контейнера (2026-10-11).
             raise ValueError("плащането иска шлюза (--gateway-usage)")
@@ -139,6 +141,8 @@ class App:
             raise ValueError("Stripe иска плащане (--billing) и --public-url")
         self.stripe = stripe
         self.stripe_opener = stripe_opener
+        # Данните на продавача за правните страници (--legal); {} = празни места.
+        self.legal_values = legal_values or {}
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="turn")
         self._failures: dict[str, list[float]] = {}
         self._noted: dict[str, float] = {}     # ключ → кога заключването е записано
@@ -340,6 +344,7 @@ class App:
             "month_spent": fmt(spent), "monthly_cap": fmt(cap),
             "turns_today": self.store.turns_today(uid), "turns_per_day": per_day,
             "max_tokens_per_turn": max_tokens, "plan": account["plan"],
+            "plan_ends": self.store.plan_ends(uid) if account["plan"] else None,
             "billing": prices is not None, "stripe": self.stripe is not None,
             "packs": packs, "plans": plans,
             # Stripe без нито един price_… в prices.json (2026-11-10): страницата
@@ -795,6 +800,16 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/healthz":
             self._json(200, {"ok": True})
             return
+        if path.startswith("/legal/"):
+            # Без вход (2026-11-13): условията се четат преди регистрация и плащане.
+            page = path.removeprefix("/legal/")
+            lang = "en" if parse_qs(url.query).get("lang") == ["en"] else "bg"
+            if page not in legal.PAGES:
+                self._error(404, "няма такава страница")
+                return
+            body = legal.render(page, lang, self.app.legal_values).encode()
+            self._send(200, body, _STATIC_TYPES[".html"])
+            return
         user = self._user()
         if user is None:
             self._error(401, "нужен е вход")
@@ -954,6 +969,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"ok": True}, {"Set-Cookie": self._cookie("", 0)})
         elif path == "/api/checkout":
             self._checkout(user, body)
+        elif path == "/api/subscription/cancel":
+            self._cancel_plan(user)
         elif path == "/api/chats":
             title = str(body.get("title") or "Нов разговор").strip()
             self._json(201, {"id": store.new_chat(user["id"], title)})
@@ -1040,6 +1057,31 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"url": url})
 
 
+    def _cancel_plan(self, user: dict[str, Any]) -> None:
+        app = self.app
+        if app.prices is None or app.stripe is None:
+            self._error(404, "няма такъв адрес")
+            return
+        customers = app.store.active_customers(user["id"])
+        if not customers:
+            self._error(409, "нямаш активен абонамент")
+            return
+        kw = {"opener": app.stripe_opener} if app.stripe_opener is not None else {}
+        try:
+            ends = billing.cancel_subscriptions(app.stripe, customers, **kw)
+        except billing.StripeError:
+            self._error(502, "Stripe не отговаря — опитай пак след малко")
+            return
+        if not ends:
+            # В Stripe вече няма активен; customer.subscription.deleted идва
+            # или е дошъл — планът изчезва с него.
+            self._error(409, "абонаментът вече е спрян")
+            return
+        for customer, at in ends.items():
+            app.store.set_cancel(customer, at)
+        self._json(200, {"ends": app.store.plan_ends(user["id"]) or max(ends.values())})
+
+
 # socketserver слуша с опашка 5: при 20 едновременни заявки Linux
 # (syncookies) приема връзката и после я реже — клиентът получава
 # ConnectionResetError вместо 409/429 (CI 3.13, 2026-10-11).
@@ -1122,6 +1164,18 @@ def _admin(a: argparse.Namespace, store: Store) -> int:
         print(f"{user['email']}: {billing.fmt_credits(amount)} → баланс "
               f"{billing.fmt_credits(store.balance(uid))} кредита")
         return 0
+    if a.cmd == "forget":
+        why = store.forget(uid)
+        if why:
+            print(f"{user['email']}: не е изтрит — {why}", file=sys.stderr)
+            return 1
+        # Папките на разговорите (файловете от задачите) — след базата: ако
+        # триенето спре по средата, човекът вече не може да влезе.
+        folder = a.jobs / str(uid)
+        if folder.is_dir() and not folder.is_symlink():
+            shutil.rmtree(folder)
+        print(f"{user['email']}: изтрит (deleted-{uid}@invalid); сметката остава за счетоводството")
+        return 0
     if a.cmd in ("disable", "enable"):
         store.set_disabled(uid, a.cmd == "disable")
         print(f"{user['email']}: {'спрян, сесиите са затворени' if a.cmd == 'disable' else 'пуснат'}")
@@ -1158,7 +1212,9 @@ def _admin(a: argparse.Namespace, store: Store) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """Командите и флаговете — и за main, и за cloud/golive_check.py, който
+    чете аргументите от /etc/default/genesis-web точно както serve."""
     p = argparse.ArgumentParser(description="Genesis онлайн — вход, чат, файлове.")
     sub = p.add_subparsers(dest="cmd", required=True)
     add = sub.add_parser("add-user", help="нов човек (бета — само ръчно)")
@@ -1170,13 +1226,14 @@ def main(argv: list[str] | None = None) -> int:
         "grant": sub.add_parser("grant", help="кредити на човек (отрицателно = корекция)"),
         "disable": sub.add_parser("disable", help="спира човека и затваря сесиите му"),
         "enable": sub.add_parser("enable", help="пуска спрян човек"),
+        "forget": sub.add_parser("forget", help="изтрива човека по искане (ОРЗД); сметката остава"),
         "limits": sub.add_parser("limits", help="лимити на един човек"),
         "invite": sub.add_parser("invite", help="нови покани (кодове за еднократна регистрация)"),
         "reconcile": sub.add_parser("reconcile", help="таксува ходовете без такса от шлюза"),
     }
     for name, sp in admin.items():
         sp.add_argument("--data", type=Path, default=Path("/srv/genesis/web"))
-        if name in ("balance", "grant", "disable", "enable", "limits"):
+        if name in ("balance", "grant", "disable", "enable", "limits", "forget"):
             sp.add_argument("email")
     admin["grant"].add_argument("credits", help="напр. 12.5 или -3")
     admin["grant"].add_argument("--note", default="")
@@ -1188,6 +1245,7 @@ def main(argv: list[str] | None = None) -> int:
     admin["invite"].add_argument("--credits", default="0", help="подарени кредити при регистрация")
     admin["invite"].add_argument("--note", default="")
     admin["invite"].add_argument("--public-url", default="")
+    admin["forget"].add_argument("--jobs", type=Path, default=Path("/srv/jobs"))
     admin["reconcile"].add_argument("--gateway-usage", type=Path, required=True)
     admin["reconcile"].add_argument("--prices", type=Path, default=billing.PRICES)
     srv = sub.add_parser("serve")
@@ -1219,7 +1277,13 @@ def main(argv: list[str] | None = None) -> int:
                      help="месечен таван на харченето в кредити (с плащане)")
     srv.add_argument("--public-url", default="",
                      help="https://адресът на услугата (за Stripe; иначе GENESIS_PUBLIC_URL)")
-    a = p.parse_args(argv)
+    srv.add_argument("--legal", type=Path,
+                     help="JSON с данните на продавача за правните страници (/legal/…)")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    a = build_parser().parse_args(argv)
     # README-то казва „никога и двете“, а кодът приемаше и вярваше на
     # CF-Connecting-IP — зад Caddy клиентът си го пише сам и спирачката на
     # входа не спираше нищо (одит 2026-10-11: 12 × 401, нито един 429).
@@ -1266,6 +1330,13 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as e:
         print(e, file=sys.stderr)
         return 2
+    legal_values: dict[str, str] = {}
+    if a.legal:
+        try:
+            legal_values = legal.load_values(a.legal)
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 2
     gateway = None
     if a.gateway_usage:
         if not a.env_file:
@@ -1282,7 +1353,8 @@ def main(argv: list[str] | None = None) -> int:
               env_file=a.env_file, runtime=a.runtime, secure_cookie=not a.insecure_cookie,
               trust_proxy="cloudflare" if a.trust_cloudflare else a.trust_proxy, gateway=gateway,
               recover=False, prices=prices, turns_per_day=a.turns_per_day,
-              max_tokens_per_turn=a.max_tokens_per_turn, monthly_cap=monthly_cap, stripe=stripe)
+              max_tokens_per_turn=a.max_tokens_per_turn, monthly_cap=monthly_cap, stripe=stripe,
+              legal_values=legal_values)
     try:
         server = make_server(app, a.host, a.port)
     except OSError as e:

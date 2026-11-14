@@ -67,3 +67,12 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
   #app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
   aside { border-right: 0; border-bottom: 1px solid var(--line); max-height: 32vh; }
 }
+/* правните страници (/legal/…) */
+body.legal main { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; display: block; }
+body.legal nav { font-size: 14px; margin-bottom: 16px; }
+body.legal table { border-collapse: collapse; width: 100%; font-size: 14px; display: block; overflow-x: auto; }
+body.legal th, body.legal td { border: 1px solid var(--line); padding: 6px 8px; text-align: left; vertical-align: top; }
+body.legal dt { font-weight: 600; margin-top: 8px; }
+body.legal dd { margin: 0; }
+.draft { border: 1px solid var(--error); color: var(--error); border-radius: 8px; padding: 8px 12px; }
+.legal-links { font-size: 13px; }

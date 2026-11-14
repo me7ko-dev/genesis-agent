@@ -18,6 +18,8 @@
 		output file /var/log/caddy/genesis.log {
 			roll_size 10MiB
 			roll_keep 10
+			# поверителността (cloud/web/static/legal) обещава IP адресите до 30 дни
+			roll_keep_for 720h
 		}
 	}
 }
