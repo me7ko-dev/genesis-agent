@@ -80,8 +80,10 @@ _RUNNER_SUBCOMMANDS = {
     # Одит 2026-11-15: `pipenv *`, `bundle *`, `mise *` покриваха `pipenv run rm
     # -rf …`, `bundle exec …`, `mise exec -- …`; `npm *` — `npm explore p -- rm`;
     # `git *` — `git submodule foreach …` и `git -c core.pager=… log`.
-    "pipenv": frozenset({"run"}), "bundle": frozenset({"exec"}), "bundler": frozenset({"exec"}),
-    "mise": frozenset({"exec", "x"}), "direnv": frozenset({"exec"}), "asdf": frozenset({"exec"}),
+    # `bundle e|ex|exe` са съкращения на exec; `asdf env <cmd> <util>` пуска util.
+    "pipenv": frozenset({"run"}), "bundle": frozenset({"exec", "e", "ex", "exe"}),
+    "bundler": frozenset({"exec", "e", "ex", "exe"}),
+    "mise": frozenset({"exec", "x"}), "direnv": frozenset({"exec"}), "asdf": frozenset({"exec", "env"}),
     "rbenv": frozenset({"exec"}), "pyenv": frozenset({"exec"}), "fnm": frozenset({"exec"}),
     "volta": frozenset({"run"}), "docker": frozenset({"run", "exec"}),
     "podman": frozenset({"run", "exec"}), "flatpak": frozenset({"run"}),
