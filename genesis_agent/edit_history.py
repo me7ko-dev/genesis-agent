@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import stat
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,6 +58,9 @@ class _Turn:
     # WRITE/EDIT → тук, команда → в `commands` (одит 2026-10-09: снимка за
     # целия ход връщаше съдържанието след командата, ако EDIT идваше после).
     before: dict[Path, bytes | None] = field(default_factory=dict)
+    # Правата на файла отпреди хода (одит 2026-11-15: EDIT + `chmod +x` в един
+    # ход — съдържанието се връщаше, правата оставаха).
+    modes: dict[Path, int] = field(default_factory=dict)
     too_big: list[Path] = field(default_factory=list)
     commands: dict[Path, _FromCommand] = field(default_factory=dict)
     # Какво е било накрая (blob id или None = няма файл): друг, който го е
@@ -337,6 +341,7 @@ def record(path: Path) -> None:
             _current.too_big.append(path)
             return
         _current.before[path] = path.read_bytes()
+        _current.modes[path] = stat.S_IMODE(path.stat().st_mode)
     except OSError:
         return
 
@@ -387,6 +392,10 @@ def pending() -> list[str]:
     for path, data in turn.before.items():
         if data is None:
             lines.append(f"изтрий {path} (създаден в този ход)" if path.exists() else "")
+        elif path.is_symlink():
+            # Одит 2026-11-15: командата е сменила файла с връзка. /undo маха
+            # самата връзка (целта ѝ не се пипа) и връща обикновения файл.
+            lines.append(f"върни {path} (на мястото му е връзка — махам я, целта ѝ не се пипа)")
         else:
             lines.append(f"върни {path}")
     lines += [f"не може: {p} (над {_MAX_BYTES // 1_000_000} MB)" for p in turn.too_big]
@@ -450,14 +459,30 @@ def _undo_turn(turn: _Turn, skip: frozenset[Path] = frozenset()) -> list[tuple[P
                 done.append((path, f"⚠ {path} (води извън проекта — оставен)"))
             elif path in skip or _moved_since(turn, path):
                 done.append((path, f"⚠ {path} ({_LEFT})"))
+            elif path.is_symlink():
+                # Одит 2026-11-15: `rm f && ln -s /elsewhere f` след EDIT.
+                # unlink() маха връзката, не целта ѝ; чак тогава се пише —
+                # никога през нея (правило от 2026-11-10 остава).
+                path.unlink()
+                if data is None:
+                    done.append((path, f"изтрит {path} (връзка, направена в хода)"))
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
+                    _put_mode(turn, path)
+                    done.append((path, (f"върнат {path} (връзката извън проекта е махната,"
+                                        " външният файл не е пипнат)")))
             elif data is None:
                 if path.is_file():
                     path.unlink()
                     done.append((path, f"изтрит {path}"))
-            elif not path.exists() or path.read_bytes() != data:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(data)
-                done.append((path, f"върнат {path}"))
+            else:
+                same = path.is_file() and path.read_bytes() == data
+                if not same:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    _write_bytes(path, data)
+                if _put_mode(turn, path) or not same:
+                    done.append((path, f"върнат {path}"))
         except OSError as e:
             done.append((path, f"❌ {path}: {e}"))
     if turn.commands and turn.workspace is not None:
@@ -466,6 +491,31 @@ def _undo_turn(turn: _Turn, skip: frozenset[Path] = frozenset()) -> list[tuple[P
     if turn.lost:
         done.append((None, f"❌ {turn.lost}"))
     return done
+
+
+def _write_bytes(path: Path, data: bytes) -> None:
+    """Файл, станал само за четене в хода (`chmod a-w`), не пречи на /undo."""
+    try:
+        path.write_bytes(data)
+    except PermissionError:
+        if not path.exists():
+            raise
+        path.chmod(stat.S_IMODE(path.stat().st_mode) | stat.S_IWRITE)
+        path.write_bytes(data)
+
+
+def _put_mode(turn: _Turn, path: Path) -> bool:
+    """Правата, каквито файлът е имал преди хода (одит 2026-11-15)."""
+    want = turn.modes.get(path)
+    if want is None:
+        return False
+    try:
+        if stat.S_IMODE(path.stat().st_mode) == want:
+            return False
+        path.chmod(want)
+    except OSError:
+        return False
+    return True
 
 
 def _led_out(turn: _Turn, path: Path) -> bool:
@@ -479,19 +529,10 @@ def _led_out(turn: _Turn, path: Path) -> bool:
         path.relative_to(ws)
     except ValueError:
         return False          # извън проекта по замисъл (EDIT на абсолютен път)
-    if not checkpoints.inside(ws, path):
-        return True
-    # Самият файл е станал връзка навън (одит 2026-11-10): EDIT_FILE config.yml,
-    # после `ln -sf /outside/shared.yml config.yml` в същия ход — /undo пишеше
-    # старото съдържание ПРЕЗ връзката и презаписваше файл извън проекта.
-    # Проверяваше се само папката над файла.
-    if path.is_symlink():
-        try:
-            real, root = os.path.realpath(path), os.path.realpath(ws)
-            return os.path.commonpath([real, root]) != root
-        except (OSError, ValueError):
-            return True
-    return False
+    # Самият файл като връзка навън (одит 2026-11-10) вече не е оставен:
+    # от 2026-11-15 _undo_turn маха връзката и връща файла, без да пише през
+    # нея. Тук остава само папката над файла.
+    return not checkpoints.inside(ws, path)
 
 
 def _undo_commands(turn: _Turn, ws: Path,
@@ -535,7 +576,6 @@ def _undo_commands(turn: _Turn, ws: Path,
 def _restore_mode(path: Path, mode: str) -> bool:
     """Изпълнимият бит както преди командата (`chmod +x` се листваше, но не
     се връщаше — одит 2026-10-09). На Windows няма такъв бит."""
-    import os
     if os.name == "nt":
         return False
     current = path.stat().st_mode
