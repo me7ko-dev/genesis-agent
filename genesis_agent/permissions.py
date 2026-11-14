@@ -56,6 +56,9 @@ _LAUNCHERS = frozenset({
     # се приемаше и покриваше `flock /tmp/l sudo apt-get install …`).
     "flock", "strace", "ltrace", "setarch", "taskset", "chrt", "numactl",
     "prlimit", "systemd-run", "runuser", "pkexec", "proot", "firejail",
+    # Пускат остатъка като команда при всяко извикване (одит 2026-11-15:
+    # `parallel rm ::: …` минаваше с правило `parallel *`).
+    "parallel", "nix-shell", "dumb-init", "tini",
 })
 _INTERPRETERS = re.compile(r"^(python[\d.]*|py|pypy[\d.]*|perl|ruby|node|deno|bun|php|lua|osascript)$")
 # Флагът веднага след интерпретатора, който значи „кодът е тук“ (или „пусни
@@ -74,7 +77,20 @@ _RUNNER_SUBCOMMANDS = {
     "pipx": frozenset({"run"}), "conda": frozenset({"run"}), "mamba": frozenset({"run"}),
     "micromamba": frozenset({"run"}), "pdm": frozenset({"run"}), "hatch": frozenset({"run"}),
     "pixi": frozenset({"run"}), "rye": frozenset({"run"}),
+    # Одит 2026-11-15: `pipenv *`, `bundle *`, `mise *` покриваха `pipenv run rm
+    # -rf …`, `bundle exec …`, `mise exec -- …`; `npm *` — `npm explore p -- rm`;
+    # `git *` — `git submodule foreach …` и `git -c core.pager=… log`.
+    "pipenv": frozenset({"run"}), "bundle": frozenset({"exec"}), "bundler": frozenset({"exec"}),
+    "mise": frozenset({"exec", "x"}), "direnv": frozenset({"exec"}), "asdf": frozenset({"exec"}),
+    "rbenv": frozenset({"exec"}), "pyenv": frozenset({"exec"}), "fnm": frozenset({"exec"}),
+    "volta": frozenset({"run"}), "docker": frozenset({"run", "exec"}),
+    "podman": frozenset({"run", "exec"}), "flatpak": frozenset({"run"}),
+    "nix": frozenset({"run", "shell", "develop"}), "rustup": frozenset({"run"}),
+    "git": frozenset({"foreach", "-c"}),
 }
+_RUNNER_SUBCOMMANDS["npm"] = _RUNNER_SUBCOMMANDS["npm"] | {"explore"}
+_RUNNER_SUBCOMMANDS["pnpm"] = _RUNNER_SUBCOMMANDS["pnpm"] | {"x"}
+_RUNNER_SUBCOMMANDS["yarn"] = _RUNNER_SUBCOMMANDS["yarn"] | {"node"}
 
 # Причини, които никое правило не покрива: тайни и управляващите файлове на
 # Genesis (hooks/MCP/доверие/тези правила). `cat *` иначе четеше ключа, с
