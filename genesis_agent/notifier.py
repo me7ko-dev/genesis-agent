@@ -218,7 +218,25 @@ _NAME_VALUE_RE = re.compile(
     r"(?:(?-i:[A-Z0-9]+)(?=(?:PASSWORD|PASSWD|PASSPHRASE|TOKEN|SECRET)(?![A-Za-z]))|api|auth|access|db)?"
     r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|PWD|PASS|PAT|DSN)(?![A-Za-z])[A-Z0-9_]*)"
     rf"\s*[=:]\s*{_VALUE}")
-_SECRET_PATTERNS: list[tuple[re.Pattern[str], str] | Callable[[str], str]] = [
+# `mysql_config`/`mariadb_config` не са клиенти: `gcc $(mysql_config
+# --cflags) -pthread` ставаше `-p***` (прегледът, 2026-11-05). Ползва го и
+# workspace_memory.mask_secrets (2026-11-15: `mysql -p…` оставаше в паметта).
+MYSQL_PASSWORD_RE = _tool_flag(r"(?:mysql|mariadb)(?!_config\b)\w*", "-p")
+# Име на поле, което само по себе си не казва „тайна“: `event['key'] == 'Enter'`
+# е клавиш, `d['pat'] != 'x'` — образец (2026-11-15).
+_WEAK_KEYS = frozenset({"key", "pat", "dsn"})
+
+
+def _quoted_key(m: re.Match[str]) -> str:
+    name = re.search(r"[\w-]+", m.group(1))
+    if (m.group(2) not in (":", "=>", "=") and name and name.group(0).lower() in _WEAK_KEYS
+            and re.fullmatch(r"""["']?[A-Za-z]{1,16}["']?""", m.group(3))):
+        return m.group(0)
+    return m.group(1) + '"***"'
+
+
+_SECRET_PATTERNS: list[tuple[re.Pattern[str], str | Callable[[re.Match[str]], str]]
+                       | Callable[[str], str]] = [
     (re.compile(r"\b((?:bot)?)\d{6,12}:AA[A-Za-z0-9_-]{30,}"), r"\1***"),
     (re.compile(r"(://)[^/\s:@]*:[^/\s@]+@"), r"\1***@"),
     _mask_user_pass_at,
@@ -226,19 +244,27 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str] | Callable[[str], str]] = [
     # (слепено без граница — само api/auth/access/db, `"monkey"` остава),
     # `"passphrase"`, индекс вместо литерал — `d['password'] = 'x'`, — и
     # сравнение (`== 'x'`, `!= 'x'`: стойността пак е тайната) изтичаха.
+    # 2026-11-15: `"pass_phrase"` (с долна черта) изтичаше; `event['key'] ==
+    # 'Enter'` ставаше `== "***"` — виж _quoted_key.
     (re.compile(r"""(["'](?:[\w-]*[_-](?i:api|auth|access|db)?|[A-Za-z0-9]*[a-z0-9](?=[A-Z])"""
                 r"|(?i:api|auth|access|db))?"
-                r"(?:[Kk]ey|KEY|[Tt]oken|TOKEN|[Ss]ecret|SECRET|[Pp]ass(?:word|wd|phrase)?|PASS(?:WORD|WD|PHRASE)?"
-                r"""|[Pp]wd|PWD|[Pp]at|PAT|[Dd]sn|DSN)\\?["']\]?\s*(?::|=>|!?={1,3})\s*)"""
-                r"""(?:"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|[^\s,}]+)"""),
+                r"(?:[Kk]ey|KEY|[Tt]oken|TOKEN|[Ss]ecret|SECRET|[Pp]ass(?:[_-]?(?:word|wd|phrase))?"
+                r"|PASS(?:[_-]?(?:WORD|WD|PHRASE))?"
+                r"""|[Pp]wd|PWD|[Pp]at|PAT|[Dd]sn|DSN)\\?["']\]?\s*(:|=>|!?={1,3})\s*)"""
+                r"""("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|[^\s,}]+)"""),
+     _quoted_key),
+    # `password == "…"`, `user.password != '…'` — сравнение с литерал: стойността
+    # е тайната (2026-11-15). С идентификатор (`== other`) — не се пипа.
+    (re.compile(r"""(?i)\b((?:[a-z0-9]+_)*(?:password|passwd|passphrase|pass_phrase|secret|api_?key"""
+                r"""|token)\w*\s*[!=]==?\s*)(?:"[^"\n]*"|'[^'\n]*')"""),
      r'\1"***"'),
-    # `mysql_config`/`mariadb_config` не са клиенти: `gcc $(mysql_config
-    # --cflags) -pthread` ставаше `-p***` (прегледът, 2026-11-05).
-    (_tool_flag(r"(?:mysql|mariadb)(?!_config\b)\w*|sshpass|7z[ar]?|(?:un)?rar", "-p"),
-     r"\1***"),
+    (MYSQL_PASSWORD_RE, r"\1***"),
+    (_tool_flag(r"sshpass|7z[ar]?|(?:win)?(?:un)?rar", "-p"), r"\1***"),
     # `rar -hp<парола>` шифрова и имената; `ssh-keygen -N <фраза>` (2026-11-09).
-    (_tool_flag(r"(?:un)?rar", "-hp"), r"\1***"),
+    # `WinRAR` и старата фраза `ssh-keygen -p -P стара` изтичаха (2026-11-15).
+    (_tool_flag(r"(?:win)?(?:un)?rar", "-hp"), r"\1***"),
     (_tool_flag(r"ssh-keygen", "-N ?"), r"\1***"),
+    (_tool_flag(r"ssh-keygen", "-P ?"), r"\1***"),
     # С интервал — изрично по инструмент, за да важи и за паметта (без голото -p).
     (_tool_flag(r"sshpass", "-p ?"), r"\1***"),
     (_tool_flag(r"sqlcmd|osql|isql|bcp|zip|unzip|zipcloak", "-P ?"), r"\1***"),
@@ -262,7 +288,8 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str] | Callable[[str], str]] = [
 # `sorted(rows, key=***`. Тук голите `-p`/`-u <дума>` и общото ИМЕ=стойност
 # отпадат; формите по инструмент (mysql -p, sshpass -p, …) и по вид на ключа
 # остават, а ИМЕ=стойност поема workspace_memory.mask_secrets с по-тясното правило.
-_MEMORY_PATTERNS: list[tuple[re.Pattern[str], str] | Callable[[str], str]] = [
+_MEMORY_PATTERNS: list[tuple[re.Pattern[str], str | Callable[[re.Match[str]], str]]
+                       | Callable[[str], str]] = [
     ((re.compile(_FLAG_RULE.format(short="")), r"\1 ***")
      if isinstance(rule, tuple) and rule[0] is _GENERIC_FLAG_RE else rule)
     for rule in _SECRET_PATTERNS

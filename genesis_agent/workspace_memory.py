@@ -41,7 +41,7 @@ from typing import Any
 
 from genesis_agent import sqlite_store
 from genesis_agent.config import MEMORY_DIR
-from genesis_agent.notifier import API_TOKEN_RE
+from genesis_agent.notifier import API_TOKEN_RE, MYSQL_PASSWORD_RE
 
 log = logging.getLogger("genesis.workspace_memory")
 
@@ -161,8 +161,18 @@ def _clean(text: Any, limit: int = _MAX_TEXT) -> str:
 _SECRET_RES = (
     (re.compile(r"(://)[^/\s:@]+:[^/\s@]+@"), r"\1***@"),
     (re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]{16,}"), r"\1 ***"),
+    # Препратка не е тайна (2026-11-15): `api_key=os.environ["OPENAI_API_KEY"]`,
+    # `os.getenv(…)`, `process.env.X` се режеха — над 20 знака са.
     (re.compile(r"(?i)\b((?:[a-z0-9]+_)*(?:api_?key|key|token|secret|password|passwd)(?:_[a-z0-9]+)*)"
-                r"\s*=\s*(?![$<{%*])(?=\S*\d|\S{20})\S{6,}"), r"\1=***"),
+                r"\s*=\s*(?![$<{%*]|os\.(?:environ|getenv)|getenv\(|process\.env\b|ENV\[|env\()"
+                r"(?=\S*\d|\S{20})\S{6,}"), r"\1=***"),
+    # `{"password": "…"}` и `mysql -p…` оставаха в паметта (2026-11-15). В JSON/YAML
+    # с име, което само казва „тайна“, стойността е тайната — без правилото за
+    # цифра/20 знака; голото `"key"`/`"token"` (`{"key": "id"}`) — не.
+    (re.compile(r"""(["'])((?:[a-z0-9]+_)*(?:api_?key|secret|password|passwd|passphrase|pass_phrase"""
+                r"""|private_key|access_token|refresh_token)(?:_[a-z0-9]+)*)\1(\s*:\s*)(["'])(?!\4)"""
+                r"""[^"'\n]{4,}\4""", re.IGNORECASE), r"\1\2\1\3\4***\4"),
+    (MYSQL_PASSWORD_RE, r"\1***"),
     (re.compile(r"\b[sr]k_(?:live|test)_[A-Za-z0-9]{10,}"), "***"),
     (API_TOKEN_RE, "***"),
 )
