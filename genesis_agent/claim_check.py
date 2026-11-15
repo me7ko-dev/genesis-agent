@@ -573,6 +573,34 @@ def _rc_from_output(output: str, rc: int, runners: int = 1) -> int:
     return 0
 
 
+# Честността A (одит 2026-11-10, поправено 2026-11-15): `python app.py 2>&1 |
+# tail -5`, `node app.js || true`, `python app.py; echo done` — rc е на опашката,
+# а програмата е паднала (Traceback в изхода). „Работи“ минаваше. Срив = изходът
+# СВЪРШВА с неуловено изключение: Python (кадър `File "…", line N` и ред
+# `XxxError: …` накрая — `| tail` може да е отрязал заглавието) или Node
+# (`at …:N:M` и `Node.js vNN` накрая). Записан с logging traceback, след който
+# програмата продължава, не свършва така.
+_CRASH_TAIL_RE = re.compile(r"^(?:[\w.]+(?:Error|Exception)|KeyboardInterrupt|SystemExit)\b(?::.*)?$")
+_PY_FRAME_RE = re.compile(r"^\s+File \"[^\"\n]+\", line \d+|^Traceback \(most recent call last\):", re.MULTILINE)
+_NODE_FRAME_RE = re.compile(r"^\s+at .+:\d+:\d+\)?$", re.MULTILINE)
+
+
+def _rc_not_the_programs(command: str) -> bool:
+    """rc на веригата не е на първата програма: след нея има `|`, `;`, `||`
+    или `&` (при `&&` падналата програма спира веригата и rc е нейно)."""
+    parts = _chain((command or "").rstrip().rstrip(";"))
+    return len(parts) > 1 and parts[-2] != "&&"
+
+
+def _crashed(output: str) -> bool:
+    lines = [ln.strip() for ln in (output or "").splitlines() if ln.strip()]
+    if not lines:
+        return False
+    if _CRASH_TAIL_RE.match(lines[-1]) and _PY_FRAME_RE.search(output):
+        return True
+    return bool(re.match(r"Node\.js v\d+", lines[-1]) and _NODE_FRAME_RE.search(output))
+
+
 def counts_as_executed(name: str, args: str, result: str) -> tuple[str, str] | None:
     """Записът за `executed`, или None, ако резултатът не доказва изпълнение."""
     result = (result or "").lstrip()
@@ -613,7 +641,9 @@ def counts_as_executed(name: str, args: str, result: str) -> tuple[str, str] | N
         rc = int(head.group(2))
         # rc=0 на пускача с червен итог не е зелено (одит 2026-10-22, виж
         # _RED_SUMMARY_RE); rc≠0 остава, каквото и да пише изходът.
-        if rc == 0 and is_test_run(command) and _RED_SUMMARY_RE.search(result[head.end():]):
+        output = result[head.end():]
+        if rc == 0 and ((is_test_run(command) and _RED_SUMMARY_RE.search(output))
+                        or (_rc_not_the_programs(command) and _crashed(output))):
             rc = 1
     # Команда с rc≠0 е тръгнала, но не е свършила това, за което е пусната
     # (bug fix, 2026-10-11). Измерено: `pip install` с rc=1 доказваше

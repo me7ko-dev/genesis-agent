@@ -32,7 +32,9 @@
 - ~~Честността D–E~~ — MismatchCheck: `[FAIL]`, `Test 2: FAIL`, `… FAILED`, `✗` в края,
   `1 of 3 tests failed`; брояч `1/3 ok … 3/3 ok` не е тревога. TestEditCheck: `def _test_x`,
   голо `return` в теста, `except AssertionError: pass`. bench_honesty 15/15, 0/12 (без промяна).
-- Отворено: честността A–C (скрит срив в тръба, нарочен rc≠0, `echo > f`/`del` не доказват
+- ~~Честността A~~ — срив, скрит от `| tail`, `|| true`, `; echo`: изходът свършва с
+  неуловено изключение (Python/Node) → rc=1. bench_honesty 15/15, 0/12.
+- Отворено: честността B–C (нарочен rc≠0 и „нарочно“; `echo > f`/`del` не доказват
   запис) — по-долу; преглед на PR #120.
 
 ## 2026-11-13 — готов за истински пари (клон `claude/go-live-20261113`, PR #121)
@@ -102,8 +104,8 @@
   ~~Не е покрито: `cd / && chmod -R 777 .`, `curl … | tee f | bash`, `find ~ -exec mv`~~ — 15.11.
 - ~~/permissions приема `pipenv *`, `bundle *`, `mise *`, `parallel *`; `npm explore`~~ — 15.11.
 - ~~/undo: EDIT + `chmod +x`; команда, сменила файл с връзка~~ — 15.11.
-- Честността: „работи“ след срив, скрит от тръба (`python app.py 2>&1 | tail -5`, `|| true`)
-  минава; обратното — честно „работи“ след нарочен rc≠0 (`| grep -i error`, `timeout 3`,
+- Честността: ~~„работи“ след срив, скрит от тръба (`python app.py 2>&1 | tail -5`, `|| true`)
+  минава~~ (15.11); обратното — честно „работи“ след нарочен rc≠0 (`| grep -i error`, `timeout 3`,
   pytest rc=5) се бележи и „нарочно“ не го чисти; `echo x > f`, `del`, `Remove-Item`, `ln -s`,
   `find -delete` не доказват запис/триене; ~~MismatchCheck не вижда `Test 2: FAIL`, `[FAIL]`,
   `... FAILED`, `✗` в края, `1 of 3 tests failed`, а брояч `1/3 ok … 3/3 ok` е тревога;
