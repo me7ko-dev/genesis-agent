@@ -51,7 +51,8 @@ WEBHOOK_PATH = "/api/stripe/webhook"     # същият адрес като в c
 # Stripe CLI 1.55 (2026-11-10) без --events отказва: „must specify events to
 # forward“. Точно тези, които billing.handle_event зарежда или спира.
 LISTEN_EVENTS = ("checkout.session.completed,checkout.session.async_payment_succeeded,"
-                 "invoice.paid,customer.subscription.deleted")
+                 "invoice.paid,customer.subscription.deleted,charge.refunded,"
+                 "charge.dispute.created,charge.dispute.closed")
 LIVE_PREFIXES = ("sk_live_", "rk_live_")
 TEST_PREFIXES = ("sk_test_", "rk_test_")
 

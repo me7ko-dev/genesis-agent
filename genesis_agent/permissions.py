@@ -56,6 +56,9 @@ _LAUNCHERS = frozenset({
     # се приемаше и покриваше `flock /tmp/l sudo apt-get install …`).
     "flock", "strace", "ltrace", "setarch", "taskset", "chrt", "numactl",
     "prlimit", "systemd-run", "runuser", "pkexec", "proot", "firejail",
+    # Пускат остатъка като команда при всяко извикване (одит 2026-11-15:
+    # `parallel rm ::: …` минаваше с правило `parallel *`).
+    "parallel", "nix-shell", "dumb-init", "tini",
 })
 _INTERPRETERS = re.compile(r"^(python[\d.]*|py|pypy[\d.]*|perl|ruby|node|deno|bun|php|lua|osascript)$")
 # Флагът веднага след интерпретатора, който значи „кодът е тук“ (или „пусни
@@ -74,13 +77,76 @@ _RUNNER_SUBCOMMANDS = {
     "pipx": frozenset({"run"}), "conda": frozenset({"run"}), "mamba": frozenset({"run"}),
     "micromamba": frozenset({"run"}), "pdm": frozenset({"run"}), "hatch": frozenset({"run"}),
     "pixi": frozenset({"run"}), "rye": frozenset({"run"}),
+    # Одит 2026-11-15: `pipenv *`, `bundle *`, `mise *` покриваха `pipenv run rm
+    # -rf …`, `bundle exec …`, `mise exec -- …`; `npm *` — `npm explore p -- rm`;
+    # `git *` — `git submodule foreach …` и `git -c core.pager=… log`.
+    # `bundle e|ex|exe` са съкращения на exec; `asdf env <cmd> <util>` пуска util.
+    "pipenv": frozenset({"run"}), "bundle": frozenset({"exec", "e", "ex", "exe"}),
+    "bundler": frozenset({"exec", "e", "ex", "exe"}),
+    "mise": frozenset({"exec", "x"}), "direnv": frozenset({"exec"}), "asdf": frozenset({"exec", "env"}),
+    "rbenv": frozenset({"exec"}), "pyenv": frozenset({"exec"}), "fnm": frozenset({"exec"}),
+    "volta": frozenset({"run"}), "docker": frozenset({"run", "exec"}),
+    "podman": frozenset({"run", "exec"}), "flatpak": frozenset({"run"}),
+    "nix": frozenset({"run", "shell", "develop"}), "rustup": frozenset({"run"}),
+    "git": frozenset({"foreach", "-c"}),
 }
+_RUNNER_SUBCOMMANDS["npm"] = _RUNNER_SUBCOMMANDS["npm"] | {"explore"}
+_RUNNER_SUBCOMMANDS["pnpm"] = _RUNNER_SUBCOMMANDS["pnpm"] | {"x"}
+_RUNNER_SUBCOMMANDS["yarn"] = _RUNNER_SUBCOMMANDS["yarn"] | {"node"}
+# След тези подкоманди стои цел, а не командата (преглед на PR #122,
+# 2026-11-15): `asdf env nodejs rm …` пуска rm, а правилото `asdf env nodejs *`
+# се проверяваше като `nodejs *` и се приемаше — същото с `docker run образ`,
+# `npm explore пакет --`, `rustup run stable`, `direnv exec папка`, `git -c к=ст`.
+# () — една цел (и `--` след нея); иначе целите са до тази дума (`nix shell
+# a b --command …`, `mise exec node@20 -- …`).
+_TARGET_FIRST: dict[tuple[str, str], tuple[str, ...]] = {
+    ("asdf", "env"): (), ("npm", "explore"): (), ("rustup", "run"): (),
+    ("direnv", "exec"): (), ("docker", "run"): (), ("docker", "exec"): (),
+    ("podman", "run"): (), ("podman", "exec"): (), ("git", "-c"): (),
+    ("nix", "shell"): ("--command", "-c"), ("nix", "develop"): ("--command", "-c"),
+    ("mise", "exec"): ("--",), ("mise", "x"): ("--",),
+}
+
+
+# git пуска команда и през флаг на подкомандата (одит 2026-11-15, отворено от
+# нощния проход): `git bisect run rm …`, `git rebase -x rm …`, `git difftool
+# --extcmd=rm`. `-x` само при тях — `git cherry-pick -x` е друго. Последното
+# срещане: `git rebase -x make -x rm` пуска и rm.
+_GIT_RUNS = {"bisect": ("run",), "rebase": ("-x", "--exec"),
+             "difftool": ("-x", "--extcmd"), "mergetool": ("--extcmd",)}
+
+
+def _git_run(words: list[str]) -> list[str] | None:
+    flags = {f for sub, fl in _GIT_RUNS.items() if sub in words[1:] for f in fl}
+    for i in range(len(words) - 1, 0, -1):
+        word = words[i]
+        if word in flags:
+            return words[i + 1:]
+        name, eq, value = word.partition("=")
+        if eq and name in flags and name.startswith("--"):
+            return [value, *words[i + 1:]] if value else words[i + 1:]
+    return None
+
+
+def _past_target(first: str, sub: str, rest: list[str]) -> list[str]:
+    marks = _TARGET_FIRST.get((first, sub))
+    if marks is None:
+        return rest
+    if marks:
+        cut = next((j for j, w in enumerate(rest) if w in marks), None)
+        return [] if cut is None else rest[cut + 1:]
+    if not rest or rest[0].startswith("-"):
+        return rest               # флаг преди целта — правило с него се отказва
+    return rest[2:] if rest[1:2] == ["--"] else rest[1:]
 
 # Причини, които никое правило не покрива: тайни и управляващите файлове на
 # Genesis (hooks/MCP/доверие/тези правила). `cat *` иначе четеше ключа, с
 # който се подписва доверието, а `cp *` пишеше ~/.genesis/hooks.json —
 # програма извън sandbox-а с целия os.environ.
-_NEVER_COVERED = ("достъп до ", "промяна на управляващ файл на Genesis")
+# Файл, който се пуска при старт (~/.bashrc, .git/hooks, `git config core.pager`)
+# — кодът там тръгва извън Genesis; правило `tee *`/`git *` не го покрива (2026-11-15).
+_NEVER_COVERED = ("достъп до ", "промяна на управляващ файл на Genesis",
+                  "промяна на файл, който се пуска при старт")
 
 _LOCK = threading.Lock()
 _SESSION: dict[str, set[str]] = {}
@@ -124,10 +190,14 @@ def _after_runner(words: list[str]) -> list[str] | None:
         return words[1:]
     if _INTERPRETERS.match(first) and len(words) > 2 and words[1] == "-m":
         return _after_runner(words[2:])
+    if first == "git":
+        ran = _git_run(words)
+        if ran is not None:
+            return ran
     subs = _RUNNER_SUBCOMMANDS.get(first)
     for i, word in enumerate(words[1:], 1):
         if subs and word in subs:
-            return words[i + 1:]
+            return _past_target(first, word, words[i + 1:])
     return None
 
 

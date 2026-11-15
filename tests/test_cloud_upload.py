@@ -334,15 +334,22 @@ def test_leftover_parts_from_a_crash_are_removed_at_start(env) -> None:
 
 # ── пътят до сървъра и страницата ────────────────────────────────────────────
 
+# Как Caddy чете `max_size` (go-humanize): MB е 1000², MiB е 1024². Прегледът на
+# 2026-11-15: `26MB` = 26 000 000 < 25 MiB = 26 214 400 на сървъра — файл от 24.8 до
+# 25 MiB минаваше страницата и сървъра, а Caddy го спираше с отговор, който не е JSON.
+_CADDY_UNITS = {"": 1, "B": 1, "KB": 1000, "MB": 1000 ** 2, "GB": 1000 ** 3,
+                "KIB": 1024, "MIB": 1024 ** 2, "GIB": 1024 ** 3}
+
+
 def test_caddy_lets_an_upload_through_and_keeps_1mb_for_the_rest() -> None:
     """Caddyfile режеше всяко тяло на 1 MB — качването щеше да работи в теста
     и да пада зад истинския прокси."""
     import re
     caddy = (REPO / "cloud" / "deploy" / "Caddyfile").read_text(encoding="utf-8")
-    sizes = {m[1]: int(m[2]) for m in re.finditer(
-        r"request_body\s+(@\w+)\s*\{\s*max_size\s+(\d+)MB", caddy)}
-    assert sizes["@upload"] * 1024 * 1024 >= web.MAX_UPLOAD
-    assert sizes["@rest"] == 1
+    sizes = {m[1]: int(m[2]) * _CADDY_UNITS[m[3].upper()] for m in re.finditer(
+        r"request_body\s+(@\w+)\s*\{\s*max_size\s+(\d+)\s*([A-Za-z]*)", caddy)}
+    assert web.MAX_UPLOAD <= sizes["@upload"] <= web.MAX_UPLOAD + 2 * 1024 * 1024
+    assert sizes["@rest"] == 1000 ** 2
     rx = re.search(r"@upload\s+path_regexp\s+(\S+)", caddy)
     assert rx and re.fullmatch(rx[1], "/api/chats/" + "a" * 32 + "/upload")
     assert not re.fullmatch(rx[1], "/api/login")

@@ -333,6 +333,45 @@ def model_allowed(models: frozenset[str] | None, provider: str, model: str) -> b
 
 # ── HTTP ─────────────────────────────────────────────────────────────────────
 
+def _no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    # casefold: `"model"` и `"Model"` (или `"ſtream"` и `"stream"`) са един ключ
+    # за разбор без значение на регистъра (encoding/json на Go — 2026-11-15).
+    keys = [k.casefold() for k, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise ValueError("повтарящ се ключ в JSON")
+    return dict(pairs)
+
+
+def _no_constant(name: str) -> Any:
+    raise ValueError(f"{name} не е валиден JSON")
+
+
+def parse_request(body: bytes) -> Any:
+    """Строг разбор на тялото, по който шлюзът решава модел, цена и ограничения.
+
+    Одит 2026-11-15: шлюзът проверява едно, а препраща ОРИГИНАЛНИТЕ байтове —
+    всяка разлика между неговия разбор и разбора на доставчика е дупка.
+    `json.loads` държи ПОСЛЕДНИЯ от два еднакви ключа ({"model":"скъп",…,
+    "model":"евтин"} се таксува като евтин, а доставчикът може да вземе
+    първия); приема NaN/Infinity, BOM и UTF-16/32 (определя кодировката сам).
+    Тук всичко това е ValueError → 400, преди каквато и да е такса или
+    препращане. Дълбока вложеност дава RecursionError (хваща се при викащия).
+    """
+    text = body.decode("utf-8")     # UnicodeDecodeError е ValueError; UTF-16/32 пада тук
+    if text.startswith("﻿"):
+        raise ValueError("BOM в началото на тялото")
+    request = json.loads(text, object_pairs_hook=_no_duplicates, parse_constant=_no_constant)
+    # Отвореното от нощния проход: разбор без значение на регистъра чете
+    # `"STREAM": true`, `"N": 128`, `"ſtream"` (U+017F) като stream/n, а шлюзът
+    # ги пропускаше като непознати — поток без usage, n × max_tokens без таван.
+    # В API-тата ключовете на първо ниво са малки ASCII букви; другото е 400.
+    if isinstance(request, dict):
+        odd = next((k for k in request if not (k.isascii() and k == k.lower())), None)
+        if odd is not None:
+            raise ValueError(f"ключ {odd!r} не е с малки ASCII букви")
+    return request
+
+
 class Gateway:
     def __init__(self, secret: str, keys: dict[str, str], ledger: Ledger,
                  opener: Any = urllib.request.urlopen,
@@ -351,10 +390,10 @@ class Gateway:
         if not keys:
             return 404, _err(f"няма ключ за {provider}")
         try:
-            request = json.loads(body)
+            request = parse_request(body)
             model = str(request.get("model", ""))
         except (ValueError, AttributeError, RecursionError):   # "[" × 200 000 (2026-10-11)
-            return 400, _err("невалиден JSON")
+            return 400, _err("невалиден JSON (повтарящ се ключ, ключ с главни букви, NaN/Infinity, BOM или недопустима кодировка)")
         # Поточен отговор не е JSON — `usage` се губеше и задачата харчеше без
         # таван и без сметка (2026-10-07). Genesis не ползва stream.
         if request.get("stream"):

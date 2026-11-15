@@ -124,9 +124,26 @@ CREATE TABLE IF NOT EXISTS invites (
     used_by INTEGER,
     used_at REAL
 );
+-- Какво е заредило всяко плащане (2026-11-13), за да се върне при refund:
+-- `pi_…` за пакет (от сесията), `cus_…` за абонамент (всеки абонамент е свой
+-- клиент с един план). Charge.refunded носи payment_intent и customer, не
+-- сесията, а от API „basil“ нататък — и не фактурата.
+CREATE TABLE IF NOT EXISTS stripe_payments (
+    ref TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    credits INTEGER NOT NULL,       -- µc, заредени за amount_cents
+    amount_cents INTEGER NOT NULL,
+    currency TEXT NOT NULL
+);
 -- Заключен вход (2026-10-12, за cloud/monitor.py): броячът на грешните опити
 -- е в паметта на сървъра и наблюдението не го вижда. По един ред на ключ
 -- (имейл или IP) на прозорец — без имейла и адреса, само вида.
+-- Абонамент, спрян от самия човек (2026-11-13): Stripe го държи до края на
+-- платения месец (cancel_at_period_end), после идва customer.subscription.deleted.
+CREATE TABLE IF NOT EXISTS stripe_cancels (
+    customer TEXT PRIMARY KEY,
+    ends REAL NOT NULL               -- cancel_at от Stripe (unix)
+);
 CREATE TABLE IF NOT EXISTS lockouts (
     id INTEGER PRIMARY KEY,
     kind TEXT NOT NULL,            -- email | ip | signup
@@ -496,6 +513,125 @@ class Store:
                 return
             c.execute("UPDATE stripe_customers SET plan = '' WHERE customer = ?", (customer,))
             self._sync_plan(c, int(row["user_id"]))
+
+    def forget(self, user_id: int) -> str:
+        """Изтриване по искане на човека (ОРЗД, 2026-11-13): сесии, разговори,
+        ходове и събитията им; имейлът става deleted-<id>@invalid, паролата —
+        непозната, профилът е спрян. Сметката (ledger) остава — тя е запис за
+        плащанията, който законът иска да се пази, и е само с добавяне.
+
+        Връща "" или защо не може: върви ход, или сметката на ход още не е
+        окончателна (~17 мин след хода) — без ходовете settle не я довършва."""
+        c = sqlite3.connect(self.path, timeout=10, isolation_level=None)
+        c.row_factory = sqlite3.Row
+        # Без secure_delete изтритият текст остава в свободните страници на
+        # файла (и в следващото копие от backup.py) — пробвано тук.
+        c.execute("PRAGMA secure_delete = ON")
+        try:
+            c.execute("BEGIN IMMEDIATE")
+            mine = "SELECT t.id FROM turns t JOIN chats ch ON ch.id = t.chat_id WHERE ch.user_id = ?"
+            if c.execute(f"SELECT 1 FROM turns WHERE id IN ({mine}) "
+                         "AND status IN ('queued', 'running')", (user_id,)).fetchone():
+                c.execute("ROLLBACK")
+                return "върви задача — опитай след нея"
+            if c.execute(f"SELECT 1 FROM turn_jobs WHERE settled = 0 AND turn_id IN ({mine})",
+                         (user_id,)).fetchone():
+                c.execute("ROLLBACK")
+                return "сметката на последния ход още не е окончателна — опитай след ~17 мин"
+            for sql in (f"DELETE FROM events WHERE turn_id IN ({mine})",
+                        f"DELETE FROM turn_jobs WHERE turn_id IN ({mine})",
+                        f"DELETE FROM turns WHERE id IN ({mine})",
+                        "DELETE FROM chats WHERE user_id = ?",
+                        "DELETE FROM sessions WHERE user_id = ?"):
+                c.execute(sql, (user_id,))
+            c.execute("UPDATE users SET email = ?, password = ? WHERE id = ?",
+                      (f"deleted-{user_id}@invalid", hash_password(secrets.token_hex(32)), user_id))
+            c.execute("INSERT INTO accounts (user_id, disabled) VALUES (?, 1) "
+                      "ON CONFLICT(user_id) DO UPDATE SET disabled = 1", (user_id,))
+            c.execute("COMMIT")
+        except BaseException:
+            if c.in_transaction:
+                c.execute("ROLLBACK")
+            raise
+        finally:
+            c.close()
+        return ""
+
+    def active_customers(self, user_id: int) -> list[str]:
+        """Stripe клиентите на човека с още активен абонамент."""
+        with self._db() as c:
+            rows = c.execute("SELECT customer FROM stripe_customers WHERE user_id = ? "
+                             "AND plan != '' ORDER BY rowid", (user_id,)).fetchall()
+        return [r["customer"] for r in rows]
+
+    def set_cancel(self, customer: str, ends: float) -> None:
+        with self._db() as c:
+            c.execute("INSERT INTO stripe_cancels (customer, ends) VALUES (?, ?) "
+                      "ON CONFLICT(customer) DO UPDATE SET ends = excluded.ends", (customer, ends))
+
+    def plan_ends(self, user_id: int) -> float | None:
+        """Кога спира абонаментът, ако човекът е спрял всичките си активни."""
+        with self._db() as c:
+            rows = c.execute("SELECT x.ends FROM stripe_customers s LEFT JOIN stripe_cancels x "
+                             "ON x.customer = s.customer WHERE s.user_id = ? AND s.plan != ''",
+                             (user_id,)).fetchall()
+        if not rows or any(r["ends"] is None for r in rows):
+            return None
+        return max(float(r["ends"]) for r in rows)
+
+    def record_payment(self, ref: str, user_id: int, credits: int, amount_cents: int,
+                       currency: str) -> None:
+        """Плащането `ref` (pi_… или cus_…) е заредило `credits` µc. Първият запис остава."""
+        with self._db() as c:
+            c.execute("INSERT INTO stripe_payments (ref, user_id, credits, amount_cents, currency) "
+                      "VALUES (?,?,?,?,?) ON CONFLICT(ref) DO NOTHING",
+                      (ref, user_id, credits, amount_cents, currency))
+
+    def payment(self, ref: str) -> dict[str, Any] | None:
+        if not ref:
+            return None
+        with self._db() as c:
+            row = c.execute("SELECT * FROM stripe_payments WHERE ref = ?", (ref,)).fetchone()
+        return dict(row) if row else None
+
+    def settle_charge(self, user_id: int, charge: str, key: str, owed: int, ref: str) -> int:
+        """Сваля до `owed` µc общо за плащането `charge`. Връща сваленото сега.
+
+        Връщанията (charge.refunded, нарастващ amount_refunded) и оспорванията
+        (charge.dispute.created) по едно плащане се смятат заедно — редовете им
+        са stripe:charge:<charge>:…, и всяко сваля само разликата до дължимото:
+        върнато и после оспорено не се сваля два пъти. Сборът се чете под BEGIN
+        IMMEDIATE: две доставки наведнъж иначе свалят двойно."""
+        prefix = f"stripe:charge:{charge}:"
+        c = sqlite3.connect(self.path, timeout=10, isolation_level=None)
+        try:
+            c.execute("BEGIN IMMEDIATE")
+            delta = owed - self._taken(c, prefix)
+            new = delta > 0 and self._add_entry(c, user_id, f"{prefix}{key}", "adjust",
+                                                -delta, None, ref)
+            c.execute("COMMIT")
+        except BaseException:
+            if c.in_transaction:
+                c.execute("ROLLBACK")
+            raise
+        finally:
+            c.close()
+        return delta if new else 0
+
+    def dispute_won(self, user_id: int, charge: str, dispute: str, ref: str) -> int:
+        """Спечелен спор: връща точно сваленото от този спор, веднъж."""
+        prefix = f"stripe:charge:{charge}:dispute:{dispute}"
+        with self._db() as c:
+            back = self._taken(c, prefix)
+            if back > 0 and self._add_entry(c, user_id, f"{prefix}:won", "adjust", back, None, ref):
+                return back
+        return 0
+
+    @staticmethod
+    def _taken(c: sqlite3.Connection, prefix: str) -> int:
+        return -int(c.execute("SELECT COALESCE(SUM(amount), 0) FROM ledger "
+                              "WHERE substr(event_id, 1, ?) = ?",
+                              (len(prefix), prefix)).fetchone()[0])
 
     def turns_today(self, user_id: int, now: float | None = None) -> int:
         """Ходовете от полунощ UTC — всякакви, и провалените: спам с грешни

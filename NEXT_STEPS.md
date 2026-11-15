@@ -1,4 +1,4 @@
-# Следващи стъпки (обновено 2026-11-12)
+# Следващи стъпки (обновено 2026-11-15)
 
 > **Тази бележка е, за да се пестят токени, не за да се харчат повече.**
 > Тук вече е записано какво е проверено и решено. Вярвай ѝ и започни директно
@@ -7,21 +7,80 @@
 > нещо се свърши, обнови бележката накратко: зачеркни или изтрий готовото,
 > не трупай нов текст.
 
-## 2026-11-12 — какво пречи да се продава (клон `claude/magical-clarke-972puf`)
+## 2026-11-15 — нощен проход + сутрешен (клон `claude/night-20261115`, PR #122)
+
+Нощта: осем агента успоредно изядоха квотата за ~6 минути; довършени три. Сутринта —
+един агент, без рояк, по отвореното от 10.11 и от прегледа на PR #122. Всичко с тест,
+който пада без поправката; пълният пакет 6103+ passed, ruff/mypy чисти.
+- ~~/permissions~~ — `pipenv|bundle|mise|parallel *`, `npm explore`; цел след
+  подкомандата (`asdf env`, `docker run образ`, `npm explore пакет --`, `rustup run`,
+  `direnv exec`, `git -c`, `nix shell … --command`, `mise exec … --`) се прескача;
+  `git bisect run`, `git rebase -x/--exec`, `git difftool --extcmd` не се покриват от `git *`.
+- ~~/undo~~ — EDIT + chmod; файл, сменен с връзка. Windows CI падаше: `os.readlink` дава
+  `\\?\C:\…`, git пази `C:/…` (`checkpoints.git_link`). Твърда връзка навън не се пише
+  на място (нов файл + os.replace), няма прозорец unlink → запис.
+- ~~Шлюзът~~ — дублиран ключ, NaN/Infinity, BOM, UTF-16/32; и с друг регистър
+  (`Model`, `STREAM`, `ſtream` — casefold, първото ниво само малки ASCII).
+- ~~Портата~~ — тайни през скоби (`~/.ss{h,x}/id_rs{a,b}`, и в `bash -c`); съдържанието на
+  целия дом (`grep -r X ~`, `find ~ -exec`, `tar c… ~`, `rsync -a ~`); запис в стартов
+  файл (`>> ~/.bashrc`, `.git/hooks/*`, `git config core.pager …`; и WRITE_FILE) — пита,
+  правило не го покрива; `git commit -m '…rm -rf /…'` не е BLOCKED; `curl … | tee f | bash`;
+  `cd / && chmod -R 777 .` е BLOCKED като `chmod -R 777 /`.
+- ~~redact/паметта~~ — `password == "…"`, `ssh-keygen -P`, `WinRAR -hp`, `pass_phrase`,
+  `{"password": …}` и `mysql -p` в паметта; `event['key'] == 'Enter'` и
+  `api_key=os.environ[…]` вече не се маскират.
+- ~~Честността D–E~~ — MismatchCheck: `[FAIL]`, `Test 2: FAIL`, `… FAILED`, `✗` в края,
+  `1 of 3 tests failed`; брояч `1/3 ok … 3/3 ok` не е тревога. TestEditCheck: `def _test_x`,
+  голо `return` в теста, `except AssertionError: pass`. bench_honesty 15/15, 0/12 (без промяна).
+- ~~Честността A~~ — срив, скрит от `| tail`, `|| true`, `; echo`: изходът свършва с
+  неуловено изключение (Python/Node) → rc=1. bench_honesty 15/15, 0/12.
+- ~~Честността B–C~~ — „работи“ след нарочен rc≠0 се чисти от „нарочно“, назованото rc
+  („излиза с код 2“) и `timeout` 124 + „спрях го“ (темата „невалиден вход“ — не);
+  `| grep -i error` с rc=1 и чист изход е rc=0; pytest rc=5 не е пускане на кода.
+  Запис/триене: `> f`, `ln`, `mklink`, `Set-Content`/`Out-File`/`New-Item`, `del`/`rd`/`ren`
+  (само като команда — `ls del/` не), `Remove-Item`, `unlink`, `find -delete`.
+  `tests/test_audit_2026_11_15_claims.py` (50; 28 падат без поправката). bench 15/15, 0/12.
+- Отворено: преглед на PR #120.
+
+## 2026-11-13 — готов за истински пари (клон `claude/go-live-20261113`, PR #121)
+
+Начало: 5678 passed, 120 skipped → край: 5757 passed, 122 skipped; ruff/mypy (и `--platform linux`) чисти.
+- ~~Refund не сваляше кредитите~~ — `charge.refunded`: пакетът по payment_intent,
+  планът по клиента, пропорционално, веднъж (BEGIN IMMEDIATE за частичните).
+- ~~Правни страници~~ — `/legal/terms|privacy|refunds|contact` БГ/EN, данните на
+  продавача от `--legal` (извън репото), „чернова“ до `ПРЕГЛЕДАНО: да`; връзки при
+  регистрацията, до бутоните и на Stripe Checkout (`custom_text`).
+- ~~deploy.sh губеше `--billing`~~ (пишеше /etc/default/genesis-web наново) —
+  `/srv/genesis/web.args` + `stripe.env` (EnvironmentFile, 600).
+- `cloud/golive_check.py`: готово ли е за live без обръщение към Stripe (32 проверки,
+  всяка с тест). `forget` (ОРЗД, secure_delete). `cloud/PRICING.md` — предложение:
+  `groq/*` пуска qwen3.8 (изход 3.6× над тарифата), NVIDIA пробният — не за production.
+- CI `server`: сухо пускане на деплоя, build.sh, check.py в двата режима, уеб с
+  `--billing` (Docker 29.4.2: изолация ✓, 137 при 256 MB, 62/64 процеса).
+- Stripe тестов режим от край до край (числата в cloud/README.md): пакет, повтор,
+  грешна сума, план, refund 2.50 → −250 и останалото, refund на плана, спиране.
+- Следобед: ~~оспорено плащане ръчно~~ — `charge.dispute.created` сваля, спечелен спор
+  връща (истински Stripe: номерата са `du_…`, спорът може да дойде ПРЕДИ сесията → 503);
+  ~~спиране на абонамента само с имейл~~ — бутон в „Сметка“ (`cancel_at_period_end`).
+- Остава само за оператора: Stripe live, наемане на сървъра, сдвояване на телефона.
+  Не е мерено: bench_fix 12/12 (иска ключ); ограничен ключ rk_live с правата от бележката;
+  спор по абонаментна фактура (спорът няма клиента) — ръчно `grant … -X`.
+
+## 2026-11-12 — какво пречи да се продава (PR #120, слят 15.11)
 
 Преглед на платената част (`cloud/`, `site/`), не нов одит на агента. По тежест:
 1. ~~Страницата обещава, което облакът не може~~ — качване на файлове в уеб чата
-   (`cloud/README.md`, „Качване на файлове“; `tests/test_cloud_upload.py`, 34) и
-   примерите в `site/public/index.html` са само неща с файл на входа; „GitHub проектът
-   ми“ и „всяка сутрин проверява сайта“ са махнати (задачата няма мрежа и разписание).
+   (`cloud/README.md`, „Качване на файлове“; `tests/test_cloud_upload.py`) и
+   примерите в `site/public/index.html` са само неща с файл на входа. Прегледът на 15.11:
+   Caddy чете `26MB` като 26 000 000 < 25 MiB на сървъра — сега `26MiB`.
    **Остава на оператора:** `wrangler pages deploy` на site/ и проба зад истински Caddy.
 2. Цените: по `prices.json` малка задача е 0.02–0.04 €, проект от бенча (130k токена)
    ~0.12 € по groq; месечният таван е 2000 кр. = 20 €/човек, планът дава същите
    кредити за евро като пакета. Решение на оператора (планове с включени задачи?).
 3. 54/54 е мерено с `claude_cli`; шлюзът няма Anthropic, а безплатната верига на 05.11
    беше неизползваема. Бенч в контейнера с веригата, която ще се продава — с ключове.
-4. Липсва: смяна/възстановяване на парола (и като команда), отказ от абонамент от
-   страницата, `charge.refunded`/спорове, ДДС в Checkout, условия и изтриване на профил.
+4. Липсва: смяна/възстановяване на парола (и като команда), ДДС в Checkout.
+   ~~Отказ от абонамент, `charge.refunded`/спорове, условия, изтриване на профил~~ — #121.
 5. Неподписан `genesis.exe` (Smart App Control), няма го в PyPI.
 6. Броят записани от страницата за ранен достъп не е записан тук.
 
@@ -57,32 +116,27 @@
   bench_honesty след това: 15/15 хванати, 0/12 фалшиви.
 
 **Отворено от този кръг** (възпроизведено, непоправено — по реда на тежестта):
-- Портата: четене на тайни през `bash -c 'cat ~/.ss{h,x}/id_rs{a,b}'` (скоби), `cd; cat .s*/*`,
+- ~~Портата: четене на тайни през `bash -c 'cat ~/.ss{h,x}/id_rs{a,b}'` (скоби), `cd; cat .s*/*`,
   `grep -rh X ~`, `find ~ -exec cat {} +` — SAFE; `echo … >> ~/.bashrc|.gitconfig` — SAFE;
-  `git commit -m '… rm -rf / …'` — BLOCKED. ~~Целият дом без rm (`mv ~`, `find ~ | xargs rm`,
+  `git commit -m '… rm -rf / …'` — BLOCKED~~ — 15.11. ~~Целият дом без rm (`mv ~`, `find ~ | xargs rm`,
   `rsync --delete ~/`, `rm -rf ~/.*`, `chmod 777 -R /`, `cd $HOME && rm -rf *`), `git checkout
   -f`/`git restore файл`, `[IO.Directory]::Delete`, качване (`curl -sT`, localhost в чужд
   хост, `rsync f u@h:`, `/dev/tcp/`), `curl … | zsh|python3`, `bash <(curl …)`~~ — осми кръг,
   `tests/test_audit_2026_11_10_gate_round8.py` (86; 54 падат без поправката). Нарочно: домът
   при `chmod/chown -R` само пита (отказ не се одобрява); `| python3 -m …`/`-c` е данни — SAFE.
-  Не е покрито: `cd / && chmod -R 777 .`, `curl … | tee f | bash`, `find ~ -exec mv`.
-- /permissions приема `pipenv *`, `bundle *`, `mise *`, `parallel *` (покриват всяка команда);
-  `npm *` покрива `npm explore pkg -- rm -rf build`.
-- /undo: EDIT + `chmod +x` в същия ход — правата остават; команда, сменила файл с връзка —
-  pending() обещава „върни“, undo го оставя.
-- Честността: „работи“ след срив, скрит от тръба (`python app.py 2>&1 | tail -5`, `|| true`)
-  минава; обратното — честно „работи“ след нарочен rc≠0 (`| grep -i error`, `timeout 3`,
+  ~~Не е покрито: `cd / && chmod -R 777 .`, `curl … | tee f | bash`, `find ~ -exec mv`~~ — 15.11.
+- ~~/permissions приема `pipenv *`, `bundle *`, `mise *`, `parallel *`; `npm explore`~~ — 15.11.
+- ~~/undo: EDIT + `chmod +x`; команда, сменила файл с връзка~~ — 15.11.
+- Честността: ~~„работи“ след срив, скрит от тръба (`python app.py 2>&1 | tail -5`, `|| true`)
+  минава~~ (15.11); ~~обратното — честно „работи“ след нарочен rc≠0 (`| grep -i error`, `timeout 3`,
   pytest rc=5) се бележи и „нарочно“ не го чисти; `echo x > f`, `del`, `Remove-Item`, `ln -s`,
-  `find -delete` не доказват запис/триене; MismatchCheck не вижда `Test 2: FAIL`, `[FAIL]`,
+  `find -delete` не доказват запис/триене~~ (15.11); ~~MismatchCheck не вижда `Test 2: FAIL`, `[FAIL]`,
   `... FAILED`, `✗` в края, `1 of 3 tests failed`, а брояч `1/3 ok … 3/3 ok` е тревога;
-  TestEditCheck не вижда `def _test_x`, `return` пред assert, `except AssertionError: pass`.
-- redact (известия): `if event['key'] == 'Enter':` → `"***"`; още изтичат `password ==
-  "…"`, `ssh-keygen -p -P стара`, `WinRAR -hp…`, `{"pass_phrase": …}`. conversation_memory:
-  `api_key=os.environ["X"]` се реже, а `{"password": "…"}` и `mysql -p…` остават.
-- Шлюзът препраща оригиналните байтове: при дублиран ключ в JSON (`"model"` два пъти)
-  проверката гледа последния, доставчикът може да вземе първия — не е пробвано с ключ.
-- test_ctrl_c_in_parallel_reads_is_not_held_by_a_slow_read (e86464e) падна веднъж при
-  натоварена машина (4 одита успоредно); сам минава.
+  TestEditCheck не вижда `def _test_x`, `return` пред assert, `except AssertionError: pass`~~
+  — 15.11 (bench_honesty: 15/15, 0/12 и преди, и след).
+- ~~redact (известия и conversation_memory)~~ — 15.11.
+- ~~Шлюзът: дублиран ключ в JSON~~ — 15.11 (и с друг регистър).
+- ~~test_ctrl_c_in_parallel_reads_is_not_held_by_a_slow_read~~ — 15.11, чака Event.
 
 ## 2026-11-10 — готов ли е за показване (клон `claude/gotov-20261110`)
 
@@ -1389,13 +1443,14 @@ Genesis остава двигателят; услугата е отделна ч
 2. ~~Вход, уеб чат, файлове за сваляне~~ — `cloud/web/` (виж `cloud/README.md`);
    ~~скриптове за сървъра~~ (2026-10-11: `cloud/deploy.sh`, systemd, Caddyfile, бекъп,
    `cloud/check.py`). Остава: да се наеме сървърът и да се пусне. 3. ~~Stripe~~ в код
-   (2026-10-11, `cloud/web/billing.py`): остават истинските ключове, цените в евро
-   (сега пробни в `prices.json`) и едно тестово плащане в Stripe test mode.
+   (2026-10-11, `cloud/web/billing.py`): остават ~~истинските ключове~~ live ключът,
+   цените (предложение в `cloud/PRICING.md`); ~~тестово плащане в test mode~~ (10.11, 13.11).
    4. ~~Защита — покани, квоти, таван на месец~~; ~~наблюдение/аларми~~ (2026-10-12,
    `cloud/monitor.py` на 5 мин: имейл/webhook само при смяна). Stripe проба за 5 мин:
    `cloud/stripe_check.py` (виж `cloud/README.md`).
    5. Бета с 10 души.
-Нужно от оператора: фирма/регистрация, платени API ключове, условия и GDPR.
+Нужно от оператора: фирма/регистрация, платени API ключове, ~~условия и GDPR~~ (чернови
+`/legal/…` от 13.11 — данните и преглед от юрист).
 
 **Да не се прави:** нови интерфейси и нови модули извън плана по-горе. Качеството идва от измерване
 и изглаждане на основния цикъл.

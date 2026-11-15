@@ -601,10 +601,10 @@ def _last_two_trees(ws: Path) -> list[str]:
     return refs[-2:]
 
 
-@pytest.mark.skipif(os.name == "nt", reason="символни връзки на Windows искат права")
 def test_a_symlink_a_command_created_is_removed_by_undo(ws, tmp_path) -> None:
     """pending обещаваше „изтрий link“, а /undo казваше „променен след хода“ и
-    я оставяше: current_id връщаше None за връзка (одит 2026-10-21)."""
+    я оставяше: current_id връщаше None за връзка (одит 2026-10-21). И на
+    Windows (2026-11-15): там целта в снимката е `C:/…`, а readlink — `\\\\?\\C:\\…`."""
     outside = tmp_path / "secret.txt"
     outside.write_text("SECRET\n", encoding="utf-8")
     link = ws / "link.txt"
