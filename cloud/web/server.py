@@ -80,6 +80,7 @@ MONTHLY_CAP = 2000 * MICRO
 HIDDEN = ".genesis"          # историята на разговора (task.py) — не е за сваляне
 # През колко секунди shutdown() почиства отново, докато чака живите ходове.
 SHUTDOWN_POLL = 1.0
+EXPIRE_EVERY = 3600.0         # срокът на разговорите (expire) — проход на всеки час
 
 Runner = Callable[..., launch.Result]
 
@@ -120,7 +121,7 @@ class App:
                  max_tokens_per_turn: int = launch.TASK_BUDGET,
                  monthly_cap: int = MONTHLY_CAP, stripe: billing.StripeConfig | None = None,
                  stripe_opener: billing.Opener | None = None,
-                 legal_values: dict[str, str] | None = None) -> None:
+                 legal_values: dict[str, str] | None = None, keep_days: int = 0) -> None:
         if prices is not None and gateway is None:
             # Без шлюза токените ги казва кодът в контейнера (2026-10-11).
             raise ValueError("плащането иска шлюза (--gateway-usage)")
@@ -143,6 +144,8 @@ class App:
         self.stripe_opener = stripe_opener
         # Данните на продавача за правните страници (--legal); {} = празни места.
         self.legal_values = legal_values or {}
+        # След колко дни без ход разговорът се трие (expire); 0 = никога.
+        self.keep_days = keep_days
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="turn")
         self._failures: dict[str, list[float]] = {}
         self._noted: dict[str, float] = {}     # ключ → кога заключването е записано
@@ -191,6 +194,57 @@ class App:
             if not running or not wait(running, timeout=SHUTDOWN_POLL).not_done:
                 break
         self.pool.shutdown(wait=True)
+
+    # ── срок на разговорите ─────────────────────────────────────────────────
+    def expire(self, now: float | None = None) -> int:
+        """Трие разговорите без ход от `keep_days` дни — редовете и папката.
+
+        Поверителността (2026-11-15) обещава срок {{СРОК_РАЗГОВОРИ}}, а нищо не
+        триеше: с качването (фактури, до 1 GiB на човек на ден) дискът растеше
+        без край. Не пипа разговор с ход в ход, с неокончателна сметка (като
+        `forget`), със сваляне или качване в ход, нито такъв, чиято папка е
+        пипана след срока (каченият файл не е ход — денят му е в папката)."""
+        if self.keep_days <= 0:
+            return 0
+        before = (time.time() if now is None else now) - self.keep_days * 86400
+        stale = [(uid, chat) for uid, chat in self.store.stale_chats(before)
+                 if _untouched_since(self.workspace(uid, chat), before)]
+        with self._lock:
+            # Под заключването, с което start_turn и сваляне/качване започват:
+            # след drop_chats разговорът го няма и те го отказват.
+            stale = [(uid, chat) for uid, chat in stale if self._downloading[chat] <= 0]
+            gone = self.store.drop_chats([chat for _, chat in stale], before)
+        # Папката — след базата (като forget): ако триенето спре, следващият
+        # проход я намира като папка без разговор.
+        for uid, chat in stale:
+            if chat in gone:
+                _remove_tree(self.workspace(uid, chat))
+        self._sweep_orphans(before)
+        return len(gone)
+
+    def _sweep_orphans(self, before: float) -> None:
+        if not self.jobs_dir.is_dir():
+            return
+        for user_dir in self.jobs_dir.iterdir():
+            if not user_dir.name.isdigit() or user_dir.is_symlink() or not user_dir.is_dir():
+                continue
+            for folder in user_dir.iterdir():
+                if _CHAT_ID.fullmatch(folder.name) and _untouched_since(folder, before) \
+                        and not self.store.has_chat(folder.name):
+                    _remove_tree(folder)
+
+    def expire_loop(self, every: float = EXPIRE_EVERY) -> None:
+        """Нишката на `serve --keep-days`: проход веднага и после на всеки час."""
+        while True:
+            try:
+                n = self.expire()
+                if n:
+                    print(f"срок: изтрити {n} разговора без ход от {self.keep_days} дни",
+                          file=sys.stderr)
+            except (OSError, sqlite3.Error) as e:
+                print(f"срок: {type(e).__name__}: {e}", file=sys.stderr)
+            if self._stopping.wait(every):
+                return
 
     # ── вход ────────────────────────────────────────────────────────────────
     def _recent_failures(self, key: str) -> list[float]:
@@ -412,6 +466,10 @@ class App:
             if account["disabled"]:
                 # Сесията вече е невалидна (session_user) — това е само втора стена.
                 raise TurnRefused(403, "профилът е спрян — пиши на поддръжката")
+            if self.store.chat(uid, chat_id) is None:
+                # Изтрит (срокът, expire) между обработчика и тук — без ред в
+                # chats ходът би останал сирак, а папката — без собственик.
+                raise TurnRefused(404, "няма такъв разговор")
             if self.store.busy(user_id=uid) or self._downloading[chat_id] > 0:
                 raise TurnRefused(409, "предишната ти задача още върви")
             per_day, budget, cap = self.limits_for(account)
@@ -637,6 +695,32 @@ def zip_files(workspace: Path) -> bytes | None:
             if p is not None:
                 z.writestr(shown, read_file(p))
     return buf.getvalue()
+
+
+# ── срок на разговорите ──────────────────────────────────────────────────────
+
+_CHAT_ID = re.compile(r"[0-9a-f]{32}")
+
+
+def _untouched_since(folder: Path, before: float) -> bool:
+    """Папката (самата, не съдържанието — качване и ход я пипат) е от преди
+    `before`, или я няма."""
+    try:
+        return folder.lstat().st_mtime < before
+    except OSError:
+        return True
+
+
+def _remove_tree(folder: Path) -> None:
+    """Папка на разговор — без да се следва връзка (кодът в контейнера е чужд;
+    shutil.rmtree на Linux не следва връзките вътре)."""
+    try:
+        if folder.is_symlink() or not folder.is_dir():
+            folder.unlink(missing_ok=True)
+        else:
+            shutil.rmtree(folder)
+    except OSError as e:
+        print(f"срок: {folder} не се изтри: {type(e).__name__}: {e}", file=sys.stderr)
 
 
 # ── HTTP ─────────────────────────────────────────────────────────────────────
@@ -1279,6 +1363,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="https://адресът на услугата (за Stripe; иначе GENESIS_PUBLIC_URL)")
     srv.add_argument("--legal", type=Path,
                      help="JSON с данните на продавача за правните страници (/legal/…)")
+    srv.add_argument("--keep-days", type=int, default=0,
+                     help="след колко дни без ход разговорът и файловете му се трият "
+                          "(0 = никога; поверителността обещава срок — СРОК_РАЗГОВОРИ)")
     return p
 
 
@@ -1354,7 +1441,7 @@ def main(argv: list[str] | None = None) -> int:
               trust_proxy="cloudflare" if a.trust_cloudflare else a.trust_proxy, gateway=gateway,
               recover=False, prices=prices, turns_per_day=a.turns_per_day,
               max_tokens_per_turn=a.max_tokens_per_turn, monthly_cap=monthly_cap, stripe=stripe,
-              legal_values=legal_values)
+              legal_values=legal_values, keep_days=max(0, a.keep_days))
     try:
         server = make_server(app, a.host, a.port)
     except OSError as e:
@@ -1363,6 +1450,8 @@ def main(argv: list[str] | None = None) -> int:
         app.pool.shutdown(wait=False)
         return 1
     app.recover()
+    if app.keep_days:
+        threading.Thread(target=app.expire_loop, name="expire", daemon=True).start()
     # systemd спира услугата със SIGTERM; без обработчик процесът умираше
     # веднага и контейнерите оставаха (деплой одит 2026-10-11).
     signal.signal(signal.SIGTERM, _interrupt)

@@ -557,6 +557,59 @@ class Store:
             c.close()
         return ""
 
+    # Срокът на разговорите (2026-11-15): поверителността обещава, че разговорите и
+    # файловете се пазят до {{СРОК_РАЗГОВОРИ}}, а нищо не ги триеше. Стар е разговор
+    # без ход след `before` (без ходове — създаден преди него), без ход в ход и с
+    # окончателна сметка — същото, което `forget` чака.
+    _STALE = ("COALESCE((SELECT MAX(t.created) FROM turns t WHERE t.chat_id = ch.id), "
+              "ch.created) < ? AND NOT EXISTS (SELECT 1 FROM turns t WHERE t.chat_id = ch.id "
+              "AND t.status IN ('queued', 'running')) AND NOT EXISTS (SELECT 1 FROM turn_jobs j "
+              "JOIN turns t ON t.id = j.turn_id WHERE t.chat_id = ch.id AND j.settled = 0)")
+
+    def stale_chats(self, before: float) -> list[tuple[int, str]]:
+        """(човек, разговор) на старите разговори — кандидати за drop_chats."""
+        with self._db() as c:
+            rows = c.execute(f"SELECT ch.user_id, ch.id FROM chats ch WHERE {self._STALE} "
+                             "ORDER BY ch.created", (before,)).fetchall()
+        return [(int(r[0]), str(r[1])) for r in rows]
+
+    def has_chat(self, chat_id: str) -> bool:
+        with self._db() as c:
+            return c.execute("SELECT 1 FROM chats WHERE id = ?", (chat_id,)).fetchone() is not None
+
+    def drop_chats(self, chat_ids: list[str], before: float) -> set[str]:
+        """Трие разговорите, които и в тази транзакция още са стари (ход може да е
+        тръгнал между stale_chats и тук): ходовете, събитията, жетоните, реда.
+        Сметката остава. С secure_delete — като forget, текстът не остава в
+        свободните страници на файла."""
+        if not chat_ids:
+            return set()
+        c = sqlite3.connect(self.path, timeout=10, isolation_level=None)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA secure_delete = ON")
+        gone: set[str] = set()
+        try:
+            c.execute("BEGIN IMMEDIATE")
+            for chat_id in chat_ids:
+                if c.execute(f"SELECT 1 FROM chats ch WHERE ch.id = ? AND {self._STALE}",
+                             (chat_id, before)).fetchone() is None:
+                    continue
+                turns = "SELECT id FROM turns WHERE chat_id = ?"
+                for sql in (f"DELETE FROM events WHERE turn_id IN ({turns})",
+                            f"DELETE FROM turn_jobs WHERE turn_id IN ({turns})",
+                            "DELETE FROM turns WHERE chat_id = ?",
+                            "DELETE FROM chats WHERE id = ?"):
+                    c.execute(sql, (chat_id,))
+                gone.add(chat_id)
+            c.execute("COMMIT")
+        except BaseException:
+            if c.in_transaction:
+                c.execute("ROLLBACK")
+            raise
+        finally:
+            c.close()
+        return gone
+
     def active_customers(self, user_id: int) -> list[str]:
         """Stripe клиентите на човека с още активен абонамент."""
         with self._db() as c:
