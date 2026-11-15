@@ -253,7 +253,11 @@ _CONFIRM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # <(curl …)` и `. <(curl …)` бяха SAFE — същото изтегляне и изпълнение с друг
     # изпълнител. Интерпретаторът се брои само гол (или с `-`): `| python3 -m
     # json.tool` и `| python3 -c '…'` четат входа като ДАННИ и остават без въпрос.
-    (_c(r"\b(curl|wget)\b[^\n|]*\|\s*(sudo\s+)?(?:(?:ba|z|da|k|a|fi)?sh\b"
+    # 2026-11-15: и през междинен етап — `curl … | tee f | bash`, `wget -qO- … |
+    # tee /tmp/a | sh`, `curl … | jq -r .s | bash`, `curl … | tee >(bash)` бяха
+    # SAFE. Тръбата до изпълнителя може да минава през всякакви етапи; `;` и нов
+    # ред я свършват.
+    (_c(r"\b(curl|wget)\b[^\n;]*?(?:\||>\()\s*(sudo\s+)?(?:(?:ba|z|da|k|a|fi)?sh\b"
         r"|(?:python[\d.]*|perl|ruby|node|php)(?:\.exe)?\s*(?:-\s*)?(?:$|[\n|;&)]))"
         r"|(?:\b(?:ba|z|da|k|a|fi)?sh|\bsource|(?:^|[;&|(\s])\.)\s+(?:-\S+\s+)*<\(\s*(?:curl|wget)\b"),
      "изтегляне и директно изпълнение в shell (curl|bash)"),
@@ -2397,6 +2401,9 @@ def _whole_root_reason(target: str) -> str | None:
     return None
 
 
+_HERE = frozenset({".", "./", "*", "./*", ".*", "./.*"})
+
+
 def _whole_root_block(command: str) -> str | None:
     """Причина за отказ, ако командата мести, изпразва или пренаписва правата
     на цял корен/дом без `rm`; иначе None."""
@@ -2405,6 +2412,10 @@ def _whole_root_block(command: str) -> str | None:
         reason = _whole_root_reason(m.group(1))
         if reason:
             return f"[IO.Directory]::Delete върху {reason}"
+    # `cd / && chmod -R 777 .` (одит 2026-11-10, „не е покрито“): точката е
+    # коренът, в който `cd` е влязъл — като `chmod -R 777 /`. Само `cd` към
+    # цял корен/дом се помни; друг `cd` го забравя.
+    here = ""
     for statement in _split_segments(command, pipes=False):
         stages = _split_segments(statement) or [statement]
         for index, stage in enumerate(stages):
@@ -2413,7 +2424,11 @@ def _whole_root_block(command: str) -> str | None:
                 continue
             name = Path(tokens[0]).name
             args = tokens[1:]
-            operands = [a for a in args if not a.startswith("-")]
+            if name == "cd":
+                target = next((a for a in args if not a.startswith("-")), "~")
+                here = target if _whole_root_reason(target) else ""
+                continue
+            operands = [(here if here and a in _HERE else a) for a in args if not a.startswith("-")]
             if name == "mv":
                 # С `-t ПАПКА` всички думи са източници; иначе последната е целта.
                 targeted = any(a in ("-t", "--target-directory") or a.startswith("--target-directory=")
