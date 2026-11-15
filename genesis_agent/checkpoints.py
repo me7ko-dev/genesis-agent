@@ -384,10 +384,27 @@ def current_id(path: Path) -> str | None:
     nothing. A link gave None, so a link a command made was always „changed
     since“ for /undo and never removed (audit 2026-10-21)."""
     if path.is_symlink():
-        return blob_id(os.readlink(path).encode("utf-8", "surrogateescape"))
+        return blob_id(git_link(os.readlink(path)).encode("utf-8", "surrogateescape"))
     if not path.is_file():
         return None
     return blob_id(path.read_bytes())
+
+
+def git_link(target: str, windows: bool = os.name == "nt") -> str:
+    """Целта на връзка така, както git я пази в снимката. Git за Windows маха
+    `\\\\?\\` / `\\??\\` и обръща `\\` в `/` (compat/mingw.c, normalize_ntpath),
+    а os.readlink връща `\\\\?\\C:\\...`: всяка абсолютна връзка изглеждаше
+    „пипната след хода“ и /undo я оставяше (Windows CI 2026-11-15, job
+    132610759444 — 2 от новите тестове за /undo)."""
+    if not windows:
+        return target
+    for prefix in ("\\\\?\\", "\\??\\"):
+        if target.startswith(prefix):
+            target = target[len(prefix):]
+            break
+    if target[:4].upper() == "UNC\\":
+        target = "\\" + target[3:]          # \\?\UNC\srv\share → \\srv\share
+    return target.replace("\\", "/")
 
 
 def inside(workspace: Path, path: Path) -> bool:

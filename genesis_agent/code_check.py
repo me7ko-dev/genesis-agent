@@ -173,8 +173,15 @@ _FAIL_LINE = re.compile(r"^\s*(?:❌|✗|✘|(?-i:FAIL(?:ED)?)\b(?![:=]?\s*0\b)|
 # Failed: 0“ числото пред „failed“ е на passed — след „failed“ идва собственото му.
 _FAIL_COUNT = re.compile(r"(?<!expected )\b(?:failed|failures?|wrong|грешни|паднали|неуспешни)\s*[:=]\s*[1-9]"
                          r"|\b[1-9]\d*\s+(?:failed|failing|wrong|грешни|паднаха|паднали)\b"
-                         r"(?!\s*[:=]?\s*\d)",
+                         r"(?!\s*[:=]?\s*\d)"
+                         # `1 of 3 tests failed`, `2 от 5 теста паднаха` (2026-11-15).
+                         r"|\b[1-9]\d*\s+(?:of|out of|от|из)\s+\d+\s+(?:\w+\s+){0,2}?"
+                         r"(?:failed|failing|паднаха|паднали|грешни|неуспешни)\b",
                          re.IGNORECASE)
+# 2026-11-15 (отвореното от 10.11, D): `Test 2: FAIL`, `[FAIL] total`, `test_sub
+# ... FAILED`, `t.py::test_sub FAILED`, `total ✗` — отметката е в края или в скоби.
+_FAIL_MARK = re.compile(r"^\s*\[\s*(?-i:FAIL(?:ED)?)\s*\]|(?:^|[\s:])(?-i:FAIL(?:ED)?)\s*$"
+                        r"|\s[✗✘❌]\s*$")
 _RATIO = re.compile(r"\b(\d+)\s*/\s*(\d+)\s+(?:tests?\s+)?(?:passed|pass|ok|correct|верни|минаха|"
                     r"минават|успешни)\b", re.IGNORECASE)
 # Ред на съобщение за грешка — там „expected 10, got 9“ е отказът, който проверката иска.
@@ -256,6 +263,13 @@ def is_self_check(command: str, output: str) -> bool:
     return is_test_run(command) or bool(_CHECK_SCRIPT.search(command) or _SELF_SUMMARY.search(output))
 
 
+def _reaches(later: list[str], total: str) -> bool:
+    """Брояч на напредъка (`1/3 ok … 3/3 ok`) не е разминаване, ако по-късно
+    стига до края със същия знаменател (2026-11-15: беше тревога)."""
+    return any(m.group(1) == m.group(2) == total
+               for line in later for m in _RATIO.finditer(line))
+
+
 def mismatch_line(output: str, *, self_check: bool = True) -> str:
     """Първият ред от изхода, който показва разминаване; "" ако няма.
     Без `self_check` — само „expected X, got Y“ на един ред (виж горе)."""
@@ -264,10 +278,12 @@ def mismatch_line(output: str, *, self_check: bool = True) -> str:
         text = line.strip()
         if not text:
             continue
-        if self_check and (_FAIL_LINE.match(text) or _FAIL_COUNT.search(text)):
+        if self_check and (_FAIL_LINE.match(text) or _FAIL_COUNT.search(text)
+                           or _FAIL_MARK.search(text)):
             return text[:200]
         ratio = _RATIO.search(text) if self_check else None
-        if ratio and int(ratio.group(1)) < int(ratio.group(2)):
+        if ratio and int(ratio.group(1)) < int(ratio.group(2)) \
+                and not _reaches(lines[i + 1:], ratio.group(2)):
             return text[:200]
         if _ERROR_LINE.search(text):
             continue
@@ -384,7 +400,48 @@ def weakening(before: str, after: str) -> str:
         return "добавено пропускане (skip/xfail)"
     gone = next((ln for ln in before.splitlines()
                  if ASSERT_RE.search(ln) and (old - new)[re.sub(r"\s+", "", ln)]), "")
-    return f"сменена или махната проверка `{gone.strip()[:120]}`" if gone else ""
+    if gone:
+        return f"сменена или махната проверка `{gone.strip()[:120]}`"
+    return _disabled(before, after, new - old)
+
+
+# 2026-11-15 (отвореното от 10.11, E): проверките остават на мястото си, а не се
+# изпълняват — `def test_x` → `def _test_x` (pytest не го събира), голо `return`
+# преди тях, `except AssertionError: pass` около тях.
+_TEST_DEF = re.compile(r"^[ \t]*(?:async[ \t]+)?def[ \t]+(test\w*)[ \t]*\(", re.MULTILINE)
+_ANY_DEF = re.compile(r"^([ \t]*)(?:async[ \t]+)?def[ \t]+(\w+)[ \t]*\(")
+_SWALLOW = re.compile(r"^[ \t]*(except\b(?:[ \t]*\(?[ \t]*(?:AssertionError|Exception|BaseException)\b"
+                      r"[^:\n]*)?:)[ \t]*(?:#[^\n]*)?\n?[ \t]*pass\b", re.MULTILINE)
+
+
+def _disabled(before: str, after: str, added: Counter[str]) -> str:
+    names = set(_TEST_DEF.findall(after))
+    for name in sorted(set(_TEST_DEF.findall(before)) - names):
+        renamed = next((m.group(2) for ln in after.splitlines() if (m := _ANY_DEF.match(ln))
+                        and name in m.group(2) and not m.group(2).startswith("test")), "")
+        if renamed:
+            return f"тестът `{name}` е преименуван на `{renamed}` — pytest вече не го събира"
+    if added["return"]:
+        lines = after.splitlines()
+        for i, ln in enumerate(lines):
+            if ln.strip() == "return" and _enclosing(lines, i).startswith("test"):
+                return f"голо `return` в `{_enclosing(lines, i)}` — проверките след него не се изпълняват"
+    was = Counter(m.group(1) for m in _SWALLOW.finditer(before))
+    for m in _SWALLOW.finditer(after):
+        if was[m.group(1)]:
+            was[m.group(1)] -= 1
+            continue
+        return f"проверката се поглъща (`{m.group(1)} pass`)"
+    return ""
+
+
+def _enclosing(lines: list[str], i: int) -> str:
+    indent = len(lines[i]) - len(lines[i].lstrip())
+    for ln in reversed(lines[:i]):
+        m = _ANY_DEF.match(ln)
+        if m and len(m.group(1)) < indent:
+            return m.group(2)
+    return ""
 
 
 class TestEditCheck:

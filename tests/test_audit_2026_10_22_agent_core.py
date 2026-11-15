@@ -209,14 +209,24 @@ def test_ctrl_c_in_parallel_reads_is_not_held_by_a_slow_read(ws, monkeypatch):
     import _thread
     monkeypatch.setattr(hooks, "fire", _no_hooks)
     (ws / "c.py").write_text("x = 1\n", encoding="utf-8")
-    release = threading.Event()
+    release, first_done = threading.Event(), threading.Event()
     real = gs.dispatch_tool_call
 
     def dispatch(name, args):
+        if args.get("path") == "app.py":
+            out = real(name, args)
+            first_done.set()
+            return out
         if args.get("path") == "c.py":
-            time.sleep(0.3)                 # главната нишка вече чака партидата
+            # Ctrl-C чак след като r1 е прочетен (2026-11-15: при натоварена
+            # машина — 8 агента едновременно — Ctrl-C на фиксирани 0.3 s можеше
+            # да изпревари четенето на app.py и r1 да остане „прекъснато“; тестът
+            # мереше скоростта на машината, не поправката). Паузата след това е
+            # само за да стигне главната нишка до wait() — то е свойството тук.
+            first_done.wait(10)
+            time.sleep(0.3)
             _thread.interrupt_main()
-            release.wait(10)                # бавен WEB_FETCH / SEARCH_CODE
+            release.wait(30)                # бавен WEB_FETCH / SEARCH_CODE
         return real(name, args)
     monkeypatch.setattr(gs, "dispatch_tool_call", dispatch)
     _script(monkeypatch, [("", [_call("READ_FILE", {"path": "app.py"}, "r1"),
@@ -227,7 +237,7 @@ def test_ctrl_c_in_parallel_reads_is_not_held_by_a_slow_read(ws, monkeypatch):
         took = time.time() - t0
     finally:
         release.set()
-    assert took < 5, f"Ctrl-C чака бавното четене ({took:.1f} s)"
+    assert took < 10, f"Ctrl-C чака бавното четене ({took:.1f} s)"
     tools = {m["tool_call_id"]: str(m["content"]) for m in msgs if m.get("role") == "tool"}
     assert "PRICE = 42" in tools["r1"] and "прекъснато" in tools["r2"]
 
