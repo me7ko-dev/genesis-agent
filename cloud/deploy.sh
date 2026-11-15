@@ -10,7 +10,7 @@
 # GENESIS_NO_PULL=1, DEPLOY_DRY_DIR (къде сухото пускане пише файловете),
 # GENESIS_MONITOR_ENV (само за тестовете: genesis-monitor.service чете
 # /srv/genesis/monitor.env), GENESIS_WEB_ARGS_FILE (/srv/genesis/web.args —
-# още аргументи на сървъра: --billing, --public-url, --prices, --legal…),
+# още аргументи на сървъра: --billing, --public-url, --prices, --legal, --keep-days…),
 # GENESIS_STRIPE_ENV (само за тестовете: genesis-web.service чете
 # /srv/genesis/stripe.env).
 set -euo pipefail

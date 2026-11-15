@@ -70,7 +70,8 @@ class Setup:
         self.args = {"--env-file": self.keys.as_posix(),
                      "--gateway-usage": (tmp / "usage.jsonl").as_posix(),
                      "--billing": None, "--public-url": "https://genesis.mydomain.eu",
-                     "--prices": self.prices.as_posix(), "--legal": self.legal.as_posix()}
+                     "--prices": self.prices.as_posix(), "--legal": self.legal.as_posix(),
+                     "--keep-days": "90"}
 
     def write(self, *, prices: Any = None, stripe: Any = None, values: Any = None) -> None:
         if prices is not None:
@@ -139,6 +140,9 @@ BREAKS: list[tuple[str, str]] = [
     ("legal_empty", "не са попълнени ИМЕЙЛ"),
     ("legal_draft", "още „чернова“"),
     ("legal_bad_json", "невалиден JSON"),
+    # 2026-11-15: поверителността обещава срок, а нищо не триеше старите разговори.
+    ("no_keep_days", "--keep-days липсва"),
+    ("keep_days_differs", "обещава 90 дни, а --keep-days е 30"),
 ]
 
 
@@ -212,6 +216,10 @@ def _break(s: Setup, what: str) -> None:
         s.args["--turns-per-day"] = "0"
     elif what == "no_turn_cap":
         s.args["--max-tokens-per-turn"] = "0"
+    elif what == "no_keep_days":
+        del s.args["--keep-days"]
+    elif what == "keep_days_differs":
+        s.args["--keep-days"] = "30"
     elif what == "no_legal":
         del s.args["--legal"]
     elif what == "legal_empty":

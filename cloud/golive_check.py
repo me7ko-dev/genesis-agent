@@ -212,6 +212,27 @@ def check_legal(path: Path | None) -> list[Check]:
     return out
 
 
+# Срокът на разговорите (2026-11-15): поверителността обещава {{СРОК_РАЗГОВОРИ}},
+# а без --keep-days нищо не трие. Ако обещанието е в дни, броят трябва да съвпада.
+_PROMISED_DAYS = re.compile(r"(\d+)\s*(?:дни|дена|ден|days?)\b", re.IGNORECASE)
+
+
+def check_keep_days(keep_days: int, legal_path: Path | None) -> Check:
+    if keep_days <= 0:
+        return Check(False, "--keep-days липсва: поверителността обещава срок за разговорите "
+                            "и файловете, а без него нищо не ги трие (напр. --keep-days 90)")
+    promised = ""
+    if legal_path is not None:
+        try:
+            promised = legal.load_values(legal_path).get("СРОК_РАЗГОВОРИ", "")
+        except ValueError:
+            promised = ""   # check_legal вече казва защо не се чете
+    m = _PROMISED_DAYS.search(promised)
+    if m and int(m[1]) != keep_days:
+        return Check(False, f"поверителността обещава {m[1]} дни, а --keep-days е {keep_days}")
+    return Check(True, f"разговорите без ход се трият след {keep_days} дни")
+
+
 def run_checks(args_line: str, stripe_env: Mapping[str, str], *,
                stripe_prices: Path | None = None, repo: Path = REPO) -> list[Check]:
     out: list[Check] = []
@@ -261,6 +282,7 @@ def run_checks(args_line: str, stripe_env: Mapping[str, str], *,
     out.append(Check(a.max_tokens_per_turn > 0, f"таван на ход: {a.max_tokens_per_turn} токена"
                      if a.max_tokens_per_turn > 0 else "--max-tokens-per-turn е 0"))
     out.extend(check_legal(a.legal))
+    out.append(check_keep_days(a.keep_days, a.legal))
     return out
 
 

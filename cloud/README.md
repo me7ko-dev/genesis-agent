@@ -305,7 +305,7 @@ python -m cloud.web.server serve ... --env-file /srv/genesis/keys.env \
 ```bash
 # /srv/genesis/web.args — още аргументи на сървъра (deploy.sh ги добавя)
 --billing --public-url https://genesis.example.com --prices /srv/genesis/prices.json
---legal /srv/genesis/legal.json --monthly-cap 2000 --turns-per-day 50
+--legal /srv/genesis/legal.json --monthly-cap 2000 --turns-per-day 50 --keep-days 90
 # /srv/genesis/stripe.env (chmod 600) — EnvironmentFile на genesis-web
 STRIPE_SECRET_KEY=sk_live_…
 STRIPE_WEBHOOK_SECRET=whsec_…
@@ -314,6 +314,9 @@ STRIPE_WEBHOOK_SECRET=whsec_…
 спрял на местна промяна). `legal.json` попълва празните места на `/legal/terms`,
 `/legal/privacy`, `/legal/refunds`, `/legal/contact` (`cloud/web/legal.py`, `FIELDS`) и
 след преглед от юрист — `"ПРЕГЛЕДАНО": "да"` маха лентата „чернова“.
+`--keep-days 90` изпълнява обещания там срок (`СРОК_РАЗГОВОРИ`): на всеки час сървърът
+трие разговорите без ход от 90 дни — редовете (secure_delete) и папката в `/srv/jobs`;
+сметката остава. Без него нищо не се трие (`golive_check` го иска и сверява дните).
 Преди първия истински клиент: `sudo python3 -m cloud.golive_check --stripe-prices
 stripe-prices.json` (от `stripe prices list --live --limit 100`) — без обръщение
 към Stripe казва „ГОТОВО ЗА LIVE“ или какво липсва.
