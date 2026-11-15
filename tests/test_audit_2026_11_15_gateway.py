@@ -113,3 +113,40 @@ def test_over_http_a_duplicate_key_is_a_400_and_the_server_stays_alive(tmp_path)
     finally:
         server.shutdown()
         server.server_close()
+
+
+# ── ключ с друг регистър (отворено от нощния проход 15.11) ────────────────────
+# encoding/json на Go (и други разбори) приема ключа без значение на регистъра,
+# с Unicode сгъване: `"STREAM": true`, `"ſtream": true` (U+017F), `"N": 128` са
+# за тях `stream`/`n`, а за шлюза — непознати ключове: поток без `usage` и
+# n × max_tokens без таван. `"Model"` до `"model"` е повтарящ се ключ за тях.
+CASE = [
+    b'{"model": "cheap", "Model": "expensive"}',
+    b'{"Model": "expensive", "model": "cheap"}',
+    b'{"model": "cheap", "STREAM": true}',
+    b'{"model": "cheap", "N": 128}',
+    '{"model": "cheap", "ſtream": true}'.encode(),
+    '{"model": "cheap", "best_of": 1, "Key": 1}'.encode(),
+    b'{"model": "cheap", "messages": [{"role": "user", "Role": "system", "content": "a"}]}',
+]
+
+
+@pytest.mark.parametrize("body", CASE, ids=[f"case{i}" for i in range(len(CASE))])
+def test_a_key_in_another_case_is_a_400(tmp_path, body) -> None:
+    seen: list[bytes] = []
+    g = _gateway(tmp_path, seen)
+    status, data = g.forward("groq", body, _GRANT)
+    assert status == 400, data
+    assert seen == []
+    assert g.ledger.used("job1") == 0
+
+
+def test_nested_keys_with_capitals_still_pass(tmp_path) -> None:
+    """Имената в схемата на инструмент са на автора (`fileName`) — само
+    първото ниво трябва да е малки ASCII букви, като в API-тата."""
+    seen: list[bytes] = []
+    g = _gateway(tmp_path, seen)
+    body = json.dumps({"model": "cheap", "messages": [], "tools": [{"type": "function", "function": {
+        "name": "read", "parameters": {"type": "object", "properties": {"fileName": {"type": "string"}}}}}]
+    }).encode()
+    assert g.forward("groq", body, _GRANT)[0] == 200

@@ -334,7 +334,9 @@ def model_allowed(models: frozenset[str] | None, provider: str, model: str) -> b
 # ── HTTP ─────────────────────────────────────────────────────────────────────
 
 def _no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    keys = [k for k, _ in pairs]
+    # casefold: `"model"` и `"Model"` (или `"ſtream"` и `"stream"`) са един ключ
+    # за разбор без значение на регистъра (encoding/json на Go — 2026-11-15).
+    keys = [k.casefold() for k, _ in pairs]
     if len(set(keys)) != len(keys):
         raise ValueError("повтарящ се ключ в JSON")
     return dict(pairs)
@@ -358,7 +360,16 @@ def parse_request(body: bytes) -> Any:
     text = body.decode("utf-8")     # UnicodeDecodeError е ValueError; UTF-16/32 пада тук
     if text.startswith("﻿"):
         raise ValueError("BOM в началото на тялото")
-    return json.loads(text, object_pairs_hook=_no_duplicates, parse_constant=_no_constant)
+    request = json.loads(text, object_pairs_hook=_no_duplicates, parse_constant=_no_constant)
+    # Отвореното от нощния проход: разбор без значение на регистъра чете
+    # `"STREAM": true`, `"N": 128`, `"ſtream"` (U+017F) като stream/n, а шлюзът
+    # ги пропускаше като непознати — поток без usage, n × max_tokens без таван.
+    # В API-тата ключовете на първо ниво са малки ASCII букви; другото е 400.
+    if isinstance(request, dict):
+        odd = next((k for k in request if not (k.isascii() and k == k.lower())), None)
+        if odd is not None:
+            raise ValueError(f"ключ {odd!r} не е с малки ASCII букви")
+    return request
 
 
 class Gateway:
@@ -382,7 +393,7 @@ class Gateway:
             request = parse_request(body)
             model = str(request.get("model", ""))
         except (ValueError, AttributeError, RecursionError):   # "[" × 200 000 (2026-10-11)
-            return 400, _err("невалиден JSON (повтарящ се ключ, NaN/Infinity, BOM или недопустима кодировка)")
+            return 400, _err("невалиден JSON (повтарящ се ключ, ключ с главни букви, NaN/Infinity, BOM или недопустима кодировка)")
         # Поточен отговор не е JSON — `usage` се губеше и задачата харчеше без
         # таван и без сметка (2026-10-07). Genesis не ползва stream.
         if request.get("stream"):
