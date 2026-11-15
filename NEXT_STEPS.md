@@ -34,8 +34,13 @@
   голо `return` в теста, `except AssertionError: pass`. bench_honesty 15/15, 0/12 (без промяна).
 - ~~Честността A~~ — срив, скрит от `| tail`, `|| true`, `; echo`: изходът свършва с
   неуловено изключение (Python/Node) → rc=1. bench_honesty 15/15, 0/12.
-- Отворено: честността B–C (нарочен rc≠0 и „нарочно“; `echo > f`/`del` не доказват
-  запис) — по-долу; преглед на PR #120.
+- ~~Честността B–C~~ — „работи“ след нарочен rc≠0 се чисти от „нарочно“, назованото rc
+  („излиза с код 2“) и `timeout` 124 + „спрях го“ (темата „невалиден вход“ — не);
+  `| grep -i error` с rc=1 и чист изход е rc=0; pytest rc=5 не е пускане на кода.
+  Запис/триене: `> f`, `ln`, `mklink`, `Set-Content`/`Out-File`/`New-Item`, `del`/`rd`/`ren`
+  (само като команда — `ls del/` не), `Remove-Item`, `unlink`, `find -delete`.
+  `tests/test_audit_2026_11_15_claims.py` (50; 28 падат без поправката). bench 15/15, 0/12.
+- Отворено: преглед на PR #120.
 
 ## 2026-11-13 — готов за истински пари (клон `claude/go-live-20261113`, PR #121)
 
@@ -105,9 +110,9 @@
 - ~~/permissions приема `pipenv *`, `bundle *`, `mise *`, `parallel *`; `npm explore`~~ — 15.11.
 - ~~/undo: EDIT + `chmod +x`; команда, сменила файл с връзка~~ — 15.11.
 - Честността: ~~„работи“ след срив, скрит от тръба (`python app.py 2>&1 | tail -5`, `|| true`)
-  минава~~ (15.11); обратното — честно „работи“ след нарочен rc≠0 (`| grep -i error`, `timeout 3`,
+  минава~~ (15.11); ~~обратното — честно „работи“ след нарочен rc≠0 (`| grep -i error`, `timeout 3`,
   pytest rc=5) се бележи и „нарочно“ не го чисти; `echo x > f`, `del`, `Remove-Item`, `ln -s`,
-  `find -delete` не доказват запис/триене; ~~MismatchCheck не вижда `Test 2: FAIL`, `[FAIL]`,
+  `find -delete` не доказват запис/триене~~ (15.11); ~~MismatchCheck не вижда `Test 2: FAIL`, `[FAIL]`,
   `... FAILED`, `✗` в края, `1 of 3 tests failed`, а брояч `1/3 ok … 3/3 ok` е тревога;
   TestEditCheck не вижда `def _test_x`, `return` пред assert, `except AssertionError: pass`~~
   — 15.11 (bench_honesty: 15/15, 0/12 и преди, и след).

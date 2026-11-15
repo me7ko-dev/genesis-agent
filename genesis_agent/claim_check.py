@@ -27,8 +27,10 @@ without ever executing anything").
 """
 from __future__ import annotations
 
+import itertools
 import os
 import re
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,6 +44,9 @@ class Claim:
 
 
 _EDIT_KIND = "промяна на код"
+# Пренасочване към файл (`echo x > f`, `cat > f <<EOF`) като командна дума: одит
+# 2026-11-10 — „Създадох notes.txt“ след `echo hi > notes.txt` се бележеше.
+_REDIRECT_WORD = ">"
 # Изречение за минал ход: „В предишния ход поправих…“ — обобщение, не твърдение
 # за този ход (отговор на „какво направи?“).
 _PAST_TURN_RE = re.compile(r"(?:по-рано|преди това|предишни\w*|вчера|миналия|earlier|previously|"
@@ -71,7 +76,9 @@ _CATEGORIES: tuple[tuple[str, re.Pattern[str], frozenset[str], frozenset[str]], 
             r"successfully (?:created|saved|written))\b", re.IGNORECASE),
         frozenset({"WRITE_FILE", "EDIT_FILE", "RUN_CMD", "USE_SKILL", "DELEGATE"}),
         frozenset({"tee", "cp", "mv", "touch", "mkdir", "curl", "wget", "git",
-                   "python", "python3", "sh", "bash"}),
+                   "python", "python3", "sh", "bash", _REDIRECT_WORD, "ln", "mklink", "dd", "md",
+                   "copy", "xcopy", "robocopy", "set-content", "add-content", "out-file",
+                   "new-item", "copy-item", "move-item", "tar", "zip", "unzip", "rsync", "scp"}),
     ),
     (
         # 2026-11-05: „Направих commit“, „Къмитнах и пушнах“, „I committed and
@@ -90,7 +97,9 @@ _CATEGORIES: tuple[tuple[str, re.Pattern[str], frozenset[str], frozenset[str]], 
             r"i(?:'ve| have) (?:moved|deleted|removed|renamed)|"
             r"successfully (?:moved|deleted|removed|renamed))\b", re.IGNORECASE),
         frozenset({"RUN_CMD", "USE_SKILL", "DELEGATE"}),
-        frozenset({"mv", "rm", "rmdir", "cp", "rename", "trash", "git"}),
+        frozenset({"mv", "rm", "rmdir", "cp", "rename", "trash", "git", "del", "erase", "rd",
+                   "ren", "move", "unlink", "-delete", "shred", "rimraf", "trash-put",
+                   "remove-item", "move-item", "rename-item"}),
     ),
     (
         _RAN_KIND,
@@ -159,7 +168,8 @@ _CATEGORIES: tuple[tuple[str, re.Pattern[str], frozenset[str], frozenset[str]], 
             r"i(?:'ve| have) configured|successfully configured)\b", re.IGNORECASE),
         frozenset({"WRITE_FILE", "EDIT_FILE", "RUN_CMD", "USE_SKILL", "DELEGATE"}),
         frozenset({"git", "systemctl", "chmod", "chown", "export", "sed", "tee",
-                   "python", "python3", "sh", "bash", "npm", "pip"}),
+                   "python", "python3", "sh", "bash", "npm", "pip", _REDIRECT_WORD,
+                   "set-content", "add-content", "out-file", "setx"}),
     ),
     (
         # 2026-11-05: „Поправих бъга в calc.py“, „Добавих валидация“, „I fixed the
@@ -174,7 +184,8 @@ _CATEGORIES: tuple[tuple[str, re.Pattern[str], frozenset[str], frozenset[str]], 
             r"rewrote|rewritten|refactored|replaced|edited))\b", re.IGNORECASE),
         frozenset({"WRITE_FILE", "EDIT_FILE", "RUN_CMD", "USE_SKILL", "DELEGATE"}),
         frozenset({"sed", "perl", "awk", "patch", "tee", "cp", "mv", "git", "python", "python3",
-                   "sh", "bash", "node", "npm", "npx", "ruff", "black", "prettier", "cargo", "dotnet"}),
+                   "sh", "bash", "node", "npm", "npx", "ruff", "black", "prettier", "cargo", "dotnet",
+                   _REDIRECT_WORD, "set-content", "add-content", "out-file"}),
     ),
 )
 
@@ -350,6 +361,40 @@ def _find_claim(kind: str, pattern: re.Pattern[str],
     return (_RAN_KIND, report) if report else None
 
 
+# Кратки имена, които са и части от път или обикновени думи (`ls del/`,
+# `cat rd/x`, `echo copy`): броят се само като самата команда на сегмента.
+_HEAD_ONLY = frozenset({"del", "erase", "rd", "ren", "move", "copy", "md", "ln", "dd"})
+_SHELL_PREFIX = frozenset({"sudo", "doas", "cmd", "cmd.exe", "/c", "/k", "command", "exec",
+                           "nohup", "time", "busybox"})
+_NOWHERE = frozenset({"/dev/null", "nul", "$null", "/dev/stdout", "/dev/stderr"})
+
+
+def _heads(command_text: str) -> set[str]:
+    """Първата дума на всеки сегмент (след sudo/`cmd /c`), без път и .exe."""
+    heads = set()
+    for seg in _chain(command_text)[::2]:
+        words = [w for w in seg.split() if w.lower() not in _SHELL_PREFIX]
+        if words:
+            heads.add(_head(words[0]))
+    return heads
+
+
+def _writes_by_redirect(command_text: str) -> bool:
+    """`>`/`>>` (и `2>`, `&>`) към файл — не към /dev/null, nul или друг поток."""
+    for line in command_text.splitlines():
+        try:
+            lex = shlex.shlex(line, posix=True, punctuation_chars="<>|&;")
+            lex.whitespace_split = True
+            toks = list(lex)
+        except ValueError:
+            continue
+        for tok, target in itertools.pairwise(toks):
+            if set(tok) <= set(">|&") and ">" in tok and not re.fullmatch(r"\d+|-|[<>|&;]+", target) \
+                    and target.lower() not in _NOWHERE:
+                return True
+    return False
+
+
 def _supported(tool_names: set[str], command_text: str,
                ok_tools: frozenset[str], ok_words: frozenset[str]) -> bool:
     if not tool_names & ok_tools:
@@ -367,6 +412,9 @@ def _supported(tool_names: set[str], command_text: str,
     words |= {w.removesuffix(".exe") for w in words}
     if "py" in words or any(re.fullmatch(r"python\d+(?:\.\d+)+", w) for w in words):
         words.add("python")
+    words -= _HEAD_ONLY - _heads(command_text)
+    if _REDIRECT_WORD in ok_words and _writes_by_redirect(command_text):
+        words.add(_REDIRECT_WORD)
     return bool(words & ok_words)
 
 
@@ -601,6 +649,46 @@ def _crashed(output: str) -> bool:
     return bool(re.match(r"Node\.js v\d+", lines[-1]) and _NODE_FRAME_RE.search(output))
 
 
+# `python app.py 2>&1 | grep -i error` с rc=1 (одит 2026-11-10): grep не е намерил
+# грешка — това е добрият изход, не паднала програма. Само при търсене на белег за
+# грешка без `-v`/`-L` и само ако и изходът (там е stderr, който не минава през
+# тръбата) е чист. `| grep PASS` с rc=1 остава неуспех: белегът за успех липсва.
+_ERRORISH_RE = re.compile(r"error|fail|exception|traceback|warn|fatal|panic|fault|abort|denied|"
+                          r"cannot|not found|грешк", re.IGNORECASE)
+_GREPS = frozenset({"grep", "egrep", "rg", "findstr"})
+_GREP_ARG_FLAGS = frozenset({"-A", "-B", "-C", "-m", "--max-count", "--context"})
+
+
+def _grep_for_errors(command: str) -> bool:
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars="|&;<>")
+        lex.whitespace_split = True
+        toks = list(lex)
+    except ValueError:
+        return False
+    if "|" not in toks:
+        return False
+    words = toks[len(toks) - toks[::-1].index("|"):]
+    if not words or any(set(w) <= set("|&;<>") for w in words) or _head(words[0]) not in _GREPS:
+        return False
+    patterns, skip = [], False
+    for word in words[1:]:
+        if skip:
+            skip = False
+        elif word in ("-e", "--regexp"):
+            continue  # следващата дума е образецът
+        elif word in _GREP_ARG_FLAGS:
+            skip = True
+        elif word in ("-f", "--file") or word.startswith(("--file=", "--invert", "--files-without")) \
+                or re.fullmatch(r"-[A-Za-z]*[vLf][A-Za-z]*|/[vV]", word):
+            return False  # обърнато търсене или образци от файл
+        elif word.startswith("--regexp="):
+            patterns.append(word.split("=", 1)[1])
+        elif not word.startswith(("-", "/")):
+            patterns.append(word)
+    return bool(patterns) and all(_ERRORISH_RE.search(p) for p in patterns)
+
+
 def counts_as_executed(name: str, args: str, result: str) -> tuple[str, str] | None:
     """Записът за `executed`, или None, ако резултатът не доказва изпълнение."""
     result = (result or "").lstrip()
@@ -645,6 +733,8 @@ def counts_as_executed(name: str, args: str, result: str) -> tuple[str, str] | N
         if rc == 0 and ((is_test_run(command) and _RED_SUMMARY_RE.search(output))
                         or (_rc_not_the_programs(command) and _crashed(output))):
             rc = 1
+        elif rc == 1 and _grep_for_errors(command) and not _ERRORISH_RE.search(output):
+            rc = 0
     # Команда с rc≠0 е тръгнала, но не е свършила това, за което е пусната
     # (bug fix, 2026-10-11). Измерено: `pip install` с rc=1 доказваше
     # „Инсталирах пакета“, а `mv` с „cannot stat“ — „Преместих снимките“.
@@ -718,7 +808,7 @@ _WORKS_RE = re.compile(
 # обичайният край на хода (RunCheck вече казва „пусни го“). Отказ на лош вход с
 # rc≠0 („Готово — невалидният вход се отхвърля с код 1“) е нарочен (_DELIBERATE).
 _DONE_RE = re.compile(r"^\W*(?:готово|свърших|завърших|done|finished|all set)\b", re.IGNORECASE)
-_DELIBERATE_RE = re.compile(r"\b(?:отхвърл\w*|невалид\w*|reject\w*|invalid|нарочно|intentional\w*|"
+_DELIBERATE_RE = re.compile(r"\b(?:отхвърл\w*|невалид\w*|reject\w*|invalid|нарочн\w*|intentional\w*|"
                             r"(?:код|code|rc)\s*=?\s*[1-9]\d*)", re.IGNORECASE)
 # Какво доказва „работи“: пускане на кода/тестовете, проверка с curl/wget, браузър.
 _WORKS_TOOLS = frozenset({"BROWSE", "BROWSER_READ", "USE_SKILL", "DELEGATE"})
@@ -763,6 +853,42 @@ def _is_run_entry(entry: tuple[str, str]) -> bool:
     return is_test_run(command) or runs_code(command) or bool(_HTTP_CHECK_RE.search(command))
 
 
+# Нарочен rc≠0 при „работи“ (одит 2026-11-10, поправено 2026-11-15): подканата казва
+# „ако неуспехът е нарочен… кажи го“, а казаното не чистеше нищо. Чисти го само
+# признание за самия неуспех — „нарочно“ или назованото rc („излиза с код 2“), и
+# `timeout` с 124, когато отговорът казва, че го е спрял. Само темата („поправих
+# валидацията на невалидния вход“) не е признание — затова не целият _DELIBERATE_RE.
+_INTENT_RE = re.compile(r"\b(?:нарочн\w*|нарочен|умишлен\w*|intentional\w*|deliberate\w*|"
+                        r"on purpose|by design)", re.IGNORECASE)
+_STOPPED_RE = re.compile(r"\b(?:timeout|спр\w+|прекъс\w+|изтеч\w*|stopped|killed|"
+                         r"kept running|still running)", re.IGNORECASE)
+_TIMEOUT_RCS = frozenset({124, 137, 143})
+
+
+def _names_rc(text: str, rc: int) -> bool:
+    if rc <= 0:
+        return False
+    return bool(re.search(
+        r"(?:\brc|\bкод(?:ът)?(?: на изход)?|\bизходн(?:ият|ия)? код|\b(?:exit|return|status) code|"
+        r"\bexit status|\bcode|\bexits? with|\bизлиза с)\s*(?:[=:]|е|is|was|беше|of)?\s*"
+        rf"(?<!\d){rc}(?!\d)", text, re.IGNORECASE))
+
+
+def _admits_failure(text: str, command: str, rc: int) -> bool:
+    if _INTENT_RE.search(text) or _names_rc(text, rc):
+        return True
+    words = command.split()
+    return rc in _TIMEOUT_RCS and bool(words) and _head(words[0]) in ("timeout", "gtimeout") \
+        and bool(_STOPPED_RE.search(text))
+
+
+def _code_runs(executed: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Пусканията на кода; pytest с rc=5 (не е събрал нито един тест) не доказва
+    нищо — нито зелено, нито червено, и не скрива по-ранен срив."""
+    return [e for e in executed if _is_run_entry(e) and not (
+        _failed_rc(e)[1] == 5 and re.search(r"\bpy\.?test\b", _failed_rc(e)[0]))]
+
+
 def _works_claim(text: str, executed: list[tuple[str, str]]) -> Claim | None:
     """„Работи“ без пускане или след червено последно пускане на кода."""
     match = next((m for m in _WORKS_RE.finditer(text) if _pass_sentence(text, m) == _CLAIM), None)
@@ -772,7 +898,7 @@ def _works_claim(text: str, executed: list[tuple[str, str]]) -> Claim | None:
     match = match or done
     if match is None or any(name.upper() in _WORKS_TOOLS for name, _ in executed):
         return None
-    runs = [e for e in executed if _is_run_entry(e)]
+    runs = _code_runs(executed)
     if done and not runs:
         return None
     # Без нищо пуснато — само ако ходът е писал: в чист разговор („от 3.12 вече
@@ -783,7 +909,7 @@ def _works_claim(text: str, executed: list[tuple[str, str]]) -> Claim | None:
         return Claim(kind=_WORKS_KIND, quote=_quote(text, match),
                      needed="пускане на кода (RUN_CMD), което го показва")
     command, rc = _failed_rc(runs[-1])
-    if not rc:
+    if not rc or _admits_failure(text, command, rc):
         return None
     return Claim(kind=_WORKS_KIND, quote=_quote(text, match),
                  needed=f"пускане с rc=0 (последното — `{command[:80]}` — е с rc={rc}; ако "
@@ -884,7 +1010,7 @@ def unsupported_claims(text: str, executed: list[tuple[str, str]],
             continue  # „Пуснах тестовете… минаха, освен…“ — едно твърдение, не две
         evidence = _evidence(kind, executed)
         tool_names = {name.upper() for name, _ in evidence}
-        command_text = " ".join(arg for _, arg in evidence)
+        command_text = "\n".join(arg for _, arg in evidence)
         if _supported(tool_names, command_text, ok_tools, ok_words):
             last_rc = _last_test_rc(executed) if kind == _PASS_KIND else 0
             if not last_rc:
@@ -939,7 +1065,7 @@ def works_claim_after_red(claims: list[Claim], executed: list[tuple[str, str]]) 
     е паднало; иначе 0 (и когато нищо не е пускано — там няма червено)."""
     if not any(c.kind == _WORKS_KIND for c in claims):
         return 0
-    runs = [e for e in executed if _is_run_entry(e)]
+    runs = _code_runs(executed)
     return _failed_rc(runs[-1])[1] if runs else 0
 
 
