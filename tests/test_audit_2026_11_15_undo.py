@@ -153,4 +153,154 @@ def test_link_the_operator_repointed_after_the_turn_is_left(ws, tmp_path) -> Non
     f.unlink()
     os.symlink(other, f)                      # операторът я пренасочи
     edit_history.undo()
-    assert f.is_symlink() and os.readlink(f) == str(other)
+    # Не os.readlink(f) == str(other): на Windows readlink връща `\\?\C:\…`
+    # (Windows CI 2026-11-15, job 132610759444).
+    assert f.is_symlink() and f.resolve() == other.resolve()
+
+
+# ── преглед на PR #122 (2026-11-15): твърди връзки и прозорецът unlink → запис ──
+
+def _hardlink_or_skip(target: Path, link: Path) -> None:
+    try:
+        os.link(target, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("няма твърди връзки на тази файлова система")
+    if os.lstat(link).st_nlink < 2:
+        pytest.skip("st_nlink не се отчита тук")
+
+
+def test_hardlink_to_an_outside_file_after_an_edit_is_replaced_not_written(ws, tmp_path) -> None:
+    """`rm f && ln /outside/x f` след EDIT: /undo пишеше на място — през общия
+    inode — и презаписваше външния файл."""
+    shared = tmp_path / "shared.txt"
+    shared.write_text("на оператора\n", encoding="utf-8")
+    f = ws / "f.txt"
+
+    def swap() -> None:
+        f.unlink()
+        _hardlink_or_skip(shared, f)
+
+    edit_history.begin_turn("edit, после твърда връзка навън")
+    _edit(f, "v2\n")
+    _in_command(ws, swap)
+    edit_history.end_turn()
+    _label, lines = edit_history.undo()
+    assert shared.read_text(encoding="utf-8") == "на оператора\n", lines
+    assert f.read_text(encoding="utf-8") == "v1\n"
+    assert os.lstat(f).st_nlink == 1
+    assert any("твърда връзка" in ln for ln in lines), lines
+
+
+def test_hardlink_a_command_made_is_replaced_not_written(ws, tmp_path) -> None:
+    """Същото без EDIT — файлът е само в снимките на командата."""
+    shared = tmp_path / "shared.txt"
+    shared.write_text("на оператора\n", encoding="utf-8")
+    f = ws / "f.txt"
+
+    def swap() -> None:
+        f.unlink()
+        _hardlink_or_skip(shared, f)
+
+    edit_history.begin_turn("твърда връзка навън от команда")
+    _in_command(ws, swap)
+    edit_history.end_turn()
+    _label, lines = edit_history.undo()
+    assert shared.read_text(encoding="utf-8") == "на оператора\n", lines
+    assert f.read_text(encoding="utf-8") == "v1\n"
+
+
+def test_the_operators_own_hardlink_is_restored_in_place(ws, tmp_path) -> None:
+    """Твърда връзка отпреди хода е на оператора: EDIT е писал през нея, /undo
+    я връща пак през нея (същият inode), не я къса."""
+    twin = tmp_path / "twin.txt"
+    _hardlink_or_skip(ws / "f.txt", twin)
+    f = ws / "f.txt"
+    edit_history.begin_turn("edit на файл с твърда връзка")
+    _edit(f, "v2\n")
+    edit_history.end_turn()
+    assert twin.read_text(encoding="utf-8") == "v2\n"
+    edit_history.undo()
+    assert f.read_text(encoding="utf-8") == twin.read_text(encoding="utf-8") == "v1\n"
+    assert os.path.samefile(f, twin)
+
+
+def test_a_link_put_back_right_after_it_is_removed_is_not_written_through(
+        ws, tmp_path, monkeypatch) -> None:
+    """Процес, пуснат в хода, слага връзката пак веднага след unlink(): старият
+    код пишеше write_bytes() през нея (преглед на PR #122). Тук „процесът“
+    печели всяко състезание — сменя всяко unlink на f с нова връзка."""
+    shared = tmp_path / "shared.txt"
+    shared.write_text("на оператора\n", encoding="utf-8")
+    f = ws / "f.txt"
+
+    def swap() -> None:
+        f.unlink()
+        _symlink_or_skip(shared, f)
+
+    edit_history.begin_turn("edit, после връзка, която се връща")
+    _edit(f, "v2\n")
+    _in_command(ws, swap)
+    edit_history.end_turn()
+    real_unlink = Path.unlink
+
+    def racing_unlink(self: Path, missing_ok: bool = False) -> None:
+        real_unlink(self, missing_ok=missing_ok)
+        if self == f:
+            os.symlink(shared, f)
+    monkeypatch.setattr(Path, "unlink", racing_unlink)
+    _label, lines = edit_history.undo()
+    monkeypatch.undo()
+    assert shared.read_text(encoding="utf-8") == "на оператора\n", lines
+    assert not f.is_symlink() and f.read_text(encoding="utf-8") == "v1\n"
+
+
+def test_put_back_never_follows_a_link_put_in_after_its_check(tmp_path, monkeypatch) -> None:
+    """Прозорецът между lstat и отварянето: O_NOFOLLOW (POSIX) или проверката
+    на inode-а след отварянето (Windows) — нов файл и os.replace."""
+    f = tmp_path / "f.txt"
+    f.write_text("v2\n", encoding="utf-8")
+    shared = tmp_path / "shared.txt"
+    shared.write_text("общ\n", encoding="utf-8")
+    real_lstat = os.lstat
+    raced: list[bool] = []
+
+    def racing_lstat(p, *args, **kwargs):
+        st = real_lstat(p, *args, **kwargs)
+        if not raced and os.fspath(p) == os.fspath(f):
+            raced.append(True)
+            os.unlink(f)
+            _symlink_or_skip(shared, f)
+        return st
+    monkeypatch.setattr(os, "lstat", racing_lstat)
+    edit_history._put_back(f, b"v1\n")
+    monkeypatch.undo()
+    assert raced
+    assert shared.read_text(encoding="utf-8") == "общ\n"
+    assert not f.is_symlink() and f.read_bytes() == b"v1\n"
+
+
+def test_no_temporary_file_is_left_next_to_the_restored_one(ws) -> None:
+    f = ws / "f.txt"
+    edit_history.begin_turn("edit, после папка на мястото")
+    _edit(f, "v2\n")
+    _in_command(ws, lambda: (f.unlink(), f.mkdir()))   # replace върху папка не става
+    edit_history.end_turn()
+    _label, lines = edit_history.undo()
+    assert any(ln.startswith("❌") for ln in lines), lines
+    assert not [p for p in ws.iterdir() if p.name.startswith(".genesis-undo-")]
+
+
+@pytest.mark.parametrize(("raw", "git"), [
+    ("\\\\?\\C:\\Users\\op\\shared.txt", "C:/Users/op/shared.txt"),
+    ("\\??\\C:\\Users\\op\\shared.txt", "C:/Users/op/shared.txt"),
+    ("\\\\?\\UNC\\srv\\share\\x.txt", "//srv/share/x.txt"),
+    ("..\\lib\\x.py", "../lib/x.py"),
+    ("f.sh", "f.sh"),
+])
+def test_link_target_as_git_for_windows_keeps_it(raw: str, git: str) -> None:
+    """Защо два от тестовете по-горе падаха на Windows: снимката пази целта
+    като `C:/…`, а os.readlink дава `\\\\?\\C:\\…` — current_id не съвпадаше и
+    всяка абсолютна връзка беше „пипната след хода“."""
+    from genesis_agent import checkpoints
+    assert checkpoints.git_link(raw, windows=True) == git
+    assert checkpoints.git_link(raw, windows=False) == raw

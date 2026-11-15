@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 import stat
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -61,6 +62,9 @@ class _Turn:
     # Правата на файла отпреди хода (одит 2026-11-15: EDIT + `chmod +x` в един
     # ход — съдържанието се връщаше, правата оставаха).
     modes: dict[Path, int] = field(default_factory=dict)
+    # Inode-ът отпреди хода: на място се пише само в същия файл (неговите
+    # твърди връзки са на оператора) — преглед на PR #122, 2026-11-15.
+    inodes: dict[Path, tuple[int, int]] = field(default_factory=dict)
     too_big: list[Path] = field(default_factory=list)
     commands: dict[Path, _FromCommand] = field(default_factory=dict)
     # Какво е било накрая (blob id или None = няма файл): друг, който го е
@@ -337,11 +341,13 @@ def record(path: Path) -> None:
     if not path.is_file():
         return
     try:
-        if path.stat().st_size > _MAX_BYTES:
+        st = path.stat()
+        if st.st_size > _MAX_BYTES:
             _current.too_big.append(path)
             return
         _current.before[path] = path.read_bytes()
-        _current.modes[path] = stat.S_IMODE(path.stat().st_mode)
+        _current.modes[path] = stat.S_IMODE(st.st_mode)
+        _current.inodes[path] = (st.st_dev, st.st_ino)
     except OSError:
         return
 
@@ -459,29 +465,23 @@ def _undo_turn(turn: _Turn, skip: frozenset[Path] = frozenset()) -> list[tuple[P
                 done.append((path, f"⚠ {path} (води извън проекта — оставен)"))
             elif path in skip or _moved_since(turn, path):
                 done.append((path, f"⚠ {path} ({_LEFT})"))
-            elif path.is_symlink():
-                # Одит 2026-11-15: `rm f && ln -s /elsewhere f` след EDIT.
-                # unlink() маха връзката, не целта ѝ; чак тогава се пише —
-                # никога през нея (правило от 2026-11-10 остава).
-                path.unlink()
-                if data is None:
-                    done.append((path, f"изтрит {path} (връзка, направена в хода)"))
-                else:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_bytes(data)
-                    _put_mode(turn, path)
-                    done.append((path, (f"върнат {path} (връзката извън проекта е махната,"
-                                        " външният файл не е пипнат)")))
             elif data is None:
-                if path.is_file():
+                if path.is_symlink():
+                    path.unlink()           # самата връзка, не целта ѝ
+                    done.append((path, f"изтрит {path} (връзка, направена в хода)"))
+                elif path.is_file():
                     path.unlink()
                     done.append((path, f"изтрит {path}"))
             else:
-                same = path.is_file() and path.read_bytes() == data
+                own = turn.inodes.get(path)
+                same = _own_file(path, own) and path.read_bytes() == data
                 if not same:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    _write_bytes(path, data)
-                if _put_mode(turn, path) or not same:
+                    # Одит 2026-11-15: `rm f && ln -s /elsewhere f` (или `ln`
+                    # без -s) след EDIT — връзката се сменя, през нея не се пише.
+                    note = _put_back(path, data, turn.modes.get(path), own, turn.workspace)
+                    _put_mode(turn, path)
+                    done.append((path, f"върнат {path}{note}"))
+                elif _put_mode(turn, path):
                     done.append((path, f"върнат {path}"))
         except OSError as e:
             done.append((path, f"❌ {path}: {e}"))
@@ -493,15 +493,93 @@ def _undo_turn(turn: _Turn, skip: frozenset[Path] = frozenset()) -> list[tuple[P
     return done
 
 
-def _write_bytes(path: Path, data: bytes) -> None:
-    """Файл, станал само за четене в хода (`chmod a-w`), не пречи на /undo."""
+def _same_inode(a: os.stat_result, b: os.stat_result | tuple[int, int]) -> bool:
+    dev, ino = (b.st_dev, b.st_ino) if isinstance(b, os.stat_result) else b
+    # На Windows st_dev от lstat (GetFileInformationByName, 3.12+) и от fstat
+    # (по дескриптор) не е задължително едно и също число; номерът на файла е.
+    return a.st_ino == ino and (os.name == "nt" or a.st_dev == dev)
+
+
+def _own_file(path: Path, own: tuple[int, int] | None) -> bool:
+    """Обикновен файл, който не е чужд: единствено име (nlink 1) или същият
+    inode като преди хода."""
     try:
-        path.write_bytes(data)
-    except PermissionError:
-        if not path.exists():
-            raise
-        path.chmod(stat.S_IMODE(path.stat().st_mode) | stat.S_IWRITE)
-        path.write_bytes(data)
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and (
+        st.st_nlink <= 1 or (own is not None and _same_inode(st, own)))
+
+
+_NEW = (os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+
+
+def _put_back(path: Path, data: bytes, mode: int | None = None,
+              own: tuple[int, int] | None = None, ws: Path | None = None) -> str:
+    """Записва `data` на `path`, без да пише през връзка или чужд inode
+    (преглед на PR #122, 2026-11-15). На място — само в същия файл отпреди
+    хода, отворен без следване на връзка; иначе нов файл до него (O_EXCL) и
+    os.replace: връзка или твърда връзка към външен файл се сменя, а външният
+    не се пипа. Без прозорец „unlink → запис“, в който процес от хода слага
+    връзката пак. Връща бележка за реда на /undo, ако на мястото е имало друго."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        st: os.stat_result | None = os.lstat(path)
+    except FileNotFoundError:
+        st = None
+    if st is not None and stat.S_ISREG(st.st_mode) and (
+            st.st_nlink <= 1 or (own is not None and _same_inode(st, own))) \
+            and _in_place(path, data, st):
+        return ""
+    if mode is None and st is not None and stat.S_ISREG(st.st_mode):
+        mode = stat.S_IMODE(st.st_mode)
+    out = ""
+    if st is not None and stat.S_ISLNK(st.st_mode) and ws is not None:
+        try:
+            out = "" if path.resolve().is_relative_to(ws.resolve()) else "извън проекта "
+        except (OSError, RuntimeError):
+            out = "извън проекта "
+    tmp = path.with_name(f".genesis-undo-{secrets.token_hex(6)}")
+    try:
+        fd = os.open(tmp, _NEW, 0o666)       # umask — като обикновен запис
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    if st is None or stat.S_ISREG(st.st_mode) and (
+            st.st_nlink <= 1 or (own is not None and _same_inode(st, own))):
+        return ""
+    if stat.S_ISLNK(st.st_mode):
+        return f" (на мястото му беше връзка {out}— махната, файлът ѝ не е пипнат)"
+    if stat.S_ISREG(st.st_mode):
+        return " (беше твърда връзка към друг файл — сменен с нов, другият не е пипнат)"
+    return " (на мястото му имаше друго — сменено с файла)"
+
+
+def _in_place(path: Path, data: bytes, st: os.stat_result) -> bool:
+    """Пише в същия файл: без следване на връзка (O_NOFOLLOW) и с проверка,
+    че отвореното е файлът от lstat. False — не стана безопасно (връзка,
+    сложена след lstat; право на запис) и _put_back прави нов файл."""
+    flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        if os.name == "nt" and not st.st_mode & stat.S_IWRITE:
+            # Атрибутът „само за четене“ (`chmod a-w` в хода): os.replace
+            # върху такъв файл на Windows също отказва.
+            os.chmod(path, stat.S_IMODE(st.st_mode) | stat.S_IWRITE)
+        fd = os.open(path, flags)
+    except OSError:
+        return False
+    with os.fdopen(fd, "wb") as fh:
+        if not _same_inode(os.fstat(fd), st):
+            return False
+        fh.write(data)
+        fh.truncate()
+    return True
 
 
 def _put_mode(turn: _Turn, path: Path) -> bool:
@@ -560,13 +638,13 @@ def _undo_commands(turn: _Turn, ws: Path,
                 done.append((path, f"⚠ {path} (сега е папка или връзка — оставен)"))
             else:
                 data = checkpoints.blob(ws, cmd.old)
-                same = path.is_file() and path.read_bytes() == data
-                if not same:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_bytes(data)
+                # Твърда връзка (nlink > 1), направена от командата към външен
+                # файл: писането на място го презаписваше (преглед на PR #122).
+                same = _own_file(path, None) and path.read_bytes() == data
+                note = "" if same else _put_back(path, data, ws=ws)
                 moded = _restore_mode(path, cmd.old_mode)
                 if not same or moded:
-                    done.append((path, f"върнат {path}"))
+                    done.append((path, f"върнат {path}{note}"))
         except Exception as e:
             log.debug("/undo не върна %s", path, exc_info=True)
             done.append((path, f"❌ {path}: {e}"))
