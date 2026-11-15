@@ -230,7 +230,8 @@
 1. git fetch origin; git checkout main; git pull; pipx reinstall genesis-agent;
    genesis --version = последният комит на main. Телефонът — от mobile/ на main.
 2. bench_all с абонамента (GENESIS_START_PROVIDER=claude_cli, Python-а на pipx
-   venv-а, --quick, --baseline-* = ~/.genesis/bench/all-20261105-183711) — само ако
+   venv-а, --quick, --baseline-* = ~/.genesis/bench/all-20261105-183711/<стъпка>/results.json —
+   папката се отказва, проверено с --dry-run 15.11) — само ако
    има нов код след 976221b. Регресия → спри и ми покажи кой проект/задача и защо.
    bench_honesty --ref <main отпреди сливането>: 15/15 хванати, 0/12 фалшиви.
 3. Ако нощният отчет ~/.genesis/bench/laptop-20261105/noshten-otchet.md липсва или
