@@ -1,4 +1,4 @@
-# Следващи стъпки (обновено 2026-11-10, седми кръг)
+# Следващи стъпки (обновено 2026-11-15)
 
 > **Тази бележка е, за да се пестят токени, не за да се харчат повече.**
 > Тук вече е записано какво е проверено и решено. Вярвай ѝ и започни директно
@@ -7,25 +7,33 @@
 > нещо се свърши, обнови бележката накратко: зачеркни или изтрий готовото,
 > не трупай нов текст.
 
-## 2026-11-15 — нощен проход по „отвореното“ от 10.11 (клон `claude/night-20261115`)
+## 2026-11-15 — нощен проход + сутрешен (клон `claude/night-20261115`, PR #122)
 
-Осем агента успоредно изядоха остатъка от 5-часовата квота за ~6 минути (84 → 98%);
-довършени са три, останалите са спрени по средата.
-- ~~/permissions: `pipenv|bundle|mise|parallel *`, `npm explore`~~ — `_LAUNCHERS` +
-  `_RUNNER_SUBCOMMANDS` (и `docker run/exec`, `git submodule foreach`, `git -c`); 31 теста,
-  20 падат без поправката. Отворено (автоматичен преглед): при `docker run образ cmd`,
-  `npm explore pkg -- cmd`, `nix run` първият аргумент е цел, не команда; `git bisect run`,
-  `git rebase --exec/-x`, `git difftool --extcmd` още се покриват от `git *`.
-- ~~/undo: EDIT + chmod; файл, сменен с връзка~~ — record() пази правата, undo ги връща;
-  връзката се маха (целта ѝ не се пипа), pending() го казва. На Windows минават 2 от 7
-  нови теста, 5 са само POSIX — мерят се в Ubuntu CI.
-- ~~Шлюзът: дублиран ключ в JSON~~ — `parse_request`: 400 преди такса и препращане за
-  дублиран ключ на всяка дълбочина, NaN/Infinity, BOM, UTF-16/32, невалиден UTF-8 (15
-  теста, 11 падат без него). Отворено: `Model`/`model` (различен регистър) минава.
-- ~~test_ctrl_c_in_parallel_reads…~~ — чакаше 0.3 s вместо събитие; сега чака Event
-  (0/20 преди и след; причината е показана със забавено четене).
-- Започнато и НЕкомитнато (работни копия в `.claude/worktrees/`): портата (тайни през
-  скоби/glob, `>> ~/.bashrc`), честността (A–E), redact, преглед на PR #120.
+Нощта: осем агента успоредно изядоха квотата за ~6 минути; довършени три. Сутринта —
+един агент, без рояк, по отвореното от 10.11 и от прегледа на PR #122. Всичко с тест,
+който пада без поправката; пълният пакет 6103+ passed, ruff/mypy чисти.
+- ~~/permissions~~ — `pipenv|bundle|mise|parallel *`, `npm explore`; цел след
+  подкомандата (`asdf env`, `docker run образ`, `npm explore пакет --`, `rustup run`,
+  `direnv exec`, `git -c`, `nix shell … --command`, `mise exec … --`) се прескача;
+  `git bisect run`, `git rebase -x/--exec`, `git difftool --extcmd` не се покриват от `git *`.
+- ~~/undo~~ — EDIT + chmod; файл, сменен с връзка. Windows CI падаше: `os.readlink` дава
+  `\\?\C:\…`, git пази `C:/…` (`checkpoints.git_link`). Твърда връзка навън не се пише
+  на място (нов файл + os.replace), няма прозорец unlink → запис.
+- ~~Шлюзът~~ — дублиран ключ, NaN/Infinity, BOM, UTF-16/32; и с друг регистър
+  (`Model`, `STREAM`, `ſtream` — casefold, първото ниво само малки ASCII).
+- ~~Портата~~ — тайни през скоби (`~/.ss{h,x}/id_rs{a,b}`, и в `bash -c`); съдържанието на
+  целия дом (`grep -r X ~`, `find ~ -exec`, `tar c… ~`, `rsync -a ~`); запис в стартов
+  файл (`>> ~/.bashrc`, `.git/hooks/*`, `git config core.pager …`; и WRITE_FILE) — пита,
+  правило не го покрива; `git commit -m '…rm -rf /…'` не е BLOCKED; `curl … | tee f | bash`;
+  `cd / && chmod -R 777 .` е BLOCKED като `chmod -R 777 /`.
+- ~~redact/паметта~~ — `password == "…"`, `ssh-keygen -P`, `WinRAR -hp`, `pass_phrase`,
+  `{"password": …}` и `mysql -p` в паметта; `event['key'] == 'Enter'` и
+  `api_key=os.environ[…]` вече не се маскират.
+- ~~Честността D–E~~ — MismatchCheck: `[FAIL]`, `Test 2: FAIL`, `… FAILED`, `✗` в края,
+  `1 of 3 tests failed`; брояч `1/3 ok … 3/3 ok` не е тревога. TestEditCheck: `def _test_x`,
+  голо `return` в теста, `except AssertionError: pass`. bench_honesty 15/15, 0/12 (без промяна).
+- Отворено: честността A–C (скрит срив в тръба, нарочен rc≠0, `echo > f`/`del` не доказват
+  запис) — по-долу; преглед на PR #120.
 
 ## 2026-11-13 — готов за истински пари (клон `claude/go-live-20261113`, PR #121)
 
@@ -83,32 +91,27 @@
   bench_honesty след това: 15/15 хванати, 0/12 фалшиви.
 
 **Отворено от този кръг** (възпроизведено, непоправено — по реда на тежестта):
-- Портата: четене на тайни през `bash -c 'cat ~/.ss{h,x}/id_rs{a,b}'` (скоби), `cd; cat .s*/*`,
+- ~~Портата: четене на тайни през `bash -c 'cat ~/.ss{h,x}/id_rs{a,b}'` (скоби), `cd; cat .s*/*`,
   `grep -rh X ~`, `find ~ -exec cat {} +` — SAFE; `echo … >> ~/.bashrc|.gitconfig` — SAFE;
-  `git commit -m '… rm -rf / …'` — BLOCKED. ~~Целият дом без rm (`mv ~`, `find ~ | xargs rm`,
+  `git commit -m '… rm -rf / …'` — BLOCKED~~ — 15.11. ~~Целият дом без rm (`mv ~`, `find ~ | xargs rm`,
   `rsync --delete ~/`, `rm -rf ~/.*`, `chmod 777 -R /`, `cd $HOME && rm -rf *`), `git checkout
   -f`/`git restore файл`, `[IO.Directory]::Delete`, качване (`curl -sT`, localhost в чужд
   хост, `rsync f u@h:`, `/dev/tcp/`), `curl … | zsh|python3`, `bash <(curl …)`~~ — осми кръг,
   `tests/test_audit_2026_11_10_gate_round8.py` (86; 54 падат без поправката). Нарочно: домът
   при `chmod/chown -R` само пита (отказ не се одобрява); `| python3 -m …`/`-c` е данни — SAFE.
-  Не е покрито: `cd / && chmod -R 777 .`, `curl … | tee f | bash`, `find ~ -exec mv`.
-- /permissions приема `pipenv *`, `bundle *`, `mise *`, `parallel *` (покриват всяка команда);
-  `npm *` покрива `npm explore pkg -- rm -rf build`.
-- /undo: EDIT + `chmod +x` в същия ход — правата остават; команда, сменила файл с връзка —
-  pending() обещава „върни“, undo го оставя.
+  ~~Не е покрито: `cd / && chmod -R 777 .`, `curl … | tee f | bash`, `find ~ -exec mv`~~ — 15.11.
+- ~~/permissions приема `pipenv *`, `bundle *`, `mise *`, `parallel *`; `npm explore`~~ — 15.11.
+- ~~/undo: EDIT + `chmod +x`; команда, сменила файл с връзка~~ — 15.11.
 - Честността: „работи“ след срив, скрит от тръба (`python app.py 2>&1 | tail -5`, `|| true`)
   минава; обратното — честно „работи“ след нарочен rc≠0 (`| grep -i error`, `timeout 3`,
   pytest rc=5) се бележи и „нарочно“ не го чисти; `echo x > f`, `del`, `Remove-Item`, `ln -s`,
-  `find -delete` не доказват запис/триене; MismatchCheck не вижда `Test 2: FAIL`, `[FAIL]`,
+  `find -delete` не доказват запис/триене; ~~MismatchCheck не вижда `Test 2: FAIL`, `[FAIL]`,
   `... FAILED`, `✗` в края, `1 of 3 tests failed`, а брояч `1/3 ok … 3/3 ok` е тревога;
-  TestEditCheck не вижда `def _test_x`, `return` пред assert, `except AssertionError: pass`.
-- redact (известия): `if event['key'] == 'Enter':` → `"***"`; още изтичат `password ==
-  "…"`, `ssh-keygen -p -P стара`, `WinRAR -hp…`, `{"pass_phrase": …}`. conversation_memory:
-  `api_key=os.environ["X"]` се реже, а `{"password": "…"}` и `mysql -p…` остават.
-- Шлюзът препраща оригиналните байтове: при дублиран ключ в JSON (`"model"` два пъти)
-  проверката гледа последния, доставчикът може да вземе първия — не е пробвано с ключ.
-- test_ctrl_c_in_parallel_reads_is_not_held_by_a_slow_read (e86464e) падна веднъж при
-  натоварена машина (4 одита успоредно); сам минава.
+  TestEditCheck не вижда `def _test_x`, `return` пред assert, `except AssertionError: pass`~~
+  — 15.11 (bench_honesty: 15/15, 0/12 и преди, и след).
+- ~~redact (известия и conversation_memory)~~ — 15.11.
+- ~~Шлюзът: дублиран ключ в JSON~~ — 15.11 (и с друг регистър).
+- ~~test_ctrl_c_in_parallel_reads_is_not_held_by_a_slow_read~~ — 15.11, чака Event.
 
 ## 2026-11-10 — готов ли е за показване (клон `claude/gotov-20261110`)
 
