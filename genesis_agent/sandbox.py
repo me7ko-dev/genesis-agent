@@ -28,6 +28,7 @@ genesis_agent.sandbox — единна защитна бариера за изп
 from __future__ import annotations
 
 import ast
+import itertools
 import logging
 import os
 import posixpath
@@ -39,7 +40,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from enum import IntEnum
 from pathlib import Path
@@ -1818,14 +1819,64 @@ def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:
     """
     import glob as _glob
 
-    base = cwd if (cwd and cwd.is_dir()) else Path.cwd()
     seen = 0
-    # Одит 2026-11-10: hooks.json се подхвърляше с команди SAFE и в режим deny —
-    # `cd ~/.genesis && cp /дълъг/път/hooks.json .`, `tar xf e.tar -C ~/.genesis`,
-    # `unzip -d ~/.genesis`, `cp -rT e ~/.genesis`, `ln e/hooks.json ~/.genesis/`,
-    # `cp … ~/.genes?s/`, `G=~/.gene; cp … ${G}sis/`. Затова тук се следят `cd` и
-    # простите присвоявания, а самата папка .genesis като аргумент на команда,
-    # която не е само четене, е запис в управляващите файлове.
+    for seg, words, head, base, local_vars, in_control_dir in _walk(command, cwd):
+        tokens = [tok for reading in _argument_readings(seg) for tok in reading]
+        whole = _whole_home_read(head, tokens, base, local_vars)
+        if whole:
+            return whole
+        for raw in tokens:
+            raw = _REDIRECT_PREFIX.sub("", raw)     # `>~/x`, `2>>log` — целта е пътят
+            if not raw or raw.startswith("-"):
+                continue
+            # Скобите на шела (одит 2026-11-10, поправено 2026-11-15):
+            # `cat ~/.ss{h,x}/id_rs{a,b}` и `cat ~/.{ssh,aws}/*` бяха SAFE —
+            # нито образецът, нито glob виждат `.ssh/id_rsa` преди разгъването.
+            for tok in _braces(raw):
+                match = _SECRET_ARG_RX.search(tok.replace("\\", "/"))
+                if match and not _SENSITIVE_PATH_EXEMPT_RE.search(tok):
+                    return f"достъп до чувствителен файл ({match.group(0)})"
+                expanded = _expand_token(tok, local_vars)
+                if not os.path.isabs(expanded):
+                    expanded = str(base / expanded)
+                if _control_file_reached(tok, expanded, bare=in_control_dir):
+                    return _GENESIS_CONTROL_REASON
+                if head not in _CONTROL_DIR_READERS and raw != words[0]:
+                    dirs = (_glob.glob(expanded)[:8] if any(c in tok for c in "*?[") else [expanded])
+                    if any(_is_control_dir(d) for d in dirs) and _may_land_a_control_file(
+                            head, [t for t in tokens if t != raw], base, local_vars):
+                        return _GENESIS_CONTROL_REASON
+                if any(ch in tok for ch in "*?["):
+                    try:
+                        paths = _glob.glob(expanded)[:_MAX_SECRET_GLOB - seen]
+                    except (OSError, ValueError, re.error):
+                        paths = []
+                else:
+                    paths = [expanded] if os.path.lexists(expanded) else []
+                for path in paths:
+                    seen += 1
+                    reason = sensitive_path_reason(path) or _named_secret(path)
+                    if reason:
+                        return reason
+                if seen >= _MAX_SECRET_GLOB:
+                    return None
+    return None
+
+
+def _walk(command: str, cwd: Path | None) -> Iterator[tuple[str, list[str], str, Path,
+                                                            dict[str, str], bool]]:
+    """Сегментите на командата с папката, в която всеки тръгва, и простите
+    присвоявания преди него: (сегмент, думи, команда, папка, променливи, в .genesis ли е).
+
+    Одит 2026-11-10: hooks.json се подхвърляше с команди SAFE и в режим deny —
+    `cd ~/.genesis && cp /дълъг/път/hooks.json .`, `tar xf e.tar -C ~/.genesis`,
+    `unzip -d ~/.genesis`, `cp -rT e ~/.genesis`, `ln e/hooks.json ~/.genesis/`,
+    `cp … ~/.genes?s/`, `G=~/.gene; cp … ${G}sis/`. Затова тук се следят `cd` и
+    простите присвоявания, а самата папка .genesis като аргумент на команда,
+    която не е само четене, е запис в управляващите файлове."""
+    import glob as _glob
+
+    base = cwd if (cwd and cwd.is_dir()) else Path.cwd()
     local_vars: dict[str, str] = {}
     in_control_dir = False
     for seg in _split_segments(command):
@@ -1847,38 +1898,233 @@ def _secret_in_arguments(command: str, cwd: Path | None) -> str | None:
                 base = Path(landed)
                 in_control_dir = _is_control_dir(landed)
             continue
-        tokens = [tok for reading in _argument_readings(seg) for tok in reading]
-        for tok in tokens:
-            tok = _REDIRECT_PREFIX.sub("", tok)     # `>~/x`, `2>>log` — целта е пътят
-            if not tok or tok.startswith("-"):
-                continue
-            match = _SECRET_ARG_RX.search(tok.replace("\\", "/"))
-            if match and not _SENSITIVE_PATH_EXEMPT_RE.search(tok):
-                return f"достъп до чувствителен файл ({match.group(0)})"
-            expanded = _expand_token(tok, local_vars)
-            if not os.path.isabs(expanded):
-                expanded = str(base / expanded)
-            if _control_file_reached(tok, expanded, bare=in_control_dir):
-                return _GENESIS_CONTROL_REASON
-            if head not in _CONTROL_DIR_READERS and tok != words[0]:
-                dirs = (_glob.glob(expanded)[:8] if any(c in tok for c in "*?[") else [expanded])
-                if any(_is_control_dir(d) for d in dirs) and _may_land_a_control_file(
-                        head, [t for t in tokens if t != tok], base, local_vars):
-                    return _GENESIS_CONTROL_REASON
-            if any(ch in tok for ch in "*?["):
-                try:
-                    paths = _glob.glob(expanded)[:_MAX_SECRET_GLOB - seen]
-                except (OSError, ValueError, re.error):
-                    paths = []
-            else:
-                paths = [expanded] if os.path.lexists(expanded) else []
-            for path in paths:
-                seen += 1
-                reason = sensitive_path_reason(path) or _named_secret(path)
+        yield seg, words, head, base, local_vars, in_control_dir
+
+
+# Файлове, които се пускат при старт — от шела на оператора, от git, от
+# сесията (одит 2026-11-10: `echo … >> ~/.bashrc`, `>> ~/.gitconfig` бяха SAFE).
+# Записаното там тръгва по-късно ИЗВЪН Genesis и портата му — затова записът
+# пита и правило в /permissions не го покрива. Четенето — не.
+_STARTUP_IN_HOME = re.compile(
+    r"^(?:\.(?:bash(?:rc|_profile|_login|_logout)|profile|zshrc|zshenv|zprofile|zlogin|zlogout"
+    r"|kshrc|mkshrc|cshrc|tcshrc|login|xprofile|xinitrc|xsessionrc|gitconfig|pam_environment)"
+    r"|\.config/(?:fish/config\.fish|fish/conf\.d/[^/]+|git/config|autostart/[^/]+"
+    r"|systemd/user/.+|environment\.d/[^/]+)"
+    r"|Library/LaunchAgents/[^/]+"
+    r"|(?:Documents/)?(?:Windows)?PowerShell/[^/]*profile\.ps1"
+    r"|AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/[^/]+)$",
+    re.IGNORECASE)
+_STARTUP_ANYWHERE = re.compile(r"(?:^|/)\.git/(?:hooks/[^/]+|config)$", re.IGNORECASE)
+STARTUP_REASON = "промяна на файл, който се пуска при старт"
+_GIT_RUNS_KEY = re.compile(
+    r"^(?:core\.(?:pager|sshcommand|editor|hookspath|fsmonitor|askpass|gitproxy)|alias\..+"
+    r"|sequence\.editor|diff\.external|gpg(?:\.\w+)?\.program|uploadpack\.packobjectshook"
+    r"|.+\.(?:helper|textconv|clean|smudge|process|command|cmd|path))$", re.IGNORECASE)
+_WRITE_LAST = frozenset({"cp", "mv", "install", "ln", "rsync", "copy", "move", "xcopy"})
+_WRITE_ALL = frozenset({"tee", "truncate"})
+_WRITE_IN_PLACE = frozenset({"sed", "perl", "ruby"})
+
+
+def startup_path_reason(path: str | os.PathLike[str]) -> str | None:
+    """Пише ли се в файл, който се пуска при старт (~/.bashrc, ~/.profile,
+    ~/.gitconfig, autostart, LaunchAgents, профилът на PowerShell, `.git/hooks/*`,
+    `.git/config`). Едно правило за шела и за WRITE_FILE/EDIT_FILE."""
+    try:
+        norm = os.path.realpath(os.path.expanduser(os.fspath(path))).replace("\\", "/")
+        home = os.path.realpath(os.path.expanduser("~")).replace("\\", "/").rstrip("/")
+    except (OSError, ValueError):
+        return None
+    if _STARTUP_ANYWHERE.search(norm):
+        return (f"{STARTUP_REASON} ({norm.rsplit('/.git/', 1)[-1]} в .git — тръгва при "
+                "следващия git извън Genesis)")
+    if norm.lower().startswith(home.lower() + "/"):
+        rel = norm[len(home) + 1:]
+        if _STARTUP_IN_HOME.match(rel):
+            return f"{STARTUP_REASON} (~/{rel} — кодът в него тръгва извън Genesis)"
+    return None
+
+
+def _write_targets(seg: str, head: str, words: list[str]) -> list[str]:
+    """Пътищата, в които сегментът пише: целта на `>`/`>>` и файловете на
+    tee/cp/mv/ln/dd/truncate/`sed -i`."""
+    text = seg.replace("\\", "/") if os.name == "nt" else seg
+    try:
+        lex = shlex.shlex(text, posix=True, punctuation_chars="<>|&;")
+        lex.whitespace_split = True
+        toks = list(lex)
+    except ValueError:
+        toks = []
+    out = [toks[i + 1] for i, tok in enumerate(toks[:-1])
+           if set(tok) <= set(">|&") and ">" in tok and not re.fullmatch(r"\d+|-", toks[i + 1])]
+    args = [w for w in words[1:] if not w.startswith("-") and not set(w) & set("<>")]
+    if head in _WRITE_LAST and args:
+        out.append(args[-1])
+    elif head in _WRITE_ALL or (head in _WRITE_IN_PLACE and any(
+            re.fullmatch(r"-[A-Za-z]*i\S*", w) for w in words[1:])):
+        out += args
+    elif head == "dd":
+        out += [w[3:] for w in words[1:] if w.startswith("of=")]
+    return out
+
+
+def _startup_write(command: str, cwd: Path | None) -> str | None:
+    for seg, words, head, base, local_vars, _ in _walk(command, cwd):
+        if head == "git" and "config" in words:
+            reason = _git_config_runs(words)
+            if reason:
+                return reason
+        for target in _write_targets(seg, head, words):
+            for variant in _braces(target):
+                path = _expand_token(variant, local_vars)
+                if not os.path.isabs(path):
+                    path = str(base / path)
+                reason = startup_path_reason(path)
                 if reason:
                     return reason
-            if seen >= _MAX_SECRET_GLOB:
-                return None
+    return None
+
+
+def _git_config_runs(words: list[str]) -> str | None:
+    """`git config [--global] core.pager /tmp/x.sh` — настройка, която пуска
+    програма при следващия git. Четенето (`--get`, `-l`, само ключ) — не."""
+    if any(w in ("--get", "--get-all", "--get-regexp", "-l", "--list", "--unset",
+                 "--unset-all", "--remove-section", "--show-origin") for w in words):
+        return None
+    args = [w for w in words[words.index("config") + 1:] if not w.startswith("-")]
+    if args[:1] == ["set"]:
+        args = args[1:]                     # git 2.46+: `git config set ключ стойност`
+    if args[:1] and args[0].lower().startswith("alias.") and not "".join(args[1:2]).startswith("!"):
+        return None                         # псевдоним на git команда, не на шел
+    if len(args) >= 2 and _GIT_RUNS_KEY.match(args[0]):
+        return (f"{STARTUP_REASON} (git настройка {args[0]} пуска програма при "
+                "следващия git извън Genesis)")
+    return None
+
+
+_MAX_BRACES = 64
+_BRACE_RANGE = re.compile(r"(-?\d{1,4})\.\.(-?\d{1,4})|([A-Za-z])\.\.([A-Za-z])")
+
+
+def _braces(word: str) -> list[str]:
+    """Разгъването на скобите в една дума, както го прави bash (`a{b,c}d`,
+    `{1..3}`, `{a..c}`), до _MAX_BRACES варианта — само за оценката. `${VAR}`
+    не е скоба. Кавичките вече ги няма (shlex), затова и `'{a,b}'` се разгъва:
+    в посоката на повече проверка."""
+    out: list[str] = []
+    todo = [word]
+    while todo and len(out) + len(todo) <= _MAX_BRACES * 2:
+        current = todo.pop(0)
+        parts = _first_brace(current)
+        if parts is None:
+            out.append(current)
+            if len(out) >= _MAX_BRACES:
+                break
+            continue
+        pre, alternatives, post = parts
+        todo[:0] = [pre + alt + post for alt in alternatives]
+    return out or [word]
+
+
+def _first_brace(word: str) -> tuple[str, list[str], str] | None:
+    start = 0
+    while True:
+        open_at = word.find("{", start)
+        if open_at < 0:
+            return None
+        start = open_at + 1
+        if open_at and word[open_at - 1] == "$":
+            continue
+        depth, cut, i = 0, [open_at], open_at
+        for i in range(open_at, len(word)):
+            if word[i] == "{":
+                depth += 1
+            elif word[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            elif word[i] == "," and depth == 1:
+                cut.append(i)
+        else:
+            return None
+        pre, body, post = word[:open_at], word[open_at + 1:i], word[i + 1:]
+        if len(cut) > 1:
+            cut.append(i)
+            return pre, [word[a + 1:b] for a, b in itertools.pairwise(cut)], post
+        seq = _BRACE_RANGE.fullmatch(body)
+        if seq and seq.group(1) is not None:
+            a, b = int(seq.group(1)), int(seq.group(2))
+            step = 1 if b >= a else -1
+            return pre, [str(n) for n in range(a, b + step, step)][:_MAX_BRACES], post
+        if seq:
+            a, b = ord(seq.group(3)), ord(seq.group(4))
+            step = 1 if b >= a else -1
+            return pre, [chr(n) for n in range(a, b + step, step)][:_MAX_BRACES], post
+
+
+# Цялото дърво: съдържанието на всеки файл в него (одит 2026-11-10 — `grep -rh
+# X ~`, `find ~ -exec cat {} +` бяха SAFE и печатаха ~/.ssh/id_rsa заедно с
+# всичко останало). Само имената (`ls -R`, `find ~ -name`, `du`) — не.
+_TREE_ALWAYS = frozenset({"rg", "ag", "ack", "ack-grep", "rsync"})
+_TREE_GREP = frozenset({"grep", "egrep", "fgrep", "zgrep"})
+_TREE_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+
+
+def _reads_tree(head: str, tokens: list[str]) -> bool:
+    args = tokens[1:]
+    if head in _TREE_ALWAYS:
+        return True
+    if head in _TREE_GREP:
+        return any(t in ("--recursive", "--dereference-recursive", "--directories=recurse")
+                   or re.fullmatch(r"-[A-Za-z]*[rR][A-Za-z]*", t) for t in args)
+    if head == "find":
+        return any(t in _TREE_EXEC for t in args)
+    if head in ("tar", "bsdtar", "gtar"):
+        return bool(args) and (args[0] == "--create" or re.fullmatch(r"-?[A-Za-z]*c[A-Za-z]*", args[0])
+                               is not None) or any(t in ("-c", "--create") for t in args)
+    if head == "zip":
+        return any(re.fullmatch(r"-[A-Za-z]*r[A-Za-z]*", t) or t == "--recurse-paths" for t in args)
+    if head in ("7z", "7za", "7zz"):
+        return bool(args) and args[0] == "a"
+    if head in ("cp", "scp"):
+        return any(re.fullmatch(r"-[A-Za-z]*[rRa][A-Za-z]*", t) or t in ("--recursive", "--archive")
+                   for t in args)
+    return False
+
+
+def _whole_home_read(head: str, tokens: list[str], base: Path,
+                     local_vars: dict[str, str]) -> str | None:
+    """Команда, която чете съдържанието на цяло дърво, когато дървото е домът
+    или над него (`~`, `/home`, `/`): вътре са ~/.ssh, ~/.aws, ~/.gnupg."""
+    if not tokens or not _reads_tree(head, tokens):
+        return None
+    try:
+        home = Path(os.path.realpath(os.path.expanduser("~")))
+    except (OSError, ValueError):
+        return None
+    roots: list[tuple[str, str]] = []
+    named = False
+    args = [t for t in tokens[1:] if not t.startswith("-") and t not in ("{}", "+", ";")]
+    if head in ("cp", "scp", "rsync"):
+        args = args[:-1]                 # последното е къде, не какво (`cp -r b ~`)
+    for tok in args:
+        for variant in _braces(tok):
+            path = _expand_token(variant, local_vars)
+            if not os.path.isabs(path):
+                path = str(base / path)
+            if os.path.isdir(path):
+                roots.append((tok, path))
+            if os.path.lexists(path):
+                named = True
+    if not named and head in _TREE_ALWAYS | _TREE_GREP:
+        roots.append((str(base), str(base)))    # `rg TODO`, `grep -r X` — текущата папка
+    for shown, root in roots:
+        try:
+            real = Path(os.path.realpath(root))
+        except (OSError, ValueError):
+            continue
+        if home == real or home.is_relative_to(real):
+            return (f"достъп до чувствителни файлове (цялото {shown} — вътре са "
+                    "ключовете в ~/.ssh, ~/.aws, ~/.gnupg)")
     return None
 
 
@@ -1918,6 +2164,25 @@ def _ansi_escape(seq: str) -> str:
     if seq[0] == "c" and len(seq) == 2:
         return chr(ord(seq[1]) & 0x1F)
     return _ANSI_C_ESCAPES.get(seq, "\\" + seq)
+
+
+# Съобщението на `git commit -m '…'` е данни, git не го пуска (одит 2026-11-10:
+# `git commit -m 'fix: rm -rf / вече не се вика'` беше BLOCKED). Образците на
+# текста не го гледат; структурните проверки и без това гледат думите. В двойни
+# кавички с `$(` или `` ` `` шелът изпълнява — такова съобщение остава.
+_MESSAGE_ARG = re.compile(
+    r"""(?P<pre>(?:^|[;&|(\n])\s*(?:[A-Za-z_]\w*=\S*\s+)*"""
+    r"""(?:(?:git|hg)\b(?:[^;&|\n'"]|'')*?\s(?:-m|--message)"""
+    r"""|gh\b(?:[^;&|\n'"]|'')*?\s(?:-t|-b|--title|--body))"""
+    r"""(?:=|\s+))(?P<q>'[^']+'|"(?:[^"\\$`]|\\[^$`])+")""")
+
+
+def _without_messages(command: str) -> str:
+    previous = None
+    while previous != command:
+        previous = command
+        command = _MESSAGE_ARG.sub(lambda m: m.group("pre") + "''", command)
+    return command
 
 
 def _shell_scripts(command: str) -> list[str]:
@@ -2227,8 +2492,9 @@ def assess_command(command: str, cwd: Path | None = None, *, arguments: bool = T
     if encoded.level == RiskLevel.BLOCKED:
         return encoded
 
+    text = _without_messages(command)
     for rx, why in _BLOCK_PATTERNS:
-        if rx.search(command):
+        if rx.search(text):
             reasons.append(why)
             level = RiskLevel.BLOCKED
     if arguments:
@@ -2244,7 +2510,7 @@ def assess_command(command: str, cwd: Path | None = None, *, arguments: bool = T
     if level == RiskLevel.BLOCKED:
         return RiskVerdict(level, reasons)
     for rx, why in _CONFIRM_PATTERNS:
-        if rx.search(command):
+        if rx.search(text):
             reasons.append(why)
             level = RiskLevel.CONFIRM
     if windows_delete.level == RiskLevel.CONFIRM and level < RiskLevel.CONFIRM:
@@ -2269,6 +2535,15 @@ def assess_command(command: str, cwd: Path | None = None, *, arguments: bool = T
         if secret:
             if secret not in reasons:
                 reasons.append(secret)
+            level = RiskLevel(max(level, RiskLevel.CONFIRM))
+    if arguments:
+        try:
+            startup = _startup_write(command, cwd)
+        except Exception:
+            log.debug("проверката за стартови файлове се провали", exc_info=True)
+            startup = None
+        if startup and startup not in reasons:
+            reasons.append(startup)
             level = RiskLevel(max(level, RiskLevel.CONFIRM))
     verdict = RiskVerdict(level, reasons)
     try:

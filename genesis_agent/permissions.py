@@ -143,7 +143,10 @@ def _past_target(first: str, sub: str, rest: list[str]) -> list[str]:
 # Genesis (hooks/MCP/доверие/тези правила). `cat *` иначе четеше ключа, с
 # който се подписва доверието, а `cp *` пишеше ~/.genesis/hooks.json —
 # програма извън sandbox-а с целия os.environ.
-_NEVER_COVERED = ("достъп до ", "промяна на управляващ файл на Genesis")
+# Файл, който се пуска при старт (~/.bashrc, .git/hooks, `git config core.pager`)
+# — кодът там тръгва извън Genesis; правило `tee *`/`git *` не го покрива (2026-11-15).
+_NEVER_COVERED = ("достъп до ", "промяна на управляващ файл на Genesis",
+                  "промяна на файл, който се пуска при старт")
 
 _LOCK = threading.Lock()
 _SESSION: dict[str, set[str]] = {}

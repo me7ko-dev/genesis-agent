@@ -812,6 +812,15 @@ def _tool_write_file(arg: str, content: str, exact: bool = False) -> str:
         allowed, reason = sandbox._decide(f"WRITE_FILE {path}", verdict, sandbox.get_policy())
         if not allowed:
             return f"[WRITE_FILE] {reason}"
+    # Файл, който се пуска при старт (.git/hooks/*, ~/.bashrc) — същото като
+    # `cat > .git/hooks/pre-commit` в шела (2026-11-15): вътре в проекта е, а
+    # кодът тръгва при следващия git на оператора, извън Genesis.
+    startup = sandbox.startup_path_reason(path)
+    if startup:
+        verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM, [startup])
+        allowed, reason = sandbox._decide(f"WRITE_FILE {path}", verdict, sandbox.get_policy())
+        if not allowed:
+            return f"[WRITE_FILE] {reason}"
     # Пишем ли извън workspace-а? Това е операция за потвърждение.
     try:
         inside = path.resolve().is_relative_to(_WORKSPACE.resolve())
@@ -990,6 +999,15 @@ def _tool_edit_file(path_arg: str, old: str, new: str, replace_all: bool = False
     control = sandbox.control_path_reason(path)
     if control:
         verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM, [control])
+        allowed, reason = sandbox._decide(f"EDIT_FILE {path}", verdict, sandbox.get_policy())
+        if not allowed:
+            return f"[EDIT_FILE] {reason}"
+    # Файл, който се пуска при старт (.git/hooks/*, ~/.bashrc) — същото като
+    # `cat > .git/hooks/pre-commit` в шела (2026-11-15): вътре в проекта е, а
+    # кодът тръгва при следващия git на оператора, извън Genesis.
+    startup = sandbox.startup_path_reason(path)
+    if startup:
+        verdict = sandbox.RiskVerdict(sandbox.RiskLevel.CONFIRM, [startup])
         allowed, reason = sandbox._decide(f"EDIT_FILE {path}", verdict, sandbox.get_policy())
         if not allowed:
             return f"[EDIT_FILE] {reason}"
