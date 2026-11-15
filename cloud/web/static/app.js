@@ -114,7 +114,8 @@ $("new-chat").addEventListener("click", () => {
   // Одит 2026-11-10: без това „Прати“ оставаше „Работи…“ след „Нов разговор“ насред
   // задача — никой вече не пита за нея. Втора задача сървърът и без това спира с 409.
   setBusy(false);
-  $("log").replaceChildren(el("p", "muted", "Нов разговор. Напиши задачата долу."));
+  uploadNote("");
+  $("log").replaceChildren(el("p", "muted", "Нов разговор. Напиши задачата долу или прикачи файлове."));
   $("files").hidden = true;
   for (const li of $("chats").children) li.classList.remove("active");
   $("text").focus();
@@ -125,6 +126,7 @@ function stopPolling() { if (polling) { clearTimeout(polling); polling = null; }
 async function openChat(id) {
   showChatView();
   stopPolling();
+  if (current !== id) uploadNote("");
   current = id;
   const chat = await api(`/api/chats/${id}`);
   for (const li of $("chats").children) li.classList.toggle("active", li.dataset.id === id);
@@ -181,7 +183,68 @@ function cost(t) { return t.cost ? ` · ${t.cost} кредита` : ""; }
 function setBusy(busy) {
   $("send").disabled = busy;
   $("send").textContent = busy ? "Работи…" : "Прати";
+  // Докато върви задача, сървърът отказва качване (409) — бутонът го казва предварително.
+  $("attach").disabled = busy;
 }
+
+// ── качване на файлове (2026-11-12) ──
+// Същият таван като MAX_UPLOAD в cloud/web/server.py: по-голям файл се отказва
+// тук, преди да е пътувал 25 MB, за да чуе „твърде голям“.
+const MAX_UPLOAD = 25 * 1024 * 1024;
+
+function uploadNote(text, failed) {
+  const n = $("upload-note");
+  n.textContent = text;
+  n.hidden = !text;
+  n.className = failed ? "failed" : "muted";
+}
+
+async function uploadOne(file) {
+  if (!file.size) throw new Error("файлът е празен");
+  if (file.size > MAX_UPLOAD) throw new Error("над 25 MB е");
+  const r = await fetch(`/api/chats/${current}/upload?name=${encodeURIComponent(file.name)}`, {
+    method: "POST", credentials: "same-origin",
+    headers: { "Content-Type": "application/octet-stream" }, body: file,
+  });
+  const data = await r.json().catch(() => ({}));
+  if (r.status === 401) { showLogin(); throw new Error(data.error || "нужен е вход"); }
+  if (!r.ok) throw new Error(data.error || `грешка ${r.status}`);
+}
+
+$("attach").addEventListener("click", () => $("file-input").click());
+
+$("file-input").addEventListener("change", async () => {
+  const input = $("file-input");
+  const files = [...input.files];
+  input.value = "";   // същият файл може да се избере пак
+  if (!files.length) return;
+  $("attach").disabled = true;
+  $("send").disabled = true;
+  const done = [], failed = [];
+  try {
+    if (!current) {
+      const { id } = await api("/api/chats", { title: files[0].name.slice(0, 60) });
+      current = id;
+      await loadChats();
+      $("log").replaceChildren(el("p", "muted", "Файловете са тук. Напиши какво да направя с тях."));
+    }
+    for (const [i, f] of files.entries()) {
+      uploadNote(`Качва ${i + 1} от ${files.length}: ${f.name}…`);
+      try { await uploadOne(f); done.push(f.name); }
+      catch (e) { failed.push(`${f.name} — ${e.message}`); }
+    }
+  } catch (e) {
+    failed.push(e.message);
+  }
+  const lines = [];
+  if (done.length) lines.push(`Качени: ${done.join(", ")}. Напиши какво да направя с тях.`);
+  if (failed.length) lines.push(`Не се качиха: ${failed.join("; ")}`);
+  uploadNote(lines.join("\n"), failed.length > 0);
+  // Ако междувременно е тръгнала задача, бутоните остават на нея.
+  if (!polling) setBusy(false);
+  await loadFiles().catch(() => {});
+  $("text").focus();
+});
 
 async function poll(turnId, box, seq) {
   let data;
@@ -238,6 +301,7 @@ $("ask").addEventListener("submit", async (ev) => {
     }
     const { turn_id } = await api(`/api/chats/${current}/turns`, { text });
     $("text").value = "";
+    uploadNote("");
     const box = turnBox(text);
     $("log").append(box);
     poll(turn_id, box, 0);

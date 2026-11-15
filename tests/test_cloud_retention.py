@@ -188,3 +188,18 @@ def test_serve_takes_keep_days() -> None:
     a = web.build_parser().parse_args(["serve", "--keep-days", "90"])
     assert a.keep_days == 90
     assert web.build_parser().parse_args(["serve"]).keep_days == 0
+
+
+def test_an_upload_keeps_the_chat_and_an_expired_chat_takes_no_upload(app) -> None:
+    """Качването държи разговора като свалянето; качване в разговор, изтрит между
+    обработчика и begin_upload, се отказва — иначе папката се връща без разговор."""
+    uid = app.store.add_user("ana@example.com", "correct-horse-battery")
+    chat, _, folder = _chat(app, uid)
+    assert app.begin_upload(uid, chat, 10) == ""
+    assert app.expire(now=time.time() + LATER) == 0 and folder.exists()
+    app.end_upload(uid, chat, name="invoice.pdf")
+    assert app._uploaded[chat] == ["invoice.pdf"]
+
+    assert app.expire(now=time.time() + LATER) == 1
+    assert chat not in app._uploaded                     # бележката към модела — също
+    assert app.begin_upload(uid, chat, 10) == "gone"
