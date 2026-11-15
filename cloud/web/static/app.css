@@ -20,6 +20,8 @@ input, textarea { font: inherit; width: 100%; padding: 8px 10px; border: 1px sol
 a { color: var(--accent); }
 .muted { color: var(--muted); }
 .error { color: var(--error); min-height: 1.5em; }
+.pw-form { display: grid; gap: 8px; max-width: 360px; }
+.pw-form label { display: grid; gap: 4px; }
 
 #login { display: grid; place-items: center; min-height: 100vh; padding: 16px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;

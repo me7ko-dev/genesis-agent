@@ -435,6 +435,24 @@ $("plan-cancel-yes").addEventListener("click", async () => {
   b.disabled = false;
 });
 
+// Смяна на паролата (2026-11-15): 403 = грешна стара парола (не 401 — той
+// значи „излязъл си“ и показва входа); другите устройства излизат.
+$("password-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const f = ev.target, msg = $("password-msg"), b = f.querySelector("button");
+  b.disabled = true;
+  try {
+    await api("/api/password", { old: f.old.value, new: f.new.value });
+    f.reset();
+    msg.className = "ok";
+    msg.textContent = "Паролата е сменена. Другите устройства излязоха от профила.";
+  } catch (e) {
+    msg.className = "error";
+    msg.textContent = e.message;
+  }
+  b.disabled = false;
+});
+
 $("account-link").addEventListener("click", () => showAccount());
 
 start();
