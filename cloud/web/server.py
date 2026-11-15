@@ -4,7 +4,7 @@
     python -m cloud.web.server serve --data /srv/genesis/web --jobs /srv/jobs \\
         --env-file /srv/genesis/keys.env                          # 127.0.0.1:8080
     python -m cloud.web.server users | balance | grant | disable | enable |
-        limits | invite | reconcile                               # оператор, само локално
+        limits | invite | reconcile | reset-password              # оператор, само локално
 
 Всяко съобщение в разговор е нов контейнер (cloud/runner/launch.py) върху
 СЪЩАТА папка — файловете остават, историята е в /work/.genesis (task.py).
@@ -15,7 +15,8 @@
   - вход с имейл и парола (scrypt); бисквитка HttpOnly + SameSite=Strict (+ Secure);
   - POST иска JSON и Origin от същия хост — чужда страница не може да праща
     от името на влязъл човек;
-  - 5 грешни пароли за 15 мин → 429 (на имейл и на IP);
+  - 5 грешни пароли за 15 мин → 429 (на имейл и на IP) — и грешната стара
+    парола при смяна в „Сметка“ се брои там (2026-11-15);
   - разговорите и файловете на друг човек изглеждат като липсващи (404);
   - по един ход на човек, общо най-много `--workers` контейнера наведнъж;
   - файловете се сваля само като прикачени (никога не се показват в нашия
@@ -59,7 +60,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 from cloud.gateway import gateway as gw
 from cloud.runner import launch
 from cloud.web import billing, legal
-from cloud.web.store import MICRO, SESSION_SECONDS, Store
+from cloud.web.store import MICRO, SESSION_SECONDS, Store, check_new_password
 
 log = logging.getLogger("genesis.cloud.web")
 
@@ -365,6 +366,39 @@ class App:
             if stamp in ip_list:
                 ip_list.remove(stamp)
         return self.store.new_session(user_id)
+
+    def change_password(self, user: dict[str, Any], token: str, old: str, new: str,
+                        ip: str) -> bool:
+        """Смяна от „Сметка“ (2026-11-15). False при грешна стара парола.
+
+        Новата се проверява първо (400 без брояч — не казва нищо за старата).
+        Грешната стара парола се брои към заключването на входа, на имейла и на
+        IP, както /api/login: откраднатата бисквитка не дава безкрайно налучкване
+        на паролата. При успех текущата сесия остава, другите се затварят."""
+        check_new_password(new)
+        keys = (self._email_key(user["email"]), f"ip:{ip}")
+        stamp = time.time()
+        with self._lock:
+            now = time.time()
+            for k in keys:
+                self._failures[k] = [t for t in self._failures.get(k, []) if now - t < LOGIN_WINDOW]
+            blocked = [k for k in keys if len(self._failures[k]) >= LOGIN_FAILURES]
+            fresh = self._fresh_lockouts(blocked, now)
+            if not blocked:
+                for k in keys:
+                    self._failures[k].append(stamp)
+        if blocked:
+            self._note_lockouts(fresh)
+            raise LoginBlocked
+        if not self.store.password_ok(user["id"], old):
+            return False
+        with self._lock:
+            self._failures.pop(self._email_key(user["email"]), None)
+            ip_list = self._failures.get(f"ip:{ip}", [])
+            if stamp in ip_list:
+                ip_list.remove(stamp)
+        self.store.set_password(user["id"], new, keep_token=token)
+        return True
 
     # ── сваляне ─────────────────────────────────────────────────────────────
     def begin_download(self, chat_id: str) -> bool:
@@ -1181,6 +1215,8 @@ class Handler(BaseHTTPRequestHandler):
             self._checkout(user, body)
         elif path == "/api/subscription/cancel":
             self._cancel_plan(user)
+        elif path == "/api/password":
+            self._change_password(user, body)
         elif path == "/api/chats":
             title = str(body.get("title") or "Нов разговор").strip()
             self._json(201, {"id": store.new_chat(user["id"], title)})
@@ -1422,6 +1458,22 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"url": url})
 
 
+    def _change_password(self, user: dict[str, Any], body: dict[str, Any]) -> None:
+        old, new = str(body.get("old", "")), str(body.get("new", ""))
+        try:
+            ok = self.app.change_password(user, self._token(), old, new, self._ip())
+        except LoginBlocked:
+            self._error(429, "твърде много опити — опитай пак след 15 минути")
+            return
+        except ValueError as e:
+            self._error(400, str(e))
+            return
+        if not ok:
+            # 403, не 401: 401 в страницата значи „излязъл си“ и показва входа.
+            self._error(403, "грешна стара парола")
+            return
+        self._json(200, {"ok": True})
+
     def _cancel_plan(self, user: dict[str, Any]) -> None:
         app = self.app
         if app.prices is None or app.stripe is None:
@@ -1541,6 +1593,21 @@ def _admin(a: argparse.Namespace, store: Store) -> int:
             shutil.rmtree(folder)
         print(f"{user['email']}: изтрит (deleted-{uid}@invalid); сметката остава за счетоводството")
         return 0
+    if a.cmd == "reset-password":
+        # 2026-11-15: човек, забравил паролата — операторът дава нова (възстановяване
+        # по имейл няма, сървърът не праща поща). Спрян или изтрит профил — отказ:
+        # нова парола не бива тихо да връща достъп, който е спрян нарочно.
+        if user["email"].startswith("deleted-") and user["email"].endswith("@invalid"):
+            print(f"{user['email']}: изтрит профил — нова парола няма", file=sys.stderr)
+            return 1
+        if store.account(uid)["disabled"]:
+            print(f"{user['email']}: спрян профил — първо enable", file=sys.stderr)
+            return 1
+        password = secrets.token_urlsafe(12)
+        store.set_password(uid, password)
+        print(f"{user['email']}  парола: {password}")
+        print("всички сесии са затворени", file=sys.stderr)
+        return 0
     if a.cmd in ("disable", "enable"):
         store.set_disabled(uid, a.cmd == "disable")
         print(f"{user['email']}: {'спрян, сесиите са затворени' if a.cmd == 'disable' else 'пуснат'}")
@@ -1591,6 +1658,8 @@ def build_parser() -> argparse.ArgumentParser:
         "grant": sub.add_parser("grant", help="кредити на човек (отрицателно = корекция)"),
         "disable": sub.add_parser("disable", help="спира човека и затваря сесиите му"),
         "enable": sub.add_parser("enable", help="пуска спрян човек"),
+        "reset-password": sub.add_parser(
+            "reset-password", help="нова случайна парола; всички сесии се затварят"),
         "forget": sub.add_parser("forget", help="изтрива човека по искане (ОРЗД); сметката остава"),
         "limits": sub.add_parser("limits", help="лимити на един човек"),
         "invite": sub.add_parser("invite", help="нови покани (кодове за еднократна регистрация)"),
@@ -1598,7 +1667,8 @@ def build_parser() -> argparse.ArgumentParser:
     }
     for name, sp in admin.items():
         sp.add_argument("--data", type=Path, default=Path("/srv/genesis/web"))
-        if name in ("balance", "grant", "disable", "enable", "limits", "forget"):
+        if name in ("balance", "grant", "disable", "enable", "limits", "forget",
+                    "reset-password"):
             sp.add_argument("email")
     admin["grant"].add_argument("credits", help="напр. 12.5 или -3")
     admin["grant"].add_argument("--note", default="")

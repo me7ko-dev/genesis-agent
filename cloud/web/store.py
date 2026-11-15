@@ -170,11 +170,21 @@ def _month_start(now: float | None = None) -> float:
     return t.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
 
 
+PASSWORD_MIN = 10
+
+
 def _check_new_user(email: str, password: str) -> str:
     email = email.strip().lower()
-    if "@" not in email or len(password) < 10:
-        raise ValueError("нужни са имейл и парола от поне 10 знака")
+    if "@" not in email or len(password) < PASSWORD_MIN:
+        raise ValueError(f"нужни са имейл и парола от поне {PASSWORD_MIN} знака")
     return email
+
+
+def check_new_password(password: str) -> None:
+    """Същото правило като при регистрацията (2026-11-15: смяната на паролата
+    не бива да приема по-слаба от тази, с която човек влиза за пръв път)."""
+    if len(password) < PASSWORD_MIN:
+        raise ValueError(f"новата парола трябва да е поне {PASSWORD_MIN} знака")
 
 
 def hash_password(password: str) -> str:
@@ -269,6 +279,30 @@ class Store:
                 (_token_hash(token), time.time()),
             ).fetchone()
         return {"id": int(row["id"]), "email": row["email"]} if row else None
+
+    def password_ok(self, user_id: int, password: str) -> bool:
+        """Вярна ли е паролата на ТОЗИ човек (смяната в „Сметка“ иска старата)."""
+        with self._db() as c:
+            row = c.execute("SELECT password FROM users WHERE id = ?", (user_id,)).fetchone()
+        if row is None:
+            verify_password(password, _dummy_hash())
+            return False
+        return verify_password(password, row["password"])
+
+    def set_password(self, user_id: int, password: str, *, keep_token: str = "") -> None:
+        """Нова парола и затворени сесии — в една транзакция (2026-11-15).
+
+        `keep_token` е сесията, от която човекът сменя паролата: тя остава, а
+        всички други (откраднатата бисквитка на друго устройство) се затварят.
+        Без него (`reset-password` на оператора) се затварят всички."""
+        check_new_password(password)
+        hashed = hash_password(password)   # scrypt извън транзакцията
+        with self._db() as c:
+            cur = c.execute("UPDATE users SET password = ? WHERE id = ?", (hashed, user_id))
+            if cur.rowcount != 1:
+                raise ValueError("няма такъв човек")
+            c.execute("DELETE FROM sessions WHERE user_id = ? AND token_hash != ?",
+                      (user_id, _token_hash(keep_token) if keep_token else ""))
 
     def end_session(self, token: str) -> None:
         with self._db() as c:

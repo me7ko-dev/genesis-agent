@@ -81,6 +81,13 @@
         <thead><tr><th>Кога</th><th>Какво</th><th>Кредити</th></tr></thead>
         <tbody></tbody>
       </table>
+      <h3>Парола</h3>
+      <form id="password-form" class="pw-form">
+        <label>Сегашна парола <input name="old" type="password" autocomplete="current-password" required></label>
+        <label>Нова парола (поне 10 знака) <input name="new" type="password" autocomplete="new-password" minlength="10" required></label>
+        <button type="submit">Смени паролата</button>
+        <p id="password-msg" role="status"></p>
+      </form>
       <p id="account-error" class="error" role="alert"></p>
       <p class="muted legal-links"><a href="/legal/terms" target="_blank">Условия</a> · <a href="/legal/privacy" target="_blank">Поверителност</a> · <a href="/legal/refunds" target="_blank">Връщане на пари</a> · <a href="/legal/contact" target="_blank">Контакт</a> · <a href="/legal/terms?lang=en" target="_blank" lang="en">English</a></p>
     </div>
