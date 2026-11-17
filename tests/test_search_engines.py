@@ -251,6 +251,45 @@ def test_research_does_not_open_localhost_from_search_results(monkeypatch) -> No
     assert rs._fetch_text("http://[::1]:11434/") == ("", "")
 
 
+def test_the_whole_context_is_locked_and_fails_closed() -> None:
+    """Трети преглед 2026-11-17: защитата беше на нашите страници — изскачащ
+    прозорец от чужда страница беше без нея; а без route_web_socket (стар
+    Playwright) WebSocket тихо оставаше отворен."""
+    import asyncio
+
+    import pytest
+
+    from genesis_agent import search_browser as sb
+
+    class _Ctx:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def route(self, pattern, handler):
+            self.calls.append(f"route:{handler.__name__}")
+
+        async def route_web_socket(self, pattern, handler):
+            self.calls.append("ws")
+
+        async def add_init_script(self, script):
+            self.calls.append("init" if "RTCPeerConnection" in script and "WebSocket" in script else "?")
+    ctx = _Ctx()
+    asyncio.run(sb._lock_context(ctx))
+    assert ctx.calls == ["route:_deny_route", "ws", "init"]
+
+    class _Old:
+        async def route(self, pattern, handler):
+            return None
+
+        async def add_init_script(self, script):
+            return None
+    with pytest.raises(AttributeError):
+        asyncio.run(sb._lock_context(_Old()))
+    route = _Route("https://example.org/")
+    assert _drive(sb._deny_route, route) == "abort"
+    assert "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" in sb._LAUNCH_ARGS
+
+
 def test_browser_is_off_in_tests() -> None:
     from genesis_agent import search_browser as sb
     assert not sb.available()

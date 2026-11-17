@@ -157,17 +157,43 @@ async def _guarded_route(route: Any) -> None:
         log.debug("route handler-ът не довърши заявката", exc_info=True)
 
 
-async def _no_sockets(page: Any) -> None:
-    """WebSocket не минава през route() — на чужда страница се спира изцяло:
-    без connect_to_server() сокетът остава подменен и не стига до сървъра."""
+async def _deny_route(route: Any) -> None:
+    """По подразбиране за целия контекст: страница, която не сме отворили ние
+    (изскачащ прозорец от чужда страница), няма мрежа. page.route() на нашите
+    страници има предимство пред този (трети преглед 2026-11-17)."""
+    try:
+        await route.abort("blockedbyclient")
+    except Exception:
+        log.debug("route handler-ът не довърши заявката", exc_info=True)
+
+
+# Каналите покрай route(): WebSocket, WebRTC (UDP/STUN), WebTransport. Махат се
+# преди скриптовете на страницата; route_web_socket е втората ключалка.
+_NO_SOCKETS_JS = """
+(() => {
+  for (const k of ['WebSocket', 'RTCPeerConnection', 'webkitRTCPeerConnection',
+                   'RTCDataChannel', 'WebTransport']) {
+    try { Object.defineProperty(globalThis, k, {value: undefined, writable: false, configurable: false}); }
+    catch (e) {}
+  }
+})();
+"""
+_LAUNCH_ARGS = ["--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+                "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+                "--dns-prefetch-disable"]
+
+
+async def _lock_context(ctx: Any) -> None:
+    """Всички защити на ниво контекст. Без някоя от тях браузърът не тръгва
+    (затворено при съмнение): стар Playwright без route_web_socket → няма
+    търсене в браузъра, а не търсене без защита."""
     import re
 
     async def _mock(ws: Any) -> None:
-        return None
-    try:
-        await page.route_web_socket(re.compile(".*"), _mock)
-    except AttributeError:   # Playwright < 1.48 — без route_web_socket
-        log.debug("route_web_socket липсва")
+        return None   # без connect_to_server() сокетът не стига до сървъра
+    await ctx.route("**/*", _deny_route)
+    await ctx.route_web_socket(re.compile(".*"), _mock)
+    await ctx.add_init_script(_NO_SOCKETS_JS)
 
 
 class _Runner:
@@ -213,7 +239,7 @@ class _Runner:
         last: Exception | None = None
         for channel in _channels():
             try:
-                kw: dict[str, Any] = {"headless": True}
+                kw: dict[str, Any] = {"headless": True, "args": list(_LAUNCH_ARGS)}
                 if channel:
                     kw["channel"] = channel
                 self._browser = await self._pw.chromium.launch(**kw)
@@ -227,8 +253,17 @@ class _Runner:
             self._failed_at = time.monotonic()
             raise RuntimeError(f"няма браузър за търсене: {last}")
         # Service worker прави заявки покрай page.route() — не ни трябва.
-        self._ctx = await self._browser.new_context(locale="bg-BG", user_agent=_UA,
-                                                    service_workers="block")
+        ctx = await self._browser.new_context(locale="bg-BG", user_agent=_UA,
+                                              service_workers="block")
+        try:
+            await _lock_context(ctx)
+        except Exception as e:
+            await self._browser.close()
+            await self._pw.stop()
+            self._pw = self._browser = None
+            self._failed_at = time.monotonic()
+            raise RuntimeError(f"браузърът за търсене не може да се заключи: {e}") from e
+        self._ctx = ctx
         log.info("браузърът за търсене тръгна (%s)", self.channel)
         return self._ctx
 
@@ -297,7 +332,6 @@ async def _search_async(engine: str, query: str, max_results: int, region: str) 
     page = await ctx.new_page()
     try:
         await page.route("**/*", _engine_route(host))
-        await _no_sockets(page)
         url = url_t.format(q=urllib.parse.quote(query), kl=urllib.parse.quote(region))
         await page.goto(url, wait_until="domcontentloaded", timeout=12000)
         try:
@@ -327,7 +361,6 @@ async def _fetch_async(url: str) -> tuple[str, str, str]:
     page = await ctx.new_page()
     try:
         await page.route("**/*", _guarded_route)
-        await _no_sockets(page)
         await page.goto(url, wait_until="domcontentloaded", timeout=12000)
         await page.wait_for_timeout(700)  # страници, които рисуват текста с JS
         if _refusal(page.url):
