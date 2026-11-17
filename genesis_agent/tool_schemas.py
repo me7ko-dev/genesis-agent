@@ -240,8 +240,8 @@ FULL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "RESEARCH",
-            "description": "Web research cross-checked across several sources; prefer over "
-                           "WEB_SEARCH when accuracy matters.",
+            "description": "Answer a fact from the web: reads top pages, returns answer + source "
+                           "URLs. Prefer over WEB_SEARCH for facts.",
             "parameters": {
                 "type": "object",
                 "properties": {"question": {"type": "string"}},

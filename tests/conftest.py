@@ -131,6 +131,24 @@ def _no_real_ollama(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_search(monkeypatch):
+    """Търсенето (search_engines/search_browser, 2026-11-17) не излиза навън:
+    без браузър, без API ключове на оператора (и Groq търсенето), POST към
+    DuckDuckGo се отказва. Тест, който иска търсачка, подменя функцията ѝ.
+    Почивките на търсачките (cool_down) не минават от тест в тест."""
+    monkeypatch.setenv("GENESIS_SEARCH_BROWSER", "0")
+    from genesis_agent import search_engines, web_search
+    monkeypatch.setattr(search_engines, "_key", lambda name: "")
+
+    def _no_post(url, form, timeout=10):
+        raise ConnectionError("tests: no network for search")
+    monkeypatch.setattr(web_search, "_http_post", _no_post)
+    search_engines.reset_cooldowns()
+    yield
+    search_engines.reset_cooldowns()
+
+
+@pytest.fixture(autouse=True)
 def _no_real_notifications(monkeypatch):
     """genesis_agent.autonomous_loop.run_autonomous_loop() calls notifier.notify()
     unconditionally on every mission, success or failure — and tests/test_autonomous_loop.py

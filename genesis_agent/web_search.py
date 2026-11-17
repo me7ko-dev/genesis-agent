@@ -3,7 +3,10 @@
 genesis_agent/web_search.py — Browser/Web Interaction за Genesis Agent.
 
 Поддържа:
-  - DuckDuckGo (без API ключ — напълно безплатно); при CAPTCHA — Wikipedia API
+  - Няколко търсачки паралелно (search_engines.multi_search, 2026-11-17):
+    Tavily/Serper/Brave/Jina/SearXNG, ако има ключ или адрес; без ключ —
+    Wikipedia + DuckDuckGo html, а при малко резултати — истински браузър.
+    DuckDuckGo Lite остава последна резерва.
   - Scraping на URL съдържание (urllib + html parser)
   - Кеш (избягва дублирани заявки)
 
@@ -126,7 +129,25 @@ def _http_get(url: str, timeout: int = 10) -> str:
         raise ConnectionError(f"Грешка при достъп до {url}: {e}")
 
 
-# ─── DuckDuckGo Search ────────────────────────────────────────────────────────
+def _http_post(url: str, form: dict[str, str], timeout: int = 10) -> str:
+    """POST с формуляр (html.duckduckgo.com иска POST — GET-ът дава CAPTCHA по-често)."""
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
+        "Accept": "text/html,application/xhtml+xml,*/*",
+        "Accept-Language": "bg,en;q=0.9",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Referer": url,
+    }
+    req = urllib.request.Request(url, data=urllib.parse.urlencode(form).encode(), headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode(resp.headers.get_content_charset("utf-8"), errors="replace")
+    except urllib.error.URLError as e:
+        raise ConnectionError(f"Грешка при достъп до {url}: {e}")
+
+
+# ─── Търсене ─────────────────────────────────────────────────────────────────
 
 def search(
     query: str,
@@ -136,7 +157,8 @@ def search(
     region: str = "bg-bg",
 ) -> list[dict]:
     """
-    Търси в DuckDuckGo и връща списък от резултати.
+    Търси в няколко търсачки наведнъж (search_engines.multi_search) и връща
+    списък от резултати.
 
     Args:
         query:       Търсен текст.
@@ -145,7 +167,7 @@ def search(
         region:      Регион ('bg-bg', 'en-us', etc.).
 
     Returns:
-        list[dict] с ключове: title, url, snippet
+        list[dict] с ключове: title, url, snippet (и engines — кои търсачки)
     """
     cache_key = _cache_key(f"search:{query}:{max_results}:{region}")
     if use_cache:
@@ -159,27 +181,43 @@ def search(
     # връща страница за грешка — 2026-09-28 моделът после налучка 41.52, 24.70.
     geo = _geocode(query) if _PLACE_QUERY.search(query) else []
 
-    # DuckDuckGo Lite (не изисква JS)
+    # 2026-11-17: една търсачка (DuckDuckGo Lite) даваше на RESEARCH 2/20 верни
+    # отговора — на кирилица връща CAPTCHA. Сега: API-та с ключ + Wikipedia +
+    # DuckDuckGo html паралелно, браузърът — ако уеб резултатите са малко.
+    try:
+        from genesis_agent.search_engines import multi_search
+        results = multi_search(query, max_results, region=region)
+    except Exception:
+        log.debug("multi_search се провали", exc_info=True)
+        results = []
+    if not results:
+        results = _ddg_lite(query, max_results, region)
+
+    results = (geo + results)[:max_results]
+    if not results:
+        # 2026-09-28: страницата с „патиците“ се връщаше като резултат И се
+        # кешираше — моделът търси координати три пъти подред и накрая ги
+        # измисля. Отказът не се кешира и казва ясно да не се измисля.
+        return [{"title": f"Търсачката отказа: {query}", "url": "https://duckduckgo.com/",
+                 "snippet": "Търсачките върнаха CAPTCHA/не отговориха, Wikipedia — нищо. "
+                            "Не измисляй фактите: вземи ги от конкретен източник "
+                            "(WEB_FETCH към страница/API) или кажи, че не са проверени."}]
+    if use_cache:
+        _cache_set(cache_key, json.dumps(results, ensure_ascii=False))
+    return results
+
+
+def _ddg_lite(query: str, max_results: int, region: str = "bg-bg") -> list[dict]:
+    """Последният опит без ключ и без браузър: DuckDuckGo Lite. [] при CAPTCHA."""
     params = urllib.parse.urlencode({"q": query, "kl": region, "kp": "-1"})
     url = f"https://lite.duckduckgo.com/lite/?{params}"
-
     try:
         html = _http_get(url, timeout=8)
     except ConnectionError as e:
-        log.error(f"[web_search] Търсачката недостъпна: {e}")
-        html = ""
+        log.info(f"[web_search] DuckDuckGo Lite недостъпен: {e}")
+        return []
     if not html or _is_challenge(html):
-        # 2026-09-28: DuckDuckGo (lite и html) и Mojeek връщат само CAPTCHA на
-        # лаптопа. Страницата с „патиците“ се връщаше като резултат И се кешираше —
-        # моделът търси координати три пъти подред и накрая ги измисля. Wikipedia
-        # API отговаря без ключ, а за места дава и координатите.
-        results = (geo + _wikipedia_search(query, max_results))[:max_results]
-        if use_cache and results:
-            _cache_set(cache_key, json.dumps(results, ensure_ascii=False))
-        return results or [{"title": f"Търсачката отказа: {query}", "url": url,
-                            "snippet": "DuckDuckGo върна CAPTCHA/не отговори, Wikipedia — нищо. "
-                                       "Не измисляй фактите: вземи ги от конкретен източник "
-                                       "(RUN_CMD curl към API/страница) или кажи, че не са проверени."}]
+        return []
 
     results = []
     # Парсираме DuckDuckGo Lite — опитваме няколко HTML pattern-а
@@ -216,17 +254,6 @@ def search(
                 except Exception:
                     log.debug("uddg адресът не се декодира", exc_info=True)
         results.append({"title": title, "url": result_url, "snippet": snippet[:300]})
-
-    # Fallback: показваме извлечен текст ако не е парснат нищо
-    if not results:
-        log.debug("[web_search] Fallback: не са намерени структурирани резултати.")
-        text = _extract_text(html)
-        results = [{"title": f"Резултат за: {query}", "url": url, "snippet": text[:500]}]
-
-    results = (geo + results)[:max_results]
-    if use_cache and results:
-        _cache_set(cache_key, json.dumps(results, ensure_ascii=False))
-
     return results
 
 
