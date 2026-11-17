@@ -107,6 +107,23 @@ def test_the_page_text_reaches_the_model_not_only_the_snippet(monkeypatch) -> No
     assert "2925 m [1]" in out
 
 
+def test_the_local_model_gets_shorter_passages(monkeypatch) -> None:
+    """2026-11-17: на GTX 1650 локалният модел чете ~80 токена/с — 6500 знака
+    откъси = 38 s медиана, 2200 = 17 s при същите 20/20 верни."""
+    long_page = "\n".join(f"Мусала е висок връх, ред {i}: надморската височина е 2925 m." for i in range(200))
+    _search(monkeypatch, MUSALA)
+    _pages(monkeypatch, {MUSALA[0]["url"]: long_page, MUSALA[1]["url"]: long_page})
+    prompts = []
+    for local in ("", "1"):
+        monkeypatch.setenv("GENESIS_LOCAL_ONLY", local)
+        brain = _brain(monkeypatch, ["2925 m [1]."])
+        rs.grounded_research("Каква е надморската височина на връх Мусала?")
+        prompts.append(brain.calls[0][-1]["content"])
+    cloud, local_prompt = prompts
+    assert len(local_prompt) < rs.LOCAL_CONTEXT_CHARS + 400 < len(cloud)
+    assert "2925 m" in local_prompt
+
+
 def test_sources_are_written_by_code_and_only_cited_ones_are_listed(monkeypatch) -> None:
     _search(monkeypatch, MUSALA)
     _pages(monkeypatch, MUSALA_PAGES)
