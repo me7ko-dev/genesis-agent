@@ -178,28 +178,65 @@ def test_search_browser_never_allows_loopback_even_after_browse_did(monkeypatch)
     assert sb._refusal("data:text/html,x") == ""
 
 
-def test_every_page_request_is_resolved_not_only_internal_looking_ones(monkeypatch) -> None:
-    """Публично по вид име, което сочи към домашната мрежа, минаваше: проверката
-    беше само за IP литерали и имена като „router“."""
-    import asyncio
-
+def test_refusal_fails_closed(monkeypatch) -> None:
+    """Втори преглед 2026-11-17: `x.localhost` Python не го разрешава (gaierror
+    → беше „може“), а Chromium го праща към 127.0.0.1."""
     from genesis_agent import search_browser as sb
-    _resolve(monkeypatch, {"rebind.example.com": "192.168.0.1", "cdn.example.com": "93.184.216.34"})
+    _resolve(monkeypatch, {"rebind.example.com": "192.168.0.1"})
+    assert sb._refusal("http://evil.localhost:2375/")
+    assert sb._refusal("https://no-such-name.example/")
+    assert sb._refusal("https://rebind.example.com/admin")
 
-    class _Route:
-        def __init__(self, url: str) -> None:
-            self.request = type("Req", (), {"url": url, "resource_type": "fetch"})()
-            self.done = ""
 
-        async def abort(self, why: str = "") -> None:
-            self.done = "abort"
+class _Route:
+    def __init__(self, url: str, kind: str = "fetch", method: str = "GET") -> None:
+        self.request = type("Req", (), {"url": url, "resource_type": kind, "method": method})()
+        self.done = ""
+        self.body = ""
 
-        async def continue_(self) -> None:
-            self.done = "continue"
-    bad, good = _Route("https://rebind.example.com/admin"), _Route("https://cdn.example.com/app.js")
-    asyncio.run(sb._route(bad))
-    asyncio.run(sb._route(good))
-    assert (bad.done, good.done) == ("abort", "continue")
+    async def abort(self, why: str = "") -> None:
+        self.done = "abort"
+
+    async def continue_(self) -> None:
+        self.done = "continue"
+
+    async def fulfill(self, status: int = 200, content_type: str = "", body: str = "") -> None:
+        self.done, self.body = "fulfill", body
+
+
+def _drive(handler, route: _Route) -> str:
+    import asyncio
+    asyncio.run(handler(route))
+    return route.done
+
+
+def test_a_foreign_page_never_lets_chromium_connect(monkeypatch) -> None:
+    """DNS rebinding: проверка в Python, после връзка от Chromium = два отговора
+    на DNS. Затова Chromium не се свързва: всяка заявка се тегли от
+    web_fetch.fetch (проверка на сокета) и се връща с fulfill."""
+    from genesis_agent import search_browser as sb
+    _resolve(monkeypatch, {"news.example.com": "93.184.216.34", "rebind.example.com": "192.168.0.1"})
+    fetched: list[str] = []
+
+    def fake_fetch(url):
+        fetched.append(url)
+        return url, "text/html; charset=windows-1251", "<p>текст</p>"
+    monkeypatch.setattr("genesis_agent.web_fetch.fetch", fake_fetch)
+    ok = _Route("https://news.example.com/a", kind="document")
+    assert _drive(sb._guarded_route, ok) == "fulfill" and ok.body == "<p>текст</p>"
+    assert _drive(sb._guarded_route, _Route("https://rebind.example.com/admin")) == "abort"
+    assert _drive(sb._guarded_route, _Route("http://evil.localhost/")) == "abort"
+    assert _drive(sb._guarded_route, _Route("https://news.example.com/api", method="POST")) == "abort"
+    assert fetched == ["https://news.example.com/a"]
+
+
+def test_a_search_engine_page_only_talks_to_its_own_domain() -> None:
+    from genesis_agent import search_browser as sb
+    handler = sb._engine_route("duckduckgo.com")
+    assert _drive(handler, _Route("https://links.duckduckgo.com/d.js")) == "continue"
+    assert _drive(handler, _Route("https://duckduckgo.com.evil.example/x")) == "abort"
+    assert _drive(handler, _Route("http://192.168.0.1/")) == "abort"
+    assert _drive(handler, _Route("https://duckduckgo.com/logo.png", kind="image")) == "abort"
 
 
 def test_research_does_not_open_localhost_from_search_results(monkeypatch) -> None:

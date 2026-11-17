@@ -63,59 +63,111 @@ def _channels() -> list[str]:
     return seen
 
 
-_REFUSAL_TTL = 60.0
-_refusals: dict[str, tuple[float, str]] = {}
-
+# Преглед за сигурност 2026-11-17 (два кръга). Страниците тук са чужди и се
+# отварят без човек, затова:
+#   • localhost никога (BROWSE го пуска, ако самият адрес е localhost — тук не);
+#   • Chromium НЕ разрешава чужди имена сам. Проверка в Python и после връзка от
+#     Chromium е два различни отговора на DNS: име с TTL 0 дава публичен адрес
+#     на проверката и 192.168.0.1 на браузъра (DNS rebinding), а `x.localhost`
+#     Python не разрешава изобщо, докато Chromium го праща към 127.0.0.1.
+#     Затова: търсачката — само към собствения ѝ домейн (_engine_route);
+#     чуждата страница — всяка заявка се тегли от web_fetch.fetch, който
+#     проверява адреса на сокета, в момента на свързване (_guarded_route).
 
 def _refusal(url: str) -> str:
-    """Защо браузърът за търсене не бива да пусне заявка към url („“ — може).
+    """Защо адресът не бива да се отваря („“ — може). Затворено при съмнение:
+    loopback име, неразрешимо име или кой да е вътрешен адрес → отказ. Без
+    кеш — „може“ от преди минута не казва нищо за следващото разрешаване."""
+    import ipaddress
+    import socket
 
-    Преглед за сигурност 2026-11-17: тук имаше browser._address_refusal, а тя
-    чете browser._allow_loopback — след BROWSE към localhost и страниците от
-    търсенето можеха към localhost. Тези страници са чужди и се отварят без
-    човек, затова loopback е забранен винаги. Името се разрешава за ВСЯКА
-    заявка (не само за „вътрешни по вид“ адреси, както в BROWSE): публично име,
-    което сочи към 192.168.x.x, иначе минаваше. Кеш по хост за 60 s — една
-    страница прави десетки заявки към няколко хоста."""
     from genesis_agent import web_fetch
     if not url.lower().startswith(("http://", "https://")):
         return ""   # about:blank, data:, blob: — не са мрежови адреси
     try:
         host = web_fetch._check_url(url)
+        if web_fetch._is_loopback_name(host):
+            return f"{host} е самият компютър — не се отваря от търсенето"
+        try:
+            addresses = [ipaddress.ip_address(host)]
+        except ValueError:
+            infos = socket.getaddrinfo(host, None, 0, socket.SOCK_STREAM)
+            addresses = [ipaddress.ip_address(str(i[4][0]).split("%", 1)[0]) for i in infos]
     except web_fetch.FetchError as e:
         return str(e)
-    except (ValueError, OSError) as e:
-        return f"невалиден адрес: {e}"
-    now = time.monotonic()
-    hit = _refusals.get(host)
-    if hit and now - hit[0] < _REFUSAL_TTL:
-        return hit[1]
+    except (ValueError, OSError) as e:   # socket.gaierror е OSError
+        return f"не се разрешава: {e}"
+    if not addresses:
+        return f"{host} не се разрешава"
+    for ip in addresses:
+        if not web_fetch._allowed_ip(ip, False):
+            return f"{host} е във вътрешна мрежа ({ip}) — не се отваря оттук"
+    return ""
+
+
+def _engine_route(domain: str) -> Any:
+    """Страницата на търсачката: само заявки към собствения ѝ домейн (там DNS
+    е на търсачката, не на чужд сайт); картинки/шрифтове/видео — не."""
+    async def handler(route: Any) -> None:
+        req = route.request
+        try:
+            host = (urllib.parse.urlsplit(req.url).hostname or "").lower().rstrip(".")
+            own = host == domain or host.endswith("." + domain)
+            if req.resource_type in _HEAVY or (req.url.startswith(("http://", "https://")) and not own):
+                await route.abort("blockedbyclient")
+                return
+            await route.continue_()
+        except Exception:
+            log.debug("route handler-ът не довърши заявката", exc_info=True)
+    return handler
+
+
+def _guarded_get(url: str) -> tuple[str, str] | None:
+    """(content type, текст) през web_fetch.fetch — проверка на сокета при
+    всяка връзка и пренасочване; None — отказ или грешка."""
+    from genesis_agent import web_fetch
+    if _refusal(url):
+        return None
     try:
-        web_fetch._precheck_through_proxy(host, url, False)
-        why = ""
-    except web_fetch.FetchError as e:
-        why = str(e)
-    except (ValueError, OSError) as e:
-        why = f"невалиден адрес: {e}"
-    _refusals[host] = (now, why)
-    return why
+        _final, ctype, body = web_fetch.fetch(url)
+    except web_fetch.FetchError:
+        return None
+    base = (ctype.split(";", 1)[0].strip() or "text/html")
+    return f"{base}; charset=utf-8", body
 
 
-async def _route(route: Any) -> None:
-    """Картинки/шрифтове/видео не ни трябват (по-бързо); вътрешни адреси — не."""
+async def _guarded_route(route: Any) -> None:
+    """Чуждата страница: Chromium не се свързва сам — всяка GET заявка се
+    тегли в Python (_guarded_get) и се връща с route.fulfill. Друг метод
+    (POST/PUT…) не ни трябва за четене и се отказва."""
     req = route.request
     try:
-        if req.resource_type in _HEAVY:
-            await route.abort()
+        if not req.url.startswith(("http://", "https://")):
+            await route.continue_()   # data:/blob: — без мрежа
             return
-        refusal = await asyncio.get_running_loop().run_in_executor(None, _refusal, req.url)
-        if refusal:
-            log.info("търсене в браузъра: спряна заявка към %s — %s", req.url[:200], refusal)
+        if req.resource_type in _HEAVY or req.method != "GET":
             await route.abort("blockedbyclient")
             return
-        await route.continue_()
+        got = await asyncio.get_running_loop().run_in_executor(None, _guarded_get, req.url)
+        if got is None:
+            await route.abort("blockedbyclient")
+            return
+        await route.fulfill(status=200, content_type=got[0], body=got[1])
     except Exception:
         log.debug("route handler-ът не довърши заявката", exc_info=True)
+
+
+async def _no_sockets(page: Any) -> None:
+    """WebSocket не минава през route() — на чужда страница се спира изцяло:
+    без connect_to_server() сокетът остава подменен и не стига до сървъра."""
+    import re
+
+    async def _mock(ws: Any) -> None:
+        return None
+    try:
+        await page.route_web_socket(re.compile(".*"), _mock)
+    except AttributeError:   # Playwright < 1.48 — без route_web_socket
+        log.debug("route_web_socket липсва")
 
 
 class _Runner:
@@ -174,8 +226,9 @@ class _Runner:
             self._pw = None
             self._failed_at = time.monotonic()
             raise RuntimeError(f"няма браузър за търсене: {last}")
-        self._ctx = await self._browser.new_context(locale="bg-BG", user_agent=_UA)
-        await self._ctx.route("**/*", _route)
+        # Service worker прави заявки покрай page.route() — не ни трябва.
+        self._ctx = await self._browser.new_context(locale="bg-BG", user_agent=_UA,
+                                                    service_workers="block")
         log.info("браузърът за търсене тръгна (%s)", self.channel)
         return self._ctx
 
@@ -233,7 +286,8 @@ _EXTRACT_JS = """
 _ENGINES: dict[str, tuple[str, str, str]] = {
     # име: (адрес с {q}, селектор на карта, собствен домейн)
     "ddg_browser": ("https://duckduckgo.com/?q={q}&kl={kl}", 'article[data-testid="result"]', "duckduckgo.com"),
-    "brave_browser": ("https://search.brave.com/search?q={q}", '#results .snippet[data-type="web"]', "brave.com"),
+    # 2026-11-17: Brave смени #results с #mixed-main — само по .snippet[data-type].
+    "brave_browser": ("https://search.brave.com/search?q={q}", '.snippet[data-type="web"]', "brave.com"),
 }
 
 
@@ -242,6 +296,8 @@ async def _search_async(engine: str, query: str, max_results: int, region: str) 
     ctx = await _runner.context()
     page = await ctx.new_page()
     try:
+        await page.route("**/*", _engine_route(host))
+        await _no_sockets(page)
         url = url_t.format(q=urllib.parse.quote(query), kl=urllib.parse.quote(region))
         await page.goto(url, wait_until="domcontentloaded", timeout=12000)
         try:
@@ -251,6 +307,7 @@ async def _search_async(engine: str, query: str, max_results: int, region: str) 
             if any(m in text for m in _BOT_WALL):
                 raise Blocked(engine) from None
             return []
+        await page.wait_for_timeout(500)   # първата карта идва преди останалите
         rows = await page.evaluate(_EXTRACT_JS, [card_sel, host])
         return [r for r in rows if r.get("url")][:max_results]
     finally:
@@ -269,6 +326,8 @@ async def _fetch_async(url: str) -> tuple[str, str, str]:
     ctx = await _runner.context()
     page = await ctx.new_page()
     try:
+        await page.route("**/*", _guarded_route)
+        await _no_sockets(page)
         await page.goto(url, wait_until="domcontentloaded", timeout=12000)
         await page.wait_for_timeout(700)  # страници, които рисуват текста с JS
         if _refusal(page.url):
