@@ -302,11 +302,11 @@ def test_the_dead_end_proxy_closes_every_connection() -> None:
     assert url == sb._dead_end_proxy()   # едно за процеса
     parts = urllib.parse.urlsplit(url)
     with socket.create_connection((parts.hostname, parts.port), timeout=5) as s:
-        s.sendall(b"CONNECT 192.168.0.1:80 HTTP/1.1\r\nHost: 192.168.0.1:80\r\n\r\n")
         s.settimeout(5)
         try:
+            s.sendall(b"CONNECT 192.168.0.1:80 HTTP/1.1\r\nHost: 192.168.0.1:80\r\n\r\n")
             got = s.recv(100)
-        except ConnectionResetError:   # Windows затваря с RST
+        except ConnectionError:   # Windows: RST (10054) или прекъсната (10053) — CI 2026-11-17
             got = b""
         assert got == b""   # затворено, без отговор
 
