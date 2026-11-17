@@ -290,6 +290,27 @@ def test_the_whole_context_is_locked_and_fails_closed() -> None:
     assert "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" in sb._LAUNCH_ARGS
 
 
+def test_the_dead_end_proxy_closes_every_connection() -> None:
+    """Четвърти преглед 2026-11-17: workers/QUIC/празен iframe минават покрай
+    init script и route(). Контекстът за чужди страници има прокси, което
+    затваря всяка връзка — каквото Chromium изпрати сам, не стига до никъде."""
+    import socket
+    import urllib.parse
+
+    from genesis_agent import search_browser as sb
+    url = sb._dead_end_proxy()
+    assert url == sb._dead_end_proxy()   # едно за процеса
+    parts = urllib.parse.urlsplit(url)
+    with socket.create_connection((parts.hostname, parts.port), timeout=5) as s:
+        s.sendall(b"CONNECT 192.168.0.1:80 HTTP/1.1\r\nHost: 192.168.0.1:80\r\n\r\n")
+        s.settimeout(5)
+        try:
+            got = s.recv(100)
+        except ConnectionResetError:   # Windows затваря с RST
+            got = b""
+        assert got == b""   # затворено, без отговор
+
+
 def test_browser_is_off_in_tests() -> None:
     from genesis_agent import search_browser as sb
     assert not sb.available()

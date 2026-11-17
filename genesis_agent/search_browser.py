@@ -180,10 +180,43 @@ _NO_SOCKETS_JS = """
 """
 _LAUNCH_ARGS = ["--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
                 "--webrtc-ip-handling-policy=disable_non_proxied_udp",
-                "--dns-prefetch-disable"]
+                "--dns-prefetch-disable", "--disable-quic"]
+
+_dead_end_lock = threading.Lock()
+_dead_end_url = ""
 
 
-async def _lock_context(ctx: Any) -> None:
+def _dead_end_proxy() -> str:
+    """Адрес на „прокси“, което затваря всяка връзка веднага.
+
+    Четвърти преглед 2026-11-17: махането на WebSocket/WebRTC с init script не
+    стига до workers (и до празен iframe), а WebTransport/QUIC не минава през
+    route(). Вместо да гоним всеки канал: контекстът за чужди страници има
+    това прокси и без изключение за loopback (`<-loopback>`), така че всичко,
+    което Chromium опита да изпрати сам, свършва тук. Страницата получава
+    съдържание само от _guarded_route (route.fulfill, без мрежа)."""
+    global _dead_end_url
+    import socket
+    with _dead_end_lock:
+        if _dead_end_url:
+            return _dead_end_url
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(64)
+
+        def _refuse() -> None:
+            while True:
+                try:
+                    conn, _addr = srv.accept()
+                    conn.close()
+                except OSError:
+                    return
+        threading.Thread(target=_refuse, name="genesis-search-dead-end", daemon=True).start()
+        _dead_end_url = f"http://127.0.0.1:{srv.getsockname()[1]}"
+        return _dead_end_url
+
+
+async def _lock_context(ctx: Any, default_route: Any = _deny_route) -> None:
     """Всички защити на ниво контекст. Без някоя от тях браузърът не тръгва
     (затворено при съмнение): стар Playwright без route_web_socket → няма
     търсене в браузъра, а не търсене без защита."""
@@ -191,7 +224,7 @@ async def _lock_context(ctx: Any) -> None:
 
     async def _mock(ws: Any) -> None:
         return None   # без connect_to_server() сокетът не стига до сървъра
-    await ctx.route("**/*", _deny_route)
+    await ctx.route("**/*", default_route)
     await ctx.route_web_socket(re.compile(".*"), _mock)
     await ctx.add_init_script(_NO_SOCKETS_JS)
 
@@ -203,6 +236,7 @@ class _Runner:
         self._pw: Any = None
         self._browser: Any = None
         self._ctx: Any = None
+        self._foreign: Any = None
         self._failed_at = 0.0
         self.channel = ""
 
@@ -267,6 +301,23 @@ class _Runner:
         log.info("браузърът за търсене тръгна (%s)", self.channel)
         return self._ctx
 
+    async def foreign_context(self) -> Any:
+        """Контекстът за чужди страници: мрежата му е задънена улица
+        (_dead_end_proxy), всяка заявка се обслужва от _guarded_route."""
+        if self._foreign is not None:
+            return self._foreign
+        await self.context()
+        ctx = await self._browser.new_context(
+            locale="bg-BG", user_agent=_UA, service_workers="block",
+            proxy={"server": _dead_end_proxy(), "bypass": "<-loopback>"})
+        try:
+            await _lock_context(ctx, _guarded_route)
+        except Exception as e:
+            await ctx.close()
+            raise RuntimeError(f"контекстът за чужди страници не може да се заключи: {e}") from e
+        self._foreign = ctx
+        return ctx
+
     async def close(self) -> None:
         try:
             if self._browser is not None:
@@ -275,7 +326,7 @@ class _Runner:
                 await self._pw.stop()
         except Exception:
             log.debug("браузърът за търсене не се затвори чисто", exc_info=True)
-        self._pw = self._browser = self._ctx = None
+        self._pw = self._browser = self._ctx = self._foreign = None
 
 
 _runner = _Runner()
@@ -357,10 +408,9 @@ def search(engine: str, query: str, max_results: int = 8, *, region: str = "bg-b
 
 
 async def _fetch_async(url: str) -> tuple[str, str, str]:
-    ctx = await _runner.context()
+    ctx = await _runner.foreign_context()
     page = await ctx.new_page()
     try:
-        await page.route("**/*", _guarded_route)
         await page.goto(url, wait_until="domcontentloaded", timeout=12000)
         await page.wait_for_timeout(700)  # страници, които рисуват текста с JS
         if _refusal(page.url):
