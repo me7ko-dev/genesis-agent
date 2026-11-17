@@ -14,7 +14,7 @@ DuckDuckGo и Brave дадоха верните страници за 1.4–2.4 
 Браузърът живее в отделна нишка с asyncio цикъл: стартът (~1 s) се плаща веднъж
 на сесия, а търсачките и страниците се отварят паралелно в отделни раздели.
 Профилът е празен (без бисквитките/паролите на потребителя). Вътрешни адреси
-не се отварят — същото правило като BROWSE (browser._address_refusal).
+и localhost не се отварят, и то за всяка заявка на страницата (_refusal).
 """
 from __future__ import annotations
 
@@ -63,6 +63,44 @@ def _channels() -> list[str]:
     return seen
 
 
+_REFUSAL_TTL = 60.0
+_refusals: dict[str, tuple[float, str]] = {}
+
+
+def _refusal(url: str) -> str:
+    """Защо браузърът за търсене не бива да пусне заявка към url („“ — може).
+
+    Преглед за сигурност 2026-11-17: тук имаше browser._address_refusal, а тя
+    чете browser._allow_loopback — след BROWSE към localhost и страниците от
+    търсенето можеха към localhost. Тези страници са чужди и се отварят без
+    човек, затова loopback е забранен винаги. Името се разрешава за ВСЯКА
+    заявка (не само за „вътрешни по вид“ адреси, както в BROWSE): публично име,
+    което сочи към 192.168.x.x, иначе минаваше. Кеш по хост за 60 s — една
+    страница прави десетки заявки към няколко хоста."""
+    from genesis_agent import web_fetch
+    if not url.lower().startswith(("http://", "https://")):
+        return ""   # about:blank, data:, blob: — не са мрежови адреси
+    try:
+        host = web_fetch._check_url(url)
+    except web_fetch.FetchError as e:
+        return str(e)
+    except (ValueError, OSError) as e:
+        return f"невалиден адрес: {e}"
+    now = time.monotonic()
+    hit = _refusals.get(host)
+    if hit and now - hit[0] < _REFUSAL_TTL:
+        return hit[1]
+    try:
+        web_fetch._precheck_through_proxy(host, url, False)
+        why = ""
+    except web_fetch.FetchError as e:
+        why = str(e)
+    except (ValueError, OSError) as e:
+        why = f"невалиден адрес: {e}"
+    _refusals[host] = (now, why)
+    return why
+
+
 async def _route(route: Any) -> None:
     """Картинки/шрифтове/видео не ни трябват (по-бързо); вътрешни адреси — не."""
     req = route.request
@@ -70,12 +108,11 @@ async def _route(route: Any) -> None:
         if req.resource_type in _HEAVY:
             await route.abort()
             return
-        from genesis_agent.browser import _INTERNAL_LOOKING_URL, _address_refusal
-        if _INTERNAL_LOOKING_URL.match(req.url):
-            refusal = await asyncio.get_running_loop().run_in_executor(None, _address_refusal, req.url)
-            if refusal:
-                await route.abort("blockedbyclient")
-                return
+        refusal = await asyncio.get_running_loop().run_in_executor(None, _refusal, req.url)
+        if refusal:
+            log.info("търсене в браузъра: спряна заявка към %s — %s", req.url[:200], refusal)
+            await route.abort("blockedbyclient")
+            return
         await route.continue_()
     except Exception:
         log.debug("route handler-ът не довърши заявката", exc_info=True)
@@ -229,13 +266,12 @@ def search(engine: str, query: str, max_results: int = 8, *, region: str = "bg-b
 
 
 async def _fetch_async(url: str) -> tuple[str, str, str]:
-    from genesis_agent.browser import _address_refusal
     ctx = await _runner.context()
     page = await ctx.new_page()
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=12000)
         await page.wait_for_timeout(700)  # страници, които рисуват текста с JS
-        if _address_refusal(page.url):
+        if _refusal(page.url):
             return page.url, "", ""
         return page.url, await page.title(), await page.inner_text("body")
     finally:
@@ -244,7 +280,6 @@ async def _fetch_async(url: str) -> tuple[str, str, str]:
 
 def fetch_text(url: str, *, timeout: float = 15.0) -> tuple[str, str, str]:
     """(краен адрес, заглавие, текст) на страница, рисувана с JavaScript."""
-    from genesis_agent.browser import _address_refusal
-    if not _runner.available() or _address_refusal(url):
+    if _refusal(url) or not _runner.available():
         return url, "", ""
     return _runner.run(lambda: _fetch_async(url), timeout)

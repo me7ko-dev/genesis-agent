@@ -175,8 +175,22 @@ def rank_passages(question: str, sources: list[dict], *, budget: int = CONTEXT_C
 
 def _fetch_text(url: str) -> tuple[str, str]:
     """(заглавие, текст) на страницата; ("", "") ако не се отвори."""
-    from genesis_agent.web_fetch import FetchError, fetch, html_to_text
+    from genesis_agent.web_fetch import (
+        FetchError,
+        _check_url,
+        _is_loopback_name,
+        fetch,
+        html_to_text,
+    )
     title = text = ""
+    try:
+        # Преглед за сигурност 2026-11-17: fetch() пуска localhost, когато самият
+        # адрес е localhost („операторът го поиска“). Тук адресът идва от
+        # търсачката — чужд резултат не бива да чете услуги на лаптопа.
+        if _is_loopback_name(_check_url(url)):
+            return "", ""
+    except FetchError:
+        return "", ""
     try:
         final, ctype, body = fetch(url)
         if "html" in ctype.lower() or body.lstrip()[:200].lower().startswith(("<!doctype html", "<html")):

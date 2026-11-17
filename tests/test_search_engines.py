@@ -155,6 +155,65 @@ def test_browser_channels_fall_back_to_system_edge(monkeypatch) -> None:
     assert sb._channels() == ["chrome", "", "msedge"]
 
 
+def _resolve(monkeypatch, table: dict[str, str]) -> None:
+    import socket
+
+    def fake(host, *a, **kw):
+        if host not in table:
+            raise socket.gaierror(host)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (table[host], 0))]
+    monkeypatch.setattr("genesis_agent.web_fetch.socket.getaddrinfo", fake)
+
+
+def test_search_browser_never_allows_loopback_even_after_browse_did(monkeypatch) -> None:
+    """Преглед за сигурност 2026-11-17: правилото беше общо с BROWSE и след
+    BROWSE към localhost страниците от търсенето също можеха към localhost."""
+    from genesis_agent import browser
+    from genesis_agent import search_browser as sb
+    monkeypatch.setattr(browser, "_allow_loopback", True)
+    assert sb._refusal("http://localhost:2375/containers/json")
+    assert sb._refusal("http://127.0.0.1:11434/api/tags")
+    assert sb._refusal("http://169.254.169.254/latest/meta-data/")
+    assert sb._refusal("https://93.184.216.34/") == ""
+    assert sb._refusal("data:text/html,x") == ""
+
+
+def test_every_page_request_is_resolved_not_only_internal_looking_ones(monkeypatch) -> None:
+    """Публично по вид име, което сочи към домашната мрежа, минаваше: проверката
+    беше само за IP литерали и имена като „router“."""
+    import asyncio
+
+    from genesis_agent import search_browser as sb
+    _resolve(monkeypatch, {"rebind.example.com": "192.168.0.1", "cdn.example.com": "93.184.216.34"})
+
+    class _Route:
+        def __init__(self, url: str) -> None:
+            self.request = type("Req", (), {"url": url, "resource_type": "fetch"})()
+            self.done = ""
+
+        async def abort(self, why: str = "") -> None:
+            self.done = "abort"
+
+        async def continue_(self) -> None:
+            self.done = "continue"
+    bad, good = _Route("https://rebind.example.com/admin"), _Route("https://cdn.example.com/app.js")
+    asyncio.run(sb._route(bad))
+    asyncio.run(sb._route(good))
+    assert (bad.done, good.done) == ("abort", "continue")
+
+
+def test_research_does_not_open_localhost_from_search_results(monkeypatch) -> None:
+    """fetch() пуска localhost, когато адресът сам е localhost — а тук адресът
+    идва от чужд резултат в търсачката."""
+    from genesis_agent import research as rs
+
+    def no_fetch(url):
+        raise AssertionError(f"не биваше да се отваря: {url}")
+    monkeypatch.setattr("genesis_agent.web_fetch.fetch", no_fetch)
+    assert rs._fetch_text("http://localhost:8787/demo") == ("", "")
+    assert rs._fetch_text("http://[::1]:11434/") == ("", "")
+
+
 def test_browser_is_off_in_tests() -> None:
     from genesis_agent import search_browser as sb
     assert not sb.available()

@@ -143,6 +143,8 @@ def _no_real_search(monkeypatch):
     def _no_post(url, form, timeout=10):
         raise ConnectionError("tests: no network for search")
     monkeypatch.setattr(web_search, "_http_post", _no_post)
+    from genesis_agent import search_browser
+    search_browser._refusals.clear()
     search_engines.reset_cooldowns()
     yield
     search_engines.reset_cooldowns()
