@@ -50,14 +50,26 @@ def test_the_captcha_is_never_cached(monkeypatch) -> None:
     assert sum("duckduckgo" in u for u in seen) == 2  # второто търсене пак пита, не взима от кеша
 
 
-def test_normal_results_still_come_from_duckduckgo(monkeypatch) -> None:
+def test_duckduckgo_lite_is_the_last_resort(monkeypatch) -> None:
+    """2026-11-17: търсачките (search_engines) не дадоха нищо — Lite още се пробва."""
     html = ('<a rel="nofollow" class="result-link" href="https://example.org/a">Първи резултат</a>'
             "<td class='result-snippet'>описание</td>")
     seen: list[str] = []
-    monkeypatch.setattr(ws, "_http_get", _fake_http({"duckduckgo": html}, seen))
+    monkeypatch.setattr(ws, "_http_get", _fake_http({"lite.duckduckgo": html}, seen))
     results = ws.search("заявка", use_cache=False)
     assert results[0]["url"] == "https://example.org/a"
-    assert not any("wikipedia" in u for u in seen)
+
+
+def test_engines_come_before_lite(monkeypatch) -> None:
+    seen: list[str] = []
+    monkeypatch.setattr(ws, "_http_get", _fake_http({"lite.duckduckgo": CAPTCHA, "bg.wikipedia": WIKI}, seen))
+    monkeypatch.setattr("genesis_agent.search_engines._key",
+                        lambda name: "k" if name == "TAVILY_API_KEY" else "")
+    monkeypatch.setattr("genesis_agent.search_engines._http", lambda url, **kw: json.dumps(
+        {"results": [{"title": "Tavily", "url": "https://t.example/a", "content": "текст"}]}))
+    results = ws.search("заявка", use_cache=False)
+    assert {r["url"] for r in results} >= {"https://t.example/a"}
+    assert not any("lite.duckduckgo" in u for u in seen)
 
 
 def test_a_place_query_gets_coordinates_first(monkeypatch) -> None:
@@ -90,4 +102,3 @@ def test_a_results_page_mentioning_captcha_is_still_results(monkeypatch) -> None
     monkeypatch.setattr(ws, "_http_get", _fake_http({"duckduckgo": html}, seen))
     results = ws.search("selenium recaptcha login form", use_cache=False)
     assert results[0]["url"] == "https://example.org/r"
-    assert not any("wikipedia" in u for u in seen)

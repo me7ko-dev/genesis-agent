@@ -1,14 +1,14 @@
-"""genesis_agent.research — grounded_research(), the backend for the
-[RESEARCH: ...] tool tag. Zero coverage before this file. web_search.search
-and brain.Brain are both faked throughout: what's under test is the
-cross-verification logic itself (per-source grounded extraction, then a
-compare pass only when there's more than one source to compare), not real
-search results or a real model.
+"""genesis_agent.research — grounded_research(), бекендът на [RESEARCH: …].
+
+2026-11-17: пренаписан — търсене в няколко търсачки, четене на страниците,
+подреждане на откъсите (BM25) и ЕДНО извикване на модела с номерирани
+източници (bench_research: 2/20 → 19/20). Търсенето, страниците и моделът са
+подменени навсякъде; под тест е логиката: кой текст стига до модела, кои
+адреси излизат като източници и че грешка на модела не се представя за отговор.
 """
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import ClassVar
 
 import genesis_agent.research as rs
 
@@ -17,6 +17,12 @@ class _FakeBrain:
     def __init__(self, replies: list[str]) -> None:
         self._replies = list(replies)
         self.calls: list[list[dict]] = []
+        self.light_calls = 0
+
+    def make(self, light: bool = False, **_kw):
+        if light:
+            self.light_calls += 1
+        return self
 
     def complete(self, messages, tools=None):
         self.calls.append(messages)
@@ -25,17 +31,50 @@ class _FakeBrain:
         return SimpleNamespace(raw_text=self._replies.pop(0), code="", tool_calls=None)
 
 
-def _install_fake_brain(monkeypatch, replies: list[str]) -> _FakeBrain:
+def _brain(monkeypatch, replies: list[str]) -> _FakeBrain:
     brain = _FakeBrain(replies)
-    monkeypatch.setattr("genesis_agent.brain.Brain", lambda: brain)
+    monkeypatch.setattr("genesis_agent.brain.Brain", brain.make)
     return brain
 
 
+def _search(monkeypatch, by_query: dict[str, list[dict]] | list[dict]):
+    seen: list[str] = []
+
+    def fake(query, max_results=5, **kw):
+        seen.append(query)
+        if isinstance(by_query, list):
+            return by_query
+        return by_query.get(query, [])
+    monkeypatch.setattr("genesis_agent.web_search.search", fake)
+    return seen
+
+
+def _pages(monkeypatch, pages: dict[str, str]):
+    opened: list[str] = []
+
+    def fake(url):
+        opened.append(url)
+        return "", pages.get(url, "")
+    monkeypatch.setattr(rs, "_fetch_text", fake)
+    return opened
+
+
+MUSALA = [
+    {"title": "Мусала — Уикипедия", "url": "https://bg.wikipedia.org/wiki/Мусала", "snippet": "Мусала е връх в Рила."},
+    {"title": "Изкачване", "url": "https://planinka.example/musala", "snippet": "Маршрут от Боровец."},
+]
+MUSALA_PAGES = {
+    "https://bg.wikipedia.org/wiki/Мусала": ("Мусала е най-високият връх в България.\n"
+                                            "Надморската височина на връх Мусала е 2925 m.\n"
+                                            "Името идва от арабски."),
+    "https://planinka.example/musala": "Лифтът от Боровец стига до Ястребец. Оттам пътеката е 3 часа.",
+}
+
+
 def test_empty_question_short_circuits_without_searching(monkeypatch) -> None:
-    called = []
-    monkeypatch.setattr("genesis_agent.web_search.search", lambda *a, **kw: called.append(True))
+    seen = _search(monkeypatch, [])
     assert rs.grounded_research("   ") == "[RESEARCH] Празен въпрос."
-    assert called == []
+    assert seen == []
 
 
 def test_search_exception_is_reported_not_raised(monkeypatch) -> None:
@@ -47,126 +86,104 @@ def test_search_exception_is_reported_not_raised(monkeypatch) -> None:
     assert "DNS failure" in out
 
 
-def test_no_results_is_reported_clearly(monkeypatch) -> None:
-    monkeypatch.setattr("genesis_agent.web_search.search", lambda *a, **kw: [])
+def test_no_results_anywhere_is_reported_clearly(monkeypatch) -> None:
+    _search(monkeypatch, [])
+    _brain(monkeypatch, ["", ""])  # втори кръг: заявки от лекия модел — няма
     out = rs.grounded_research("an obscure question")
     assert "Няма намерени резултати" in out
 
 
-def test_results_with_no_snippets_are_reported_as_empty(monkeypatch) -> None:
-    monkeypatch.setattr("genesis_agent.web_search.search",
-                        lambda *a, **kw: [{"title": "t", "url": "u", "snippet": ""}])
-    out = rs.grounded_research("q")
-    assert "без съдържание" in out
-
-
-def test_single_source_skips_the_compare_pass(monkeypatch) -> None:
-    monkeypatch.setattr("genesis_agent.web_search.search", lambda *a, **kw: [
-        {"title": "Docs", "url": "https://x.test", "snippet": "the GIL is a mutex"},
-    ])
-    brain = _install_fake_brain(monkeypatch, ["the GIL is a global lock — cited: 'the GIL is a mutex'"])
-    out = rs.grounded_research("what is the GIL")
-    assert "само 1 източник, без cross-check" in out
-    assert "the GIL is a global lock" in out
-    assert len(brain.calls) == 1  # only the extraction call, no compare call
-
-
-def test_multiple_sources_triggers_a_compare_pass(monkeypatch) -> None:
-    monkeypatch.setattr("genesis_agent.web_search.search", lambda *a, **kw: [
-        {"title": "A", "url": "https://a.test", "snippet": "snippet a"},
-        {"title": "B", "url": "https://b.test", "snippet": "snippet b"},
-    ])
-    brain = _install_fake_brain(monkeypatch, [
-        "answer from A",
-        "answer from B",
-        "consensus: both agree",
-    ])
-    out = rs.grounded_research("q", top_n=2)
-    assert "consensus: both agree" in out
-    assert "проверено през 2 източника" in out
-    assert len(brain.calls) == 3  # 2 extractions + 1 compare
-
-
-def test_sources_with_empty_snippet_are_skipped_but_others_still_counted(monkeypatch) -> None:
-    monkeypatch.setattr("genesis_agent.web_search.search", lambda *a, **kw: [
-        {"title": "A", "url": "https://a.test", "snippet": "real content"},
-        {"title": "B", "url": "https://b.test", "snippet": ""},  # skipped
-        {"title": "C", "url": "https://c.test", "snippet": "more content"},
-    ])
-    brain = _install_fake_brain(monkeypatch, [
-        "answer from A",
-        "answer from C",
-        "consensus reached",
-    ])
-    out = rs.grounded_research("q", top_n=3)
-    assert "проверено през 2 източника" in out
-    assert len(brain.calls) == 3  # 2 extractions (B skipped) + 1 compare
-
-
-def test_per_source_extraction_prompt_includes_question_title_and_url(monkeypatch) -> None:
-    monkeypatch.setattr("genesis_agent.web_search.search", lambda *a, **kw: [
-        {"title": "PEP 8", "url": "https://peps.python.org/pep-0008", "snippet": "use 4 spaces"},
-    ])
-    brain = _install_fake_brain(monkeypatch, ["4 spaces per indent level"])
-    rs.grounded_research("how many spaces for indentation")
+def test_the_page_text_reaches_the_model_not_only_the_snippet(monkeypatch) -> None:
+    """Старият RESEARCH даваше на модела само описанието (≤300 знака) — 18/20
+    въпроса бяха „НЕ Е ОТКРИТО“, защото числото е в страницата, не в него."""
+    _search(monkeypatch, MUSALA)
+    opened = _pages(monkeypatch, MUSALA_PAGES)
+    brain = _brain(monkeypatch, ["Височината е 2925 m [1]."])
+    out = rs.grounded_research("Каква е надморската височина на връх Мусала?")
+    assert set(opened) == {h["url"] for h in MUSALA}
     prompt = brain.calls[0][-1]["content"]
-    assert "how many spaces for indentation" in prompt
-    assert "PEP 8" in prompt
-    assert "https://peps.python.org/pep-0008" in prompt
-    assert "use 4 spaces" in prompt
+    assert "2925 m" in prompt
+    assert len(brain.calls) == 1   # едно извикване, не по едно на източник
+    assert "2925 m [1]" in out
 
 
-class TestUnreachableModelIsNotDressedUpAsVerified:
-    """Brain.complete() does not raise when the provider chain is exhausted —
-    it returns an object whose raw_text starts with "Error:". Unchecked, that
-    string flowed straight into the report and came out labelled "(проверено
-    през N източника)": a cross-check claim with nothing behind it, and the
-    weak-model path in autonomous_loop injects exactly this text into the
-    prompt as researched context (fixed 2026-08-12). The whole module exists
-    for the difference between verified and merely verified-looking.
-    """
+def test_sources_are_written_by_code_and_only_cited_ones_are_listed(monkeypatch) -> None:
+    _search(monkeypatch, MUSALA)
+    _pages(monkeypatch, MUSALA_PAGES)
+    _brain(monkeypatch, ["2925 m [1]."])
+    out = rs.grounded_research("височина на връх Мусала")
+    assert "Източници:\n[1] Мусала — Уикипедия — https://bg.wikipedia.org/wiki/Мусала" in out
+    assert "цитирани 1 от" in out
 
-    _SOURCES: ClassVar = [
-        {"title": "A", "url": "https://a.example", "snippet": "text a"},
-        {"title": "B", "url": "https://b.example", "snippet": "text b"},
-    ]
 
-    def test_all_extractions_failing_is_reported_as_no_content(self, monkeypatch) -> None:
-        monkeypatch.setattr("genesis_agent.web_search.search", lambda *a, **kw: self._SOURCES)
-        _install_fake_brain(monkeypatch, ["Error: цялата верига е изчерпана"] * 2)
-        out = rs.grounded_research("what is the GIL")
-        assert "проверено през" not in out
-        assert "Error:" not in out
+def test_fullwidth_citations_count_as_citations(monkeypatch) -> None:
+    """gpt-oss цитира понякога с 【1】 (2026-11-17, Белмекен) — без това всички
+    прочетени източници излизаха като цитирани."""
+    _search(monkeypatch, MUSALA)
+    _pages(monkeypatch, MUSALA_PAGES)
+    _brain(monkeypatch, ["2925 m【1】"])
+    out = rs.grounded_research("височина на връх Мусала")
+    assert "2925 m[1]" in out
+    assert "цитирани 1 от" in out
 
-    def test_failed_compare_pass_does_not_claim_cross_check(self, monkeypatch) -> None:
-        monkeypatch.setattr("genesis_agent.web_search.search", lambda *a, **kw: self._SOURCES)
-        _install_fake_brain(monkeypatch, [
-            "GIL is a mutex",           # source A extraction — fine
-            "GIL serializes bytecode",  # source B extraction — fine
-            "Error: цялата верига е изчерпана",  # the compare pass fails
-        ])
-        out = rs.grounded_research("what is the GIL")
 
-        assert "проверено през" not in out
-        assert "НЕ бе извършено" in out
-        # The per-source answers that DID succeed are still handed over.
-        assert "GIL is a mutex" in out
-        assert "GIL serializes bytecode" in out
+def test_unreachable_model_returns_raw_passages_without_claiming_an_answer(monkeypatch) -> None:
+    """Brain.complete() не хвърля при изчерпана верига — връща „Error: …“.
+    Тогава откъсите се дават сурови, ясно казано (bug fix 2026-08-12)."""
+    _search(monkeypatch, MUSALA)
+    _pages(monkeypatch, MUSALA_PAGES)
+    _brain(monkeypatch, ["Error: цялата верига е изчерпана"])
+    out = rs.grounded_research("височина на връх Мусала")
+    assert "Error:" not in out
+    assert "НЕ бе направено" in out
+    assert "2925 m" in out
+    assert "цитирани" not in out
 
-    def test_a_single_failed_source_is_dropped_not_counted(self, monkeypatch) -> None:
-        monkeypatch.setattr("genesis_agent.web_search.search", lambda *a, **kw: self._SOURCES)
-        _install_fake_brain(monkeypatch, [
-            "Error: цялата верига е изчерпана",  # source A fails
-            "GIL serializes bytecode",           # source B succeeds
-        ])
-        out = rs.grounded_research("what is the GIL")
-        # One usable source left -> the no-cross-check branch, not a claim of two.
-        assert "само 1 източник" in out
-        assert "Error:" not in out
 
-    def test_healthy_run_still_claims_verification(self, monkeypatch) -> None:
-        monkeypatch.setattr("genesis_agent.web_search.search", lambda *a, **kw: self._SOURCES)
-        _install_fake_brain(monkeypatch, ["answer a", "answer b", "consensus: it is a mutex"])
-        out = rs.grounded_research("what is the GIL")
-        assert "проверено през 2 източника" in out
-        assert "consensus: it is a mutex" in out
+def test_not_found_triggers_a_second_round_with_other_queries(monkeypatch) -> None:
+    first = [{"title": "Шум", "url": "https://a.example/x", "snippet": "Белмекен е язовир."}]
+    second = [{"title": "Belmeken", "url": "https://b.example/peak", "snippet": "Belmeken peak"}]
+    seen = _search(monkeypatch, {"Колко висок е връх Белмекен?": first, "Belmeken peak elevation": second,
+                                 "Белмекен връх височина": []})
+    _pages(monkeypatch, {"https://a.example/x": "Язовир Белмекен е построен през 1974.",
+                         "https://b.example/peak": "Belmeken peak elevation is 2627 m. Белмекен връх."})
+    brain = _brain(monkeypatch, [
+        f"{rs.NOT_FOUND}. Има само за язовира [1].",          # първи кръг
+        "Белмекен връх височина\nBelmeken peak elevation",   # лекият модел: две заявки
+        "2627 m [2].",                                         # втори кръг
+    ])
+    out = rs.grounded_research("Колко висок е връх Белмекен?")
+    assert seen[1:] == ["Белмекен връх височина", "Belmeken peak elevation"]
+    assert brain.light_calls == 1
+    assert "2627 m [2]" in out
+    assert "https://b.example/peak" in out
+
+
+def test_pages_without_relevant_text_are_not_found_not_invented(monkeypatch) -> None:
+    _search(monkeypatch, [{"title": "", "url": "https://a.example", "snippet": ""}])
+    _pages(monkeypatch, {"https://a.example": ""})
+    _brain(monkeypatch, [""])  # вторият кръг: няма заявки
+    out = rs.grounded_research("височина на Мусала")
+    assert "НЕ Е ОТКРИТО" in out
+
+
+class TestRankPassages:
+    def test_the_passage_with_the_answer_comes_first_and_noise_is_dropped(self) -> None:
+        sources = [{"title": "T", "url": "u", "snippet": "",
+                    "text": "Времето в Боровец днес е слънчево.\n\n" * 3
+                            + "Надморската височина на Мусала е 2925 метра."}]
+        got = rs.rank_passages("височината на Мусала", sources, budget=60)
+        assert got and "2925" in got[0][1]
+
+    def test_budget_and_per_source_limits(self) -> None:
+        text = "\n".join(f"Мусала абзац {i} " + "дума " * 120 for i in range(10))
+        sources = [{"title": "T", "url": "u", "snippet": "", "text": text}]
+        got = rs.rank_passages("Мусала", sources, budget=10_000, per_source=2)
+        assert len(got) == 2
+
+    def test_stemming_matches_word_forms(self) -> None:
+        assert rs._terms("височина") == rs._terms("височината")
+        assert rs._terms("общини") == rs._terms("общината")
+
+    def test_markdown_links_are_cleaned_to_their_text(self) -> None:
+        assert rs._clean("виж [Мусала](https://x.example/a_(b)) ![](img.png)") == "виж Мусала"

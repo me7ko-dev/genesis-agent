@@ -279,21 +279,32 @@ def test_a_check_in_a_called_or_nested_async_function_counts() -> None:
     assert _has_real_check(ast.parse(code))
 
 
-def test_research_does_not_count_not_found_as_a_source(monkeypatch) -> None:
+def _research_fakes(monkeypatch, replies: list[str]):
+    """RESEARCH след 2026-11-17: търсене → страници → ЕДНО извикване на модела.
+    Всичко е подменено; втори кръг няма (лекият модел не дава заявки)."""
     from genesis_agent import research as rs
 
     class _B:
         def __init__(self) -> None:
-            self.replies = ["X is 42", "НЕ Е ОТКРИТО В ТОЗИ ИЗТОЧНИК", "НЕ Е ОТКРИТО В ТОЗИ ИЗТОЧНИК"]
+            self.replies = list(replies)
+            self.calls = 0
 
         def complete(self, messages):
-            return type("R", (), {"raw_text": self.replies.pop(0)})()
+            self.calls += 1
+            return type("R", (), {"raw_text": self.replies.pop(0) if self.replies else ""})()
     brain = _B()
-    monkeypatch.setattr("genesis_agent.brain.Brain", lambda: brain)
+    monkeypatch.setattr("genesis_agent.brain.Brain", lambda **kw: brain)
     monkeypatch.setattr("genesis_agent.web_search.search", lambda *a, **k: [
-        {"title": t, "url": f"https://{t}.test", "snippet": "s"} for t in "abc"])
-    out = rs.grounded_research("what is X")
-    assert "само 1 източник" in out and "проверено през" not in out
+        {"title": t, "url": f"https://{t}.test", "snippet": "zorblax value"} for t in "abc"])
+    monkeypatch.setattr(rs, "_fetch_text", lambda url: ("", f"The zorblax value on {url} is unknown."))
+    return rs, brain
+
+
+def test_research_does_not_count_not_found_as_a_source(monkeypatch) -> None:
+    rs, _ = _research_fakes(monkeypatch, ["НЕ Е ОТКРИТО В ИЗТОЧНИЦИТЕ"])
+    out = rs.grounded_research("what is the zorblax value")
+    assert "НЕ е открит в 3 прочетени източника" in out
+    assert "цитирани" not in out
 
 
 # ── преглед на поправките (2026-10-07, трета вълна) ─────────────────────────
@@ -361,19 +372,9 @@ def test_information_links_about_paying_stay_clickable(label) -> None:
 @pytest.mark.parametrize("answer", ["'НЕ Е ОТКРИТО В ТОЗИ ИЗТОЧНИК'", "„НЕ Е ОТКРИТО В ТОЗИ ИЗТОЧНИК“",
                                     "Отговор: НЕ Е ОТКРИТО В ТОЗИ ИЗТОЧНИК"])
 def test_research_not_found_in_quotes_is_not_a_source(monkeypatch, answer) -> None:
-    from genesis_agent import research as rs
-
-    class _B:
-        def __init__(self) -> None:
-            self.replies = ["X is 42", answer, answer]
-
-        def complete(self, messages):
-            return type("R", (), {"raw_text": self.replies.pop(0)})()
-    brain = _B()
-    monkeypatch.setattr("genesis_agent.brain.Brain", lambda: brain)
-    monkeypatch.setattr("genesis_agent.web_search.search", lambda *a, **k: [
-        {"title": t, "url": f"https://{t}.test", "snippet": "s"} for t in "abc"])
-    assert "само 1 източник" in rs.grounded_research("what is X")
+    rs, _ = _research_fakes(monkeypatch, [answer + " [1]"])
+    out = rs.grounded_research("what is the zorblax value")
+    assert "НЕ е открит" in out and "цитирани" not in out
 
 
 def test_page_check_serves_node_modules_but_not_credentials(tmp_path) -> None:
@@ -435,19 +436,11 @@ def test_a_sort_control_named_order_is_not_a_payment(label) -> None:
 
 
 def test_research_keeps_answers_that_merely_mention_not_found(monkeypatch) -> None:
-    from genesis_agent import research as rs
-
-    class _B:
-        def __init__(self) -> None:
-            self.replies = ["404 Not Found means the server cannot find it."] * 3 + ["агреед"]
-
-        def complete(self, messages):
-            return type("R", (), {"raw_text": self.replies.pop(0)})()
-    brain = _B()
-    monkeypatch.setattr("genesis_agent.brain.Brain", lambda: brain)
-    monkeypatch.setattr("genesis_agent.web_search.search", lambda *a, **k: [
-        {"title": t, "url": f"https://{t}.test", "snippet": "s"} for t in "abc"])
-    assert "проверено през 3 източника" in rs.grounded_research("what is 404")
+    rs, brain = _research_fakes(monkeypatch, [
+        "404 Not Found means the server cannot find it [1]. Островът не е открит до 1500 г. [2]"])
+    out = rs.grounded_research("what is the zorblax value")
+    assert "цитирани 2 от 3" in out
+    assert brain.calls == 1   # не е пуснат втори кръг
 
 
 # ── чат цикълът (одит 2026-10-07, четвърта вълна) ───────────────────────────
