@@ -26,6 +26,7 @@ from __future__ import annotations
 import concurrent.futures as cf
 import logging
 import math
+import os
 import re
 import time
 from collections import Counter
@@ -36,6 +37,11 @@ log = logging.getLogger("genesis.research")
 READ_PAGES = 5            # колко страници се отварят
 FETCH_TIMEOUT = 9.0       # за всички страници заедно
 CONTEXT_CHARS = 6500      # откъсите до модела
+# Локален модел (GENESIS_LOCAL_ONLY=1): GTX 1650 чете входа с ~80 токена/с, така
+# че времето е почти само дължината на откъсите. Бенч 2026-11-17, genesis-local:9b,
+# 20 въпроса: 6500 → 20/20, медиана 38 s; 2200 → 20/20, 17 s; 1300 → 20/20 но
+# 19/20 с източник и втори кръг до 36 s. 2200 е границата без загуба.
+LOCAL_CONTEXT_CHARS = 2200
 CHUNK_CHARS = 700
 MAX_PER_SOURCE = 3
 NOT_FOUND = "НЕ Е ОТКРИТО В ИЗТОЧНИЦИТЕ"
@@ -346,6 +352,12 @@ def _groq_web_answer(question: str) -> str:
 
 # ─── Входът ──────────────────────────────────────────────────────────────────
 
+def _context_budget() -> int:
+    """По-къси откъси, когато мисли локалният модел (/local_model_* или
+    GENESIS_LOCAL_ONLY=1) — там дължината на входа е цялото чакане."""
+    return LOCAL_CONTEXT_CHARS if os.environ.get("GENESIS_LOCAL_ONLY") == "1" else CONTEXT_CHARS
+
+
 def grounded_research(question: str, *, top_n: int = READ_PAGES) -> str:
     """Безопасно (не хвърля) — при мрежова грешка връща ясно съобщение."""
     t0 = time.monotonic()
@@ -359,8 +371,9 @@ def grounded_research(question: str, *, top_n: int = READ_PAGES) -> str:
         log.debug("търсенето се провали", exc_info=True)
         return f"[RESEARCH] Грешка при търсене: {e}"
 
+    budget = _context_budget()
     sources = _read_pages(hits, top_n) if hits else []
-    passages = rank_passages(question, sources)
+    passages = rank_passages(question, sources, budget=budget)
     answer = ""
     order: list[int] = []
     if passages:
@@ -382,7 +395,7 @@ def grounded_research(question: str, *, top_n: int = READ_PAGES) -> str:
             seen.update(h.get("url") for h in extra)
         if extra:
             sources = sources + _read_pages(extra, max(3, top_n - 2))
-            more = rank_passages(question, sources)
+            more = rank_passages(question, sources, budget=budget)
             if more:
                 passages = more
                 context, order = _numbered(passages, sources)
