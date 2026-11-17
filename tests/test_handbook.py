@@ -45,9 +45,9 @@ def test_partial_trigger_is_not_enough(book):
 
 
 def test_single_word_trigger_matches(book):
-    _note(book, "domakin", ["домакин"], "Папка Projects/domakin.")
+    _note(book, "shop", ["магазин"], "Папка Projects/shop.")
     handbook.reload()
-    assert "Projects/domakin" in handbook.handbook_context("пусни тестовете на Домакин")
+    assert "Projects/shop" in handbook.handbook_context("пусни тестовете на магазина")
 
 
 def test_at_most_two_notes_and_budget(book):
@@ -70,9 +70,9 @@ def test_long_note_is_cut_not_dropped(book):
 
 def test_more_specific_trigger_wins(book):
     _note(book, "general", ["тест"], "общо")
-    _note(book, "specific", ["тест на домакин"], "точно")
+    _note(book, "specific", ["тест на магазин"], "точно")
     handbook.reload()
-    out = handbook.handbook_context("пусни тест на домакин")
+    out = handbook.handbook_context("пусни тест на магазин")
     assert out.index("specific") < out.index("general")
 
 
