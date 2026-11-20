@@ -62,6 +62,8 @@ type Props = {
   onStop: () => void;
   onCommand: (name: string, arg: string) => boolean;
   focusKey: number;
+  /** „Редактирай“ на старо съобщение: този текст влиза в полето (n — всяко щракване). */
+  draft?: { text: string; n: number } | null;
   /** Агентът приема картинки / говор ("features" на `status`, 2026-10-15). */
   images?: boolean;
   voice?: boolean;
@@ -91,7 +93,7 @@ function hasFiles(e: DragEvent): boolean {
   return !!e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files');
 }
 
-export function Composer({ busy, disabled, placeholder, onSend, onStop, onCommand, focusKey,
+export function Composer({ busy, disabled, placeholder, onSend, onStop, onCommand, focusKey, draft,
                            images: imagesOn = false, voice = false, limits = DEFAULT_LIMITS,
                            speak = false, onSpeak, onFlash }: Props) {
   const [text, setText] = useState('');
@@ -110,6 +112,16 @@ export function Composer({ busy, disabled, placeholder, onSend, onStop, onComman
   taken.current = attached.length + reading;
 
   useEffect(() => { area.current?.focus(); }, [focusKey, disabled]);
+
+  useEffect(() => {
+    if (!draft) return;
+    setText(draft.text);
+    historyAt.current = -1;
+    setTimeout(() => {
+      const el = area.current;
+      if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+    }, 0);
+  }, [draft]);
 
   // Grow with the text up to a third of the window.
   useEffect(() => {

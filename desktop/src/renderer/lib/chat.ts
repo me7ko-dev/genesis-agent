@@ -135,18 +135,179 @@ export function toolLook(name: string): ToolLook {
  * whether it failed (a non-zero exit code or an error mark).
  */
 export function toolHeader(name: string, result: string, workspace?: string): { target: string; extra: string; failed: boolean } {
-  const first = result.split(/\r?\n/, 1)[0] ?? '';
-  const m = /^\[([A-Z_]+):\s*([\s\S]*?)\]\s*(.*)$/.exec(first.trim());
-  const rc = /\(rc=(-?\d+)\)/.exec(first);
+  const first = (result.split(/\r?\n/, 1)[0] ?? '').trim();
+  const upper = name.toUpperCase();
+  const m = /^\[([A-Z_]+):\s*([\s\S]*?)\]\s*(.*)$/.exec(first);
+  // Многоредова команда (`python -c "…"`) затваря скобата и казва rc=N чак
+  // на по-долен ред (2026-11-20, на живо: червената грешка не се виждаше).
+  const rc = /\(rc=(-?\d+)\)/.exec(first) ?? /^\[[A-Z_]+:[\s\S]*?\]\s*\(rc=(-?\d+)\)/.exec(result.trim());
   const failed = (rc !== null && rc[1] !== '0') || /^(✗|❌|error|грешка|traceback)/i.test(result.trim());
-  if (!m || m[1] !== name.toUpperCase()) {
-    // `[TASK_UPDATE] ✓ Нишка #20 обновена.` — the tool's own tag is already the card's name.
-    const own = `[${name.toUpperCase()}]`;
-    const text = result.trimStart().startsWith(own) ? result.trimStart().slice(own.length) : result;
-    return { target: summarize(text), extra: '', failed };
+  if (m && m[1] === upper) {
+    const extra = relativeTo(m[3].replace(/\(rc=0\)/, '').replace(/^✓\s*/, '').trim(), workspace);
+    return { target: relativeTo(stripCd(m[2], workspace), workspace), extra: extra.length > 80 ? `${extra.slice(0, 79)}…` : extra, failed };
   }
-  const extra = relativeTo(m[3].replace(/\(rc=0\)/, '').replace(/^✓\s*/, '').trim(), workspace);
-  return { target: relativeTo(m[2], workspace), extra: extra.length > 80 ? `${extra.slice(0, 79)}…` : extra, failed };
+  const open = /^\[([A-Z_]+):\s*(.*)$/.exec(first);
+  if (open && open[1] === upper) {
+    // 2026-11-20: картата показваше „RUN_CMD [RUN_CMD: cd C:\…\ && python -c "“.
+    return { target: `${relativeTo(stripCd(open[2], workspace), workspace).trim()} …`, extra: '', failed };
+  }
+  // `[TASK_UPDATE] ✓ Нишка #20 обновена.` — the tool's own tag is already the card's name;
+  // „приемни тестове: …“ (2026-11-20) — and so is its own name.
+  let text = result.trimStart();
+  if (text.startsWith(`[${upper}]`)) text = text.slice(upper.length + 2);
+  else if (text.toLowerCase().startsWith(`${name.toLowerCase()}:`)) text = text.slice(name.length + 1);
+  return { target: summarize(text), extra: '', failed };
+}
+
+/** A regex source for the folder, with either slash (`C:\x` and `c:/x`). */
+function rootPattern(root: string): string {
+  return root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\\\\|\//g, '[\\\\/]');
+}
+
+/**
+ * `cd C:\…\the-open-folder && pytest -q` → `pytest -q`: the agent runs every
+ * command there anyway (2026-11-20, на живо: половината карта беше пътят).
+ */
+export function stripCd(cmd: string, workspace?: string): string {
+  const root = workspace?.replace(/[\\/]+$/, '');
+  if (!root) return cmd;
+  const re = new RegExp(`^\\s*cd\\s+(?:/d\\s+)?"?${rootPattern(root)}[\\\\/]?"?\\s*(?:&&|;)\\s*`, 'i');
+  return cmd.replace(re, '');
+}
+
+/** The card's title: „Чете“, „Изпълнява“… — an unknown tool keeps its name. */
+export function toolTitle(name: string): string {
+  if (!/^[A-Z][A-Z0-9_]*$/.test(name)) return name;
+  const { label } = toolLook(name);
+  return label === 'Инструмент' ? name : label;
+}
+
+/** „RUN_CMD: cd C:\…\x && pytest -q“ (tool_start) → „Изпълнява: pytest -q“. */
+export function thinkingLabel(label: string, workspace?: string): string {
+  const m = /^([A-Z][A-Z0-9_]{2,}):\s*(.*)/.exec(label.trim());
+  if (!m) return label;
+  return `${toolTitle(m[1])}: ${relativeTo(stripCd(m[2], workspace), workspace)}`;
+}
+
+/** Two folders are the same one whatever the slashes, case or a trailing slash. */
+export function samePath(a: string, b: string): boolean {
+  const norm = (p: string) => p.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+  return norm(a) === norm(b);
+}
+
+export type DiffLine = { kind: 'add' | 'del' | 'hunk' | 'meta' | 'plain'; text: string };
+
+/** A result that carries a unified diff (EDIT_FILE), line by line; otherwise null. */
+export function diffLines(result: string): DiffLine[] | null {
+  if (!/^--- .*\r?\n\+\+\+ /m.test(result)) return null;
+  return result.split(/\r?\n/).map((text) => {
+    if (text.startsWith('+++ ') || text.startsWith('--- ')) return { kind: 'meta', text };
+    if (text.startsWith('@@')) return { kind: 'hunk', text };
+    if (text.startsWith('+')) return { kind: 'add', text };
+    if (text.startsWith('-')) return { kind: 'del', text };
+    return { kind: 'plain', text };
+  });
+}
+
+// ── ходът като едно цяло (2026-11-20) ─────────────────────────────────────
+// На живо: един ход със 7 стъпки пълнеше екрана с карти, а крайният отговор се
+// губеше между тях. Сега поредните стъпки (инструменти, бележки) са една
+// сгъваема група. Текстът на агента остава видим винаги — първата проба го
+// скриваше в групата и най-полезният отговор („бъговете са в calc.py…“)
+// изчезна зад „Работа“. Разрешенията, въпросите и грешките също са извън
+// групата — те искат теб.
+
+export type Row =
+  | { kind: 'item'; item: ChatItem;
+      /** Крайният отговор: колко продължи ходът (ms). */
+      took?: number;
+      /** Грешката, с която свърши последният ход: „Опитай пак“ праща това. */
+      retry?: string }
+  | { kind: 'work'; key: string; items: ChatItem[]; live: boolean };
+
+function isWork(it: ChatItem): boolean {
+  return it.kind === 'tool'
+    || (it.kind === 'note' && (it.tone === 'info' || it.tone === 'warn' || it.tone === 'progress'));
+}
+
+export function buildRows(items: ChatItem[], busy: boolean): Row[] {
+  const turns: ChatItem[][] = [];
+  for (const it of items) {
+    if (it.kind === 'user' || !turns.length) turns.push([it]);
+    else turns[turns.length - 1].push(it);
+  }
+  const rows: Row[] = [];
+  turns.forEach((turn, ti) => {
+    const lastTurn = ti === turns.length - 1;
+    const live = lastTurn && busy;
+    const user = turn[0].kind === 'user' ? turn[0] : undefined;
+    const body = user ? turn.slice(1) : turn;
+    // Докато ходът върви, всеки отговор може да е междинен.
+    let final = -1;
+    if (!live) {
+      for (let i = body.length - 1; i >= 0; i--) if (body[i].kind === 'assistant') { final = i; break; }
+    }
+    const out: Row[] = [];
+    let group: ChatItem[] = [];
+    // Група — само около инструменти. Само бележки (отговорът на /resume,
+    // 2026-11-20 на живо) са самият отговор и не се сгъват.
+    const asRows = (g: ChatItem[]): Row[] => (g.length > 1 && g.some((x) => x.kind === 'tool')
+      ? [{ kind: 'work', key: `w${g[0].key}`, items: g, live: false }]
+      : g.map((x) => ({ kind: 'item' as const, item: x })));
+    const flush = () => {
+      out.push(...asRows(group));
+      group = [];
+    };
+    body.forEach((it, i) => {
+      if (i === final) {
+        flush();
+        const end = Math.max(...turn.map((t) => t.ts));
+        out.push({ kind: 'item', item: it, ...(user && end > user.ts ? { took: end - user.ts } : {}) });
+      } else if (isWork(it)) group.push(it);
+      else { flush(); out.push({ kind: 'item', item: it }); }
+    });
+    // Проверките след крайния отговор отиват при работата преди него.
+    const at = out.length - 1;
+    // Само бележки след отговора остават след него — те са за теб.
+    const lastIsFinal = out[at]?.kind === 'item' && (out[at] as { item: ChatItem }).item === body[final];
+    if (final >= 0 && lastIsFinal && group.some((x) => x.kind === 'tool')) {
+      const prev = out[at - 1];
+      if (prev?.kind === 'work') prev.items.push(...group);
+      else if (prev?.kind === 'item' && prev.item.kind === 'tool') out.splice(at - 1, 1, ...asRows([prev.item, ...group]));
+      else out.splice(at, 0, ...asRows(group));
+      group = [];
+    }
+    flush();
+    if (live) {
+      const w = [...out].reverse().find((r) => r.kind === 'work');
+      if (w && w.kind === 'work') w.live = true;
+    }
+    if (lastTurn && !busy && user && final < 0) {
+      const err = [...out].reverse().find((r) => r.kind === 'item' && r.item.kind === 'note' && r.item.tone === 'error');
+      if (err && err.kind === 'item') err.retry = user.kind === 'user' ? user.text : undefined;
+    }
+    if (user) rows.push({ kind: 'item', item: user });
+    rows.push(...out);
+  });
+  return rows;
+}
+
+/** What the collapsed group says: steps, the files it changed, failed steps. */
+export function workSummary(items: ChatItem[], workspace?: string): { steps: number; changed: string[]; failed: number; notes: number } {
+  let steps = 0, failed = 0, notes = 0;
+  const changed: string[] = [];
+  for (const it of items) {
+    if (it.kind !== 'tool') { if (it.kind === 'assistant') notes++; continue; }
+    steps++;
+    const head = toolHeader(it.name, it.result, workspace);
+    if (head.failed) { failed++; continue; }
+    const icon = toolLook(it.name).icon;
+    if ((icon === 'edit' || icon === 'save') && head.target) {
+      const file = baseName(head.target.replace(/ …$/, ''));
+      if (!changed.includes(file)) changed.push(file);
+    }
+  }
+  return { steps, changed, failed, notes };
 }
 
 /**
@@ -158,8 +319,7 @@ export function relativeTo(text: string, workspace?: string): string {
   const root = workspace?.replace(/[\\/]+$/, '');
   if (!root) return text;
   if (text.toLowerCase() === root.toLowerCase()) return baseName(root);
-  const escaped = root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\\\\/g, '[\\\\/]');
-  return text.replace(new RegExp(`${escaped}[\\\\/]`, 'gi'), '');
+  return text.replace(new RegExp(`${rootPattern(root)}[\\\\/]`, 'gi'), '');
 }
 
 /** First meaningful line of a tool result, for the collapsed card. */
