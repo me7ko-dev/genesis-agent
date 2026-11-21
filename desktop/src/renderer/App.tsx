@@ -3,12 +3,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DEFAULT_LIMITS, replyToSpeak, sendErrorText, speechText, voiceErrorText, type ImageAttachment } from '../shared/media';
 import type { BackendState, CommandResult, GenesisEvent, Settings, UsageReport } from '../shared/types';
 import { Composer } from './components/Composer';
-import { AssistantMessage, ConfirmCard, Note, Thinking, ToolCard, UserMessage } from './components/Messages';
+import { AssistantMessage, ConfirmCard, Note, Thinking, ToolCard, UserMessage, WorkGroup } from './components/Messages';
 import { explain, fmtTokens, Sheet, toggleMessage, type SheetView } from './components/Panels';
 import { EmptyChat, Failed, Logo, Missing, Starting, Welcome } from './components/Screens';
 import { Sidebar } from './components/Sidebar';
 import { playSpeech, stopAudio, usePlayer } from './lib/capture';
-import { mergeEvents, pendingConfirm, shortPath, toChatItems, todoSummary, turnInfo } from './lib/chat';
+import { buildRows, mergeEvents, pendingConfirm, samePath, shortPath, thinkingLabel, toChatItems, todoSummary, turnInfo } from './lib/chat';
 
 const api = window.genesis;
 
@@ -23,7 +23,12 @@ export function App() {
   const [toast, setToast] = useState('');
   const [focusKey, setFocusKey] = useState(0);
   const [atBottom, setAtBottom] = useState(true);
+  // „Редактирай“ на твое съобщение: текстът се връща в полето (n — всяко щракване).
+  const [draft, setDraft] = useState<{ text: string; n: number } | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
+  // Следи края, докато ти не превъртиш нагоре (2026-11-20: плавното превъртане
+  // само се отчиташе като „превъртя нагоре“ и чатът спираше да следи хода).
+  const stick = useRef(true);
   const player = usePlayer();
   // Докъде са видени събитията за „Чети отговорите на глас“: историята при
   // отваряне и след reset не се чете (2026-10-15).
@@ -55,6 +60,7 @@ export function App() {
   }, []);
 
   const items = useMemo(() => toChatItems(events), [events]);
+  const rows = useMemo(() => buildRows(items, state.busy), [items, state.busy]);
   const confirm = pendingConfirm(items);
   const turn = useMemo(() => turnInfo(events), [events]);
   const ready = state.phase === 'ready';
@@ -83,11 +89,20 @@ export function App() {
     setSettings((s) => { void api.setSidebar(!s.sidebar); return { ...s, sidebar: !s.sidebar }; });
   }, []);
 
+  const toBottom = useCallback(() => {
+    stick.current = true;
+    setAtBottom(true);
+    const el = scroller.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, []);
+
   const send = useCallback(async (text: string, images: ImageAttachment[] = []) => {
+    // Твоето ново съобщение винаги се вижда, дори да си чел нагоре.
+    toBottom();
     const r = await api.send(text, images);
     if (!r.ok) flash(sendErrorText(r, images.length > 0, state.limits));
     return r.ok;
-  }, [flash, state.limits]);
+  }, [flash, state.limits, toBottom]);
 
   // ── гласът (2026-10-15) ─────────────────────────────────────────────────
   const speakReply = useCallback((key: string, text: string) => {
@@ -208,15 +223,33 @@ export function App() {
   }, [confirm, answer, state.busy, stop, newChat, open, toggleSidebar, logsOpen, sheet]);
 
   // ── follow the conversation unless the user scrolled up ────────────────
+  // Всяка промяна на височината (нов ред, отворена група, дълъг отговор) →
+  // към края, ако си там. Без плавност: тя пускаше scroll събития по пътя.
   useEffect(() => {
     const el = scroller.current;
-    if (el && atBottom) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
-  }, [items.length, state.busy, turn.label, atBottom]);
+    const inner = el?.firstElementChild;
+    if (!el || !inner) return;
+    const ro = new ResizeObserver(() => { if (stick.current) el.scrollTop = el.scrollHeight; });
+    ro.observe(inner);
+    return () => ro.disconnect();
+  }, [state.phase]);
 
   function onScroll() {
     const el = scroller.current;
-    if (el) setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
+    if (!el) return;
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    stick.current = near;
+    setAtBottom(near);
   }
+
+  const lastAnswer = useMemo(() => {
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const r = rows[i];
+      if (r.kind === 'item' && r.item.kind === 'assistant') return r.item.key;
+    }
+    return '';
+  }, [rows]);
+  const ws = state.agentWorkspace || state.workspace;
 
   // ── layout ──────────────────────────────────────────────────────────────
   let main: React.ReactNode;
@@ -233,24 +266,32 @@ export function App() {
             {items.length === 0 && !state.busy && (
               <EmptyChat workspace={state.agentWorkspace || state.workspace} onPick={(t) => void send(t)} />
             )}
-            {items.map((it) => {
+            {rows.map((row) => {
+              if (row.kind === 'work') return <WorkGroup key={row.key} items={row.items} live={row.live} workspace={ws} />;
+              const it = row.item;
               switch (it.kind) {
-                case 'user': return <UserMessage key={it.key} text={it.text} images={it.images} />;
+                case 'user': return (
+                  <UserMessage key={it.key} text={it.text} images={it.images}
+                               onEdit={(t) => setDraft((d) => ({ text: t, n: (d?.n ?? 0) + 1 }))} />
+                );
                 case 'assistant': return (
-                  <AssistantMessage key={it.key} text={it.text}
+                  <AssistantMessage key={it.key} text={it.text} took={row.took} last={it.key === lastAnswer && !state.busy}
                     speech={state.voice ? { phase: player?.key === it.key ? player.phase : 'idle',
                                             onToggle: () => toggleReply(it.key, it.text) } : undefined} />
                 );
-                case 'tool': return <ToolCard key={it.key} item={it} workspace={state.agentWorkspace || state.workspace} />;
-                case 'note': return <Note key={it.key} item={it} />;
+                case 'tool': return <ToolCard key={it.key} item={it} workspace={ws} />;
+                case 'note': {
+                  const retry = row.retry;
+                  return <Note key={it.key} item={it} onRetry={retry && ready ? () => void send(retry) : undefined} />;
+                }
                 case 'confirm': return <ConfirmCard key={it.key} item={it} onAnswer={answer} />;
               }
             })}
-            {state.busy && !confirm && <Thinking label={turn.label} since={turn.since} />}
+            {state.busy && !confirm && <Thinking label={thinkingLabel(turn.label, ws)} since={turn.since} />}
           </div>
         </div>
         {!atBottom && (
-          <button className="to-bottom" onClick={() => { setAtBottom(true); }} title="Към края">
+          <button className="to-bottom" onClick={toBottom} title="Към края">
             <ArrowDown size={16} />
           </button>
         )}
@@ -263,6 +304,7 @@ export function App() {
           onStop={stop}
           onCommand={command}
           focusKey={focusKey}
+          draft={draft}
           images={!!state.images}
           voice={!!state.voice}
           limits={state.limits ?? DEFAULT_LIMITS}
@@ -274,7 +316,7 @@ export function App() {
     );
   }
 
-  const differs = ready && state.agentWorkspace && state.agentWorkspace.toLowerCase() !== state.workspace.toLowerCase();
+  const differs = ready && state.agentWorkspace && !samePath(state.agentWorkspace, state.workspace);
 
   return (
     <div className={`app ${settings.sidebar ? '' : 'no-sidebar'}`}>

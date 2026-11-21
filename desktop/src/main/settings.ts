@@ -26,6 +26,8 @@ export function saveSettings(s: Settings): void {
 
 /** The folder goes to the top of the list, once. */
 export function pushRecent(s: Settings, path: string): Settings {
-  const same = (a: string) => a.toLowerCase() === path.toLowerCase();
+  // „C:/x“ и „C:\x\“ са същата папка (2026-11-20: два реда в списъка).
+  const norm = (p: string) => p.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+  const same = (a: string) => norm(a) === norm(path);
   return { ...s, lastWorkspace: path, recent: [path, ...s.recent.filter((p) => !same(p))].slice(0, MAX_RECENT) };
 }

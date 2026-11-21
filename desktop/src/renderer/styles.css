@@ -137,7 +137,7 @@ button.chip:hover { border-color: var(--line-2); color: var(--text); }
   margin: 10px 16px 0; padding: 8px 12px; border-radius: 9px; font-size: 13px;
   background: rgba(251, 191, 36, .08); border: 1px solid rgba(251, 191, 36, .25); color: #f5d98b;
 }
-.chat { flex: 1; overflow-y: auto; scroll-behavior: smooth; }
+.chat { flex: 1; overflow-y: auto; }
 .chat-inner { max-width: 860px; margin: 0 auto; padding: 28px 28px 24px; display: flex; flex-direction: column; gap: 14px; }
 
 .msg { display: flex; gap: 14px; animation: rise .22s ease-out; }
@@ -200,7 +200,7 @@ button.chip:hover { border-color: var(--line-2); color: var(--text); }
 .tool.open .chev { transform: rotate(90deg); }
 .tool-icon { color: var(--accent); flex: none; }
 .tool.failed .tool-icon { color: var(--error); }
-.tool-name { font-family: var(--mono); font-feature-settings: "locl" 0; font-size: 12px; color: var(--text); flex: none; }
+.tool-name { font-size: 12.8px; font-weight: 600; color: var(--text); flex: none; }
 .tool-sum { flex: 1; min-width: 0; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-feature-settings: "locl" 0; font-size: 11.8px; }
 .tool-extra { flex: none; color: var(--muted); font-size: 11.8px; white-space: nowrap; }
 .tool.failed .tool-extra { color: var(--error); }
@@ -579,3 +579,67 @@ table.data tr:hover td { background: rgba(255, 255, 255, .02); }
 .image-chip-size { color: var(--muted); font-family: var(--mono); font-feature-settings: "locl" 0; font-size: 11px; }
 .msg-actions.shown { opacity: 1; }
 .icon-btn.on { color: var(--accent); }
+
+/* ── ходът като едно цяло (2026-11-20) ─────────────────────────────────── */
+/* твоите съобщения: копирай / редактирай, дългите се сгъват */
+.user-col { display: flex; flex-direction: column; align-items: flex-end; max-width: 78%; min-width: 0; }
+.msg.user .user-col .bubble { max-width: 100%; }
+.bubble.clamped {
+  max-height: 300px; overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 70%, transparent);
+  mask-image: linear-gradient(to bottom, #000 70%, transparent);
+}
+.more-btn { margin-top: 4px; font-size: 12px; color: var(--accent-2); padding: 2px 6px; border-radius: 6px; }
+.more-btn:hover { background: var(--panel); }
+.msg.user { gap: 6px; align-items: flex-end; }
+.user-actions { margin: 0 0 4px; }
+.msg.assistant.last .msg-actions { opacity: 1; }
+/* Междинните отговори: бутоните изскачат горе вдясно при посочване, без да
+   оставят празен ред (2026-11-20, на живо: 40 px дупка под всеки отговор). */
+.msg.assistant { position: relative; }
+.msg.assistant:not(.last) .msg-actions {
+  position: absolute; top: -10px; right: 0; margin: 0; padding: 2px; z-index: 2;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 9px; box-shadow: 0 4px 14px rgba(0, 0, 0, .35);
+}
+.took { align-self: center; margin-left: 6px; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* стъпките на хода в една сгъваема група */
+.work { margin-left: 34px; animation: rise .2s ease-out; min-width: 0; }
+.work-head {
+  display: inline-flex; align-items: center; gap: 8px; max-width: 100%; padding: 6px 12px 6px 8px;
+  border-radius: 9px; font-size: 13px; color: var(--text-2); border: 1px solid transparent;
+}
+.work-head:hover { background: var(--panel); border-color: var(--line); color: var(--text); }
+.work-head .chev { color: var(--muted); transition: transform .15s; flex: none; }
+.work.open > .work-head .chev { transform: rotate(90deg); }
+.work-mark { color: var(--accent); flex: none; }
+.work-title { font-weight: 600; color: var(--text); flex: none; }
+.work-sum { color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.work-failed { color: var(--error); font-size: 12px; flex: none; font-variant-numeric: tabular-nums; }
+.work-icons { display: inline-flex; gap: 6px; color: var(--muted); margin-left: 2px; flex: none; }
+.work-body {
+  margin: 4px 0 4px 15px; padding: 2px 0 2px 16px; border-left: 2px solid var(--line);
+  display: flex; flex-direction: column; gap: 6px; animation: fade .15s;
+}
+.work.live .work-body { border-left-color: rgba(94, 234, 212, .35); }
+.work-body .tool, .work-body .note { margin-left: 0; }
+.work-body .tool + .tool { margin-top: 0; }
+.interim { font-size: 13.5px; color: var(--text-2); padding: 2px 0 2px; }
+.interim .md p { margin-bottom: .4em; }
+
+/* картите: грешка и промени */
+.tool-bad {
+  flex: none; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 99px;
+  color: var(--error); background: rgba(248, 113, 113, .1); border: 1px solid rgba(248, 113, 113, .3);
+}
+.dl { display: block; }
+.dl.add { color: #86efac; background: rgba(74, 222, 128, .08); }
+.dl.del { color: #fca5a5; background: rgba(248, 113, 113, .08); }
+.dl.hunk { color: var(--accent-2); }
+.dl.meta { color: var(--muted); }
+
+/* грешка в края на хода: „Опитай пак“ */
+.note.error { align-items: center; padding: 8px 12px; border-radius: 10px; background: rgba(248, 113, 113, .06); border: 1px solid rgba(248, 113, 113, .25); }
+.note.error svg { margin-top: 0; }
+.note-text { flex: 1; min-width: 0; word-break: break-word; user-select: text; }
+.note .retry { flex: none; color: var(--text); }
