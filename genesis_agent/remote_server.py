@@ -74,6 +74,15 @@ _MAX_VOICE_BODY, по един наведнъж; за всяка друга — 
 "user" носи "images": [{name, mime, bytes, width, height}] — без байтовете.
 Сървърът смалява до 1568 px сам, но смалена на телефона снимка (~300 KB) е
 обикновен плик и пести мрежа и батерия.
+
+2026-11-23 — поток дума по дума: събитието "delta" носи "text" — следващата
+част от отговора на модела, докато пристига (на порции, до ~20 в секунда), и
+"start": true на първата част на всяка заявка (следващ модел, повторен опит):
+показаното дотогава се изтрива. Всяко друго събитие освен "progress" и
+"thinking" затваря потока — "assistant" носи крайния текст и заменя
+показаното; без "assistant" (само tool_calls, грешка) показаното изчезва.
+Затворените "delta" излизат от дневника — повторно свързан телефон вижда само
+крайния текст. Старо приложение не познава "delta" и го прескача.
 """
 from __future__ import annotations
 
@@ -108,6 +117,14 @@ _MAX_BODY = 256 * 1024
 _MAX_WAIT_S = 25.0
 _CONFIRM_TIMEOUT_S = 300.0
 _EVENT_LOG = 1000
+# Събития, които НЕ затварят потока дума по дума (виж "delta" горе): напредъкът
+# на под-агент идва от друга нишка посред отговора (2026-11-23).
+_KEEPS_LIVE = frozenset({"delta", "progress", "thinking"})
+# Най-много толкова "delta" в дневника наведнъж: дълъг отговор (3 мин по 20
+# порции/с) иначе изтласкваше от 1000-те места целия разговор и телефон, свързан
+# наново, виждаше само части. Над тавана частите се сливат в една със "start"
+# (целият текст дотук) — клиентът просто подменя показаното.
+_MAX_LIVE_DELTAS = 200
 _TOOL_PREVIEW = 4000
 # Таван на един отговор на `events` (одит 2026-10-11): студен старт след 1000
 # изхода на инструменти теглеше 7.3 MiB, а open() на телефона ги декодираше
@@ -438,10 +455,21 @@ class RemoteSession:
         self._stop = threading.Event()
         self._pending: dict[str, _Pending] = {}
         self.epoch = secrets.token_hex(4)
+        # Тече ли поток "delta" (2026-11-23): закъсняла порция след крайния
+        # отговор (таймерът на DeltaBatcher) не бива да отвори нов балон.
+        self._live = False
+        self._live_text: list[str] = []
+        self._live_count = 0
 
     # -- събития --
     def emit(self, kind: str, **data: Any) -> dict:
         with self._cond:
+            if kind not in _KEEPS_LIVE and self._live:
+                # Потокът е затворен: частите му вече не трябват на никого,
+                # а 1000-те места в дневника са за истинските събития.
+                self._live, self._live_text, self._live_count = False, [], 0
+                kept = [e for e in self._events if e["type"] != "delta"]
+                self._events = deque(kept, maxlen=_EVENT_LOG)
             self._seq += 1
             event = {"seq": self._seq, "ts": int(time.time() * 1000), "type": kind, **data}
             self._events.append(event)
@@ -452,6 +480,25 @@ class RemoteSession:
             except Exception:
                 log.debug("on_event се провали за %s", kind, exc_info=True)
         return event
+
+    def delta(self, text: str, start: bool = False) -> None:
+        """Част от отговора, докато пристига. Без `start` след затворен поток —
+        нищо (закъсняла порция след "assistant")."""
+        with self._cond:
+            if start:
+                self._live, self._live_text, self._live_count = True, [], 0
+            elif not self._live:
+                return
+            self._live_text.append(text)
+            self._live_count += 1
+            if self._live_count > _MAX_LIVE_DELTAS:
+                self._events = deque((e for e in self._events if e["type"] != "delta"),
+                                     maxlen=_EVENT_LOG)
+                text, start = "".join(self._live_text), True
+                self._live_text, self._live_count = [text], 1
+            # emit под същата ключалка (RLock): иначе "assistant" от друга нишка
+            # може да мине между проверката и записа.
+            self.emit("delta", text=text, **({"start": True} if start else {}))
 
     def events_after(self, after: int, wait: float = 0.0) -> dict:
         deadline = time.monotonic() + max(0.0, min(wait, _MAX_WAIT_S))
@@ -612,6 +659,12 @@ class RemoteTurnUI:
 
     def __init__(self, session: RemoteSession) -> None:
         self._s = session
+        from genesis_agent.brain import DeltaBatcher
+        self._deltas = DeltaBatcher(session.delta)
+
+    def delta(self, text: str, start: bool = False) -> None:
+        """Текстът на модела, докато пристига (run_turn → brain.stream_deltas)."""
+        self._deltas(text, start)
 
     def thinking(self, label: str, spinner: str = "dots"):
         from contextlib import contextmanager
