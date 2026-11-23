@@ -175,6 +175,11 @@ def main(argv: list[str] | None = None) -> int:
             # не в базата; крайният е в "assistant" (2026-11-23).
             self._deltas(text, start)
 
+        def delta_end(self) -> None:
+            # Само tool_calls след написан текст: браузърът маха балона.
+            self._deltas.drop()
+            emit("delta_end")
+
         def assistant(self, text: str) -> None:
             if text.strip():
                 last_reply["text"] = text

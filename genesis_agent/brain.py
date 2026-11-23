@@ -193,6 +193,14 @@ class DeltaBatcher:
             if self._buf:
                 self._send()
 
+    def drop(self) -> None:
+        """Потокът свърши без текст: чакащото не се праща."""
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+            self._buf, self._start = [], False
+
     def _send(self) -> None:
         chunk, first = "".join(self._buf), self._start
         self._buf, self._start, self._last = [], False, time.monotonic()

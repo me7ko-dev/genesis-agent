@@ -64,6 +64,11 @@ def test_the_app_keeps_the_live_text_in_memory_only(tmp_path) -> None:
         app._event(7, {"kind": "assistant", "text": "Втори път"})
         assert app.live_text(7) == ""
         assert [e["kind"] for e in store.events(7)] == ["assistant"]
+        # Само tool_calls след написан текст (преглед на PR #133): балонът изчезва,
+        # а краят не е събитие в базата.
+        app._event(8, {"kind": "delta", "text": "отхвърлен", "start": True})
+        app._event(8, {"kind": "delta_end"})
+        assert app.live_text(8) == "" and store.events(8) == []
     finally:
         app.pool.shutdown(wait=True)
 

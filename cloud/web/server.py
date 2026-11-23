@@ -686,6 +686,12 @@ class App:
                 if live.count < LIVE_MAX_DELTAS:
                     live.add(text)
             return
+        if kind == "delta_end":
+            # Заявката свърши само с tool_calls: текстът на живо изчезва, а
+            # самото събитие не е за базата (преглед на PR #133).
+            with self._lock:
+                self._live.pop(turn_id, None)
+            return
         if kind not in ("progress", "thinking"):
             with self._lock:
                 self._live.pop(turn_id, None)

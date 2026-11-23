@@ -937,7 +937,17 @@ def ask_genesis(messages, tools=None):
         return _ask_genesis(messages, tools)
     from genesis_agent.brain import stream_deltas
     with stream_deltas(sink):
-        return _ask_genesis(messages, tools)
+        response, tool_calls = _ask_genesis(messages, tools)
+    end = getattr(_TURN_STREAM, "end", None)
+    if end is not None and not str(response or "").strip():
+        # Отговор без текст (само tool_calls), след като лекият модел или отказан
+        # опит е писал: иначе отхвърленият текст стоеше с мигащ курсор, докато
+        # вървят инструментите (преглед на PR #133). С текст — "assistant" го заменя.
+        try:
+            end()
+        except Exception:
+            log.debug("краят на потока не стигна до UI", exc_info=True)
+    return response, tool_calls
 
 
 def _ask_genesis(messages, tools=None):
@@ -1895,7 +1905,9 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI",
     # терминалът го няма и заявките му остават непоточни (2026-11-23).
     # Вложен ход (под-агент в същата нишка) връща приемника на външния.
     outer_sink = getattr(_TURN_STREAM, "sink", None)
+    outer_end = getattr(_TURN_STREAM, "end", None)
     _TURN_STREAM.sink = getattr(ui, "delta", None)
+    _TURN_STREAM.end = getattr(ui, "delta_end", None)
     try:
         messages = _run_turn_once(messages, user_input, watched, extra, images=images)
         for _ in range(_STOP_HOOK_ROUNDS):
@@ -1922,7 +1934,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI",
             messages = _run_turn_once(
                 messages, f"[hook Stop на оператора — довърши, преди да спреш]\n{stop.message}", watched, "")
     finally:
-        _TURN_STREAM.sink = outer_sink
+        _TURN_STREAM.sink, _TURN_STREAM.end = outer_sink, outer_end
         genesis_skills._set_cancel(None)
         edit_history.end_turn()
     return messages

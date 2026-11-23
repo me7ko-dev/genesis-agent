@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import json
 import sys
+import threading
 import time
 import types
 from collections import deque
@@ -281,7 +282,7 @@ def test_the_session_forwards_deltas_and_drops_them_after_the_answer() -> None:
                      ("progress", "под-агентът чете", None), ("delta", "!", None),
                      ("assistant", "Здравей!", None)]
     # Повторно свързан телефон вижда само крайния текст.
-    log = session.events_after(0)["events"]
+    log = session.events_after(0, stream=True)["events"]
     assert [e["type"] for e in log] == ["progress", "assistant"]
 
 
@@ -294,11 +295,80 @@ def test_a_long_stream_does_not_push_the_conversation_out_of_the_log(monkeypatch
     session.delta("0", start=True)
     for i in range(1, 12):
         session.delta(str(i))
-    log = session.events_after(0)["events"]
+    log = session.events_after(0, stream=True)["events"]
     deltas = [e for e in log if e["type"] == "delta"]
     assert log[0]["type"] == "user"
     assert len(deltas) <= 5 and deltas[0].get("start") is True
     assert "".join(e["text"] for e in deltas) == "01234567891011"
+
+
+# ── преглед на PR #133 ─────────────────────────────────────────────────────
+
+
+def test_clients_without_stream_never_see_deltas_and_are_not_woken_by_them() -> None:
+    """Телефонът (без "stream") пазеше частите — 60 s поток изтласкваше разговора
+    от 1000-те му събития, а дългото чакане се събуждаше ~20 пъти в секунда."""
+    session = rs.RemoteSession(lambda t, ui: None)
+    server = rs.RemoteServer(bytes(range(32)), session, name="pc")
+    session.emit("user", text="здрасти")
+    last = session.events_after(0)["last"]
+    timer = threading.Timer(0.05, lambda: (session.delta("Здра", start=True), session.delta_end()))
+    timer.start()
+    t0 = time.monotonic()
+    phone = server._dispatch({"op": "events", "after": last, "wait": 0.6})
+    assert time.monotonic() - t0 >= 0.5            # частите не го събудиха
+    assert phone["events"] == []
+    assert [e["type"] for e in server._dispatch({"op": "events", "after": 0})["events"]] == ["user"]
+    desktop = server._dispatch({"op": "events", "after": last, "stream": True})
+    assert [e["type"] for e in desktop["events"]] == ["delta_end"]   # частите са махнати след края
+    timer.join()
+
+
+def test_failed_attempts_do_not_push_the_message_out_of_the_log() -> None:
+    """6 отказани опита × 190 части изтласкваха съобщението от дневника (1000)."""
+    session = rs.RemoteSession(lambda t, ui: None)
+    session.emit("user", text="пусни тестовете")
+    for attempt in range(6):
+        session.delta(f"опит {attempt}", start=True)
+        for _ in range(189):
+            session.delta(".")
+    log = session.events_after(0, stream=True)["events"]
+    assert log[0]["type"] == "user"
+    assert sum(1 for e in log if e["type"] == "delta") == 190
+    assert next(e for e in log if e["type"] == "delta")["text"] == "опит 5"
+
+
+def test_a_reply_with_only_tool_calls_ends_the_stream(monkeypatch) -> None:
+    """Лекият модел писа текст, ескалацията отговори само с tool_calls: без край
+    отхвърленият текст стоеше с мигащ курсор, докато вървят инструментите."""
+    ends: list[int] = []
+    _, sink = _collect()
+    replies = iter([("", [{"id": "c1", "type": "function",
+                           "function": {"name": "READ_FILE", "arguments": "{}"}}]),
+                    ("Готово.", None)])
+
+    def fake(messages, tools=None):
+        brain_mod._delta_writer()("отхвърлен текст")
+        return next(replies)
+    monkeypatch.setattr(gta, "_ask_genesis", fake)
+    monkeypatch.setattr(gta._TURN_STREAM, "sink", sink, raising=False)
+    monkeypatch.setattr(gta._TURN_STREAM, "end", lambda: ends.append(1), raising=False)
+    gta.ask_genesis([{"role": "user", "content": "x"}])
+    assert ends == [1]
+    gta.ask_genesis([{"role": "user", "content": "x"}])   # с текст — "assistant" заменя
+    assert ends == [1]
+
+
+def test_the_session_end_drops_the_bubble_and_late_parts() -> None:
+    seen: list[dict] = []
+    session = rs.RemoteSession(lambda t, ui: None, on_event=seen.append)
+    ui = rs.RemoteTurnUI(session)
+    ui.delta("Чета", start=True)
+    ui.delta(" файла")                 # чака в порцията
+    ui.delta_end()
+    time.sleep(0.15)                   # таймерът на порцията не праща нищо след края
+    ui.delta_end()                     # втори край без поток — нищо
+    assert [(e["type"], e.get("text")) for e in seen] == [("delta", "Чета"), ("delta_end", None)]
 
 
 @pytest.fixture

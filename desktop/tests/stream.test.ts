@@ -71,6 +71,18 @@ test('a reply with only tool calls: the live text goes when the tool card comes'
   assert.deepEqual(items.map((i) => i.kind), ['user', 'tool']);
 });
 
+test('delta_end (only tool calls after the text) removes the bubble before the tools run', () => {
+  // Преглед на PR #133: отхвърленият текст стоеше с мигащ курсор, докато вървят инструментите.
+  const events = [
+    ev(1, 'user', { text: 'x' }),
+    ev(2, 'delta', { text: 'Лекият модел мисли, че…', start: true }),
+    ev(3, 'delta_end'),
+    ev(4, 'thinking', { label: 'READ_FILE: a.py' }),
+  ];
+  assert.equal(live(toChatItems(events)).length, 0);
+  assert.deepEqual(toChatItems(events).map((i) => i.kind), ['user']);
+});
+
 test('parts of a finished stream are dropped from memory, a running one is kept', () => {
   const done = [...STREAM, ev(8, 'assistant', { text: 'Във файла има две функции.' })];
   assert.deepEqual(compactDeltas(done).map((e) => e.seq), [1, 2, 3, 6, 8]);

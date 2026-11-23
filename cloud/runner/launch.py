@@ -390,7 +390,7 @@ def _run_in(network: str, name: str, text: str, workspace: Path, *, limits: Limi
             ev = _parse_event(raw)
             if ev is None:
                 continue
-            if ev.get("kind") == "delta":
+            if ev.get("kind") in ("delta", "delta_end"):
                 delta_bytes += len(raw)
                 if on_event and not capped and delta_bytes <= _MAX_DELTA_BYTES:
                     on_event(ev)
