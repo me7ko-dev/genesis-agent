@@ -1,7 +1,8 @@
 """
 genesis_agent.browser — истинска интерактивна browser автоматизация (design note, 2026-07-25).
 
-Playwright, headless Chromium, ИЗОЛИРАН ефемерен профил (НЕ реалния Chrome
+Playwright, headless Chromium (или системният Edge/Chrome, когато вграденият
+липсва — 2026-11-23), ИЗОЛИРАН ефемерен профил (НЕ реалния Chrome
 профил на потребителя — няма достъп до неговите бисквитки/запазени пароли/сесии).
 Всяко действие минава през genesis_agent.sandbox risk-класификация:
 
@@ -149,7 +150,36 @@ def _ensure_page():
     # GENESIS_BROWSER_VISIBLE=1 показва реален прозорец, за да гледаш агента
     # докато навигира (design note, 2026-07-29, изрична заявка на оператора).
     visible = os.environ.get("GENESIS_BROWSER_VISIBLE") == "1"
-    _browser = _pw.chromium.launch(headless=not visible)
+    # 2026-11-23: тук се пускаше само вграденият Chromium на Playwright. На
+    # лаптопа той липсва (`playwright install` не е пускан) и BROWSE падаше с
+    # „Executable doesn't exist“, макар Edge да е на всеки Windows. Редът на
+    # опитите е същият като при търсенето в браузъра (search_browser._channels:
+    # изричният GENESIS_BROWSER_CHANNEL, вграденият, msedge, chrome) — едно
+    # място, за да не се разминат. Профилът пак е празен: channel сменя само
+    # изпълнимия файл, не взима профила на потребителя.
+    from genesis_agent.search_browser import _channels
+    last = None
+    for channel in _channels():
+        try:
+            if channel:
+                _browser = _pw.chromium.launch(headless=not visible, channel=channel)
+            else:
+                _browser = _pw.chromium.launch(headless=not visible)
+            log.info("BROWSE: браузърът тръгна (%s)", channel or "chromium")
+            break
+        except Exception as e:  # noqa: BLE001 — пробва следващия канал; последната грешка излиза по-долу
+            last = e
+    if _browser is None:
+        # Без спрян драйвер следващият BROWSE би вдигнал втори sync_playwright
+        # в същата нишка („Sync API inside the asyncio loop“) вместо тази грешка.
+        try:
+            _pw.stop()
+        except Exception:
+            log.debug("Playwright не спря чисто", exc_info=True)
+        _pw = None
+        raise RuntimeError(
+            "няма браузър за BROWSE (нито вграденият Chromium, нито Edge/Chrome): "
+            f"{last}. Пусни `playwright install chromium` или задай GENESIS_BROWSER_CHANNEL.")
     _page = _browser.new_page()
     _page.set_default_timeout(15000)
     # На контекста, не на страницата — и прозорците, които страницата отваря.
