@@ -82,7 +82,12 @@ _MAX_VOICE_BODY, по един наведнъж; за всяка друга — 
 "thinking" затваря потока — "assistant" носи крайния текст и заменя
 показаното; без "assistant" (само tool_calls, грешка) показаното изчезва.
 Затворените "delta" излизат от дневника — повторно свързан телефон вижда само
-крайния текст. Старо приложение не познава "delta" и го прескача.
+крайния текст. "delta_end" — потокът свърши без текстов отговор (само
+tool_calls): показаното се маха. Частите идват САМО при `events` със
+"stream": true (Desktop); без него (телефонът, старите версии) — нито "delta",
+нито "delta_end", и дългото чакане не се събужда от тях (преглед на PR #133:
+приложението пазеше по 1000 събития и 60 s поток изтласкваше разговора, а
+телефонът питаше ~20 пъти в секунда).
 """
 from __future__ import annotations
 
@@ -120,6 +125,8 @@ _EVENT_LOG = 1000
 # Събития, които НЕ затварят потока дума по дума (виж "delta" горе): напредъкът
 # на под-агент идва от друга нишка посред отговора (2026-11-23).
 _KEEPS_LIVE = frozenset({"delta", "progress", "thinking"})
+# Само за клиенти с `events` "stream": true (виж горе).
+_STREAM_ONLY = frozenset({"delta", "delta_end"})
 # Най-много толкова "delta" в дневника наведнъж: дълъг отговор (3 мин по 20
 # порции/с) иначе изтласкваше от 1000-те места целия разговор и телефон, свързан
 # наново, виждаше само части. Над тавана частите се сливат в една със "start"
@@ -460,6 +467,8 @@ class RemoteSession:
         self._live = False
         self._live_text: list[str] = []
         self._live_count = 0
+        # Последното събитие, което виждат и клиентите без поток.
+        self._real_seq = 0
 
     # -- събития --
     def emit(self, kind: str, **data: Any) -> dict:
@@ -473,6 +482,8 @@ class RemoteSession:
             self._seq += 1
             event = {"seq": self._seq, "ts": int(time.time() * 1000), "type": kind, **data}
             self._events.append(event)
+            if kind not in _STREAM_ONLY:
+                self._real_seq = self._seq
             self._cond.notify_all()
         if self._on_event is not None:
             try:
@@ -486,6 +497,11 @@ class RemoteSession:
         нищо (закъсняла порция след "assistant")."""
         with self._cond:
             if start:
+                # Частите на отказания опит не трябват (преглед на PR #133: 6
+                # отказани опита × 190 части изтласкаха съобщението ти от дневника).
+                if self._live:
+                    self._events = deque((e for e in self._events if e["type"] != "delta"),
+                                         maxlen=_EVENT_LOG)
                 self._live, self._live_text, self._live_count = True, [], 0
             elif not self._live:
                 return
@@ -500,10 +516,16 @@ class RemoteSession:
             # може да мине между проверката и записа.
             self.emit("delta", text=text, **({"start": True} if start else {}))
 
-    def events_after(self, after: int, wait: float = 0.0) -> dict:
+    def delta_end(self) -> None:
+        """Заявката свърши без текст (само tool_calls) — показаното се маха."""
+        with self._cond:
+            if self._live:
+                self.emit("delta_end")
+
+    def events_after(self, after: int, wait: float = 0.0, *, stream: bool = False) -> dict:
         deadline = time.monotonic() + max(0.0, min(wait, _MAX_WAIT_S))
         with self._cond:
-            while self._seq <= after:
+            while (self._seq if stream else self._real_seq) <= after:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
@@ -517,6 +539,8 @@ class RemoteSession:
             # завъртян дневник — 7 страници, 3.3 MB вместо 1 страница 0.5 MB).
             reset = after <= 0 or after + 1 < first or after > self._seq
             items = list(self._events) if reset else [e for e in self._events if e["seq"] > after]
+            if not stream:
+                items = [e for e in items if e["type"] not in _STREAM_ONLY]
             reply = {"events": items, "last": self._seq, "reset": reset,
                      "busy": self._busy, "epoch": self.epoch, "more": False}
         # Размерът се мери извън ключалката — emit() не чака сериализацията.
@@ -665,6 +689,11 @@ class RemoteTurnUI:
     def delta(self, text: str, start: bool = False) -> None:
         """Текстът на модела, докато пристига (run_turn → brain.stream_deltas)."""
         self._deltas(text, start)
+
+    def delta_end(self) -> None:
+        """Заявката свърши без текст: чакащата порция отпада, балонът се маха."""
+        self._deltas.drop()
+        self._s.delta_end()
 
     def thinking(self, label: str, spinner: str = "dots"):
         from contextlib import contextmanager
@@ -1019,7 +1048,7 @@ class RemoteServer:
                 wait = float(p.get("wait") or 0)
             except (TypeError, ValueError, OverflowError):   # "after": Infinity
                 return {"ok": False, "error": "bad_args"}
-            reply = {"ok": True, **s.events_after(after, wait)}
+            reply = {"ok": True, **s.events_after(after, wait, stream=p.get("stream") is True)}
             # Последните приети `mid` (вълна 5, 2026-10-11): телефонът по тях
             # забравя повторения опит, и когато своето балонче не е в
             # страницата (reset от най-новите, „/clear“ без балонче) — иначе

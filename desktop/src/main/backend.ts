@@ -239,7 +239,8 @@ export class Backend extends EventEmitter {
     while (gen === this.generation && this.client) {
       try {
         const reply: EventsBatch & { ok: boolean } = await this.client.call<EventsBatch & { ok: boolean }>(
-          'events', { after: this.after, wait: atOnce ? 0 : 20 }, 35_000);
+          // stream: частите на отговора ("delta") идват само на който ги поиска (2026-11-23).
+          'events', { after: this.after, wait: atOnce ? 0 : 20, stream: true }, 35_000);
         failures = 0;
         if (gen !== this.generation) return;
         // A restarted agent numbers its events from 1 again: what it just sent
