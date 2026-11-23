@@ -1,8 +1,8 @@
-import * as Clipboard from 'expo-clipboard';
 import { memo, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { confirmChoices, todoSummary, type ChatItem } from '../lib/chat';
+import { copyText } from '../lib/copy';
 import type { Todo } from '../lib/protocol';
 import { mono, useTheme, type Theme } from '../lib/theme';
 import { diffLines, toolHeader, toolLook, toolTitle, workSummary, workTitle, type DiffLine } from '../lib/turns';
@@ -18,20 +18,19 @@ type Item<K extends ChatItem['kind']> = Extract<ChatItem, { kind: K }>;
  *  става — цялото съобщение с едно докосване, както в Desktop от 20.11. */
 function CopyButton({ text, label, align }: { text: string; label: string; align?: 'flex-end' }) {
   const theme = useTheme();
-  const [copied, setCopied] = useState(false);
+  // lib/copy.ts зарежда expo-clipboard чак тук — на стар билд без модула
+  // бутонът казва „не стана“, а чатът си работи.
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const copy = async () => {
-    try {
-      await Clipboard.setStringAsync(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1400);
-    } catch (e) {
-      console.warn('genesis: copy', e instanceof Error ? e.message : String(e));
-    }
+    setState((await copyText(text)) ? 'copied' : 'failed');
+    setTimeout(() => setState('idle'), 1400);
   };
   return (
     <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={copy} hitSlop={8}
       style={[styles.action, align ? { alignSelf: align } : null]}>
-      <Text style={[styles.small, { color: copied ? theme.ok : theme.muted }]}>{copied ? '✓ копирано' : '⧉ копирай'}</Text>
+      <Text style={[styles.small, { color: state === 'copied' ? theme.ok : state === 'failed' ? theme.danger : theme.muted }]}>
+        {state === 'copied' ? '✓ копирано' : state === 'failed' ? '✕ не стана — обнови приложението' : '⧉ копирай'}
+      </Text>
     </Pressable>
   );
 }

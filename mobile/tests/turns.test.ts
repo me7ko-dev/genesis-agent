@@ -84,6 +84,18 @@ test('only the last turn offers a retry, and not after an answer', () => {
   assert.equal(buildRows(toChatItems(events), false).some((r) => r.kind === 'item' && r.retry), false);
 });
 
+test('a message with photos offers no retry — the photos could not be sent again', () => {
+  // Преглед на PR #131: повторението праща само текста; снимките щяха да се изгубят мълчаливо.
+  const turn = (user: Partial<GenesisEvent>) => buildRows(toChatItems([
+    { seq: 1, ts: 1, type: 'user', ...user },
+    { seq: 2, ts: 2, type: 'error', text: 'моделът не отговори' },
+  ]), false);
+  const retry = (rows: Row[]) => rows.map((r) => (r.kind === 'item' ? r.retry : undefined)).find((x) => x !== undefined);
+  assert.equal(retry(turn({ text: 'поправи го' })), 'поправи го');
+  assert.equal(retry(turn({ text: 'какво е това', images: [{ name: 'a.jpg' }] })), undefined);
+  assert.equal(retry(turn({ text: '', images: [{ name: 'a.jpg' }] })), undefined);
+});
+
 test('a group of one is the thing itself, without a frame', () => {
   const events: GenesisEvent[] = [
     { seq: 1, ts: 1, type: 'user', text: 'виж' },

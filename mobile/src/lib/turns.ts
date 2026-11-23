@@ -186,7 +186,9 @@ export function buildRows(items: readonly ChatItem[], busy: boolean): Row[] {
     }
     if (lastTurn && !busy && user && user.kind === 'user' && final < 0) {
       const err = [...out].reverse().find((r) => r.kind === 'item' && r.item.kind === 'note' && r.item.tone === 'error');
-      if (err && err.kind === 'item') err.retry = user.text;
+      // Само текст: снимките не се пазят (идват като име) и повторението щеше да ги
+      // изгуби мълчаливо — със снимки бутон няма, както в Desktop (преглед на PR #131).
+      if (err && err.kind === 'item' && user.text && !user.images.length) err.retry = user.text;
     }
     if (user) rows.push(row(user));
     rows.push(...out);
