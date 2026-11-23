@@ -112,6 +112,10 @@ _MAX_EVENT_LINE = 1 << 20
 # сървъра от един ход; кодът в контейнера пише в същия stdout като агента.
 _MAX_EVENTS = 2000
 _MAX_EVENT_BYTES = 8 << 20
+# Частите на отговора на живо ("delta", 2026-11-23) не влизат в тавана по-горе и
+# не се пазят — отиват само към on_event (уеб сървърът ги държи в паметта).
+# Отделен таван: кодът в контейнера пише в същия stdout и може да ги измисля.
+_MAX_DELTA_BYTES = 8 << 20
 # Ревю 2026-10-11: ред `{"kind":"assistant","text":"\\udcee"}` от кода в
 # контейнера става lone surrogate след json.loads; store.add_event (json.dumps
 # в sqlite) гърмеше с UnicodeEncodeError, ходът падаше и `docker run`
@@ -370,6 +374,7 @@ def _run_in(network: str, name: str, text: str, workspace: Path, *, limits: Limi
         assert proc.stdout is not None
         skipping = False
         kept_bytes = 0
+        delta_bytes = 0
         capped = False
         late_done: dict[str, Any] | None = None
         while True:
@@ -384,6 +389,11 @@ def _run_in(network: str, name: str, text: str, workspace: Path, *, limits: Limi
                 continue
             ev = _parse_event(raw)
             if ev is None:
+                continue
+            if ev.get("kind") == "delta":
+                delta_bytes += len(raw)
+                if on_event and not capped and delta_bytes <= _MAX_DELTA_BYTES:
+                    on_event(ev)
                 continue
             if not capped and (len(events) >= _MAX_EVENTS
                                or kept_bytes + len(raw) > _MAX_EVENT_BYTES):

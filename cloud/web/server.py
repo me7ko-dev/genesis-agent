@@ -93,6 +93,8 @@ LOGIN_FAILURES = 5
 # Подразбиранията за всеки човек (2026-10-11) — профилът може да ги смени
 # (`limits`). Ходовете на ден важат и без плащане: всеки ход е контейнер.
 TURNS_PER_DAY = 50
+# Текстът на живо на един ход (поток "delta", 2026-11-23) — краят му, ако е по-дълъг.
+LIVE_MAX_CHARS = 64 * 1024
 MONTHLY_CAP = 2000 * MICRO
 HIDDEN = ".genesis"          # историята на разговора (task.py) — не е за сваляне
 # През колко секунди shutdown() почиства отново, докато чака живите ходове.
@@ -177,6 +179,10 @@ class App:
         self._uploaded: dict[str, list[str]] = {}
         self._uploading: set[str] = set()                 # разговори с качване в ход
         self._upload_day: dict[int, tuple[int, int]] = {}  # човек → (ден, байтове)
+        # Текстът на модела, докато пристига (поток "delta", 2026-11-23), по ход.
+        # Само в паметта, не в базата: частите са до ~4 на секунда и иначе пълнеха
+        # web.db и тавана от 2000 събития на ход. Крайният отговор е в базата.
+        self._live: dict[int, str] = {}
         self._cleanup = cleanup or launch.cleanup_leftovers
         self._stopping = threading.Event()
         self._futures: set[Future[None]] = set()
@@ -614,6 +620,37 @@ class App:
         fut.add_done_callback(self._forget)
         return turn_id
 
+    def _event(self, turn_id: int, event: dict[str, Any]) -> None:
+        """Събитие от контейнера. "delta" (2026-11-23) расте текста на живо в
+        паметта: "start" го почва наново (следващ модел), без "start" след
+        затворен поток — нищо (закъсняла част след крайния отговор). Всяко друго
+        освен "progress"/"thinking" затваря потока и отива в базата."""
+        kind = event.get("kind")
+        if kind == "delta":
+            text = event.get("text")
+            if not isinstance(text, str):
+                return
+            with self._lock:
+                if event.get("start") is True:
+                    live = text
+                elif turn_id in self._live:
+                    live = self._live[turn_id] + text
+                else:
+                    return
+                if len(live) > LIVE_MAX_CHARS:
+                    # Кодът в контейнера е чужд: таван и на текста на живо.
+                    live = "…" + live[-LIVE_MAX_CHARS:]
+                self._live[turn_id] = live
+            return
+        if kind not in ("progress", "thinking"):
+            with self._lock:
+                self._live.pop(turn_id, None)
+        self.store.add_event(turn_id, event)
+
+    def live_text(self, turn_id: int) -> str:
+        with self._lock:
+            return self._live.get(turn_id, "")
+
     def _forget(self, fut: Future[None]) -> None:
         with self._lock:
             self._futures.discard(fut)
@@ -646,7 +683,7 @@ class App:
         tokens: dict[str, int] = {}
         try:
             res = self.runner(text, workspace, limits=self.limits,
-                              on_event=lambda e: self.store.add_event(turn_id, e),
+                              on_event=lambda e: self._event(turn_id, e),
                               env_file=self.env_file, runtime=self.runtime,
                               gateway=gateway, name=job, on_token=on_token)
             ok, error, tokens, seconds = res.ok, res.error, res.tokens, res.seconds
@@ -682,6 +719,8 @@ class App:
             except Exception as e:  # noqa: BLE001 — вече се печата в stderr; reconcile при следващия старт го таксува
                 print(f"сметка: ход {turn_id} не е таксуван: {type(e).__name__}: {e}",
                       file=sys.stderr)
+        with self._lock:
+            self._live.pop(turn_id, None)
         self.store.finish_turn(turn_id, ok=ok, error=error, tokens=tokens, seconds=seconds)
         if prices is not None and gateway is not None:
             # Покрай всеки ход — окончателната сметка на ходовете с изтекъл жетон
@@ -1084,10 +1123,16 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 after = 0
             after = min(max(after, 0), _MAX_ROWID)  # иначе OverflowError в sqlite (2026-10-22)
+            # "live" — текстът на модела, докато пристига (2026-11-23); само
+            # докато тече, крайният отговор идва като събитие "assistant".
+            # След събитията: _event маха текста ПРЕДИ да запише отговора, тоест
+            # двете заедно не идват — иначе браузърът показваше отговора два пъти.
+            events = store.events(turn["id"], after)
+            live = self.app.live_text(turn["id"]) if turn["status"] == "running" else ""
             self._json(200, _with_cost({
                 "status": turn["status"], "error": turn["error"], "tokens": turn["tokens"],
-                "seconds": turn["seconds"], "events": store.events(turn["id"], after),
-                "cost_micro": turn.get("cost_micro")}))
+                "seconds": turn["seconds"], "events": events,
+                "cost_micro": turn.get("cost_micro"), **({"live": live} if live else {})}))
         elif (m := _FILES.match(path)) or (m := _ZIP.match(path)) or (m := _FILE.match(path)):
             self._files(user, m)
         else:
