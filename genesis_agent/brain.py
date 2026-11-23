@@ -330,7 +330,11 @@ def _post_stream_with_deadline(url: str, *, headers: dict, json: dict, timeout: 
                     _ = r.content   # тялото се чете, преди връзката да се затвори
                     box["r"] = r
                     return
-                box["r"] = _sse_reply(r.iter_lines(chunk_size=None), guarded, r.headers)
+                # chunk_size=None: всяка част идва веднага, щом пристигне (не чака 512 B).
+                # Описанието на типовете в requests не го позволява, а самата
+                # библиотека го поддържа (2026-11-23, mypy в CI с types-requests).
+                box["r"] = _sse_reply(r.iter_lines(chunk_size=None),  # type: ignore[call-overload]
+                                      guarded, r.headers)
         except BaseException as e:  # noqa: BLE001 — предава се на викащата нишка, която я хвърля
             box["e"] = e
 
