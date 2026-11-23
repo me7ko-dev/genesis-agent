@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections import deque
 from datetime import datetime
@@ -922,7 +923,24 @@ def _ask_via_legacy(messages, tools, prov, model):
     return response, tool_calls
 
 
+# Приемникът на потока дума по дума за хода в ТАЗИ нишка (2026-11-23): run_turn
+# го слага, когато UI-ят може да показва текста, докато пристига (`delta` —
+# Desktop, облакът, телефонът). Само ask_genesis го ползва — другите обръщения
+# към модел в хода (резюме, проучване, проверки) не бива да пишат в чата.
+_TURN_STREAM = threading.local()
+
+
 def ask_genesis(messages, tools=None):
+    """Връща (content, tool_calls); с приемник на хода — и поточно (виж _TURN_STREAM)."""
+    sink = getattr(_TURN_STREAM, "sink", None)
+    if sink is None:
+        return _ask_genesis(messages, tools)
+    from genesis_agent.brain import stream_deltas
+    with stream_deltas(sink):
+        return _ask_genesis(messages, tools)
+
+
+def _ask_genesis(messages, tools=None):
     """Връща (content, tool_calls).
 
     ОБЕДИНЕНО с genesis_agent.brain.Brain (design note, 2026-07-25). Дотогава терминалът
@@ -1873,6 +1891,11 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI",
     vision.begin_turn()
     watched = _WatchedUI(ui)
     genesis_skills._set_cancel(watched.cancelled)
+    # Текстът, докато пристига — само за UI, който го показва (`delta`);
+    # терминалът го няма и заявките му остават непоточни (2026-11-23).
+    # Вложен ход (под-агент в същата нишка) връща приемника на външния.
+    outer_sink = getattr(_TURN_STREAM, "sink", None)
+    _TURN_STREAM.sink = getattr(ui, "delta", None)
     try:
         messages = _run_turn_once(messages, user_input, watched, extra, images=images)
         for _ in range(_STOP_HOOK_ROUNDS):
@@ -1899,6 +1922,7 @@ def run_turn(messages: "deque", user_input: str, ui: "TurnUI",
             messages = _run_turn_once(
                 messages, f"[hook Stop на оператора — довърши, преди да спреш]\n{stop.message}", watched, "")
     finally:
+        _TURN_STREAM.sink = outer_sink
         genesis_skills._set_cancel(None)
         edit_history.end_turn()
     return messages
