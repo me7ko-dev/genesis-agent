@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, shell } from 'electron';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { sanitizeImages } from '../shared/media';
 import { Backend, findExe, genesisHome, reapOrphan } from './backend';
 import { allowPermission } from './permissions';
@@ -118,6 +118,9 @@ async function openWorkspace(path?: string) {
     if (res.canceled || !res.filePaths[0]) return backend.state;
     target = res.filePaths[0];
   }
+  // 2026-11-20: „C:/x“ от прекия път и „C:\x“ от диалога бяха два проекта в
+  // списъка и жълт банер „работи в C:\x, не в C:/x“.
+  target = resolve(target);
   if (!existsSync(target)) {
     settings = { ...settings, recent: settings.recent.filter((p) => p !== target) };
     saveSettings(settings);
