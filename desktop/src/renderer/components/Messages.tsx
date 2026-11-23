@@ -114,7 +114,17 @@ function SpeakButton({ speech }: { speech: Speech }) {
   );
 }
 
-export function AssistantMessage({ text, speech, took, last }: { text: string; speech?: Speech; took?: number; last?: boolean }) {
+export function AssistantMessage({ text, speech, took, last, live }: { text: string; speech?: Speech; took?: number; last?: boolean; live?: boolean }) {
+  // Докато пристига (2026-11-23) — обикновен текст: недовършен markdown (отворена
+  // ``` ограда) прескачаше при всяка нова част. Крайният отговор идва като markdown.
+  if (live) {
+    return (
+      <div className="msg assistant live">
+        <div className="avatar"><span className="logo-dot" /></div>
+        <div className="body"><div className="live-text">{text}<span className="caret" /></div></div>
+      </div>
+    );
+  }
   return (
     <div className={`msg assistant ${last ? 'last' : ''}`}>
       <div className="avatar"><span className="logo-dot" /></div>

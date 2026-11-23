@@ -14,6 +14,7 @@ import { createServer } from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { checkImages, limitsFrom, TRANSCRIBE_TIMEOUT_MS, VOICE_TIMEOUT_MS, type ImageAttachment } from '../shared/media';
+import { compactDeltas } from '../shared/stream';
 import type { BackendState, CommandResult, EventsBatch, GenesisEvent, SendResult, SpeakResult, TranscribeResult } from '../shared/types';
 import { guardedFolder } from '../shared/workspace';
 import { exeCandidates } from './exe';
@@ -256,7 +257,8 @@ export class Backend extends EventEmitter {
         const reset = reply.reset;
         this.epoch = reply.epoch;
         this.after = reply.last;
-        this.eventLog = reset ? reply.events : [...this.eventLog, ...reply.events];
+        // Частите на завършен поток ("delta") не се пазят — крайният отговор е тук.
+        this.eventLog = compactDeltas(reset ? reply.events : [...this.eventLog, ...reply.events]);
         if (this.eventLog.length > EVENT_LOG) this.eventLog = this.eventLog.slice(-EVENT_LOG);
         const wasBusy = this.state.busy;
         const next = { ...this.state, busy: reply.busy };

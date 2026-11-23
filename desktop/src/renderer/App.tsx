@@ -274,7 +274,7 @@ export function App() {
                   <UserMessage key={it.key} text={it.text} images={it.images}
                                onEdit={(t) => setDraft((d) => ({ text: t, n: (d?.n ?? 0) + 1 }))} />
                 );
-                case 'assistant': return (
+                case 'assistant': return it.live ? <AssistantMessage key={it.key} text={it.text} live /> : (
                   <AssistantMessage key={it.key} text={it.text} took={row.took} last={it.key === lastAnswer && !state.busy}
                     speech={state.voice ? { phase: player?.key === it.key ? player.phase : 'idle',
                                             onToggle: () => toggleReply(it.key, it.text) } : undefined} />

@@ -1,8 +1,11 @@
+import { closesLive, compactDeltas } from '../../shared/stream.ts';
 import type { GenesisEvent, ImageRef, Todo } from '../../shared/types';
 
 export type ChatItem =
   | { kind: 'user'; key: string; text: string; ts: number; images?: ImageRef[] }
-  | { kind: 'assistant'; key: string; text: string; ts: number }
+  | { kind: 'assistant'; key: string; text: string; ts: number;
+      /** Текстът още пристига ("delta", 2026-11-23): обикновен текст, после крайният (markdown). */
+      live?: boolean }
   | { kind: 'tool'; key: string; name: string; result: string; clipped: boolean; ts: number }
   | { kind: 'note'; key: string; tone: 'info' | 'warn' | 'error' | 'asked' | 'progress'; text: string; ts: number }
   | { kind: 'confirm'; key: string; id: string; operation: string; reasons: string[];
@@ -23,9 +26,29 @@ export function confirmChoices(item: Extract<ChatItem, { kind: 'confirm' }>): Co
 export function toChatItems(events: GenesisEvent[]): ChatItem[] {
   let items: ChatItem[] = [];
   const confirms = new Map<string, number>();
+  // Балонът на потока (2026-11-23): индексът му в items, докато пристига текст.
+  let live = -1;
   for (const e of events) {
     const key = String(e.seq);
     const ts = e.ts;
+    if (e.type === 'delta') {
+      const text = e.text ?? '';
+      if (e.start) {
+        // Нова заявка (друг модел, повторен опит): старият текст е от отказан опит.
+        if (live >= 0) items.splice(live, 1);
+        live = items.length;
+        items.push({ kind: 'assistant', key: `live${key}`, text, ts, live: true });
+      } else if (live >= 0) {
+        const it = items[live];
+        if (it.kind === 'assistant') items[live] = { ...it, text: it.text + text };
+      }
+      continue;
+    }
+    if (live >= 0 && closesLive(e.type)) {
+      // Крайният отговор (или краят без такъв) заменя показаното.
+      items.splice(live, 1);
+      live = -1;
+    }
     switch (e.type) {
       case 'cleared':
         items = [];
@@ -74,10 +97,10 @@ export function toChatItems(events: GenesisEvent[]): ChatItem[] {
 
 /** Merge a batch into what we have: by seq, no duplicates, in order. */
 export function mergeEvents(current: GenesisEvent[], incoming: GenesisEvent[], reset: boolean): GenesisEvent[] {
-  if (reset) return [...incoming].sort((a, b) => a.seq - b.seq);
+  if (reset) return compactDeltas([...incoming].sort((a, b) => a.seq - b.seq));
   const last = current.length ? current[current.length - 1].seq : 0;
   const fresh = incoming.filter((e) => e.seq > last);
-  return fresh.length ? [...current, ...fresh] : current;
+  return fresh.length ? compactDeltas([...current, ...fresh]) : current;
 }
 
 /** The running turn: its latest "thinking" label (or a sub-agent's step —
