@@ -110,6 +110,37 @@ export function step(index: number, total: number, dir: 1 | -1): number {
   return (index + dir + total) % total;
 }
 
+// ── клавишите (2026-11-23, преглед на PR #131) ─────────────────────────────
+// Enter/Esc на прозореца отговарят на чакащо разрешение (App.onKey). Първата
+// версия спираше клавиша само в полето за търсене: Enter върху бутоните ▲/▼
+// на лентата стигаше до прозореца и РАЗРЕШАВАШЕ чакащата команда. Сега
+// решението е тук, на две места: лентата спира своите клавиши, а прозорецът
+// не приема отговор от клавиш, натиснат вътре в нея.
+
+/** Натиснат ли е клавишът вътре в лентата за търсене. */
+export function inSearchBar(target: unknown): boolean {
+  const el = target as { closest?: (selector: string) => unknown } | null;
+  return !!el && typeof el.closest === 'function' && !!el.closest('.search-bar');
+}
+
+/** Какво значи клавишът за чакащото разрешение: Enter разрешава, Esc отказва. */
+export function confirmKey(
+  e: { key: string; ctrlKey?: boolean; altKey?: boolean; target?: unknown }, pending: boolean,
+): 'allow' | 'deny' | null {
+  if (!pending || e.ctrlKey || e.altKey || inSearchBar(e.target)) return null;
+  return e.key === 'Enter' ? 'allow' : e.key === 'Escape' ? 'deny' : null;
+}
+
+/**
+ * Клавиш в лентата. 'pass' — Enter върху бутон: бутонът си върши работата
+ * (▲, ▼, ✕), но клавишът не продължава към прозореца. null — не е за лентата.
+ */
+export function searchBarKey(key: string, shift: boolean, onInput: boolean): 'next' | 'prev' | 'close' | 'pass' | null {
+  if (key === 'Escape') return 'close';
+  if (key !== 'Enter') return null;
+  return onInput ? (shift ? 'prev' : 'next') : 'pass';
+}
+
 /** Броячът в лентата: „3 от 12“, „Няма“, или нищо, докато не е написано нищо. */
 export function counter(index: number, total: number, query: string): string {
   if (!activeQuery(query)) return '';

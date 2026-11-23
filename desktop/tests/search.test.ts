@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildRows, toChatItems } from '../src/renderer/lib/chat.ts';
-import { counter, findAll, fold, locate, searchOpen, step } from '../src/renderer/lib/search.ts';
+import { confirmKey, counter, findAll, fold, inSearchBar, locate, searchBarKey, searchOpen, step } from '../src/renderer/lib/search.ts';
 
 const WS = 'C:\\Users\\u\\Projects\\demo';
 
@@ -123,6 +123,53 @@ test('searchOpen: бележка в групата — без Markdown знац�
   const open = searchOpen(r, 'с важна дума');
   assert.equal(open.groups.length, 1);
   assert.deepEqual(open.tools, []);
+});
+
+// ── клавишите (преглед на PR #131) ──────────────────────────────────────────
+// Фалшив елемент: само `closest`, колкото ползва inSearchBar.
+const el = (...classes: string[]) => ({ closest: (sel: string) => (classes.some((c) => sel === `.${c}`) ? {} : null) });
+
+test('Enter върху бутон на лентата НЕ разрешава чакаща команда', () => {
+  // Преди: Enter на ▼ стигаше до прозореца → answer(confirm.id, true).
+  const nextButton = el('search-bar');
+  assert.equal(confirmKey({ key: 'Enter', target: nextButton }, true), null);
+  assert.equal(confirmKey({ key: 'Escape', target: nextButton }, true), null);
+  assert.equal(inSearchBar(nextButton), true);
+});
+
+test('извън лентата Enter/Esc отговарят на разрешението както преди', () => {
+  assert.equal(confirmKey({ key: 'Enter', target: el('composer') }, true), 'allow');
+  assert.equal(confirmKey({ key: 'Escape', target: el('composer') }, true), 'deny');
+  assert.equal(confirmKey({ key: 'Enter', target: null }, true), 'allow');
+  assert.equal(confirmKey({ key: 'Enter', target: el('composer') }, false), null);
+  assert.equal(confirmKey({ key: 'Enter', ctrlKey: true, target: el('composer') }, true), null);
+  assert.equal(confirmKey({ key: 'a', target: el('composer') }, true), null);
+  assert.equal(inSearchBar(null), false);
+  assert.equal(inSearchBar({}), false);
+});
+
+test('клавиш в лентата: в полето — следващо/предишно; върху бутон — само спира', () => {
+  assert.equal(searchBarKey('Enter', false, true), 'next');
+  assert.equal(searchBarKey('Enter', true, true), 'prev');
+  // Бутонът (▲, ▼, ✕) върши своето; клавишът не продължава към прозореца.
+  assert.equal(searchBarKey('Enter', false, false), 'pass');
+  assert.equal(searchBarKey('Escape', false, false), 'close');
+  assert.equal(searchBarKey('Escape', false, true), 'close');
+  assert.equal(searchBarKey('a', false, true), null);
+  assert.equal(searchBarKey(' ', false, false), null);
+});
+
+test('само последният ход с текст и без картинки предлага „Опитай пак“', () => {
+  // Преглед на PR #131: повторението праща само текста — картинките (байтовете
+  // не се пазят) щяха да се изгубят мълчаливо. С картинки бутон няма.
+  const turn = (user: object) => buildRows(toChatItems([
+    { seq: 1, ts: 1, type: 'user', ...user },
+    { seq: 2, ts: 2, type: 'error', text: 'моделът не отговори' },
+  ] as never), false);
+  const retry = (rows: ReturnType<typeof buildRows>) => rows.map((r) => (r.kind === 'item' ? r.retry : undefined)).find((x) => x !== undefined);
+  assert.equal(retry(turn({ text: 'поправи го' })), 'поправи го');
+  assert.equal(retry(turn({ text: 'какво е това', images: [{ name: 'a.png', bytes: 10, mime: 'image/png' }] })), undefined);
+  assert.equal(retry(turn({ text: '', images: [{ name: 'a.png', bytes: 10, mime: 'image/png' }] })), undefined);
 });
 
 test('step: следващо/предишно в кръг', () => {

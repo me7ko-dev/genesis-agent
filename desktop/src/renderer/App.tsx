@@ -8,6 +8,7 @@ import { explain, fmtTokens, Sheet, toggleMessage, type SheetView } from './comp
 import { EmptyChat, Failed, Logo, Missing, Starting, Welcome } from './components/Screens';
 import { SearchBar, SearchOpenProvider, useChatSearch } from './components/Search';
 import { Sidebar } from './components/Sidebar';
+import { confirmKey } from './lib/search';
 import { playSpeech, stopAudio, usePlayer } from './lib/capture';
 import { buildRows, mergeEvents, pendingConfirm, samePath, shortPath, thinkingLabel, toChatItems, todoSummary, turnInfo } from './lib/chat';
 
@@ -205,10 +206,9 @@ export function App() {
   // ── keyboard ────────────────────────────────────────────────────────────
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (confirm && !e.ctrlKey && !e.altKey) {
-        if (e.key === 'Enter') { e.preventDefault(); answer(confirm.id, true); return; }
-        if (e.key === 'Escape') { e.preventDefault(); answer(confirm.id, false); return; }
-      }
+      // confirmKey: не и от клавиш, натиснат в лентата за търсене (Enter на ▼ разрешаваше команда).
+      const reply = confirmKey(e, !!confirm);
+      if (confirm && reply) { e.preventDefault(); answer(confirm.id, reply === 'allow'); return; }
       if (e.key === 'Escape') {
         if (sheet) setSheet(null);
         else if (logsOpen) setLogsOpen(false);

@@ -8,7 +8,7 @@ import {
   type KeyboardEvent, type RefObject,
 } from 'react';
 import type { Row } from '../lib/chat';
-import { activeQuery, counter, locate, searchOpen, step } from '../lib/search';
+import { activeQuery, counter, locate, searchBarKey, searchOpen, step } from '../lib/search';
 
 type Forced = { groups: ReadonlySet<string>; tools: ReadonlySet<string> };
 const NONE: Forced = { groups: new Set(), tools: new Set() };
@@ -171,28 +171,26 @@ export function SearchBar({ search, onClose }: { search: ChatSearch; onClose: ()
     input.current?.select();
   }, [search.focusKey]);
 
-  function onKeyDown(e: KeyboardEvent<HTMLInputElement>) {
-    // Спира се тук: Enter/Esc на прозореца отговарят на чакащо разрешение
-    // (App.onKey) — Enter в търсенето не бива да разреши команда.
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      e.stopPropagation();
-      search.go(e.shiftKey ? -1 : 1);
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      e.stopPropagation();
-      onClose();
-    }
+  function onKeyDown(e: KeyboardEvent<HTMLDivElement>) {
+    // На ЦЯЛАТА лента, не само на полето: Enter/Esc на прозореца отговарят на
+    // чакащо разрешение (App.onKey), а Enter върху ▲/▼ стигаше дотам и
+    // разрешаваше командата (преглед на PR #131).
+    const what = searchBarKey(e.key, e.shiftKey, e.target === input.current);
+    if (!what) return;
+    e.stopPropagation();
+    if (what === 'pass') return;   // бутонът си върши работата сам
+    e.preventDefault();
+    if (what === 'close') onClose();
+    else search.go(what === 'prev' ? -1 : 1);
   }
 
   return (
-    <div className="search-bar" role="search">
+    <div className="search-bar" role="search" onKeyDown={onKeyDown}>
       <SearchIcon size={14} className="search-icon" />
       <input
         ref={input}
         value={search.query}
         onChange={(e) => search.setQuery(e.target.value)}
-        onKeyDown={onKeyDown}
         placeholder="Търси в разговора…"
         aria-label="Търси в разговора"
         spellCheck={false}
