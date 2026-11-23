@@ -68,6 +68,32 @@ def test_the_app_keeps_the_live_text_in_memory_only(tmp_path) -> None:
         app.pool.shutdown(wait=True)
 
 
+def test_many_fast_deltas_stay_bounded_and_keep_the_tail(tmp_path) -> None:
+    """Ревю 2026-11-23: `текст + част` под общата ключалка — квадратично копиране,
+    с което чуждият код в контейнера държеше ключалката на всички ходове. Сега:
+    части в ограничена опашка, орязана отпред; низът се сглобява само при четене."""
+    store = Store(tmp_path / "web.db")
+    app = web.App(store, tmp_path / "jobs", runner=lambda *a, **k: None, recover=False)
+    try:
+        parts = [f"{i:07d}|" for i in range(30_000)]        # 240 000 знака
+        app._event(1, {"kind": "delta", "text": parts[0], "start": True})
+        for p in parts[1:]:
+            app._event(1, {"kind": "delta", "text": p})
+        live = app._live[1]
+        assert live.size <= web.LIVE_MAX_CHARS
+        assert len(live.chunks) <= web.LIVE_MAX_CHUNKS
+        text = app.live_text(1)
+        assert text.startswith("…") and len(text) == web.LIVE_MAX_CHARS + 1
+        # Отвъд тавана на частите на хода нищо не се добавя.
+        whole = "".join(parts[:web.LIVE_MAX_DELTAS])
+        assert text[1:] == whole[-web.LIVE_MAX_CHARS:]
+        # Една огромна част — само краят ѝ.
+        app._event(2, {"kind": "delta", "text": "x" * (3 * web.LIVE_MAX_CHARS) + "КРАЙ", "start": True})
+        assert app._live[2].size == web.LIVE_MAX_CHARS and app.live_text(2).endswith("КРАЙ")
+    finally:
+        app.pool.shutdown(wait=True)
+
+
 class _StreamingRunner:
     def __init__(self) -> None:
         self.gate = threading.Event()

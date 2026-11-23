@@ -49,7 +49,7 @@ import time
 import unicodedata
 import uuid
 import zipfile
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -95,6 +95,49 @@ LOGIN_FAILURES = 5
 TURNS_PER_DAY = 50
 # Текстът на живо на един ход (поток "delta", 2026-11-23) — краят му, ако е по-дълъг.
 LIVE_MAX_CHARS = 64 * 1024
+# Части в паметта на един ход най-много; над тях се слепват в една (ревю
+# 2026-11-23: `текст + част` под общата ключалка беше квадратично копиране —
+# хиляди бързи части от чуждия код в контейнера държаха ключалката на всички).
+LIVE_MAX_CHUNKS = 256
+# Части на ход най-много (след тях — пренебрегват се; крайният отговор пак идва).
+LIVE_MAX_DELTAS = 20_000
+
+
+class _LiveText:
+    """Текстът на живо на един ход: части в deque с текуща дължина, орязани
+    отпред до LIVE_MAX_CHARS. Добавянето е O(част) (слепването на LIVE_MAX_CHUNKS
+    части е O(LIVE_MAX_CHARS) веднъж на 256 — линейно общо); целият низ се
+    сглобява само при четене (live_text)."""
+
+    __slots__ = ("chunks", "count", "size", "trimmed")
+
+    def __init__(self) -> None:
+        self.chunks: deque[str] = deque()
+        self.size = 0
+        self.count = 0
+        self.trimmed = False
+
+    def add(self, text: str) -> None:
+        self.count += 1
+        if len(text) >= LIVE_MAX_CHARS:
+            self.chunks.clear()
+            self.size, self.trimmed = 0, True
+            text = text[-LIVE_MAX_CHARS:]
+        self.chunks.append(text)
+        self.size += len(text)
+        while self.size > LIVE_MAX_CHARS:
+            head = self.chunks.popleft()
+            self.size -= len(head)
+            self.trimmed = True
+            if self.size < LIVE_MAX_CHARS:
+                keep = head[len(head) - (LIVE_MAX_CHARS - self.size):]
+                self.chunks.appendleft(keep)
+                self.size += len(keep)
+        if len(self.chunks) > LIVE_MAX_CHUNKS:
+            self.chunks = deque(["".join(self.chunks)])
+
+    def text(self) -> str:
+        return ("…" if self.trimmed else "") + "".join(self.chunks)
 MONTHLY_CAP = 2000 * MICRO
 HIDDEN = ".genesis"          # историята на разговора (task.py) — не е за сваляне
 # През колко секунди shutdown() почиства отново, докато чака живите ходове.
@@ -182,7 +225,7 @@ class App:
         # Текстът на модела, докато пристига (поток "delta", 2026-11-23), по ход.
         # Само в паметта, не в базата: частите са до ~4 на секунда и иначе пълнеха
         # web.db и тавана от 2000 събития на ход. Крайният отговор е в базата.
-        self._live: dict[int, str] = {}
+        self._live: dict[int, _LiveText] = {}
         self._cleanup = cleanup or launch.cleanup_leftovers
         self._stopping = threading.Event()
         self._futures: set[Future[None]] = set()
@@ -631,16 +674,17 @@ class App:
             if not isinstance(text, str):
                 return
             with self._lock:
+                live = self._live.get(turn_id)
                 if event.get("start") is True:
-                    live = text
-                elif turn_id in self._live:
-                    live = self._live[turn_id] + text
-                else:
+                    # Нов опит: таванът на частите остава за целия ход.
+                    count = live.count if live is not None else 0
+                    live = self._live[turn_id] = _LiveText()
+                    live.count = count
+                elif live is None:
                     return
-                if len(live) > LIVE_MAX_CHARS:
-                    # Кодът в контейнера е чужд: таван и на текста на живо.
-                    live = "…" + live[-LIVE_MAX_CHARS:]
-                self._live[turn_id] = live
+                # Кодът в контейнера е чужд: таван на броя и на размера.
+                if live.count < LIVE_MAX_DELTAS:
+                    live.add(text)
             return
         if kind not in ("progress", "thinking"):
             with self._lock:
@@ -649,7 +693,8 @@ class App:
 
     def live_text(self, turn_id: int) -> str:
         with self._lock:
-            return self._live.get(turn_id, "")
+            live = self._live.get(turn_id)
+            return live.text() if live is not None else ""
 
     def _forget(self, fut: Future[None]) -> None:
         with self._lock:
