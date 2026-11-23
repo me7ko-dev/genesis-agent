@@ -1,9 +1,11 @@
+import * as Clipboard from 'expo-clipboard';
 import { memo, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { confirmChoices, todoSummary, type ChatItem } from '../lib/chat';
 import type { Todo } from '../lib/protocol';
-import { mono, useTheme } from '../lib/theme';
+import { mono, useTheme, type Theme } from '../lib/theme';
+import { diffLines, toolHeader, toolLook, toolTitle, workSummary, workTitle, type DiffLine } from '../lib/turns';
 import { RichText } from './RichText';
 
 type Item<K extends ChatItem['kind']> = Extract<ChatItem, { kind: K }>;
@@ -12,9 +14,32 @@ type Item<K extends ChatItem['kind']> = Extract<ChatItem, { kind: K }>;
 // така ново „thinking“ не рисува пак всяка карта и не разбира Markdown-а
 // наново (одит 2026-10-11).
 
+/** „Копирай“ (2026-11-23): избирането на текст с пръст през три екрана не
+ *  става — цялото съобщение с едно докосване, както в Desktop от 20.11. */
+function CopyButton({ text, label, align }: { text: string; label: string; align?: 'flex-end' }) {
+  const theme = useTheme();
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await Clipboard.setStringAsync(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1400);
+    } catch (e) {
+      console.warn('genesis: copy', e instanceof Error ? e.message : String(e));
+    }
+  };
+  return (
+    <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={copy} hitSlop={8}
+      style={[styles.action, align ? { alignSelf: align } : null]}>
+      <Text style={[styles.small, { color: copied ? theme.ok : theme.muted }]}>{copied ? '✓ копирано' : '⧉ копирай'}</Text>
+    </Pressable>
+  );
+}
+
 export const UserBubble = memo(function UserBubble({ item }: { item: Item<'user'> }) {
   const theme = useTheme();
   return (
+    <View style={styles.userCol}>
     <View style={[styles.user, { backgroundColor: theme.userBubble }]}>
       {/* Снимките идват само като име (2026-10-15) — байтовете остават на компютъра. */}
       {item.images.length ? (
@@ -27,6 +52,8 @@ export const UserBubble = memo(function UserBubble({ item }: { item: Item<'user'
         </View>
       ) : null}
       <Text selectable style={[styles.userText, { color: theme.userText }]}>{item.text}</Text>
+    </View>
+    {item.text ? <CopyButton text={item.text} label="Копирай съобщението" align="flex-end" /> : null}
     </View>
   );
 });
@@ -44,6 +71,7 @@ export const AssistantMessage = memo(function AssistantMessage({ item, speech, o
   return (
     <View style={styles.assistant}>
       <RichText text={item.text} />
+      <View style={styles.actions}>
       {onSpeak ? (
         <Pressable
           accessibilityRole="button"
@@ -56,26 +84,45 @@ export const AssistantMessage = memo(function AssistantMessage({ item, speech, o
             : <Text style={[styles.small, { color: theme.muted }]}>{speech === 'playing' ? '■ спри' : '▶ на глас'}</Text>}
         </Pressable>
       ) : null}
+      {item.text ? <CopyButton text={item.text} label="Копирай отговора" /> : null}
+      </View>
     </View>
   );
 });
 
-export const ToolCard = memo(function ToolCard({ item }: { item: Item<'tool'> }) {
+function diffColor(kind: DiffLine['kind'], theme: Theme): string {
+  return kind === 'add' ? theme.ok : kind === 'del' ? theme.danger : kind === 'plain' ? theme.text : theme.muted;
+}
+
+/** Картата на един инструмент (2026-11-23, като в Desktop от 20.11): „Чете
+ *  calc.py“ вместо „🔧 READ_FILE“ и пълния път; без `cd <папката> &&`;
+ *  многоредова команда — с първия ред; промените в зелено/червено. */
+export const ToolCard = memo(function ToolCard({ item, workspace }: { item: Item<'tool'>; workspace?: string }) {
   const theme = useTheme();
   const [open, setOpen] = useState(false);
-  const first = item.result.split('\n').find((l) => l.trim()) ?? '';
+  const look = toolLook(item.name);
+  const head = toolHeader(item.name, item.result, workspace);
+  const title = toolTitle(item.name);
+  const diff = open ? diffLines(item.result) : null;
   return (
     <Pressable
       onPress={() => setOpen((o) => !o)}
       accessibilityRole="button"
-      accessibilityLabel={`Инструмент ${item.name}, ${open ? 'свий' : 'разгъни'}`}
-      style={[styles.tool, { backgroundColor: theme.surfaceAlt, borderColor: theme.border }]}>
-      <Text style={[styles.toolName, { color: theme.muted }]}>
-        {open ? '▾' : '▸'} 🔧 {item.name}
+      accessibilityLabel={`${title} ${head.target}${head.failed ? ', грешка' : ''}, ${open ? 'свий' : 'разгъни'}`}
+      style={[styles.tool, { backgroundColor: theme.surfaceAlt, borderColor: head.failed ? theme.danger : theme.border }]}>
+      <Text numberOfLines={open ? undefined : 2} style={[styles.toolName, { color: theme.muted }]}>
+        {open ? '▾' : '▸'} {look.icon} {title}
+        {head.target ? <Text style={[mono, styles.toolTarget, { color: theme.text }]}>{'  '}{head.target}</Text> : null}
+        {head.extra ? <Text style={styles.toolExtra}>{'  '}{head.extra}</Text> : null}
+        {head.failed ? <Text style={{ color: theme.danger }}>{'  '}грешка</Text> : null}
       </Text>
-      <Text selectable style={[mono, styles.toolBody, { color: theme.text }]} numberOfLines={open ? undefined : 2}>
-        {open ? item.result : first}
-      </Text>
+      {open ? (
+        <Text selectable style={[mono, styles.toolBody, { color: theme.text }]}>
+          {diff ? diff.map((l, i) => (
+            <Text key={i} style={{ color: diffColor(l.kind, theme) }}>{l.text}{i < diff.length - 1 ? '\n' : ''}</Text>
+          )) : item.result}
+        </Text>
+      ) : null}
       {open && item.clipped ? (
         <Text style={[styles.small, { color: theme.muted }]}>… съкратено — пълното е на компютъра</Text>
       ) : null}
@@ -83,7 +130,13 @@ export const ToolCard = memo(function ToolCard({ item }: { item: Item<'tool'> })
   );
 });
 
-export const Note = memo(function Note({ item }: { item: Item<'note'> }) {
+export const Note = memo(function Note({ item, retry, onRetry }: {
+  item: Item<'note'>;
+  /** Грешката, с която свърши последният ход: „Опитай пак“ праща това съобщение. */
+  retry?: string;
+  /** Стабилна функция (не нова стрелка на всеки рендер) — иначе memo не пази картата. */
+  onRetry?: (text: string) => void;
+}) {
   const theme = useTheme();
   const color = item.tone === 'error' ? theme.danger
     : item.tone === 'info' || item.tone === 'progress' ? theme.muted : theme.warn;
@@ -99,7 +152,55 @@ export const Note = memo(function Note({ item }: { item: Item<'note'> }) {
   if (item.tone === 'progress') {
     return <Text selectable style={[mono, styles.progress, { color }]}>{item.text.trim()}</Text>;
   }
-  return <Text selectable style={[styles.note, { color }]}>{icon ? `${icon} ` : ''}{item.text}</Text>;
+  const text = <Text selectable style={[styles.note, { color }]}>{icon ? `${icon} ` : ''}{item.text}</Text>;
+  if (!retry || !onRetry) return text;
+  return (
+    <View style={styles.retryWrap}>
+      {text}
+      <Pressable accessibilityRole="button" accessibilityHint="Праща същото съобщение пак"
+        onPress={() => onRetry(retry)} style={[styles.retry, { borderColor: theme.border }]}>
+        <Text style={[styles.retryText, { color: theme.text }]}>↻ Опитай пак</Text>
+      </Pressable>
+    </View>
+  );
+});
+
+/**
+ * Стъпките на един ход в една сгъваема група (2026-11-23, като в Desktop от
+ * 20.11). Докато ходът върви, е отворена и се пълни на живо; щом свърши —
+ * сгъва се до един ред „Работа · 3 стъпки · промени calc.py“.
+ */
+export const WorkGroup = memo(function WorkGroup({ items, live, workspace }: {
+  items: ChatItem[]; live: boolean; workspace?: string;
+}) {
+  const theme = useTheme();
+  const [manual, setManual] = useState<boolean | null>(null);
+  const open = manual ?? live;
+  const failed = workSummary(items, workspace).failed;
+  const title = workTitle(items, workspace);
+  return (
+    <View style={styles.work}>
+      <Pressable
+        onPress={() => setManual(!open)}
+        accessibilityRole="button"
+        accessibilityLabel={`${live ? 'Работи' : 'Работа'}, ${title}, ${open ? 'свий' : 'разгъни'}`}
+        style={[styles.workHead, { backgroundColor: theme.surfaceAlt, borderColor: theme.border }]}>
+        {live ? <ActivityIndicator size="small" color={theme.accent} /> : null}
+        <Text numberOfLines={2} style={[styles.workTitle, { color: theme.muted }]}>
+          {open ? '▾' : '▸'} {live ? '' : '🔧 '}
+          <Text style={{ color: theme.text }}>{live ? 'Работи' : 'Работа'}</Text>
+          {' · '}{title}
+          {failed > 0 ? <Text style={{ color: theme.danger }}>{'  '}✗ {failed}</Text> : null}
+        </Text>
+      </Pressable>
+      {open ? (
+        <View style={[styles.workBody, { borderColor: theme.border }]}>
+          {items.map((it) => (it.kind === 'tool' ? <ToolCard key={it.key} item={it} workspace={workspace} />
+            : it.kind === 'note' ? <Note key={it.key} item={it} /> : null))}
+        </View>
+      ) : null}
+    </View>
+  );
 });
 
 const TODO_MARK: Record<Todo['status'], string> = { pending: '☐', in_progress: '▶', completed: '☑' };
@@ -193,15 +294,27 @@ export const ConfirmCard = memo(function ConfirmCard({ item, onAnswer }: {
 });
 
 const styles = StyleSheet.create({
-  user: { alignSelf: 'flex-end', maxWidth: '85%', borderRadius: 18, borderBottomRightRadius: 4, paddingHorizontal: 14, paddingVertical: 9 },
+  userCol: { alignSelf: 'flex-end', maxWidth: '85%', gap: 2 },
+  user: { alignSelf: 'flex-end', maxWidth: '100%', borderRadius: 18, borderBottomRightRadius: 4, paddingHorizontal: 14, paddingVertical: 9 },
   userText: { fontSize: 16, lineHeight: 22 },
   assistant: { paddingVertical: 2 },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 4 },
   chip: { fontSize: 12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8, paddingHorizontal: 6, paddingVertical: 2, maxWidth: 200 },
-  speak: { alignSelf: 'flex-start', marginTop: 4, borderWidth: StyleSheet.hairlineWidth, borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4, minWidth: 70, alignItems: 'center' },
+  actions: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 4 },
+  action: { paddingVertical: 2 },
+  speak: { alignSelf: 'flex-start', borderWidth: StyleSheet.hairlineWidth, borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4, minWidth: 70, alignItems: 'center' },
   tool: { borderRadius: 10, borderWidth: StyleSheet.hairlineWidth, padding: 10, gap: 4 },
   toolName: { fontSize: 13, fontWeight: '600' },
+  toolTarget: { fontSize: 12, fontWeight: '400' },
+  toolExtra: { fontSize: 12, fontWeight: '400' },
   toolBody: { fontSize: 12, lineHeight: 17 },
+  work: { gap: 6 },
+  workHead: { flexDirection: 'row', alignItems: 'center', gap: 8, borderRadius: 10, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 10, paddingVertical: 8 },
+  workTitle: { flex: 1, fontSize: 13, fontWeight: '600' },
+  workBody: { gap: 6, marginLeft: 8, paddingLeft: 8, borderLeftWidth: 2 },
+  retryWrap: { gap: 8, alignItems: 'flex-start' },
+  retry: { borderWidth: 1, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 8 },
+  retryText: { fontSize: 14, fontWeight: '600' },
   small: { fontSize: 12 },
   note: { fontSize: 13, lineHeight: 18 },
   progress: { fontSize: 12, lineHeight: 16 },
