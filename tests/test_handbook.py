@@ -112,3 +112,79 @@ def test_note_goes_into_a_conversation_once(book):
     text, names = handbook.fresh_notes(said, [])
     assert names == ["deploy"]
     assert handbook.fresh_notes("пак качване в cloudflare", [f"{said}\n\n{text}"]) == ("", [])
+
+
+# ── 2026-11-23: преглед на PR #128 преди сливане ────────────────────────────
+
+def test_note_saved_with_bom_is_read(book):
+    # Windows PowerShell 5.1 (`Set-Content -Encoding utf8`) и старият Notepad
+    # слагат BOM в началото. С него главата „---“ не е на първа позиция и
+    # бележката изчезваше без нито един ред на екрана.
+    book.mkdir(parents=True)
+    (book / "deploy.md").write_bytes(
+        b"\xef\xbb\xbf" + "---\r\ntriggers:\r\n- качване в cloudflare\r\n---\r\nwrangler deploy\r\n".encode())
+    handbook.reload()
+    assert "wrangler deploy" in handbook.handbook_context("направи качване в cloudflare")
+
+
+def test_total_stays_within_the_budget_with_headers(book):
+    # „Общо 3000 знака“ важи за всичко, което се лепи, не само за телата:
+    # заглавните редове на две бележки са още ~300 знака над тавана.
+    _note(book, "a", ["pytest пада"], "ред от бележката\n" * 170)   # ~2900 знака
+    _note(book, "b", ["pytest пада"], "втора бележка\n" * 200)
+    handbook.reload()
+    out = handbook.handbook_context("pytest пада с грешка")
+    assert "ред от бележката" in out
+    assert len(out) <= handbook.MAX_CHARS
+
+
+def test_cut_keeps_most_of_a_note_without_line_breaks(book):
+    # Рязането на последния нов ред не бива да изяде бележката: един къс
+    # първи ред и дълъг абзац след него оставяха само първия ред.
+    _note(book, "big", ["голяма бележка"], "заглавие\n" + "дума " * 2000)
+    handbook.reload()
+    out = handbook.handbook_context("отвори голямата бележка")
+    assert len(out) > handbook.MAX_CHARS // 2
+    assert len(out) <= handbook.MAX_CHARS
+
+
+def test_note_added_while_running_is_seen(book):
+    # Чатът и `genesis serve` работят с часове. Бележка, записана междувременно,
+    # трябва да важи от следващата заявка, не след рестарт.
+    _note(book, "shop", ["магазин"], "Папка Projects/shop.")
+    assert handbook.handbook_context("пусни тестовете на магазина") != ""
+    _note(book, "deploy", ["качване в cloudflare"], "wrangler deploy")
+    assert "wrangler deploy" in handbook.handbook_context("направи качване в cloudflare")
+    (book / "deploy.md").unlink()
+    assert handbook.handbook_context("направи качване в cloudflare") == ""
+
+
+def test_chat_turn_carries_the_note_once(book, monkeypatch):
+    # Самото лепене в чата (run_turn) — модулът беше покрит, връзката не.
+    import contextlib
+    from collections import deque
+
+    import genesis_terminal_agent as gta
+    _note(book, "deploy", ["качване в cloudflare"], "Командата е wrangler deploy.")
+    handbook.reload()
+    monkeypatch.setattr(gta, "ask_genesis", lambda m, tools=None: ("", None))
+    shown: list[str] = []
+
+    class UI(gta.TurnUI):
+        def thinking(self, label, spinner="dots"): return contextlib.nullcontext()
+        def assistant(self, text): pass
+        def tool(self, name, result): pass
+        def asked(self, question): pass
+        def spinning(self, note): pass
+        def warn(self, text): pass
+        def info(self, text): shown.append(text)
+        def cancelled(self): return False
+
+    msgs = gta.run_turn(deque([{"role": "system", "content": "s"}], maxlen=30),
+                        "направи качване в cloudflare", UI())
+    msgs = gta.run_turn(msgs, "пак качване в cloudflare", UI())
+    said = [m["content"] for m in msgs if m["role"] == "user"]
+    assert said[0].startswith("направи качване в cloudflare\n\n## Бележка от наръчника: deploy\n")
+    assert "wrangler deploy" in said[0]
+    assert "Бележка от наръчника" not in said[1]
+    assert [s for s in shown if "наръчника" in s] == ["📒 от наръчника: deploy"]

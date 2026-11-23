@@ -40,9 +40,12 @@ log = logging.getLogger("genesis.handbook")
 MAX_CHARS = 3000
 MAX_NOTES = 2
 HEADER = "## Бележка от наръчника: "
+_CUT_MARK = "\n[…бележката е съкратена]"
 
 _FRONTMATTER = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n?", re.DOTALL)
 _CACHE: dict[str, dict[str, Any]] | None = None
+# Отпечатък на папката при последното четене (2026-11-23), виж _notes.
+_STAMP: tuple[Any, ...] | None = None
 
 
 def handbook_dir() -> Path:
@@ -53,16 +56,33 @@ def handbook_dir() -> Path:
     return paths.GENESIS_HOME / "handbook"
 
 
+def _stamp(folder: Path) -> tuple[Any, ...]:
+    """Папката и за всяка бележка име, час на промяна и размер — евтин знак,
+    че нещо е добавено, пипнато или изтрито."""
+    files: list[tuple[str, int, int]] = []
+    try:
+        for path in sorted(folder.glob("*.md")):
+            st = path.stat()
+            files.append((path.name, st.st_mtime_ns, st.st_size))
+    except OSError:
+        pass
+    return (str(folder), *files)
+
+
 def reload() -> dict[str, dict[str, Any]]:
     """Чете бележките наново от диска. Счупена бележка се пропуска с ред в
     дневника — една грешка в YAML не бива да скрие останалите."""
-    global _CACHE
+    global _CACHE, _STAMP
     notes: dict[str, dict[str, Any]] = {}
     folder = handbook_dir()
+    stamp = _stamp(folder)
     if folder.is_dir():
         for path in sorted(folder.glob("*.md")):
             try:
-                text = path.read_text(encoding="utf-8")
+                # utf-8-sig (2026-11-23): Windows PowerShell 5.1 и старият
+                # Notepad слагат BOM; с него „---“ не е в началото и бележката
+                # се пропускаше мълчаливо (test_note_saved_with_bom_is_read).
+                text = path.read_text(encoding="utf-8-sig")
                 head = _FRONTMATTER.match(text)
                 if not head:
                     continue
@@ -78,12 +98,17 @@ def reload() -> dict[str, dict[str, Any]]:
                                     "triggers": triggers, "body": body}
             except Exception:
                 log.debug("бележката %s не се прочете", path.name, exc_info=True)
-    _CACHE = notes
+    _CACHE, _STAMP = notes, stamp
     return notes
 
 
 def _notes() -> dict[str, dict[str, Any]]:
-    return reload() if _CACHE is None else _CACHE
+    # Преди 2026-11-23 кешът живееше до края на процеса: бележка, записана
+    # докато чатът или `genesis serve` работи, не важеше до рестарт. Сега се
+    # чете наново, щом папката се е променила; иначе е по едно stat на бележка.
+    if _CACHE is None or _STAMP != _stamp(handbook_dir()):
+        return reload()
+    return _CACHE
 
 
 def _ranked(query: str) -> list[dict[str, Any]]:
@@ -142,14 +167,24 @@ def fresh_notes(query: str, earlier: list[str]) -> tuple[str, list[str]]:
     names: list[str] = []
     left = MAX_CHARS
     for note in hits:
-        if left < 200:
+        head = (f"{HEADER}{note['name']}\n"
+                "Това е записано от оператора за неговите проекти и машина — довери му се "
+                "преди собствените си предположения.\n")
+        # Таванът е за всичко залепено (2026-11-23): преди се брояха само
+        # телата и две бележки излизаха ~3300 знака при обявени 3000.
+        room = left - len(head) - (2 if parts else 0)
+        if room < 200:
             break
-        names.append(note["name"])
         body = note["body"]
-        if len(body) > left:
-            body = body[:left].rsplit("\n", 1)[0] + "\n[…бележката е съкратена]"
-        parts.append(f"{HEADER}{note['name']}\n"
-                     "Това е записано от оператора за неговите проекти и машина — довери му се "
-                     "преди собствените си предположения.\n" + body)
-        left -= len(body)
+        if len(body) > room:
+            cut = body[:room - len(_CUT_MARK)]
+            # На нов ред — само ако не се губи повече от половината: къс първи
+            # ред и дълъг абзац след него оставяха от бележката едно заглавие.
+            line_end = cut.rfind("\n")
+            if line_end >= len(cut) // 2:
+                cut = cut[:line_end]
+            body = cut.rstrip() + _CUT_MARK
+        names.append(note["name"])
+        parts.append(head + body)
+        left = room - len(body)
     return "\n\n".join(parts), names
