@@ -37,6 +37,8 @@ import re
 import threading
 import time
 from collections import deque
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -103,6 +105,254 @@ def _post_with_deadline(url: str, *, headers: dict, json: dict, timeout: int,
         deadline = timeout * _TOTAL_DEADLINE_FACTOR
     worker.join(deadline)
     if worker.is_alive():
+        raise requests.exceptions.Timeout(f"няма отговор за {deadline} s (общ краен срок)")
+    if "e" in box:
+        raise box["e"]
+    return box["r"]
+
+
+# ── поток дума по дума (2026-11-23) ─────────────────────────────────────────
+# Чатът в Desktop и в облака показваше отговора наведнъж, чак в края — при
+# 30–60 s отговор човекът гледа „Мисли…“ и не знае дали нещо става. Сега, ако
+# извикващият е поискал (stream_deltas около complete()), доставчикът се пита
+# поточно и всяка част ТЕКСТ отива към него веднага. Само текстът: tool-call
+# JSON-ът и размисълът (thinking) не се показват. Крайният отговор, проверките
+# по него, историята (кешът на Anthropic) и сметката са същите — потокът е
+# само за очите. Без stream_deltas нищо не се мени: същата заявка, както преди.
+
+_STREAM = threading.local()
+
+
+@contextmanager
+def stream_deltas(on_delta: Callable[[str, bool], None] | None) -> Iterator[None]:
+    """Докато е активно в ТАЗИ нишка, всяка поточна заявка на Brain праща
+    частите текст към `on_delta(text, start)`. `start` е True за първата част
+    на всяка нова заявка (следващ модел във веригата, повторен опит) — тогава
+    показаното дотук е от отказан опит и се изтрива."""
+    previous = getattr(_STREAM, "sink", None)
+    _STREAM.sink = on_delta
+    try:
+        yield
+    finally:
+        _STREAM.sink = previous
+
+
+def _delta_writer() -> Callable[[str], None] | None:
+    """Пише към приемника на тази нишка, или None — тогава заявката не е
+    поточна. Грешка в приемника (затворен прозорец) не бива да събаря хода."""
+    sink = getattr(_STREAM, "sink", None)
+    if sink is None:
+        return None
+    first = [True]
+
+    def write(text: str) -> None:
+        if not text:
+            return
+        start, first[0] = first[0], False
+        try:
+            sink(text, start)
+        except Exception:
+            log.debug("приемникът на потока се провали", exc_info=True)
+    return write
+
+
+class DeltaBatcher:
+    """Частите на потока на порции: OpenAI-съвместимите пращат по токен (~50 в
+    секунда) — събитие за всеки би напълнило дневника на `genesis serve` (1000
+    събития) за 20 s и би карало прозореца да рисува 50 пъти в секунда. Най-много
+    една порция на `every` s; `start` (нов опит) изхвърля чакащото от стария и
+    тръгва веднага. Остатъкът се праща след `every` s (таймер): между текста и
+    дълъг tool_use (WRITE_FILE) моделът мълчи с десетки секунди, а последните
+    думи иначе чакаха чак крайния отговор."""
+
+    def __init__(self, emit: Callable[[str, bool], None], every: float = 0.05) -> None:
+        self._emit = emit
+        self._every = every
+        self._lock = threading.Lock()
+        self._buf: list[str] = []
+        self._last = 0.0
+        self._start = False
+        self._timer: threading.Timer | None = None
+
+    def __call__(self, text: str, start: bool = False) -> None:
+        with self._lock:
+            if start:
+                self._buf, self._start = [], True
+            self._buf.append(text)
+            if not self._start and time.monotonic() - self._last < self._every:
+                if self._timer is None:
+                    self._timer = threading.Timer(self._every, self.flush)
+                    self._timer.daemon = True
+                    self._timer.start()
+                return
+            self._send()
+
+    def flush(self) -> None:
+        with self._lock:
+            self._timer = None
+            if self._buf:
+                self._send()
+
+    def drop(self) -> None:
+        """Потокът свърши без текст: чакащото не се праща."""
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+            self._buf, self._start = [], False
+
+    def _send(self) -> None:
+        chunk, first = "".join(self._buf), self._start
+        self._buf, self._start, self._last = [], False, time.monotonic()
+        # Под ключалката: редът на порциите е редът на текста.
+        self._emit(chunk, first)
+
+
+class _StreamedReply:
+    """Отговорът, сглобен от SSE потока — същото, което _http чете от
+    requests.Response (status_code, json(), text, headers)."""
+
+    def __init__(self, body: dict, raw: str, headers: Any = None) -> None:
+        self.status_code = 200
+        self._body = body
+        self.text = raw
+        self.headers = headers or {}
+
+    def json(self) -> dict:
+        return self._body
+
+
+def _sse_reply(lines: Any, write: Callable[[str], None], headers: Any = None) -> _StreamedReply:
+    """OpenAI-съвместим поток (`data: {...}` редове) → тяло като без stream:
+    {"choices": [{"message": {content, tool_calls}, "finish_reason"}], "usage"}.
+    Текстът отива към `write`, докато пристига; tool_calls се сглобяват по
+    `index` (името идва веднъж, аргументите на парчета)."""
+    parts: list[str] = []
+    reasoning: list[str] = []
+    calls: dict[int, dict[str, Any]] = {}
+    finish = ""
+    usage: Any = None
+    error: Any = None
+    seen_choice = False
+    raw_head: list[str] = []
+    for line in lines:
+        if isinstance(line, bytes):
+            line = line.decode("utf-8", "replace")
+        line = line.strip()
+        if len(raw_head) < 20:
+            raw_head.append(line)
+        if not line.startswith("data:"):
+            continue   # празен ред, `: keep-alive`, `event: …`
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data)
+        except ValueError:
+            continue
+        if not isinstance(chunk, dict):
+            continue
+        if chunk.get("error"):
+            # Грешка посред потока (OpenRouter я праща като `data: {"error": …}`)
+            # — тяло без choices → HTTP_200_MALFORMED → следващият модел.
+            error = chunk["error"]
+            break
+        if isinstance(chunk.get("usage"), dict):
+            usage = chunk["usage"]
+        choices = chunk.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            continue
+        seen_choice = True
+        choice = choices[0]
+        delta = choice.get("delta") or choice.get("message") or {}
+        if not isinstance(delta, dict):
+            delta = {}
+        content = delta.get("content")
+        if isinstance(content, list):
+            content = "".join(str(p.get("text") or "") for p in content if isinstance(p, dict))
+        if isinstance(content, str) and content:
+            parts.append(content)
+            write(content)
+        for key in ("reasoning", "reasoning_content"):
+            if isinstance(delta.get(key), str):
+                reasoning.append(delta[key])
+        for pos, tc in enumerate(delta.get("tool_calls") or []):
+            if not isinstance(tc, dict):
+                continue
+            raw_idx = tc.get("index")
+            idx = raw_idx if isinstance(raw_idx, int) else pos
+            entry = calls.setdefault(idx, {"id": None, "type": "function",
+                                           "function": {"name": "", "arguments": ""}})
+            if tc.get("id"):
+                entry["id"] = tc["id"]
+            raw_fn = tc.get("function")
+            fn: dict[str, Any] = raw_fn if isinstance(raw_fn, dict) else {}
+            if fn.get("name") and not entry["function"]["name"]:
+                entry["function"]["name"] = str(fn["name"])
+            if isinstance(fn.get("arguments"), str):
+                entry["function"]["arguments"] += fn["arguments"]
+            # Останалото (напр. extra_content с thought_signature на Gemini)
+            # трябва да се върне със следващата заявка — пази се както идва.
+            for k, v in tc.items():
+                if k not in ("index", "id", "function", "type"):
+                    entry[k] = v
+        if choice.get("finish_reason"):
+            finish = str(choice["finish_reason"])
+    raw = "\n".join(raw_head)
+    if error is not None:
+        return _StreamedReply({"error": error}, raw, headers)
+    if not seen_choice:
+        return _StreamedReply({"choices": [], "usage": usage}, raw, headers)
+    tool_calls = [calls[i] for i in sorted(calls)]
+    message: dict[str, Any] = {"role": "assistant",
+                               "content": "".join(parts) if parts or not tool_calls else None}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    if reasoning:
+        message["reasoning"] = "".join(reasoning)
+    return _StreamedReply({"choices": [{"index": 0, "message": message, "finish_reason": finish or None}],
+                           "usage": usage}, raw, headers)
+
+
+def _post_stream_with_deadline(url: str, *, headers: dict, json: dict, timeout: int,
+                               write: Callable[[str], None],
+                               deadline: float | None = None) -> Any:
+    """Като _post_with_deadline, но поточно: текстът тръгва към `write`, докато
+    пристига, а връщането е като от обикновена заявка. Отговор, който не е
+    поток (грешка 4xx/5xx или доставчик, който пренебрегва `stream`), се
+    връща такъв, какъвто е. След крайния срок нищо повече не стига до `write`."""
+    box: dict[str, Any] = {}
+    alive = threading.Event()
+    alive.set()
+
+    def guarded(text: str) -> None:
+        if alive.is_set():
+            write(text)
+
+    def _run() -> None:
+        try:
+            with requests.post(url, headers=headers, json=json, timeout=timeout,
+                               stream=True) as r:
+                ctype = str(r.headers.get("content-type") or "").lower()
+                if r.status_code != 200 or "text/event-stream" not in ctype:
+                    _ = r.content   # тялото се чете, преди връзката да се затвори
+                    box["r"] = r
+                    return
+                # chunk_size=None: всяка част идва веднага, щом пристигне (не чака 512 B).
+                # Описанието на типовете в requests не го позволява, а самата
+                # библиотека го поддържа (2026-11-23, mypy в CI с types-requests).
+                box["r"] = _sse_reply(r.iter_lines(chunk_size=None),  # type: ignore[call-overload]
+                                      guarded, r.headers)
+        except BaseException as e:  # noqa: BLE001 — предава се на викащата нишка, която я хвърля
+            box["e"] = e
+
+    worker = threading.Thread(target=_run, daemon=True, name="genesis-http-stream")
+    worker.start()
+    if deadline is None:
+        deadline = timeout * _TOTAL_DEADLINE_FACTOR
+    worker.join(deadline)
+    if worker.is_alive():
+        alive.clear()
         raise requests.exceptions.Timeout(f"няма отговор за {deadline} s (общ краен срок)")
     if "e" in box:
         raise box["e"]
@@ -1474,11 +1724,24 @@ class Brain:
         if extra:
             payload.update(extra)
         url = f"{base_url}/chat/completions"
+        write = _delta_writer()
+        r = None
+        if write is not None:
+            # Поточно само когато някой гледа (stream_deltas, 2026-11-23). Тялото
+            # на заявката е същото + stream; отговорът се сглобява в същия вид,
+            # затова всичко по-долу (празен, отрязан, tool_calls) е непроменено.
+            streamed = {**payload, "stream": True, "stream_options": {"include_usage": True}}
+            r = _post_stream_with_deadline(url, headers=headers, json=streamed, timeout=timeout,
+                                           write=write, deadline=self.total_deadline)
+            if r.status_code == 400 and "stream" in str(getattr(r, "text", "")).lower():
+                # Доставчик, който не приема stream/stream_options: веднъж
+                # наново, без поток — както преди 2026-11-23.
+                r = None
         # deadline само когато е зададен: заместителите на _post_with_deadline
         # в тестовете приемат точно (url, headers, json, timeout).
-        if self.total_deadline is None:
+        if r is None and self.total_deadline is None:
             r = _post_with_deadline(url, headers=headers, json=payload, timeout=timeout)
-        else:
+        elif r is None:
             r = _post_with_deadline(url, headers=headers, json=payload, timeout=timeout,
                                     deadline=self.total_deadline)
         if r.status_code == 429:
@@ -1676,9 +1939,19 @@ class Brain:
 
     def _anthropic_final(self, api: Any, params: dict[str, Any], **extra: Any) -> Any:
         """Поточна заявка, върнат е само крайният отговор (виж
-        ANTHROPIC_STREAM_MAX_TOKENS) — за веригата същото като create()."""
+        ANTHROPIC_STREAM_MAX_TOKENS) — за веригата същото като create().
+        Със stream_deltas (2026-11-23) частите текст (text_delta) тръгват към
+        чата, докато пристигат; размисълът и JSON-ът на tool_use — не."""
+        write = _delta_writer()
         with api.stream(**extra, **params) as stream:
             try:
+                if write is not None:
+                    for event in stream:
+                        if getattr(event, "type", "") != "content_block_delta":
+                            continue
+                        delta = getattr(event, "delta", None)
+                        if getattr(delta, "type", "") == "text_delta":
+                            write(str(getattr(delta, "text", "") or ""))
                 return stream.get_final_message()
             except BaseException:
                 # Скъсан поток след message_start (одит 2026-10-27): входът вече

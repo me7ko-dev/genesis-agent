@@ -166,6 +166,21 @@ function renderEvent(box, e) {
   if (node) box.insertBefore(node, box.status);
 }
 
+// Поток дума по дума (2026-11-23): "live" в отговора на /events е текстът на
+// модела, докато пристига. Един балон на ход; новите събития (крайният отговор
+// е сред тях) го махат, а ако потокът още тече — той се връща след тях.
+function renderLive(box, text) {
+  if (!text) {
+    if (box.live) { box.live.remove(); box.live = null; }
+    return;
+  }
+  if (!box.live) {
+    box.live = el("div", "msg assistant live");
+    box.insertBefore(box.live, box.status);
+  }
+  box.live.textContent = text;
+}
+
 function renderStatus(box, t) {
   const s = box.status;
   s.className = "msg status";
@@ -250,12 +265,18 @@ async function poll(turnId, box, seq) {
   let data;
   try { data = await api(`/api/turns/${turnId}/events?after=${seq}`); }
   catch { polling = setTimeout(() => poll(turnId, box, seq), 3000); return; }
-  for (const e of data.events) { renderEvent(box, e); seq = e.seq; }
-  renderStatus(box, data);
   const log = $("log");
-  log.scrollTop = log.scrollHeight;
+  // Следи края, само ако си там: с текста на живо страницата се мени често, а
+  // превъртян нагоре трябва да може да чете (2026-11-23).
+  const stick = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+  if (data.events.length) renderLive(box, "");
+  for (const e of data.events) { renderEvent(box, e); seq = e.seq; }
+  renderLive(box, data.live || "");
+  renderStatus(box, data);
+  if (stick) log.scrollTop = log.scrollHeight;
   if (data.status === "queued" || data.status === "running") {
-    polling = setTimeout(() => poll(turnId, box, seq), 1000);
+    // Докато текстът пристига — по-често, за да се вижда как расте.
+    polling = setTimeout(() => poll(turnId, box, seq), data.live ? 400 : 1000);
   } else {
     polling = null;
     setBusy(false);

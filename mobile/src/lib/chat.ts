@@ -88,9 +88,13 @@ export const MAX_EVENTS = 1000;
 
 /** Merge a reply into what we have: by seq, no duplicates, in order. */
 export function mergeEvents(current: GenesisEvent[], incoming: GenesisEvent[], reset: boolean): GenesisEvent[] {
-  if (reset) return trimEvents([...incoming].sort((a, b) => a.seq - b.seq));
+  // Частите на отговора на живо ("delta", 2026-11-23) приложението още не ги
+  // показва: не ги пази, за да не изтласкат разговора от MAX_EVENTS. Сървърът
+  // ги праща само при `events` със stream — това е за всеки случай.
+  const shown = incoming.filter((e) => e.type !== 'delta' && e.type !== 'delta_end');
+  if (reset) return trimEvents([...shown].sort((a, b) => a.seq - b.seq));
   const last = current.length ? current[current.length - 1].seq : 0;
-  const fresh = incoming.filter((e) => e.seq > last);
+  const fresh = shown.filter((e) => e.seq > last);
   return fresh.length ? trimEvents([...current, ...fresh]) : current;
 }
 

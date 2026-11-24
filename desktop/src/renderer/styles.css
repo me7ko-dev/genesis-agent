@@ -149,6 +149,12 @@ button.chip:hover { border-color: var(--line-2); color: var(--text); }
   white-space: pre-wrap; word-break: break-word; user-select: text;
 }
 .msg.assistant { align-items: flex-start; }
+/* Текстът, докато пристига (2026-11-23): без markdown, с мигащ курсор накрая. */
+.live-text { white-space: pre-wrap; word-break: break-word; line-height: 1.6; user-select: text; padding-top: 4px; }
+.live-text .caret {
+  display: inline-block; width: 7px; height: 1em; margin-left: 2px; vertical-align: -2px;
+  background: var(--accent); border-radius: 1px; animation: pulse 1s ease-in-out infinite;
+}
 .avatar {
   flex: none; width: 28px; height: 28px; border-radius: 9px; margin-top: 2px;
   display: grid; place-items: center; background: var(--panel); border: 1px solid var(--line);

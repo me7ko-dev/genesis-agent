@@ -46,6 +46,9 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .msg.status { font-size: 13px; color: var(--muted); }
 .msg.status.failed { color: var(--error); }
 .msg.status.ok { color: var(--ok); }
+/* Текстът на модела, докато пристига (2026-11-23); крайният отговор го заменя. */
+.msg.assistant.live::after { content: "▍"; color: var(--muted); animation: blink 1s steps(2) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
 #files { border-top: 1px solid var(--line); padding: 8px 16px; max-height: 30vh; overflow-y: auto; }
 #files h2 { font-size: 14px; margin: 0 0 4px; display: flex; gap: 12px; align-items: baseline; }
 #files h2 a { font-weight: normal; }

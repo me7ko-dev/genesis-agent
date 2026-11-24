@@ -49,7 +49,7 @@ import time
 import unicodedata
 import uuid
 import zipfile
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -93,6 +93,51 @@ LOGIN_FAILURES = 5
 # Подразбиранията за всеки човек (2026-10-11) — профилът може да ги смени
 # (`limits`). Ходовете на ден важат и без плащане: всеки ход е контейнер.
 TURNS_PER_DAY = 50
+# Текстът на живо на един ход (поток "delta", 2026-11-23) — краят му, ако е по-дълъг.
+LIVE_MAX_CHARS = 64 * 1024
+# Части в паметта на един ход най-много; над тях се слепват в една (ревю
+# 2026-11-23: `текст + част` под общата ключалка беше квадратично копиране —
+# хиляди бързи части от чуждия код в контейнера държаха ключалката на всички).
+LIVE_MAX_CHUNKS = 256
+# Части на ход най-много (след тях — пренебрегват се; крайният отговор пак идва).
+LIVE_MAX_DELTAS = 20_000
+
+
+class _LiveText:
+    """Текстът на живо на един ход: части в deque с текуща дължина, орязани
+    отпред до LIVE_MAX_CHARS. Добавянето е O(част) (слепването на LIVE_MAX_CHUNKS
+    части е O(LIVE_MAX_CHARS) веднъж на 256 — линейно общо); целият низ се
+    сглобява само при четене (live_text)."""
+
+    __slots__ = ("chunks", "count", "size", "trimmed")
+
+    def __init__(self) -> None:
+        self.chunks: deque[str] = deque()
+        self.size = 0
+        self.count = 0
+        self.trimmed = False
+
+    def add(self, text: str) -> None:
+        self.count += 1
+        if len(text) >= LIVE_MAX_CHARS:
+            self.chunks.clear()
+            self.size, self.trimmed = 0, True
+            text = text[-LIVE_MAX_CHARS:]
+        self.chunks.append(text)
+        self.size += len(text)
+        while self.size > LIVE_MAX_CHARS:
+            head = self.chunks.popleft()
+            self.size -= len(head)
+            self.trimmed = True
+            if self.size < LIVE_MAX_CHARS:
+                keep = head[len(head) - (LIVE_MAX_CHARS - self.size):]
+                self.chunks.appendleft(keep)
+                self.size += len(keep)
+        if len(self.chunks) > LIVE_MAX_CHUNKS:
+            self.chunks = deque(["".join(self.chunks)])
+
+    def text(self) -> str:
+        return ("…" if self.trimmed else "") + "".join(self.chunks)
 MONTHLY_CAP = 2000 * MICRO
 HIDDEN = ".genesis"          # историята на разговора (task.py) — не е за сваляне
 # През колко секунди shutdown() почиства отново, докато чака живите ходове.
@@ -177,6 +222,10 @@ class App:
         self._uploaded: dict[str, list[str]] = {}
         self._uploading: set[str] = set()                 # разговори с качване в ход
         self._upload_day: dict[int, tuple[int, int]] = {}  # човек → (ден, байтове)
+        # Текстът на модела, докато пристига (поток "delta", 2026-11-23), по ход.
+        # Само в паметта, не в базата: частите са до ~4 на секунда и иначе пълнеха
+        # web.db и тавана от 2000 събития на ход. Крайният отговор е в базата.
+        self._live: dict[int, _LiveText] = {}
         self._cleanup = cleanup or launch.cleanup_leftovers
         self._stopping = threading.Event()
         self._futures: set[Future[None]] = set()
@@ -614,6 +663,45 @@ class App:
         fut.add_done_callback(self._forget)
         return turn_id
 
+    def _event(self, turn_id: int, event: dict[str, Any]) -> None:
+        """Събитие от контейнера. "delta" (2026-11-23) расте текста на живо в
+        паметта: "start" го почва наново (следващ модел), без "start" след
+        затворен поток — нищо (закъсняла част след крайния отговор). Всяко друго
+        освен "progress"/"thinking" затваря потока и отива в базата."""
+        kind = event.get("kind")
+        if kind == "delta":
+            text = event.get("text")
+            if not isinstance(text, str):
+                return
+            with self._lock:
+                live = self._live.get(turn_id)
+                if event.get("start") is True:
+                    # Нов опит: таванът на частите остава за целия ход.
+                    count = live.count if live is not None else 0
+                    live = self._live[turn_id] = _LiveText()
+                    live.count = count
+                elif live is None:
+                    return
+                # Кодът в контейнера е чужд: таван на броя и на размера.
+                if live.count < LIVE_MAX_DELTAS:
+                    live.add(text)
+            return
+        if kind == "delta_end":
+            # Заявката свърши само с tool_calls: текстът на живо изчезва, а
+            # самото събитие не е за базата (преглед на PR #133).
+            with self._lock:
+                self._live.pop(turn_id, None)
+            return
+        if kind not in ("progress", "thinking"):
+            with self._lock:
+                self._live.pop(turn_id, None)
+        self.store.add_event(turn_id, event)
+
+    def live_text(self, turn_id: int) -> str:
+        with self._lock:
+            live = self._live.get(turn_id)
+            return live.text() if live is not None else ""
+
     def _forget(self, fut: Future[None]) -> None:
         with self._lock:
             self._futures.discard(fut)
@@ -646,7 +734,7 @@ class App:
         tokens: dict[str, int] = {}
         try:
             res = self.runner(text, workspace, limits=self.limits,
-                              on_event=lambda e: self.store.add_event(turn_id, e),
+                              on_event=lambda e: self._event(turn_id, e),
                               env_file=self.env_file, runtime=self.runtime,
                               gateway=gateway, name=job, on_token=on_token)
             ok, error, tokens, seconds = res.ok, res.error, res.tokens, res.seconds
@@ -682,6 +770,8 @@ class App:
             except Exception as e:  # noqa: BLE001 — вече се печата в stderr; reconcile при следващия старт го таксува
                 print(f"сметка: ход {turn_id} не е таксуван: {type(e).__name__}: {e}",
                       file=sys.stderr)
+        with self._lock:
+            self._live.pop(turn_id, None)
         self.store.finish_turn(turn_id, ok=ok, error=error, tokens=tokens, seconds=seconds)
         if prices is not None and gateway is not None:
             # Покрай всеки ход — окончателната сметка на ходовете с изтекъл жетон
@@ -1084,10 +1174,16 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 after = 0
             after = min(max(after, 0), _MAX_ROWID)  # иначе OverflowError в sqlite (2026-10-22)
+            # "live" — текстът на модела, докато пристига (2026-11-23); само
+            # докато тече, крайният отговор идва като събитие "assistant".
+            # След събитията: _event маха текста ПРЕДИ да запише отговора, тоест
+            # двете заедно не идват — иначе браузърът показваше отговора два пъти.
+            events = store.events(turn["id"], after)
+            live = self.app.live_text(turn["id"]) if turn["status"] == "running" else ""
             self._json(200, _with_cost({
                 "status": turn["status"], "error": turn["error"], "tokens": turn["tokens"],
-                "seconds": turn["seconds"], "events": store.events(turn["id"], after),
-                "cost_micro": turn.get("cost_micro")}))
+                "seconds": turn["seconds"], "events": events,
+                "cost_micro": turn.get("cost_micro"), **({"live": live} if live else {})}))
         elif (m := _FILES.match(path)) or (m := _ZIP.match(path)) or (m := _FILE.match(path)):
             self._files(user, m)
         else:

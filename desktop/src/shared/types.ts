@@ -26,6 +26,8 @@ export type GenesisEvent = {
   session?: boolean;
   /** "user": the pictures sent with the message (server 2026-10-15). */
   images?: ImageRef[];
+  /** "delta": the first part of a new model request — what was shown so far goes (2026-11-23). */
+  start?: boolean;
 };
 
 /** The agent's task list (the TODO tool), sent with every `events` reply. */

@@ -31,6 +31,12 @@ MAX_TOOL_OUTPUT = 4000
 HISTORY_FILE = Path(".genesis") / "history.json"
 HISTORY_MAX_MESSAGES = 20
 HISTORY_MAX_CHARS = 12000
+# Поток дума по дума (2026-11-23): частите на отговора — най-много една на
+# DELTA_EVERY_S. Браузърът пита веднъж в секунда; по-често само пълни тръбата.
+DELTA_EVERY_S = 0.25
+# Таймерът на порциите пише от своя нишка: без ключалка два реда можеха да се
+# сплетат в един невалиден JSON ред.
+_EMIT_LOCK = threading.Lock()
 
 
 def load_history(workspace: Path) -> list[dict[str, str]]:
@@ -76,7 +82,8 @@ def emit(kind: str, **data: Any) -> None:
             line = line.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
         except UnicodeEncodeError:
             line = line.encode("utf-8", "replace").decode("utf-8")
-    print(line, flush=True)
+    with _EMIT_LOCK:
+        print(line, flush=True)
 
 
 def _log_lines(path: Path) -> int:
@@ -155,7 +162,24 @@ def main(argv: list[str] | None = None) -> int:
     # done ok:true). Пази се първата такава грешка.
     chain_error = {"text": ""}
 
+    from genesis_agent.brain import DeltaBatcher
+
     class JsonTurnUI(gta.TurnUI):
+        def __init__(self) -> None:
+            self._deltas = DeltaBatcher(
+                lambda t, start: emit("delta", text=t, **({"start": True} if start else {})),
+                every=DELTA_EVERY_S)
+
+        def delta(self, text: str, start: bool = False) -> None:
+            # Текстът, докато пристига — сървърът го държи в паметта ("live"),
+            # не в базата; крайният е в "assistant" (2026-11-23).
+            self._deltas(text, start)
+
+        def delta_end(self) -> None:
+            # Само tool_calls след написан текст: браузърът маха балона.
+            self._deltas.drop()
+            emit("delta_end")
+
         def assistant(self, text: str) -> None:
             if text.strip():
                 last_reply["text"] = text
