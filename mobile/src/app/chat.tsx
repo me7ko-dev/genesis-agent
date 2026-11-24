@@ -1,14 +1,13 @@
 import { Redirect, router } from 'expo-router';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator, FlatList, KeyboardAvoidingView, type NativeScrollEvent, type NativeSyntheticEvent, Platform, Pressable, StyleSheet, Text, TextInput, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { AssistantMessage, ConfirmCard, Note, TodoPanel, ToolCard, UserBubble, type SpeakState } from '../components/Cards';
+import { AssistantMessage, ConfirmCard, Note, TodoPanel, ToolCard, UserBubble, WorkGroup, type SpeakState } from '../components/Cards';
 import { AttachMenu, AttachmentStrip, RecordingBar } from '../components/Media';
 import { micAvailable, playAudio, stopPlayback, usePlayingKey, useRecorder } from '../lib/audio';
-import type { ChatItem } from '../lib/chat';
 import { appendDictation, imagesLeft, lastSeqOf, replyToRead } from '../lib/media';
 import { MAX_MESSAGE, trimDraft } from '../lib/messages';
 import { usePairing } from '../lib/pairing';
@@ -16,6 +15,7 @@ import { pickFromLibrary, takePhoto, type Attachment, type PickResult } from '..
 import type { Pairing } from '../lib/protocol';
 import { DEFAULT_PREFS, loadPrefs, savePrefs, type Prefs } from '../lib/storage';
 import { useTheme } from '../lib/theme';
+import { buildRows, reuseRows, stepLabel, type Row } from '../lib/turns';
 import { useGenesis, type Connection } from '../lib/useGenesis';
 
 export default function ChatRoute() {
@@ -38,7 +38,17 @@ function Chat({ pairing }: { pairing: Pairing }) {
   const { unpair } = usePairing();
   const g = useGenesis(pairing);
   const [draft, setDraft] = useState('');
-  const list = useRef<FlatList<ChatItem>>(null);
+  const list = useRef<FlatList<Row>>(null);
+
+  // Ходът като едно цяло (2026-11-23, като в Desktop от 20.11): поредните
+  // инструменти са една сгъваема група, не 3–4 екрана карти. reuseRows пази
+  // старите редове — списъкът не се рисува пак на всяко допитване.
+  const workspace = g.status?.workspace || undefined;
+  const lastRows = useRef<Row[]>([]);
+  const rows = useMemo(() => {
+    lastRows.current = reuseRows(lastRows.current, buildRows(g.items, g.busy));
+    return lastRows.current;
+  }, [g.items, g.busy]);
 
   // ── снимки (2026-10-15) ──
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -183,6 +193,15 @@ function Chat({ pairing }: { pairing: Pairing }) {
     atBottom.current = true;
     g.send(text);
   };
+  // „Опитай пак“ под грешката, с която свърши ходът: същото съобщение.
+  // През ref — функцията остава същата и memo пази картата.
+  const sendRef = useRef(g.send);
+  sendRef.current = g.send;
+  const retry = useCallback((text: string) => {
+    atBottom.current = true;
+    void sendRef.current(text);
+  }, []);
+  const canRetry = g.connection === 'online' && !g.busy && !g.sending;
   const doUnpair = async () => {
     setMenuOpen(false);
     await unpair();
@@ -254,8 +273,8 @@ function Chat({ pairing }: { pairing: Pairing }) {
       <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <FlatList
           ref={list}
-          data={g.items}
-          keyExtractor={(item) => item.key}
+          data={rows}
+          keyExtractor={(row) => row.key}
           contentContainerStyle={styles.listBody}
           keyboardDismissMode="interactive"
           onScroll={onScroll}
@@ -269,15 +288,17 @@ function Chat({ pairing }: { pairing: Pairing }) {
               </Text>
             </View>
           }
-          renderItem={({ item }) => {
+          renderItem={({ item: row }) => {
+            if (row.kind === 'work') return <WorkGroup items={row.items} live={row.live} workspace={workspace} />;
+            const item = row.item;
             switch (item.kind) {
               case 'user': return <UserBubble item={item} />;
               case 'assistant': return (
                 <AssistantMessage item={item} onSpeak={g.features.voice ? onSpeak : undefined}
                   speech={speechState(item.key, playing, loadingKey)} />
               );
-              case 'tool': return <ToolCard item={item} />;
-              case 'note': return <Note item={item} />;
+              case 'tool': return <ToolCard item={item} workspace={workspace} />;
+              case 'note': return <Note item={item} retry={canRetry ? row.retry : undefined} onRetry={retry} />;
               case 'confirm': return <ConfirmCard item={item} onAnswer={g.confirm} />;
             }
           }}
@@ -285,7 +306,7 @@ function Chat({ pairing }: { pairing: Pairing }) {
             g.busy ? (
               <View style={styles.thinking}>
                 <ActivityIndicator size="small" color={theme.accent} />
-                <Text style={[styles.thinkingText, { color: theme.muted }]}>{g.label}</Text>
+                <Text style={[styles.thinkingText, { color: theme.muted }]} numberOfLines={2}>{stepLabel(g.label, workspace)}</Text>
               </View>
             ) : null
           }

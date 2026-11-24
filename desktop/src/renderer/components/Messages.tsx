@@ -8,6 +8,7 @@ import { fmtBytes } from '../../shared/media';
 import type { ImageRef } from '../../shared/types';
 import { confirmChoices, diffLines, elapsed, toolHeader, toolLook, toolTitle, workSummary, type ChatItem } from '../lib/chat';
 import { renderMarkdown } from '../lib/markdown';
+import { useSearchOpen } from './Search';
 
 const TOOL_ICONS = {
   file: File, edit: FilePen, save: Save, folder: Folder, search: Search, globe: Globe,
@@ -152,7 +153,10 @@ function ToolBody({ item }: { item: Extract<ChatItem, { kind: 'tool' }> }) {
 }
 
 export function ToolCard({ item, workspace }: { item: Extract<ChatItem, { kind: 'tool' }>; workspace?: string }) {
-  const [open, setOpen] = useState(false);
+  const [manual, setOpen] = useState(false);
+  // Търсенето (Ctrl+F) отваря картата, в чийто изход е съвпадението.
+  const found = useSearchOpen().tools.has(item.key);
+  const open = manual || found;
   const look = toolLook(item.name);
   const Icon = TOOL_ICONS[look.icon as keyof typeof TOOL_ICONS] ?? Wrench;
   const head = toolHeader(item.name, item.result, workspace);
@@ -202,7 +206,9 @@ export function Note({ item, onRetry }: { item: Extract<ChatItem, { kind: 'note'
  */
 export function WorkGroup({ items, live, workspace }: { items: ChatItem[]; live: boolean; workspace?: string }) {
   const [manual, setManual] = useState<boolean | null>(null);
-  const open = manual ?? live;
+  // Търсенето (Ctrl+F) държи отворена група със съвпадение (ключът на реда — chat.buildRows).
+  const found = useSearchOpen().groups.has(`w${items[0]?.key}`);
+  const open = found || (manual ?? live);
   const sum = workSummary(items, workspace);
   const icons = [...new Set(items.filter((i) => i.kind === 'tool').map((i) => toolLook((i as { name: string }).name).icon))].slice(0, 6);
   const parts = [

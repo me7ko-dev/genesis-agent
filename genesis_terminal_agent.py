@@ -1964,6 +1964,18 @@ def _run_turn_once(messages: "deque", user_input: str, ui: "TurnUI", extra: str 
         names = [line.split(": ", 1)[-1] for line in knowledge.splitlines()
                  if line.startswith("## Проверено ")]   # знание + ръководство (2026-10-12)
         ui.info(f"📚 проверено знание: {', '.join(names) or head.split(': ', 1)[-1]}")
+    # Наръчникът на оператора (2026-11-17): кое къде стои и как се прави при
+    # него. Всяка бележка — веднъж на разговор, както знанието отгоре.
+    try:
+        from genesis_agent.handbook import fresh_notes
+        notes, note_names = fresh_notes(
+            user_input, [vision.text_of(m.get("content")) for m in messages if m.get("role") == "user"])
+    except Exception:
+        log.debug("наръчникът не се зареди", exc_info=True)
+        notes, note_names = "", []
+    if notes:
+        content = f"{content}\n\n{notes}"
+        ui.info(f"📒 от наръчника: {', '.join(note_names)}")
     content += extra
     # Без таван до края на хода: deque(maxlen) изхвърляше посред задачата
     # системния промпт и самата заявка (виж agent_core.bounded_history).

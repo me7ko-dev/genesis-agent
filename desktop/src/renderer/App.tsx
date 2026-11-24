@@ -6,7 +6,9 @@ import { Composer } from './components/Composer';
 import { AssistantMessage, ConfirmCard, Note, Thinking, ToolCard, UserMessage, WorkGroup } from './components/Messages';
 import { explain, fmtTokens, Sheet, toggleMessage, type SheetView } from './components/Panels';
 import { EmptyChat, Failed, Logo, Missing, Starting, Welcome } from './components/Screens';
+import { SearchBar, SearchOpenProvider, useChatSearch } from './components/Search';
 import { Sidebar } from './components/Sidebar';
+import { confirmKey } from './lib/search';
 import { playSpeech, stopAudio, usePlayer } from './lib/capture';
 import { buildRows, mergeEvents, pendingConfirm, samePath, shortPath, thinkingLabel, toChatItems, todoSummary, turnInfo } from './lib/chat';
 
@@ -62,6 +64,9 @@ export function App() {
   const items = useMemo(() => toChatItems(events), [events]);
   const rows = useMemo(() => buildRows(items, state.busy), [items, state.busy]);
   const confirm = pendingConfirm(items);
+  // Търсене в чата (Ctrl+F, 2026-11-23) — цялото е в components/Search.tsx.
+  const search = useChatSearch(scroller, rows, stick);
+  const closeSearch = useCallback(() => { search.close(); setFocusKey((k) => k + 1); }, [search.close]);
   const turn = useMemo(() => turnInfo(events), [events]);
   const ready = state.phase === 'ready';
 
@@ -201,26 +206,27 @@ export function App() {
   // ── keyboard ────────────────────────────────────────────────────────────
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (confirm && !e.ctrlKey && !e.altKey) {
-        if (e.key === 'Enter') { e.preventDefault(); answer(confirm.id, true); return; }
-        if (e.key === 'Escape') { e.preventDefault(); answer(confirm.id, false); return; }
-      }
+      // confirmKey: не и от клавиш, натиснат в лентата за търсене (Enter на ▼ разрешаваше команда).
+      const reply = confirmKey(e, !!confirm);
+      if (confirm && reply) { e.preventDefault(); answer(confirm.id, reply === 'allow'); return; }
       if (e.key === 'Escape') {
         if (sheet) setSheet(null);
         else if (logsOpen) setLogsOpen(false);
+        else if (search.open) closeSearch();
         else if (state.busy) stop();
         return;
       }
       if (!e.ctrlKey) return;
       const k = e.key.toLowerCase();
-      if (k === 'n') { e.preventDefault(); void newChat(); }
+      if (k === 'f' && ready) { e.preventDefault(); search.show(); }
+      else if (k === 'n') { e.preventDefault(); void newChat(); }
       else if (k === 'o') { e.preventDefault(); void open(); }
       else if (k === 'b') { e.preventDefault(); toggleSidebar(); }
       else if (k === 'l' && e.shiftKey) { e.preventDefault(); setLogsOpen((v) => !v); }
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [confirm, answer, state.busy, stop, newChat, open, toggleSidebar, logsOpen, sheet]);
+  }, [confirm, answer, state.busy, stop, newChat, open, toggleSidebar, logsOpen, sheet, ready, search.open, search.show, closeSearch]);
 
   // ── follow the conversation unless the user scrolled up ────────────────
   // Всяка промяна на височината (нов ред, отворена група, дълъг отговор) →
@@ -260,7 +266,8 @@ export function App() {
     main = <Failed state={state} onRetry={() => void api.restart()} onLogs={() => setLogsOpen(true)} onOpen={() => void open()} />;
   } else {
     main = (
-      <>
+      <SearchOpenProvider value={search.forced}>
+        {search.open && <SearchBar search={search} onClose={closeSearch} />}
         <div className="chat" ref={scroller} onScroll={onScroll}>
           <div className="chat-inner">
             {items.length === 0 && !state.busy && (
@@ -312,7 +319,7 @@ export function App() {
           onSpeak={setSpeak}
           onFlash={flash}
         />
-      </>
+      </SearchOpenProvider>
     );
   }
 
