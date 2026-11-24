@@ -284,7 +284,9 @@ export function buildRows(items: ChatItem[], busy: boolean): Row[] {
     }
     if (lastTurn && !busy && user && final < 0) {
       const err = [...out].reverse().find((r) => r.kind === 'item' && r.item.kind === 'note' && r.item.tone === 'error');
-      if (err && err.kind === 'item') err.retry = user.kind === 'user' ? user.text : undefined;
+      // Само текст: картинките не се пазят (идват като име и размер) и повторението
+      // щеше да ги изгуби мълчаливо — с картинки бутон няма (2026-11-23, преглед на PR #131).
+      if (err && err.kind === 'item' && user.kind === 'user' && user.text && !user.images?.length) err.retry = user.text;
     }
     if (user) rows.push({ kind: 'item', item: user });
     rows.push(...out);
