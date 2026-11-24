@@ -251,6 +251,10 @@ def _isolated_operator_settings(monkeypatch, tmp_path):
     home = tmp_path / "genesis_home"
     home.mkdir(exist_ok=True)
     monkeypatch.setattr("genesis_agent.paths.GENESIS_HOME", home)
+    # Наръчникът (2026-11-17) чете ~/.genesis/handbook и го държи в кеш на
+    # модула: без това бележките на оператора биха стигнали до всеки тест на чата.
+    monkeypatch.delenv("GENESIS_HANDBOOK_DIR", raising=False)
+    monkeypatch.setattr("genesis_agent.handbook._CACHE", None)
     # .env файловете с ключовете (одит 2026-10-11): ENV_FILES се смята при
     # внасяне от истинската ~/.genesis, така че Brain() и vertex_auth в тест
     # четяха ключовете и проектите на оператора. brain го внася по име.
