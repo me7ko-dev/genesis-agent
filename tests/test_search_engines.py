@@ -13,6 +13,9 @@ import pytest
 
 from genesis_agent import search_engines as se
 
+# Истинският `_key` — conftest (_no_real_search) го подменя с празно за всеки тест.
+_REAL_KEY = se._key
+
 
 def _row(url: str, title: str = "t", snippet: str = "") -> dict:
     return {"title": title, "url": url, "snippet": snippet}
@@ -315,3 +318,61 @@ def test_browser_is_off_in_tests() -> None:
     from genesis_agent import search_browser as sb
     assert not sb.available()
     assert sb.search("ddg_browser", "q") == []
+
+
+# ── 2026-11-23: ключовете за търсене от ~/.genesis/.env ─────────────────────
+# Проверка, не нова функция: TAVILY_API_KEY и SERPER_API_KEY вече са в
+# API_ENGINES. Тук е целият път наведнъж — ключ само във файла (не в средата),
+# подменен HTTP, двете търсачки в сливането. conftest подменя `_key` с празно
+# за всеки тест, затова истинската функция е взета при внасянето (_REAL_KEY).
+def _fake_search_http(seen: list[tuple[str, dict]]):
+    def http(url, *, data=None, headers=None, **kw):
+        seen.append((url, dict(headers or {})))
+        if "tavily" in url:
+            return json.dumps({"results": [
+                {"title": "Общ", "url": "https://both.org/page", "content": "от tavily"},
+                {"title": "T", "url": "https://only-tavily.org", "content": "t"}]})
+        if "serper" in url:
+            return json.dumps({"organic": [
+                {"title": "S", "link": "https://only-serper.org", "snippet": "s"},
+                {"title": "Общ", "link": "https://www.both.org/page/", "snippet": "от serper, по-дълго"}]})
+        raise AssertionError(f"неочаквана заявка: {url}")
+    return http
+
+
+def _only_the_env_file(monkeypatch, tmp_path, text: str) -> None:
+    env = tmp_path / ".env"
+    env.write_text(text, encoding="utf-8")
+    monkeypatch.setattr("genesis_agent.paths.ENV_FILES", (str(env),))
+    for name in ("TAVILY_API_KEY", "SERPER_API_KEY", "BRAVE_API_KEY", "JINA_API_KEY", "SEARXNG_URL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(se, "_key", _REAL_KEY)
+    monkeypatch.setattr(se, "FREE_ENGINES", [])
+
+
+def test_tavily_and_serper_keys_from_the_env_file_join_the_fusion(monkeypatch, tmp_path) -> None:
+    _only_the_env_file(monkeypatch, tmp_path,
+                       "TAVILY_API_KEY=tvly-test\nexport SERPER_API_KEY=serper-test\n")
+    seen: list[tuple[str, dict]] = []
+    monkeypatch.setattr(se, "_http", _fake_search_http(seen))
+
+    assert se.configured_api_engines() == ["tavily", "serper"]
+    rows = se.multi_search("връх Мусала", browser=False)
+
+    # Страницата, която и двете дават, е първа и носи имената им.
+    assert se.norm_url(rows[0]["url"]) == se.norm_url("https://both.org/page")
+    assert sorted(rows[0]["engines"]) == ["serper", "tavily"]
+    assert len(rows) == 3
+    sent = {("tavily" if "tavily" in u else "serper"): h for u, h in seen}
+    assert sent["tavily"]["Authorization"] == "Bearer tvly-test"
+    assert sent["serper"]["X-API-KEY"] == "serper-test"
+
+
+def test_without_the_keys_no_request_goes_to_tavily_or_serper(monkeypatch, tmp_path) -> None:
+    _only_the_env_file(monkeypatch, tmp_path, "TAVILY_API_KEY=\n")   # празно не е ключ
+    seen: list[tuple[str, dict]] = []
+    monkeypatch.setattr(se, "_http", _fake_search_http(seen))
+
+    assert se.configured_api_engines() == []
+    assert se.multi_search("q", browser=False) == []
+    assert seen == []

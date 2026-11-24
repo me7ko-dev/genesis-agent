@@ -151,3 +151,117 @@ class TestTypeTextArgument:
     def test_a_missing_separator_is_reported_not_guessed(self, monkeypatch) -> None:
         monkeypatch.setattr(b, "_page", object())
         assert "Формат:" in b.type_text("just some text")
+
+
+# ── 2026-11-23: BROWSE и системният Edge/Chrome ─────────────────────────────
+# На лаптопа вграденият Chromium липсва (`playwright install` не е пускан) и
+# BROWSE падаше с „Executable doesn't exist“, докато търсенето в браузъра вече
+# вървеше през Edge. Истински браузър тук няма: playwright.sync_api е подменен.
+class _FakeContext:
+    def __init__(self) -> None:
+        self.routes: list[tuple[object, object]] = []
+
+    def route(self, pattern, handler) -> None:
+        self.routes.append((pattern, handler))
+
+
+class _FakePage:
+    def __init__(self) -> None:
+        self.context = _FakeContext()
+
+    def set_default_timeout(self, ms) -> None:
+        pass
+
+
+class _FakeBrowser:
+    def __init__(self) -> None:
+        self.page = _FakePage()
+        self.context_kwargs: list[dict] = []
+
+    def new_page(self, **kw):
+        self.context_kwargs.append(kw)
+        return self.page
+
+    def close(self) -> None:
+        pass
+
+
+class _FakePlaywright:
+    """chromium.launch успява само за каналите в `installed` („“ = вграденият)."""
+
+    def __init__(self, installed: set[str]) -> None:
+        self.installed = installed
+        self.launches: list[dict] = []
+        self.stopped = False
+        self.chromium = self
+        self.browser = _FakeBrowser()
+
+    def launch(self, **kw):
+        self.launches.append(kw)
+        if kw.get("channel", "") not in self.installed:
+            raise RuntimeError("Executable doesn't exist")
+        return self.browser
+
+    def start(self):
+        return self
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+def _fake_playwright(monkeypatch, installed: set[str]) -> _FakePlaywright:
+    import sys
+    import types
+    pw = _FakePlaywright(installed)
+    mod = types.ModuleType("playwright.sync_api")
+    mod.sync_playwright = lambda: pw  # type: ignore[attr-defined]
+    pkg = types.ModuleType("playwright")
+    pkg.sync_api = mod  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "playwright", pkg)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", mod)
+    monkeypatch.setattr(b, "_pw", None)
+    monkeypatch.setattr(b, "_browser", None)
+    monkeypatch.delenv("GENESIS_BROWSER_CHANNEL", raising=False)
+    monkeypatch.delenv("GENESIS_BROWSER_VISIBLE", raising=False)
+    return pw
+
+
+class TestSystemBrowserFallback:
+    def test_without_bundled_chromium_browse_starts_system_edge(self, monkeypatch) -> None:
+        pw = _fake_playwright(monkeypatch, {"msedge"})
+        page = b._ensure_page()
+        assert page is pw.browser.page
+        assert [k.get("channel", "") for k in pw.launches] == ["", "msedge"]
+        assert all(k["headless"] is True for k in pw.launches)
+
+    def test_bundled_chromium_is_still_preferred(self, monkeypatch) -> None:
+        pw = _fake_playwright(monkeypatch, {"", "msedge", "chrome"})
+        b._ensure_page()
+        assert pw.launches == [{"headless": True}]
+
+    def test_the_order_is_the_one_the_search_browser_uses(self, monkeypatch) -> None:
+        pw = _fake_playwright(monkeypatch, {"chrome"})
+        monkeypatch.setenv("GENESIS_BROWSER_CHANNEL", "chrome")
+        b._ensure_page()
+        assert [k.get("channel", "") for k in pw.launches] == ["chrome"]
+
+    def test_the_system_browser_gets_the_same_guards_and_an_empty_profile(
+        self, monkeypatch
+    ) -> None:
+        """Каналът сменя само изпълнимия файл: пазачът на вътрешните адреси е
+        на контекста и профилът не е този на потребителя (launch, не
+        launch_persistent_context; без user_data_dir/storage_state)."""
+        pw = _fake_playwright(monkeypatch, {"msedge"})
+        page = b._ensure_page()
+        assert page.context.routes == [(b._INTERNAL_LOOKING_URL, b._route_guard)]
+        assert pw.browser.context_kwargs == [{}]
+        assert all(set(k) <= {"headless", "channel"} for k in pw.launches)
+
+    def test_no_browser_at_all_is_a_clear_error_and_can_be_retried(self, monkeypatch) -> None:
+        pw = _fake_playwright(monkeypatch, set())
+        with pytest.raises(RuntimeError, match="няма браузър за BROWSE"):
+            b._ensure_page()
+        assert [k.get("channel", "") for k in pw.launches] == ["", "msedge", "chrome"]
+        assert pw.stopped and b._pw is None and b._page is None
+        pw.installed.add("msedge")          # Edge се появи → следващият BROWSE тръгва
+        assert b._ensure_page() is pw.browser.page
